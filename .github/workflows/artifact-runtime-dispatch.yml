@@ -1,0 +1,25 @@
+name: Artifact runtime dispatch
+
+# Thin manual caller for the reusable artifact-runtime workflow. ci.yml calls it on
+# every push to main with `source_sha: github.sha`; on a fork that push trigger stays
+# dormant, so this workflow lets an owner assemble the same exact-SHA bundle by hand.
+# It passes exactly what ci.yml passes (the source SHA) and nothing else.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source SHA whose native runtime is being assembled.
+        required: true
+        type: string
+        default: 11febf6a7db69f479fecd162ae82b5fda3c58088
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    name: Build exact artifact runtime inputs
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
