@@ -215,7 +215,11 @@ import {
   type SerializedTool,
   type Tool,
 } from "@openai/agents";
-import { getToolSearchExecution, getToolSearchProviderCallId } from "@openai/agents-core/utils";
+import {
+  getToolSearchExecution,
+  getToolSearchProviderCallId,
+  toFunctionToolName,
+} from "@openai/agents-core/utils";
 import {
   Capabilities,
   Manifest,
@@ -2922,17 +2926,49 @@ function mcpServerDefersModelSchemas(server: MCPServer): boolean {
   );
 }
 
-/** True when the unprefixed tool `name` requires approval under `policy`. */
+/**
+ * True when the unprefixed tool `name` requires approval under `policy`.
+ *
+ * Both sides are compared in the SDK's function-tool spelling
+ * (`toFunctionToolName`: every non-alphanumeric character becomes `_`), because
+ * the wrap sees the SDK tool — already sanitised — while a policy entry may be
+ * written as the raw MCP tool name (`task-create`) or as the model-facing name
+ * (`task_create`). Without this, a hyphen on either side silently disabled the
+ * approval floor.
+ */
 function mcpToolRequiresApproval(
   policy: boolean | ReadonlySet<string>,
   unprefixedName: string,
 ): boolean {
-  return policy === true || (policy !== false && policy.has(unprefixedName));
+  if (policy === true) return true;
+  if (policy === false) return false;
+  const wanted = toFunctionToolName(unprefixedName);
+  for (const entry of policy) {
+    if (toFunctionToolName(entry) === wanted) return true;
+  }
+  return false;
 }
 
-/** Stable, secret-free execution identity for an MCP server without a connection row. */
-function sessionMcpApprovalConnectionId(serverId: string, url: string): string {
-  const targetHash = createHash("sha256").update(url, "utf8").digest("hex");
+/**
+ * The prefix a policy's server contributes to the SDK function-tool name. The
+ * registry prefix is `<id>__` (see {@link prefixedMcpToolName}); the SDK then
+ * rewrites the whole tool name through `toFunctionToolName`, so a hyphenated
+ * server id such as `cendra-pms` reaches the model as `cendra_pms__…`. Matching
+ * the raw prefix against the sanitised name never succeeded for such ids, and
+ * every tool of that server ran without its approval stamp.
+ */
+function sanitizedMcpApprovalPrefix(policy: Pick<McpApprovalPolicy, "prefix">): string {
+  return toFunctionToolName(policy.prefix);
+}
+
+/**
+ * Stable, secret-free execution identity for an MCP server without a connection
+ * row. `target` is the server URL, or the host-frozen connection identity of a
+ * local registration when one exists, so the approval stays scoped to that
+ * registration without the host identity ever becoming the row's connection id.
+ */
+function sessionMcpApprovalConnectionId(serverId: string, target: string): string {
+  const targetHash = createHash("sha256").update(target, "utf8").digest("hex");
   return `session-mcp:${serverId}:${targetHash}`;
 }
 
@@ -3032,14 +3068,20 @@ function installMcpApprovalPolicy(
       if (tool.type !== "function") {
         return tool;
       }
+      // Prepared servers resolve through the exact model name -> {serverId,toolName}
+      // map. A legacy unwrapped server falls back to prefix matching, compared in the
+      // SDK function-tool spelling (`toFunctionToolName`) so a hyphenated server id
+      // (`cendra-pms` -> `cendra_pms__`) still matches (LONGEST sanitised prefix
+      // first — see {@link applyMcpApprovalPolicy}).
       const identity = identities.get(tool.name);
       const policy = identity
         ? policies.find((entry) => entry.serverId === identity.serverId)
-        : policies.find((entry) => tool.name.startsWith(entry.prefix));
+        : policies.find((entry) => tool.name.startsWith(sanitizedMcpApprovalPrefix(entry)));
       if (!policy) {
         return tool;
       }
-      const unprefixed = identity?.toolName ?? tool.name.slice(policy.prefix.length);
+      const unprefixed =
+        identity?.toolName ?? tool.name.slice(sanitizedMcpApprovalPrefix(policy).length);
       const originalNeedsApproval = tool.needsApproval.bind(tool);
       const originalInvoke = tool.invoke.bind(tool);
       const legacyApproval =
@@ -3389,9 +3431,17 @@ function applyMcpApprovalPolicy(
     )
     .map((server) => {
       const connectionId = (): string | null => {
-        return (
-          resolvedMcpConnectionId(server, resolvedMcpConnectionIds) ??
-          (server.connectionRef ? null : sessionMcpApprovalConnectionId(server.id, server.url))
+        if (server.connectionRef) {
+          return resolvedMcpConnectionId(server, resolvedMcpConnectionIds);
+        }
+        // A session-MCP approval always carries the synthetic `session-mcp:` identity
+        // the durable store requires. A host-registered local server may freeze its
+        // own connection identity (LocalMcpServerRegistration.resolvedConnectionId);
+        // that identity scopes the approval but is never the row's connection id,
+        // which is why it is hashed into the synthetic form instead of replacing it.
+        return sessionMcpApprovalConnectionId(
+          server.id,
+          resolvedMcpConnectionIds?.get(server.id) ?? server.url,
         );
       };
       return {
@@ -3405,7 +3455,7 @@ function applyMcpApprovalPolicy(
         connectionId,
       };
     })
-    .sort((a, b) => b.prefix.length - a.prefix.length);
+    .sort((a, b) => sanitizedMcpApprovalPrefix(b).length - sanitizedMcpApprovalPrefix(a).length);
   if (policies.length === 0) {
     return;
   }
@@ -4800,7 +4850,10 @@ function installAttemptConnectorActionGatewayLifecycle(
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
             approvalId,
-            connectionId: sessionMcpApprovalConnectionId(config!.id, config!.url),
+            connectionId: sessionMcpApprovalConnectionId(
+              config!.id,
+              resolvedMcpConnectionIds.get(config!.id) ?? config!.url,
+            ),
             serverId: definition.identity.serverId,
             toolName: definition.identity.toolName,
             arguments: arguments_,
