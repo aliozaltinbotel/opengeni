@@ -2218,16 +2218,16 @@ describe("runtime event normalization", () => {
     test("requireApproval matches a hyphenated server id in the SDK's sanitised spelling", async () => {
       const map = await mcpToolApprovalMap(["fetch_document"], false, "cendra-pms");
       expect(map).toEqual({
-        cendra_pms__search_documents: false,
-        cendra_pms__fetch_document: true,
+        [prefixedMcpToolName("cendra-pms", "search_documents")]: false,
+        [prefixedMcpToolName("cendra-pms", "fetch_document")]: true,
       });
     });
 
     test("requireApproval: true covers every tool of a hyphenated server id", async () => {
       const map = await mcpToolApprovalMap(true, false, "cendra-pms");
       expect(map).toEqual({
-        cendra_pms__search_documents: true,
-        cendra_pms__fetch_document: true,
+        [prefixedMcpToolName("cendra-pms", "search_documents")]: true,
+        [prefixedMcpToolName("cendra-pms", "fetch_document")]: true,
       });
     });
 
@@ -2236,8 +2236,8 @@ describe("runtime event normalization", () => {
     test("requireApproval entries match in either the raw MCP or the model spelling", async () => {
       const map = await mcpToolApprovalMap(["fetch-document"], false, "cendra-pms");
       expect(map).toEqual({
-        cendra_pms__search_documents: false,
-        cendra_pms__fetch_document: true,
+        [prefixedMcpToolName("cendra-pms", "search_documents")]: false,
+        [prefixedMcpToolName("cendra-pms", "fetch_document")]: true,
       });
     });
 
@@ -3450,7 +3450,7 @@ describe("runtime event normalization", () => {
         });
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "cendra_pms__task_create",
+            candidate.type === "function" && candidate.name === prefixedMcpToolName("cendra-pms", "task_create"),
         );
         if (!tool || tool.type !== "function") throw new Error("hyphenated local MCP tool missing");
         expect(await tool.needsApproval(new RunContext(), { title: "x" }, "host-call")).toBe(true);
@@ -3508,7 +3508,7 @@ describe("runtime event normalization", () => {
         ],
       });
       const model = new ScriptedModel([
-        { output: [scriptedFunctionCall("cendra_pms__task_create", {}, "cendra-task-call")] },
+        { output: [scriptedFunctionCall(prefixedMcpToolName("cendra-pms", "task_create"), {}, "cendra-task-call")] },
       ]);
       const agent = buildOpenGeniAgent(settings, [], {
         model,
@@ -3521,7 +3521,7 @@ describe("runtime event normalization", () => {
       }
       await result.completed;
       expect(result.interruptions).toHaveLength(1);
-      expect(result.interruptions[0]?.rawItem).toMatchObject({ name: "cendra_pms__task_create" });
+      expect(result.interruptions[0]?.rawItem).toMatchObject({ name: prefixedMcpToolName("cendra-pms", "task_create") });
     });
 
     // B3 (SPEC-BLOCKER-MAINT-P09-026-001). The approval wrap records the SDK
@@ -3589,7 +3589,9 @@ describe("runtime event normalization", () => {
       const pausedArgs = { title: "Restock minibar 204" };
       const callId = "cendra-approved-call";
       try {
-        expect(prefixedMcpToolName(serverId, "task_create")).toBe("cendra-pms__task_create");
+        // A hyphenated id is not a valid model tool name, so the registry aliases it
+        // (`mcp_<24 hex>__task_create`); the approval wrap must still find it.
+        expect(prefixedMcpToolName(serverId, "task_create")).toMatch(/^mcp_[0-9a-f]{24}__task_create$/);
         const agent = buildOpenGeniAgent(settings, [], {
           mcpServers: prepared.mcpServers,
           connectorActionPolicy: hooks,
@@ -3597,7 +3599,7 @@ describe("runtime event normalization", () => {
         });
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "cendra_pms__task_create",
+            candidate.type === "function" && candidate.name === prefixedMcpToolName("cendra-pms", "task_create"),
         );
         if (!tool || tool.type !== "function") throw new Error("hyphenated catalogue tool missing");
         const resumed = await tool.invoke(new RunContext(), JSON.stringify(pausedArgs), {
@@ -3663,7 +3665,7 @@ describe("runtime event normalization", () => {
         });
         const [tool] = (await agent.getMcpTools(new RunContext())).filter(
           (candidate) =>
-            candidate.type === "function" && candidate.name === "cendra_pms__task_create",
+            candidate.type === "function" && candidate.name === prefixedMcpToolName("cendra-pms", "task_create"),
         );
         if (!tool || tool.type !== "function") throw new Error("hyphenated catalogue tool missing");
         expect(
