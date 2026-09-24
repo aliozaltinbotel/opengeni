@@ -438,6 +438,16 @@ Pause and recovery preserve it. See
 [`work-discovery.md`](work-discovery.md) for the complete authority, ranking,
 mutation, and rollout contract.
 
+A realtime delegation admitted from the ledger sync inherits the same way
+unless its `delegation_call` entry names a route (`model`, `reasoningEffort`,
+`latencyMode`). A named route is resolved exactly like a Send/Steer body before
+the ledger transaction -- omitted parts fall back to the session defaults, the
+model is canonicalized and checked against the workspace model policy and the
+session's provider lock, and the requested parts are recorded with source
+`explicit` -- and it applies to that one turn only. A routed entry the API did
+not resolve is refused, and replaying the same operation on another route is
+`REALTIME_DELEGATION_CHANGED`.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing

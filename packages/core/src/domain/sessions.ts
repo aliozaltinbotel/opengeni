@@ -1999,6 +1999,65 @@ export function resolveSessionCreateScope(input: {
   return resolved;
 }
 
+/**
+ * The execution route of a realtime delegation turn that names one (model,
+ * reasoningEffort, latencyMode on its ledger entry), resolved exactly as a
+ * Send/Steer body is: omitted fields fall back to the session defaults, the model
+ * is canonicalized against the workspace catalog, checked against the workspace
+ * model policy and the session's provider lock, and every requested part is
+ * recorded with source "explicit". Runs before the ledger transaction; the ledger
+ * admits the delegation with exactly this policy.
+ */
+export async function resolveRealtimeDelegationTurnExecutionPolicy(
+  deps: Pick<ApiRouteDeps, "db" | "settings" | "catalogSourceSettings">,
+  grant: AccessGrant,
+  workspaceId: string,
+  sessionId: string,
+  requested: {
+    model?: string | undefined;
+    reasoningEffort?: Settings["openaiReasoningEffort"] | undefined;
+    latencyMode?: "standard" | "priority" | "fast" | undefined;
+  },
+) {
+  const session = await requireSession(deps.db, workspaceId, sessionId);
+  const settings = await resolveWorkspaceModelBoundarySettings(
+    deps,
+    grant,
+    workspaceId,
+    [requested.model ?? session.model],
+    session.model,
+  );
+  const requestedModel = canonicalConfiguredModel(settings, requested.model ?? null) ?? null;
+  const effectiveModel = canonicalConfiguredModel(settings, requestedModel ?? session.model) ?? null;
+  if (effectiveModel === null) {
+    throw new Error("effective realtime delegation model unexpectedly resolved to null");
+  }
+  await assertWorkspaceModelPolicyAllows(deps.db, settings, workspaceId, requestedModel);
+  try {
+    assertSessionAllowsProductModel(session, effectiveModel);
+  } catch (error) {
+    if (error instanceof CodexCompactionV2ProviderLockedError) {
+      throw new HTTPException(422, { message: error.message, cause: error });
+    }
+    throw error;
+  }
+  try {
+    return resolveTurnExecutionPolicyV1(settings, {
+      modelId: effectiveModel,
+      requestedModelId: requested.model ?? null,
+      modelSource: requested.model === undefined ? "session" : "explicit",
+      reasoningEffort: requested.reasoningEffort ?? session.reasoningEffort,
+      reasoningSource: requested.reasoningEffort === undefined ? "session" : "explicit",
+      latencyMode: requested.latencyMode ?? session.latencyMode,
+      latencyModeSource: requested.latencyMode === undefined ? "session" : "explicit",
+    });
+  } catch (error) {
+    throw new HTTPException(422, {
+      message: error instanceof Error ? error.message : "realtime delegation route is not runnable",
+    });
+  }
+}
+
 async function resolveWorkspaceModelBoundarySettings(
   deps: Pick<ApiRouteDeps, "db" | "settings" | "catalogSourceSettings">,
   grant: AccessGrant,

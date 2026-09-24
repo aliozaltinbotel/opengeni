@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { MODEL_CONTEXT_LABEL } from "@opengeni/contracts";
+import { MODEL_CONTEXT_LABEL, readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
+import { testSettings } from "@opengeni/testing";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { and, asc, eq, sql } from "drizzle-orm";
 
@@ -1425,6 +1427,127 @@ describe("session realtime ledger", () => {
     expect(persisted.count).toBe(before.count);
     expect(persisted.children).toBe(0);
     expect(persisted.session).toEqual(before.session);
+  });
+
+  test("a routed delegation runs exactly its resolved route, marked explicit; an unrouted one inherits the newest started turn", async () => {
+    const value = await fixture();
+    const priorTurnId = crypto.randomUUID();
+    await transaction(value.owner.workspaceId, async (tx) => {
+      await tx.insert(schema.sessionTurns).values({
+        id: priorTurnId,
+        accountId: value.grant.accountId,
+        workspaceId: value.owner.workspaceId,
+        sessionId: value.session.id,
+        triggerEventId: crypto.randomUUID(),
+        temporalWorkflowId: `session-${value.session.id}`,
+        status: "completed",
+        source: "user",
+        position: 1,
+        prompt: "a question answered on the question route",
+        resources: [],
+        tools: [],
+        model: "codex/configured-conversation-model",
+        reasoningEffort: "low",
+        latencyMode: "fast",
+        sandboxBackend: "docker",
+        sandboxOs: "linux",
+        startedAt: new Date(),
+        finishedAt: new Date(),
+      });
+    });
+    await appendSessionEvents(client.db, value.owner.workspaceId, value.session.id, [
+      { type: "turn.started", turnId: priorTurnId, payload: {} },
+    ]);
+    const first = await claimInitial(value);
+    await complete(value, first.claimed.connection);
+    await proveProviderStarted(value, first.claimed.connection);
+    // The API resolves the route before the ledger transaction (resolveRealtimeDelegationTurnExecutionPolicy);
+    // the ledger receives only the trusted result, keyed by the delegation's operation id.
+    const settings = testSettings();
+    const workPolicy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: settings.openaiModel,
+      requestedModelId: settings.openaiModel,
+      modelSource: "explicit",
+      reasoningEffort: "medium",
+      reasoningSource: "explicit",
+      latencyMode: "standard",
+      latencyModeSource: "explicit",
+    });
+    const routed = delegationSyncInput(value, first.claimed.connection);
+    const routedEntry = {
+      ...routed.entries[0]!,
+      model: settings.openaiModel,
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+    };
+    // A routed entry the API did not resolve is refused, never run on a guessed route.
+    await expect(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, { ...routed, entries: [routedEntry] }),
+      ),
+    ).rejects.toThrow("Realtime delegation route was not resolved");
+    const policies = new Map([[routedEntry.operationId, workPolicy]]);
+    const admitted = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...routed,
+        entries: [routedEntry],
+        delegationExecutionPolicies: policies,
+      }),
+    );
+    const routedTurnId = admitted.accepted[0]!.entry.turnId!;
+    const turnOf = async (turnId: string) =>
+      await transaction(value.owner.workspaceId, async (tx) => {
+        const [turn] = await tx
+          .select()
+          .from(schema.sessionTurns)
+          .where(eq(schema.sessionTurns.id, turnId));
+        return turn!;
+      });
+    const routedTurn = await turnOf(routedTurnId);
+    expect([routedTurn.model, routedTurn.reasoningEffort, routedTurn.latencyMode]).toEqual([
+      settings.openaiModel,
+      "medium",
+      "standard",
+    ]);
+    const recorded = readTurnExecutionPolicyV1(routedTurn.metadata);
+    expect(recorded.kind).toBe("valid");
+    expect(recorded.kind === "valid" ? recorded.policy : null).toMatchObject({
+      productModelId: settings.openaiModel,
+      modelSource: "explicit",
+      reasoningSource: "explicit",
+      latencyModeSource: "explicit",
+    });
+    expect(
+      (routedTurn.metadata as { realtimeDelegation?: { route?: string } }).realtimeDelegation?.route,
+    ).toBe("explicit");
+    // The same operation replayed on its route is a replay; on another route it is a changed request.
+    const replay = await transaction(value.owner.workspaceId, (tx) =>
+      syncSessionRealtimeLedgerInTransaction(tx, {
+        ...routed,
+        entries: [routedEntry],
+        delegationExecutionPolicies: policies,
+      }),
+    );
+    expect(replay.accepted[0]).toMatchObject({ replay: true, entry: { turnId: routedTurnId } });
+    const questionPolicy = resolveTurnExecutionPolicyV1(settings, {
+      modelId: settings.openaiModel,
+      requestedModelId: settings.openaiModel,
+      modelSource: "explicit",
+      reasoningEffort: "low",
+      reasoningSource: "explicit",
+      latencyMode: "standard",
+      latencyModeSource: "explicit",
+    });
+    await expectConflict(
+      transaction(value.owner.workspaceId, (tx) =>
+        syncSessionRealtimeLedgerInTransaction(tx, {
+          ...routed,
+          entries: [{ ...routedEntry, reasoningEffort: "low" as const }],
+          delegationExecutionPolicies: new Map([[routedEntry.operationId, questionPolicy]]),
+        }),
+      ),
+      "REALTIME_DELEGATION_CHANGED",
+    );
   });
 
   test("private-session voice delegation retains human authority through Company Brain selection", async () => {

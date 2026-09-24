@@ -191,6 +191,7 @@ import {
   latestWorkspaceCapture,
   sessionLatestWorkspaceCapture,
   renewSessionRealtimeInTransaction,
+  realtimeDelegationRequestsRoute,
   syncSessionRealtimeLedgerInTransaction,
   withWorkspaceSessionActivityRls,
   withWorkspaceRls,
@@ -223,6 +224,7 @@ import { createXaiRealtimeConnectionSecret, XaiRealtimeBrokerError } from "../xa
 import {
   prepareExternalLinkTurnAdmission,
   externalContinuationCommitAuthorizer,
+  resolveRealtimeDelegationTurnExecutionPolicy,
 } from "@opengeni/core";
 import { z, ZodError } from "zod";
 import {
@@ -1777,6 +1779,23 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           message: "invalid realtime ledger sync request",
         });
       }
+      // A delegation that names its turn's route is resolved like a Send/Steer body,
+      // before the ledger transaction; the ledger admits it with exactly this policy.
+      const delegationExecutionPolicies = new Map<
+        string,
+        Awaited<ReturnType<typeof resolveRealtimeDelegationTurnExecutionPolicy>>
+      >();
+      for (const entry of parsed.data.entries ?? []) {
+        if (!realtimeDelegationRequestsRoute(entry)) continue;
+        delegationExecutionPolicies.set(
+          entry.operationId,
+          await resolveRealtimeDelegationTurnExecutionPolicy(deps, grant, workspaceId, sessionId, {
+            model: entry.model,
+            reasoningEffort: entry.reasoningEffort,
+            latencyMode: entry.latencyMode,
+          }),
+        );
+      }
       try {
         const result = await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
           // Acquire origin authority before inference/session locks. A deferred
@@ -1791,6 +1810,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               realtimeId,
               ownerSubjectId: grant.subjectId,
               ...parsed.data,
+              delegationExecutionPolicies,
               controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
             },
             captureLinked

@@ -15,7 +15,7 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { readTurnExecutionPolicyV1, signDelegatedAccessToken } from "@opengeni/contracts";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -23,6 +23,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { Hono } from "hono";
+import { eq } from "drizzle-orm";
+import * as schema from "@opengeni/db/schema";
 
 import { registerSessionRoutes } from "../src/routes/sessions";
 
@@ -728,5 +730,119 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(await response.json()).toMatchObject({
       accepted: [{ replay: false, entry: { kind: "user_transcript" } }],
     });
+  });
+  test("a delegation that names its route is resolved like a Send: an unknown model is 422 before any ledger row; a runnable one runs on exactly that route", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: "gpt-live-1-boulder-alpha",
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+    const connectionOperationId = crypto.randomUUID();
+    const claimed = await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        claimSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          realtimeId: started.mode.id,
+          operationId: connectionOperationId,
+          ownerSubjectId: value.subjectId,
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch: 1,
+          rotate: false,
+        }),
+      ),
+    );
+    await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        completeSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          realtimeId: started.mode.id,
+          connectionId: claimed.connection.id,
+          operationId: connectionOperationId,
+          connectionEpoch: 1,
+          sdpAnswer: "v=0\r\na=answer:api-test\r\n",
+        }),
+      ),
+    );
+    await withWorkspaceRls(client.db, value.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        activateSessionRealtimeConnectionInTransaction(tx as unknown as Database, {
+          workspaceId: value.workspaceId,
+          sessionId: value.sessionId,
+          realtimeId: started.mode.id,
+          connectionId: claimed.connection.id,
+          operationId: connectionOperationId,
+          ownerSubjectId: value.subjectId,
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch: 1,
+          connectionEpoch: 1,
+        }),
+      ),
+    );
+    const sync = async (entries: unknown[], providerStarted = true) =>
+      await app.request(`${base}/${started.mode.id}/sync`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: started.mode.version,
+          connectionId: claimed.connection.id,
+          connectionEpoch: 1,
+          ...(providerStarted ? { providerStarted: { providerSessionId: "provider-session-1" } } : {}),
+          entries,
+        }),
+      });
+    const delegation = (operationId: string, route: Record<string, unknown>) => ({
+      operationId,
+      kind: "delegation_call",
+      delegationItemId: `item-${operationId}`,
+      text: "<realtime_delegation><input>Prepare the reply</input></realtime_delegation>",
+      payload: { inputTranscript: "Prepare the reply", transcriptFenceTurnIds: [] },
+      ...route,
+    });
+    // A route on anything but a delegation is a malformed request.
+    const onTranscript = await sync(
+      [{ operationId: crypto.randomUUID(), kind: "user_transcript", text: "hi", payload: { turnId: "t1" }, model: settings.openaiModel }],
+      false,
+    );
+    expect(onTranscript.status).toBe(422);
+    const unknown = await sync([delegation(crypto.randomUUID(), { model: "no-such-model" })]);
+    expect(unknown.status).toBe(422);
+    const ledgerRows = await withWorkspaceRls(client.db, value.workspaceId, async (scopedDb) =>
+      await scopedDb
+        .select({ kind: schema.sessionRealtimeEntries.kind })
+        .from(schema.sessionRealtimeEntries)
+        .where(eq(schema.sessionRealtimeEntries.realtimeId, started.mode.id)),
+    );
+    expect(ledgerRows.filter((row) => row.kind === "delegation_call")).toHaveLength(0);
+    const routed = await sync([delegation(crypto.randomUUID(), { model: settings.openaiModel, reasoningEffort: "medium" })]);
+    expect(routed.status).toBe(200);
+    const accepted = (await routed.json()) as { accepted: Array<{ entry: { turnId: string | null } }> };
+    const turnId = accepted.accepted[0]!.entry.turnId!;
+    const [turn] = await withWorkspaceRls(client.db, value.workspaceId, async (scopedDb) =>
+      await scopedDb.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, turnId)),
+    );
+    expect([turn!.model, turn!.reasoningEffort]).toEqual([settings.openaiModel, "medium"]);
+    const policy = readTurnExecutionPolicyV1(turn!.metadata);
+    expect(policy.kind === "valid" ? [policy.policy.modelSource, policy.policy.reasoningSource, policy.policy.latencyModeSource] : null).toEqual([
+      "explicit",
+      "explicit",
+      "session",
+    ]);
   });
 });

@@ -6804,9 +6804,29 @@ export const SessionRealtimeInboundEntry = z
     // It is ordinary model-visible user-message content when materialized, not
     // a secret or instruction-authority boundary.
     modelContext: z.string().trim().min(1).max(32768).optional(),
+    // Execution route for the turn a delegation admits, exactly like a Send/Steer
+    // body: applied to that one turn (modelSource "explicit"), validated against the
+    // deployment catalog, the workspace model policy and the session's provider lock.
+    // Omitted fields fall back to the session defaults as on Steer; when all three are
+    // omitted the delegation keeps the newest-started-turn policy it always had.
+    model: z.string().trim().min(1).max(256).optional(),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
   })
   .strict()
   .superRefine((entry, context) => {
+    if (
+      (entry.model !== undefined ||
+        entry.reasoningEffort !== undefined ||
+        entry.latencyMode !== undefined) &&
+      entry.kind !== "delegation_call"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["model"],
+        message: "an execution route requires a delegation entry",
+      });
+    }
     if (
       entry.modelContext !== undefined &&
       entry.kind !== "delegation_call" &&

@@ -2425,6 +2425,26 @@ describe("contracts", () => {
     ).toBe(false);
   });
 
+  test("accepts an execution route only on a delegation entry, like a Send/Steer body", () => {
+    const operationId = "00000000-0000-4000-8000-000000000012";
+    const routed = SessionRealtimeInboundEntry.parse({
+      operationId,
+      kind: "delegation_call",
+      delegationItemId: "item-1",
+      text: "prepare the reply",
+      model: "gpt-6-astra",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+    });
+    expect([routed.model, routed.reasoningEffort, routed.latencyMode]).toEqual(["gpt-6-astra", "medium", "standard"]);
+    expect(
+      SessionRealtimeInboundEntry.safeParse({ operationId, kind: "delegation_call", reasoningEffort: "turbo" }).success,
+    ).toBe(false);
+    for (const kind of ["user_transcript", "assistant_transcript", "interruption", "error"] as const) {
+      expect(SessionRealtimeInboundEntry.safeParse({ operationId, kind, model: "gpt-6-astra" }).success).toBe(false);
+    }
+  });
+
   test("keeps text-only user messages compatible", () => {
     const payload = ClientSessionEvent.parse({
       type: "user.message",

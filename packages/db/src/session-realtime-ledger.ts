@@ -1,7 +1,12 @@
 import { withLatestStartedSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
-import { LatencyMode, ReasoningEffort, type SessionRealtimeMode } from "@opengeni/contracts";
+import {
+  LatencyMode,
+  ReasoningEffort,
+  type SessionRealtimeMode,
+  type TurnExecutionPolicyV1,
+} from "@opengeni/contracts";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -160,11 +165,33 @@ export type SessionRealtimeInboundEntryInput = {
   text?: string | null | undefined;
   payload?: Record<string, unknown> | undefined;
   modelContext?: string | undefined;
+  /** Requested route of a delegation's turn; resolved by the API into `delegationExecutionPolicies`. */
+  model?: string | undefined;
+  reasoningEffort?: ReasoningEffort | undefined;
+  latencyMode?: LatencyMode | undefined;
 };
+
+/** True when a delegation entry names any part of its turn's execution route. */
+export function realtimeDelegationRequestsRoute(
+  entry: Pick<SessionRealtimeInboundEntryInput, "kind" | "model" | "reasoningEffort" | "latencyMode">,
+): boolean {
+  return (
+    entry.kind === "delegation_call" &&
+    (entry.model !== undefined ||
+      entry.reasoningEffort !== undefined ||
+      entry.latencyMode !== undefined)
+  );
+}
 
 export type SyncSessionRealtimeLedgerInput = AssertSessionRealtimeOwnerInput & {
   /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
   controlLockTimeoutMs?: number;
+  /**
+   * Trusted, API-resolved execution policies keyed by delegation operation id, one
+   * for every delegation entry that requests a route. Never read from the client:
+   * a routed delegation without its resolved policy is refused.
+   */
+  delegationExecutionPolicies?: ReadonlyMap<string, TurnExecutionPolicyV1> | undefined;
   connectionId: string;
   connectionEpoch: number;
   entries?: SessionRealtimeInboundEntryInput[] | undefined;
@@ -1124,11 +1151,48 @@ async function appendInvalidDelegationFailure(
   });
 }
 
+/**
+ * A replayed routed delegation must name the route its turn was admitted on: the
+ * same operation with a different model/effort/latency is a changed request, never
+ * a replay. An unrouted replay matches as before.
+ */
+async function delegationRouteMatches(
+  db: SessionActivityDatabase,
+  existing: typeof schema.sessionRealtimeEntries.$inferSelect,
+  incoming: SessionRealtimeInboundEntryInput,
+  policies: ReadonlyMap<string, TurnExecutionPolicyV1> | undefined,
+): Promise<boolean> {
+  if (!realtimeDelegationRequestsRoute(incoming)) return true;
+  if (!existing.turnId) return false;
+  const policy = policies?.get(incoming.operationId);
+  if (!policy) return false;
+  const [turn] = await db
+    .select({
+      model: schema.sessionTurns.model,
+      reasoningEffort: schema.sessionTurns.reasoningEffort,
+      latencyMode: schema.sessionTurns.latencyMode,
+    })
+    .from(schema.sessionTurns)
+    .where(eq(schema.sessionTurns.id, existing.turnId))
+    .limit(1);
+  return (
+    turn !== undefined &&
+    turn.model === policy.productModelId &&
+    turn.reasoningEffort === policy.reasoningEffort &&
+    turn.latencyMode === policy.latencyMode
+  );
+}
+
 async function admitRealtimeDelegationInTransaction(
   db: SessionActivityDatabase,
   input: Pick<
     SyncSessionRealtimeLedgerInput,
-    "workspaceId" | "sessionId" | "realtimeId" | "connectionEpoch" | "ownerSubjectId"
+    | "workspaceId"
+    | "sessionId"
+    | "realtimeId"
+    | "connectionEpoch"
+    | "ownerSubjectId"
+    | "delegationExecutionPolicies"
   >,
   accountId: string,
   incoming: SessionRealtimeInboundEntryInput,
@@ -1150,6 +1214,14 @@ async function admitRealtimeDelegationInTransaction(
   }
   const [policy] = await withLatestStartedSessionPolicy(db, input.workspaceId, [session]);
   if (!policy) throw new Error("Realtime delegation session disappeared");
+  // A routed delegation runs exactly the route the API resolved for it; an
+  // unrouted one keeps the newest-started-turn policy (the historical behaviour).
+  const explicit = realtimeDelegationRequestsRoute(incoming)
+    ? input.delegationExecutionPolicies?.get(incoming.operationId)
+    : undefined;
+  if (realtimeDelegationRequestsRoute(incoming) && !explicit) {
+    throw new Error("Realtime delegation route was not resolved");
+  }
   const provenance = {
     source: "realtime_provider_delegation",
     realtimeId: input.realtimeId,
@@ -1182,12 +1254,25 @@ async function admitRealtimeDelegationInTransaction(
     },
     mirrorToRealtime: false,
     resources: [],
-    model: policy.model,
-    reasoningEffort: ReasoningEffort.parse(policy.reasoningEffort),
-    latencyMode: LatencyMode.parse(policy.latencyMode),
+    ...(explicit
+      ? {
+          model: explicit.productModelId,
+          reasoningEffort: ReasoningEffort.parse(explicit.reasoningEffort),
+          latencyMode: LatencyMode.parse(explicit.latencyMode),
+          turnExecutionPolicy: explicit,
+        }
+      : {
+          model: policy.model,
+          reasoningEffort: ReasoningEffort.parse(policy.reasoningEffort),
+          latencyMode: LatencyMode.parse(policy.latencyMode),
+        }),
     reasoningEffortFallback: ReasoningEffort.parse(session.reasoningEffort),
     turnMetadata: {
-      realtimeDelegation: { ...provenance, inputTranscript },
+      realtimeDelegation: {
+        ...provenance,
+        inputTranscript,
+        route: explicit ? "explicit" : "inherited",
+      },
     },
     source: "api",
   });
@@ -1434,7 +1519,8 @@ export async function syncSessionRealtimeLedgerInTransaction(
     if (existing) {
       if (
         !inboundReplayMatches(existing, incoming, role, text, payload, modelContext) ||
-        !(await delegationModelContextMatches(db, existing, modelContext))
+        !(await delegationModelContextMatches(db, existing, modelContext)) ||
+        !(await delegationRouteMatches(db, existing, incoming, input.delegationExecutionPolicies))
       ) {
         throw new SessionRealtimeConflictError(
           incoming.kind === "delegation_call"
