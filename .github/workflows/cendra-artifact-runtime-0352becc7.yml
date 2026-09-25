@@ -1,0 +1,19 @@
+name: Cendra artifact runtime for 0352becc7
+
+# Cendra fork only (OPENGENI-VOICE-DELEGATION-ROUTE-PIN, operator decision path B). Runs upstream's own reusable
+# artifact-runtime workflow, unchanged, for the exact production source 0352becc7 (branch cendra/fork-e5818e5a2), so the
+# OpenGeni api image can be built with an artifact-runtime bundle from the same commit. Every job inside checks out
+# and verifies source_sha itself; this commit only adds the caller.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-0352becc7
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 0352becc7bfe9204d259d54b54aee9d96e4c5b80
