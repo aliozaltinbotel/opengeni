@@ -1,0 +1,19 @@
+name: Cendra artifact runtime for f2f9bfac3
+
+# Cendra fork only (OPENGENI-PIN-32A430695: closed MCP roots, eager-preparation deferred schemas, tool-path phase
+# timing). Runs upstream's own reusable artifact-runtime workflow, unchanged, for the exact production source f2f9bfac3
+# (branch cendra/mcp-closed-schema-0352becc7), so the OpenGeni api image can be built with an artifact-runtime bundle
+# from the same commit. Every job inside checks out and verifies source_sha itself; this commit only adds the caller.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-f2f9bfac3
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: f2f9bfac32edcadb1c61c1430f27301d975de40b
