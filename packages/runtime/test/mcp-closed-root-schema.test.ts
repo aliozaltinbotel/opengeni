@@ -5,7 +5,11 @@ import { mcpToFunctionTool } from "@openai/agents-core";
 // an explicitly closed input root closed. Unpatched 0.14.3 (and upstream through 0.18.0) overwrite it with true.
 const server = { name: "cendra-pms", cacheToolsList: false, callTool: async () => [] } as never;
 const convert = (inputSchema: Record<string, unknown>, strict = false) =>
-  mcpToFunctionTool({ name: "reservation_read", description: "read", inputSchema } as never, server, strict) as unknown as {
+  mcpToFunctionTool(
+    { name: "reservation_read", description: "read", inputSchema } as never,
+    server,
+    strict,
+  ) as unknown as {
     parameters: Record<string, unknown>;
     strict: boolean;
   };
@@ -37,7 +41,15 @@ describe("MCP closed-root schema on the non-strict path", () => {
   });
 
   test("convertSchemasToStrict=true is unchanged by the patch", () => {
-    const tool = convert({ type: "object", properties: { q: { type: "string" } }, required: ["q"], additionalProperties: false }, true);
+    const tool = convert(
+      {
+        type: "object",
+        properties: { q: { type: "string" } },
+        required: ["q"],
+        additionalProperties: false,
+      },
+      true,
+    );
     expect(tool.strict).toBe(true);
     expect(tool.parameters.additionalProperties).toBe(false);
   });

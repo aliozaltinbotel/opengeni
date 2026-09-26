@@ -1871,6 +1871,19 @@ export type BuildAgentOptions = {
    * must never be used to make a whole MCP carrier eager.
    */
   preparationIndependentToolNames?: readonly string[];
+  /**
+   * Exact MCP server registry ids whose preparation stays as configured (an
+   * `eager` ToolRef is still connected and listed before the first model
+   * request) while their model-facing schemas stay behind progressive
+   * discovery: the first request discloses only the always-visible base set,
+   * `preparationIndependentToolNames`, and the discovery tools; every other
+   * tool of these servers is found through tool_search/tool_list and binds
+   * through the same resolver as any deferred tool. It changes disclosure
+   * only: tool objects, allow-lists, approval and execution authority are the
+   * same. Takes effect only when progressive disclosure is installed
+   * (`lazyToolTransport` with its setting enabled). Omitted: current behaviour.
+   */
+  deferModelSchemasForEagerMcpServerIds?: readonly string[];
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
@@ -2884,9 +2897,22 @@ function maybeInstallLazyToolTransport(
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
   // or parseable prefixes. Preserve legacy embedded/test-server classification.
   const mcpServerIds = new Set(mcpServers.map((server) => mcpServerRegistryId(server)));
+  const schemaDeferredEagerIds = new Set(options.deferModelSchemasForEagerMcpServerIds ?? []);
+  for (const server of mcpServers) {
+    if (!schemaDeferredEagerIds.has(mcpServerRegistryId(server))) continue;
+    // Model-input accounting follows disclosure: no schema of this server is
+    // provider context until tool_search discloses it (as for non-eager refs).
+    (
+      server as MCPServer & { deferModelToolSchemaAccounting?: () => void }
+    ).deferModelToolSchemaAccounting?.();
+  }
   const deferredMcpServerIds = new Set(
     mcpServers
-      .filter((server) => mcpServerDefersModelSchemas(server))
+      .filter(
+        (server) =>
+          mcpServerDefersModelSchemas(server) ||
+          schemaDeferredEagerIds.has(mcpServerRegistryId(server)),
+      )
       .map((server) => mcpServerRegistryId(server)),
   );
   installLazyToolRuntime(
