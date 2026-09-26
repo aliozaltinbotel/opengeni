@@ -1,3 +1,4 @@
+import { ToolPathPhaseTimer, toolPathPhaseMetricObserver } from "./tool-path-phase-timing";
 import {
   getSessionEvent,
   getHumanInputResumeForEvent,
@@ -925,6 +926,8 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    eventing.toolPathPhases = new ToolPathPhaseTimer(toolPathPhaseMetricObserver(observability));
+    const toolPathPhases = eventing.toolPathPhases;
     eventing.batcher = createRuntimeBatcher(
       async (events) => {
         await eventing.publish!(events);
@@ -993,36 +996,38 @@ export async function runTurnStreamAttempt(
         const generatedImageReceipt = generatedImage
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
-        const responseResult = await processModelResponseTerminalEvent({
-          event: next.value,
-          state: modelResponseState,
-          dispatchId: modelUsageDispatchId,
-          settings,
-          db,
-          observability,
-          publish: eventing.publish,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: activeTurnId,
-          turnAttemptId: input.attemptId,
-          provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-          providerApi: resolvedModel?.provider.api ?? "responses",
-          model: turn.model,
-          latencyMode: turnExecutionPolicy.latencyMode,
-          metricProvider: streamProvider,
-          externallyBilled: billingState.isExternallyBilledTurn,
-          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-          countsTowardTokenCap: billingState.countsTowardTokenCap,
-          servingCredentialId: providerTurn.effectiveCodexCredentialId,
-          priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-          emittedSourceKeys: emittedModelUsageSourceKeys,
-          renewLease: () => leases.renewServing("model_usage"),
-          leaseLost: leases.servingLost,
-          leaseLostMessage: "Provider credential lease expired during the active turn",
-          setLastInputTokens: setLastInputTokensFenced,
-          contextContributions: eventing.companyBrainContextContributions,
-        });
+        const responseResult = await toolPathPhases.measureTerminal(() =>
+          processModelResponseTerminalEvent({
+            event: next.value,
+            state: modelResponseState,
+            dispatchId: modelUsageDispatchId,
+            settings,
+            db,
+            observability,
+            publish: eventing.publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            turnAttemptId: input.attemptId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: turn.model,
+            latencyMode: turnExecutionPolicy.latencyMode,
+            metricProvider: streamProvider,
+            externallyBilled: billingState.isExternallyBilledTurn,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+            countsTowardTokenCap: billingState.countsTowardTokenCap,
+            servingCredentialId: providerTurn.effectiveCodexCredentialId,
+            priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+            emittedSourceKeys: emittedModelUsageSourceKeys,
+            renewLease: () => leases.renewServing("model_usage"),
+            leaseLost: leases.servingLost,
+            leaseLostMessage: "Provider credential lease expired during the active turn",
+            setLastInputTokens: setLastInputTokensFenced,
+            contextContributions: eventing.companyBrainContextContributions,
+          }),
+        );
         assertModelResponseLatencyMode({
           event: next.value,
           requested: turnExecutionPolicy.latencyMode,
@@ -1068,19 +1073,23 @@ export async function runTurnStreamAttempt(
           streamSawPerResponseUsage ||= responseResult.usageReported;
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
-          await historySink.reconcileConversationTruth();
+          await toolPathPhases.measure("terminal_history_reconciliation", () =>
+            historySink.reconcileConversationTruth(),
+          );
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
           try {
-            await ensureRunAllowed(
-              settings,
-              db,
-              input.accountId,
-              input.workspaceId,
-              billingState.isExternallyBilledTurn,
-              entitlements,
-              billingState.chargesOpenGeniCredits,
-              billingState.countsTowardTokenCap,
+            await toolPathPhases.measure("ensure_run_allowed", () =>
+              ensureRunAllowed(
+                settings,
+                db,
+                input.accountId,
+                input.workspaceId,
+                billingState.isExternallyBilledTurn,
+                entitlements,
+                billingState.chargesOpenGeniCredits,
+                billingState.countsTowardTokenCap,
+              ),
             );
           } catch (limitError) {
             // Capture the run state at the boundary so the budget valve in
@@ -1105,19 +1114,21 @@ export async function runTurnStreamAttempt(
           : next.value;
         const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
         if (pendingToolCall) {
-          const registered = await registerPendingSessionToolCall(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration: attempt.executionGeneration,
-            attemptId: input.attemptId,
-            modelToolOutputTruncationTokens:
-              eventing.modelRunSettings.modelToolOutputTruncationTokens,
-            callId: pendingToolCall.callId,
-            callType: pendingToolCall.callType,
-            callItem: pendingToolCall.callItem as Record<string, unknown>,
-          });
+          const registered = await toolPathPhases.measure("pending_tool_registration", () =>
+            registerPendingSessionToolCall(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+              modelToolOutputTruncationTokens:
+                eventing.modelRunSettings.modelToolOutputTruncationTokens,
+              callId: pendingToolCall.callId,
+              callType: pendingToolCall.callType,
+              callItem: pendingToolCall.callItem as Record<string, unknown>,
+            }),
+          );
           if (!registered.accepted) {
             throw new TurnAttemptFencedError(
               "turn attempt ended while recording an in-flight tool call",
@@ -1234,26 +1245,28 @@ export async function runTurnStreamAttempt(
           // non-monotonic while parallel calls complete (a later call may
           // appear before an earlier persisted pair), so reconciling a
           // partial batch through a scalar watermark can create an orphan.
-          const recorded = await recordPendingSessionToolCallResult(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            executionGeneration: attempt.executionGeneration,
-            attemptId: input.attemptId,
-            callId: completedToolCall.callId,
-            modelToolOutputTruncationTokens:
-              eventing.modelRunSettings.modelToolOutputTruncationTokens,
-            resultItem: durableResultItem as Record<string, unknown>,
-            eventOutput: normalizedToolOutput.output,
-            ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
-              ? {
-                  videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
-                    completedToolCall.callId,
-                  )!,
-                }
-              : {}),
-          });
+          const recorded = await toolPathPhases.measure("pending_result_recording", () =>
+            recordPendingSessionToolCallResult(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+              callId: completedToolCall.callId,
+              modelToolOutputTruncationTokens:
+                eventing.modelRunSettings.modelToolOutputTruncationTokens,
+              resultItem: durableResultItem as Record<string, unknown>,
+              eventOutput: normalizedToolOutput.output,
+              ...(videoGenerationAcceptancesByCallId.has(completedToolCall.callId)
+                ? {
+                    videoGenerationAcceptance: videoGenerationAcceptancesByCallId.get(
+                      completedToolCall.callId,
+                    )!,
+                  }
+                : {}),
+            }),
+          );
           if (!recorded.accepted) {
             throw new TurnAttemptFencedError(
               "turn attempt ended while recording a tool-call result",
@@ -1291,7 +1304,9 @@ export async function runTurnStreamAttempt(
             // the receipts until the normalized tool-output event below is
             // durably flushed: recovery then covers every crash boundary
             // without either losing or duplicating the UI projection.
-            await historySink.reconcileConversationTruth({ requireDurable: true });
+            await toolPathPhases.measure("stable_history_reconciliation", () =>
+              historySink.reconcileConversationTruth({ requireDurable: true }),
+            );
             stableToolCallIdsToClear = currentBatchIsStable
               ? [...currentToolBatchCallIds]
               : [completedToolCall.callId];
@@ -1321,7 +1336,11 @@ export async function runTurnStreamAttempt(
               event.payload,
             );
           streamTiming.onEvent(event.type);
-          await eventing.batcher.push(event);
+          if (event.type === "agent.toolCall.created" || event.type === "agent.toolCall.output") {
+            await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event));
+          } else {
+            await eventing.batcher.push(event);
+          }
         }
         // Structural tool-output events await their durable append before
         // push returns. The complete result is now retained in the event

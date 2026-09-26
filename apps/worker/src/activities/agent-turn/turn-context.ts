@@ -23,6 +23,7 @@ import type { RunCredentialRenewalController } from "../run-credential-renewal";
 import type { createRuntimeBatcher, startActivityHeartbeat } from "../streaming";
 import type { RunAgentTurnResult } from "../types";
 import type { TurnOutcome } from "../../observability-metrics";
+import type { ToolPathPhaseTimer } from "./tool-path-phase-timing";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
@@ -127,6 +128,8 @@ export type EventingState = {
   heartbeatDetails: TurnHeartbeatDetails | null;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
   batcher: ReturnType<typeof createRuntimeBatcher> | null;
+  /** Per-occurrence tool-path phase timing (diagnostics only; tool-path-phase-timing.ts). */
+  toolPathPhases: ToolPathPhaseTimer | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
   toolPreparationReady: Promise<void> | null;
   toolPreparationClosing: boolean;
@@ -259,6 +262,7 @@ export function createTurnContext(input: {
       heartbeatDetails: null,
       heartbeatTimer: undefined,
       batcher: null,
+      toolPathPhases: null,
       preparedTools: null,
       toolPreparationReady: null,
       toolPreparationClosing: false,

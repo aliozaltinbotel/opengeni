@@ -456,7 +456,12 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
           recordSessionEventAppendLatency(observability, {
             durationSeconds,
           }),
-        onAppendPhase: (observation) => recordSessionEventAppendPhase(observability, observation),
+        onAppendPhase: (observation) => {
+          recordSessionEventAppendPhase(observability, observation);
+          if (observation.phase === "turn_attempt_fence" && observation.outcome === "ok") {
+            eventing.toolPathPhases?.noteAppendFenceSettled();
+          }
+        },
         onPublish: ({ durationSeconds }) =>
           recordSessionEventPublishLatency(observability, {
             durationSeconds,

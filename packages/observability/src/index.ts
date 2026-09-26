@@ -293,6 +293,9 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "route",
   "status",
   "durationMs",
+  // Wall-clock epoch milliseconds of a diagnostic phase occurrence (numbers only; tool-path phase timing).
+  "startedAtMs",
+  "endedAtMs",
   "attempt",
   "attempts",
   "delayMs",
