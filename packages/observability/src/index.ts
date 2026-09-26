@@ -293,9 +293,6 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "route",
   "status",
   "durationMs",
-  // Wall-clock epoch milliseconds of a diagnostic phase occurrence (numbers only; tool-path phase timing).
-  "startedAtMs",
-  "endedAtMs",
   "attempt",
   "attempts",
   "delayMs",
@@ -324,6 +321,10 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "fullEvidenceAvailable",
   "retainedOutputKind",
 ]);
+
+/** Wall-clock epoch milliseconds of a diagnostic phase occurrence (tool-path phase timing): published only as a
+ * finite number, never a string, NaN or Infinity. */
+const PUBLIC_TELEMETRY_FINITE_NUMBER_KEYS = new Set(["startedAtMs", "endedAtMs"]);
 
 /** Opaque correlation fields require both a reviewed name and a closed value
  * grammar. Merely adding one to the ordinary allow-list would let an unrelated
@@ -1518,6 +1519,9 @@ function projectPublicTelemetryAttributes(attributes: Attributes): Attributes {
     Object.entries(attributes).filter(([key, value]) => {
       if (value === undefined) return false;
       if (PUBLIC_TELEMETRY_ATTRIBUTE_KEYS.has(key)) return true;
+      if (PUBLIC_TELEMETRY_FINITE_NUMBER_KEYS.has(key)) {
+        return typeof value === "number" && Number.isFinite(value);
+      }
       const pattern = PUBLIC_TELEMETRY_OPAQUE_ATTRIBUTE_PATTERNS.get(key);
       return typeof value === "string" && pattern?.test(value) === true;
     }),

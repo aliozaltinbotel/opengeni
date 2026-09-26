@@ -93,36 +93,6 @@ describe("tool-path phase timing", () => {
     ]);
   });
 
-  test("a structural publication splits at the last write fence reported while it is in flight", async () => {
-    const seen: ToolPathPhaseObservation[] = [];
-    const { clock, advance } = fakeClock();
-    const timer = new ToolPathPhaseTimer((o) => seen.push(o), clock);
-    // Outside a structural publication a fence is ignored.
-    timer.noteAppendFenceSettled();
-    await timer.measureStructuralPublication(async () => {
-      advance(40); // an earlier delta batch's append
-      timer.noteAppendFenceSettled();
-      advance(380); // this event's batch: transaction admission and its fence wait
-      timer.noteAppendFenceSettled();
-      advance(115); // insert (occurredAt assigned after the fence), projection, commit, publish
-    });
-    const byPhase = Object.fromEntries(seen.map((o) => [o.phase, o]));
-    expect(byPhase.structural_publication).toMatchObject({ outcome: "completed", durationMs: 535 });
-    expect(byPhase.structural_append_pre_fence).toMatchObject({
-      outcome: "completed",
-      durationMs: 420,
-      startedAtMs: byPhase.structural_publication!.startedAtMs,
-    });
-    expect(byPhase.structural_append_post_fence).toMatchObject({
-      outcome: "completed",
-      durationMs: 115,
-      endedAtMs: byPhase.structural_publication!.endedAtMs,
-    });
-    expect(byPhase.structural_append_pre_fence!.endedAtMs).toBe(
-      byPhase.structural_append_post_fence!.startedAtMs,
-    );
-  });
-
   test("a throwing or rejecting observer changes no value, error, await or order", async () => {
     const order: string[] = [];
     const run = async (timer: ToolPathPhaseTimer) => {
@@ -145,7 +115,6 @@ describe("tool-path phase timing", () => {
       results.push(
         await timer.measureStructuralPublication(async () => {
           order.push("push");
-          timer.noteAppendFenceSettled();
           return undefined;
         }),
       );
@@ -167,13 +136,11 @@ describe("tool-path phase timing", () => {
     }
   });
 
-  test("the structural split around a real batcher keeps its flush order and batches", async () => {
+  test("the structural publication around a real batcher keeps its flush order and batches", async () => {
     const seen: ToolPathPhaseObservation[] = [];
     const timer = new ToolPathPhaseTimer((o) => seen.push(o));
     const appended: string[][] = [];
     const batcher = createRuntimeBatcher(async (events) => {
-      // The append observer reports the fence inside each batch's transaction.
-      timer.noteAppendFenceSettled();
       appended.push(events.map((event) => event.type));
     });
     await batcher.push({ type: "agent.message.delta", payload: {} });
@@ -183,13 +150,10 @@ describe("tool-path phase timing", () => {
     await batcher.flush();
     // Same single flush carrying the pending delta first, exactly as without timing.
     expect(appended).toEqual([["agent.message.delta", "agent.toolCall.output"]]);
-    expect(seen.map((o) => o.phase)).toEqual([
-      "structural_publication",
-      "structural_append_pre_fence",
-      "structural_append_post_fence",
+    expect(seen.map((o) => [o.phase, o.outcome])).toEqual([
+      ["structural_publication", "completed"],
     ]);
   });
-
   test("metric observer uses closed labels and a debug record with wall times only", () => {
     const histograms: unknown[] = [];
     const logs: Array<[string, Record<string, unknown>]> = [];
@@ -198,7 +162,7 @@ describe("tool-path phase timing", () => {
       debug: (message, attributes) => logs.push([message, attributes as Record<string, unknown>]),
     } as unknown as Observability)!;
     observer({
-      phase: "structural_append_post_fence",
+      phase: "structural_publication",
       outcome: "completed",
       startedAtMs: 1,
       endedAtMs: 2,
@@ -207,7 +171,7 @@ describe("tool-path phase timing", () => {
     expect(histograms).toEqual([
       expect.objectContaining({
         name: "opengeni_turn_tool_path_phase_seconds",
-        labels: { phase: "structural_append_post_fence", outcome: "completed" },
+        labels: { phase: "structural_publication", outcome: "completed" },
         value: 0.115,
       }),
     ]);
@@ -215,7 +179,7 @@ describe("tool-path phase timing", () => {
       [
         "turn.tool_path.phase",
         {
-          op: "structural_append_post_fence",
+          op: "structural_publication",
           outcome: "completed",
           startedAtMs: 1,
           endedAtMs: 2,
@@ -284,4 +248,49 @@ test("real Observability public projection keeps the wall-clock numbers", () => 
   expect(record).toBeTruthy();
   expect(JSON.stringify(record)).toContain("1790000000000");
   expect(JSON.stringify(record)).toContain("1790000000123");
+});
+
+test("the two wall-clock keys are published only as finite numbers", () => {
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (line: string) => lines.push(line);
+  try {
+    const observability = createObservability(testSettings({ observabilityStructuredLogs: true }), {
+      component: "worker",
+      now: () => 1,
+    });
+    for (const [startedAtMs, endedAtMs] of [
+      ["1790000000000", "secret-looking string"],
+      [Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY],
+      [Number.NaN, { nested: 1 }],
+      [1_790_000_000_000, 1_790_000_000_123],
+    ] as const) {
+      observability.debug("turn.tool_path.phase", {
+        op: "structural_publication",
+        startedAtMs: startedAtMs as never,
+        endedAtMs: endedAtMs as never,
+      });
+    }
+  } finally {
+    console.log = original;
+  }
+  const records = lines
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return null;
+      }
+    })
+    .filter((value) => value?.message === "turn.tool_path.phase");
+  expect(records).toHaveLength(4);
+  for (const record of records.slice(0, 3)) {
+    expect(record).not.toHaveProperty("startedAtMs");
+    expect(record).not.toHaveProperty("endedAtMs");
+  }
+  expect(records[3]).toMatchObject({
+    startedAtMs: 1_790_000_000_000,
+    endedAtMs: 1_790_000_000_123,
+  });
+  expect(lines.join("\n")).not.toContain("secret-looking string");
 });

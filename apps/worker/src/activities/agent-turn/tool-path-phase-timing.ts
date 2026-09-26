@@ -14,8 +14,6 @@ export const TOOL_PATH_PHASES = [
   "pending_result_recording",
   "stable_history_reconciliation",
   "structural_publication",
-  "structural_append_pre_fence",
-  "structural_append_post_fence",
 ] as const;
 export type ToolPathPhase = (typeof TOOL_PATH_PHASES)[number];
 
@@ -48,14 +46,9 @@ function observeSafely(
 
 /**
  * One turn attempt's recorder. `measure` awaits exactly the given work and returns or rethrows exactly
- * its outcome. A structural publication additionally splits at the last turn-attempt write fence the
- * append path reports while the publication is in flight (`noteAppendFenceSettled`): the event's own batch
- * is always the final batch of that drain, so its fence is the last one, and the created/output row's
- * `occurredAt` is assigned after it.
+ * its outcome.
  */
 export class ToolPathPhaseTimer {
-  private structural: { start: Mark; lastFence: Mark | null } | null = null;
-
   constructor(
     private readonly observer: ToolPathPhaseObserver | undefined,
     private readonly clock: Clock = systemClock,
@@ -110,34 +103,17 @@ export class ToolPathPhaseTimer {
     return value;
   }
 
+  /** A structural created/output publication (the durable append plus its publish), as one phase. */
   async measureStructuralPublication<T>(work: () => Promise<T>): Promise<T> {
-    if (!this.observer) return await work();
-    const state = { start: this.mark(), lastFence: null as Mark | null };
-    this.structural = state;
-    let outcome: ToolPathPhaseObservation["outcome"] = "failed";
-    try {
-      const value = await work();
-      outcome = "completed";
-      return value;
-    } finally {
-      if (this.structural === state) this.structural = null;
-      const end = this.mark();
-      this.emit("structural_publication", outcome, state.start, end);
-      if (state.lastFence) {
-        this.emit("structural_append_pre_fence", "completed", state.start, state.lastFence);
-        this.emit("structural_append_post_fence", outcome, state.lastFence, end);
-      }
-    }
+    return await this.measure("structural_publication", work);
   }
 
-  /** Called by the append observer when a turn-attempt write fence phase completes. */
-  noteAppendFenceSettled(): void {
-    try {
-      if (this.structural) this.structural.lastFence = this.mark();
-    } catch {
-      // A clock failure must not reach the append path.
-    }
-  }
+  /**
+   * Inert. The pre/post append-fence split was removed (audit review of b24faac92: a direct publication's fence
+   * could replace the structural one, so the split misattributed time); nothing in the worker calls this, and it
+   * records nothing, so no fence can be attributed to the wrong publication.
+   */
+  noteAppendFenceSettled(): void {}
 }
 
 /** Existing observability surface: a closed-label histogram plus one debug record per occurrence. */
