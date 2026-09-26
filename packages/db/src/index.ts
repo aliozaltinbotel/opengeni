@@ -41369,24 +41369,34 @@ export async function appendSessionHistoryItems(
           attemptId: input.expectedAttemptId,
         });
         if (!allowed.allowed) return false;
-        await tx
+        // Canonicalize once: insertion and exact readback compare the same values.
+        const expected = input.items.map((entry) => ({
+          position: entry.position,
+          // This is the canonical model-memory boundary. The pending-call
+          // ledger and audit event retain their separate raw/preview forms.
+          item: canonicalizePersistedHistoryItem(
+            entry.item,
+            input.modelToolOutputTruncationTokens,
+          ),
+        }));
+        const savedFields = {
+          position: schema.sessionHistoryItems.position,
+          turnId: schema.sessionHistoryItems.turnId,
+          // The schema reads ordered JSON, not the legacy JSONB projection.
+          item: schema.sessionHistoryItems.item,
+          itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+        };
+        const inserted = await tx
           .insert(schema.sessionHistoryItems)
           .values(
             withLosslessContentWriteVersion(
-              input.items.map((entry) => ({
+              expected.map((entry) => ({
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 position: entry.position,
-                // This is the canonical model-memory boundary. The pending-call
-                // ledger and audit event may retain their separate raw/preview
-                // forms, but conversation truth is always the bounded Codex form
-                // without Responses output-only fields such as `status`.
-                item: canonicalizePersistedHistoryItem(
-                  entry.item,
-                  input.modelToolOutputTruncationTokens,
-                ),
+                item: entry.item,
               })),
               "item",
               "itemCodecVersion",
@@ -41398,36 +41408,37 @@ export async function appendSessionHistoryItems(
               schema.sessionHistoryItems.sessionId,
               schema.sessionHistoryItems.position,
             ],
-          });
+          })
+          .returning(savedFields);
+        const byPosition = new Map(inserted.map((row) => [row.position, row]));
+        const conflictingPositions = [...new Set(
+          expected.filter((entry) => !byPosition.has(entry.position)).map((entry) => entry.position),
+        )];
+        // RETURNING contains the stored fresh rows. Only position conflicts
+        // need another read; every row still receives the exact comparison.
+        if (conflictingPositions.length > 0) {
+          const existing = await tx
+            .select(savedFields)
+            .from(schema.sessionHistoryItems)
+            .where(
+              and(
+                eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+                eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+                inArray(schema.sessionHistoryItems.position, conflictingPositions),
+              ),
+            );
+          for (const row of existing) byPosition.set(row.position, row);
+        }
         // A position conflict is idempotent only when the exact conversation
         // item is already there. Never acknowledge a different item as saved.
-        const saved = await tx
-          .select({
-            position: schema.sessionHistoryItems.position,
-            turnId: schema.sessionHistoryItems.turnId,
-            item: schema.sessionHistoryItems.item,
-            itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-          })
-          .from(schema.sessionHistoryItems)
-          .where(
-            and(
-              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-              inArray(
-                schema.sessionHistoryItems.position,
-                input.items.map((entry) => entry.position),
-              ),
-            ),
-          );
-        const byPosition = new Map(saved.map((row) => [row.position, row]));
-        for (const entry of input.items) {
+        for (const entry of expected) {
           const row = byPosition.get(entry.position);
           if (
             !row ||
             row.turnId !== input.turnId ||
             !isDeepStrictEqual(
               fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-              canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+              entry.item,
             )
           ) {
             throw new Error(

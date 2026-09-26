@@ -6421,6 +6421,70 @@ describe("clean session control plane", () => {
     });
   });
 
+  test("history append accepts mixed fresh and equal rows and rolls back mixed conflicts", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "read the property once");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("History fixture turn was not claimed");
+    const input = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
+      expectedAttemptId: attemptId,
+    };
+    const before = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    const position = (before.at(-1)?.position ?? -1) + 1;
+    const call = {
+      type: "function_call",
+      callId: "history-property-read",
+      name: "property_read",
+      arguments: "{}",
+    };
+    const result = {
+      type: "function_call_result",
+      callId: call.callId,
+      output: { type: "text", text: "Property result: \0 and \ud800" },
+    };
+    expect(await appendSessionHistoryItems(client.db, {
+      ...input,
+      items: [{ position, item: call }],
+    })).toBe(true);
+    const mixed = [
+      { position, item: call },
+      { position: position + 1, item: result },
+    ];
+    expect(await appendSessionHistoryItems(client.db, { ...input, items: mixed })).toBe(true);
+    const accepted = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
+    expect(accepted.map((row) => ({ position: row.position, item: row.item }))).toEqual([
+      ...before.map((row) => ({ position: row.position, item: row.item })),
+      ...mixed.map((entry) => ({
+        position: entry.position,
+        item: canonicalizePersistedHistoryItem(entry.item),
+      })),
+    ]);
+    // A complete equal replay stays idempotent, including lossless content.
+    expect(await appendSessionHistoryItems(client.db, { ...input, items: mixed })).toBe(true);
+    expect(await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).toEqual(accepted);
+    // Put the fresh row first: detecting the later conflict must roll it back.
+    await expect(appendSessionHistoryItems(client.db, {
+      ...input,
+      items: [
+        { position: position + 2, item: { type: "message", role: "assistant", content: "must roll back" } },
+        { position, item: { ...call, arguments: '{"changed":true}' } },
+      ],
+    })).rejects.toThrow(`Conversation history persistence conflict at position ${position}`);
+    expect(await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).toEqual(accepted);
+  });
+
   test("a replaced attempt cannot compact history or overwrite its token signal", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "build it");
