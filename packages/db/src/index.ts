@@ -41673,131 +41673,124 @@ export async function recordPendingSessionToolCallResult(
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        const fence = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
-        });
-        if (!fence.allowed) {
-          return { accepted: false, recorded: false };
-        }
-        const [pending] = await tx
+    async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.executionGeneration,
+        attemptId: input.attemptId,
+      });
+      if (!fence.allowed) {
+        return { accepted: false, recorded: false };
+      }
+      const [pending] = await tx
+        .select()
+        .from(schema.sessionPendingToolCalls)
+        .where(
+          and(
+            eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+            eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+            eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+            eq(schema.sessionPendingToolCalls.callId, input.callId),
+          ),
+        )
+        .for("update")
+        .limit(1);
+      if (!pending) return { accepted: true, recorded: false };
+      assertPendingToolOutputPolicyMatches(
+        pending.modelToolOutputTruncationTokens,
+        input.modelToolOutputTruncationTokens,
+        input.callId,
+      );
+      if (
+        pending.modelToolOutputTruncationTokens === null &&
+        input.modelToolOutputTruncationTokens !== undefined
+      ) {
+        await tx
+          .update(schema.sessionPendingToolCalls)
+          .set({
+            modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
+          })
+          .where(eq(schema.sessionPendingToolCalls.id, pending.id));
+      }
+      const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
+      if (
+        !resultType ||
+        historyItemType(input.resultItem) !== resultType ||
+        historyCallId(input.resultItem) !== input.callId
+      ) {
+        throw new Error(`SDK tool result does not settle ${pending.callType}:${input.callId}`);
+      }
+      const resultUpdate = withLosslessContentWriteVersion(
+        {
+          resultItem: input.resultItem,
+          resultRecordedAt: new Date(),
+        },
+        "resultItem",
+        "resultItemCodecVersion",
+      );
+      const update = Object.hasOwn(input, "eventOutput")
+        ? withLosslessContentWriteVersion(
+            {
+              ...resultUpdate,
+              eventOutput: { value: input.eventOutput },
+            },
+            "eventOutput",
+            "eventOutputCodecVersion",
+          )
+        : resultUpdate;
+      const recorded = await tx
+        .update(schema.sessionPendingToolCalls)
+        .set(update)
+        .where(
+          and(
+            eq(schema.sessionPendingToolCalls.id, pending.id),
+            sql`${schema.sessionPendingToolCalls.resultItem} is null`,
+          ),
+        )
+        .returning({ id: schema.sessionPendingToolCalls.id });
+      if (input.videoGenerationAcceptance) {
+        const [operation] = await tx
           .select()
-          .from(schema.sessionPendingToolCalls)
+          .from(schema.videoGenerationOperations)
           .where(
             and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              eq(schema.sessionPendingToolCalls.callId, input.callId),
+              eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
+              eq(schema.videoGenerationOperations.id, input.videoGenerationAcceptance.operationId),
+              eq(
+                schema.videoGenerationOperations.requestDigest,
+                input.videoGenerationAcceptance.requestDigest,
+              ),
             ),
           )
           .for("update")
           .limit(1);
-        if (!pending) return { accepted: true, recorded: false };
-        assertPendingToolOutputPolicyMatches(
-          pending.modelToolOutputTruncationTokens,
-          input.modelToolOutputTruncationTokens,
-          input.callId,
-        );
-        if (
-          pending.modelToolOutputTruncationTokens === null &&
-          input.modelToolOutputTruncationTokens !== undefined
-        ) {
-          await tx
-            .update(schema.sessionPendingToolCalls)
-            .set({
-              modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens,
-            })
-            .where(eq(schema.sessionPendingToolCalls.id, pending.id));
-        }
-        const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
-        if (
-          !resultType ||
-          historyItemType(input.resultItem) !== resultType ||
-          historyCallId(input.resultItem) !== input.callId
-        ) {
-          throw new Error(`SDK tool result does not settle ${pending.callType}:${input.callId}`);
-        }
-        const resultUpdate = withLosslessContentWriteVersion(
-          {
-            resultItem: input.resultItem,
-            resultRecordedAt: new Date(),
-          },
-          "resultItem",
-          "resultItemCodecVersion",
-        );
-        const update = Object.hasOwn(input, "eventOutput")
-          ? withLosslessContentWriteVersion(
-              {
-                ...resultUpdate,
-                eventOutput: { value: input.eventOutput },
-              },
-              "eventOutput",
-              "eventOutputCodecVersion",
-            )
-          : resultUpdate;
-        const recorded = await tx
-          .update(schema.sessionPendingToolCalls)
-          .set(update)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.id, pending.id),
-              sql`${schema.sessionPendingToolCalls.resultItem} is null`,
-            ),
-          )
-          .returning({ id: schema.sessionPendingToolCalls.id });
-        if (input.videoGenerationAcceptance) {
-          const [operation] = await tx
-            .select()
-            .from(schema.videoGenerationOperations)
-            .where(
-              and(
-                eq(schema.videoGenerationOperations.workspaceId, input.workspaceId),
-                eq(
-                  schema.videoGenerationOperations.id,
-                  input.videoGenerationAcceptance.operationId,
-                ),
-                eq(
-                  schema.videoGenerationOperations.requestDigest,
-                  input.videoGenerationAcceptance.requestDigest,
-                ),
-              ),
-            )
-            .for("update")
-            .limit(1);
-          if (!operation) throw new Error("Video generation acceptance operation disappeared");
-          await markVideoGenerationAcceptedInTransaction(tx as unknown as Database, {
-            workspaceId: input.workspaceId,
-            operation,
-            toolCallId: input.callId,
-          });
-        } else {
-          // Admission and its accepted tool result are one causal boundary. If
-          // reference preparation (or any other pre-submit work) failed, settle
-          // the still-unaccepted operation in this same result transaction so
-          // quota and managed credits cannot remain reserved.
-          await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(
-            tx as unknown as Database,
-            {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              toolCallIds: [input.callId],
-              reason: "Video generation failed before it was accepted.",
-              now: new Date(),
-            },
-          );
-        }
-        return {
-          accepted: true,
-          recorded: recorded.length === 1,
-        };
-      }),
+        if (!operation) throw new Error("Video generation acceptance operation disappeared");
+        await markVideoGenerationAcceptedInTransaction(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          operation,
+          toolCallId: input.callId,
+        });
+      } else {
+        // Admission and its accepted tool result are one causal boundary. If
+        // reference preparation (or any other pre-submit work) failed, settle
+        // the still-unaccepted operation in this same result transaction so
+        // quota and managed credits cannot remain reserved.
+        await cancelUnacceptedVideoGenerationsForToolCallsInTransaction(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          toolCallIds: [input.callId],
+          reason: "Video generation failed before it was accepted.",
+          now: new Date(),
+        });
+      }
+      return {
+        accepted: true,
+        recorded: recorded.length === 1,
+      };
+    },
   );
 }
 

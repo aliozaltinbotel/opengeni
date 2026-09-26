@@ -410,27 +410,35 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   if (typeof context.accountId !== "string" || context.accountId.trim() === "") {
     throw new Error("setRlsContext: a non-empty accountId is required to establish an RLS context");
   }
-  // Transaction-local writer identity covers supported injected/embedded
-  // database handles whose connection-level application_name is host-owned.
-  // Standalone createDb connections also carry version receipts in their exact
-  // application_name, while old OpenGeni binaries set neither current receipt.
+  const sessionActor = sessionRlsActorContext.getStore();
+  if (sessionActor && !sessionActor.subjectId.trim()) {
+    throw new Error("setSubjectRlsContext: a non-empty subjectId is required");
+  }
+  // These transaction-local setters are independent. Install them together,
+  // then verify the subject with a separate backend read before any scoped work.
+  // An absent actor must leave an inherited subject/file-owner scope untouched.
+  const actorSettings = sessionActor
+    ? sql`,
+      set_config('opengeni.subject_id', ${sessionActor.subjectId}, true),
+      set_config('opengeni.private_file_owner', ${sessionActor.privateFileOwnerSubjectId ?? ""}, true),
+      set_config('opengeni.initiating_human_subject_id', ${sessionActor.initiatingHumanSubjectId ?? ""}, true)`
+    : sql``;
   await db.execute(sql`select
     set_config('opengeni.account_id', ${context.accountId}, true),
     set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true),
     set_config('opengeni.lossless_content_writer', '1', true),
     set_config('opengeni.sandbox_recovery_protocol_v2', '1', true),
     set_config('opengeni.pending_tool_event_output_v1', '1', true),
-    set_config('opengeni.session_variable_set_attachments_v1', '1', true)`);
-  const sessionActor = sessionRlsActorContext.getStore();
+    set_config('opengeni.session_variable_set_attachments_v1', '1', true)
+    ${actorSettings}`);
   if (sessionActor) {
-    await setSubjectRlsContext(db, sessionActor.subjectId);
-    await db.execute(
-      sql`select set_config('opengeni.private_file_owner', ${sessionActor.privateFileOwnerSubjectId ?? ""}, true), set_config(
-        'opengeni.initiating_human_subject_id',
-        ${sessionActor.initiatingHumanSubjectId ?? ""},
-        true
-      )`,
+    const [applied] = await rawRows<{ subject_id: string | null }>(
+      db,
+      sql`select current_setting('opengeni.subject_id', true) as subject_id`,
     );
+    if ((applied?.subject_id ?? "") !== sessionActor.subjectId) {
+      throw new Error("Authenticated subject RLS context was not applied on the active backend");
+    }
   }
 }
 

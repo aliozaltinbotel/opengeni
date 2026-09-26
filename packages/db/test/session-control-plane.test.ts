@@ -2386,6 +2386,137 @@ describe("clean session control plane", () => {
     ).toEqual([]);
   });
 
+  test("pending result failure rolls back policy writes and preserves a caller transaction", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "record a tool result atomically");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const base = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    for (const callId of ["failed-result", "outer-result"]) {
+      await registerPendingSessionToolCall(client.db, {
+        ...base,
+        callId,
+        callType: "function_call",
+        callItem: { type: "function_call", name: "atomic_result_tool", callId, arguments: "{}" },
+      });
+    }
+    const invalid = {
+      ...base,
+      callId: "failed-result",
+      modelToolOutputTruncationTokens: 100,
+      resultItem: { type: "message", callId: "failed-result", content: [] },
+    };
+    const readPending = () =>
+      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select({
+            callId: schema.sessionPendingToolCalls.callId,
+            policy: schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+            result: schema.sessionPendingToolCalls.resultItem,
+          })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id))
+          .orderBy(schema.sessionPendingToolCalls.callId),
+      );
+    await expect(recordPendingSessionToolCallResult(client.db, invalid)).rejects.toThrow(
+      "SDK tool result does not settle function_call:failed-result",
+    );
+    expect(await readPending()).toEqual([
+      { callId: "failed-result", policy: null, result: null },
+      { callId: "outer-result", policy: null, result: null },
+    ]);
+    const result = {
+      type: "function_call_result",
+      callId: "outer-result",
+      output: { type: "text", text: "earlier outer write survives" },
+    };
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (tx) => {
+      expect(
+        await recordPendingSessionToolCallResult(tx, {
+          ...base,
+          callId: "outer-result",
+          resultItem: result,
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+      await expect(recordPendingSessionToolCallResult(tx, invalid)).rejects.toThrow(
+        "SDK tool result does not settle function_call:failed-result",
+      );
+      // Fail in PostgreSQL after both the policy and result UPDATEs. The
+      // helper-owned savepoint must clear the aborted backend state while
+      // preserving the caller's earlier result and its ability to continue.
+      let sqlFailure: unknown;
+      try {
+        await recordPendingSessionToolCallResult(tx, {
+          ...base,
+          callId: "failed-result",
+          modelToolOutputTruncationTokens: 100,
+          resultItem: { ...result, callId: "failed-result" },
+          videoGenerationAcceptance: { operationId: "not-a-uuid", requestDigest: "test" },
+        });
+      } catch (error) {
+        sqlFailure = error;
+      }
+      const sqlStates: unknown[] = [];
+      for (let cause = sqlFailure, depth = 0; cause && depth < 5; depth += 1) {
+        const value = cause as { code?: unknown; cause?: unknown };
+        sqlStates.push(value.code);
+        cause = value.cause;
+      }
+      expect(sqlStates).toContain("22P02");
+      const scope = await tx.execute(sql`select
+        current_setting('opengeni.account_id', true) as account_id,
+        current_setting('opengeni.workspace_id', true) as workspace_id`);
+      expect(scope[0]).toEqual({ account_id: grant.accountId, workspace_id: grant.workspaceId });
+      expect(
+        await recordPendingSessionToolCallResult(tx, {
+          ...base,
+          callId: "outer-result",
+          resultItem: result,
+        }),
+      ).toEqual({ accepted: true, recorded: false });
+    });
+    const rows = await readPending();
+    expect(rows[0]).toEqual({ callId: "failed-result", policy: null, result: null });
+    expect(rows[1]!.policy).toBeNull();
+    expect(rows[1]!.result).toEqual(result);
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...base,
+        callId: "missing-result",
+        resultItem: { ...result, callId: "missing-result" },
+      }),
+    ).toEqual({ accepted: true, recorded: false });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...base,
+        executionGeneration: turn!.executionGeneration + 1,
+        callId: "outer-result",
+        resultItem: result,
+      }),
+    ).toEqual({ accepted: false, recorded: false });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...base,
+        callId: "failed-result",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: { ...result, callId: "failed-result" },
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+  });
+
   test("pending recovery policy fills rolling nulls and rejects conflicting retries", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "recover calls across a rolling worker update");
