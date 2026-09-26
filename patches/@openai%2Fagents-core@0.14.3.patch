@@ -2588,3 +2588,39 @@ diff --git a/dist/sandbox/capabilities/shell.mjs b/dist/sandbox/capabilities/she
                  description: 'Runs a command in a PTY, returning output or a session ID for ongoing interaction.',
                  parameters: z.object({
                      cmd: z.string().min(1).describe('Shell command to execute.'),
+diff --git a/dist/mcp.js b/dist/mcp.js
+index e1ef644..2c31231 100644
+--- a/dist/mcp.js
++++ b/dist/mcp.js
+@@ -682,9 +682,12 @@ function mcpToFunctionTool(mcpTool, server, convertSchemasToStrict, options = {}
+             (0, logger_1.logToolActionWarning)(logger_1.logger, 'Error converting MCP schema to strict mode:', e);
+         }
+     }
++    // Cendra/OpenGeni patch (MAINT-P09-160): keep an explicitly closed MCP input root closed on the non-strict path.
++    // Upstream 0.14.3-0.18.0 overwrite it with true, so the model sees an open contract the server then refuses.
++    // An absent or non-false additionalProperties keeps the historical true; nothing else in the schema changes.
+     const nonStrictSchema = {
+         ...schema,
+-        additionalProperties: true,
++        additionalProperties: mcpTool.inputSchema?.additionalProperties === false ? false : true,
+     };
+     return (0, tool_1.tool)({
+         name: toolName,
+diff --git a/dist/mcp.mjs b/dist/mcp.mjs
+index 2bc703c..0036e56 100644
+--- a/dist/mcp.mjs
++++ b/dist/mcp.mjs
+@@ -664,9 +664,12 @@ export function mcpToFunctionTool(mcpTool, server, convertSchemasToStrict, optio
+             logToolActionWarning(globalLogger, 'Error converting MCP schema to strict mode:', e);
+         }
+     }
++    // Cendra/OpenGeni patch (MAINT-P09-160): keep an explicitly closed MCP input root closed on the non-strict path.
++    // Upstream 0.14.3-0.18.0 overwrite it with true, so the model sees an open contract the server then refuses.
++    // An absent or non-false additionalProperties keeps the historical true; nothing else in the schema changes.
+     const nonStrictSchema = {
+         ...schema,
+-        additionalProperties: true,
++        additionalProperties: mcpTool.inputSchema?.additionalProperties === false ? false : true,
+     };
+     return tool({
+         name: toolName,
