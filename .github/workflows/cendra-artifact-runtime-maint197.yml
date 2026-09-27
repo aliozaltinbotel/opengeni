@@ -1,0 +1,17 @@
+name: Cendra artifact runtime for MAINT-P09-197
+
+# Reuse the unchanged native release builder for the exact reviewed source.
+# This caller builds source-bound inputs only; it never promotes or deploys.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-maint197
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: d1c3874448698b8deef024cdd4423fe34271eba0
