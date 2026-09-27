@@ -26,4 +26,13 @@ test("packaged Documents Skill carries the direct and secondary report delivery 
   expect(source).toContain("unfinished requirement and state the concrete blocker");
   expect(source).toContain("internal worker findings");
   expect(source).toContain("explicitly requested local-file");
+  expect(source).toContain("`authoringIds.paragraph`");
+  const reference = await Bun.file(
+    new URL("../src/bundled_artifact_skills/opengeni-documents/references/api.md", import.meta.url),
+  ).text();
+  expect(artifact?.files.find((file) => file.path === "references/api.md")?.content).toBe(
+    reference,
+  );
+  expect(reference).toContain("Direct paragraph authoring without CodeMode");
+  expect(reference).toContain("does not reserve the ID, mutate the");
 });

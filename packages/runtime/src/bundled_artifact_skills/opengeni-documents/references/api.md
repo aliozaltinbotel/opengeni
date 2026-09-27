@@ -17,6 +17,36 @@ automatically.
 For a direct `opengeni__editable_artifact_inspect` call, pass the query below as
 `request`, alongside `artifactId` and `modality: "document"`.
 
+## Direct paragraph authoring without CodeMode
+
+Inspect with `request: { kind: "summary" }`. In addition to the unchanged native
+projection and inspection receipt, the result contains
+`authoringIds: { paragraph: "p/…" }`. Copy that exact ID into a new
+`paragraph.add` command. The server generates one bounded canonical ID from the
+namespace of the inspected document; it does not reserve the ID, mutate the
+document, or grant write authority. Inspect again when another new paragraph ID
+is needed. Reuse IDs from the body projection when editing existing paragraphs.
+
+Call `opengeni__editable_artifact_apply` with the same `artifactId`, modality
+`document`, `expectedHeadSequence` and `expectedStateHash` from the returned
+`artifact`, and a command of this shape:
+
+```js
+{
+  kind: "paragraph.add",
+  target: { kind: "body" },
+  id: summaryResult.authoringIds.paragraph,
+  runs: [{ text: "The report's evidence-grounded finding.", style: {} }],
+  style: {}
+}
+```
+
+An ID does not replace the inspected-head fence. On a conflict, inspect again
+and recompute the edit. After writing, inspect the body and use its receipt for
+report completion. Body queries and non-document inspections do not return
+`authoringIds`. Older deployments without this field require one of the existing
+ID helpers below; never invent a paragraph ID.
+
 ## Report requirements and inspection evidence
 
 For a report deliverable, declare `reportRequirements: [{ id: "audit", title:

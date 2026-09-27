@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessGrant } from "@opengeni/contracts";
+import {
+  DOCUMENT_ARTIFACT_COMMAND_VERSION,
+  encodeDocumentArtifactCommandBatch,
+} from "@opengeni/contracts/editable-artifacts";
+import type { EditableArtifactAgentApplication } from "@opengeni/core/editable-artifacts";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -14,6 +19,127 @@ const attemptId = "55555555-5555-4555-8555-555555555555";
 const artifactId = "a".repeat(32);
 
 describe("editable artifact MCP surface", () => {
+  test("direct summary inspection supplies one canonical paragraph ID without CodeMode execution", async () => {
+    const namespace = 0xfedcba9876543210n;
+    const projection = { items: [{ kind: "summary", idNamespace: namespace, blockCount: 0 }] };
+    const inspectionReceiptId = "66666666-6666-4666-8666-666666666666";
+    const applies: Array<Parameters<EditableArtifactAgentApplication["apply"]>[0]> = [];
+    let authorized = true;
+    let inspectCalls = 0;
+    const server = new McpServer({ name: "direct-document-authoring", version: "1" });
+    registerEditableArtifactAgentTools({
+      server,
+      deps: {
+        editableArtifactAgent: {
+          async inspect() {
+            inspectCalls += 1;
+            return { artifact: metadata("document"), projection, inspectionReceiptId };
+          },
+          async apply(input: Parameters<EditableArtifactAgentApplication["apply"]>[0]) {
+            if (input.batch.modality !== "document") throw new Error("Expected document");
+            encodeDocumentArtifactCommandBatch({
+              version: DOCUMENT_ARTIFACT_COMMAND_VERSION,
+              commands: input.batch.commands,
+            });
+            applies.push(input);
+            return {
+              artifact: { ...metadata("document"), headSequence: 1 },
+              transaction: {
+                id: "c".repeat(32),
+                clientTransactionId: "direct-paragraph",
+                sequenceStart: 1,
+                sequenceEnd: 1,
+                stateHash: `sha256:${"d".repeat(64)}`,
+                committedAt: "2026-08-10T10:00:01.000Z",
+                replayed: false,
+              },
+            };
+          },
+        },
+      } as never,
+      grant: grant(),
+      sessionId,
+      async authorize() {
+        if (!authorized) throw new Error("Session access revoked");
+      },
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "direct-document-authoring", version: "1" });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const inspect = () =>
+      client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: { artifactId, modality: "document", request: { kind: "summary" } },
+      });
+    try {
+      const first = await inspect();
+      expect(first.isError).not.toBe(true);
+      const ids = first.structuredContent?.authoringIds as { paragraph: string };
+      expect(ids).toEqual({
+        paragraph: expect.stringMatching(/^p\/fedcba9876543210[0-9a-f]{16}$/u),
+      });
+      const counter = BigInt(`0x${ids.paragraph.slice(-16)}`);
+      expect(counter > 0n && counter < BigInt(Number.MAX_SAFE_INTEGER)).toBe(true);
+      expect(first.structuredContent).toMatchObject({
+        artifact: metadata("document"),
+        inspectionReceiptId,
+        projection: {
+          items: [{ kind: "summary", idNamespace: namespace.toString(), blockCount: 0 }],
+        },
+      });
+      const second = await inspect();
+      expect(second.structuredContent?.authoringIds).not.toEqual(ids);
+      expect(applies).toHaveLength(0);
+      const command = {
+        kind: "paragraph.add",
+        target: { kind: "body" },
+        id: ids.paragraph,
+        runs: [{ text: "A durable report paragraph.", style: {} }],
+        style: {},
+      };
+      const result = await client.callTool({
+        name: "editable_artifact_apply",
+        arguments: {
+          artifactId,
+          modality: "document",
+          expectedHeadSequence: 0,
+          expectedStateHash: metadata("document").stateHash,
+          commands: [command],
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(applies).toHaveLength(1);
+      expect(applies[0]).toMatchObject({
+        sessionId,
+        actor: { sessionId, turnId, attemptId, generation: 7 },
+        expectedHeadSequence: 0,
+        expectedStateHash: metadata("document").stateHash,
+        batch: { modality: "document", commands: [command] },
+      });
+      const body = await client.callTool({
+        name: "editable_artifact_inspect",
+        arguments: {
+          artifactId,
+          modality: "document",
+          request: {
+            kind: "body",
+            startBlock: 0,
+            limits: { maxItems: 1, maxTextUtf16: 100, maxTableCells: 1 },
+          },
+        },
+      });
+      expect(body.structuredContent).not.toHaveProperty("authoringIds");
+      projection.items[0]!.idNamespace = -1n;
+      expect((await inspect()).isError).toBe(true);
+      const count = inspectCalls;
+      authorized = false;
+      expect((await inspect()).isError).toBe(true);
+      expect(inspectCalls).toBe(count);
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
   test("artifact-only create, get and final body inspection return a supported handoff reference", async () => {
     const server = new McpServer({ name: "artifact-only-report", version: "1" });
     const requests: string[] = [];

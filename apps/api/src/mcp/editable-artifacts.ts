@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import type { AccessGrant } from "@opengeni/contracts";
+import { codemodeArtifactIds } from "@opengeni/codemode";
 import type {
   EditableArtifactAgentApplication,
   EditableArtifactAgentCommandBatch,
@@ -204,7 +205,7 @@ export function registerEditableArtifactAgentTools(
     {
       title: "Inspect editable artifact",
       description:
-        "Query the artifact's current canonical head through the same native kernel used by the browser. Use bounded modality queries; results are current, not a sandbox-file snapshot. Native document queries return a server-issued inspectionReceiptId; use a post-edit body inspection receipt for declared report completion. If the document changes during inspection, retry against its current head.",
+        "Query the artifact's current canonical head through the same native kernel used by the browser. Use bounded modality queries; results are current, not a sandbox-file snapshot. A document summary also returns authoringIds.paragraph: one new paragraph ID in the inspected document namespace, usable by direct apply without CodeMode. Native document queries return a server-issued inspectionReceiptId; use a post-edit body inspection receipt for declared report completion. If the document changes during inspection, retry against its current head.",
       inputSchema: {
         artifactId: ArtifactId,
         modality: Modality,
@@ -214,18 +215,38 @@ export function registerEditableArtifactAgentTools(
         artifact: ArtifactMetadata,
         projection: z.unknown(),
         inspectionReceiptId: z.string().uuid().optional(),
+        authoringIds: z
+          .object({ paragraph: z.string().regex(/^p\/[0-9a-f]{32}$/u) })
+          .strict()
+          .optional(),
       },
       annotations: readOnlyAnnotations("Inspect editable artifact"),
     },
     async ({ artifactId, modality, request }, extra) =>
-      await execute(
-        async () =>
-          await application().inspect({
-            ...context("editable_artifact_inspect", extra),
-            artifactId: editableArtifactId(artifactId),
-            request: { modality, query: request } as EditableArtifactAgentQuery,
-          }),
-      ),
+      await execute(async () => {
+        const result = await application().inspect({
+          ...context("editable_artifact_inspect", extra),
+          artifactId: editableArtifactId(artifactId),
+          request: { modality, query: request } as EditableArtifactAgentQuery,
+        });
+        if (modality !== "document" || request.kind !== "summary") return result;
+        const items = isRecord(result.projection) ? result.projection.items : undefined;
+        if (
+          !Array.isArray(items) ||
+          items.length !== 1 ||
+          !isRecord(items[0]) ||
+          items[0].kind !== "summary" ||
+          typeof items[0].idNamespace !== "bigint"
+        ) {
+          throw new Error("Native document summary namespace is unavailable");
+        }
+        return {
+          ...result,
+          authoringIds: {
+            paragraph: codemodeArtifactIds.document("paragraph", items[0].idNamespace),
+          },
+        };
+      }),
   );
 
   input.server.registerTool(
