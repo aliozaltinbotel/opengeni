@@ -2311,3 +2311,171 @@ describe("Codex realtime browser controller", () => {
     await controller.stop();
   });
 });
+
+// A begin failure precedes the active-mode recovery path. Reuse the ordinary
+// browser/transport fixture and preserve the same durable owner intent.
+function beginRecoveryFixture(failures: OpenGeniApiError[]) {
+  const browser = browserFixture();
+  const storage = storageFixture();
+  const timers = timerFixture();
+  const requests: Parameters<Parameters<typeof createCodexRealtimeController>[0]['client']['beginSessionRealtime']>[2][] = [];
+  let current = mode(), negotiations = 0, ended = 0;
+  const options: Parameters<typeof createCodexRealtimeController>[0] = {
+    workspaceId: WORKSPACE_ID, sessionId: SESSION_ID, storage,
+    remoteAudio: browser.remoteAudio, randomUUID: uuidSource(),
+    now: () => new Date('2026-07-29T07:00:00.000Z'),
+    createPeerConnection: () => browser.peer, getUserMedia: async () => browser.media,
+    ...timers,
+    client: {
+      beginSessionRealtime: async (workspaceId, sessionId, request) => {
+        expect([workspaceId, sessionId]).toEqual([WORKSPACE_ID, SESSION_ID]);
+        requests.push(structuredClone(request));
+        const failure = failures.shift(); if (failure) throw failure;
+        current = mode({operationId: request.operationId, browserInstanceId: request.browserInstanceId});
+        return {mode: current, replay: requests.length > 1};
+      },
+      negotiateCodexRealtimeWebrtc: async (_workspace, _session, request) => {
+        negotiations++;
+        return {sdp: ANSWER, version: 'v3', model: 'gpt-live-1-boulder-alpha', connectionId: CONNECTION_ID,
+          connectionEpoch: request.expectedConnectionEpoch, startupFenceSequence: 0, modeVersion: current.version, replay: false};
+      },
+      activateCodexRealtimeConnection: async () => ({mode: current, replay: false}),
+      heartbeatSessionRealtime: async () => ({mode: current, replay: false}),
+      syncSessionRealtimeLedger: async () => ({accepted: [], outbound: []}),
+      endSessionRealtime: async () => {ended++; return {mode: mode({...current, state: 'ended', endReason: 'user_stop'}), replay: false};},
+    },
+  };
+  return {options, storage, timers, requests, get negotiations() {return negotiations;}, get ended() {return ended;}};
+}
+
+for (const outcomeUnknown of [false, true]) {
+  test(`explicit failed-begin retry preserves owner and operation identity (unknown=${outcomeUnknown})`, async () => {
+    const failure = new OpenGeniApiError(503, JSON.stringify({code: 'temporarily_unavailable', retryable: true, outcomeUnknown}), {mutation: true});
+    const f = beginRecoveryFixture([failure]), controller = createCodexRealtimeController(f.options);
+    await expect(controller.start()).rejects.toBe(failure);
+    expect(controller.snapshot()).toMatchObject({status: 'error', mode: null});
+    expect(f.requests).toHaveLength(1); expect(f.negotiations).toBe(0);
+    expect(f.storage.values.size).toBe(1); expect(f.timers.timeoutDelays()).toEqual([]);
+    await Promise.all([controller.retry(), controller.retry()]);
+    expect(f.requests).toHaveLength(2); expect(f.requests[1]).toEqual(f.requests[0]);
+    expect(controller.snapshot().status).toBe('active'); expect(f.negotiations).toBe(1);
+    await controller.stop(); expect(f.ended).toBe(1); expect(f.storage.values.size).toBe(0);
+    controller.close();
+  });
+}
+
+test('permanent failed-begin refusal is not retained or retried', async () => {
+  const failure = new OpenGeniApiError(403, JSON.stringify({code: 'forbidden', retryable: false}), {mutation: true});
+  const f = beginRecoveryFixture([failure]), controller = createCodexRealtimeController(f.options);
+  await expect(controller.start()).rejects.toBe(failure);
+  expect(f.storage.values.size).toBe(0);
+  await expect(controller.retry()).rejects.toThrow('owner is not recoverable');
+  expect(f.requests).toHaveLength(1); expect(f.negotiations).toBe(0); controller.close();
+});
+
+test('reload of a pending begin reconciles the original owner and operation', async () => {
+  const f = beginRecoveryFixture([new OpenGeniApiError(503, '', {code: 'network', retryable: true, outcomeUnknown: true, mutation: true})]);
+  const first = createCodexRealtimeController(f.options);
+  await expect(first.start()).rejects.toBeInstanceOf(OpenGeniApiError); first.close();
+  const restored = createCodexRealtimeController(f.options);
+  await restored.observeLifecycle(null);
+  expect(f.requests).toHaveLength(2); expect(f.requests[1]).toEqual(f.requests[0]);
+  expect(restored.snapshot().status).toBe('active'); expect(f.negotiations).toBe(1);
+  await restored.stop(); restored.close();
+});
+
+test('stop reconciles an indeterminate pending begin before ending with no provider connection', async () => {
+  const f = beginRecoveryFixture([new OpenGeniApiError(503, '', {code: 'network', retryable: true, outcomeUnknown: true, mutation: true})]);
+  const controller = createCodexRealtimeController(f.options);
+  await expect(controller.start()).rejects.toBeInstanceOf(OpenGeniApiError);
+  await controller.stop();
+  expect(f.requests).toHaveLength(2); expect(f.requests[1]).toEqual(f.requests[0]);
+  expect(f.negotiations).toBe(0); expect(f.ended).toBe(1); expect(f.storage.values.size).toBe(0);
+  expect(controller.snapshot().status).toBe('idle'); controller.close();
+});
+
+test('an unavailable stop reconciliation retains the pending begin for explicit retry', async () => {
+  const unknown = () => new OpenGeniApiError(503, '', {code: 'network', retryable: true, outcomeUnknown: true, mutation: true});
+  const f = beginRecoveryFixture([unknown(), unknown()]), controller = createCodexRealtimeController(f.options);
+  await expect(controller.start()).rejects.toBeInstanceOf(OpenGeniApiError);
+  await expect(controller.stop()).rejects.toBeInstanceOf(OpenGeniApiError);
+  expect(controller.snapshot()).toMatchObject({status: 'error', mode: null});
+  expect(f.storage.values.size).toBe(1); expect(f.ended).toBe(0); expect(f.negotiations).toBe(0);
+  await controller.retry();
+  expect(f.requests).toHaveLength(3); expect(f.requests.every(request => JSON.stringify(request) === JSON.stringify(f.requests[0]))).toBe(true);
+  expect(controller.snapshot().status).toBe('active'); await controller.stop(); controller.close();
+});
+
+
+test('a refused reconciliation does not discard an earlier indeterminate begin', async () => {
+  const f = beginRecoveryFixture([
+    new OpenGeniApiError(503, '', {code: 'network', retryable: true, outcomeUnknown: true, mutation: true}),
+    new OpenGeniApiError(403, JSON.stringify({code: 'forbidden', retryable: false}), {mutation: true}),
+  ]);
+  const controller = createCodexRealtimeController(f.options);
+  await expect(controller.start()).rejects.toBeInstanceOf(OpenGeniApiError);
+  await expect(controller.retry()).rejects.toBeInstanceOf(OpenGeniApiError);
+  expect(f.storage.values.size).toBe(1); expect(f.requests).toHaveLength(2);
+  expect(f.requests[1]).toEqual(f.requests[0]); expect(f.negotiations).toBe(0);
+  controller.close();
+});
+
+test('late begin retry response cannot revive a mode already reconciled and stopped', async () => {
+  const f = beginRecoveryFixture([new OpenGeniApiError(503, '', {code: 'network', retryable: true, outcomeUnknown: true, mutation: true})]);
+  const originalBegin = f.options.client.beginSessionRealtime;
+  let finishRetry: (() => void) | undefined;
+  let retryStarted: (() => void) | undefined;
+  const delayed = new Promise<void>(resolve => {finishRetry = resolve;});
+  const pending = new Promise<void>(resolve => {retryStarted = resolve;});
+  f.options.client.beginSessionRealtime = async (...args) => {
+    const result = await originalBegin(...args);
+    if (f.requests.length === 2) {retryStarted!(); await delayed;}
+    return result;
+  };
+  const controller = createCodexRealtimeController(f.options);
+  await expect(controller.start()).rejects.toBeInstanceOf(OpenGeniApiError);
+  const retry = controller.retry(); await pending;
+  await controller.stop();
+  expect(f.ended).toBe(1); expect(f.storage.values.size).toBe(0);
+  expect(controller.snapshot()).toMatchObject({status: 'idle', mode: null});
+  finishRetry!(); await retry.catch(() => undefined);
+  expect(controller.snapshot()).toMatchObject({status: 'idle', mode: null, realtimeId: null});
+  expect(f.negotiations).toBe(0); expect(f.requests).toHaveLength(3);
+  expect(f.requests.every(request => JSON.stringify(request) === JSON.stringify(f.requests[0]))).toBe(true);
+  controller.close();
+});
+
+test('a retryable reload reconciliation waits for explicit retry of the same pending begin', async () => {
+  const unavailable = () => new OpenGeniApiError(503, JSON.stringify({code: 'temporarily_unavailable', retryable: true}), {mutation: true});
+  const f = beginRecoveryFixture([unavailable(), unavailable()]);
+  const first = createCodexRealtimeController(f.options);
+  await expect(first.start()).rejects.toBeInstanceOf(OpenGeniApiError); first.close();
+  const restored = createCodexRealtimeController(f.options);
+  await restored.observeLifecycle(null);
+  expect(f.requests).toHaveLength(2); expect(f.negotiations).toBe(0);
+  expect(restored.snapshot()).toMatchObject({status: 'error', mode: null, diagnostic: {recoverable: true}});
+  expect(f.timers.timeoutDelays()).toEqual([]); expect(f.storage.values.size).toBe(1);
+  await restored.retry();
+  expect(f.requests).toHaveLength(3);
+  expect(f.requests.every(request => JSON.stringify(request) === JSON.stringify(f.requests[0]))).toBe(true);
+  expect(restored.snapshot().status).toBe('active'); expect(f.negotiations).toBe(1);
+  await restored.stop(); restored.close();
+});
+
+test('a terminal reload reconciliation forbids retry of the retained pending begin', async () => {
+  const f = beginRecoveryFixture([
+    new OpenGeniApiError(503, '', {code: 'network', retryable: true, outcomeUnknown: true, mutation: true}),
+    new OpenGeniApiError(403, JSON.stringify({code: 'forbidden', retryable: false}), {mutation: true}),
+  ]);
+  const first = createCodexRealtimeController(f.options);
+  await expect(first.start()).rejects.toBeInstanceOf(OpenGeniApiError); first.close();
+  const restored = createCodexRealtimeController(f.options);
+  await restored.observeLifecycle(null);
+  expect(restored.snapshot()).toMatchObject({status: 'error', mode: null, diagnostic: {recoverable: false}});
+  expect(f.requests).toHaveLength(2); expect(f.storage.values.size).toBe(1);
+  await expect(restored.retry()).rejects.toThrow('recovery is terminal');
+  await expect(restored.start()).rejects.toThrow('recovery is terminal');
+  expect(f.requests).toHaveLength(2); expect(f.negotiations).toBe(0);
+  expect(f.requests[1]).toEqual(f.requests[0]); expect(f.timers.timeoutDelays()).toEqual([]);
+  restored.close();
+});

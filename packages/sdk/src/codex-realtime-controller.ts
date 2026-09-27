@@ -748,6 +748,16 @@ export function createCodexRealtimeController(
       });
       return;
     }
+    if (owner && !state.mode) {
+      // There is no active connection for scheduled recovery yet. Keep the
+      // pending begin visible as an error until the person explicitly retries.
+      publish({
+        status: "error",
+        diagnostic: diagnostic("negotiation_failure", message, true),
+        error: message,
+      });
+      return;
+    }
     reconnectAttempt += 1;
     publish({
       status: "recovering",
@@ -1080,6 +1090,9 @@ export function createCodexRealtimeController(
         model,
       },
     );
+    // Stop or close may retire this owner while the begin reply is in flight.
+    // A late reply cannot republish its mode or restart its transport.
+    if (owner !== record || closed || (stopping && connectAfterBegin)) return null;
     if (response.mode.state !== "active") {
       transitionEnded();
       return null;
@@ -1129,11 +1142,17 @@ export function createCodexRealtimeController(
   };
 
   const retry = async (): Promise<void> => {
-    if (!owner || state.mode?.state !== "active") {
-      throw new Error("Codex realtime owner is not recoverable");
-    }
     if (recoveryTerminal || state.diagnostic?.recoverable === false) {
       throw new Error("Codex realtime recovery is terminal; stop the mode before retrying");
+    }
+    if (owner && !state.mode) {
+      // A failed begin has no active lease to reconnect yet. The retained owner
+      // is the exact start intent; an explicit retry must replay it unchanged.
+      await controller.start();
+      return;
+    }
+    if (!owner || state.mode?.state !== "active") {
+      throw new Error("Codex realtime owner is not recoverable");
     }
     if (reconnectTimer !== null) unscheduleTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -1172,11 +1191,15 @@ export function createCodexRealtimeController(
       if (state.status === "lost_owner") {
         throw new Error("Realtime mode belongs to another browser owner");
       }
+      if (owner && (recoveryTerminal || state.diagnostic?.recoverable === false)) {
+        throw new Error("Codex realtime recovery is terminal; stop the mode before retrying");
+      }
       if (!["idle", "error"].includes(state.status) || state.mode?.state === "active") return;
       closed = false;
       stopping = false;
       recoveryTerminal = false;
-      const record: OwnerRecord = {
+      const retainedOwner = owner;
+      const record: OwnerRecord = retainedOwner ?? {
         version: OWNER_RECORD_VERSION,
         workspaceId: options.workspaceId,
         sessionId: options.sessionId,
@@ -1195,7 +1218,11 @@ export function createCodexRealtimeController(
         if (failedMode?.state === "active") {
           await handleConnectionFailure(error, "reconnect", false);
         } else {
-          clearOwner();
+          // A retryable refusal or an indeterminate response must not replace
+          // the begin operation/owner identity on retry or reload.
+          if (!retainedOwner && !(error instanceof OpenGeniApiError && (error.retryable || error.outcomeUnknown))) {
+            clearOwner();
+          }
           publish({
             status: "error",
             realtimeId: null,
@@ -1320,7 +1347,7 @@ export function createCodexRealtimeController(
     setOutputMuted,
     stop: async () => {
       const currentOwner = owner;
-      if (!currentOwner || !state.mode) {
+      if (!currentOwner) {
         if (state.status !== "lost_owner") transitionEnded();
         return;
       }
@@ -1339,8 +1366,11 @@ export function createCodexRealtimeController(
       try {
         await active?.bridge.sealAndFlush();
         closeBrowserResources();
-        let current = state.mode;
-        if (!current) throw new Error("Codex realtime mode disappeared while stopping");
+        // An unknown begin may already have committed. Resolve that exact
+        // intent without starting a provider connection before ending it.
+        const knownMode = state.mode ?? await begin(currentOwner, true, false);
+        if (!knownMode) return;
+        let current = knownMode;
         let response: SessionRealtimeMutationResponse;
         try {
           response = await exclusive(
@@ -1381,9 +1411,9 @@ export function createCodexRealtimeController(
       } catch (error) {
         stopping = false;
         owner = currentOwner;
-        startActiveIntervals();
+        if (state.mode?.state === "active") startActiveIntervals();
         publish({
-          status: "recovering",
+          status: state.mode?.state === "active" ? "recovering" : "error",
           diagnostic: diagnostic("terminal_stop", safeError(error), true),
           error: safeError(error),
         });
