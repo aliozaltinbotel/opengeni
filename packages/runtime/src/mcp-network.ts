@@ -701,7 +701,13 @@ export async function boundedMcpRequest(
     await reader.cancel().catch(() => undefined);
     throw error;
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {
+      // Bun 1.3.14 can throw here when an inbound body was accessed before
+      // asynchronous middleware and then drained. The read or cancellation
+      // already finished; cleanup must preserve its result or original error.
+    }
   }
   const body = new Uint8Array(receivedBytes);
   let offset = 0;

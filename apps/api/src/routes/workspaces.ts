@@ -91,6 +91,7 @@ import {
   requireAccessContext,
   listExternalActorWorkspaces,
   addExternalWorkspaceMemberForRequest,
+  updateExternalWorkspaceMemberForRequest,
   requireAccessGrant,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
@@ -208,6 +209,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         c,
         deps,
         c.req.param("workspaceId"),
+        await c.req.json(),
+      ),
+    );
+  });
+  app.patch("/v1/workspaces/:workspaceId/external-members/:subjectId", async (c) => {
+    return c.json(
+      await updateExternalWorkspaceMemberForRequest(
+        c,
+        deps,
+        c.req.param("workspaceId"),
+        decodeURIComponent(c.req.param("subjectId")),
         await c.req.json(),
       ),
     );

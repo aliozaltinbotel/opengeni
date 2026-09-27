@@ -2013,8 +2013,9 @@ export async function getDocumentForIndexing(
   db: Database,
   workspaceId: string,
   documentId: string,
+  access?: Pick<DocumentAccessFilter, "viewerSubjectId">,
 ): Promise<Document | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  return await withDocumentRls(db, workspaceId, access, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
       .from(schema.documents)
@@ -2175,7 +2176,7 @@ export async function indexDocumentNow(
   // Internal indexing must be able to return a private document to the caller
   // that created/queued it. Public reads remain fail-closed when no subject is
   // supplied; the creator subject is the document's frozen access principal.
-  const updated = await getDocumentForIndexing(db, workspaceId, documentId);
+  const updated = await getDocumentForIndexing(db, workspaceId, documentId, access);
   if (!updated) throw new Error(`Document disappeared after indexing: ${documentId}`);
   return updated;
 }

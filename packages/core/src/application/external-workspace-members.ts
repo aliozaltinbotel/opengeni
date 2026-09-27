@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import {
   AddExternalWorkspaceMemberRequest,
+  UpdateExternalWorkspaceMemberRequest,
   ExternalIdentityReference,
   CancelExternalWorkspaceMemberGrantRequest,
   type ExternalIdentity,
@@ -11,6 +12,7 @@ import {
   grantWorkspaceAccess,
   listWorkspaceMembers,
   lockExternalWorkspaceMembershipLifecycle,
+  lockActiveExternalOrganizationKey,
   requireWorkspace,
   setRlsContext,
   withWorkspaceSubjectRls,
@@ -113,6 +115,98 @@ export async function addExternalWorkspaceMemberForRequest(
       permissions,
     });
     return identity;
+  });
+}
+
+/** Organization-service reconciliation of an existing external grant. It never provisions, reactivates or replaces a member. */
+export async function updateExternalWorkspaceMemberForRequest(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  subjectId: string,
+  input: unknown,
+) {
+  const payload = UpdateExternalWorkspaceMemberRequest.parse(input);
+  const context = await requireAccessContext(c, deps);
+  const authority = accountScopedApiKeyWorkspaceAuthority(context);
+  if (!authority || !/^external_user:[0-9a-f-]{36}$/.test(subjectId))
+    throw new HTTPException(403, {
+      message: "external membership update requires an organization service key",
+    });
+  const grant = await requireFreshAccessGrant(c, deps, workspaceId, "members:manage");
+  if (
+    grant.accountId !== authority.accountId ||
+    payload.permissions.some((permission) => !hasPermission(grant.permissions, permission))
+  )
+    throw new HTTPException(403, { message: "membership exceeds key authority" });
+  return withWorkspaceSubjectRls(deps.db, workspaceId, grant.subjectId, async (tx) => {
+    await lockExternalWorkspaceMembershipLifecycle(tx, grant.accountId);
+    const keyPermissions = await lockActiveExternalOrganizationKey(
+      tx,
+      authority.accountId,
+      grant.subjectId.slice("api_key:".length),
+    );
+    if (
+      !keyPermissions ||
+      !hasPermission(keyPermissions, "members:manage") ||
+      payload.permissions.some((permission) => !hasPermission(keyPermissions, permission))
+    )
+      throw new HTTPException(403, { message: "membership key authority changed" });
+    const live = await requireFreshAccessGrant(
+      c,
+      { ...deps, db: tx },
+      workspaceId,
+      "members:manage",
+    );
+    if (
+      live.accountId !== grant.accountId ||
+      live.subjectId !== grant.subjectId ||
+      payload.permissions.some((permission) => !hasPermission(live.permissions, permission))
+    )
+      throw new HTTPException(403, { message: "membership authority changed" });
+    const workspace = await requireWorkspace(tx, workspaceId);
+    if (workspace.kind !== "shared" || workspace.accountId !== authority.accountId)
+      throw new HTTPException(403, {
+        message: "external membership update requires a shared organization workspace",
+      });
+    const identity = await lookupExternalIdentity(
+      tx,
+      { organizationId: authority.accountId, actorSubjectId: grant.subjectId },
+      payload.identity,
+    );
+    if (
+      !identity.found ||
+      identity.subjectId !== subjectId ||
+      identity.identityStatus !== "active" ||
+      identity.membershipStatus !== "active"
+    )
+      throw new HTTPException(403, {
+        message: "external membership is not active for this identity",
+      });
+    const current = (await listWorkspaceMembers(tx, workspaceId)).find(
+      (member) => member.subjectId === subjectId,
+    );
+    if (!current) throw new HTTPException(404, { message: "external workspace member not found" });
+    const expected = [...new Set(payload.expectedPermissions)].sort();
+    const observed = [...new Set(current.permissions)].sort();
+    if (
+      expected.length !== observed.length ||
+      expected.some((permission, index) => permission !== observed[index])
+    )
+      throw new HTTPException(409, { message: "external workspace member permissions changed" });
+    await grantWorkspaceAccess(tx, {
+      accountId: authority.accountId,
+      workspaceId,
+      subjectId,
+      ...(current.subjectLabel === null ? {} : { subjectLabel: current.subjectLabel }),
+      role: current.role,
+      permissions: [...new Set(payload.permissions)].sort(),
+    });
+    const updated = (await listWorkspaceMembers(tx, workspaceId)).find(
+      (member) => member.subjectId === subjectId,
+    );
+    if (!updated) throw new Error("External workspace member update disappeared");
+    return updated;
   });
 }
 

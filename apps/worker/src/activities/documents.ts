@@ -58,6 +58,7 @@ export function createDocumentActivities(
           lockedDb,
           input.workspaceId,
           input.documentId,
+          { viewerSubjectId: storedAuthority.authoritySubjectId },
         );
         if (
           !claimedDocument ||

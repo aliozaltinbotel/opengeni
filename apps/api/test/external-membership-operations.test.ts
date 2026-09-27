@@ -36,7 +36,9 @@ afterAll(async () => {
   await shared?.release();
 });
 
-async function fixture() {
+async function fixture(
+  permissions?: Parameters<typeof createOrganizationApiKey>[1]["permissions"],
+) {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('Embedded product fixture') returning id`;
   const accountId = String(account!.id);
@@ -47,7 +49,12 @@ async function fixture() {
     name: "Service fixture",
     prefix: "test",
     keyHash: createHash("sha256").update(token).digest("hex"),
-    permissions: ["workspace:read", "members:manage", "sessions:read", "account:admin"],
+    permissions: permissions ?? [
+      "workspace:read",
+      "members:manage",
+      "sessions:read",
+      "account:admin",
+    ],
   });
   const app = new Hono();
   app.onError((error, c) => {
@@ -115,6 +122,28 @@ async function fixture() {
     cancellation,
     revoke,
     members,
+    patch: (
+      body: unknown,
+      options: { subjectId?: string; workspaceId?: string; asUser?: boolean } = {},
+    ) =>
+      app.request(
+        `/v1/workspaces/${options.workspaceId ?? workspace.id}/external-members/${encodeURIComponent(options.subjectId ?? identity.subjectId)}`,
+        {
+          method: "PATCH",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+            ...(options.asUser
+              ? {
+                  "x-opengeni-external-actor": encodeURIComponent(
+                    JSON.stringify({ mode: "external", identity: reference }),
+                  ),
+                }
+              : {}),
+          },
+          body: JSON.stringify(body),
+        },
+      ),
     lose: (path: string) => {
       loseNextPath = path;
     },
@@ -485,4 +514,113 @@ test("keyed cancellation tears down private, child, live and scheduled work only
   const [wake] =
     await shared.admin`select count(*)::int as n from session_workflow_wake_outbox where session_id = ${target.sessionId}`;
   expect(wake!.n).toBeGreaterThan(0);
+});
+
+test("external permission OCC updates preserve membership and existing session identity", async () => {
+  const f = await fixture(["workspace:admin", "account:admin"]);
+  const command = {
+    identity: f.reference,
+    expectedPermissions: ["workspace:read"],
+    permissions: ["workspace:read", "sessions:read", "workspace:admin"],
+  };
+  expect((await f.patch(command)).status).toBe(404);
+  await f.add();
+  const session = await withSessionRlsActorContext({ subjectId: f.identity.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Existing work",
+      resources: [],
+      metadata: {},
+      visibility: "workspace_shared",
+      createdBy: { kind: "subject", subjectId: f.identity.subjectId },
+      subjectId: f.identity.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const before =
+    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`;
+  const changed = await f.patch(command);
+  expect(changed.status).toBe(200);
+  expect(await changed.json()).toMatchObject({
+    subjectId: f.identity.subjectId,
+    permissions: [...command.permissions].sort(),
+  });
+  expect((await f.patch(command)).status).toBe(409);
+  // The caller can reconcile a lost successful response from current canonical membership.
+  expect(
+    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
+  ).toEqual([...command.permissions].sort());
+  expect(
+    (
+      await f.patch({
+        identity: f.reference,
+        expectedPermissions: command.permissions,
+        permissions: ["workspace:read", "sessions:read"],
+      })
+    ).status,
+  ).toBe(200);
+  expect(
+    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`,
+  ).toEqual(before);
+  expect((await shared.admin`select id from sessions where id=${session.id}`)[0]?.id).toBe(
+    session.id,
+  );
+  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
+    found: true,
+    subjectId: f.identity.subjectId,
+    membershipStatus: "active",
+    membershipAuthorizationRevision: 1,
+  });
+});
+
+test("concurrent external permission writers cannot overwrite an intervening grant", async () => {
+  const f = await fixture(["workspace:admin", "account:admin"]);
+  await f.add();
+  const command = { identity: f.reference, expectedPermissions: ["workspace:read"] };
+  const results = await Promise.all([
+    f.patch({ ...command, permissions: ["workspace:read", "sessions:read"] }),
+    f.patch({ ...command, permissions: ["workspace:read", "documents:search"] }),
+  ]);
+  expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
+  const winner = await results.find((result) => result.status === 200)!.json();
+  expect(
+    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
+  ).toEqual(winner.permissions);
+});
+
+test("external permission changes refuse foreign identity, human actors, inactive membership and key excess", async () => {
+  const f = await fixture();
+  await f.add();
+  const command = {
+    identity: f.reference,
+    expectedPermissions: ["workspace:read"],
+    permissions: ["workspace:read"],
+  };
+  const other = await fixture();
+  await other.add();
+  expect((await f.patch({ ...command, identity: other.reference })).status).toBe(403);
+  expect((await f.patch(command, { workspaceId: other.workspace.id })).status).toBe(403);
+  expect((await f.patch(command, { asUser: true })).status).toBe(403);
+  expect((await f.patch(command, { subjectId: `user:${crypto.randomUUID()}` })).status).toBe(403);
+  const limited = await fixture(["workspace:read", "members:manage"]);
+  await limited.add();
+  expect(
+    (
+      await limited.patch({
+        identity: limited.reference,
+        expectedPermissions: ["workspace:read"],
+        permissions: ["workspace:admin"],
+      })
+    ).status,
+  ).toBe(403);
+  await f.service.updateExternalIdentityMembership(
+    f.accountId,
+    f.identity.organizationMembershipId,
+    { kind: "suspend", expectedAuthorizationRevision: 1, operationId: crypto.randomUUID() },
+  );
+  expect((await f.patch(command)).status).toBe(403);
 });

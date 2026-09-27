@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { createDb, getKnowledgeEntry, type KnowledgeContext } from "@opengeni/db";
+import { createDb, getKnowledgeEntry, withSessionRlsActorContext, type KnowledgeContext } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
-import { indexDocumentNow, type DocumentServices } from "../src";
+import { getDocumentForIndexing, indexDocumentNow, type DocumentServices } from "../src";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 beforeAll(async () => {
@@ -15,7 +15,9 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 180_000);
-test("the document adapter retains exact parsed source without hidden findings or a second embedding write", async () => {
+test.each(["workspace", "personal"] as const)("the %s document adapter retains exact parsed source without hidden findings or a second embedding write", async (authorityKind) => {
+  const subjectId = "user:reader";
+  const privateOwner = authorityKind === "personal" ? subjectId : null;
   const accountId = crypto.randomUUID(),
     workspaceId = crypto.randomUUID(),
     fileId = crypto.randomUUID(),
@@ -25,12 +27,12 @@ test("the document adapter retains exact parsed source without hidden findings o
   const exact = "Acme agreement  🚀\u0000\n\nRenewal: 1 December.  ";
   await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Preparation test')`;
   await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Sources')`;
-  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key)
-    VALUES(${fileId},${accountId},${workspaceId},'ready','Acme.pdf','Acme.pdf','application/pdf',${bytes.length},'test',${fileId})`;
+  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key,private_owner_subject_ids)
+    VALUES(${fileId},${accountId},${workspaceId},'ready','Acme.pdf','Acme.pdf','application/pdf',${bytes.length},'test',${fileId},${privateOwner ? [privateOwner] : null})`;
   await shared.admin`INSERT INTO document_bases(id,account_id,workspace_id,name) VALUES(${baseId},${accountId},${workspaceId},'Customer contracts')`;
   await shared.admin`INSERT INTO documents(id,account_id,workspace_id,origin_workspace_id,base_id,file_id,status,title,curation_status,
-    authority_kind,authority_workspace_id) VALUES(${documentId},${accountId},${workspaceId},${workspaceId},${baseId},${fileId},
-    'queued','Acme contract','pending','workspace',${workspaceId})`;
+    authority_kind,authority_workspace_id,authority_subject_id,visibility,created_by) VALUES(${documentId},${accountId},${workspaceId},${workspaceId},${baseId},${fileId},
+    'queued','Acme contract','pending',${authorityKind},${workspaceId},${privateOwner},${privateOwner ? "private" : "workspace"},${subjectId})`;
   let parsed = 0;
   const services = {
     parser: {
@@ -58,7 +60,17 @@ test("the document adapter retains exact parsed source without hidden findings o
     },
   } as unknown as DocumentServices;
   const storage = { getObjectBytes: async () => ({ bytes }) } as unknown as ObjectStorage;
-  const document = await indexDocumentNow(client.db, storage, workspaceId, documentId, services);
+  if (privateOwner) {
+    expect(await getDocumentForIndexing(client.db, workspaceId, documentId)).toBeNull();
+    expect(await getDocumentForIndexing(client.db, workspaceId, documentId, { viewerSubjectId: "user:other" })).toBeNull();
+    expect((await getDocumentForIndexing(client.db, workspaceId, documentId, { viewerSubjectId: privateOwner }))?.id).toBe(documentId);
+  }
+  // The worker's identity remains a service; the immutable stored subject supplies only the document/file scope.
+  const index = () => withSessionRlsActorContext(
+    { subjectId: "service:document-preparation", privateFileOwnerSubjectId: privateOwner },
+    () => indexDocumentNow(client.db, storage, workspaceId, documentId, services, { viewerSubjectId: privateOwner }),
+  );
+  const document = await index();
   expect(document.status).toBe("ready");
   expect(document.curationStatus).toBe("none");
   expect(parsed).toBe(1);
@@ -81,7 +93,7 @@ test("the document adapter retains exact parsed source without hidden findings o
   expect(entry?.revision.entry.content).toBe(exact);
   expect(entry?.revision.entry.kind).toBe("source");
   expect(entry?.revision.entry.evidence).toEqual([]);
-  const retry = await indexDocumentNow(client.db, storage, workspaceId, documentId, services);
+  const retry = await index();
   expect(retry.status).toBe("ready");
   const [counts] =
     await shared.admin`SELECT (SELECT count(*)::int FROM knowledge_entry_revisions WHERE entry_id=${row!.id}) AS revisions,

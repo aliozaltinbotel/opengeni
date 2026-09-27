@@ -50,6 +50,18 @@ export const AddExternalWorkspaceMemberRequest = z
   .strict();
 export type AddExternalWorkspaceMemberRequest = z.infer<typeof AddExternalWorkspaceMemberRequest>;
 
+/** Host-managed changes affect one existing external member only. Both sets are complete; stale observations fail closed. */
+export const UpdateExternalWorkspaceMemberRequest = z
+  .object({
+    identity: ExternalIdentityReference,
+    expectedPermissions: z.array(Permission).max(Permission.options.length),
+    permissions: z.array(Permission).max(Permission.options.length),
+  })
+  .strict();
+export type UpdateExternalWorkspaceMemberRequest = z.infer<
+  typeof UpdateExternalWorkspaceMemberRequest
+>;
+
 /** Content-free service lookup, including identities which can no longer act. */
 export const ExternalIdentityLookup = z.discriminatedUnion("found", [
   z.object({ found: z.literal(false) }).strict(),
