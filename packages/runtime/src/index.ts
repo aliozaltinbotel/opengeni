@@ -2389,10 +2389,32 @@ export function mcpToolErrorOutput(error: unknown): {
     content: [
       {
         type: "text",
-        text: `An error occurred while running the tool. Please try again. Error: ${details}`,
+        text: toolErrorIsFinal(error)
+          ? `An error occurred while running the tool. Error: ${details}`
+          : `An error occurred while running the tool. Please try again. Error: ${details}`,
       },
     ],
   };
+}
+
+/**
+ * A thrown tool failure the host marked FINAL: an object whose `retryable`
+ * property is exactly `false` (a host application's refusal -- a policy, a
+ * budget, a permission -- rather than a transport fault). "Please try again"
+ * is actively wrong for it: it invites the very retry and rephrasing the host
+ * refused, so the wrapper keeps the host's own words and adds no retry advice.
+ * Anything else (no property, `true`, a non-boolean, a hostile getter) keeps
+ * the generic text. Same doctrine as the selfhosted fault renderer
+ * (sandbox/selfhosted/fault-rendering.ts): the retry verdict must be correct
+ * for the fault class.
+ */
+function toolErrorIsFinal(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  try {
+    return (error as { retryable?: unknown }).retryable === false;
+  } catch {
+    return false;
+  }
 }
 
 // Applied to EVERY MCP server via the agent's `mcpConfig.errorFunction`

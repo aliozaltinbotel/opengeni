@@ -2082,6 +2082,51 @@ describe("runtime event normalization", () => {
       expect(mcpToolErrorOutput(hostileMessage).content[0]?.text).toContain("MCP tool call failed");
     });
 
+    test("a host refusal marked final (retryable: false) gets no retry advice; everything else keeps it", () => {
+      const refusal = Object.assign(
+        new Error(
+          "Cendra refused this guest message (OTA_POLICY_OFF_PLATFORM_PAYMENT): Nothing was requested or sent. This channel rule is final.",
+        ),
+        { code: "PRECONDITION_FAILED", retryable: false },
+      );
+      const final = mcpToolErrorOutput(refusal).content[0]?.text ?? "";
+      expect(final).not.toContain("Please try again");
+      expect(final).toContain("OTA_POLICY_OFF_PLATFORM_PAYMENT");
+      expect(final).toContain("This channel rule is final.");
+      // No flag, an explicit true, a non-boolean, a non-object, and a hostile getter keep the generic advice.
+      for (const error of [
+        new Error("MCP error -32001: Request timed out"),
+        Object.assign(new Error("upstream 503"), { retryable: true }),
+        Object.assign(new Error("ambiguous"), { retryable: "false" }),
+        "boom",
+      ]) {
+        expect(mcpToolErrorOutput(error).content[0]?.text).toContain("Please try again");
+      }
+      const hostile = new Error("hostile");
+      Object.defineProperty(hostile, "retryable", {
+        get() {
+          throw new Error("hostile retryable getter");
+        },
+      });
+      expect(mcpToolErrorOutput(hostile).content[0]?.text).toContain("Please try again");
+    });
+
+    test("the agent's MCP errorFunction carries a final refusal without retry advice", () => {
+      const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
+      const errorFunction = (agent as any).mcpConfig?.errorFunction as (args: {
+        context: unknown;
+        error: unknown;
+      }) => { isError?: boolean; content?: Array<{ text?: string }> };
+      const produced = errorFunction({
+        context: {},
+        error: Object.assign(new Error("Applicable execution budget is exhausted."), { retryable: false }),
+      });
+      expect(produced.isError).toBe(true);
+      expect(produced.content?.[0]?.text).toBe(
+        "An error occurred while running the tool. Error: Applicable execution budget is exhausted.",
+      );
+    });
+
     test("mcpToolErrorOutput preserves credential-shaped error details exactly", () => {
       const bearer = "synthetic-bearer-value-123456";
       const cookie = ["synthetic", "cookie", "value", "123456"].join("-");
