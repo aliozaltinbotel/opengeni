@@ -373,9 +373,11 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   latencyModeForMetadata,
   metadataWithTurnExecutionPolicyV1,
+  metadataWithTurnRouteDeclarationV1,
   metadataWithCodexCredentialPolicySnapshotV1,
   readCodexCredentialPolicySnapshotV1,
   readTurnExecutionPolicyV1,
+  readTurnRouteDeclarationV1,
   reasoningEffortForMetadata,
   resolveWorkspaceCodexCompactionDefault,
   type LatencyMode,
@@ -75357,6 +75359,17 @@ export type RequestSessionTurnRecoveryInput = {
     runStateId?: string;
     reason: "encrypted_content_rejected";
   };
+  /**
+   * F-2 (Cendra agent-ops): re-run the SAME accepted turn on its declared fallback route. Applied in this transaction
+   * only when the turn's frozen declaration names exactly this fallback policy and has not run it yet (executed =
+   * primary): the turn's model, reasoning effort, latency mode and execution policy become the fallback's, and the
+   * declaration records executed = fallback with the primary's refusal. Anything else is not_recoverable (a fallback
+   * never runs twice and never replaces a policy the turn did not declare).
+   */
+  modelFallback?: {
+    policy: TurnExecutionPolicyV1;
+    reason: string;
+  };
 };
 
 export type RequestSessionTurnRecoveryResult =
@@ -75536,6 +75549,35 @@ export async function requestSessionTurnRecovery(
           };
         }
       }
+      // F-2: the declared fallback, checked against the turn's own frozen declaration before anything changes.
+      let modelFallback: {
+        columns: { model: string; reasoningEffort: string; latencyMode: string };
+        declaration: ReturnType<typeof readTurnRouteDeclarationV1> & { kind: "valid" };
+      } | null = null;
+      if (input.modelFallback) {
+        const declared = readTurnRouteDeclarationV1(turn.metadata);
+        if (
+          declared.kind !== "valid" ||
+          declared.declaration.executed !== "primary" ||
+          declared.declaration.fallbackPolicy === null ||
+          stableJson(declared.declaration.fallbackPolicy) !== stableJson(input.modelFallback.policy)
+        ) {
+          return {
+            action: "not_recoverable" as const,
+            events: [] as [],
+            providerArtifactsInvalidated: 0 as const,
+          };
+        }
+        const fallbackPolicy = declared.declaration.fallbackPolicy;
+        modelFallback = {
+          columns: {
+            model: fallbackPolicy.productModelId,
+            reasoningEffort: fallbackPolicy.reasoningEffort,
+            latencyMode: fallbackPolicy.latencyMode,
+          },
+          declaration: declared,
+        };
+      }
       await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
         id: input.attemptId,
         accountId: session.accountId,
@@ -75603,6 +75645,12 @@ export async function requestSessionTurnRecovery(
           ),
         )
         .returning();
+      const recoveryMetadata = {
+        ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
+        ...(input.providerRecoveryCount !== undefined
+          ? { providerRecoveryCount: input.providerRecoveryCount }
+          : {}),
+      };
       const [updatedTurn] = await tx
         .update(schema.sessionTurns)
         .set({
@@ -75613,12 +75661,17 @@ export async function requestSessionTurnRecovery(
           cancelledBy: null,
           cancelReason: null,
           version: turn.version + 1,
-          metadata: {
-            ...recoveryTurnMetadata(turn.metadata, input.sandboxLifecycleWait),
-            ...(input.providerRecoveryCount !== undefined
-              ? { providerRecoveryCount: input.providerRecoveryCount }
-              : {}),
-          },
+          ...(modelFallback ? modelFallback.columns : {}),
+          metadata: modelFallback
+            ? metadataWithTurnRouteDeclarationV1(
+                metadataWithTurnExecutionPolicyV1(recoveryMetadata, input.modelFallback!.policy),
+                {
+                  ...modelFallback.declaration.declaration,
+                  executed: "fallback",
+                  fallbackReason: input.modelFallback!.reason,
+                },
+              )
+            : recoveryMetadata,
           updatedAt: now,
         })
         .where(

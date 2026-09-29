@@ -15229,6 +15229,44 @@ function requireMessageTextOrAnnotations(
   }
 }
 
+/**
+ * F-2 (Cendra agent-ops): a declared fallback route for one turn. It is used only when the turn's primary route is
+ * refused by the provider BEFORE the turn produced any output (a typed, non-retryable refusal on the first model call);
+ * never after output, never for a retryable error, never twice. The fallback is resolved and validated at admission
+ * exactly as the primary is (deployment catalog, workspace model policy, the session's provider lock), and it must name
+ * a different model.
+ */
+export const TurnFallbackRouteRequestV1 = z
+  .object({
+    model: z.string().trim().min(1).max(256),
+    reasoningEffort: ReasoningEffort.optional(),
+    latencyMode: LatencyMode.optional(),
+  })
+  .strict();
+export type TurnFallbackRouteRequestV1 = z.infer<typeof TurnFallbackRouteRequestV1>;
+
+/**
+ * F-2 (Cendra agent-ops): an explicitly configured budget for one turn. Runs have no default length limit
+ * (docs/run-lifecycle.md); a declared budget is an explicit cap, so reaching it ends the turn gracefully at the next
+ * model-call boundary with the named terminal reason TURN_BUDGET_EXHAUSTED (the session idles; no continuation).
+ * Every field is optional, and at least one is required.
+ */
+export const TurnBudgetV1 = z
+  .object({
+    maxModelCalls: z.number().int().min(1).max(100_000).optional(),
+    maxTotalTokens: z.number().int().min(1_000).max(10_000_000).optional(),
+    maxDurationMs: z.number().int().min(1_000).max(86_400_000).optional(),
+  })
+  .strict()
+  .refine(
+    (budget) =>
+      budget.maxModelCalls !== undefined ||
+      budget.maxTotalTokens !== undefined ||
+      budget.maxDurationMs !== undefined,
+    { message: "a turn budget names at least one limit" },
+  );
+export type TurnBudgetV1 = z.infer<typeof TurnBudgetV1>;
+
 export const SessionUserMessagePayload = z
   .object({
     text: z.string().default(""),
@@ -15240,6 +15278,9 @@ export const SessionUserMessagePayload = z
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     latencyMode: LatencyMode.optional(),
+    /** F-2: the declared fallback route and budget of the turn this message starts. */
+    fallback: TurnFallbackRouteRequestV1.optional(),
+    turnBudget: TurnBudgetV1.optional(),
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
     // Header-value rotation only. URL/name/tool settings are immutable after
@@ -15291,6 +15332,9 @@ export const SteerSessionMessageRequest = z
     model: z.string().min(1).optional(),
     reasoningEffort: ReasoningEffort.optional(),
     latencyMode: LatencyMode.optional(),
+    /** F-2: the declared fallback route and budget of the turn this message starts. */
+    fallback: TurnFallbackRouteRequestV1.optional(),
+    turnBudget: TurnBudgetV1.optional(),
     clientEventId: SessionOperationKey.optional(),
     controlEtag: z.string().min(1).optional(),
     expectedDraftRevision: z.number().int().nonnegative().optional(),
@@ -16587,6 +16631,84 @@ export function metadataWithTurnExecutionPolicyV1(
     [TURN_EXECUTION_POLICY_METADATA_KEY]: TurnExecutionPolicyV1.parse(policy),
   };
 }
+
+export const TURN_ROUTE_DECLARATION_METADATA_KEY = "turnRouteDeclarationV1" as const;
+
+/**
+ * F-2: what one accepted turn declared beside its primary TurnExecutionPolicyV1, frozen at admission in the turn's
+ * metadata: the fallback route resolved to its own full policy (never a bare model name), and the budget. `executed`
+ * records which route the turn actually ran and, when it switched, the provider's refusal of the primary.
+ */
+export const TurnRouteDeclarationV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      fallbackPolicy: TurnExecutionPolicyV1.nullable(),
+      turnBudget: TurnBudgetV1.nullable(),
+      executed: z.enum(["primary", "fallback"]).default("primary"),
+      fallbackReason: z.string().trim().min(1).max(512).nullable().default(null),
+    })
+    .strict()
+    .superRefine((declaration, context) => {
+      if (declaration.executed === "fallback" && declaration.fallbackPolicy === null) {
+        context.addIssue({ code: "custom", path: ["executed"], message: "a turn ran its fallback only when it declared one" });
+      }
+      if (declaration.executed === "fallback" && declaration.fallbackReason === null) {
+        context.addIssue({ code: "custom", path: ["fallbackReason"], message: "a fallback run names the primary's refusal" });
+      }
+      if (declaration.executed === "primary" && declaration.fallbackReason !== null) {
+        context.addIssue({ code: "custom", path: ["fallbackReason"], message: "only a fallback run carries a refusal" });
+      }
+    }),
+);
+export type TurnRouteDeclarationV1 = z.infer<typeof TurnRouteDeclarationV1>;
+
+export type TurnRouteDeclarationReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; declaration: TurnRouteDeclarationV1 };
+
+/** Read the declaration from turn metadata; absent is legacy, anything present and malformed fails closed. */
+export function readTurnRouteDeclarationV1(metadata: unknown): TurnRouteDeclarationReadV1 {
+  if (metadata === null || metadata === undefined) return { kind: "absent" };
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("Malformed turn route declaration metadata: turn metadata is not an object");
+  }
+  const record = metadata as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, TURN_ROUTE_DECLARATION_METADATA_KEY)) return { kind: "absent" };
+  const parsed = TurnRouteDeclarationV1.safeParse(record[TURN_ROUTE_DECLARATION_METADATA_KEY]);
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "declaration" : `declaration.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed turn route declaration metadata at ${paths || "declaration"}`);
+  }
+  return { kind: "valid", declaration: parsed.data };
+}
+
+/** Merge a trusted declaration into turn metadata without disturbing dispatch/recovery state. */
+export function metadataWithTurnRouteDeclarationV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  declaration: TurnRouteDeclarationV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [TURN_ROUTE_DECLARATION_METADATA_KEY]: TurnRouteDeclarationV1.parse(declaration),
+  };
+}
+
+/** The named terminal reasons of a declared route (F-2). */
+export const TURN_ROUTE_TERMINAL_REASONS = Object.freeze([
+  "TURN_BUDGET_EXHAUSTED",
+  "PRIMARY_REFUSED_FALLBACK_RAN",
+  "PRIMARY_REFUSED_NO_FALLBACK",
+  "PRIMARY_REFUSED_AFTER_OUTPUT",
+  "FALLBACK_REFUSED",
+] as const);
+export type TurnRouteTerminalReason = (typeof TURN_ROUTE_TERMINAL_REASONS)[number];
 
 /**
  * Minimal, stable evidence projection for command receipts and audit events.

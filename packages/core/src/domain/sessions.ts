@@ -45,8 +45,12 @@ import {
   normalizeAutomaticSessionTitle,
   resolveWorkspaceSessionToolDefaults,
   metadataWithTurnExecutionPolicyV1,
+  metadataWithTurnRouteDeclarationV1,
   readTurnExecutionPolicyV1,
   stableJson,
+  TurnRouteDeclarationV1,
+  type TurnBudgetV1,
+  type TurnFallbackRouteRequestV1,
   type AccessGrant,
   type ComposerDraft,
   type CreateSessionResponse,
@@ -1608,6 +1612,8 @@ type PostUserMessageTurnInput = {
   boundaryRequestHash?: string;
   reasoningEffortFallback?: Settings["openaiReasoningEffort"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  /** F-2: trusted core-only turn metadata (the frozen route declaration). */
+  turnMetadata?: Record<string, unknown>;
   recordAgentRunUsage?: boolean;
   schedulePostCommit?: (task: () => Promise<void>) => void;
 };
@@ -1798,6 +1804,7 @@ export async function postUserMessageTurn(
               reasoningEffortFallback:
                 input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
               turnExecutionPolicy: input.turnExecutionPolicy,
+              ...(input.turnMetadata ? { turnMetadata: input.turnMetadata } : {}),
               source: input.origin === "operator" ? "api" : "user",
               ...(input.recordAgentRunUsage !== undefined
                 ? { recordAgentRunUsage: input.recordAgentRunUsage }
@@ -3515,6 +3522,61 @@ export async function createSessionForRequest(
   ).session;
 }
 
+/**
+ * F-2 (Cendra agent-ops): a turn's declared fallback route and budget, resolved and frozen at admission. The fallback
+ * is resolved exactly as the primary is -- the workspace catalog, the workspace model policy and the session's
+ * provider lock -- into its own full TurnExecutionPolicyV1, and must name a different model; anything not runnable
+ * refuses the message by name (422) and is never dropped silently. Null when the message declares neither.
+ */
+async function resolveTurnRouteDeclarationV1(
+  deps: { db: Database; settings: Settings },
+  workspaceId: string,
+  session: Parameters<typeof assertSessionAllowsProductModel>[0],
+  primary: TurnExecutionPolicyV1,
+  requested: { fallback: TurnFallbackRouteRequestV1 | undefined; turnBudget: TurnBudgetV1 | undefined },
+): Promise<TurnRouteDeclarationV1 | null> {
+  if (requested.fallback === undefined && requested.turnBudget === undefined) return null;
+  let fallbackPolicy: TurnExecutionPolicyV1 | null = null;
+  if (requested.fallback !== undefined) {
+    const fallbackModel = canonicalConfiguredModel(deps.settings, requested.fallback.model) ?? null;
+    if (fallbackModel === null) {
+      throw new HTTPException(422, { message: "the fallback route names a model this deployment does not run" });
+    }
+    if (fallbackModel === primary.productModelId) {
+      throw new HTTPException(422, { message: "the fallback route must name a different model from the primary" });
+    }
+    await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, fallbackModel);
+    try {
+      assertSessionAllowsProductModel(session, fallbackModel);
+    } catch (error) {
+      if (error instanceof CodexCompactionV2ProviderLockedError) {
+        throw new HTTPException(422, { message: error.message, cause: error });
+      }
+      throw error;
+    }
+    try {
+      fallbackPolicy = resolveTurnExecutionPolicyV1(deps.settings, {
+        modelId: fallbackModel,
+        requestedModelId: requested.fallback.model,
+        modelSource: "explicit",
+        reasoningEffort: requested.fallback.reasoningEffort ?? primary.reasoningEffort,
+        reasoningSource: requested.fallback.reasoningEffort === undefined ? primary.reasoningSource : "explicit",
+        latencyMode: requested.fallback.latencyMode ?? primary.latencyMode,
+        latencyModeSource: requested.fallback.latencyMode === undefined ? primary.latencyModeSource : "explicit",
+      });
+    } catch (error) {
+      throw new HTTPException(422, {
+        message: error instanceof Error ? `the fallback route is not runnable: ${error.message}` : "the fallback route is not runnable",
+      });
+    }
+  }
+  return TurnRouteDeclarationV1.parse({
+    schemaVersion: 1,
+    fallbackPolicy,
+    turnBudget: requested.turnBudget ?? null,
+  });
+}
+
 function sessionPromptBoundaryRequestHash(input: {
   delivery: "send" | "steer";
   controlEtag: string | null;
@@ -3532,6 +3594,8 @@ function sessionPromptBoundaryRequestHash(input: {
   connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
+  fallback?: TurnFallbackRouteRequestV1;
+  turnBudget?: TurnBudgetV1;
 }): string {
   return `prompt-boundary-v1:${canonicalSessionCommandHash({
     delivery: input.delivery,
@@ -3550,6 +3614,10 @@ function sessionPromptBoundaryRequestHash(input: {
     mcpCredentialUpdates: input.mcpCredentialUpdates,
     connectionAccounts: input.connectionAccounts ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
+    // F-2: present only when declared, so every earlier prompt keeps its exact hash.
+    ...(input.fallback !== undefined || input.turnBudget !== undefined
+      ? { routeDeclaration: { fallback: input.fallback ?? null, turnBudget: input.turnBudget ?? null } }
+      : {}),
     ...(input.commandActor.type === "service"
       ? {
           serviceInitiator: {
@@ -3593,6 +3661,9 @@ async function acceptSessionUserMessageInFileScope(
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     authorization?: AccessGrantAuthorization;
+    /** F-2: the turn's declared fallback route and budget. */
+    fallback?: TurnFallbackRouteRequestV1;
+    turnBudget?: TurnBudgetV1;
   },
 ): Promise<{
   accepted: SessionEvent;
@@ -3647,6 +3718,8 @@ async function acceptSessionUserMessageInFileScope(
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
         commandActor,
+        ...(input.fallback !== undefined ? { fallback: input.fallback } : {}),
+        ...(input.turnBudget !== undefined ? { turnBudget: input.turnBudget } : {}),
       })
     : null;
   if (input.clientEventId && boundaryRequestHash) {
@@ -3700,7 +3773,8 @@ async function acceptSessionUserMessageInFileScope(
       deps,
       grant,
       workspaceId,
-      [input.model ?? existingSession.model],
+      // F-2: a declared fallback is resolved against the same workspace catalog as the primary.
+      [input.model ?? existingSession.model, ...(input.fallback ? [input.fallback.model] : [])],
       existingSession.model,
     );
     if (settings !== deps.settings) {
@@ -3738,6 +3812,13 @@ async function acceptSessionUserMessageInFileScope(
       latencyMode: effectiveLatencyMode,
       latencyModeSource: input.latencyMode == null ? "session" : "explicit",
     });
+    const turnRouteDeclaration = await resolveTurnRouteDeclarationV1(
+      { db, settings },
+      workspaceId,
+      existingSession,
+      turnExecutionPolicy,
+      { fallback: input.fallback, turnBudget: input.turnBudget },
+    );
     if (composerDraftResources) {
       const acceptedResources = new Set(requestedResources.map((resource) => stableJson(resource)));
       const unacceptedDraftResource = composerDraftResources.find(
@@ -3869,6 +3950,9 @@ async function acceptSessionUserMessageInFileScope(
         latencyMode: input.latencyMode ?? null,
         reasoningEffortFallback: sessionReasoningEffort,
         turnExecutionPolicy,
+        ...(turnRouteDeclaration
+          ? { turnMetadata: metadataWithTurnRouteDeclarationV1({}, turnRouteDeclaration) }
+          : {}),
         mcpCredentialUpdates,
         personalConnectionDelegations,
         mcpAccountBindings,

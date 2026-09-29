@@ -412,6 +412,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         capabilitySettings,
         codexAppsCredentialId,
         turnExecutionPolicy,
+        turnRouteDeclaration,
         trigger,
         humanInputResume,
         interactionInterventionResume,
@@ -423,6 +424,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      // F-2: the settlement names a declared budget's end, and a declared fallback's use, by this declaration.
+      providerTurn.turnRouteDeclaration = turnRouteDeclaration;
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }

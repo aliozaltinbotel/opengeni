@@ -138,6 +138,7 @@ import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
 import type { CompactionSummarizer } from "../context-compaction";
 import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { createTurnRouteWatch } from "./turn-budget";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -783,8 +784,15 @@ export async function runTurnStreamAttempt(
           });
         }
         attempt.modelRequestStarted = true;
+        // F-2: a turn that declared a route is watched: its declared token and duration limits are checked before each
+        // model call, and the settlement can tell whether the first model call produced anything (turn-budget.ts).
+        const turnRouteWatch = providerTurn.turnRouteDeclaration
+          ? createTurnRouteWatch(providerTurn.turnRouteDeclaration.turnBudget)
+          : null;
+        providerTurn.turnRouteWatch = turnRouteWatch;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           signal: runtimeCancellationSignal,
+          ...(turnRouteWatch ? { callModelInputFilter: turnRouteWatch.filter } : {}),
           sandboxEnvironment,
           onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
@@ -802,6 +810,7 @@ export async function runTurnStreamAttempt(
             if (leases.servingLost()) {
               throw new Error("Provider credential lease expired during the active turn");
             }
+            turnRouteWatch?.observe(event);
             await eventing.publish!([{ type: event.type, payload: event.payload }], true);
           },
           // P1.2: inject the resumed box NON-OWNED (the SDK never reaps it — the

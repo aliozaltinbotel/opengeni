@@ -55,7 +55,8 @@ import {
 } from "../../observability-metrics";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
-import { readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import { readTurnExecutionPolicyV1, readTurnRouteDeclarationV1 } from "@opengeni/contracts";
+import type { TurnRouteDeclarationV1 } from "@opengeni/contracts";
 
 import {
   credentialSubjectIdForTurnInitiator,
@@ -109,6 +110,8 @@ export type ClaimTurnOk = {
   capabilitySettings: Settings;
   codexAppsCredentialId: string | null;
   turnExecutionPolicy: TurnExecutionPolicyV1;
+  /** F-2: the turn's frozen route declaration (fallback and budget), or null when it declared none. */
+  turnRouteDeclaration: TurnRouteDeclarationV1 | null;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
   interactionInterventionResume: Awaited<
@@ -325,6 +328,14 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   );
   const turnExecutionPolicy = verifiedExecutionPolicy.policy;
   assertSessionAllowsProductModel(session, turnExecutionPolicy.productModelId);
+  // F-2: an explicitly declared per-turn model-call budget narrows the SDK's per-segment cap for THIS turn only (never
+  // widens it); reaching it ends the turn gracefully as TURN_BUDGET_EXHAUSTED (failure-settlement).
+  const declaredRoute = readTurnRouteDeclarationV1(turn.metadata);
+  const turnRouteDeclaration = declaredRoute.kind === "valid" ? declaredRoute.declaration : null;
+  const declaredModelCalls = turnRouteDeclaration?.turnBudget?.maxModelCalls;
+  if (declaredModelCalls !== undefined && declaredModelCalls < capabilitySettings.agentMaxModelCallsPerTurn) {
+    capabilitySettings = { ...capabilitySettings, agentMaxModelCallsPerTurn: declaredModelCalls };
+  }
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
   billingState.chargesOpenGeniCredits = verifiedExecutionPolicy.model.cost === "credits";
@@ -611,6 +622,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       capabilitySettings,
       codexAppsCredentialId,
       turnExecutionPolicy,
+      turnRouteDeclaration,
       trigger,
       humanInputResume,
       interactionInterventionResume,

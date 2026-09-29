@@ -6,6 +6,7 @@ import type {
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
   SessionStatus,
+  TurnRouteDeclarationV1,
   XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import type {
@@ -183,6 +184,10 @@ export type ProviderTurnState = {
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
   lastCodexRequestOpaqueArtifacts: readonly string[];
+  /** F-2: the turn's frozen route declaration (set at claim), for the settlement of a declared budget or fallback. */
+  turnRouteDeclaration: TurnRouteDeclarationV1 | null;
+  /** F-2: the watch over the running attempt (model calls, output, declared limits); null without a declaration. */
+  turnRouteWatch: import("./turn-budget").TurnRouteWatch | null;
 };
 
 export type TurnContext = {
@@ -296,6 +301,8 @@ export function createTurnContext(input: {
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
       lastCodexRequestOpaqueArtifacts: [],
+      turnRouteDeclaration: null,
+      turnRouteWatch: null,
     },
   };
 }

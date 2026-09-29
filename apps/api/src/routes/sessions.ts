@@ -3344,6 +3344,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         model: payload.model ?? null,
         reasoningEffort: payload.reasoningEffort ?? null,
         latencyMode: payload.latencyMode ?? null,
+        ...(payload.fallback !== undefined ? { fallback: payload.fallback } : {}),
+        ...(payload.turnBudget !== undefined ? { turnBudget: payload.turnBudget } : {}),
         mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
         connectionAccounts: payload.connectionAccounts,
         ...(payload.personalResourceAttachment
@@ -3428,6 +3430,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           model: event.payload.model ?? null,
           reasoningEffort: event.payload.reasoningEffort ?? null,
           latencyMode: event.payload.latencyMode ?? null,
+          ...(event.payload.fallback !== undefined ? { fallback: event.payload.fallback } : {}),
+          ...(event.payload.turnBudget !== undefined ? { turnBudget: event.payload.turnBudget } : {}),
           mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
           connectionAccounts: event.payload.connectionAccounts,
           ...(event.payload.personalResourceAttachment
