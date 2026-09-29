@@ -138,7 +138,7 @@ import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
 
 import type { CompactionSummarizer } from "../context-compaction";
 import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
-import { createTurnRouteWatch } from "./turn-budget";
+import { createTurnRouteWatch, terminalResponseTokens } from "./turn-budget";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
 import type {
@@ -1037,6 +1037,10 @@ export async function runTurnStreamAttempt(
             contextContributions: eventing.companyBrainContextContributions,
           }),
         );
+        // F-2: a declared token budget counts each terminal response the loop has processed (turn-budget.ts).
+        if (responseResult.status === "processed") {
+          providerTurn.turnRouteWatch?.responseSettled(terminalResponseTokens(next.value) ?? 0);
+        }
         assertModelResponseLatencyMode({
           event: next.value,
           requested: turnExecutionPolicy.latencyMode,

@@ -6,8 +6,18 @@
 // gracefully (turn.completed {segmentLimit: "turn_budget", terminalReason: "TURN_BUDGET_EXHAUSTED"}, the session
 // idles), exactly as a configured model-call cap does. The first model call of a turn always runs. maxModelCalls is not
 // counted here: it narrows the SDK's own per-turn cap at claim.
+//
+// Where the tokens come from: the worker's stream loop settles each terminal model response (`responseSettled`, the
+// same response the usage ledger records). Usage never arrives as a runtime event -- the worker publishes
+// agent.model.usage itself -- so counting runtime events counted nothing (measured live: a 1,000-token budget let a
+// turn make three calls). The SDK can reach the next model call before the loop has processed the previous response,
+// so the check first waits, bounded, until every earlier call's response is settled.
 import type { CallModelInputFilter } from "@openai/agents";
 import type { TurnBudgetV1 } from "@opengeni/contracts";
+import { modelTerminalResponseFromSdkEvent, normalizeModelCallUsage } from "@opengeni/runtime";
+
+/** How long a token check waits for the earlier calls' responses to be settled before it judges what it has. */
+export const TURN_BUDGET_SETTLE_WAIT_MS = 5_000;
 
 export type TurnBudgetLimit = "total_tokens" | "duration";
 
@@ -28,7 +38,12 @@ export class TurnBudgetExhaustedError extends Error {
 export function turnBudgetExhaustion(error: unknown): TurnBudgetExhaustedError | null {
   const seen = new Set<unknown>();
   let current: unknown = error;
-  while (current !== null && current !== undefined && typeof current === "object" && !seen.has(current)) {
+  while (
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object" &&
+    !seen.has(current)
+  ) {
     if (current instanceof TurnBudgetExhaustedError) return current;
     seen.add(current);
     current = (current as { cause?: unknown }).cause;
@@ -36,37 +51,76 @@ export function turnBudgetExhaustion(error: unknown): TurnBudgetExhaustedError |
   return null;
 }
 
-/** Tokens one runtime event reports, when it is a model usage event (0 otherwise). */
-export function usageTokensOf(event: Readonly<{ type: string; payload?: unknown }>): number {
-  if (event.type !== "agent.model.usage") return 0;
-  const payload = (event.payload ?? {}) as Record<string, unknown>;
-  const total = payload.totalTokens;
-  if (typeof total === "number" && Number.isFinite(total) && total >= 0) return total;
-  const input = typeof payload.inputTokens === "number" ? payload.inputTokens : 0;
-  const output = typeof payload.outputTokens === "number" ? payload.outputTokens : 0;
-  return Math.max(0, input) + Math.max(0, output);
+/**
+ * Tokens one terminal model response reports (its total, or input plus output; 0 when the provider reported no usage),
+ * or null when the stream event is not a terminal response.
+ */
+export function terminalResponseTokens(
+  event: Parameters<typeof modelTerminalResponseFromSdkEvent>[0],
+): number | null {
+  const terminal = modelTerminalResponseFromSdkEvent(event);
+  if (!terminal) return null;
+  const usage = terminal.usage?.usage;
+  if (!usage) return 0;
+  const normalized = normalizeModelCallUsage(usage);
+  if (typeof normalized.totalTokens === "number" && Number.isFinite(normalized.totalTokens))
+    return Math.max(0, normalized.totalTokens);
+  return (
+    Math.max(0, normalized.telemetry.inputTokens ?? 0) +
+    Math.max(0, normalized.telemetry.outputTokens ?? 0)
+  );
 }
 
 /**
- * A guard for the declared token and duration limits, or null when the budget declares neither. `observe` takes every
- * runtime event the worker publishes; `filter` is chained as the run's host model-input filter.
+ * A guard for the declared token and duration limits, or null when the budget declares neither. `settle` takes each
+ * terminal model response's tokens as the worker processes it; `filter` is chained as the run's host model-input filter.
  */
 export function createTurnBudgetGuard(
   budget: TurnBudgetV1 | null | undefined,
   now: () => number = () => Date.now(),
-): Readonly<{ observe: (event: Readonly<{ type: string; payload?: unknown }>) => void; filter: CallModelInputFilter; used: () => number }> | null {
-  if (!budget || (budget.maxTotalTokens === undefined && budget.maxDurationMs === undefined)) return null;
+  settleWaitMs: number = TURN_BUDGET_SETTLE_WAIT_MS,
+): Readonly<{
+  settle: (tokens: number) => void;
+  filter: CallModelInputFilter;
+  used: () => number;
+  settled: () => number;
+}> | null {
+  if (!budget || (budget.maxTotalTokens === undefined && budget.maxDurationMs === undefined))
+    return null;
   const startedAt = now();
   let tokens = 0;
   let calls = 0;
+  let settled = 0;
+  const waiters = new Set<() => void>();
+  const waitForSettled = async (count: number): Promise<void> => {
+    const deadline = Date.now() + settleWaitMs;
+    for (;;) {
+      if (settled >= count) return;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          waiters.delete(done);
+          resolve();
+        };
+        const timer = setTimeout(done, remaining);
+        waiters.add(done);
+      });
+    }
+  };
   return Object.freeze({
-    observe(event) {
-      tokens += usageTokensOf(event);
+    settle(responseTokens: number) {
+      tokens += Number.isFinite(responseTokens) ? Math.max(0, responseTokens) : 0;
+      settled += 1;
+      for (const wake of [...waiters]) wake();
     },
     used: () => tokens,
+    settled: () => settled,
     filter: async ({ modelData }) => {
       calls += 1;
       if (calls > 1) {
+        if (budget.maxTotalTokens !== undefined) await waitForSettled(calls - 1);
         if (budget.maxTotalTokens !== undefined && tokens >= budget.maxTotalTokens) {
           throw new TurnBudgetExhaustedError("total_tokens", tokens, budget.maxTotalTokens);
         }
@@ -81,15 +135,23 @@ export function createTurnBudgetGuard(
 }
 
 /** Runtime events that mean the model produced output for the turn (text or reasoning). */
-const OUTPUT_EVENT_TYPES = new Set(["agent.message.delta", "agent.message.completed", "agent.reasoning.delta"]);
+const OUTPUT_EVENT_TYPES = new Set([
+  "agent.message.delta",
+  "agent.message.completed",
+  "agent.reasoning.delta",
+]);
 
 /**
  * F-2: what the settlement must know about a turn that declared a route. `preOutput()` holds only while the turn's
  * FIRST model call has not produced anything: no output event, and no second model call (a first response of tool
  * calls leads to a second call). A declared fallback runs only in that state.
  */
-export function createTurnRouteWatch(budget: TurnBudgetV1 | null | undefined, now: () => number = () => Date.now()) {
-  const guard = createTurnBudgetGuard(budget, now);
+export function createTurnRouteWatch(
+  budget: TurnBudgetV1 | null | undefined,
+  now: () => number = () => Date.now(),
+  settleWaitMs: number = TURN_BUDGET_SETTLE_WAIT_MS,
+) {
+  const guard = createTurnBudgetGuard(budget, now, settleWaitMs);
   let modelCalls = 0;
   let outputObserved = false;
   const filter: CallModelInputFilter = async (args) => {
@@ -99,8 +161,12 @@ export function createTurnRouteWatch(budget: TurnBudgetV1 | null | undefined, no
   return Object.freeze({
     observe(event: Readonly<{ type: string; payload?: unknown }>) {
       if (OUTPUT_EVENT_TYPES.has(event.type)) outputObserved = true;
-      guard?.observe(event);
     },
+    /** One terminal model response processed by the worker's stream loop, with the tokens it reported. */
+    responseSettled(tokens: number) {
+      guard?.settle(tokens);
+    },
+    tokensUsed: () => guard?.used() ?? 0,
     filter,
     preOutput: () => modelCalls <= 1 && !outputObserved,
     modelCalls: () => modelCalls,
@@ -115,14 +181,29 @@ export type TurnRouteWatch = ReturnType<typeof createTurnRouteWatch>;
 export function primaryModelRefusal(error: unknown): string | null {
   const seen = new Set<unknown>();
   let current: unknown = error;
-  while (current !== null && current !== undefined && typeof current === "object" && !seen.has(current)) {
+  while (
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object" &&
+    !seen.has(current)
+  ) {
     seen.add(current);
-    const record = current as { status?: unknown; code?: unknown; error?: { code?: unknown } | null; cause?: unknown };
+    const record = current as {
+      status?: unknown;
+      code?: unknown;
+      error?: { code?: unknown } | null;
+      cause?: unknown;
+    };
     const status = typeof record.status === "number" ? record.status : null;
     const code =
-      typeof record.code === "string" ? record.code : typeof record.error?.code === "string" ? record.error.code : null;
+      typeof record.code === "string"
+        ? record.code
+        : typeof record.error?.code === "string"
+          ? record.error.code
+          : null;
     if (status === 404) return `http_404${code ? `:${code}` : ""}`.slice(0, 200);
-    if ((status === 400 || status === 403) && code !== null && /model/iu.test(code)) return `http_${status}:${code}`.slice(0, 200);
+    if ((status === 400 || status === 403) && code !== null && /model/iu.test(code))
+      return `http_${status}:${code}`.slice(0, 200);
     current = record.cause;
   }
   return null;
