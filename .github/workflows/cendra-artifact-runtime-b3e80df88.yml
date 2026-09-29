@@ -1,0 +1,20 @@
+name: Cendra artifact runtime for b3e80df88
+
+# Cendra fork only (AGENT-OPS slice 3: E-14 final tool refusals, F-2 declared turn fallback and budget, and the F-2
+# token-count fix, on d1c387444). Runs upstream's own reusable artifact-runtime workflow, unchanged, for the exact
+# production source b3e80df88 (branch cendra/agent-ops-e14-final-refusal), so the OpenGeni api image can be built with
+# an artifact-runtime bundle from the same commit. Every job inside checks out and verifies source_sha itself; this
+# commit only adds the caller.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-b3e80df88
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: b3e80df88873018d2f82947c9d9f1e45b260898a
