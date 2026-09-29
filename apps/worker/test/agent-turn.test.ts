@@ -5584,6 +5584,65 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
   });
 
+  test("PQA-0044: a status-less provider server_error is transient by its kind, whatever its wording", () => {
+    // The shape the OpenAI client throws for an SSE error event carrying `error`: APIError(undefined, data.error).
+    class StatuslessApiError extends Error {
+      readonly status = undefined;
+      readonly error: Record<string, unknown>;
+      readonly code: unknown;
+      readonly type: unknown;
+      constructor(body: Record<string, unknown>) {
+        super(String(body.message));
+        this.error = body;
+        this.code = body.code;
+        this.type = body.type;
+      }
+    }
+    const observed = new StatuslessApiError({
+      type: "server_error",
+      code: "server_error",
+      message: "An error occurred while processing the request.",
+      param: null,
+    });
+    expect(isTransientProviderError(observed)).toBe(true);
+    expect(agentRunFailurePayload(observed)).toEqual({
+      error: "An error occurred while processing the request.",
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    // By kind alone: any wording, and wrapped as a cause.
+    const worded = new StatuslessApiError({
+      type: "server_error",
+      code: null,
+      message: "Upstream hiccup.",
+    });
+    expect(isTransientProviderError(worded)).toBe(true);
+    expect(isTransientProviderError(new Error("model call failed", { cause: worded }))).toBe(true);
+    // The text fallback now reads "the request" as well as "your request".
+    expect(
+      isTransientProviderError(new Error("An error occurred while processing the request.")),
+    ).toBe(true);
+    // A status stays authoritative: a 400 with a server_error-looking body is not retried.
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("An error occurred while processing the request."), {
+          status: 400,
+          type: "server_error",
+        }),
+      ),
+    ).toBe(false);
+    // Another kind is not a server failure.
+    expect(
+      isTransientProviderError(
+        new StatuslessApiError({
+          type: "invalid_request_error",
+          code: "invalid_value",
+          message: "Bad input.",
+        }),
+      ),
+    ).toBe(false);
+  });
+
   test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {
     const observed = new Error("Unable to connect. Is the computer able to access the url?");
 

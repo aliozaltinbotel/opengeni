@@ -812,6 +812,33 @@ function isProviderSafetyRefusal(error: unknown): boolean {
   return providerSafetyRefusalDiagnostic(error) !== undefined;
 }
 
+/**
+ * The provider's own name for a failure it takes on itself. A status-less stream error keeps it: for an SSE error
+ * event carrying `error`, the OpenAI client throws `APIError(undefined, data.error)`, whose `type` and `code` are the
+ * body's (`server_error`), with no status. PQA-0044 (Cendra product-qa, 2026-09-29): two turns hard-failed on
+ * "An error occurred while processing the request." -- `type: server_error`, no status -- because only the
+ * "...processing YOUR request" wording matched the text fallback below.
+ */
+const PROVIDER_SERVER_FAILURE_KINDS = new Set(["server_error"]);
+
+function isStatuslessProviderServerFailure(error: unknown): boolean {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && current !== null && typeof current === "object"; depth += 1) {
+    const record = current as Record<string, unknown>;
+    const body =
+      record.error !== null && typeof record.error === "object"
+        ? (record.error as Record<string, unknown>)
+        : undefined;
+    for (const kind of [record.type, record.code, body?.type, body?.code]) {
+      if (typeof kind === "string" && PROVIDER_SERVER_FAILURE_KINDS.has(kind.toLowerCase())) {
+        return true;
+      }
+    }
+    current = record.cause;
+  }
+  return false;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
   // A semantic refusal can arrive inside a 5xx transport envelope.
   if (isProviderSafetyRefusal(error)) return false;
@@ -837,11 +864,15 @@ export function isTransientProviderError(error: unknown): boolean {
   if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
     return true;
   }
+  // No status survived: the provider's own failure kind decides first (PQA-0044), then the text.
+  if (isStatuslessProviderServerFailure(error)) {
+    return true;
+  }
   const message = error instanceof Error ? error.message : String(error);
   if (isExactStatuslessUpstreamConnectivityMessage(message)) {
     return true;
   }
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  return /overloaded|an error occurred while processing (?:your|the) request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
 }
