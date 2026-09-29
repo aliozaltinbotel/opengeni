@@ -1,0 +1,20 @@
+name: Cendra artifact runtime for 087b8b39a
+
+# Cendra fork only (AGENT-OPS slice 3: E-14 final tool refusals, F-2 declared turn fallback and budget, NPD-013 the
+# declared fallback inside the attempt, PQA-0044 the status-less server_error classifier, and the NPD-013 review fixes, on d1c387444). Runs
+# upstream's own reusable artifact-runtime workflow, unchanged, for the exact production source 087b8b39a (branch
+# cendra/agent-ops-npd013), so the OpenGeni api image can be built with an artifact-runtime bundle from the same
+# commit. Every job inside checks out and verifies source_sha itself; this commit only adds the caller.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-087b8b39a
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 087b8b39ae170693490afa88206a48be06f0d656
