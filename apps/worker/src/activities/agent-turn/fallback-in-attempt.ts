@@ -15,7 +15,11 @@
 // A declared fallback that cannot run is named (`providerTurn.fallbackNotRun`), and the turn ends FALLBACK_REFUSED.
 // The switch is recorded durably and fenced BEFORE the fallback's first call (switchSessionTurnToDeclaredFallback).
 import { assertTurnExecutionPolicyMatchesConfigV1, type Settings } from "@opengeni/config";
-import { evaluateWorkspaceModelPolicy, type TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import {
+  evaluateWorkspaceModelPolicy,
+  type TurnExecutionPolicyV1,
+  type TurnFallbackNotRunReason,
+} from "@opengeni/contracts";
 import { assertSessionAllowsProductModel } from "@opengeni/core";
 import { switchSessionTurnToDeclaredFallback } from "@opengeni/db";
 
@@ -51,7 +55,7 @@ export async function prepareDeclaredFallbackInAttempt<
   providerTurn: {
     turnRouteDeclaration: import("@opengeni/contracts").TurnRouteDeclarationV1 | null;
     turnRouteWatch: import("./turn-budget").TurnRouteWatch | null;
-    fallbackNotRun: string | null;
+    fallbackNotRun: TurnFallbackNotRunReason | null;
   };
   billingState: {
     isExternallyBilledTurn: boolean;
@@ -76,7 +80,7 @@ export async function prepareDeclaredFallbackInAttempt<
   if (!declared?.fallbackPolicy || declared.executed !== "primary" || !watch) return null;
   const refusal = primaryModelRefusal(deps.error);
   if (refusal === null || !watch.fallbackMayBegin()) return null;
-  const notRun = (reason: string) => {
+  const notRun = (reason: TurnFallbackNotRunReason) => {
     deps.providerTurn.fallbackNotRun = reason;
     return null;
   };
@@ -147,3 +151,37 @@ export async function prepareDeclaredFallbackInAttempt<
     refusal,
   };
 }
+
+/**
+ * The second run's inputs (review P1-2 of b4c66b449): the agent is rebuilt and the stream re-run on the FALLBACK's turn,
+ * policy, run settings and resolved model -- everything else exactly as the primary prepared it (the same claim,
+ * generation, tools and host context). The missing-title directive is not asked a second time (review P2-2): the
+ * primary's first request already carried it. run.ts builds both inputs here, so a refactor that drops a field fails
+ * test/fallback-in-attempt.test.ts rather than recording the primary's model for the fallback's run.
+ */
+export function fallbackRunInputs<TBuild extends object, TStream extends object, TTurn, TResolved>(
+  build: TBuild,
+  stream: TStream,
+  fallback: InAttemptFallback<TTurn, TResolved>,
+): {
+  build: TBuild & FallbackRoute<TTurn, TResolved> & { suppressMissingSessionTitleHint: true };
+  stream: TStream & FallbackRoute<TTurn, TResolved> & { generateSessionTitleInParallel: false };
+} {
+  const route: FallbackRoute<TTurn, TResolved> = {
+    turn: fallback.turn,
+    turnExecutionPolicy: fallback.policy,
+    runSettings: fallback.runSettings,
+    resolvedModel: fallback.resolvedModel,
+  };
+  return {
+    build: { ...build, ...route, suppressMissingSessionTitleHint: true },
+    stream: { ...stream, ...route, generateSessionTitleInParallel: false },
+  };
+}
+
+type FallbackRoute<TTurn, TResolved> = {
+  turn: TTurn;
+  turnExecutionPolicy: TurnExecutionPolicyV1;
+  runSettings: Settings;
+  resolvedModel: TResolved;
+};

@@ -16727,6 +16727,17 @@ export type TurnRouteTerminalReason = (typeof TURN_ROUTE_TERMINAL_REASONS)[numbe
  * the attempt (its error carries `hostAttemptRefusal: {code}`), so the turn ends named instead of as a generic failure.
  */
 export const TURN_HOST_TERMINAL_REASONS = Object.freeze(["RECOVERY_ATTEMPT_REFUSED"] as const);
+/**
+ * NPD-013 (Cendra agent-ops): why a declared fallback did not run inside the attempt. The turn then ends
+ * FALLBACK_REFUSED, and its failure payload names one of these as `fallbackNotRun`. An embedding host admits them by name.
+ */
+export const TURN_FALLBACK_NOT_RUN_REASONS = Object.freeze([
+  "fallback_route_incompatible",
+  "fallback_model_not_configured",
+  "fallback_model_blocked_by_workspace_policy",
+  "fallback_declaration_or_attempt_changed",
+] as const);
+export type TurnFallbackNotRunReason = (typeof TURN_FALLBACK_NOT_RUN_REASONS)[number];
 export type TurnHostTerminalReason = (typeof TURN_HOST_TERMINAL_REASONS)[number];
 
 /**

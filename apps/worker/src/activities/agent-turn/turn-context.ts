@@ -191,7 +191,7 @@ export type ProviderTurnState = {
   /** F-2 (review P2-3): the declared maxModelCalls narrowed the SDK cap for this turn (so reaching it is the budget). */
   turnBudgetNarrowedModelCalls: boolean;
   /** NPD-013: why a declared fallback could not run in this attempt (e.g. its route is incompatible), or null. */
-  fallbackNotRun: string | null;
+  fallbackNotRun: import("@opengeni/contracts").TurnFallbackNotRunReason | null;
 };
 
 export type TurnContext = {

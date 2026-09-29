@@ -78,6 +78,8 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
 
 export type BuildTurnAgentDeps = {
+  /** NPD-013: the in-attempt fallback's build does not ask for the session title a second time (fallbackRunInputs). */
+  suppressMissingSessionTitleHint?: boolean;
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
@@ -204,9 +206,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     session,
   );
 
-  const missingSessionTitleHint = preparationIndependentToolNames.includes(
-    SESSION_TITLE_MODEL_TOOL_NAME,
-  );
+  const missingSessionTitleHint =
+    deps.suppressMissingSessionTitleHint !== true &&
+    preparationIndependentToolNames.includes(SESSION_TITLE_MODEL_TOOL_NAME);
   // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
   // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
   // may have been swapped to a connected machine (active_sandbox_id → a

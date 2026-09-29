@@ -93,7 +93,7 @@ import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
-import { prepareDeclaredFallbackInAttempt } from "./fallback-in-attempt";
+import { fallbackRunInputs, prepareDeclaredFallbackInAttempt } from "./fallback-in-attempt";
 import { settingsWithResolvedModelContext } from "@opengeni/config";
 
 /**
@@ -1734,21 +1734,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   fallback.resolvedModel.configured,
                 )
               : fallback.runSettings;
-            const fallbackAgent = await buildTurnAgent({
-              ...agentBuildInput,
-              turn: fallback.turn,
-              turnExecutionPolicy: fallback.policy,
-              runSettings: fallback.runSettings,
-              resolvedModel: fallback.resolvedModel,
-            });
-            return await runTurnStreamAttempt({
-              ...streamAttemptInput,
-              agent: fallbackAgent.agent,
-              turn: fallback.turn,
-              turnExecutionPolicy: fallback.policy,
-              runSettings: fallback.runSettings,
-              resolvedModel: fallback.resolvedModel,
-            });
+            const next = fallbackRunInputs(agentBuildInput, streamAttemptInput, fallback);
+            const fallbackAgent = await buildTurnAgent(next.build);
+            return await runTurnStreamAttempt({ ...next.stream, agent: fallbackAgent.agent });
           }
         },
       );
