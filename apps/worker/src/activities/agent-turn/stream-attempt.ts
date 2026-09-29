@@ -786,9 +786,13 @@ export async function runTurnStreamAttempt(
         attempt.modelRequestStarted = true;
         // F-2: a turn that declared a route is watched: its declared token and duration limits are checked before each
         // model call, and the settlement can tell whether the first model call produced anything (turn-budget.ts).
-        const turnRouteWatch = providerTurn.turnRouteDeclaration
-          ? createTurnRouteWatch(providerTurn.turnRouteDeclaration.turnBudget)
-          : null;
+        // NPD-013: one watch per ATTEMPT, so a declared fallback run in this attempt shares the budget and the
+        // "nothing was produced" state with the primary's run.
+        const turnRouteWatch =
+          providerTurn.turnRouteWatch ??
+          (providerTurn.turnRouteDeclaration
+            ? createTurnRouteWatch(providerTurn.turnRouteDeclaration.turnBudget)
+            : null);
         providerTurn.turnRouteWatch = turnRouteWatch;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           signal: runtimeCancellationSignal,

@@ -93,6 +93,8 @@ import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { buildTurnAgent } from "./agent-build";
+import { prepareDeclaredFallbackInAttempt } from "./fallback-in-attempt";
+import { settingsWithResolvedModelContext } from "@opengeni/config";
 
 /**
  * Retain subscription credential/account authority for the title sidecar
@@ -413,6 +415,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         codexAppsCredentialId,
         turnExecutionPolicy,
         turnRouteDeclaration,
+        turnBudgetNarrowedModelCalls,
         trigger,
         humanInputResume,
         interactionInterventionResume,
@@ -426,6 +429,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       } = claimed.ok;
       // F-2: the settlement names a declared budget's end, and a declared fallback's use, by this declaration.
       providerTurn.turnRouteDeclaration = turnRouteDeclaration;
+      providerTurn.turnBudgetNarrowedModelCalls = turnBudgetNarrowedModelCalls;
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
@@ -555,6 +559,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelHistoryProjector,
             generatedImageHistoryProjector,
             compactionModelHistoryProjector,
+            workspaceModelPolicy,
           } = governance.ok;
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
@@ -1303,7 +1308,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             preparationIndependentToolNames,
           } = toolRuntime;
 
-          const builtAgent = await buildTurnAgent({
+          const agentBuildInput = {
             skillCatalog: toolRuntime.skillCatalog,
             mcpServers: toolRuntime.mcpServers,
             input,
@@ -1360,7 +1365,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             groupBoxBackend,
             postToolPreparationStartedAt,
             codexContext,
-          });
+          };
+          const builtAgent = await buildTurnAgent(agentBuildInput);
           const { agent, modelVisibleSkillCatalogText, postAgentPreparationStartedAt } = builtAgent;
 
           await bindLazySandboxProvisioner({
@@ -1614,7 +1620,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const unavailableSandboxFilesNote = sandboxFileDownloadFailureNote(
             fileMaterializationFailures,
           );
-          return await runTurnStreamAttempt({
+          const streamAttemptInput = {
             input,
             settings: capabilitySettings,
             db,
@@ -1694,7 +1700,56 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             fileResourceDownloads,
             runCredentialResolver,
             videoGenerationAcceptancesByCallId,
-          });
+          };
+          try {
+            return await runTurnStreamAttempt(streamAttemptInput);
+          } catch (primaryError) {
+            // NPD-013 (Cendra agent-ops): the declared fallback runs HERE, in the same attempt (same claim, same
+            // generation, the tools and host context already prepared), never as a recovery. fallback-in-attempt.ts
+            // decides whether it may; otherwise the primary's failure settles as before, named.
+            const fallback = await prepareDeclaredFallbackInAttempt({
+              error: primaryError,
+              db,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              turnId: attempt.turnId!,
+              executionGeneration: attempt.executionGeneration,
+              providerTurn,
+              billingState,
+              capabilitySettings,
+              resolveTurnModel: (settingsForModel, productModelId) =>
+                runtime.resolveTurnModel(settingsForModel, productModelId),
+              session,
+              workspaceModelPolicy,
+              turn,
+              turnExecutionPolicy,
+              resolvedModel,
+              runSettings,
+            });
+            if (fallback === null) throw primaryError;
+            eventing.modelRunSettings = fallback.resolvedModel
+              ? settingsWithResolvedModelContext(
+                  fallback.runSettings,
+                  fallback.resolvedModel.configured,
+                )
+              : fallback.runSettings;
+            const fallbackAgent = await buildTurnAgent({
+              ...agentBuildInput,
+              turn: fallback.turn,
+              turnExecutionPolicy: fallback.policy,
+              runSettings: fallback.runSettings,
+              resolvedModel: fallback.resolvedModel,
+            });
+            return await runTurnStreamAttempt({
+              ...streamAttemptInput,
+              agent: fallbackAgent.agent,
+              turn: fallback.turn,
+              turnExecutionPolicy: fallback.policy,
+              runSettings: fallback.runSettings,
+              resolvedModel: fallback.resolvedModel,
+            });
+          }
         },
       );
     } catch (error) {

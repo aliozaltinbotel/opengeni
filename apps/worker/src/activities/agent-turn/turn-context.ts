@@ -188,6 +188,10 @@ export type ProviderTurnState = {
   turnRouteDeclaration: TurnRouteDeclarationV1 | null;
   /** F-2: the watch over the running attempt (model calls, output, declared limits); null without a declaration. */
   turnRouteWatch: import("./turn-budget").TurnRouteWatch | null;
+  /** F-2 (review P2-3): the declared maxModelCalls narrowed the SDK cap for this turn (so reaching it is the budget). */
+  turnBudgetNarrowedModelCalls: boolean;
+  /** NPD-013: why a declared fallback could not run in this attempt (e.g. its route is incompatible), or null. */
+  fallbackNotRun: string | null;
 };
 
 export type TurnContext = {
@@ -303,6 +307,8 @@ export function createTurnContext(input: {
       lastCodexRequestOpaqueArtifacts: [],
       turnRouteDeclaration: null,
       turnRouteWatch: null,
+      turnBudgetNarrowedModelCalls: false,
+      fallbackNotRun: null,
     },
   };
 }

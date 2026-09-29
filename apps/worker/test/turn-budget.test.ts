@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   createTurnBudgetGuard,
   createTurnRouteWatch,
+  hostAttemptRefusal,
   primaryModelRefusal,
   terminalResponseTokens,
   TurnBudgetExhaustedError,
@@ -140,5 +141,38 @@ describe("F-2 route watch and model refusal", () => {
     expect(primaryModelRefusal({ status: 401, code: "invalid_api_key" })).toBeNull();
     expect(primaryModelRefusal({ status: 500 })).toBeNull();
     expect(primaryModelRefusal({ status: 403, code: "insufficient_quota" })).toBeNull();
+    // Review P2-1: a bare 404 (a gateway's or proxy's) is not the model's refusal.
+    expect(primaryModelRefusal({ status: 404 })).toBeNull();
+    expect(primaryModelRefusal({ status: 404, code: "not_found" })).toBeNull();
+  });
+});
+
+describe("NPD-013 route watch: the fallback begins once, only before anything was produced", () => {
+  test("a tool call created, or output, or a second call closes it; beginning twice is refused", async () => {
+    const watch = createTurnRouteWatch({ maxTotalTokens: 1_000 });
+    await watch.filter(args);
+    expect(watch.fallbackMayBegin()).toBe(true);
+    watch.beginFallback();
+    expect(watch.fallbackMayBegin()).toBe(false);
+    expect(() => watch.beginFallback()).toThrow();
+    // The refused call was settled with no tokens: the fallback's first call does not wait on it.
+    const started = Date.now();
+    expect(await watch.filter(args)).toBe(modelData);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    const tool = createTurnRouteWatch(null);
+    await tool.filter(args);
+    tool.observe({ type: "agent.toolCall.created", payload: {} });
+    expect(tool.fallbackMayBegin()).toBe(false);
+    expect(tool.preOutput()).toBe(false);
+  });
+  test("a host's refusal is read from the cause chain by its code, and nothing else is", () => {
+    const refused = Object.assign(new Error("ATTEMPT_CONTEXT_AUTHORITY_STALE"), {
+      hostAttemptRefusal: { code: "ATTEMPT_CONTEXT_AUTHORITY_STALE" },
+    });
+    expect(hostAttemptRefusal(new Error("wrapped", { cause: refused }))).toBe(
+      "ATTEMPT_CONTEXT_AUTHORITY_STALE",
+    );
+    expect(hostAttemptRefusal(new Error("ATTEMPT_CONTEXT_AUTHORITY_STALE"))).toBeNull();
+    expect(hostAttemptRefusal({ hostAttemptRefusal: { code: "not a code" } })).toBeNull();
   });
 });

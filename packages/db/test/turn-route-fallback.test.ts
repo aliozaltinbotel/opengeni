@@ -19,6 +19,7 @@ import {
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
   submitHumanPromptInTransaction,
+  switchSessionTurnToDeclaredFallback,
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   withWorkspaceSubjectSessionActivityRls as withWorkspaceSubjectRls,
 } from "../src/index";
@@ -57,7 +58,10 @@ const fallbackPolicy = TurnExecutionPolicyV1.parse({
   upstreamModelId: "gpt-5.6-terra",
   definitionVersion: `sha256:${"c".repeat(64)}`,
 });
-const otherPolicy = TurnExecutionPolicyV1.parse({ ...fallbackPolicy, definitionVersion: `sha256:${"d".repeat(64)}` });
+const otherPolicy = TurnExecutionPolicyV1.parse({
+  ...fallbackPolicy,
+  definitionVersion: `sha256:${"d".repeat(64)}`,
+});
 const declared = (fallback: TurnExecutionPolicyV1 | null) =>
   metadataWithTurnRouteDeclarationV1(
     metadataWithTurnExecutionPolicyV1({}, acceptedPolicy),
@@ -189,7 +193,11 @@ async function install(
 }
 
 describe("F-2 declared fallback in the turn recovery", () => {
-  const recover = (value: Fixture, claimed: Awaited<ReturnType<typeof claim>>, policy: TurnExecutionPolicyV1) =>
+  const recover = (
+    value: Fixture,
+    claimed: Awaited<ReturnType<typeof claim>>,
+    policy: TurnExecutionPolicyV1,
+  ) =>
     requestSessionTurnRecovery(client.db, value.workspaceId, {
       sessionId: value.sessionId,
       turnId: value.turnId,
@@ -204,20 +212,35 @@ describe("F-2 declared fallback in the turn recovery", () => {
     if (!available) return;
     const value = await fixture(declared(fallbackPolicy));
     const first = await claim(value);
-    expect(await install(value, first)).toMatchObject({ accepted: true, installed: false, policy: acceptedPolicy });
+    expect(await install(value, first)).toMatchObject({
+      accepted: true,
+      installed: false,
+      policy: acceptedPolicy,
+    });
     expect(await recover(value, first, fallbackPolicy)).toMatchObject({ action: "recovering" });
     const turn = await getSessionTurn(client.db, value.workspaceId, value.turnId);
     expect(turn?.model).toBe(fallbackPolicy.productModelId);
     expect(turn?.reasoningEffort).toBe(fallbackPolicy.reasoningEffort);
-    expect(readTurnExecutionPolicyV1(turn?.metadata)).toEqual({ kind: "valid", policy: fallbackPolicy });
+    expect(readTurnExecutionPolicyV1(turn?.metadata)).toEqual({
+      kind: "valid",
+      policy: fallbackPolicy,
+    });
     const route = readTurnRouteDeclarationV1(turn?.metadata);
     expect(route.kind === "valid" && route.declaration.executed).toBe("fallback");
-    expect(route.kind === "valid" && route.declaration.fallbackReason).toBe("http_404:model_not_found");
+    expect(route.kind === "valid" && route.declaration.fallbackReason).toBe(
+      "http_404:model_not_found",
+    );
     // The next attempt claims the fallback as the turn's accepted policy.
     const second = await claim(value);
-    expect(await install(value, second)).toMatchObject({ accepted: true, installed: false, policy: fallbackPolicy });
+    expect(await install(value, second)).toMatchObject({
+      accepted: true,
+      installed: false,
+      policy: fallbackPolicy,
+    });
     // Never twice.
-    expect(await recover(value, second, fallbackPolicy)).toMatchObject({ action: "not_recoverable" });
+    expect(await recover(value, second, fallbackPolicy)).toMatchObject({
+      action: "not_recoverable",
+    });
   });
 
   test("a policy the turn did not declare, or a turn that declared no fallback, is not recoverable this way", async () => {
@@ -232,11 +255,78 @@ describe("F-2 declared fallback in the turn recovery", () => {
     const none = await fixture(declared(null));
     const noneAttempt = await claim(none);
     await install(none, noneAttempt);
-    expect(await recover(none, noneAttempt, fallbackPolicy)).toMatchObject({ action: "not_recoverable" });
+    expect(await recover(none, noneAttempt, fallbackPolicy)).toMatchObject({
+      action: "not_recoverable",
+    });
 
     const legacy = await fixture(metadataWithTurnExecutionPolicyV1({}, acceptedPolicy));
     const legacyAttempt = await claim(legacy);
     await install(legacy, legacyAttempt);
-    expect(await recover(legacy, legacyAttempt, fallbackPolicy)).toMatchObject({ action: "not_recoverable" });
+    expect(await recover(legacy, legacyAttempt, fallbackPolicy)).toMatchObject({
+      action: "not_recoverable",
+    });
+  });
+});
+
+describe("NPD-013 declared fallback inside the attempt (no recovery, no generation bump)", () => {
+  const switchTo = (
+    value: Fixture,
+    claimed: Awaited<ReturnType<typeof claim>>,
+    policy: TurnExecutionPolicyV1,
+    overrides: { attemptId?: string; executionGeneration?: number } = {},
+  ) =>
+    switchSessionTurnToDeclaredFallback(client.db, value.workspaceId, {
+      sessionId: value.sessionId,
+      turnId: value.turnId,
+      attemptId: overrides.attemptId ?? claimed.attemptId,
+      executionGeneration: overrides.executionGeneration ?? claimed.turn.executionGeneration,
+      policy,
+      reason: "http_404:model_not_found",
+    });
+
+  test("the attempt that holds the turn switches it to the declared fallback, once, at the same generation", async () => {
+    if (!available) return;
+    const value = await fixture(declared(fallbackPolicy));
+    const first = await claim(value);
+    await install(value, first);
+    const switched = await switchTo(value, first, fallbackPolicy);
+    expect(switched?.declaration.executed).toBe("fallback");
+    expect(switched?.declaration.fallbackReason).toBe("http_404:model_not_found");
+    const turn = await getSessionTurn(client.db, value.workspaceId, value.turnId);
+    expect(turn?.status).toBe("running");
+    expect(turn?.activeAttemptId).toBe(first.attemptId);
+    expect(turn?.executionGeneration).toBe(first.turn.executionGeneration);
+    expect(turn?.model).toBe(fallbackPolicy.productModelId);
+    expect(turn?.reasoningEffort).toBe(fallbackPolicy.reasoningEffort);
+    expect(readTurnExecutionPolicyV1(turn?.metadata)).toEqual({
+      kind: "valid",
+      policy: fallbackPolicy,
+    });
+    const route = readTurnRouteDeclarationV1(turn?.metadata);
+    expect(route.kind === "valid" && route.declaration.executed).toBe("fallback");
+    // Never twice.
+    expect(await switchTo(value, first, fallbackPolicy)).toBeNull();
+  });
+
+  test("refused: another attempt, another generation, an undeclared policy, no declared fallback", async () => {
+    if (!available) return;
+    const value = await fixture(declared(fallbackPolicy));
+    const first = await claim(value);
+    await install(value, first);
+    expect(
+      await switchTo(value, first, fallbackPolicy, { attemptId: crypto.randomUUID() }),
+    ).toBeNull();
+    expect(
+      await switchTo(value, first, fallbackPolicy, {
+        executionGeneration: first.turn.executionGeneration + 1,
+      }),
+    ).toBeNull();
+    expect(await switchTo(value, first, otherPolicy)).toBeNull();
+    const turn = await getSessionTurn(client.db, value.workspaceId, value.turnId);
+    expect(turn?.model).toBe(acceptedPolicy.productModelId);
+    const none = await fixture(declared(null));
+    const noneAttempt = await claim(none);
+    await install(none, noneAttempt);
+    expect(await switchTo(none, noneAttempt, fallbackPolicy)).toBeNull();
   });
 });

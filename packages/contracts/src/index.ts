@@ -16651,13 +16651,25 @@ export const TurnRouteDeclarationV1 = /* @__PURE__ */ defineModelContractSchema(
     .strict()
     .superRefine((declaration, context) => {
       if (declaration.executed === "fallback" && declaration.fallbackPolicy === null) {
-        context.addIssue({ code: "custom", path: ["executed"], message: "a turn ran its fallback only when it declared one" });
+        context.addIssue({
+          code: "custom",
+          path: ["executed"],
+          message: "a turn ran its fallback only when it declared one",
+        });
       }
       if (declaration.executed === "fallback" && declaration.fallbackReason === null) {
-        context.addIssue({ code: "custom", path: ["fallbackReason"], message: "a fallback run names the primary's refusal" });
+        context.addIssue({
+          code: "custom",
+          path: ["fallbackReason"],
+          message: "a fallback run names the primary's refusal",
+        });
       }
       if (declaration.executed === "primary" && declaration.fallbackReason !== null) {
-        context.addIssue({ code: "custom", path: ["fallbackReason"], message: "only a fallback run carries a refusal" });
+        context.addIssue({
+          code: "custom",
+          path: ["fallbackReason"],
+          message: "only a fallback run carries a refusal",
+        });
       }
     }),
 );
@@ -16674,7 +16686,8 @@ export function readTurnRouteDeclarationV1(metadata: unknown): TurnRouteDeclarat
     throw new Error("Malformed turn route declaration metadata: turn metadata is not an object");
   }
   const record = metadata as Record<string, unknown>;
-  if (!Object.prototype.hasOwnProperty.call(record, TURN_ROUTE_DECLARATION_METADATA_KEY)) return { kind: "absent" };
+  if (!Object.prototype.hasOwnProperty.call(record, TURN_ROUTE_DECLARATION_METADATA_KEY))
+    return { kind: "absent" };
   const parsed = TurnRouteDeclarationV1.safeParse(record[TURN_ROUTE_DECLARATION_METADATA_KEY]);
   if (!parsed.success) {
     const paths = [
@@ -16709,6 +16722,12 @@ export const TURN_ROUTE_TERMINAL_REASONS = Object.freeze([
   "FALLBACK_REFUSED",
 ] as const);
 export type TurnRouteTerminalReason = (typeof TURN_ROUTE_TERMINAL_REASONS)[number];
+/**
+ * A host's refusal of a re-claimed (recovery) attempt, named on turn.failed: the embedding host's tool preparation refused
+ * the attempt (its error carries `hostAttemptRefusal: {code}`), so the turn ends named instead of as a generic failure.
+ */
+export const TURN_HOST_TERMINAL_REASONS = Object.freeze(["RECOVERY_ATTEMPT_REFUSED"] as const);
+export type TurnHostTerminalReason = (typeof TURN_HOST_TERMINAL_REASONS)[number];
 
 /**
  * Minimal, stable evidence projection for command receipts and audit events.

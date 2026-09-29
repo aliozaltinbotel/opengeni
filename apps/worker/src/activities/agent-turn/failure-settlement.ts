@@ -16,7 +16,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { agentsErrorRunState, maxTurnsExceededRunState } from "@opengeni/runtime";
-import { primaryModelRefusal, turnBudgetExhaustion } from "./turn-budget";
+import { hostAttemptRefusal, primaryModelRefusal, turnBudgetExhaustion } from "./turn-budget";
 import { ApplicationFailure, CancelledFailure } from "@temporalio/activity";
 import {
   authoritativeCodexCapacityResetAt,
@@ -552,7 +552,9 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
   // that resumption.
   // F-2: a DECLARED budget's end (tokens or duration, checked before a model call) settles like the cap below.
   const budgetEnd = turnBudgetExhaustion(error);
-  const maxTurns = budgetEnd ? { serializedRunState: agentsErrorRunState(error) } : maxTurnsExceededRunState(error);
+  const maxTurns = budgetEnd
+    ? { serializedRunState: agentsErrorRunState(error) }
+    : maxTurnsExceededRunState(error);
   if (maxTurns && eventing.publish && attempt.turnId && eventing.turnStartedPublished) {
     await flushRuntimeBatcher();
     // The SDK attaches the run state at the throw site; persisting it lets
@@ -569,9 +571,21 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
             type: "turn.completed",
             // F-2: a cap the turn DECLARED (turnBudget.maxModelCalls) is its budget, named, not the pacing valve.
             payload: budgetEnd
-              ? { output: "", segmentLimit: "turn_budget", terminalReason: "TURN_BUDGET_EXHAUSTED", budget: budgetEnd.limit, used: budgetEnd.used, maximum: budgetEnd.maximum }
-              : providerTurn.turnRouteDeclaration?.turnBudget?.maxModelCalls !== undefined
-                ? { output: "", segmentLimit: "turn_budget", terminalReason: "TURN_BUDGET_EXHAUSTED", budget: "model_calls" }
+              ? {
+                  output: "",
+                  segmentLimit: "turn_budget",
+                  terminalReason: "TURN_BUDGET_EXHAUSTED",
+                  budget: budgetEnd.limit,
+                  used: budgetEnd.used,
+                  maximum: budgetEnd.maximum,
+                }
+              : providerTurn.turnBudgetNarrowedModelCalls
+                ? {
+                    output: "",
+                    segmentLimit: "turn_budget",
+                    terminalReason: "TURN_BUDGET_EXHAUSTED",
+                    budget: "model_calls",
+                  }
                 : { output: "", segmentLimit: "max_turns" },
           },
           { type: "session.status.changed", payload: { status: "idle" } },
@@ -1501,53 +1515,11 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
       return claimedResult({ status: "recovering" });
     }
   }
-  // F-2 (Cendra agent-ops): the declared fallback. Only when the provider definitively refused the PRIMARY model on
-  // the turn's first model call, before any output; never after output, never for a retryable error, never twice (the
-  // recovery transaction checks the frozen declaration: executed must still be primary). The same accepted turn is
-  // recovered with the fallback's model and policy, and the declaration records which ran and why.
+  // F-2 / NPD-013 (Cendra agent-ops): the declared fallback runs INSIDE the attempt (run.ts), never as a recovery: a
+  // recovery re-claims the turn at the next generation, which an embedding host's attempt fence refuses. A model
+  // refusal that reaches the settlement is therefore one the fallback could not answer; it is named below.
   const declaredRoute = providerTurn.turnRouteDeclaration;
   const modelRefusal = declaredRoute ? primaryModelRefusal(error) : null;
-  if (
-    declaredRoute?.fallbackPolicy &&
-    declaredRoute.executed === "primary" &&
-    modelRefusal !== null &&
-    providerTurn.turnRouteWatch?.preOutput() === true &&
-    attempt.turnId &&
-    attempt.triggerEventId &&
-    eventing.publish &&
-    eventing.turnStartedPublished
-  ) {
-    await flushRuntimeBatcher();
-    const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
-      sessionId: input.sessionId,
-      turnId: attempt.turnId,
-      triggerEventId: attempt.triggerEventId,
-      attemptId: input.attemptId,
-      reason: "model_fallback",
-      detail: {
-        code: "PRIMARY_REFUSED_FALLBACK_RAN",
-        retryable: true,
-        refusal: modelRefusal,
-        fallbackModel: declaredRoute.fallbackPolicy.productModelId,
-      },
-      modelFallback: { policy: declaredRoute.fallbackPolicy, reason: modelRefusal },
-    });
-    if (recovery.action === "stale") {
-      acknowledgeLostAttemptOwnership();
-      control.activityStatus = "cancelled";
-      control.turnMetricOutcome = "cancelled";
-      return claimedResult({ status: "cancelled" });
-    }
-    if (recovery.action === "recovering") {
-      acknowledgeRecoveryQuiescence();
-      await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
-      control.turnMetricOutcome = "recovering";
-      control.activityStatus = "recovering";
-      control.activityError = error;
-      return claimedResult({ status: "recovering" });
-    }
-    // not_recoverable: the declaration no longer allows it; the turn fails below, named.
-  }
   // A retryable provider/MCP failure is transient external backpressure,
   // not a session or goal failure. The in-client retry budget is already
   // exhausted by the time the error reaches here. Checkpoint conversation
@@ -1576,12 +1548,23 @@ export async function settleTurnFailure(deps: TurnFailureDeps): Promise<RunAgent
     failure = {
       ...failure,
       terminalReason:
-        declaredRoute.executed === "fallback"
+        declaredRoute.executed === "fallback" || providerTurn.fallbackNotRun !== null
           ? "FALLBACK_REFUSED"
           : declaredRoute.fallbackPolicy === null
             ? "PRIMARY_REFUSED_NO_FALLBACK"
             : "PRIMARY_REFUSED_AFTER_OUTPUT",
-      refusal: modelRefusal,
+      refusal: providerTurn.fallbackNotRun ?? modelRefusal,
+    } as typeof failure;
+  }
+  // A host's refusal of a RE-CLAIMED attempt (a recovery the embedding host's attempt fence does not admit) is named, so
+  // the person sees why, not "the turn failed". It never recovers again.
+  const hostRefusal = hostAttemptRefusal(error);
+  if (hostRefusal !== null && attempt.executionGeneration > 1) {
+    failure = {
+      ...failure,
+      retryable: false,
+      terminalReason: "RECOVERY_ATTEMPT_REFUSED",
+      refusal: hostRefusal,
     } as typeof failure;
   }
   if (

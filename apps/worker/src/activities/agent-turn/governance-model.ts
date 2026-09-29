@@ -117,6 +117,8 @@ export type GovernanceModelOk = {
   compactionModelHistoryProjector: (
     items: Array<Record<string, unknown>>,
   ) => Promise<Array<Record<string, unknown>>>;
+  /** NPD-013: the workspace model policy read for this attempt (it also gates a declared fallback). */
+  workspaceModelPolicy: Parameters<typeof evaluateWorkspaceModelPolicy>[0] | null | undefined;
 };
 
 export type GovernanceModelOutcome = { exit: RunAgentTurnResult } | { ok: GovernanceModelOk };
@@ -477,6 +479,8 @@ export async function prepareGovernanceAndModel(
       modelHistoryProjector,
       generatedImageHistoryProjector,
       compactionModelHistoryProjector,
+      // NPD-013: the same workspace model policy gates a declared fallback before it runs in this attempt.
+      workspaceModelPolicy,
     },
   };
 }

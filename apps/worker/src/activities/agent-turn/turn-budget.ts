@@ -142,9 +142,11 @@ const OUTPUT_EVENT_TYPES = new Set([
 ]);
 
 /**
- * F-2: what the settlement must know about a turn that declared a route. `preOutput()` holds only while the turn's
- * FIRST model call has not produced anything: no output event, and no second model call (a first response of tool
- * calls leads to a second call). A declared fallback runs only in that state.
+ * F-2: what the attempt must know about a turn that declared a route. `preOutput()` holds only while the turn's FIRST
+ * model call has not produced anything: no output event, no tool call created, and no second model call (a first
+ * response of tool calls leads to a second call). A declared fallback runs only in that state, once, inside the same
+ * attempt (NPD-013: `beginFallback`), so nothing was sent and nothing is sent twice. One watch spans both runs, so the
+ * declared budget spans them too.
  */
 export function createTurnRouteWatch(
   budget: TurnBudgetV1 | null | undefined,
@@ -154,6 +156,8 @@ export function createTurnRouteWatch(
   const guard = createTurnBudgetGuard(budget, now, settleWaitMs);
   let modelCalls = 0;
   let outputObserved = false;
+  let toolCallCreated = false;
+  let fallbackBegun = false;
   const filter: CallModelInputFilter = async (args) => {
     modelCalls += 1;
     return guard ? await guard.filter(args) : args.modelData;
@@ -161,6 +165,7 @@ export function createTurnRouteWatch(
   return Object.freeze({
     observe(event: Readonly<{ type: string; payload?: unknown }>) {
       if (OUTPUT_EVENT_TYPES.has(event.type)) outputObserved = true;
+      if (event.type === "agent.toolCall.created") toolCallCreated = true;
     },
     /** One terminal model response processed by the worker's stream loop, with the tokens it reported. */
     responseSettled(tokens: number) {
@@ -168,7 +173,20 @@ export function createTurnRouteWatch(
     },
     tokensUsed: () => guard?.used() ?? 0,
     filter,
-    preOutput: () => modelCalls <= 1 && !outputObserved,
+    preOutput: () => modelCalls <= 1 && !outputObserved && !toolCallCreated,
+    /** The declared fallback may begin: the primary's first call produced nothing, and no fallback ran yet. */
+    fallbackMayBegin: () =>
+      !fallbackBegun && modelCalls <= 1 && !outputObserved && !toolCallCreated,
+    /**
+     * NPD-013: the fallback begins in this attempt. The refused call is settled with no tokens (it produced no response),
+     * so the fallback's first call never waits on it; its time stays counted against a declared duration.
+     */
+    beginFallback() {
+      if (fallbackBegun) throw new Error("F-2: the declared fallback runs at most once per turn");
+      fallbackBegun = true;
+      guard?.settle(0);
+    },
+    fallbackBegun: () => fallbackBegun,
     modelCalls: () => modelCalls,
   });
 }
@@ -176,7 +194,8 @@ export type TurnRouteWatch = ReturnType<typeof createTurnRouteWatch>;
 
 /**
  * F-2: a provider's typed, definitive refusal of the requested MODEL (not a transient or credential fault): HTTP 404,
- * or HTTP 400/403 whose error code names the model. Anywhere in the cause chain. Returns a short reason, or null.
+ * 400 or 403 whose error code names the model (a bare 404 from a gateway or proxy is not the model's). Anywhere in the
+ * cause chain. Returns a short reason, or null.
  */
 export function primaryModelRefusal(error: unknown): string | null {
   const seen = new Set<unknown>();
@@ -201,10 +220,37 @@ export function primaryModelRefusal(error: unknown): string | null {
         : typeof record.error?.code === "string"
           ? record.error.code
           : null;
-    if (status === 404) return `http_404${code ? `:${code}` : ""}`.slice(0, 200);
-    if ((status === 400 || status === 403) && code !== null && /model/iu.test(code))
+    // Review P2-1: only a refusal whose code names the model counts (a gateway's or proxy's bare 404 is not the model's).
+    if (
+      (status === 404 || status === 400 || status === 403) &&
+      code !== null &&
+      /model/iu.test(code)
+    )
       return `http_${status}:${code}`.slice(0, 200);
     current = record.cause;
+  }
+  return null;
+}
+
+/**
+ * A host's refusal of a re-claimed attempt: the embedding host's tool preparation threw an error carrying
+ * `hostAttemptRefusal: {code}` (anywhere in the cause chain). Returns the host's code, or null.
+ */
+export function hostAttemptRefusal(error: unknown): string | null {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (
+    current !== null &&
+    current !== undefined &&
+    typeof current === "object" &&
+    !seen.has(current)
+  ) {
+    seen.add(current);
+    const marked = (current as { hostAttemptRefusal?: { code?: unknown } | null })
+      .hostAttemptRefusal;
+    if (marked && typeof marked.code === "string" && /^[A-Z][A-Z0-9_]{2,99}$/u.test(marked.code))
+      return marked.code;
+    current = (current as { cause?: unknown }).cause;
   }
   return null;
 }

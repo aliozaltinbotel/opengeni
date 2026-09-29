@@ -399,6 +399,7 @@ import {
   canonicalSkillReviewQuestion,
   SubmitHumanInputResponseRequest,
   TurnExecutionPolicyV1,
+  TurnRouteDeclarationV1,
   CodexCredentialPolicySnapshotV1,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
@@ -41376,10 +41377,7 @@ export async function appendSessionHistoryItems(
           position: entry.position,
           // This is the canonical model-memory boundary. The pending-call
           // ledger and audit event retain their separate raw/preview forms.
-          item: canonicalizePersistedHistoryItem(
-            entry.item,
-            input.modelToolOutputTruncationTokens,
-          ),
+          item: canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
         }));
         const savedFields = {
           position: schema.sessionHistoryItems.position,
@@ -41413,9 +41411,13 @@ export async function appendSessionHistoryItems(
           })
           .returning(savedFields);
         const byPosition = new Map(inserted.map((row) => [row.position, row]));
-        const conflictingPositions = [...new Set(
-          expected.filter((entry) => !byPosition.has(entry.position)).map((entry) => entry.position),
-        )];
+        const conflictingPositions = [
+          ...new Set(
+            expected
+              .filter((entry) => !byPosition.has(entry.position))
+              .map((entry) => entry.position),
+          ),
+        ];
         // RETURNING contains the stored fresh rows. Only position conflicts
         // need another read; every row still receives the exact comparison.
         if (conflictingPositions.length > 0) {
@@ -41438,10 +41440,7 @@ export async function appendSessionHistoryItems(
           if (
             !row ||
             row.turnId !== input.turnId ||
-            !isDeepStrictEqual(
-              fromPostgresLosslessJson(row.item, row.itemCodecVersion),
-              entry.item,
-            )
+            !isDeepStrictEqual(fromPostgresLosslessJson(row.item, row.itemCodecVersion), entry.item)
           ) {
             throw new Error(
               `Conversation history persistence conflict at position ${entry.position}`,
@@ -75720,6 +75719,91 @@ export async function requestSessionTurnRecovery(
         events: [...closedTools.events, ...inserted.map(mapEvent)],
         ...(input.providerArtifactInvalidation ? { providerArtifactsInvalidated } : {}),
       };
+    });
+  });
+}
+
+/**
+ * NPD-013 (Cendra agent-ops): the turn's declared fallback runs INSIDE the attempt that holds the turn -- no recovery, no
+ * re-claim, no generation bump -- so an embedding host's compiled attempt context is reused. This records the switch
+ * durably BEFORE the fallback's first model call, fenced on the attempt still owning the turn at the same generation:
+ * the turn's model, reasoning effort, latency mode and execution policy become the fallback's, and the frozen
+ * declaration records executed = fallback with the primary's refusal. Anything else answers null (the declaration no
+ * longer allows it, or the attempt lost the turn); the caller then ends the turn named, never recovers it.
+ * Every usage row of the fallback's calls is written after this commit, so no usage row names a model the turn does not.
+ */
+export async function switchSessionTurnToDeclaredFallback(
+  db: Database,
+  workspaceId: string,
+  input: {
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    executionGeneration: number;
+    policy: TurnExecutionPolicyV1;
+    reason: string;
+  },
+): Promise<{ declaration: TurnRouteDeclarationV1 } | null> {
+  return await withWorkspaceSessionActivityRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const [turn] = await tx
+        .select()
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+          ),
+        )
+        .for("update");
+      if (
+        !turn ||
+        turn.status !== "running" ||
+        turn.activeAttemptId !== input.attemptId ||
+        turn.executionGeneration !== input.executionGeneration
+      ) {
+        return null;
+      }
+      const declared = readTurnRouteDeclarationV1(turn.metadata);
+      if (
+        declared.kind !== "valid" ||
+        declared.declaration.executed !== "primary" ||
+        declared.declaration.fallbackPolicy === null ||
+        stableJson(declared.declaration.fallbackPolicy) !== stableJson(input.policy)
+      ) {
+        return null;
+      }
+      const declaration = {
+        ...declared.declaration,
+        executed: "fallback" as const,
+        fallbackReason: input.reason,
+      };
+      const [updated] = await tx
+        .update(schema.sessionTurns)
+        .set({
+          model: input.policy.productModelId,
+          reasoningEffort: input.policy.reasoningEffort,
+          latencyMode: input.policy.latencyMode,
+          metadata: metadataWithTurnRouteDeclarationV1(
+            metadataWithTurnExecutionPolicyV1(turn.metadata, input.policy),
+            declaration,
+          ),
+          version: turn.version + 1,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.sessionTurns.workspaceId, workspaceId),
+            eq(schema.sessionTurns.sessionId, input.sessionId),
+            eq(schema.sessionTurns.id, input.turnId),
+            eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+            eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+          ),
+        )
+        .returning({ id: schema.sessionTurns.id });
+      if (!updated) throw new Error(`Session turn changed while locked: ${input.turnId}`);
+      return { declaration };
     });
   });
 }

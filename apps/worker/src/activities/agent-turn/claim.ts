@@ -112,6 +112,8 @@ export type ClaimTurnOk = {
   turnExecutionPolicy: TurnExecutionPolicyV1;
   /** F-2: the turn's frozen route declaration (fallback and budget), or null when it declared none. */
   turnRouteDeclaration: TurnRouteDeclarationV1 | null;
+  /** F-2 (review P2-3): the declared maxModelCalls narrowed the SDK's per-turn cap. */
+  turnBudgetNarrowedModelCalls: boolean;
   trigger: NonNullable<Awaited<ReturnType<typeof getSessionEvent>>>;
   humanInputResume: Awaited<ReturnType<typeof getHumanInputResumeForEvent>>;
   interactionInterventionResume: Awaited<
@@ -333,8 +335,11 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
   const declaredRoute = readTurnRouteDeclarationV1(turn.metadata);
   const turnRouteDeclaration = declaredRoute.kind === "valid" ? declaredRoute.declaration : null;
   const declaredModelCalls = turnRouteDeclaration?.turnBudget?.maxModelCalls;
-  if (declaredModelCalls !== undefined && declaredModelCalls < capabilitySettings.agentMaxModelCallsPerTurn) {
-    capabilitySettings = { ...capabilitySettings, agentMaxModelCallsPerTurn: declaredModelCalls };
+  const turnBudgetNarrowedModelCalls =
+    declaredModelCalls !== undefined &&
+    declaredModelCalls < capabilitySettings.agentMaxModelCallsPerTurn;
+  if (turnBudgetNarrowedModelCalls) {
+    capabilitySettings = { ...capabilitySettings, agentMaxModelCallsPerTurn: declaredModelCalls! };
   }
   const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
   billingState.isExternallyBilledTurn = billingIdentity.externallyBilled;
@@ -623,6 +628,7 @@ export async function claimTurnAttempt(deps: ClaimTurnDeps): Promise<ClaimTurnOu
       codexAppsCredentialId,
       turnExecutionPolicy,
       turnRouteDeclaration,
+      turnBudgetNarrowedModelCalls,
       trigger,
       humanInputResume,
       interactionInterventionResume,
