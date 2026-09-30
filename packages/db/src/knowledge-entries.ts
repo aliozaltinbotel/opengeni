@@ -393,15 +393,37 @@ async function withIndexStatus<T extends KnowledgeEntryRecord | KnowledgeEntrySu
     .map((entry) => ({ entryId: entry.id, revisionId: entry.revision.id }));
   if (!items.length) return entries;
   const statuses = await inKnowledgeContext(db, context, async (tx) => {
-    const [row] = await rawRows<{ result: unknown }>(
-      tx,
-      sql`SELECT knowledge_visible_index_status(${context.accountId}::uuid,
+    // knowledge_visible_index_status re-checks every item through knowledge_entry_read, so it resolves the actor
+    // once per item, and knowledge_resolve_actor clears opengeni.subject_id after checking a service actor (a
+    // service never reads personal Knowledge). One call therefore refused a service actor's second item 42501, and
+    // every service list or search whose page held two sources failed. A service actor's items are checked one call
+    // each, under this transaction's own subject again, so every check still runs; human and agent actors resolve
+    // repeatably and keep one call.
+    const actor = context.actor;
+    const batches = actor.kind === "service" ? items.map((item) => [item]) : [items];
+    const checked: Array<{
+      entryId: string;
+      revisionId: string;
+      status: z.infer<typeof KnowledgeIndexStatus>;
+    }> = [];
+    for (const batch of batches) {
+      if (actor.kind === "service")
+        await tx.execute(sql`select set_config('opengeni.subject_id', ${actor.subjectId}, true)`);
+      const [row] = await rawRows<{ result: unknown }>(
+        tx,
+        sql`SELECT knowledge_visible_index_status(${context.accountId}::uuid,
         ${context.workspaceId}::uuid,${JSON.stringify(context.actor)}::jsonb,
-        ${JSON.stringify(items)}::jsonb,${view}) AS result`,
-    );
-    return z
-      .array(z.object({ entryId: z.uuid(), revisionId: z.uuid(), status: KnowledgeIndexStatus }))
-      .parse(row?.result);
+        ${JSON.stringify(batch)}::jsonb,${view}) AS result`,
+      );
+      checked.push(
+        ...z
+          .array(
+            z.object({ entryId: z.uuid(), revisionId: z.uuid(), status: KnowledgeIndexStatus }),
+          )
+          .parse(row?.result),
+      );
+    }
+    return checked;
   });
   const byRevision = new Map(statuses.map((item) => [item.revisionId, item.status]));
   return entries.map((entry) => {
