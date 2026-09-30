@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { createDb, getKnowledgeEntry, withSessionRlsActorContext, type KnowledgeContext } from "@opengeni/db";
+import {
+  createDb,
+  getKnowledgeEntry,
+  withSessionRlsActorContext,
+  type KnowledgeContext,
+} from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { getDocumentForIndexing, indexDocumentNow, type DocumentServices } from "../src";
 let shared: SharedTestDatabase;
@@ -15,88 +20,105 @@ afterAll(async () => {
   await client?.close();
   await shared?.release();
 }, 180_000);
-test.each(["workspace", "personal"] as const)("the %s document adapter retains exact parsed source without hidden findings or a second embedding write", async (authorityKind) => {
-  const subjectId = "user:reader";
-  const privateOwner = authorityKind === "personal" ? subjectId : null;
-  const accountId = crypto.randomUUID(),
-    workspaceId = crypto.randomUUID(),
-    fileId = crypto.randomUUID(),
-    baseId = crypto.randomUUID(),
-    documentId = crypto.randomUUID();
-  const bytes = new TextEncoder().encode("Contract source bytes");
-  const exact = "Acme agreement  🚀\u0000\n\nRenewal: 1 December.  ";
-  await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Preparation test')`;
-  await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Sources')`;
-  await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key,private_owner_subject_ids)
+test.each(["workspace", "personal"] as const)(
+  "the %s document adapter retains exact parsed source without hidden findings or a second embedding write",
+  async (authorityKind) => {
+    const subjectId = "user:reader";
+    const privateOwner = authorityKind === "personal" ? subjectId : null;
+    const accountId = crypto.randomUUID(),
+      workspaceId = crypto.randomUUID(),
+      fileId = crypto.randomUUID(),
+      baseId = crypto.randomUUID(),
+      documentId = crypto.randomUUID();
+    const bytes = new TextEncoder().encode("Contract source bytes");
+    const exact = "Acme agreement  🚀\u0000\n\nRenewal: 1 December.  ";
+    await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Preparation test')`;
+    await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Sources')`;
+    await shared.admin`INSERT INTO files(id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,bucket,object_key,private_owner_subject_ids)
     VALUES(${fileId},${accountId},${workspaceId},'ready','Acme.pdf','Acme.pdf','application/pdf',${bytes.length},'test',${fileId},${privateOwner ? [privateOwner] : null})`;
-  await shared.admin`INSERT INTO document_bases(id,account_id,workspace_id,name) VALUES(${baseId},${accountId},${workspaceId},'Customer contracts')`;
-  await shared.admin`INSERT INTO documents(id,account_id,workspace_id,origin_workspace_id,base_id,file_id,status,title,curation_status,
+    await shared.admin`INSERT INTO document_bases(id,account_id,workspace_id,name) VALUES(${baseId},${accountId},${workspaceId},'Customer contracts')`;
+    await shared.admin`INSERT INTO documents(id,account_id,workspace_id,origin_workspace_id,base_id,file_id,status,title,curation_status,
     authority_kind,authority_workspace_id,authority_subject_id,visibility,created_by) VALUES(${documentId},${accountId},${workspaceId},${workspaceId},${baseId},${fileId},
     'queued','Acme contract','pending',${authorityKind},${workspaceId},${privateOwner},${privateOwner ? "private" : "workspace"},${subjectId})`;
-  let parsed = 0;
-  const services = {
-    parser: {
-      name: "test-parser",
-      parse: async (input: Uint8Array) => {
-        expect(input).toEqual(bytes);
-        parsed++;
-        return { text: exact };
+    let parsed = 0;
+    const services = {
+      parser: {
+        name: "test-parser",
+        parse: async (input: Uint8Array) => {
+          expect(input).toEqual(bytes);
+          parsed++;
+          return { text: exact };
+        },
       },
-    },
-    chunker: {
-      chunk: () => {
-        throw new Error("Old chunk storage must not be used");
+      chunker: {
+        chunk: () => {
+          throw new Error("Old chunk storage must not be used");
+        },
       },
-    },
-    embedder: {
-      embedMany: () => {
-        throw new Error("Embeddings belong to the canonical projection worker");
+      embedder: {
+        embedMany: () => {
+          throw new Error("Embeddings belong to the canonical projection worker");
+        },
       },
-    },
-    curator: {
-      curate: () => {
-        throw new Error("Mechanical preparation must not create findings");
+      curator: {
+        curate: () => {
+          throw new Error("Mechanical preparation must not create findings");
+        },
       },
-    },
-  } as unknown as DocumentServices;
-  const storage = { getObjectBytes: async () => ({ bytes }) } as unknown as ObjectStorage;
-  if (privateOwner) {
-    expect(await getDocumentForIndexing(client.db, workspaceId, documentId)).toBeNull();
-    expect(await getDocumentForIndexing(client.db, workspaceId, documentId, { viewerSubjectId: "user:other" })).toBeNull();
-    expect((await getDocumentForIndexing(client.db, workspaceId, documentId, { viewerSubjectId: privateOwner }))?.id).toBe(documentId);
-  }
-  // The worker's identity remains a service; the immutable stored subject supplies only the document/file scope.
-  const index = () => withSessionRlsActorContext(
-    { subjectId: "service:document-preparation", privateFileOwnerSubjectId: privateOwner },
-    () => indexDocumentNow(client.db, storage, workspaceId, documentId, services, { viewerSubjectId: privateOwner }),
-  );
-  const document = await index();
-  expect(document.status).toBe("ready");
-  expect(document.curationStatus).toBe("none");
-  expect(parsed).toBe(1);
-  const [row] =
-    await shared.admin`SELECT id,version FROM knowledge_entries WHERE legacy_document_id=${documentId}`;
-  expect(row?.version).toBe(1);
-  const context: KnowledgeContext = {
-    accountId,
-    workspaceId,
-    actor: {
-      kind: "human",
-      principalKind: "human_session",
-      subjectId: "user:reader",
-      writeScopes: [],
-      settingsScopes: [],
-      review: false,
-    },
-  };
-  const entry = await getKnowledgeEntry(client.db, context, row!.id);
-  expect(entry?.revision.entry.content).toBe(exact);
-  expect(entry?.revision.entry.kind).toBe("source");
-  expect(entry?.revision.entry.evidence).toEqual([]);
-  const retry = await index();
-  expect(retry.status).toBe("ready");
-  const [counts] =
-    await shared.admin`SELECT (SELECT count(*)::int FROM knowledge_entry_revisions WHERE entry_id=${row!.id}) AS revisions,
+    } as unknown as DocumentServices;
+    const storage = { getObjectBytes: async () => ({ bytes }) } as unknown as ObjectStorage;
+    if (privateOwner) {
+      expect(await getDocumentForIndexing(client.db, workspaceId, documentId)).toBeNull();
+      expect(
+        await getDocumentForIndexing(client.db, workspaceId, documentId, {
+          viewerSubjectId: "user:other",
+        }),
+      ).toBeNull();
+      expect(
+        (
+          await getDocumentForIndexing(client.db, workspaceId, documentId, {
+            viewerSubjectId: privateOwner,
+          })
+        )?.id,
+      ).toBe(documentId);
+    }
+    // The worker's identity remains a service; the immutable stored subject supplies only the document/file scope.
+    const index = () =>
+      withSessionRlsActorContext(
+        { subjectId: "service:document-preparation", privateFileOwnerSubjectId: privateOwner },
+        () =>
+          indexDocumentNow(client.db, storage, workspaceId, documentId, services, {
+            viewerSubjectId: privateOwner,
+          }),
+      );
+    const document = await index();
+    expect(document.status).toBe("ready");
+    expect(document.curationStatus).toBe("none");
+    expect(parsed).toBe(1);
+    const [row] =
+      await shared.admin`SELECT id,version FROM knowledge_entries WHERE legacy_document_id=${documentId}`;
+    expect(row?.version).toBe(1);
+    const context: KnowledgeContext = {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:reader",
+        writeScopes: [],
+        settingsScopes: [],
+        review: false,
+      },
+    };
+    const entry = await getKnowledgeEntry(client.db, context, row!.id);
+    expect(entry?.revision.entry.content).toBe(exact);
+    expect(entry?.revision.entry.kind).toBe("source");
+    expect(entry?.revision.entry.evidence).toEqual([]);
+    const retry = await index();
+    expect(retry.status).toBe("ready");
+    const [counts] =
+      await shared.admin`SELECT (SELECT count(*)::int FROM knowledge_entry_revisions WHERE entry_id=${row!.id}) AS revisions,
     (SELECT count(*)::int FROM document_chunks WHERE document_id=${documentId}) AS chunks`;
-  expect(counts).toEqual({ revisions: 1, chunks: 0 });
-});
+    expect(counts).toEqual({ revisions: 1, chunks: 0 });
+  },
+);

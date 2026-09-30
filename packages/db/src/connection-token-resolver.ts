@@ -1,3 +1,4 @@
+import { beginMcpPhase, measureMcpPhase } from "@opengeni/observability";
 import {
   environmentsEncryptionKeyBytes,
   type McpServerConnectionRef,
@@ -7,6 +8,7 @@ import type {
   ConnectionCredentialPlacement,
   ConnectionKind,
   ConnectionStatus,
+  ConnectionMetadata,
   McpConnectionResourceScope,
   McpCredentialAuthNeededReason,
 } from "@opengeni/contracts";
@@ -522,7 +524,9 @@ export function buildConnectionTokenResolver(
     if (!key) {
       throw new Error("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is not configured");
     }
-    const refreshed = await deps.refresh(cred, ref, settings, options.refreshTransport);
+    const refreshed = await measureMcpPhase("oauth_refresh", () =>
+      deps.refresh(cred, ref, settings, options.refreshTransport),
+    );
     const refreshRecord: ConnectionTokenRefreshInput = {
       id: cred.id,
       version: cred.version,
@@ -573,12 +577,14 @@ export function buildConnectionTokenResolver(
     const key = `${cred.subjectId ?? "workspace"}:${cred.id}:${cred.version}`;
     const existing = inflight.get(key);
     if (existing) {
-      return existing;
+      return measureMcpPhase("oauth_wait", () => existing);
     }
+    const lockWait = beginMcpPhase("oauth_wait");
     const promise = (deps.withRefreshLock ?? withConnectionRefreshLock)(
       db,
       cred,
       async (lockedDb) => {
+        lockWait.end();
         // A different worker may have rotated while this request waited. Never
         // exchange the old token again, or switch to another authority generation.
         const current = await load(
@@ -595,6 +601,8 @@ export function buildConnectionTokenResolver(
         return performRefresh(current, ref, lockedDb);
       },
     ).finally(() => {
+      // A lock acquisition failure must also close the diagnostic interval.
+      lockWait.end("failed");
       if (inflight.get(key) === promise) {
         inflight.delete(key);
       }
@@ -628,19 +636,25 @@ export function buildConnectionTokenResolver(
           ref.connectionId,
         );
       }
-      const authorization = await deps.authorizeAcceptedUse(db, {
-        ...input.connectionUseContext,
-        serverId: input.serverId,
-        ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
-        providerDomain: ref.providerDomain,
-        ...(ref.kind ? { connectionKind: ref.kind } : {}),
-        subjectScope: ref.subjectScope === "subject" ? "subject" : "workspace",
-        // An owner binding belongs only to the personal lanes. Interactive
-        // turns stamp the initiating human's subjectId on every credential
-        // request regardless of ref scope; forwarding it for a workspace ref
-        // would make the 0279 workspace lane deny the ambient shared row.
-        ...(ref.subjectScope === "subject" && subjectId ? { ownerSubjectId: subjectId } : {}),
-      });
+      const connectionUseContext = input.connectionUseContext;
+      const authorization = await measureMcpPhase(
+        "provider_authorization",
+        () =>
+          deps.authorizeAcceptedUse!(db, {
+            ...connectionUseContext,
+            serverId: input.serverId,
+            ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+            providerDomain: ref.providerDomain,
+            ...(ref.kind ? { connectionKind: ref.kind } : {}),
+            subjectScope: ref.subjectScope === "subject" ? "subject" : "workspace",
+            // An owner binding belongs only to the personal lanes. Interactive
+            // turns stamp the initiating human's subjectId on every credential
+            // request regardless of ref scope; forwarding it for a workspace ref
+            // would make the 0279 workspace lane deny the ambient shared row.
+            ...(ref.subjectScope === "subject" && subjectId ? { ownerSubjectId: subjectId } : {}),
+          }),
+        (result) => (result.status === "authorized" ? "completed" : "rejected"),
+      );
       if (authorization.status === "denied") {
         return authNeeded(
           ref,
@@ -768,7 +782,7 @@ function authorityReasonForScope(personal: boolean): AuthNeededReason {
 }
 
 function connectionBindingMatches(
-  cred: ConnectionCredentialForBroker,
+  cred: Pick<ConnectionCredentialForBroker, "providerDomain" | "kind" | "credential" | "metadata">,
   ref: McpServerConnectionRef,
   destinationUrl: string,
 ): boolean {
@@ -805,6 +819,20 @@ function connectionBindingMatches(
     if (canonicalResource(ref.resource) !== canonicalResource(boundResource)) return false;
   }
   return true;
+}
+
+/** Credential-free preflight only. Physical requests still resolve credentials
+ * and enforce their binding, current status and accepted-use authority. */
+export function connectionMetadataMatchesBinding(
+  connection: ConnectionMetadata,
+  ref: McpServerConnectionRef,
+  destinationUrl: string,
+): boolean {
+  return (
+    connectionBindingMatches({ ...connection, credential: {} }, ref, destinationUrl) &&
+    missingRequestedScopes(ref.scopes, connection.grantedScopes, connection.providerDomain)
+      .length === 0
+  );
 }
 
 function destinationHostMatchesProvider(destinationUrl: string, providerDomain: string): boolean {

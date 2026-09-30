@@ -1,4 +1,5 @@
 import {
+  authorizeAutomaticSandboxCheckpointRecovery,
   getEnrollment,
   getSandbox,
   readActiveSandbox,
@@ -35,7 +36,11 @@ import {
 import { rigProviderImageSourceImage } from "../sandbox-images";
 import type { TurnActivityServices as ActivityServices, RunAgentTurnInput } from "../types";
 import type { currentActivityContext } from "../streaming";
-import { resumeBoxForTurn, type ResumedTurnSandbox } from "../../sandbox-resume";
+import {
+  createFreshSandboxReadinessReplacementBudget,
+  resumeBoxForTurn,
+  type ResumedTurnSandbox,
+} from "../../sandbox-resume";
 import {
   wrapTurnBoxWithRouting,
   wrapLazyTurnBoxWithRouting,
@@ -44,6 +49,8 @@ import {
 } from "../../sandbox-routing";
 import {
   makeMachineOpObserver,
+  recordSandboxAutomaticRecoverySelected,
+  sandboxAutomaticRecoveryOutcome,
   recordSandboxLogicalProvision,
   recordSandboxProvisionAttempt,
   recordSandboxSharedPreparation,
@@ -298,6 +305,9 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
 }
 
 export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Promise<void> {
+  // One fresh-box readiness replacement per turn attempt, shared by the eager
+  // establish and every lazy provisioner retry of this attempt.
+  const freshSandboxReadinessReplacementBudget = createFreshSandboxReadinessReplacementBudget();
   const {
     input,
     settings,
@@ -371,7 +381,54 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
   ) {
     const sandboxEstablishStartedAt = performance.now();
     let sandboxEstablishOutcome: "completed" | "failed" = "completed";
+    // A committed system recovery decision is rematerialized in this turn even
+    // when the sandbox is otherwise on-demand: the decision pins group
+    // membership until publication, and the next turn must not dead-end.
+    let automaticRecoveryPending = false;
     try {
+      if (!machinePrimary && groupBoxBackend === "modal" && activeSandboxBackend !== "selfhosted") {
+        // This happens before buildTurnAgent reads the durable instruction
+        // tail, even for an on-demand sandbox. The DB admits only a provider-
+        // lost group with no unresolved workspace writers in ANY member: the
+        // latest verified checkpoint, or a new empty workspace when none is
+        // usable. Every group member receives its durable warning receipt.
+        const fallback = await authorizeAutomaticSandboxCheckpointRecovery(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          attemptId: input.attemptId,
+        });
+        automaticRecoveryPending = fallback.status !== "not_eligible";
+        if (fallback.status === "authorized") {
+          try {
+            recordSandboxAutomaticRecoverySelected(
+              observability,
+              "modal",
+              sandboxAutomaticRecoveryOutcome(fallback),
+            );
+          } catch {
+            // Telemetry must not turn a committed recovery into another failure.
+          }
+          if (fallback.lane === "checkpoint") {
+            observability.warn("managed sandbox selected an older verified checkpoint", {
+              backend: "modal",
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              archiveGeneration: fallback.selection.archiveGeneration,
+              workspaceGeneration: fallback.selection.workspaceGeneration,
+              groupSessionCount: fallback.groupSessionCount,
+            });
+          } else {
+            observability.warn("managed sandbox continues on an empty workspace after loss", {
+              backend: "modal",
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              reason: fallback.reason,
+              groupSessionCount: fallback.groupSessionCount,
+            });
+          }
+        }
+      }
       const managedOwnership = managedSandboxOwnershipForTurn(
         machinePrimary,
         input.attemptId,
@@ -592,6 +649,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                observability,
+                freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
               },
@@ -624,6 +683,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
               hasRepositoryResources: turnResources.some(
                 (resource) => resource.kind === "repository",
               ),
+              automaticRecoveryPending,
             })
           ) {
             startRunGitCredentialsMint();
@@ -667,6 +727,8 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
                 logicalFallbackSettings: logicalSandboxSettings,
                 cancellationSignal: sandboxResumeSignal,
                 sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                observability,
+                freshSandboxReadinessReplacementBudget,
                 onSandboxLost: publishSandboxLost,
                 objectStorage,
               },

@@ -1,4 +1,6 @@
 export * from "./artifact-catalog";
+export * from "./claude-subscription-usage";
+export * from "./workspace-integrations";
 export * from "./session-message-search";
 export * from "./session-goal-reports";
 import { SessionGoalReportRequirements } from "./session-goal-reports";
@@ -8,6 +10,7 @@ import { AgentLearningOverrides } from "./agent-learning";
 export * from "./skills";
 export * from "./agent-instruction-changes";
 export * from "./bundled-skills";
+export * from "./skill-use";
 import { BundledSkillSelection } from "./bundled-skills";
 import { SkillWriteReceipt, SkillSourceReleaseReceipt, SkillPublicationReceipt } from "./skills";
 import { readSkillMetadata } from "./skill-metadata";
@@ -21,6 +24,13 @@ import {
 export * from "./model-connection-access";
 export * from "./sandbox-provider-command";
 import { z } from "zod";
+import {
+  FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+  AnalyticsModelProvider,
+  SessionTurnSurface,
+  ToolFamily,
+} from "./product-analytics";
 export const HostMcpCreateSelections = z
   .array(
     z
@@ -50,6 +60,7 @@ import {
   type SessionEventBoundarySurface,
 } from "./event-preview";
 import { MemorySlackPublicationDistribution } from "./memory-slack-delivery";
+import { PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN } from "./product-lifecycle-facts";
 import { WorkspaceInstructionPolicyRoleKeyInput } from "./workspace-instruction-policies";
 import { ClientResumableVoiceInputConfig } from "./transcription-recordings";
 import { MediaGenerationResult } from "./video-generation";
@@ -73,6 +84,8 @@ export * from "./video-generation";
 export * from "./editable-artifacts";
 export * from "./editable-artifact-committed-transaction";
 export * from "./editable-artifact-serialized-commit";
+export * from "./signup-attribution";
+export * from "./product-lifecycle-facts";
 export * from "./tool-catalog";
 export * from "./mcp-oauth";
 export * from "./tool-result-spill";
@@ -84,6 +97,7 @@ export * from "./session-mcp-projections";
 export * from "./session-topology-primitives";
 export * from "./agent-topology";
 export * from "./work-claims";
+export * from "./product-analytics";
 
 export {
   CreateWorkspaceArtifactRequest,
@@ -874,6 +888,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "rig_promote",
   "sessions_list",
   "session_get",
+  "session_set_model",
   "session_events",
   "session_wait",
   "command_wait",
@@ -912,6 +927,7 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "environment_set_variable",
   "capability_catalog_search",
   "capability_authorization_request",
+  "custom_mcp_setup_request",
   "github_connect_link",
   "github_repositories_list",
   "social_connections_list",
@@ -951,8 +967,11 @@ export const FIRST_PARTY_MCP_TOOL_NAMES = [
   "slack_bot_list_files",
   "slack_bot_file_info",
   "slack_bot_file_content",
+  "slack_bot_upload_file",
   "slack_bot_post_message",
   "slack_bot_delete_message",
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
   "fiken_companies_list",
   "fiken_contacts_list",
   "fiken_contact_create",
@@ -1086,6 +1105,23 @@ export const FIRST_PARTY_REMOTE_MCP_TOOL_NAMES = FIRST_PARTY_MCP_TOOL_NAMES.filt
     !FIRST_PARTY_IN_PROCESS_TOOL_NAME_SET.has(name) &&
     !FIRST_PARTY_COMPATIBILITY_ONLY_TOOL_NAME_SET.has(name),
 ) satisfies readonly FirstPartyMcpToolName[];
+
+const FIRST_PARTY_TOOL_FAMILY_NAME_SET: ReadonlySet<string> = new Set<string>([
+  ...FIRST_PARTY_MCP_TOOL_NAMES,
+  ...FIRST_PARTY_ATTEMPT_TOOL_FAMILY_NAMES,
+  ...FIRST_PARTY_FUNCTION_TOOL_FAMILY_NAMES,
+]);
+
+/**
+ * Analytics tool family for a tool OpenGeni itself defines. Only names from
+ * OpenGeni's fixed first-party lists qualify; anything else returns null, so a
+ * model-invented or third-party name never becomes an exported value.
+ */
+export function firstPartyToolFamily(toolName: string | null | undefined): ToolFamily | null {
+  return typeof toolName === "string" && FIRST_PARTY_TOOL_FAMILY_NAME_SET.has(toolName)
+    ? toolName
+    : null;
+}
 
 /** Authored CodeMode paths for the canonical collaborative artifact surface. */
 export const EDITABLE_ARTIFACT_MCP_CODEMODE_PATHS = {
@@ -2187,6 +2223,10 @@ export const SlackReactionChannelListResponse = z.object({
 });
 export type SlackReactionChannelListResponse = z.infer<typeof SlackReactionChannelListResponse>;
 
+/** Active, non-shared channels the bot belongs to, offered as a task's fixed destination. */
+export const ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
+export type ScheduledTaskSlackChannelListResponse = SlackReactionChannelListResponse;
+
 /** Where one Slack channel starts work. */
 export const SlackChannelRoute = z.object({
   slackChannelId: z.string().min(1).max(64),
@@ -2297,6 +2337,13 @@ export type HistoricalMemoryPromptMode = z.infer<typeof HistoricalMemoryPromptMo
 // (future) keys rather than stripping them. memoryEnabled defaults on and the
 // Memory V1 prompt mode is always retrieval-only composition;
 // voiceInput defaults to enabled when the deployment has a provider.
+export const WorkspaceDefaultSandboxImage = z
+  .string()
+  .trim()
+  .min(1)
+  .max(512)
+  .regex(/^[^\s]+$/, "image reference must not contain whitespace");
+
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
@@ -2319,6 +2366,9 @@ export const WorkspaceSettingsSchema = z
     // Whether agents may expose and invoke the built-in structured human-input
     // tool. Absent preserves the historical enabled behavior.
     agentHumanInputEnabled: z.boolean().optional(),
+    // Whether agents get the Jev-backed `code_search` tool. Absent or null
+    // follows the deployment default; the deployment can always keep it off.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     // Optional Slack reaction invocation. Absent/invalid fails closed to the
     // disabled default via resolveWorkspaceSlackReactionSummonSettings.
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
@@ -2327,9 +2377,19 @@ export const WorkspaceSettingsSchema = z
     // closed to disabled via resolveWorkspaceSlackOrchestrationNoticeSettings,
     // because an unsolicited Slack post is worse than a missed one.
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+    // Sandbox image for new managed boxes in this workspace. Only images on the
+    // deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST are accepted; absent or
+    // null uses the deployment image.
+    defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
+
+/** The workspace sandbox image override, or null for the deployment image. */
+export function resolveWorkspaceDefaultSandboxImage(settings: unknown): string | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.defaultSandboxImage ?? null) : null;
+}
 
 // Resolve the effective memoryEnabled flag from a raw settings bag. Omission
 // defaults on; malformed settings still fail closed so invalid state cannot
@@ -2469,8 +2529,11 @@ export const UpdateWorkspaceSettingsRequest = z
     maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
     codexCompactionDefault: CodexCompactionMode.optional(),
     agentHumanInputEnabled: z.boolean().optional(),
+    // null returns the workspace to the deployment default.
+    codeSearchEnabled: z.boolean().nullable().optional(),
     slackReactionSummon: WorkspaceSlackReactionSummonSettings.optional(),
     slackOrchestrationNotices: WorkspaceSlackOrchestrationNoticeSettings.optional(),
+    defaultSandboxImage: WorkspaceDefaultSandboxImage.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -2582,7 +2645,12 @@ export type OrganizationProviderCustomModelsResponse = z.infer<
   typeof OrganizationProviderCustomModelsResponse
 >;
 
-export const OrganizationModelProviderKind = z.enum(["vercel_gateway", "openrouter"]);
+export const OrganizationModelProviderKind = z.enum([
+  "vercel_gateway",
+  "openrouter",
+  "anthropic",
+  "claude_subscription",
+]);
 export type OrganizationModelProviderKind = z.infer<typeof OrganizationModelProviderKind>;
 export const OrganizationModelProviderConnectionResponse = z.object({
   providerKind: OrganizationModelProviderKind,
@@ -2599,6 +2667,13 @@ export const UpsertOrganizationModelProviderConnectionRequest = z
     operationId: z.string().uuid(),
     expectedVersion: z.number().int().nonnegative().optional(),
     apiKey: z.string().trim().min(1).max(8192),
+    claudeIdentity: z
+      .object({
+        accountUuid: z.string().uuid(),
+        deviceId: z.string().regex(/^[a-f0-9]{64}$/),
+      })
+      .strict()
+      .optional(),
   })
   .strict();
 export type UpsertOrganizationModelProviderConnectionRequest = z.infer<
@@ -3262,7 +3337,10 @@ export type CreateWorkspaceRequest = z.infer<typeof CreateWorkspaceRequest>;
 
 export const EnsureWorkspaceRequest = z
   .object({
-    accountId: z.string().uuid(),
+    // Owning organization. An organization API key may omit it: the key's own
+    // organization is the only one it can create workspaces in. Every other
+    // caller (a human may belong to several organizations) must send it.
+    accountId: z.string().uuid().optional(),
     externalSource: z.string().trim().min(1).max(200),
     externalId: z.string().trim().min(1).max(1024),
     name: z.string().trim().min(1).max(200),
@@ -4149,6 +4227,8 @@ export type RunCredentialsResolution =
       files?: RunCredentialFile[];
       /** Environment name to one returned relative file path. */
       fileEnvironment?: Record<string, string>;
+      /** Secret, turn-local request headers for session-attached remote MCP servers. */
+      mcp?: import("./workspace-integrations").CredentialProviderMcpHeaders[];
       /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
       expiresAt?: string | null;
       /** Partial degradation: usable material may coexist with reconnect notices. */
@@ -4786,6 +4866,15 @@ export const RepositoryResourceRef = z.object({
   connectionId: z.string().min(1).optional(),
   githubInstallationId: z.number().int().positive().optional(),
   githubRepositoryId: z.number().int().positive().optional(),
+  /**
+   * Best-effort materialization. When true, a failed clone of this repository
+   * logs a warning and the session continues without it instead of failing
+   * sandbox setup. OpenGeni sets it on repositories it attaches on the
+   * person's behalf (a Slack task's recently used repositories); a repository
+   * a caller names explicitly stays strict unless the caller opts in. Only
+   * `true` is stored.
+   */
+  optional: z.boolean().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
 
@@ -5887,7 +5976,20 @@ export const RotateSessionMcpCredentialsRequest = z
             expectedServerUrl: httpsUrl,
             headers: z.record(z.string(), z.string()),
           })
-          .strict(),
+          .strict()
+          .or(
+            z
+              .object({
+                id: SessionMcpServerId,
+                expectedCredentialVersion: z.number().int().min(1).max(2_147_483_646),
+                expectedServerUrl: httpsUrl,
+                /** Resolve from the authenticated caller's native account inventory. */
+                nativeConnectionId: z.string().uuid(),
+                /** Explicit opt-in; must match the selected account's bound MCP URL. */
+                replacementServerUrl: httpsUrl.optional(),
+              })
+              .strict(),
+          ),
       )
       .min(1)
       .max(64),
@@ -6430,6 +6532,16 @@ export const UpdateSessionRequest = z.object({
   title: z.string().min(1).max(200),
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
+
+/** Explicit future defaults, not a message, wake, or queued-turn edit. */
+export const SetSessionModelRequest = z
+  .object({
+    model: z.string().min(1).max(512),
+    reasoningEffort: ReasoningEffort,
+    idempotencyKey: z.string().uuid(),
+  })
+  .strict();
+export type SetSessionModelRequest = z.infer<typeof SetSessionModelRequest>;
 
 export const UpdateSessionVariableSetsRequest = z
   .object({
@@ -6987,6 +7099,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.model.write",
   "session.channel.write",
   "session.variable_sets.write",
   "session.mcp.approval_policy.write",
@@ -7388,6 +7501,37 @@ export const MODEL_CONTEXT_LABEL = "[Application context attached to this user m
 export const SESSION_GOAL_CONTEXT_LABEL =
   "[Session goal frozen when this turn was accepted]" as const;
 
+const MODEL_CONTEXT_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+] as const;
+
+/**
+ * Wall-clock time as the model sees it, for example
+ * `Saturday 2026-09-26 07:51 UTC`. Minute precision gives the model the current
+ * date and time without prompting sub-second answers. Callers pass a durable
+ * timestamp (message acceptance, update creation or delivery), never the
+ * inference-time clock, so persisted history renders once and replays exactly.
+ */
+export function formatModelContextTimestamp(value: Date | string): string {
+  const date = typeof value === "string" ? new Date(value) : value;
+  if (Number.isNaN(date.getTime())) {
+    throw new RangeError("Model context timestamp is not a valid date");
+  }
+  const iso = date.toISOString();
+  return `${MODEL_CONTEXT_WEEKDAYS[date.getUTCDay()]} ${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
+}
+
+/** The time part of one accepted user-role message, from its acceptance time. */
+export function renderMessageSentAtForModel(sentAt: Date | string): string {
+  return `[Message sent ${formatModelContextTimestamp(sentAt)}]`;
+}
+
 /**
  * Render the exact goal authority frozen with one accepted logical turn. Goal
  * state belongs at the chronological input boundary, not in the mutable
@@ -7407,28 +7551,29 @@ export function renderSessionGoalContext(snapshot?: SessionGoalSnapshot): string
   const policy =
     snapshot.mutationPolicy === "review_changes"
       ? "Semantic changes are proposals until a user applies them."
-      : snapshot.mutationPolicy === "preserve_intent"
-        ? "You may directly refine wording without changing intent; adaptations and replacements are proposals until a user applies them."
-        : "You may autonomously refine, adapt, or replace the goal when explicit user direction or material new evidence justifies it.";
+      : "You may update your operational goal directly when explicit user direction or material new evidence justifies it. Keep it faithful to the user's intended outcome; changing the goal grants no additional authority.";
   return `Standing session goal (frozen at logical-turn acceptance; objective revision ${snapshot.objectiveRevision}; status ${snapshot.state}): ${snapshot.text}\nSuccess criteria: ${snapshot.successCriteria ?? "none specified"}.${rootConstraints}${reports}\nMutation policy: ${snapshot.mutationPolicy}. ${policy} Treat later ordinary messages as additional context unless they explicitly redirect this objective. Root constraints are user/API authority and cannot be widened, removed, or rewritten by an agent. Semantic goal changes use opengeni__goal_update with the expected objective revision, change kind, and rationale.`;
 }
 
 /**
  * Build one canonical user-role message body. `modelContext` is ordinary
  * message content, while `goalSnapshot` is the exact goal authority frozen at
- * turn acceptance. Both remain in the visible message's chronological
- * position, and presentation layers may omit their leading parts.
+ * turn acceptance. `sentAt` is the message's durable acceptance time, so the
+ * model knows the current date without spending a tool call on it. All of them
+ * remain in the visible message's chronological position, and presentation
+ * layers may omit their leading parts.
  */
 export function renderUserMessageContentForModel(
   text: string,
   annotations: readonly TimelineAnnotation[],
   modelContext?: string | null,
   goalSnapshot?: SessionGoalSnapshot,
+  sentAt?: Date | string | null,
 ): string | Array<{ type: "input_text"; text: string }> {
   const visibleContent = renderTimelineAnnotationsForModel(text, annotations);
   const context = modelContext?.trim();
   const goalContext = renderSessionGoalContext(goalSnapshot);
-  if (!context && !goalContext) return visibleContent;
+  if (!context && !goalContext && sentAt == null) return visibleContent;
   return [
     ...(goalContext
       ? [
@@ -7445,6 +7590,9 @@ export function renderUserMessageContentForModel(
             text: `${MODEL_CONTEXT_LABEL}\n${context}`,
           },
         ]
+      : []),
+    ...(sentAt != null
+      ? [{ type: "input_text" as const, text: renderMessageSentAtForModel(sentAt) }]
       : []),
     { type: "input_text", text: visibleContent },
   ];
@@ -7726,6 +7874,14 @@ export const NewSessionDraft = z.object({
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   latencyMode: LatencyMode,
+  /**
+   * True when the person chose this model policy (model, reasoning, latency).
+   * False means it follows the resolved default for new chats, so a later
+   * subscription or credit purchase can replace it. Absent on a save from an
+   * older client; the server then treats a draft that names the deployment
+   * default as following the default and any other model as chosen.
+   */
+  modelProvided: z.boolean().optional(),
   /** Absent on legacy drafts; null is explicit provenance for the Default project. */
   selectedProjectChannelId: z.string().uuid().nullable().optional(),
   options: NewSessionDraftOptions,
@@ -7742,6 +7898,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   model: true,
   reasoningEffort: true,
   latencyMode: true,
+  modelProvided: true,
   selectedProjectChannelId: true,
   options: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -8165,6 +8322,192 @@ export const ChildProgressPayload = z
   .passthrough();
 export type ChildProgressPayload = z.infer<typeof ChildProgressPayload>;
 
+/**
+ * Bound, in UTF-8 bytes including the truncation marker, on the child's final
+ * answer copied into its `child_terminal_result`. The complete answer stays in
+ * the child's durable `turn.completed` event; `nextAction` points at it.
+ */
+export const CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES = 8 * 1024;
+
+/**
+ * The child's final answer, frozen by the idle settlement that produced the
+ * terminal result. `sequence` is the child's result-bearing `turn.completed`
+ * event whose output `text` copies. A truncated copy keeps the head and the
+ * tail around an explicit marker, and `nextAction` reads the complete answer.
+ *
+ * `goalContinuations` holds the output of each goal-continuation turn that
+ * ran after that answer, oldest first. Such a turn only continued the child's
+ * goal (for example to confirm and complete it), so it never replaces the
+ * answer. Each entry is the exact output of its `turn.completed` event, copied
+ * whole together with the answer when all of them fit the bound.
+ *
+ * When they do not fit, the copy is the newest part instead, marked truncated:
+ * `sequence` and `text` are that part (cut around a marker only if it alone
+ * exceeds the bound), `omittedSequences` lists the earlier parts it leaves
+ * out, `totalBytes` counts every part, and `nextAction` reads all of them from
+ * the first.
+ */
+export const ChildTerminalResultFinalAnswer = z
+  .object({
+    sequence: z.number().int().positive(),
+    text: z.string(),
+    truncated: z.boolean(),
+    totalBytes: z.number().int().nonnegative(),
+    goalContinuations: z
+      .array(
+        z
+          .object({
+            sequence: z.number().int().positive(),
+            text: z.string().min(1),
+          })
+          .passthrough(),
+      )
+      .min(1)
+      .optional(),
+    omittedSequences: z.array(z.number().int().positive()).min(1).max(64).optional(),
+    nextAction: z
+      .object({
+        tool: z.literal("session_events"),
+        arguments: z
+          .object({
+            sessionId: z.string().uuid(),
+            view: z.literal("results"),
+            after: z.number().int().nonnegative(),
+          })
+          .passthrough(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+export type ChildTerminalResultFinalAnswer = z.infer<typeof ChildTerminalResultFinalAnswer>;
+
+/**
+ * Every child answer event a final-answer copy reports on: the copied answer,
+ * each copied goal continuation, and each earlier part a truncated copy omits.
+ * A parent has consumed the result only once it received all of them whole.
+ */
+export function childTerminalResultFinalAnswerSequences(
+  answer: Pick<
+    ChildTerminalResultFinalAnswer,
+    "sequence" | "goalContinuations" | "omittedSequences"
+  >,
+): number[] {
+  return [
+    answer.sequence,
+    ...(answer.goalContinuations ?? []).map((part) => part.sequence),
+    ...(answer.omittedSequences ?? []),
+  ];
+}
+
+/** Head and tail of `output` around an omission marker, within `maxBytes`. */
+function headTailWithinBytes(
+  output: string,
+  maxBytes: number,
+  marker: (omittedBytes: number) => string,
+): string {
+  const totalBytes = utf8Bytes(output);
+  // Reserve the widest marker first: the real omitted count never has more
+  // digits than the total, so the result always fits the bound.
+  const budget = maxBytes - utf8Bytes(marker(totalBytes));
+  const head = utf8PrefixForResult(output, Math.floor(budget * 0.7));
+  const tail = utf8SuffixForResult(output, budget - utf8Bytes(head));
+  return `${head}${marker(totalBytes - utf8Bytes(head) - utf8Bytes(tail))}${tail}`;
+}
+
+/** Bounded, UTF-8 safe copy of one child's final answer for its parent. */
+export function childTerminalResultFinalAnswer(input: {
+  childSessionId: string;
+  sequence: number;
+  output: string;
+}): ChildTerminalResultFinalAnswer {
+  const totalBytes = utf8Bytes(input.output);
+  if (totalBytes <= CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES) {
+    return { sequence: input.sequence, text: input.output, truncated: false, totalBytes };
+  }
+  return {
+    sequence: input.sequence,
+    text: headTailWithinBytes(
+      input.output,
+      CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES,
+      (omittedBytes) =>
+        `\n\n[... ${omittedBytes} bytes of the final answer omitted here. Call finalAnswer.nextAction to read the complete answer. ...]\n\n`,
+    ),
+    truncated: true,
+    totalBytes,
+    nextAction: {
+      tool: "session_events",
+      arguments: { sessionId: input.childSessionId, view: "results", after: input.sequence - 1 },
+    },
+  };
+}
+
+/**
+ * The child's answer followed by the output of each goal-continuation turn
+ * that ran after it, oldest first. Without continuation output this is
+ * `childTerminalResultFinalAnswer`. With it, the answer and every continuation
+ * are copied whole when together they fit the bound. Otherwise the copy is
+ * the newest continuation, marked truncated, with a leading note that earlier
+ * output was omitted and `nextAction` reading every part from the answer: the
+ * parent is never handed a cut answer or a dropped part as the whole result,
+ * and it still receives at least the newest output.
+ */
+export function childTerminalResultFinalAnswerWithGoalContinuations(input: {
+  childSessionId: string;
+  sequence: number;
+  output: string;
+  goalContinuations: readonly { sequence: number; output: string }[];
+}): ChildTerminalResultFinalAnswer {
+  const goalContinuations = input.goalContinuations.filter(
+    (continuation) => continuation.output.length > 0,
+  );
+  const newest = goalContinuations.at(-1);
+  if (!newest) return childTerminalResultFinalAnswer(input);
+  const totalBytes = utf8Bytes(input.output);
+  const combinedBytes = goalContinuations.reduce(
+    (sum, continuation) => sum + utf8Bytes(continuation.output),
+    totalBytes,
+  );
+  if (combinedBytes <= CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES) {
+    return {
+      sequence: input.sequence,
+      text: input.output,
+      truncated: false,
+      totalBytes,
+      goalContinuations: goalContinuations.map((continuation) => ({
+        sequence: continuation.sequence,
+        text: continuation.output,
+      })),
+    };
+  }
+  const earlier = [
+    { sequence: input.sequence, output: input.output },
+    ...goalContinuations.slice(0, -1),
+  ];
+  const lead = `[... ${combinedBytes - utf8Bytes(newest.output)} bytes of earlier output from this child (${earlier.length === 1 ? "1 turn" : `${earlier.length} turns`}) omitted here. Call finalAnswer.nextAction to read the complete result. ...]\n\n`;
+  const budget = CHILD_TERMINAL_RESULT_FINAL_ANSWER_MAX_BYTES - utf8Bytes(lead);
+  return {
+    sequence: newest.sequence,
+    text: `${lead}${
+      utf8Bytes(newest.output) <= budget
+        ? newest.output
+        : headTailWithinBytes(
+            newest.output,
+            budget,
+            (omittedBytes) =>
+              `\n\n[... ${omittedBytes} bytes of this output omitted here. Call finalAnswer.nextAction to read the complete result. ...]\n\n`,
+          )
+    }`,
+    truncated: true,
+    totalBytes: combinedBytes,
+    omittedSequences: earlier.map((part) => part.sequence),
+    nextAction: {
+      tool: "session_events",
+      arguments: { sessionId: input.childSessionId, view: "results", after: input.sequence - 1 },
+    },
+  };
+}
+
 export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
   z
     .object({
@@ -8228,6 +8571,8 @@ export const SessionSystemUpdatePayload = z.discriminatedUnion("type", [
       type: z.literal("child_terminal_result"),
       childSessionId: z.string().uuid(),
       status: z.enum(["idle", "failed", "cancelled"]),
+      /** Optional so older rows and older producers remain valid. */
+      finalAnswer: ChildTerminalResultFinalAnswer.optional(),
     })
     .passthrough(),
   MediaGenerationResult,
@@ -8317,18 +8662,38 @@ export const SessionQueueSnapshot = z.object({
 });
 export type SessionQueueSnapshot = z.infer<typeof SessionQueueSnapshot>;
 
+type RenderableSessionSystemUpdate = Pick<
+  SessionSystemUpdate,
+  "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
+> &
+  Partial<Pick<SessionSystemUpdate, "createdAt">>;
+
+/**
+ * Durable delivery time of one claimed batch: the `deliveredAt` written to
+ * every member in the same claim transaction. Rendering it tells the model the
+ * current time on turns that no human message started.
+ */
+export type SessionSystemUpdateBatchRenderOptions = {
+  deliveredAt?: Date | string | null;
+};
+
+function renderSessionSystemUpdateDeliveredAt(
+  options: SessionSystemUpdateBatchRenderOptions,
+): string[] {
+  return options.deliveredAt == null
+    ? []
+    : [`Delivered: ${formatModelContextTimestamp(options.deliveredAt)}`];
+}
+
 /**
  * Deterministic, protocol-safe model representation of one claimed machine
  * input batch. This exact string is persisted before inference and replayed on
  * every later turn; callers must not synthesize an equivalent transient copy.
+ * Times come from the durable update rows, never from the rendering clock.
  */
 export function renderSessionSystemUpdateBatch(
-  updates: ReadonlyArray<
-    Pick<
-      SessionSystemUpdate,
-      "id" | "kind" | "classification" | "sourceId" | "summary" | "payload" | "lineage"
-    >
-  >,
+  updates: ReadonlyArray<RenderableSessionSystemUpdate>,
+  options: SessionSystemUpdateBatchRenderOptions = {},
 ): string {
   if (updates.length === 0) {
     throw new TypeError("A durable machine-input batch requires at least one update");
@@ -8336,12 +8701,14 @@ export function renderSessionSystemUpdateBatch(
   return [
     "[OpenGeni internal updates]",
     "These platform updates were delivered together for this inference.",
+    ...renderSessionSystemUpdateDeliveredAt(options),
     JSON.stringify({
       updates: updates.map((update) => ({
         id: update.id,
         kind: update.kind,
         classification: update.classification,
         sourceId: update.sourceId,
+        ...(update.createdAt ? { createdAt: formatModelContextTimestamp(update.createdAt) } : {}),
         summary: update.summary,
         payload: update.payload,
         lineage: update.lineage,
@@ -8363,6 +8730,7 @@ export const SCHEDULED_OCCURRENCE_TASK_LABEL = "[OpenGeni scheduled task occurre
  */
 function renderScheduledOccurrenceTaskBatch(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
+  options: SessionSystemUpdateBatchRenderOptions,
 ): string | null {
   if (updates.length === 0 || updates.some((update) => update.kind !== "scheduled_occurrence")) {
     return null;
@@ -8387,6 +8755,7 @@ function renderScheduledOccurrenceTaskBatch(
   return [
     SCHEDULED_OCCURRENCE_TASK_LABEL,
     introduction,
+    ...renderSessionSystemUpdateDeliveredAt(options),
     "The scheduled instructions below are the task for this turn. Earlier completed goals, occurrences, conversation, and tool outputs are historical context and do not complete this occurrence. When the task depends on mutable external state, query that state during this occurrence instead of reusing an earlier result.",
     ...occurrences.flatMap((occurrence, index) => {
       if (!occurrence) return [];
@@ -8396,6 +8765,9 @@ function renderScheduledOccurrenceTaskBatch(
         `Scheduled task ID: ${occurrence.payload.scheduledTaskId}`,
         `Scheduled task run ID: ${occurrence.payload.scheduledTaskRunId}`,
         `Update ID: ${occurrence.update.id}`,
+        ...(occurrence.update.createdAt
+          ? [`Created: ${formatModelContextTimestamp(occurrence.update.createdAt)}`]
+          : []),
         "Instructions:",
         occurrence.payload.text,
       ];
@@ -8406,18 +8778,20 @@ function renderScheduledOccurrenceTaskBatch(
 export function sessionSystemUpdateBatchHistoryItem(
   updates: Parameters<typeof renderSessionSystemUpdateBatch>[0],
   goalSnapshot?: SessionGoalSnapshot,
-  options: { promoteScheduledOccurrenceToUser?: boolean } = {},
+  options: SessionSystemUpdateBatchRenderOptions & {
+    promoteScheduledOccurrenceToUser?: boolean;
+  } = {},
 ): { type: "message"; role: "system" | "user"; content: string } {
   const goalContext = renderSessionGoalContext(goalSnapshot);
   const scheduledTask = options.promoteScheduledOccurrenceToUser
-    ? renderScheduledOccurrenceTaskBatch(updates)
+    ? renderScheduledOccurrenceTaskBatch(updates, options)
     : null;
   return {
     type: "message",
     role: scheduledTask ? "user" : "system",
     content: [
       ...(goalContext ? [`${SESSION_GOAL_CONTEXT_LABEL}\n${goalContext}`] : []),
-      scheduledTask ?? renderSessionSystemUpdateBatch(updates),
+      scheduledTask ?? renderSessionSystemUpdateBatch(updates, options),
     ].join("\n\n"),
   };
 }
@@ -8967,6 +9341,19 @@ export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
 
+// Declared ahead of the scheduled-task projections that name it; the
+// `tool.auth_needed` payload below uses the same enum.
+export const ToolAuthNeededReason = z.enum([
+  "missing_connection",
+  "expired",
+  "insufficient_scope",
+  "refresh_failed",
+  "personal_authority_unavailable",
+  "unsupported_auth",
+  "resource_scope_unavailable",
+]);
+export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
+
 export const ScheduledTaskStatus = /* @__PURE__ */ z.enum(["active", "paused"]);
 export type ScheduledTaskStatus = z.infer<typeof ScheduledTaskStatus>;
 
@@ -9316,6 +9703,24 @@ export const ScheduledTaskMetadataInput =
     "scheduled task metadata",
   );
 
+/** A Slack public or private channel ID. Direct messages are not destinations. */
+export const ScheduledTaskSlackChannelId = z
+  .string()
+  .regex(/^[CG][A-Z0-9]{2,63}$/, "must be a Slack channel ID such as C0123456789");
+
+/**
+ * The only first-party tools that post as the OpenGeni bot. A generated
+ * session receives them only when a person chose its task's Slack channel,
+ * and they refuse every other destination.
+ */
+export const SCHEDULED_SLACK_BOT_POSTING_TOOLS = [
+  "slack_bot_prepare_message",
+  "slack_bot_send_prepared_message",
+] as const satisfies readonly FirstPartyMcpToolName[];
+
+export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS = 60;
+export const SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS = 30 * 24 * 60 * 60;
+
 function scheduledTaskAgentConfigShape(bounded: boolean) {
   const machineTarget = z
     .object({
@@ -9349,6 +9754,10 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // The worker copies this non-secret pointer into session metadata; the
     // first-party Slack tools never fall back to a personal hosted-MCP grant.
     slackBotConnectionId: z.string().uuid().optional(),
+    // The one Slack channel this task's runs may post to as the OpenGeni bot.
+    // Only a person chooses it (never an agent attempt); it requires
+    // slackBotConnectionId and is read from the task at every post.
+    slackBotChannelId: ScheduledTaskSlackChannelId.optional(),
     model: bounded
       ? scheduledTaskBoundedString(512, "scheduled task model").optional()
       : z.string().min(1).optional(),
@@ -9366,6 +9775,16 @@ function scheduledTaskAgentConfigShape(bounded: boolean) {
     // Durable task override. Scheduled dispatch is trusted to preserve this
     // snapshot even if the workspace/deployment policy narrows later.
     maxNestedAgentDepth: NestedAgentDepthValue.optional(),
+    // How long a run's own turn may wait on a person (a tool approval or a
+    // structured question) before the scheduler answers for it: approvals are
+    // rejected and questions skipped, as a labelled system decision. Frozen in
+    // each run's accepted execution. Omitted: wait indefinitely.
+    approvalTimeoutSeconds: z
+      .number()
+      .int()
+      .min(SCHEDULED_TASK_APPROVAL_TIMEOUT_MIN_SECONDS)
+      .max(SCHEDULED_TASK_APPROVAL_TIMEOUT_MAX_SECONDS)
+      .optional(),
   };
 }
 
@@ -9471,6 +9890,57 @@ export const ScheduledTaskAgentConfigInput = /* @__PURE__ */ z
   });
 export type ScheduledTaskAgentConfigInput = z.infer<typeof ScheduledTaskAgentConfigInput>;
 
+/** One connector named in a scheduled task's access report. */
+export const ScheduledTaskAccessConnector = /* @__PURE__ */ z
+  .object({
+    id: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+  })
+  .strict();
+export type ScheduledTaskAccessConnector = z.infer<typeof ScheduledTaskAccessConnector>;
+
+export const SCHEDULED_TASK_ACCESS_CONNECTORS_MAX = 64;
+
+/**
+ * What a scheduled task's frozen tools and connector accounts lack compared
+ * with what its owner would get by saving it again now. A task freezes its
+ * connectors, its connector accounts and (when an agent created it, migration
+ * 0428) its OpenGeni tool policy, so later workspace changes never reach its
+ * runs on their own. This read-only projection names what
+ * `POST .../scheduled-tasks/:taskId/refresh-access` would add or remove; the
+ * refresh adds only the OpenGeni permissions those named tools need and drops
+ * frozen permissions the refreshing person no longer holds.
+ *
+ * Present only for a viewer who can act on it: the task owner, or anyone who
+ * manages schedules for a task without an owner. `null` or absent means there
+ * is nothing to refresh or the viewer cannot refresh it.
+ */
+export const ScheduledTaskPolicyDrift = /* @__PURE__ */ z
+  .object({
+    /** Workspace default connectors that new schedules get and this one lacks. */
+    missingConnectors: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+    unavailableConnectors: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+    missingOpenGeniTools: z.array(FirstPartyMcpToolName).max(FIRST_PARTY_MCP_TOOL_NAMES.length),
+    /** Connectors whose chosen account can no longer be used by this schedule. */
+    unavailableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Connectors this schedule has no account for, although one is now available. */
+    attachableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+    canRefresh: z.boolean(),
+  })
+  .strict();
+export type ScheduledTaskPolicyDrift = z.infer<typeof ScheduledTaskPolicyDrift>;
+
 export const ScheduledTask = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -9504,6 +9974,8 @@ export const ScheduledTask = /* @__PURE__ */ z.object({
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /** Read-only response projection; never stored and never execution authority. */
+  policyDrift: ScheduledTaskPolicyDrift.nullable().optional(),
 });
 export type ScheduledTask = z.infer<typeof ScheduledTask>;
 
@@ -9716,6 +10188,89 @@ export const KnowledgeSourceSyncRunSummary = /* @__PURE__ */ z.object({
 });
 export type KnowledgeSourceSyncRunSummary = z.infer<typeof KnowledgeSourceSyncRunSummary>;
 
+/**
+ * Why the scheduler refused an occurrence before accepting execution. The run
+ * carries it with `error` equal to `reason`. `retryable: true` (run status
+ * `skipped`) means this occurrence was not run but a later one is admitted
+ * normally once the condition clears; `retryable: false` (status `failed`)
+ * means every occurrence is refused until the task or a resource it names
+ * changes. Known reasons: `scheduled_authority_unavailable`,
+ * `machine_target_unavailable`, `machine_enrollment_inactive`,
+ * `variable_set_unavailable`, `rig_version_unavailable` (terminal) and
+ * `insufficient_credits`, `monthly_model_cost_limit`, `monthly_agent_run_limit`
+ * (transient). Readers must tolerate new reasons.
+ */
+export const ScheduledTaskAdmissionRefusal = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    reason: z.string().min(1).max(128),
+    retryable: z.boolean(),
+  })
+  .strict();
+export type ScheduledTaskAdmissionRefusal = z.infer<typeof ScheduledTaskAdmissionRefusal>;
+
+export const ScheduledTaskRunAwaitingHuman = /* @__PURE__ */ z
+  .object({
+    since: z.string(),
+    expiresAt: z.string().nullable(),
+  })
+  .strict();
+export type ScheduledTaskRunAwaitingHuman = z.infer<typeof ScheduledTaskRunAwaitingHuman>;
+
+/** Non-secret evidence of a refused connection selection, never execution authority. */
+export const ConnectionAccountSelectionDiagnostic = /* @__PURE__ */ z
+  .object({
+    version: z.literal(1),
+    reason: z.enum([
+      "selected_account_unavailable",
+      "owner_access_unavailable",
+      "ambiguous_account",
+      "parent_accounts_required",
+      "selection_unavailable",
+    ]),
+    accounts: z.array(
+      z
+        .object({
+          serverId: z.string().min(1).max(256),
+          connectionId: z.string().uuid().nullable(),
+          reason: z.enum([
+            "connector_unavailable",
+            "account_not_visible",
+            "account_inactive",
+            "account_mismatch",
+            "selection_unavailable",
+          ]),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+export type ConnectionAccountSelectionDiagnostic = z.infer<
+  typeof ConnectionAccountSelectionDiagnostic
+>;
+
+/**
+ * A connector a scheduled run could not use: its own scheduled turn recorded a
+ * `tool.auth_needed` fact (the run failed closed on a missing connection or
+ * personal authority). Derived at read time from durable session events;
+ * credential-free.
+ */
+export const ScheduledTaskRunAccessFailure = /* @__PURE__ */ z
+  .object({
+    /** Configured connector id (the account route is folded into its connector). */
+    serverId: z.string().min(1).max(256),
+    name: z.string().min(1).max(256),
+    providerDomain: z.string().min(1).max(512),
+    reason: ToolAuthNeededReason,
+    /** How many times the run hit this connector and reason. */
+    count: z.number().int().positive(),
+    firstOccurredAt: z.string(),
+  })
+  .strict();
+export type ScheduledTaskRunAccessFailure = z.infer<typeof ScheduledTaskRunAccessFailure>;
+
+export const SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX = 8;
+
 export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -9738,10 +10293,116 @@ export const ScheduledTaskRun = /* @__PURE__ */ z.object({
   knowledgeSummary: KnowledgeSourceSyncRunSummary.nullable().default(null),
   completedAt: z.string().nullable().default(null),
   error: z.string().nullable(),
+  admissionDiagnostic: ConnectionAccountSelectionDiagnostic.nullable().optional(),
+  /** Why the scheduler refused this occurrence before running it (see the schema). */
+  admissionRefusal: ScheduledTaskAdmissionRefusal.nullable().optional(),
+  /**
+   * Read-time: this dispatched run's own turn is waiting on a person (a tool
+   * approval or structured question) since `since`; `expiresAt` is when the
+   * task's approval timeout answers for it (null: waits indefinitely).
+   * Absent/null when the run is not waiting.
+   */
+  awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
+  /**
+   * Connectors this run could not use. Projected only for a viewer who can act
+   * on the task (see `ScheduledTaskPolicyDrift`); absent otherwise.
+   */
+  accessFailures: z
+    .array(ScheduledTaskRunAccessFailure)
+    .max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX)
+    .optional(),
 });
 export type ScheduledTaskRun = z.infer<typeof ScheduledTaskRun>;
+
+/**
+ * A schedule that needs its owner's attention because of connector access:
+ * - its latest run with a turn failed closed on a connector and no later run
+ *   has cleared it (`runId`, `firedAt` and `failures`); and/or
+ * - a connector account it chose can no longer be used
+ *   (`unavailableAccounts`), so every fresh occurrence is refused before it
+ *   creates a run. There is no run to point at, so `runId` and `firedAt` are
+ *   null when only this applies.
+ * At least one of `failures` and `unavailableAccounts` is non-empty. Listed
+ * for its owner; a task without an owner is listed only for a key or service
+ * that manages schedules.
+ */
+export const ScheduledTaskAccessAttention = /* @__PURE__ */ z
+  .object({
+    taskId: z.string().uuid(),
+    taskName: z.string(),
+    /** The task head this item was computed against; a new head is a new notice. */
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    runId: z.string().uuid().nullable(),
+    firedAt: z.string().nullable(),
+    failures: z.array(ScheduledTaskRunAccessFailure).max(SCHEDULED_TASK_RUN_ACCESS_FAILURES_MAX),
+    /** Connectors whose chosen account can no longer be used; new runs cannot start. */
+    unavailableAccounts: z
+      .array(ScheduledTaskAccessConnector)
+      .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX),
+    /** The latest run is waiting on a person (approval or question) right now. */
+    awaitingHuman: ScheduledTaskRunAwaitingHuman.nullable().default(null),
+  })
+  .strict()
+  .refine(
+    (item) =>
+      item.failures.length > 0 ||
+      item.unavailableAccounts.length > 0 ||
+      item.awaitingHuman !== null,
+    {
+      message:
+        "an attention item names a failed connector, an unavailable account, or a run waiting on a person",
+    },
+  )
+  .refine((item) => (item.runId === null) === (item.firedAt === null), {
+    message: "runId and firedAt are both set or both null",
+  })
+  .refine((item) => item.failures.length === 0 || item.runId !== null, {
+    message: "a run's access failures name the run",
+  });
+export type ScheduledTaskAccessAttention = z.infer<typeof ScheduledTaskAccessAttention>;
+
+export const SCHEDULED_TASK_ACCESS_ATTENTION_MAX = 100;
+
+export const ListScheduledTaskAccessAttentionResponse = /* @__PURE__ */ z
+  .object({
+    tasks: z.array(ScheduledTaskAccessAttention).max(SCHEDULED_TASK_ACCESS_ATTENTION_MAX),
+  })
+  .strict();
+export type ListScheduledTaskAccessAttentionResponse = z.infer<
+  typeof ListScheduledTaskAccessAttentionResponse
+>;
+
+/**
+ * Re-freeze a task's connectors, connector accounts and OpenGeni tool policy
+ * with the calling person's current authority. `executionDigest` is the task
+ * head the person reviewed; a changed task is refused with 409.
+ */
+export const RefreshScheduledTaskAccessRequest = /* @__PURE__ */ z
+  .object({
+    executionDigest: z.string().regex(/^[0-9a-f]{64}$/u),
+    /**
+     * Workspace default connectors and OpenGeni tools the person chose to keep
+     * off this schedule (the drift they dismissed). It only narrows what the
+     * refresh adds; it never removes anything the schedule already has.
+     */
+    leaveOut: z
+      .object({
+        connectors: z
+          .array(z.string().min(1).max(256))
+          .max(SCHEDULED_TASK_ACCESS_CONNECTORS_MAX)
+          .optional(),
+        openGeniTools: z
+          .array(FirstPartyMcpToolName)
+          .max(FIRST_PARTY_MCP_TOOL_NAMES.length)
+          .optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict();
+export type RefreshScheduledTaskAccessRequest = z.infer<typeof RefreshScheduledTaskAccessRequest>;
 
 const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
   {
@@ -9765,7 +10426,10 @@ const CreateAgentScheduledTaskRequest = /* @__PURE__ */ withVariableSetIdAlias(
     status: ScheduledTaskStatus.default("active"),
     variableSetId: z.string().uuid().nullable().optional(),
     environmentId: z.string().uuid().nullable().optional(),
-    // The rig each run binds to (M3); its active version is resolved per fire.
+    // The Sandbox Environment each run binds to; its active version is resolved
+    // per fire. Omitted resolves once at create, like session create: the
+    // workspace default (none for a Connected Machine task), or the target
+    // session's own environment for an existing-session task. null means none.
     rigId: z.string().uuid().nullable().optional(),
     metadata: ScheduledTaskMetadataInput.default({}),
   },
@@ -9852,6 +10516,18 @@ export const UpdateScheduledTaskRequest =
       connectionAccounts: McpConnectionAccountSelections.optional(),
 
       agentConfig: ScheduledTaskAgentConfigInput.optional(),
+      // Narrow, lossless update: never reconstruct agentConfig from its
+      // bounded MCP projection. Full agentConfig retains replacement semantics.
+      agentConfigPatch: z
+        .object({
+          model: scheduledTaskBoundedString(512, "scheduled task model").optional(),
+          reasoningEffort: ReasoningEffort.optional(),
+        })
+        .strict()
+        .refine((patch) => patch.model !== undefined || patch.reasoningEffort !== undefined, {
+          message: "agentConfigPatch requires model or reasoningEffort",
+        })
+        .optional(),
       status: ScheduledTaskStatus.optional(),
       variableSetId: z.string().uuid().nullable().optional(),
       environmentId: z.string().uuid().nullable().optional(),
@@ -9862,6 +10538,13 @@ export const UpdateScheduledTaskRequest =
     },
     { rejectKeys: ["selectedHostMcpDelegations"] },
   ).superRefine((value, context) => {
+    if (value.agentConfig && value.agentConfigPatch) {
+      context.addIssue({
+        code: "custom",
+        path: ["agentConfigPatch"],
+        message: "agentConfigPatch cannot be combined with agentConfig replacement",
+      });
+    }
     if (value.targetSessionId && value.runMode && value.runMode !== "existing_session") {
       context.addIssue({
         code: "custom",
@@ -12324,6 +13007,12 @@ export const Session = /* @__PURE__ */ defineSkillContractSchema(() =>
     // model admission for the life of the session; portable ⇒ plaintext compaction
     // and free mid-session provider switching (today's behavior).
     codexCompactionMode: CodexCompactionMode,
+    /**
+     * The `code_search` decision frozen at create. A turn gets the tool only when
+     * this is true, the deployment still offers it, the workspace is not Off, and
+     * the turn has POSIX compute.
+     */
+    codeSearchEnabled: z.boolean().default(false),
     /** Personal (authenticated subject) workspace pin state, never workspace-global. */
     pinned: z.boolean().default(false),
     /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -12607,6 +13296,7 @@ export const SessionEventType = z.enum([
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
+  "session.model_settings.updated",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
@@ -12692,6 +13382,63 @@ export const SessionEventType = z.enum([
   "machine.runner.restarted",
 ]);
 export type SessionEventType = z.infer<typeof SessionEventType>;
+
+/**
+ * The assistant channel on `agent.message.delta` / `agent.message.completed`:
+ * the provider-declared Responses phase, or else the Agents SDK's own rule once
+ * the response is known: `commentary` when the same response asks for tool work
+ * or ends with a later message (the SDK never returns it as the final output),
+ * `final_answer` for the message it returns. Deltas carry only a declared
+ * phase. Absent on legacy events and on the settlement copy.
+ */
+export type AssistantMessagePhase = "commentary" | "final_answer";
+
+function sessionEventPayloadRecord(payload: unknown): Record<string, unknown> | null {
+  return payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : null;
+}
+
+export function assistantMessagePhase(payload: unknown): AssistantMessagePhase | null {
+  const phase = sessionEventPayloadRecord(payload)?.phase;
+  return phase === "commentary" || phase === "final_answer" ? phase : null;
+}
+
+/**
+ * The reply a human or API message received from a turn that ended waiting for
+ * input. Such a turn settles with an empty `output` (the wait, not an answer,
+ * ended it), and its answer shares a model response with the `wait_for_input`
+ * call, so it streams as commentary. Settlement records that latest assistant
+ * message on `turn.completed` as `reply` so unread attention and Slack treat it
+ * as the answer (SDK chat and the timeline already show a wait-ended turn's
+ * latest message). It is not a result: a parent joining a child result still
+ * reads `output`. Machine-started turns never carry one.
+ */
+export function turnCompletedReply(payload: unknown): string | null {
+  const reply = sessionEventPayloadRecord(payload)?.reply;
+  return typeof reply === "string" && reply.trim().length > 0 ? reply : null;
+}
+
+/**
+ * A completion the worker streamed for one provider message: it always carries
+ * a `phase`, and the provider `messageId` when the provider sent one. The
+ * phase-less, id-less shape is the settlement copy published with
+ * `turn.completed` by older workers, or when a stream did not complete the
+ * final text itself. A streamed final message is followed by its
+ * `turn.completed` with the same output, so consumers that act on settled
+ * answers (Slack, `session_wait` change mode) wait for that instead.
+ */
+export function isStreamedAssistantMessageCompletion(event: {
+  type: string;
+  payload: unknown;
+}): boolean {
+  if (event.type !== "agent.message.completed") return false;
+  const payload = sessionEventPayloadRecord(event.payload);
+  return (
+    (typeof payload?.messageId === "string" && payload.messageId.length > 0) ||
+    assistantMessagePhase(payload) !== null
+  );
+}
 
 /**
  * Stable semantic groups for bounded session monitoring. These are a read
@@ -12786,6 +13533,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.queue.prompt.cancelled",
     "session.mcp.approval_policy.updated",
     "session.tool_policy.updated",
+    "session.model_settings.updated",
   ],
   terminal: [
     "turn.completed",
@@ -12893,17 +13641,6 @@ export function resolveSessionEventTypeFilters(input: ResolveSessionEventTypeFil
   return { includeTypes: [...included], excludeTypes: [...excluded] };
 }
 
-export const ToolAuthNeededReason = z.enum([
-  "missing_connection",
-  "expired",
-  "insufficient_scope",
-  "refresh_failed",
-  "personal_authority_unavailable",
-  "unsupported_auth",
-  "resource_scope_unavailable",
-]);
-export type ToolAuthNeededReason = z.infer<typeof ToolAuthNeededReason>;
-
 export const ToolAuthNeededPayload = z
   .object({
     serverId: z.string().min(1),
@@ -12947,8 +13684,37 @@ export const ToolAuthNeededPayload = z
         requiredVariables: z.array(VariableSetVariableName).max(64).default([]),
       })
       .optional(),
+    /** An agent suggestion, not a catalog entry or authority to contact this URL. */
+    setupRequest: z
+      .object({
+        kind: z.literal("mcp"),
+        name: z.string().trim().min(1).max(256),
+        endpointUrl: z
+          .string()
+          .url()
+          .max(2048)
+          .refine((url) => {
+            const parsed = new URL(url);
+            return (
+              parsed.protocol === "https:" &&
+              !parsed.username &&
+              !parsed.password &&
+              !parsed.hash &&
+              !parsed.search
+            );
+          }),
+        rationale: z.string().trim().min(1).max(2000),
+      })
+      .optional(),
   })
   .superRefine((payload, context) => {
+    if (payload.setupRequest && (payload.capability || payload.authoritySource === "host")) {
+      context.addIssue({
+        code: "custom",
+        message: "A setup proposal cannot carry connection authority",
+        path: ["setupRequest"],
+      });
+    }
     if (payload.authoritySource === "host") {
       if (payload.reason !== "unsupported_auth") {
         context.addIssue({
@@ -13242,6 +14008,8 @@ export const FsEncoding = z.enum(["utf8", "base64"]);
 export type FsEncoding = z.infer<typeof FsEncoding>;
 export const FsReadRequest = z.object({
   path: z.string(),
+  /** Narrow this read to the selected working directory without following symlinks. */
+  workspaceOnly: z.boolean().optional(),
   encoding: FsEncoding.default("utf8"),
   maxBytes: z
     .number()
@@ -14165,6 +14933,14 @@ const HostExportAttribution = {
   initiator: HostExportInitiator.nullable(),
   initiatorContext: HostExportInitiatorContext,
   origin: SessionTurnSource.nullable(),
+  /**
+   * Product surface of the attributed turn (see `SessionTurnSurface`). Null
+   * for facts without a turn and for turns captured before surfaces existed.
+   * Optional so an older writer's batch still parses during a rolling upgrade.
+   */
+  surface: SessionTurnSurface.nullable().optional(),
+  /** Model provider family of the attributed turn's accepted execution policy. */
+  modelProvider: AnalyticsModelProvider.nullable().optional(),
 } as const;
 
 /**
@@ -14211,6 +14987,11 @@ export const HostEventExport = z.object({
    */
   rootSessionId: z.string().uuid().nullable(),
   ...HostExportAttribution,
+  /**
+   * Content-free family of an `agent.toolCall.created` event's tool (see
+   * `ToolFamily`). Null for every other event type and for older rows.
+   */
+  toolFamily: ToolFamily.nullable().optional(),
   event: HostSessionEvent,
 });
 export type HostEventExport = z.infer<typeof HostEventExport>;
@@ -14252,9 +15033,58 @@ export const HostUsageExportBatch = z.object({
 export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
 
 /**
+ * One content-free per-person lifecycle fact (`lifecycle_fact` export kind).
+ * `accountId` is null for facts that belong to a person rather than an
+ * organization (sign-up, email verification, sign-in); `workspaceId` is set
+ * only for workspace-scoped setup facts. `subjectId` is present only for opaque
+ * managed-user and API-key subjects. Type and attribute are bounded tokens so an
+ * older consumer can carry a newer writer's fact during a rolling upgrade; the
+ * known values are `PRODUCT_LIFECYCLE_FACT_ATTRIBUTES`.
+ */
+export const HostLifecycleFact = z.object({
+  id: z.string().uuid(),
+  type: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z_]*\.[a-z][a-z_]*$/),
+  attribute: z
+    .string()
+    .max(64)
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .nullable(),
+  subjectKind: z
+    .string()
+    .max(32)
+    .regex(/^[a-z][a-z_]*$/),
+  subjectId: z.string().regex(PRODUCT_LIFECYCLE_SUBJECT_ID_PATTERN).nullable(),
+  occurredAt: z.string(),
+});
+export type HostLifecycleFact = z.infer<typeof HostLifecycleFact>;
+
+export const HostLifecycleFactExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  idempotencyKey: z.string().min(1).max(2048),
+  accountId: z.string().uuid().nullable(),
+  workspaceId: z.string().uuid().nullable(),
+  fact: HostLifecycleFact,
+});
+export type HostLifecycleFactExport = z.infer<typeof HostLifecycleFactExport>;
+
+export const HostLifecycleFactExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostLifecycleFactExport).min(1).max(256),
+});
+export type HostLifecycleFactExportBatch = z.infer<typeof HostLifecycleFactExportBatch>;
+
+/**
  * Optional embedded-host sinks. Delivery is at least once: the same batch may
  * be repeated after a process dies between sink success and checkpoint commit,
- * so sinks must deduplicate by event/usage idempotency key.
+ * so sinks must deduplicate by event/usage/fact idempotency key.
  */
 export type HostEventSink = {
   consumerId: HostExportConsumerId;
@@ -14264,6 +15094,11 @@ export type HostEventSink = {
 export type HostUsageSink = {
   consumerId: HostExportConsumerId;
   deliverUsage: (batch: HostUsageExportBatch) => Promise<void>;
+};
+
+export type HostLifecycleFactSink = {
+  consumerId: HostExportConsumerId;
+  deliverLifecycleFacts: (batch: HostLifecycleFactExportBatch) => Promise<void>;
 };
 
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;
@@ -15396,6 +16231,13 @@ export const GitHubRepository = z.object({
   defaultBranch: z.string(),
   accountLogin: z.string(),
   accountType: z.string().nullable(),
+  /** GitHub's archived flag, when the provider reported it. */
+  archived: z.boolean().optional(),
+  /**
+   * GitHub's reported repository size in kilobytes, when the provider
+   * reported it. Zero means GitHub considers the repository empty.
+   */
+  sizeKb: z.number().int().nonnegative().optional(),
 });
 export type GitHubRepository = z.infer<typeof GitHubRepository>;
 
@@ -16145,6 +16987,7 @@ export const MachineRuntime = z.object({
   updateChannel: z.enum(["stable", "beta"]).nullable(),
   desiredVersion: z.string().nullable(),
   versionState: z.enum(["unknown", "current", "outdated", "ahead", "updating", "update_failed"]),
+  updateBlockedReason: z.string().nullable().optional(),
   capabilities: MachineRuntimeCapabilities,
   update: MachineUpdateState.nullable(),
 });
@@ -16475,7 +17318,7 @@ export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema((
       latencyModeSource: TurnExecutionLatencyModeSourceV1.default("deployment"),
       providerId: z.string().min(1),
       upstreamModelId: z.string().min(1),
-      wireApi: z.enum(["responses", "chat"]),
+      wireApi: z.enum(["responses", "chat", "anthropic-messages"]),
       credentialSource: TurnExecutionCredentialSourceV1,
       billing: ModelBillingAttributionV1,
       definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
@@ -16812,7 +17655,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     shortLabel: z.string().min(1).max(64).optional(),
     provider: z.string(), // provider id
     providerLabel: z.string(),
-    api: z.enum(["responses", "chat"]),
+    api: z.enum(["responses", "chat", "anthropic-messages"]),
     source: z
       .enum(["opengeni", "codex", "supergrok", "workspace_gateway", "openrouter"])
       .optional(),
@@ -16824,7 +17667,7 @@ export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
     deployment: z
       .object({
         upstreamModelId: z.string().min(1),
-        wireApi: z.enum(["responses", "chat"]),
+        wireApi: z.enum(["responses", "chat", "anthropic-messages"]),
       })
       .optional(),
     executionLimits: z
@@ -16935,10 +17778,38 @@ export const WorkspaceModelCatalogModel =
   );
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
 
+/**
+ * Why a new chat or scheduled task without an explicit model gets its default:
+ * a saved workspace default, the first usable connected subscription model, the
+ * configured OpenGeni credits model while the organization holds a credit
+ * balance, or the deployment default.
+ */
+export const DefaultModelSelectionSource = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["workspace", "subscription", "credits", "deployment"]),
+);
+export type DefaultModelSelectionSource = z.infer<typeof DefaultModelSelectionSource>;
+
+export const DefaultModelSelection = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    model: z.string().min(1),
+    reasoningEffort: ReasoningEffort,
+    source: DefaultModelSelectionSource,
+  }),
+);
+export type DefaultModelSelection = z.infer<typeof DefaultModelSelection>;
+
 export const WorkspaceModelCatalogResponse =
   /* @__PURE__ */ defineModelContractSchema(() =>
     z.object({
       models: z.array(WorkspaceModelCatalogModel),
+      /** Default for new chats and scheduled tasks that name no model. */
+      defaultSelection: DefaultModelSelection.optional(),
+      /**
+       * The default this workspace would use once its organization holds an
+       * OpenGeni credit balance. Null when this deployment does not bill
+       * credits.
+       */
+      creditsSelection: DefaultModelSelection.nullable().optional(),
     }),
   );
 export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
@@ -16956,6 +17827,9 @@ export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 /** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
 export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 
+/** Public OpenGeni documentation linked from the web console's Help menu by default. */
+export const DEFAULT_OPENGENI_DOCUMENTATION_URL = "https://docs.opengeni.ai" as const;
+
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({
     deploymentRevision: z.string(),
@@ -16964,6 +17838,7 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // compatibility policy lives in docs/architecture.md — clients within the
     // same major are supported; evolution is additive within a major.
     serverVersion: z.string().optional(),
+    claudeSubscriptionEnabled: z.boolean().optional(),
     defaultModel: z.string(),
     allowedModels: z.array(z.string()).min(1),
     // Richer model list (provider-grouped) for the picker. Defaults to [] for
@@ -16995,6 +17870,8 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       enabled: z.boolean(),
       maxSizeBytes: z.number().int().positive(),
     }),
+    /** Session proxy capability; absent on native deployments. */
+    sandboxFiles: z.boolean().optional(),
     // Native voice-input capability. Provider/model/credentials stay server-private;
     // clients only learn whether a deployment can transcribe and the hard ceilings.
     voiceInput: ClientVoiceInputConfig.default({
@@ -17003,12 +17880,26 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
       maxSizeBytes: VOICE_INPUT_MAX_SIZE_BYTES,
       acceptedMimeTypes: [...VOICE_INPUT_ACCEPTED_MIME_TYPES],
     }),
+    // Whether this deployment offers the Jev-backed code_search agent tool and
+    // whether workspaces without their own setting get it.
+    codeSearch: z
+      .object({ available: z.boolean(), workspaceDefault: z.enum(["off", "on", "split"]) })
+      .default({ available: false, workspaceDefault: "off" }),
     productAccessMode: ProductAccessMode,
     billingMode: BillingMode.default("disabled"),
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
     auth: ClientAuthConfig.default({ mode: "none" }),
+    // Product documentation the console links from its Help menu. The API
+    // always sends it: DEFAULT_OPENGENI_DOCUMENTATION_URL unless operators
+    // point it elsewhere or hide it (null) with OPENGENI_DOCUMENTATION_URL.
+    // Parsing adds no default, so an absent field still means a server that
+    // predates it and clients show no link rather than guessing.
+    documentationUrl: z
+      .url({ protocol: /^https?$/u })
+      .nullable()
+      .optional(),
     analytics: z
       .object({
         consentRequired: z.boolean(),
@@ -17159,5 +18050,6 @@ export type { PluginDiscoveryItem, PluginDiscoveryPage } from "./plugin-discover
 export { mcpEndpointIdentity } from "./mcp-endpoint";
 export { pluginMcpUnavailableReason } from "./mcp-endpoint";
 export * from "./connector-tool-permissions";
+export * from "./mcp-catalog-limits";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";

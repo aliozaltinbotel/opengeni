@@ -51,4 +51,14 @@ export const embeddingMigrationTail = [
   "0509_verified_signup_trial_credits.sql",
   "0510_knowledge_index_funding_wait.sql",
   "0511_knowledge_visible_index_status.sql",
+  // Patches learning resolvers introduced by the withheld 0461 migration.
+  "0515_autonomous_learning_defaults.sql",
+  // Patches the 0509 trial grant trigger; replay after it.
+  "0521_verified_signup_trial_runtime_switch.sql",
+  // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
+  "0534_scheduled_admission_diagnostics.sql",
+  // References the files scope identity introduced by withheld 0461.
+  "0535_slack_file_upload_operations.sql",
+  // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
+  "0539_scheduled_admission_refusals.sql",
 ];

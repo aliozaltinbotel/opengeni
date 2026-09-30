@@ -1220,7 +1220,10 @@ export function createCodexRealtimeController(
         } else {
           // A retryable refusal or an indeterminate response must not replace
           // the begin operation/owner identity on retry or reload.
-          if (!retainedOwner && !(error instanceof OpenGeniApiError && (error.retryable || error.outcomeUnknown))) {
+          if (
+            !retainedOwner &&
+            !(error instanceof OpenGeniApiError && (error.retryable || error.outcomeUnknown))
+          ) {
             clearOwner();
           }
           publish({
@@ -1368,7 +1371,7 @@ export function createCodexRealtimeController(
         closeBrowserResources();
         // An unknown begin may already have committed. Resolve that exact
         // intent without starting a provider connection before ending it.
-        const knownMode = state.mode ?? await begin(currentOwner, true, false);
+        const knownMode = state.mode ?? (await begin(currentOwner, true, false));
         if (!knownMode) return;
         let current = knownMode;
         let response: SessionRealtimeMutationResponse;

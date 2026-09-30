@@ -96,7 +96,7 @@ function PreviewResult({ view }: { view: string }) {
               : "Payment simulated. No money was charged."
             : authorization
               ? "This simulates the external sign-in step. In the real flow, you authorize on the provider’s website using code DEMO-2254."
-              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in OpenGeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
+              : `You selected $${Number(params.get("amount") || 25).toFixed(2)} in Opengeni credits. The real flow opens Stripe Checkout to collect payment details. This preview does not reproduce Stripe’s payment page.`}
         </p>
         {!finished ? (
           <Button
@@ -117,8 +117,32 @@ function PreviewResult({ view }: { view: string }) {
   );
 }
 
+/** `?included=free|deployment` previews the step when the deployment default model is included. */
+function previewIncludedModel() {
+  const included = new URLSearchParams(window.location.search).get("included");
+  if (included === "free") return { id: "preview-free", label: "Preview Free Model", free: true };
+  if (included === "deployment")
+    return { id: "preview-included", label: "Preview Included Model", free: false };
+  return null;
+}
+
+/** `?credits=trial` previews the step when the organization already holds OpenGeni credits. */
+function previewStartingCredits() {
+  if (new URLSearchParams(window.location.search).get("credits") !== "trial") return null;
+  return {
+    balance: { balanceMicros: 10_000_000, currency: "usd" },
+    model: {
+      id: "preview-credits",
+      label: "Preview Credits Model",
+      reasoningEffort: "xhigh" as const,
+    },
+  };
+}
+
 function ModelPreview({ organization = false }: { organization?: boolean }) {
   const [completed, setCompleted] = useState(false);
+  const includedModel = previewIncludedModel();
+  const startingCredits = previewStartingCredits();
   if (completed)
     return (
       <section className="flex flex-1 items-center justify-center px-4">
@@ -142,7 +166,11 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
+      includedModel={includedModel}
+      startingCredits={startingCredits}
       previewState="required"
+      activeEmail="preview@example.test"
+      onSignOut={() => window.location.assign("/dev/onboarding")}
       onComplete={() => setCompleted(true)}
     />
   ) : (
@@ -153,6 +181,8 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
+      includedModel={includedModel}
+      startingCredits={startingCredits}
       onComplete={() => setCompleted(true)}
     />
   );
@@ -182,18 +212,18 @@ function AdditionalOrganizationPreview() {
 
   return (
     <main className="min-h-screen bg-bg p-5 text-fg">
-      <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-xl border border-border bg-surface-1 shadow-2xl">
+      <div className="mx-auto flex min-h-[calc(100vh-2.5rem)] max-w-6xl overflow-hidden rounded-xl border border-border bg-surface shadow-2xl">
         <aside className="w-64 shrink-0 border-r border-border bg-surface-2/35 p-3">
           <div className="mb-6 flex items-center gap-2 px-1 py-2 text-sm font-semibold">
-            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-white">
+            <span className="flex size-7 items-center justify-center rounded-md bg-brand text-xs font-bold text-brand-fg">
               O
             </span>
-            OpenGeni
+            Opengeni
           </div>
           <div className="grid gap-1.5">
             <OrganizationSwitcherLine
-              orgs={[{ accountId: "preview-account", label: "OpenGeni", canManage: true }]}
-              currentLabel="OpenGeni"
+              orgs={[{ accountId: "preview-account", label: "Opengeni", canManage: true }]}
+              currentLabel="Opengeni"
               activeAccountId="preview-account"
               onSelect={() => undefined}
               onCreate={() => setOpen(true)}
@@ -252,5 +282,8 @@ export function OnboardingPreviewRoute() {
   if (view === "credits") return <CreditPromptPreview />;
   if (view === "organization") return <ModelPreview organization />;
   if (view === "models") return <ModelPreview />;
+  if (view === "signin") return <ManagedAuthPanel onSubmit={async () => undefined} />;
+  if (view === "verification-expired")
+    return <ManagedAuthPanel verificationLinkError="expired" onSubmit={async () => undefined} />;
   return <ManagedAuthPanel initialMode="signup" onSubmit={async () => undefined} />;
 }

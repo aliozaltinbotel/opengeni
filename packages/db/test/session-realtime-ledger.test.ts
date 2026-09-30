@@ -1,5 +1,9 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { MODEL_CONTEXT_LABEL, readTurnExecutionPolicyV1 } from "@opengeni/contracts";
+import {
+  MODEL_CONTEXT_LABEL,
+  readTurnExecutionPolicyV1,
+  renderMessageSentAtForModel,
+} from "@opengeni/contracts";
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
@@ -926,6 +930,7 @@ describe("session realtime ledger", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
+        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
         { type: "input_text", text: input.entries[0]!.text },
       ],
     });
@@ -1518,7 +1523,8 @@ describe("session realtime ledger", () => {
       latencyModeSource: "explicit",
     });
     expect(
-      (routedTurn.metadata as { realtimeDelegation?: { route?: string } }).realtimeDelegation?.route,
+      (routedTurn.metadata as { realtimeDelegation?: { route?: string } }).realtimeDelegation
+        ?.route,
     ).toBe("explicit");
     // The same operation replayed on its route is a replay; on another route it is a changed request.
     const replay = await transaction(value.owner.workspaceId, (tx) =>
@@ -1646,6 +1652,8 @@ describe("session realtime ledger", () => {
     expect(facts.replacement).toMatchObject({
       id: replacementId,
       status: "queued",
+      // Analytics: a live voice delegation entered through voice.
+      surface: "voice",
       metadata: {
         delivery: "steer",
         replacedTurnId: foreground.turnId,

@@ -74,11 +74,14 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       add column end_user_id text,
       add column memory_scope text not null default 'workspace',
       add column execution_authority_epoch integer not null default 1,
-      add column initial_mcp_account_bindings jsonb`;
+      add column initial_mcp_account_bindings jsonb,
+      add column code_search_enabled boolean`;
     // Current session/claim adapters project 0494 receipts. Keep historical
     // NULL semantics and install no account-binding runtime guards here: this
     // fixture must still exercise the actual pre-0343 authority boundary.
     await admin`alter table session_turns add column mcp_account_bindings jsonb`;
+    // The current claim adapter reads the 0533 turn surface; removed before 0533 runs.
+    await admin`alter table session_turns add column surface text`;
     await admin`alter table session_system_updates add column mcp_account_bindings jsonb`;
     await admin`alter table session_system_update_outbox add column mcp_account_bindings jsonb`;
     // The current claim adapter also reads timer fields under the workspace
@@ -288,8 +291,10 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
       drop column end_user_id,
       drop column memory_scope,
       drop column execution_authority_epoch,
-      drop column initial_mcp_account_bindings`;
+      drop column initial_mcp_account_bindings,
+      drop column code_search_enabled`;
     await admin`alter table session_turns drop column mcp_account_bindings`;
+    await admin`alter table session_turns drop column surface`;
     await admin`alter table session_system_updates drop column mcp_account_bindings`;
     await admin`alter table session_system_update_outbox drop column mcp_account_bindings`;
     await migrate(ownerUrl);

@@ -110,6 +110,7 @@ import {
   persistOrSignalSessionAttemptQuiescence,
   preClaimAdmissionFailure,
   PROVIDER_BACKPRESSURE_DELAY_MS,
+  PROVIDER_RATE_LIMIT_BACKOFF_MS,
   providerRecoveryCountAfterModelRequestPhase,
   providerRecoveryCountFromMetadata,
   sessionTitleCodexRequestContext,
@@ -3204,6 +3205,15 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "none" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, groupBoxBackend: "selfhosted" })).toBe(false);
     expect(shouldPrefetchManagedSandbox({ ...base, hasRepositoryResources: false })).toBe(false);
+    // A committed post-loss recovery decision rematerializes without waiting
+    // for the first tool call, still only for managed on-demand turns.
+    const recovering = { ...base, hasRepositoryResources: false, automaticRecoveryPending: true };
+    expect(shouldPrefetchManagedSandbox(recovering)).toBe(true);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, machinePrimary: true })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, establishPolicy: "eager" })).toBe(false);
+    expect(shouldPrefetchManagedSandbox({ ...recovering, groupBoxBackend: "selfhosted" })).toBe(
+      false,
+    );
   });
 
   test("credential-bearing lazy turns resolve context once and materialize at the first shared operation", async () => {
@@ -3552,7 +3562,10 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(establishes).toBe(1);
   });
 
-  test("command-readiness timeout creates at most one sandbox for the turn", async () => {
+  // resumeBoxForTurn owns the single proven fresh-box replacement internally
+  // (see sandbox-resume.test.ts). A readiness timeout that reaches the
+  // provisioner is terminal for the turn and must not start another establish.
+  test("a terminal command-readiness timeout is never re-provisioned by the turn", async () => {
     let establishes = 0;
     let failures = 0;
     const timeout = new SandboxExecReadinessTimeoutError("modal", 60_000, {
@@ -6063,6 +6076,21 @@ describe("transient provider error classifier", () => {
         retryAfterMs: 12_000,
       }),
     ).toEqual({ status: "recovering", continueDelayMs: 12_000 });
+    // A one-second retry-after on a per-minute limit still waits out the window.
+    expect(
+      [1, 2, 3, 4, 5].map((attemptNumber) =>
+        providerRecoveryResult({
+          failureCode: "provider_rate_limited",
+          attemptNumber,
+          retryAfterMs: 1_000,
+        }),
+      ),
+    ).toEqual(
+      PROVIDER_RATE_LIMIT_BACKOFF_MS.map((continueDelayMs) => ({
+        status: "recovering",
+        continueDelayMs,
+      })),
+    );
     expect(
       providerRecoveryResult({
         failureCode: "provider_unavailable",
@@ -6696,6 +6724,21 @@ describe("acceptsPromptCacheKeyForTurn", () => {
   test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
     expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
+  });
+
+  test("passes stable session identity to native Claude without enabling unknown registry wires", () => {
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "claude-subscription-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn({
+        provider: { kind: "anthropic-organization", api: "anthropic-messages" },
+      }),
+    ).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "anthropic-messages"))).toBe(true);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
   });
 });
 

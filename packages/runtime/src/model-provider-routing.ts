@@ -9,6 +9,8 @@ import {
   type ResponseStreamEvent,
 } from "@openai/agents";
 import OpenAI from "openai";
+import { AnthropicMessagesModel } from "./anthropic-messages";
+import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
@@ -104,6 +106,12 @@ export function buildModelInstance(
   client: OpenAI,
   modelId: string,
 ): Model {
+  if (provider.api === "anthropic-messages")
+    return new AnthropicMessagesModel(
+      provider,
+      modelId,
+      instrumentedModelFetch(provider.id, globalThis.fetch),
+    );
   return provider.api === "chat"
     ? new OpenGeniChatCompletionsModel(client, modelId)
     : new OpenGeniResponsesModel(client, modelId, provider);
@@ -160,9 +168,27 @@ export function resolveTurnModel(
  * SDK default provider for a model that is in no provider's allow-list.
  */
 export class MultiProviderModelProvider implements ModelProvider {
+  // Per-run only: preserve Claude prompt/request lineage across tool iterations.
+  private readonly anthropicModels = new Map<string, Model>();
   constructor(private readonly settings: Settings) {}
 
   async getModel(modelName?: string): Promise<Model> {
+    const binding = this.resolveBinding(modelName);
+    if (binding.provider.api !== "anthropic-messages") return binding.model;
+    const key = `${binding.provider.id}/${binding.modelId}`;
+    const cached = this.anthropicModels.get(key);
+    if (cached) return cached;
+    this.anthropicModels.set(key, binding.model);
+    return binding.model;
+  }
+
+  /**
+   * The provider, owned client, and upstream model id that `getModel` binds.
+   * Standalone requests outside an agent run (the session-title sidecar) use
+   * this to call the provider directly instead of the runner-facing
+   * `Model.getResponse()`, which requires an active trace.
+   */
+  resolveBinding(modelName?: string): ModelProviderBinding {
     if (modelName) {
       const resolved = resolveTurnModel(
         settingsForRunScopedModelResolution(this.settings, modelName),
@@ -189,7 +215,12 @@ export class MultiProviderModelProvider implements ModelProvider {
         ) {
           throw new XaiSubscriptionUnavailableError(modelName);
         }
-        return resolved.model;
+        return {
+          provider: resolved.provider,
+          client: resolved.client,
+          model: resolved.model,
+          modelId: resolved.configured.upstreamModelId,
+        };
       }
       // A `codex/<slug>` id only resolves when the per-workspace worker overlay
       // (settingsWithCodexCredential) has injected the synthetic codex-subscription
@@ -215,13 +246,24 @@ export class MultiProviderModelProvider implements ModelProvider {
     // JSON parse/stringify transport wrapper on the fallback path.
     const builtin = configuredProviders(this.settings)[0];
     if (!builtin) throw new Error("Built-in model provider is unavailable");
-    return new OpenGeniResponsesModel(
-      buildProviderClient(builtin, this.settings),
-      modelName ?? this.settings.openaiModel,
-      builtin,
-    );
+    const client = buildProviderClient(builtin, this.settings);
+    const modelId = modelName ?? this.settings.openaiModel;
+    return {
+      provider: builtin,
+      client,
+      model: new OpenGeniResponsesModel(client, modelId, builtin),
+      modelId,
+    };
   }
 }
+
+export type ModelProviderBinding = {
+  provider: ResolvedModelProvider;
+  client: OpenAI;
+  model: Model;
+  /** The id sent on the provider wire (the upstream id for a registry model). */
+  modelId: string;
+};
 
 function settingsForRunScopedModelResolution(settings: Settings, modelName: string): Settings {
   if (modelName !== settings.openaiModel) {

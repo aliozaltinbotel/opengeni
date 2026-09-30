@@ -803,7 +803,9 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
           expectedVersion: started.mode.version,
           connectionId: claimed.connection.id,
           connectionEpoch: 1,
-          ...(providerStarted ? { providerStarted: { providerSessionId: "provider-session-1" } } : {}),
+          ...(providerStarted
+            ? { providerStarted: { providerSessionId: "provider-session-1" } }
+            : {}),
           entries,
         }),
       });
@@ -817,32 +819,54 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     });
     // A route on anything but a delegation is a malformed request.
     const onTranscript = await sync(
-      [{ operationId: crypto.randomUUID(), kind: "user_transcript", text: "hi", payload: { turnId: "t1" }, model: settings.openaiModel }],
+      [
+        {
+          operationId: crypto.randomUUID(),
+          kind: "user_transcript",
+          text: "hi",
+          payload: { turnId: "t1" },
+          model: settings.openaiModel,
+        },
+      ],
       false,
     );
     expect(onTranscript.status).toBe(422);
     const unknown = await sync([delegation(crypto.randomUUID(), { model: "no-such-model" })]);
     expect(unknown.status).toBe(422);
-    const ledgerRows = await withWorkspaceRls(client.db, value.workspaceId, async (scopedDb) =>
-      await scopedDb
-        .select({ kind: schema.sessionRealtimeEntries.kind })
-        .from(schema.sessionRealtimeEntries)
-        .where(eq(schema.sessionRealtimeEntries.realtimeId, started.mode.id)),
+    const ledgerRows = await withWorkspaceRls(
+      client.db,
+      value.workspaceId,
+      async (scopedDb) =>
+        await scopedDb
+          .select({ kind: schema.sessionRealtimeEntries.kind })
+          .from(schema.sessionRealtimeEntries)
+          .where(eq(schema.sessionRealtimeEntries.realtimeId, started.mode.id)),
     );
     expect(ledgerRows.filter((row) => row.kind === "delegation_call")).toHaveLength(0);
-    const routed = await sync([delegation(crypto.randomUUID(), { model: settings.openaiModel, reasoningEffort: "medium" })]);
+    const routed = await sync([
+      delegation(crypto.randomUUID(), { model: settings.openaiModel, reasoningEffort: "medium" }),
+    ]);
     expect(routed.status).toBe(200);
-    const accepted = (await routed.json()) as { accepted: Array<{ entry: { turnId: string | null } }> };
+    const accepted = (await routed.json()) as {
+      accepted: Array<{ entry: { turnId: string | null } }>;
+    };
     const turnId = accepted.accepted[0]!.entry.turnId!;
-    const [turn] = await withWorkspaceRls(client.db, value.workspaceId, async (scopedDb) =>
-      await scopedDb.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, turnId)),
+    const [turn] = await withWorkspaceRls(
+      client.db,
+      value.workspaceId,
+      async (scopedDb) =>
+        await scopedDb.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, turnId)),
     );
     expect([turn!.model, turn!.reasoningEffort]).toEqual([settings.openaiModel, "medium"]);
     const policy = readTurnExecutionPolicyV1(turn!.metadata);
-    expect(policy.kind === "valid" ? [policy.policy.modelSource, policy.policy.reasoningSource, policy.policy.latencyModeSource] : null).toEqual([
-      "explicit",
-      "explicit",
-      "session",
-    ]);
+    expect(
+      policy.kind === "valid"
+        ? [
+            policy.policy.modelSource,
+            policy.policy.reasoningSource,
+            policy.policy.latencyModeSource,
+          ]
+        : null,
+    ).toEqual(["explicit", "explicit", "session"]);
   });
 });

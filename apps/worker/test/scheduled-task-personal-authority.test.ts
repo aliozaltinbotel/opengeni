@@ -33,6 +33,7 @@ import {
   createRig,
   createScheduledTask,
   createScheduledTaskRun,
+  recordScheduledTaskAdmissionFailure,
   createSession,
   createVariableSet,
   createXaiSubscriptionCredential,
@@ -374,12 +375,12 @@ describe("scheduled task personal MCP authority", () => {
     });
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, update);
     const scheduler = activities({ mcpServers });
-    const dispatch = () =>
+    const dispatch = (producerKey = crypto.randomUUID()) =>
       scheduler.dispatchScheduledTaskRun({
         workspaceId: workspace.workspaceId,
         taskId: task.id,
         triggerType: "scheduled",
-        producerKey: crypto.randomUUID(),
+        producerKey,
       });
     const emptyRun = await dispatch();
     expect(emptyRun.action).toBe("start");
@@ -419,7 +420,8 @@ describe("scheduled task personal MCP authority", () => {
     expect(selectedUpdate.agentConfig?.connectionAccounts).toHaveLength(2);
     await updateScheduledTask(client.db, workspace.workspaceId, task.id, selectedUpdate);
     await commonConnectionDelegationFixture(workspace);
-    const selectedRun = await dispatch();
+    const acceptedProducer = crypto.randomUUID();
+    const selectedRun = await dispatch(acceptedProducer);
     expect(selectedRun.action).toBe("start");
     const selectedRuns = await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10);
     const selectedAccepted = await getScheduledTaskRunAcceptedExecution(client.db, {
@@ -429,13 +431,38 @@ describe("scheduled task personal MCP authority", () => {
     expect(
       selectedAccepted?.mcpAccountBindings?.map((binding) => binding.connectionId).sort(),
     ).toEqual(selections.map((selection) => selection.connectionId).sort());
+    const acceptedTask = (await getScheduledTask(client.db, workspace.workspaceId, task.id))!;
+    const acceptedWinner = await recordScheduledTaskAdmissionFailure(client.db, {
+      workspaceId: task.workspaceId,
+      taskId: task.id,
+      taskAuthorityRevision: acceptedTask.authorityRevision,
+      taskExecutionDigest: acceptedTask.executionDigest,
+      producerKey: acceptedProducer,
+      triggerType: "scheduled",
+      diagnostic: { version: 1, reason: "selection_unavailable", accounts: [] },
+    });
+    expect(acceptedWinner.admissionDiagnostic).toBeNull();
+    expect(acceptedWinner.sessionId).toBe(
+      selectedRun.action === "start" ? selectedRun.sessionId : null,
+    );
     await admin`update connections set status = 'revoked' where id = ${first.connection.id}`;
-    expect(await dispatch()).toEqual({
+    const refusedProducer = crypto.randomUUID();
+    const refusal = await dispatch(refusedProducer);
+    expect(refusal).toMatchObject({
       action: "blocked",
       reason: "connection_account_unavailable",
+      diagnostic: {
+        reason: "selected_account_unavailable",
+        accounts: [{ serverId: "scheduled-common", connectionId: first.connection.id }],
+      },
     });
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      2,
+      3,
+    );
+    await admin`update connections set status = 'active' where id = ${first.connection.id}`;
+    expect(await dispatch(refusedProducer)).toEqual(refusal);
+    expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
+      3,
     );
   });
 
@@ -549,9 +576,9 @@ describe("scheduled task personal MCP authority", () => {
     });
     expect(
       await scheduler.dispatchScheduledTaskRun({ ...firstInput, producerKey: crypto.randomUUID() }),
-    ).toEqual({ action: "blocked", reason: "connection_account_unavailable" });
+    ).toMatchObject({ action: "blocked", reason: "connection_account_unavailable" });
     expect(await listScheduledTaskRuns(client.db, workspace.workspaceId, task.id, 10)).toHaveLength(
-      3,
+      4,
     );
   });
 
@@ -1479,7 +1506,7 @@ describe("scheduled task personal MCP authority", () => {
       await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
       // These later migrations require the post-0461 Knowledge/file policies.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql')`;
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql')`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
         new URL(

@@ -51,15 +51,15 @@ export const AddExternalWorkspaceMemberRequest = z
 export type AddExternalWorkspaceMemberRequest = z.infer<typeof AddExternalWorkspaceMemberRequest>;
 
 /** Host-managed changes affect one existing external member only. Both sets are complete; stale observations fail closed. */
-export const UpdateExternalWorkspaceMemberRequest = z
+export const UpdateExternalWorkspaceMemberPermissionsRequest = z
   .object({
     identity: ExternalIdentityReference,
     expectedPermissions: z.array(Permission).max(Permission.options.length),
     permissions: z.array(Permission).max(Permission.options.length),
   })
   .strict();
-export type UpdateExternalWorkspaceMemberRequest = z.infer<
-  typeof UpdateExternalWorkspaceMemberRequest
+export type UpdateExternalWorkspaceMemberPermissionsRequest = z.infer<
+  typeof UpdateExternalWorkspaceMemberPermissionsRequest
 >;
 
 /** Content-free service lookup, including identities which can no longer act. */
@@ -102,6 +102,32 @@ export const CancelExternalWorkspaceMemberGrantResponse = z
   .strict();
 export type CancelExternalWorkspaceMemberGrantResponse = z.infer<
   typeof CancelExternalWorkspaceMemberGrantResponse
+>;
+
+/** Replace an existing external member's permissions in one shared workspace.
+ * Keyed and idempotent like a grant; narrowing forces live authority to
+ * re-check but never cancels or tears down work. */
+export const UpdateExternalWorkspaceMemberRequest = z
+  .object({
+    permissions: z.array(Permission).min(1).max(Permission.options.length),
+    operationId: z.string().uuid(),
+  })
+  .strict();
+export type UpdateExternalWorkspaceMemberRequest = z.infer<
+  typeof UpdateExternalWorkspaceMemberRequest
+>;
+export const UpdateExternalWorkspaceMemberResponse = z
+  .object({
+    subjectId: z.string(),
+    organizationMembershipId: z.string().uuid(),
+    permissions: z.array(Permission),
+    /** True when a previously held permission was removed. */
+    narrowed: z.boolean(),
+    replay: z.boolean(),
+  })
+  .strict();
+export type UpdateExternalWorkspaceMemberResponse = z.infer<
+  typeof UpdateExternalWorkspaceMemberResponse
 >;
 
 /** Uses the organization membership ID returned by lazy identity admission.

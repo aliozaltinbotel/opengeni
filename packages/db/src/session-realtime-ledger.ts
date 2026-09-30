@@ -1,4 +1,4 @@
-import { withLatestStartedSessionPolicy } from "./session-execution-policy";
+import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { createHash } from "node:crypto";
 
 import {
@@ -173,7 +173,10 @@ export type SessionRealtimeInboundEntryInput = {
 
 /** True when a delegation entry names any part of its turn's execution route. */
 export function realtimeDelegationRequestsRoute(
-  entry: Pick<SessionRealtimeInboundEntryInput, "kind" | "model" | "reasoningEffort" | "latencyMode">,
+  entry: Pick<
+    SessionRealtimeInboundEntryInput,
+    "kind" | "model" | "reasoningEffort" | "latencyMode"
+  >,
 ): boolean {
   return (
     entry.kind === "delegation_call" &&
@@ -1212,7 +1215,7 @@ async function admitRealtimeDelegationInTransaction(
   if (!session || session.accountId !== accountId || session.status === "cancelled") {
     throw new SessionRealtimeConflictError("REALTIME_NOT_FOUND", "Session not found");
   }
-  const [policy] = await withLatestStartedSessionPolicy(db, input.workspaceId, [session]);
+  const [policy] = await withEffectiveSessionPolicy(db, input.workspaceId, [session]);
   if (!policy) throw new Error("Realtime delegation session disappeared");
   // A routed delegation runs exactly the route the API resolved for it; an
   // unrouted one keeps the newest-started-turn policy (the historical behaviour).
@@ -1275,6 +1278,7 @@ async function admitRealtimeDelegationInTransaction(
       },
     },
     source: "api",
+    surface: "voice",
   });
   return {
     turnId: admitted.turnId,

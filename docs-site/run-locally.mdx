@@ -37,6 +37,10 @@ Connected Machines is off for fresh checkouts. Set `OPENGENI_SANDBOX_SELFHOSTED_
 
 The local stack runs in `local` access mode: a bootstrap account and workspace with a single `dev` user and broad permissions. It is for development only.
 
+By default the agent runs commands directly on your machine through the `local` sandbox, so the API, web app and infrastructure ports listen only on `127.0.0.1`. Set `OPENGENI_SANDBOX_BACKEND=docker` to run the agent in an isolated local container instead. Set `OPENGENI_DEV_BIND_HOST=0.0.0.0` only if other devices must reach the stack; anyone who can reach it can run commands as you.
+
+Because the local API has no login, it also refuses browser requests from other websites and answers only requests addressed to this computer, so a web page you visit cannot drive it. If you serve your own front end on another local port, list its origin in `OPENGENI_LOCAL_ALLOWED_ORIGINS` (for example `http://127.0.0.1:5173`). On Linux, Docker sandboxes get a narrow route to the API on the Docker network, so `OPENGENI_SANDBOX_BACKEND=docker` works without exposing the stack.
+
 <Note>
   Ports are chosen per checkout. If a default port is busy, the launcher picks a nearby free one and
   prints the URLs it actually used.
@@ -62,6 +66,8 @@ Wait for `OpenGeni dev stack ready` before opening the printed web URL. Infrastr
 | `OPENGENI_MODEL_PROVIDERS_JSON`         | Additional OpenAI-compatible providers and their model catalogs                           |
 | `OPENGENI_SANDBOX_BACKEND`              | Where sessions run: `local` (default), `docker`, `modal`, `none`, or a cloud provider     |
 | `OPENGENI_SANDBOX_PREPARATION_PROFILES` | Opt-in profiles such as `azure` or `github` that pre-authenticate CLIs inside the sandbox |
+
+Connect Anthropic API keys from workspace or organization **Settings → Models**. Claude subscription setup is separately available when the operator enables `OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED=true` (default off). Subscription tokens use your Claude plan limits; Anthropic API keys use API billing. Setup makes no model calls.
 
 Model provider credentials never reach the agent sandbox unless you allow them explicitly. The repository's [model providers guide](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/model-providers.md) covers inference configuration in depth.
 

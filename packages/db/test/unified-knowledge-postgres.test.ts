@@ -25,6 +25,9 @@ import {
   nestedPostgresSqlState,
   withSessionRlsActorContext,
   withRlsContext,
+  KnowledgeEntryIdRequiredError,
+  KnowledgeEntryIdTakenError,
+  knowledgeEntryIdForOperation,
 } from "../src";
 import { applySkillLifecycle } from "../src/skills";
 import { createTaskNote, archiveTaskNote } from "../src/task-notes";
@@ -258,6 +261,43 @@ describe("unified Knowledge storage", () => {
     expect(
       (await getAgentLearningSettings(client.db, f.human, "workspace", source)).settings,
     ).toEqual({});
+  });
+
+  test("unsaved workspace and personal policies are automatic; saved review and off still inherit", async () => {
+    const f = await fixture();
+    const automatic = {
+      knowledge: "automatic",
+      instructions: "automatic",
+      skills: "automatic",
+    } as const;
+    for (const scope of ["workspace", "personal"] as const) {
+      expect(await getAgentLearningSettings(client.db, f.human, scope)).toMatchObject({
+        version: 0,
+        settings: automatic,
+      });
+    }
+    const initial = await attempt(f, null);
+    expect((await freezeAgentLearningPolicy(client.db, initial.agent)).effective).toEqual(
+      automatic,
+    );
+    const saved = { knowledge: "off", instructions: "review_first", skills: "off" } as const;
+    await saveAgentLearningSettings(client.db, f.human, {
+      scope: "workspace",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      settings: saved,
+    });
+    expect((await getAgentLearningSettings(client.db, f.human, "workspace")).settings).toEqual(
+      saved,
+    );
+    expect((await freezeAgentLearningPolicy(client.db, initial.agent)).effective).toEqual(
+      automatic,
+    );
+    const subsequent = await attempt(f, null);
+    expect((await freezeAgentLearningPolicy(client.db, subsequent.agent)).effective).toEqual(saved);
+    expect((await getAgentLearningSettings(client.db, f.human, "personal")).settings).toEqual(
+      automatic,
+    );
   });
 
   for (const kind of ["background_command_result", "session_wait_timeout"] as const) {
@@ -602,6 +642,48 @@ describe("unified Knowledge storage", () => {
     );
     const other = await attempt(f, "review_first");
     await fails(saveKnowledgeEntry(client.db, other.agent, request), "23505");
+  });
+
+  test("a create may omit entryId, replays by operation, and names a hidden id collision", async () => {
+    const f = await fixture();
+    const { agent } = await attempt(f, "automatic");
+    const request = {
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+      entry: { kind: "fact" as const, title: "Heron", content: "Staging runs on port 24884." },
+    };
+    const saved = await saveKnowledgeEntry(client.db, agent, request);
+    expect(saved.entryId).toBe(knowledgeEntryIdForOperation(f.accountId, request.operationId));
+    expect(await saveKnowledgeEntry(client.db, agent, request)).toEqual({
+      ...saved,
+      replayed: true,
+    });
+
+    await expect(
+      saveKnowledgeEntry(client.db, agent, {
+        ...request,
+        operationId: crypto.randomUUID(),
+        expectedVersion: 1,
+      }),
+    ).rejects.toBeInstanceOf(KnowledgeEntryIdRequiredError);
+    await expect(
+      saveKnowledgeEntry(client.db, agent, {
+        ...request,
+        operationId: crypto.randomUUID(),
+        entryId: "00000000-0000-0000-0000-000000000000",
+      }),
+    ).rejects.toThrow("omit it to create a new entry");
+
+    // Another organization's entry is invisible here but still owns its id.
+    const other = await fixture();
+    const hidden = await save(other.human, "Someone else's fact");
+    await expect(
+      saveKnowledgeEntry(client.db, agent, {
+        ...request,
+        operationId: crypto.randomUUID(),
+        entryId: hidden.entryId,
+      }),
+    ).rejects.toBeInstanceOf(KnowledgeEntryIdTakenError);
   });
 
   test("review reliability: hybrid search preserves lexical relevance before indexing", async () => {

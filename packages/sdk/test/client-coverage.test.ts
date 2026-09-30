@@ -21,6 +21,22 @@ const DOCUMENT_ID = "88888888-8888-4888-8888-888888888888";
 const TURN_A = "99999999-9999-4999-8999-999999999991";
 const TURN_B = "99999999-9999-4999-8999-999999999992";
 
+test("workspace-only file reads use a distinct route that older APIs reject", async () => {
+  const requests: string[] = [];
+  const client = new OpenGeniEmbeddingClient({
+    baseUrl: "https://api.example.test",
+    apiKey: "dummy",
+    fetch: async (input) => {
+      requests.push(String(input));
+      return Response.json({ content: "", encoding: "base64", sizeBytes: 0 });
+    },
+  });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a", workspaceOnly: true });
+  await client.fsRead(WORKSPACE_ID, SESSION_ID, { path: "a" });
+  expect(requests[0]).toEndWith("/fs/read-workspace");
+  expect(requests[1]).toEndWith("/fs/read");
+});
+
 type RecordedRequest = {
   url: string;
   method: string;
@@ -845,6 +861,18 @@ describe("OpenGeniClient access + workspaces", () => {
 });
 
 describe("OpenGeniClient scheduled tasks", () => {
+  test("sends a model-only patch without inventing a replacement config", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
+    await client.updateScheduledTask(WORKSPACE_ID, TASK_ID, {
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.method).toBe("PATCH");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      agentConfigPatch: { model: "example-model", reasoningEffort: "high" },
+    });
+  });
+
   test("normalizes Connected Machine working directories before sending", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: TASK_ID }));
     await client.createScheduledTask(WORKSPACE_ID, {
@@ -904,6 +932,55 @@ describe("OpenGeniClient scheduled tasks", () => {
       `DELETE /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}`,
       `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/runs?limit=5`,
     ]);
+  });
+
+  test("refreshes access against the reviewed head and lists access attention", async () => {
+    const digest = "a".repeat(64);
+    const { client, requests } = makeClient((request) =>
+      new URL(request.url).pathname.endsWith("/attention")
+        ? jsonResponse({
+            tasks: [
+              {
+                taskId: TASK_ID,
+                taskName: "Post the daily summary",
+                executionDigest: digest,
+                runId: TASK_ID,
+                firedAt: "2026-09-17T08:00:00.000Z",
+                unavailableAccounts: [{ id: "gmail", name: "Gmail" }],
+                failures: [
+                  {
+                    serverId: "slack",
+                    name: "Slack",
+                    providerDomain: "slack.com",
+                    reason: "personal_authority_unavailable",
+                    count: 2,
+                    firstOccurredAt: "2026-09-17T08:00:05.000Z",
+                  },
+                ],
+              },
+            ],
+          })
+        : jsonResponse({ id: TASK_ID }),
+    );
+    await client.refreshScheduledTaskAccess(WORKSPACE_ID, TASK_ID, {
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
+    const attention = await client.listScheduledTaskAccessAttention(WORKSPACE_ID);
+    expect(attention.map((item) => item.failures[0]?.reason)).toEqual([
+      "personal_authority_unavailable",
+    ]);
+    expect(attention[0]?.unavailableAccounts).toEqual([{ id: "gmail", name: "Gmail" }]);
+    expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
+      [
+        `POST /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/${TASK_ID}/refresh-access`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/scheduled-tasks/attention`,
+      ],
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      executionDigest: digest,
+      leaveOut: { connectors: ["notion"], openGeniTools: ["browser_read"] },
+    });
   });
 });
 
@@ -2278,6 +2355,8 @@ describe("OpenGeniClient billing", () => {
       buckets: [],
       workspaces: [],
       nextWorkspaceCursor: null,
+      personalWorkspaces: [],
+      personalWorkspaceCount: 0,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(

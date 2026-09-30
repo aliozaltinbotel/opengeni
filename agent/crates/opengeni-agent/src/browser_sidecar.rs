@@ -109,9 +109,10 @@ impl BrowserSidecarManager {
                 .map(|(_, sidecar)| sidecar)
                 .collect::<Vec<_>>()
         };
-        for sidecar in sidecars {
-            stop_sidecar(sidecar).await;
-        }
+        // Every authority receives its cooperative signal immediately. Serial
+        // per-scope waits multiply the stop budget and let the service manager
+        // kill later scopes before their profile cleanup even starts.
+        futures::future::join_all(sidecars.into_iter().map(stop_sidecar)).await;
     }
 
     async fn start(
@@ -190,20 +191,14 @@ impl BrowserSidecarManager {
                 .await);
             }
         };
-        if ready.service != "opengeni-browserd"
-            || ready.status != "ready"
-            || ready.protocol_version != 1
-            || ready.runtime_build_id != expected_runtime_build_id()
-            || ready.hostname != "127.0.0.1"
-            || ready.port == 0
-        {
+        if let Some(mismatches) = ready_document_mismatches(&ready, admin_token) {
             return Err(stop_with_startup_diagnostic(
                 child,
                 stderr_task,
                 stderr_diagnostic,
                 admin_token,
                 PlatformError::os(
-                    format!("browser controller sidecar returned an incompatible ready document (expected runtime build {}; received {})", expected_runtime_build_id(), ready.runtime_build_id.chars().take(128).collect::<String>()),
+                    format!("browser controller sidecar returned an incompatible ready document: {mismatches}"),
                 ),
             )
             .await);
@@ -367,9 +362,14 @@ impl BrowserControlBackend for BrowserSidecarManager {
 
 async fn stop_sidecar(mut sidecar: Sidecar) {
     signal_sidecar_termination(&mut sidecar.child);
-    if tokio::time::timeout(Duration::from_secs(10), sidecar.child.wait())
-        .await
-        .is_err()
+    if tokio::time::timeout(
+        Duration::from_secs(
+            opengeni_agent_platform::service::BROWSER_SIDECAR_SHUTDOWN_TIMEOUT_SECS,
+        ),
+        sidecar.child.wait(),
+    )
+    .await
+    .is_err()
     {
         let _ = sidecar.child.kill().await;
         let _ = sidecar.child.wait().await;
@@ -418,6 +418,49 @@ struct ReadyDocument {
 
 fn expected_runtime_build_id() -> &'static str {
     option_env!("OPENGENI_RUNTIME_BUILD_ID").unwrap_or("development")
+}
+
+fn ready_document_mismatches(ready: &ReadyDocument, admin_token: &str) -> Option<String> {
+    let mut mismatches = Vec::new();
+    for (field, expected, received) in [
+        ("service", "opengeni-browserd", ready.service.as_str()),
+        ("status", "ready", ready.status.as_str()),
+        (
+            "runtimeBuildId",
+            expected_runtime_build_id(),
+            ready.runtime_build_id.as_str(),
+        ),
+        ("hostname", "127.0.0.1", ready.hostname.as_str()),
+    ] {
+        if received != expected {
+            mismatches.push(format!(
+                "{field} expected {}, received {}",
+                bounded_ready_value(expected, admin_token),
+                bounded_ready_value(received, admin_token)
+            ));
+        }
+    }
+    if ready.protocol_version != 1 {
+        mismatches.push(format!(
+            "protocolVersion expected 1, received {}",
+            ready.protocol_version
+        ));
+    }
+    if ready.port == 0 {
+        mismatches.push("port expected nonzero, received 0".to_string());
+    }
+    (!mismatches.is_empty()).then(|| mismatches.join("; "))
+}
+
+fn bounded_ready_value(value: &str, admin_token: &str) -> String {
+    format!(
+        "{:?}",
+        value
+            .replace(admin_token, "[redacted]")
+            .chars()
+            .take(128)
+            .collect::<String>()
+    )
 }
 
 async fn read_ready_line(stdout: tokio::process::ChildStdout) -> PlatformResult<ReadyDocument> {
@@ -765,6 +808,93 @@ mod tests {
         let ready =
             serde_json::from_str::<ReadyDocument>(&current).expect("current ready document");
         assert_eq!(ready.runtime_build_id, expected_runtime_build_id());
+        assert!(ready_document_mismatches(&ready, "test-secret").is_none());
+    }
+
+    #[test]
+    fn incompatible_ready_document_names_every_mismatched_field() {
+        let ready = ReadyDocument {
+            service: "other-service".to_string(),
+            status: "starting".to_string(),
+            protocol_version: 2,
+            runtime_build_id: "other-build".to_string(),
+            _computer_available: true,
+            hostname: "::1".to_string(),
+            port: 0,
+        };
+        let mismatches =
+            ready_document_mismatches(&ready, "test-secret").expect("mismatched document");
+        for field in [
+            "service expected \"opengeni-browserd\", received \"other-service\"",
+            "status expected \"ready\", received \"starting\"",
+            "runtimeBuildId expected",
+            "received \"other-build\"",
+            "hostname expected \"127.0.0.1\", received \"::1\"",
+            "protocolVersion expected 1, received 2",
+            "port expected nonzero, received 0",
+        ] {
+            assert!(mismatches.contains(field), "missing {field}: {mismatches}");
+        }
+        assert_eq!(
+            bounded_ready_value(&format!("{}\nsecret", "x".repeat(128)), "test-secret"),
+            format!("\"{}\"", "x".repeat(128))
+        );
+        assert_eq!(
+            bounded_ready_value("before-test-secret-after", "test-secret"),
+            "\"before-[redacted]-after\""
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shutdown_waits_for_slow_owned_cleanup_across_scopes_concurrently() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let temporary = tempfile::tempdir().expect("temporary sidecar root");
+        let binary = temporary.path().join("slow-browserd");
+        // The optional fixture runs real browsers in the isolated acceptance
+        // environment. The default needs only POSIX sh, including on macOS CI.
+        let script = if let Ok(fixture) = std::env::var("OPENGENI_TEST_SLOW_BROWSERD") {
+            std::fs::read_to_string(fixture)
+                .expect("read slow browser fixture")
+                .replace("@RUNTIME_BUILD_ID@", expected_runtime_build_id())
+        } else {
+            format!(
+                "#!/bin/sh\nmkdir -p \"$OPENGENI_BROWSERD_ROOT\"\ntrap 'sleep 12; touch \"$OPENGENI_BROWSERD_ROOT/cleaned\"; exit 0' INT\nprintf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",\"protocolVersion\":1,\"runtimeBuildId\":\"{}\",\"computer\":false,\"hostname\":\"127.0.0.1\",\"port\":12345}}'\nwhile :; do sleep 1; done\n",
+                expected_runtime_build_id()
+            )
+        };
+        std::fs::write(&binary, script).expect("write slow browserd");
+        std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o700))
+            .expect("make slow browserd executable");
+        let config = temporary.path().join("config");
+        let manager = BrowserSidecarManager::with_binary(&config, &binary).expect("manager");
+        for scope in ["slow-first", "slow-second"] {
+            manager
+                .ensure(&v1::BrowserControlEnsureRequest {
+                    scope_id: scope.to_string(),
+                    scope_generation: "generation".to_string(),
+                    admin_token: "s".repeat(32),
+                    allowed_origins: vec![],
+                })
+                .await
+                .expect("start slow sidecar");
+        }
+        let started = std::time::Instant::now();
+        manager.shutdown().await;
+        assert!(
+            started.elapsed() < Duration::from_secs(23),
+            "scope drains must overlap"
+        );
+        for scope in ["slow-first", "slow-second"] {
+            assert!(
+                config
+                    .join("browserd/scopes")
+                    .join(scope_storage_key(scope))
+                    .join("state/cleaned")
+                    .is_file(),
+                "owned cleanup must finish after old 10s cutoff"
+            );
+        }
     }
 
     #[cfg(unix)]

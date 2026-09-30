@@ -61,7 +61,7 @@ import {
   initializeContextCompactionMetrics,
   initializeWorkerOutcomeMetrics,
   normalizeTurnTaskQueueStats,
-  observabilityEventLogger,
+  observabilityEventBusOptions,
   startContextCompactionPendingMonitor,
   startSessionRecoveryMonitor,
   startTurnCapacityMonitor,
@@ -108,6 +108,9 @@ export {
   type HostEventExport,
   type HostEventExportBatch,
   type HostEventSink,
+  type HostLifecycleFactExport,
+  type HostLifecycleFactExportBatch,
+  type HostLifecycleFactSink,
   type HostUsageExport,
   type HostUsageExportBatch,
   type HostUsageSink,
@@ -1173,7 +1176,7 @@ export async function startWorker() {
           controlPlaneAuth
             ? { user: controlPlaneAuth.user, pass: controlPlaneAuth.password }
             : undefined,
-          { logger: observabilityEventLogger(observability) },
+          observabilityEventBusOptions(observability),
         ),
       { ...retryOptions, onRetry },
     );

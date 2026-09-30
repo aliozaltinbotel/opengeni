@@ -8,8 +8,57 @@ export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,
+  SessionMessagePreview,
+  SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export type { ServiceContext } from "./embedding-client";
+export {
+  OPENGENI_WEBHOOK_HEADERS,
+  OpenGeniSignatureError,
+  WORKSPACE_WEBHOOK_EVENT_TYPES,
+  signOpenGeniPayload,
+  verifyCredentialProviderRequest,
+  verifyOpenGeniSignature,
+  verifyWebhookEvent,
+} from "./workspace-integrations";
+export type {
+  CreateOrganizationWebhookRequest,
+  CreateOrganizationWebhookResponse,
+  CredentialProviderMcpHeaders,
+  CredentialProviderMcpMaterial,
+  GetOrganizationCredentialProviderResponse,
+  InitiatingHuman,
+  IntegrationWorkspaceFilter,
+  ListOrganizationWebhookDeliveriesResponse,
+  ListOrganizationWebhooksResponse,
+  OrganizationCredentialProvider,
+  OrganizationWebhook,
+  OrganizationWebhookDelivery,
+  PutOrganizationCredentialProviderRequest,
+  PutOrganizationCredentialProviderResponse,
+  RotateWorkspaceCredentialProviderSecretResponse,
+  RotateOrganizationCredentialProviderSecretResponse,
+  RotateWorkspaceWebhookSecretResponse,
+  RotateOrganizationWebhookSecretResponse,
+  UpdateOrganizationWebhookRequest,
+  CreateWorkspaceWebhookRequest,
+  CreateWorkspaceWebhookResponse,
+  CredentialProviderRequest,
+  CredentialProviderResponse,
+  GetWorkspaceCredentialProviderResponse,
+  ListWorkspaceWebhookDeliveriesResponse,
+  ListWorkspaceWebhooksResponse,
+  PutWorkspaceCredentialProviderRequest,
+  PutWorkspaceCredentialProviderResponse,
+  UpdateWorkspaceWebhookRequest,
+  WorkspaceCredentialProvider,
+  WorkspaceSandboxImages,
+  WorkspaceWebhook,
+  WorkspaceWebhookDelivery,
+  WorkspaceWebhookEvent,
+  WorkspaceWebhookEventType,
+} from "./workspace-integrations";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type { ToolDisplayMetadata } from "@opengeni/contracts";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
@@ -120,6 +169,8 @@ export {
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
+export { parseDeprecationNotice } from "./deprecation";
+export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export {
   AUTOMATIC_SESSION_TITLE_FALLBACK,
   deriveAutomaticSessionTitlePreview,
@@ -146,6 +197,25 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
+export { createSessionProxyHandler } from "./session-proxy";
+export type {
+  SessionProxyContext,
+  SessionProxyCreateInput,
+  SessionProxyHandlerOptions,
+  SessionProxyMessageExtras,
+  SessionProxyMessageInput,
+  SessionProxyResolution,
+  SessionProxyResolve,
+} from "./session-proxy";
+export {
+  openGeniConsolePath,
+  parseOpenGeniLink,
+  isReservedOpenGeniLink,
+  openGeniLinkScheme,
+  parseRetainedFileReference,
+  parseSandboxLink,
+} from "./message-links";
+export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
@@ -394,6 +464,7 @@ export type {
   SkillPublicationReceipt,
   SkillSourceReleaseReceipt,
   SaveWorkspaceSkillRequest,
+  RemoveWorkspaceSkillRequest,
   ApplyWorkspaceSkillRevisionRequest,
 } from "./skills";
 export type {
@@ -589,6 +660,8 @@ export type {
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
+  DefaultModelSelection,
+  DefaultModelSelectionSource,
   WorkspaceGatewayCustomModel,
   WorkspaceGatewayCustomModelsResponse,
   CreateWorkspaceGatewayCustomModelRequest,
@@ -598,6 +671,8 @@ export type {
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   OrganizationModelProviderKind,
+  ClaudeSubscriptionUsage,
+  ClaudeUsageWindow,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -609,6 +684,7 @@ export type {
   WorkspaceRealtimeModelCatalogItem,
   WorkspaceRealtimeModelCatalogResponse,
   CodexAccount,
+  CodexPlanExcludedModel,
   CodexAccountOverview,
   CodexAccountsResponse,
   SessionCodexAccountsResponse,
@@ -682,6 +758,7 @@ export type {
   OpenGeniSlackBotInstallStart,
   SlackInstallationBinding,
   SlackInstallationBindingState,
+  ListScheduledTaskAccessAttentionResponse,
   ListSlackInstallationBindingsResponse,
   SlackChannelRoute,
   SlackChannelRouteListResponse,
@@ -873,11 +950,17 @@ export type {
   SandboxCapabilityName,
   SandboxOs,
   ScheduledTask,
+  ScheduledTaskAccessAttention,
+  ScheduledTaskAccessConnector,
+  ScheduledTaskAccessFailureReason,
   ScheduledTaskAgentConfig,
   ScheduledTaskAgentConfigInput,
   ScheduledTaskDayOfWeek,
   ScheduledTaskOverlapPolicy,
+  ScheduledTaskPolicyDrift,
+  RefreshScheduledTaskAccessRequest,
   ScheduledTaskRun,
+  ScheduledTaskRunAccessFailure,
   ScheduledTaskRunMode,
   ScheduledTaskRunStatus,
   ScheduledTaskAction,

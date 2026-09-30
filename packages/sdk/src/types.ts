@@ -3,6 +3,8 @@ export type {
   SessionMessageSearchRequest,
   SessionMessageSearchMatch,
   SessionMessageSearchResponse,
+  SessionMessagePreview,
+  SessionMessagePreviewReference,
 } from "./session-message-search";
 
 export type BundledSkillId =
@@ -568,6 +570,12 @@ export type RepositoryResourceRef = {
   connectionId?: string | undefined;
   githubInstallationId?: number | undefined;
   githubRepositoryId?: number | undefined;
+  /**
+   * Best-effort materialization: a failed clone logs a warning and the
+   * session continues without this repository instead of failing sandbox
+   * setup. Omit it to keep a failed clone fatal.
+   */
+  optional?: boolean | undefined;
 };
 
 /** Value mirror of `@opengeni/contracts`; parity-tested without importing it from ordinary SDK entries. */
@@ -667,12 +675,16 @@ export type SessionMcpCredentialUpdateInput = {
 
 export type RotateSessionMcpCredentialsRequest = {
   operationKey: string;
-  updates: Array<{
-    id: string;
-    expectedCredentialVersion: number;
-    expectedServerUrl: string;
-    headers: Record<string, string>;
-  }>;
+  updates: Array<
+    {
+      id: string;
+      expectedCredentialVersion: number;
+      expectedServerUrl: string;
+    } & (
+      | { headers: Record<string, string> }
+      | { nativeConnectionId: string; replacementServerUrl?: string | undefined }
+    )
+  >;
 };
 
 export type RotateSessionMcpCredentialsReceipt = {
@@ -1499,6 +1511,12 @@ export type Session = {
    * admission; `portable` ⇒ plaintext compaction and free provider switching.
    */
   codexCompactionMode: "remote_v2" | "portable";
+  /**
+   * The `code_search` decision frozen at create. A turn gets the tool only when
+   * this is true, the deployment still offers it, the workspace is not Off, and
+   * the turn has POSIX compute.
+   */
+  codeSearchEnabled?: boolean;
   /** Personal (authenticated subject) workspace pin state, never workspace-global. */
   pinned?: boolean;
   /** Stable pin ordering key; null when this subject has not pinned the session. */
@@ -2002,6 +2020,7 @@ export const SESSION_EVENT_TYPES = [
   "session.personal_resources.attached",
   "session.mcp.approval_policy.updated",
   "session.tool_policy.updated",
+  "session.model_settings.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   "codex.account.selection.changed",
@@ -2226,6 +2245,15 @@ export type ToolAuthNeededPayload = {
         requiredVariables: string[];
       }
     | undefined;
+  /** Agent suggestion; never a connection or permission grant. */
+  setupRequest?:
+    | {
+        kind: "mcp";
+        name: string;
+        endpointUrl: string;
+        rationale: string;
+      }
+    | undefined;
 };
 
 // Payload shapes for the high-traffic event types. `SessionEvent.payload` is
@@ -2237,6 +2265,11 @@ export type AgentToolCallCreatedPayload = {
   name: string;
   arguments: unknown;
   raw?: unknown | undefined;
+  /**
+   * Content-free analytics family: an OpenGeni first-party tool name,
+   * `integration:<reviewed domain>`, or `custom`. Absent when unclassified.
+   */
+  toolFamily?: string | undefined;
 };
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };
@@ -2457,6 +2490,8 @@ export type FsListBatchRequest = { requests: FsListRequest[] };
 export type FsListBatchResponse = { results: FsListResponse[] };
 export type FsReadRequest = {
   path: string;
+  /** Confine this read to the session's working directory, refusing symlinks. */
+  workspaceOnly?: boolean;
   encoding?: FsEncoding;
   maxBytes?: number;
   route?: FileSystemRouteIdentity;
@@ -2869,6 +2904,8 @@ export type ScheduledTaskAgentConfig = {
   tools: ToolRef[];
   metadata: Record<string, unknown>;
   slackBotConnectionId?: string | undefined;
+  /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
+  slackBotChannelId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -2877,6 +2914,8 @@ export type ScheduledTaskAgentConfig = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflight | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /** Seconds a run may wait on a person before the scheduler answers for it. */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type ScopedKnowledgeScope =
@@ -2945,6 +2984,45 @@ export type ScheduledTask = {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  /** Read-only: what `refreshScheduledTaskAccess` would change, for a viewer who can act on it. */
+  policyDrift?: ScheduledTaskPolicyDrift | null | undefined;
+};
+
+/** One connector named in a scheduled task's access report. */
+export type ScheduledTaskAccessConnector = {
+  id: string;
+  name: string;
+};
+
+/**
+ * What a scheduled task's frozen connectors, connector accounts and OpenGeni
+ * tools lack compared with what its owner would get by saving it again now.
+ */
+export type ScheduledTaskPolicyDrift = {
+  /** Workspace default connectors that new schedules get and this one lacks. */
+  missingConnectors: ScheduledTaskAccessConnector[];
+  /** Connectors this schedule names that this workspace no longer sets up; refresh drops them. */
+  unavailableConnectors: ScheduledTaskAccessConnector[];
+  /** Default OpenGeni tools missing from an agent-created task's frozen tools. */
+  missingOpenGeniTools: FirstPartyMcpToolName[];
+  /** Connectors whose chosen account can no longer be used by this schedule. */
+  unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** Connectors this schedule has no account for, although one is now available. */
+  attachableAccounts: ScheduledTaskAccessConnector[];
+  /** Whether this viewer may run the refresh (a signed-in person, not a key or agent). */
+  canRefresh: boolean;
+};
+
+/** Re-freeze with the caller's current authority; `executionDigest` is the reviewed head. */
+export type RefreshScheduledTaskAccessRequest = {
+  executionDigest: string;
+  /** Default connectors and OpenGeni tools to keep off; only narrows what the refresh adds. */
+  leaveOut?:
+    | {
+        connectors?: string[] | undefined;
+        openGeniTools?: FirstPartyMcpToolName[] | undefined;
+      }
+    | undefined;
 };
 
 export type CreateSessionRequest = {
@@ -3161,6 +3239,7 @@ export type FirstPartyMcpToolName =
   | "rig_promote"
   | "sessions_list"
   | "session_get"
+  | "session_set_model"
   | "session_events"
   | "session_wait"
   | "command_read"
@@ -3199,6 +3278,7 @@ export type FirstPartyMcpToolName =
   | "environment_set_variable"
   | "capability_catalog_search"
   | "capability_authorization_request"
+  | "custom_mcp_setup_request"
   | "github_connect_link"
   | "github_repositories_list"
   | "social_connections_list"
@@ -3238,8 +3318,11 @@ export type FirstPartyMcpToolName =
   | "slack_bot_list_files"
   | "slack_bot_file_info"
   | "slack_bot_file_content"
+  | "slack_bot_upload_file"
   | "slack_bot_post_message"
   | "slack_bot_delete_message"
+  | "slack_bot_prepare_message"
+  | "slack_bot_send_prepared_message"
   | "fiken_companies_list"
   | "fiken_contacts_list"
   | "fiken_contact_create"
@@ -3359,7 +3442,7 @@ export type ClientModel = {
   /** Provider id (e.g. `openai`, `azure`, or a registry provider id). */
   provider: string;
   providerLabel: string;
-  api: "responses" | "chat";
+  api: "responses" | "chat" | "anthropic-messages";
   source?: "opengeni" | "codex" | "supergrok" | "workspace_gateway" | "openrouter" | undefined;
   contextWindowTokens?: number | undefined;
   schemaVersion?: 1 | undefined;
@@ -3367,7 +3450,7 @@ export type ClientModel = {
   deployment?:
     | {
         upstreamModelId: string;
-        wireApi: "responses" | "chat";
+        wireApi: "responses" | "chat" | "anthropic-messages";
       }
     | undefined;
   executionLimits?:
@@ -3421,8 +3504,24 @@ export type WorkspaceModelCatalogModel = ClientModel & {
   availability: ModelAvailabilityV1;
 };
 
+/** Why a new chat or scheduled task without an explicit model gets its default. */
+export type DefaultModelSelectionSource = "workspace" | "subscription" | "credits" | "deployment";
+
+export type DefaultModelSelection = {
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  source: DefaultModelSelectionSource;
+};
+
 export type WorkspaceModelCatalogResponse = {
   models: WorkspaceModelCatalogModel[];
+  /** Default for new chats and scheduled tasks that name no model. */
+  defaultSelection?: DefaultModelSelection | undefined;
+  /**
+   * The default this workspace would use once its organization holds an
+   * OpenGeni credit balance. Null when the deployment does not bill credits.
+   */
+  creditsSelection?: DefaultModelSelection | null | undefined;
 };
 
 export type WorkspaceGatewayCustomModel = {
@@ -3459,7 +3558,34 @@ export type CreateWorkspaceOpenRouterCustomModelRequest = CreateWorkspaceGateway
 
 export type DeleteWorkspaceOpenRouterCustomModelRequest = DeleteWorkspaceGatewayCustomModelRequest;
 
-export type OrganizationModelProviderKind = "vercel_gateway" | "openrouter";
+export type OrganizationModelProviderKind =
+  | "vercel_gateway"
+  | "openrouter"
+  | "anthropic"
+  | "claude_subscription";
+
+export type ClaudeUsageWindow = {
+  id:
+    | "five_hour"
+    | "seven_day"
+    | "seven_day_opus"
+    | "seven_day_sonnet"
+    | "seven_day_overage_included"
+    | "overage";
+  usedPercent: number | null;
+  resetsAt: string | null;
+  status: "allowed" | "allowed_warning" | "rejected" | null;
+  observedAt: string;
+};
+export type ClaudeSubscriptionUsage = {
+  connected: boolean;
+  credentialVersion: number | null;
+  windows: ClaudeUsageWindow[];
+  observedAt: string | null;
+  source: "response_headers" | "provider" | null;
+  refreshStatus: "not_checked" | "available" | "scope_required" | "unavailable" | "reconnect";
+  refreshCheckedAt: string | null;
+};
 
 export type OrganizationModelProviderConnection = {
   providerKind: OrganizationModelProviderKind;
@@ -3473,6 +3599,7 @@ export type UpsertOrganizationModelProviderConnectionRequest = {
   operationId: string;
   expectedVersion?: number | undefined;
   apiKey: string;
+  claudeIdentity?: { accountUuid: string; deviceId: string } | undefined;
 };
 
 export type RevokeOrganizationModelProviderConnectionRequest = {
@@ -3583,6 +3710,7 @@ export type CodexUsagePayload = {
     meteredFeature: string;
     fiveHour: CodexUsageWindow | null;
     weekly: CodexUsageWindow | null;
+    unknownWindowExhausted: boolean;
   }>;
   credits?: {
     hasCredits: boolean;
@@ -3590,6 +3718,16 @@ export type CodexUsagePayload = {
     overageLimitReached: boolean;
     balance: string;
   };
+};
+
+/** One model a Codex account's current ChatGPT plan was proven not to include. */
+export type CodexPlanExcludedModel = {
+  /** Product model id, for example `codex/gpt-6-sol`. */
+  model: string;
+  /** Display name, for example "GPT-6 Sol". */
+  label: string;
+  excludedAt: string;
+  retryAfter: string;
 };
 
 /** One connected Codex (ChatGPT) account in a workspace (multi-account P1). Metadata only. */
@@ -3600,6 +3738,17 @@ export type CodexAccount = {
   label?: string | null;
   email?: string | null;
   plan?: string | null;
+  /** When the provider last confirmed `plan` (connect, token refresh, or usage read). */
+  planCheckedAt?: string | null;
+  /** Plan before the most recent observed plan change, and when that change was seen. */
+  planChangedFrom?: string | null;
+  planChangedAt?: string | null;
+  /**
+   * Models the current plan was proven not to include. Each is skipped by
+   * automatic selection until `retryAfter` (one request then re-checks it), or
+   * until a different plan is observed, for example after refreshing usage.
+   */
+  planExcludedModels?: CodexPlanExcludedModel[];
   status: "active" | "needs_relogin" | "error";
   active: boolean;
   expiresAt?: string | null;
@@ -3893,8 +4042,14 @@ export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
  */
 export type ClientConfig = {
   deploymentRevision: string;
-  apiContractRevision: typeof OPENGENI_API_CONTRACT_REVISION;
+  /**
+   * The API's contract revision. Equals `OPENGENI_API_CONTRACT_REVISION` for a
+   * `"strict"` client (it throws otherwise); a `"compatible"` client may
+   * receive a newer revision from an additive deployment within its major.
+   */
+  apiContractRevision: string;
   serverVersion?: string | undefined;
+  claudeSubscriptionEnabled?: boolean | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -3910,13 +4065,31 @@ export type ClientConfig = {
       }
     | undefined;
   fileUploads: { enabled: boolean; maxSizeBytes: number };
+  /**
+   * `false` when a host's session proxy fixes the model policy
+   * (`createSessionProxyHandler({ modelSelection: false })`), so UIs hide the
+   * model picker. OpenGeni itself omits it.
+   */
+  modelSelection?: boolean | undefined;
+  /** Session proxy sandbox-path download opt-in; absent on native deployments. */
+  sandboxFiles?: boolean | undefined;
   /** Native browser microphone capture + server-side transcription capability. */
   voiceInput?: ClientVoiceInputConfig | undefined;
+  /**
+   * Whether the deployment offers the Jev-backed code_search agent tool and
+   * what workspaces without their own setting get (`split` = half of sessions).
+   */
+  codeSearch?: { available: boolean; workspaceDefault: "off" | "on" | "split" } | undefined;
   productAccessMode: ProductAccessMode;
   /** Client-safe hint for whether the console should offer Stripe checkout. */
   billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
   auth: ClientAuthConfig;
+  /**
+   * Product documentation for a console Help link. `null` means the deployment
+   * hides the link; absent means a server that predates the field.
+   */
+  documentationUrl?: string | null | undefined;
   analytics: {
     consentRequired: boolean;
     providers: {
@@ -4540,6 +4713,8 @@ export type WorkspaceSettings = {
   sessionDefaults?: WorkspaceSessionDefaults | undefined;
   /** Exact capability selection inherited by new top-level sessions. */
   sessionToolDefaults?: WorkspaceSessionToolDefaults | undefined;
+  /** Allowlisted sandbox image for new managed boxes; absent uses the deployment image. */
+  defaultSandboxImage?: string | null | undefined;
   voiceInput?: WorkspaceVoiceInputSettings | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   maxNestedAgentDepth?: number | null | undefined;
@@ -4547,6 +4722,8 @@ export type WorkspaceSettings = {
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   /** Whether agents may invoke the built-in structured human-input tool. */
   agentHumanInputEnabled?: boolean | undefined;
+  /** Whether agents get the Jev-backed code_search tool; absent or null follows the deployment. */
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   /** Slack orchestration notices; both default off when absent or invalid. */
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
@@ -4638,8 +4815,11 @@ export type UpdateWorkspaceSettingsRequest = {
   maxNestedAgentDepth?: number | null | undefined;
   codexCompactionDefault?: "remote_v2" | "portable" | undefined;
   agentHumanInputEnabled?: boolean | undefined;
+  codeSearchEnabled?: boolean | null | undefined;
   slackReactionSummon?: WorkspaceSlackReactionSummonSettings | undefined;
   slackOrchestrationNotices?: WorkspaceSlackOrchestrationNoticeSettings | undefined;
+  /** One of `listWorkspaceSandboxImages().images`, or null for the deployment image. */
+  defaultSandboxImage?: string | null | undefined;
   [key: string]: unknown;
 };
 
@@ -4657,7 +4837,12 @@ export type CreateWorkspaceRequest = {
 };
 
 export type EnsureWorkspaceRequest = {
-  accountId: string;
+  /**
+   * Owning organization id. An organization API key may omit it and the
+   * workspace is created in the key's own organization; every other caller
+   * must send it.
+   */
+  accountId?: string | undefined;
   externalSource: string;
   externalId: string;
   name: string;
@@ -5098,6 +5283,11 @@ export type NewSessionDraft = {
   model: string;
   reasoningEffort: ReasoningEffort;
   latencyMode: LatencyMode;
+  /**
+   * True when the person chose this model policy; false follows the resolved
+   * default for new chats. Absent from older servers.
+   */
+  modelProvided?: boolean | undefined;
   /** Absent on legacy drafts; null records an explicit Default-project selection. */
   selectedProjectChannelId?: string | null | undefined;
   options: NewSessionDraftOptions;
@@ -5220,6 +5410,13 @@ export type SandboxRecoveryProjection = {
   reason: string | null;
   checkpoint: SandboxRecoverySelection | null;
   operationId: string | null;
+  automaticAvailable?: boolean;
+  /** What an automatic Retry does: restore `checkpoint`, or continue on a new
+   * empty workspace because no usable checkpoint survived the sandbox loss. */
+  automaticLane?: "checkpoint" | "fresh_workspace";
+  /** For a timed recovery wait: the earliest time a Retry or a new message can
+   * let OpenGeni decide again. Nothing proceeds by itself before then. */
+  availableAt?: string;
 };
 export type SandboxRecoveryRequest = {
   operationId: string;
@@ -5379,6 +5576,8 @@ export type ScheduledTaskAgentConfigInput = {
   tools?: ToolRef[] | undefined;
   metadata?: Record<string, unknown> | undefined;
   slackBotConnectionId?: string | undefined;
+  /** Slack channel a person chose for this task's bot posts; requires slackBotConnectionId. */
+  slackBotChannelId?: string | undefined;
   model?: string | undefined;
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
@@ -5387,6 +5586,12 @@ export type ScheduledTaskAgentConfigInput = {
   executionClass?: "incident_telemetry" | undefined;
   incidentTelemetryPreflight?: IncidentTelemetryPreflightInput | undefined;
   maxNestedAgentDepth?: number | undefined;
+  /**
+   * Seconds a run's own turn may wait on a person (tool approval or structured
+   * question, 60 s - 30 days) before the scheduler rejects the approval / skips
+   * the question as a labelled system decision. Omitted: waits indefinitely.
+   */
+  approvalTimeoutSeconds?: number | undefined;
 };
 
 export type CreateAgentScheduledTaskRequest = {
@@ -5406,7 +5611,12 @@ export type CreateAgentScheduledTaskRequest = {
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
-  // The rig each run binds to (M3); active version resolved per fire.
+  /**
+   * Sandbox Environment each run binds to; its active version is resolved per
+   * fire. Omit to resolve it once at create: the workspace default (none for a
+   * Connected Machine task), or the target session's own environment for an
+   * existing-session task. `null` means none.
+   */
   rigId?: string | null | undefined;
   metadata?: Record<string, unknown> | undefined;
 };
@@ -5433,6 +5643,11 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   action?: ScheduledTaskAction | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
+  /** Lossless model defaults patch; cannot be combined with agentConfig replacement.
+   * Existing target/reusable sessions retain their own model and reasoning. */
+  agentConfigPatch?:
+    | { model?: string | undefined; reasoningEffort?: ReasoningEffort | undefined }
+    | undefined;
   status?: ScheduledTaskStatus | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
@@ -5505,8 +5720,107 @@ export type ScheduledTaskRun = {
   knowledgeSummary: KnowledgeSourceSyncRunSummary | null;
   completedAt: string | null;
   error: string | null;
+  admissionDiagnostic?:
+    | {
+        version: 1;
+        reason:
+          | "selected_account_unavailable"
+          | "owner_access_unavailable"
+          | "ambiguous_account"
+          | "parent_accounts_required"
+          | "selection_unavailable";
+        accounts: Array<{
+          serverId: string;
+          connectionId: string | null;
+          reason:
+            | "connector_unavailable"
+            | "account_not_visible"
+            | "account_inactive"
+            | "account_mismatch"
+            | "selection_unavailable";
+        }>;
+      }
+    | null
+    | undefined;
+  /**
+   * Why the scheduler refused this occurrence before running it; `error`
+   * equals `reason`. `retryable: true` (status `skipped`): a later occurrence
+   * runs once the condition clears. `retryable: false` (status `failed`):
+   * every occurrence is refused until the task or a resource it names changes.
+   */
+  admissionRefusal?: ScheduledTaskAdmissionRefusal | null | undefined;
+  /**
+   * This dispatched run's own turn is waiting on a person (tool approval or
+   * structured question) since `since`; `expiresAt` is when the task's
+   * `approvalTimeoutSeconds` answers for it (null: waits indefinitely).
+   */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
   createdAt: string;
   updatedAt: string;
+  /** Connectors this run could not use; projected only for a viewer who can act on the task. */
+  accessFailures?: ScheduledTaskRunAccessFailure[] | undefined;
+};
+
+export type ScheduledTaskRunAwaitingHuman = {
+  since: string;
+  expiresAt: string | null;
+};
+
+export type ScheduledTaskAdmissionRefusal = {
+  version: 1;
+  reason:
+    | "scheduled_authority_unavailable"
+    | "machine_target_unavailable"
+    | "machine_enrollment_inactive"
+    | "variable_set_unavailable"
+    | "rig_version_unavailable"
+    | "insufficient_credits"
+    | "monthly_model_cost_limit"
+    | "monthly_agent_run_limit"
+    | (string & {});
+  retryable: boolean;
+};
+
+export type ScheduledTaskAccessFailureReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed"
+  | "personal_authority_unavailable"
+  | "unsupported_auth"
+  | "resource_scope_unavailable";
+
+/** A connector a scheduled run's own turn could not use (a `tool.auth_needed` fact). */
+export type ScheduledTaskRunAccessFailure = {
+  serverId: string;
+  name: string;
+  providerDomain: string;
+  reason: ScheduledTaskAccessFailureReason;
+  count: number;
+  firstOccurredAt: string;
+};
+
+/**
+ * A schedule that needs its owner's attention: its latest run failed closed on
+ * connector access (`runId`, `failures`), and/or a chosen connector account can
+ * no longer be used so new runs cannot start (`unavailableAccounts`; `runId`
+ * and `firedAt` are null when only this applies).
+ */
+export type ScheduledTaskAccessAttention = {
+  taskId: string;
+  taskName: string;
+  /** The task head this item was computed against; a new head is a new notice. */
+  executionDigest: string;
+  runId: string | null;
+  firedAt: string | null;
+  failures: ScheduledTaskRunAccessFailure[];
+  unavailableAccounts: ScheduledTaskAccessConnector[];
+  /** The latest run is waiting on a person (tool approval or question) right now. */
+  awaitingHuman?: ScheduledTaskRunAwaitingHuman | null | undefined;
+};
+
+export type ListScheduledTaskAccessAttentionResponse = {
+  tasks: ScheduledTaskAccessAttention[];
 };
 
 // --- VariableSets -------------------------------------------------------------
@@ -7275,6 +7589,10 @@ export type GitHubRepository = {
   defaultBranch: string;
   accountLogin: string;
   accountType: string | null;
+  /** GitHub's archived flag, when the provider reported it. */
+  archived?: boolean | undefined;
+  /** GitHub's reported size in kilobytes, when reported. Zero means empty. */
+  sizeKb?: number | undefined;
 };
 
 export type GitHubRepositoryScope = "all" | "selected";
@@ -7857,6 +8175,8 @@ export type MachineRuntime = {
   updateChannel: "stable" | "beta" | null;
   desiredVersion: string | null;
   versionState: "unknown" | "current" | "outdated" | "ahead" | "updating" | "update_failed";
+  /** Required installer bootstrap when a legacy updater cannot safely replace the install. */
+  updateBlockedReason?: string | null | undefined;
   capabilities: MachineRuntimeCapabilities;
   update: MachineUpdateState | null;
 };

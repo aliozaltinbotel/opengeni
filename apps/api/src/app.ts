@@ -1,10 +1,24 @@
+import { registerWorkspaceModelProviderRoutes } from "./routes/workspace-model-providers";
 import { registerConnectCallbackReturns } from "./integrations/connect-callback-return";
 import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerWorkspaceIntegrationRoutes } from "./routes/workspace-integrations";
+import { registerOrganizationIntegrationRoutes } from "./routes/organization-integrations";
+import {
+  CLIENT_ERRORS_PATH,
+  isClientErrorReportRequest,
+  registerClientErrorRoutes,
+} from "./routes/client-errors";
+import {
+  ANALYTICS_CONSENT_PATH,
+  isAnalyticsConsentReportRequest,
+  registerAnalyticsConsentRoutes,
+} from "./routes/analytics-consent";
 import { codemodeSessionRequest } from "./codemode";
 import { SiteSessionPathError, OrganizationIntegrationDeniedError } from "@opengeni/contracts";
 import { registerModelConnectionAccessRoutes } from "./routes/model-connection-access";
 import {
   canonicalizeConfiguredModelId,
+  codeSearchDeploymentPolicy,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
@@ -44,6 +58,7 @@ import {
   ConnectAttemptConflictError,
   ConnectAttemptNotFoundError,
   configureChildLifecycleNotices,
+  configureCodeSearchDeploymentPolicy,
   configureWorkspaceControlRequestLockTimeoutMs,
   dbSql,
   getManagedAuthSessionSetSnapshot,
@@ -55,7 +70,7 @@ import {
 } from "@opengeni/db";
 import { requireSessionEventDurableFanoutCapability } from "@opengeni/events";
 import { githubAppBotIdentityWarnings } from "@opengeni/github";
-import { createObservability, withTraceContext } from "@opengeni/observability";
+import { createObservability, withTraceContext, withMcpTelemetry } from "@opengeni/observability";
 import { createObjectStorage } from "@opengeni/storage";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { handleMcpRequestWithClientAbort } from "./mcp/request-abort";
@@ -66,7 +81,21 @@ import { cors } from "hono/cors";
 import { getCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { ApiHttpError, workspaceControlBusyHttpError } from "./http/api-error";
+import {
+  isRequestBodyValidationError,
+  requestBodyValidationHttpError,
+  tagRequestJsonParseErrors,
+} from "./http/request-body";
+import { invalidPathIdentifierHttpError } from "./http/path-identifier";
+import { replaceTrustedClientAddressHeader } from "./http/request-source";
+import { unmatchedRoute } from "./http/unmatched-route";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
+import { bearerApiContractHeaderCompatibility } from "./http/api-contract-compat";
+import { deprecationHeadersMiddleware } from "./http/deprecation";
+import {
+  boundedRegisteredRouteLabel,
+  registeredHandlerRoutePath,
+} from "./http/registered-route-label";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   CodexCompactionV2ProviderLockedError,
@@ -144,7 +173,16 @@ import {
   BrowserControlTransportError,
 } from "@opengeni/runtime/sandbox";
 import { requireAccessKey } from "./http/auth";
+import {
+  publicListenerServesMetrics,
+  registerPrometheusMetricsRoute,
+} from "./http/metrics-listener";
 import { allowedCorsOrigin } from "./http/cors";
+import {
+  createLocalBrowserBoundary,
+  localBrowserRequestHost,
+  markLocalInternalDispatch,
+} from "./http/local-browser-boundary";
 import { withAccessGrantSessionRlsContext } from "./access-grant-rls";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -294,11 +332,17 @@ export function createAppComposition(deps: AppDependencies): {
   // Pause) run inside API-originated db commands; install the boot-validated
   // rollout flag once for this process.
   configureChildLifecycleNotices({ enabled: deps.settings.childLifecycleNoticesEnabled });
+  // Sessions created by this process freeze their code_search decision from
+  // the boot-parsed deployment policy.
+  configureCodeSearchDeploymentPolicy(codeSearchDeploymentPolicy(deps.settings));
   const managedEmailTransport =
     deps.managedEmailTransport ?? createManagedEmailTransport(deps.settings);
   assertManagedEmailTransportMetadata(managedEmailTransport);
+  const observability =
+    deps.observability ?? createObservability(deps.settings, { component: "api" });
   const managedAuth =
-    deps.managedAuth ?? createManagedAuth(deps.settings, deps.db, managedEmailTransport);
+    deps.managedAuth ??
+    createManagedAuth(deps.settings, deps.db, managedEmailTransport, { observability });
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
@@ -373,8 +417,6 @@ export function createAppComposition(deps: AppDependencies): {
   // concrete for routes; it throws SandboxResumeError when sandboxBackend=none.
   const sandboxClient = deps.sandboxClient ?? createApiSandboxClient(deps.settings);
   const resumeBoxById = deps.resumeBoxById ?? makeResumeBoxById(sandboxClient);
-  const observability =
-    deps.observability ?? createObservability(deps.settings, { component: "api" });
   if (
     managedAuth &&
     deps.settings.managedAuthSessionSetMode !== "legacy" &&
@@ -435,6 +477,39 @@ export function createAppComposition(deps: AppDependencies): {
     await next();
   });
 
+  // Unauthenticated local mode: admit only requests addressed to this computer
+  // and, when a browser sent them, from this stack's web app (see
+  // http/local-browser-boundary.ts). Runs before CORS so a refused preflight
+  // carries no CORS grant, and logs each distinct refused Host or Origin once
+  // because the browser shows only a generic CORS error. Null outside local
+  // development.
+  const localBrowserBoundary = createLocalBrowserBoundary(deps.settings, {
+    warn: (message, attributes) => observability.warn(message, attributes),
+  });
+  if (localBrowserBoundary) {
+    app.use("*", async (c, next) => {
+      const rejection = localBrowserBoundary.rejection(c.req.raw);
+      if (rejection) {
+        throw new ApiHttpError(rejection.status, {
+          code: "forbidden",
+          message: rejection.message,
+          retryable: false,
+          details: { code: rejection.code },
+        });
+      }
+      await next();
+    });
+  }
+
+  // Better Auth keys its rate limits and session addresses on a request
+  // header. Drop any caller-supplied copy everywhere and stamp the trusted
+  // source address on managed-auth routes before any route derives a Better
+  // Auth request from this one.
+  app.use("*", async (c, next) => {
+    replaceTrustedClientAddressHeader(c, deps.settings, c.req.path.startsWith("/v1/auth/"));
+    await next();
+  });
+
   app.use("*", async (c, next) => {
     const oauthToken = mcpOAuthBearerToken(c.req.raw);
     if (
@@ -465,6 +540,9 @@ export function createAppComposition(deps: AppDependencies): {
     exposeHeaders: [
       "Accept-Ranges",
       "Content-Range",
+      "Deprecation",
+      "Link",
+      "Sunset",
       "X-OpenGeni-Api-Contract",
       "X-OpenGeni-Actor-Epoch",
       "X-OpenGeni-Actor-State",
@@ -498,8 +576,25 @@ export function createAppComposition(deps: AppDependencies): {
       allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
   });
 
+  const localCors = localBrowserBoundary
+    ? cors({
+        ...corsHeaders,
+        credentials: true,
+        origin: (origin, c) =>
+          localBrowserBoundary.originAllowed(origin, localBrowserRequestHost(c.req.raw))
+            ? origin
+            : null,
+      })
+    : null;
+
   app.use("*", (c, next) => {
     const origin = c.req.header("origin");
+    if (localCors) {
+      // The boundary above already refused every other origin. Local mode
+      // never answers with wildcard CORS: a request without credentials acts
+      // as the local user, so any site could otherwise read its responses.
+      return origin ? localCors(c, next) : next();
+    }
     const middleware =
       origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
         ? credentialedCors
@@ -516,7 +611,17 @@ export function createAppComposition(deps: AppDependencies): {
     // Git packfiles must stay streaming and can legitimately exceed the JSON
     // request ceiling. The exact closed broker routes apply their own method,
     // content-type, authority, and idle-deadline checks.
-    if (isPersonalGitHubGitBrokerRequest(c.req.method, new URL(c.req.url).pathname)) {
+    const pathname = new URL(c.req.url).pathname;
+    if (isPersonalGitHubGitBrokerRequest(c.req.method, pathname)) {
+      await next();
+      return;
+    }
+    // The anonymous web beacons enforce their own small limits on the
+    // streamed body; the generic ceiling would buffer far more first.
+    if (
+      isClientErrorReportRequest(c.req.method, pathname) ||
+      isAnalyticsConsentReportRequest(c.req.method, pathname)
+    ) {
       await next();
       return;
     }
@@ -537,9 +642,17 @@ export function createAppComposition(deps: AppDependencies): {
     }
   });
 
+  // Public-route deprecations (docs/design/api-compatibility-policy.md) are
+  // advertised on every response of the affected route, errors included.
+  app.use("/v1/*", deprecationHeadersMiddleware());
+  // A pinned SDK must not be told about a revision it is built to reject; see
+  // the policy's contract-header rule. Registered before the contract fence so
+  // it observes the header that fence sets.
+  app.use("/v1/*", bearerApiContractHeaderCompatibility());
+
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
-    const route = routeLabel(url.pathname);
+    const route = routeLabel(url.pathname, registeredHandlerRoutePath(c));
     const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(
@@ -550,68 +663,70 @@ export function createAppComposition(deps: AppDependencies): {
       },
       { parent: null },
     );
-    return await withTraceContext(span, async () => {
-      try {
-        await next();
-        const status = c.res.status || 200;
-        const durationSeconds = (performance.now() - start) / 1000;
-        observability.recordHttpRequest({
-          method: c.req.method,
-          route,
-          status,
-          durationSeconds,
-        });
-        span.end({
-          attributes: {
-            "http.response.status_code": status,
-            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-          },
-        });
-        observability.info("HTTP request completed", {
-          method: c.req.method,
-          route,
-          status,
-          durationMs: Math.round(durationSeconds * 1000),
-          traceId: span.traceId,
-          spanId: span.spanId,
-          correlationId,
-        });
-      } catch (error) {
-        const status = httpStatusForError(error);
-        const errorCode = errorCodeForStatus(status);
-        const durationSeconds = (performance.now() - start) / 1000;
-        observability.recordHttpRequest({
-          method: c.req.method,
-          route,
-          status,
-          durationSeconds,
-        });
-        observability.incrementCounter({
-          name: "opengeni_http_errors_total",
-          help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
-          labels: { route, status: String(status), code: errorCode },
-        });
-        span.end({
-          attributes: {
-            "http.response.status_code": status,
-            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-          },
-          error,
-        });
-        observability.error("HTTP request failed", {
-          method: c.req.method,
-          route,
-          status,
-          durationMs: Math.round(durationSeconds * 1000),
-          traceId: span.traceId,
-          spanId: span.spanId,
-          correlationId,
-          errorCode,
-          errorClass: "HttpOperationError",
-        });
-        throw error;
-      }
-    });
+    return await withMcpTelemetry(observability, span.traceId, () =>
+      withTraceContext(span, async () => {
+        try {
+          await next();
+          const status = c.res.status || 200;
+          const durationSeconds = (performance.now() - start) / 1000;
+          observability.recordHttpRequest({
+            method: c.req.method,
+            route,
+            status,
+            durationSeconds,
+          });
+          span.end({
+            attributes: {
+              "http.response.status_code": status,
+              "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            },
+          });
+          observability.info("HTTP request completed", {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: Math.round(durationSeconds * 1000),
+            traceId: span.traceId,
+            spanId: span.spanId,
+            correlationId,
+          });
+        } catch (error) {
+          const status = httpStatusForError(error);
+          const errorCode = errorCodeForStatus(status);
+          const durationSeconds = (performance.now() - start) / 1000;
+          observability.recordHttpRequest({
+            method: c.req.method,
+            route,
+            status,
+            durationSeconds,
+          });
+          observability.incrementCounter({
+            name: "opengeni_http_errors_total",
+            help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+            labels: { route, status: String(status), code: errorCode },
+          });
+          span.end({
+            attributes: {
+              "http.response.status_code": status,
+              "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            },
+            error,
+          });
+          observability.error("HTTP request failed", {
+            method: c.req.method,
+            route,
+            status,
+            durationMs: Math.round(durationSeconds * 1000),
+            traceId: span.traceId,
+            spanId: span.spanId,
+            correlationId,
+            errorCode,
+            errorClass: "HttpOperationError",
+          });
+          throw error;
+        }
+      }),
+    );
   });
 
   const accessKeyBoundary = requireAccessKey(deps.settings);
@@ -626,12 +741,53 @@ export function createAppComposition(deps: AppDependencies): {
     return await accessKeyBoundary(c, next);
   });
 
+  // Malformed JSON in a client request body is a 400 wherever a route reads it.
+  app.use("/v1/*", async (c, next) => {
+    tagRequestJsonParseErrors(c);
+    await next();
+  });
+
+  // A request no registered handler answers is a 404 (or a 405 when the path
+  // exists for other methods) before any authentication, authorization, or
+  // contract middleware can turn it into a misleading 401/409/503. This runs
+  // after the deployment perimeter so an unauthenticated caller of a
+  // key-protected deployment learns nothing new.
+  app.use("/v1/*", async (c, next) => {
+    const unmatched = unmatchedRoute(app, c);
+    if (!unmatched) {
+      await next();
+      return;
+    }
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    if (unmatched.status === 405) c.header("allow", unmatched.allow.join(", "));
+    return c.json(
+      ErrorEnvelope.parse({
+        error: {
+          status: unmatched.status,
+          code: "not_found",
+          message:
+            unmatched.status === 405
+              ? `Method ${c.req.method} is not supported for this resource. Allowed: ${unmatched.allow.join(", ")}.`
+              : "Resource not found.",
+          retryable: false,
+          requestId,
+        },
+      }),
+      unmatched.status,
+    );
+  });
+
   app.use("/v1/*", async (c, next) => {
     c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
     if (
       deps.settings.environment !== "test" &&
-      isApiContractProtectedMutation(c.req.method, new URL(c.req.url).pathname) &&
-      c.req.header(OPENGENI_API_CONTRACT_HEADER) !== OPENGENI_API_CONTRACT_REVISION
+      apiContractAdmission({
+        method: c.req.method,
+        pathname: new URL(c.req.url).pathname,
+        authorization: c.req.header("authorization"),
+        claimedRevision: c.req.header(OPENGENI_API_CONTRACT_HEADER),
+      }) === "reject"
     ) {
       return c.json(
         {
@@ -896,13 +1052,14 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(result, result.ok ? 200 : 503);
   });
 
-  app.get("/metrics", async (c) =>
-    c.text(await observability.prometheusMetrics(), 200, {
-      "content-type": "text/plain; version=0.0.4; charset=utf-8",
-    }),
-  );
+  if (publicListenerServesMetrics(deps.settings)) {
+    registerPrometheusMetricsRoute(app, observability);
+  }
 
   registerMcpOAuthRoutes(app, routeDeps);
+
+  registerClientErrorRoutes(app, { observability, settings: deps.settings });
+  registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
@@ -917,6 +1074,7 @@ export function createAppComposition(deps: AppDependencies): {
     return c.json(
       ClientConfig.parse({
         deploymentRevision: deps.settings.deploymentRevision,
+        claudeSubscriptionEnabled: deps.settings.claudeSubscriptionEnabled,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
         defaultModel: canonicalizeConfiguredModelId(catalogSettings, catalogSettings.openaiModel),
@@ -934,6 +1092,7 @@ export function createAppComposition(deps: AppDependencies): {
           name: server.name ?? server.id,
         })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
+        codeSearch: codeSearchDeploymentPolicy(deps.settings),
         fileUploads: {
           enabled: objectStorage !== null,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
@@ -969,6 +1128,7 @@ export function createAppComposition(deps: AppDependencies): {
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
         auth: clientAuthConfig(deps.settings),
+        documentationUrl: deps.settings.documentationUrl,
         analytics: clientAnalyticsConfig(deps.settings),
         // Channel-A structured services (P4.4) ride exec/readFile/createEditor,
         // available on every real backend; `none` has no box so they are all off.
@@ -1232,7 +1392,9 @@ export function createAppComposition(deps: AppDependencies): {
     } catch (error) {
       throw codemodeHttpError(error);
     }
-    return app.fetch(forwarded);
+    // The forwarded request drops the caller's Host and names a non-sandbox
+    // path; the request it was built from already passed the local boundary.
+    return app.fetch(markLocalInternalDispatch(forwarded));
   });
 
   app.get("/v1/workspaces/:workspaceId/codemode/catalog", async (c) => {
@@ -1334,9 +1496,12 @@ export function createAppComposition(deps: AppDependencies): {
   registerSkillRoutes(app, routeDeps);
   registerSessionRoutes(app, routeDeps);
   registerFeedbackRoutes(app, routeDeps);
+  registerWorkspaceIntegrationRoutes(app, routeDeps);
+  registerOrganizationIntegrationRoutes(app, routeDeps);
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
   registerOrganizationModelProviderRoutes(app, routeDeps);
+  registerWorkspaceModelProviderRoutes(app, routeDeps);
   registerOrganizationIntegrationPolicyRoutes(app, routeDeps);
   registerModelConnectionAccessRoutes(app, routeDeps);
   registerSuperGrokRoutes(app, routeDeps);
@@ -1373,7 +1538,10 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : (workspaceControlBusyHttpError(rawError) ?? rawError);
+        : (workspaceControlBusyHttpError(rawError) ??
+          requestBodyValidationHttpError(rawError) ??
+          invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+          rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);
@@ -1653,6 +1821,9 @@ export function httpStatusForError(error: unknown): number {
   if (workspaceControlBusyHttpError(error)) {
     return 503;
   }
+  if (isRequestBodyValidationError(error)) {
+    return 400;
+  }
   if (error instanceof HTTPException) {
     return error.status;
   }
@@ -1666,7 +1837,7 @@ export function errorCodeForStatus(status: number): ErrorCode {
   if (status === 401) return "unauthenticated";
   if (status === 402) return "payment_required";
   if (status === 403) return "forbidden";
-  if (status === 404) return "not_found";
+  if (status === 404 || status === 405) return "not_found";
   if (status === 409) return "conflict";
   if (status === 413 || status === 422 || status === 400) return "validation_failed";
   if (status === 429) return "limit_exceeded";
@@ -1816,6 +1987,21 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/healthz$/, label: "/healthz" },
   { pattern: /^\/readyz$/, label: "/readyz" },
+  // Better Auth answers these behind one `/v1/auth/*` registration, so the
+  // provider endpoints need an explicit closed set to stay distinguishable.
+  {
+    pattern:
+      /^\/v1\/auth\/(sign-up\/email|sign-in\/email|sign-in\/social|sign-out|send-verification-email|verify-email|request-password-reset|reset-password|error|ok)$/,
+    label: (match) => `/v1/auth/${match[1]}`,
+  },
+  { pattern: /^\/v1\/auth\/reset-password\/[^/]+$/, label: "/v1/auth/reset-password/:token" },
+  {
+    pattern: /^\/v1\/auth\/callback\/([^/]+)$/,
+    label: (match) =>
+      match[1] === "google" || match[1] === "github"
+        ? `/v1/auth/callback/${match[1]}`
+        : "/v1/auth/callback/:providerId",
+  },
   { pattern: /^\/traffic-readyz$/, label: "/traffic-readyz" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/codex\/connect\/start$/,
@@ -1871,6 +2057,8 @@ const routeLabelPatterns: Array<{
   },
   { pattern: /^\/metrics$/, label: "/metrics" },
   { pattern: /^\/v1\/config\/client$/, label: "/v1/config/client" },
+  { pattern: /^\/v1\/client-errors$/, label: "/v1/client-errors" },
+  { pattern: /^\/v1\/analytics-consent$/, label: "/v1/analytics-consent" },
   { pattern: /^\/v1\/billing$/, label: "/v1/billing" },
   { pattern: /^\/v1\/billing\/checkout$/, label: "/v1/billing/checkout" },
   { pattern: /^\/v1\/billing\/usage$/, label: "/v1/billing/usage" },
@@ -2629,7 +2817,13 @@ const routeLabelPatterns: Array<{
   },
 ];
 
-export function routeLabel(pathname: string): string {
+/**
+ * Bounded route label for metrics, spans, and request logs. Explicit patterns
+ * keep established label spellings stable; any other request answered by a
+ * registered handler uses that handler's code-owned path template (see
+ * `registeredHandlerRoutePath`). Only unregistered paths fall into `unknown`.
+ */
+export function routeLabel(pathname: string, registeredRoutePath?: string | null): string {
   if (/^\/v1\/workspaces\/[^/]+\/transcriptions$/.test(pathname))
     return "/v1/workspaces/:workspaceId/transcriptions";
   const transcription = pathname.match(
@@ -2650,7 +2844,57 @@ export function routeLabel(pathname: string): string {
       return typeof candidate.label === "string" ? candidate.label : candidate.label(match);
     }
   }
+  const registered = boundedRegisteredRouteLabel(registeredRoutePath);
+  if (registered) return registered;
   return pathname.startsWith("/v1/") ? "/v1/unknown" : "/unknown";
+}
+
+/**
+ * API contract revisions no longer admitted from ANY caller, including bearer
+ * integrations that would otherwise be accepted across revisions. Add a
+ * revision here only for a truly breaking wire change (which also requires a
+ * major release-train change); ordinary revision bumps stay additive.
+ */
+export const REFUSED_API_CONTRACT_REVISIONS: ReadonlySet<string> = new Set<string>([]);
+
+const BEARER_AUTHORIZATION = /^bearer\s+\S/i;
+
+/**
+ * The rollout fence for state-changing product calls.
+ *
+ * The exact-revision check exists to stop a stale first-party browser tab
+ * (cookie session, or unauthenticated local mode) from writing with an old
+ * request shape after a deployment; it answers 409 so the page reloads onto
+ * the matching bundle. That tab never sends `Authorization`, so this is not a
+ * header a stale bundle can choose to bypass it with.
+ *
+ * Bearer-authenticated callers (organization/workspace API keys, delegated
+ * tokens, the deployment key sent as a bearer) are integrations pinned to an
+ * SDK version: reloading cannot upgrade them, and the API is additive within a
+ * major release train. They are admitted with an older revision or with no
+ * revision claim at all. Only a revision listed in
+ * `REFUSED_API_CONTRACT_REVISIONS` is refused for them.
+ *
+ * This is a compatibility fence, not an authorization boundary: every route
+ * still authenticates and authorizes the request independently.
+ */
+export function apiContractAdmission(
+  input: {
+    method: string;
+    pathname: string;
+    authorization: string | undefined;
+    claimedRevision: string | undefined;
+  },
+  refusedRevisions: ReadonlySet<string> = REFUSED_API_CONTRACT_REVISIONS,
+): "admit" | "reject" {
+  if (!isApiContractProtectedMutation(input.method, input.pathname)) return "admit";
+  if (input.claimedRevision === OPENGENI_API_CONTRACT_REVISION) return "admit";
+  if (input.claimedRevision !== undefined && refusedRevisions.has(input.claimedRevision)) {
+    return "reject";
+  }
+  return input.authorization !== undefined && BEARER_AUTHORIZATION.test(input.authorization)
+    ? "admit"
+    : "reject";
 }
 
 /**
@@ -2680,6 +2924,9 @@ export function isApiContractProtectedMutation(method: string, pathname: string)
     pathname === "/v1/integrations/slack/commands" ||
     pathname === "/v1/integrations/slack/interactions" ||
     pathname.startsWith("/v1/github/") ||
+    // A stale tab must still report the error that follows a rollout.
+    pathname === CLIENT_ERRORS_PATH ||
+    pathname === ANALYTICS_CONSENT_PATH ||
     pathname === "/v1/enrollments/device/start" ||
     pathname === "/v1/enrollments/device/poll" ||
     pathname === "/v1/enrollments/token/exchange"

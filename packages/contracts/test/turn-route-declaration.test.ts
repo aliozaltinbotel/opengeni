@@ -70,10 +70,14 @@ describe("F-2 turn metadata", () => {
   });
   test("a malformed present declaration fails closed and never echoes the value", () => {
     expect(() =>
-      readTurnRouteDeclarationV1({ [TURN_ROUTE_DECLARATION_METADATA_KEY]: { schemaVersion: 2, secret: "sk-live" } }),
+      readTurnRouteDeclarationV1({
+        [TURN_ROUTE_DECLARATION_METADATA_KEY]: { schemaVersion: 2, secret: "sk-live" },
+      }),
     ).toThrow(/^Malformed turn route declaration metadata at /u);
     try {
-      readTurnRouteDeclarationV1({ [TURN_ROUTE_DECLARATION_METADATA_KEY]: { schemaVersion: 2, secret: "sk-live" } });
+      readTurnRouteDeclarationV1({
+        [TURN_ROUTE_DECLARATION_METADATA_KEY]: { schemaVersion: 2, secret: "sk-live" },
+      });
     } catch (error) {
       expect(String(error)).not.toContain("sk-live");
     }
@@ -82,11 +86,19 @@ describe("F-2 turn metadata", () => {
     const base = { schemaVersion: 1, fallbackPolicy: policy("gpt-5.6-terra"), turnBudget: null };
     expect(TurnRouteDeclarationV1.safeParse({ ...base, executed: "fallback" }).success).toBe(false);
     expect(
-      TurnRouteDeclarationV1.safeParse({ ...base, executed: "fallback", fallbackReason: "model_not_found" }).success,
+      TurnRouteDeclarationV1.safeParse({
+        ...base,
+        executed: "fallback",
+        fallbackReason: "model_not_found",
+      }).success,
     ).toBe(true);
     expect(
-      TurnRouteDeclarationV1.safeParse({ ...base, fallbackPolicy: null, executed: "fallback", fallbackReason: "x" })
-        .success,
+      TurnRouteDeclarationV1.safeParse({
+        ...base,
+        fallbackPolicy: null,
+        executed: "fallback",
+        fallbackReason: "x",
+      }).success,
     ).toBe(false);
     expect(TurnRouteDeclarationV1.safeParse({ ...base, fallbackReason: "x" }).success).toBe(false);
   });

@@ -136,7 +136,305 @@ describe("release schema contract", () => {
   });
 
   test("registers forward migrations in order after published history", async () => {
-    const completeSourceContract = await buildCompleteSchemaContract();
+    const sourceContract = await buildCompleteSchemaContract();
+    const failedSessionVariableSetAttach = sourceContract.migrations.find(
+      (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
+    );
+    if (failedSessionVariableSetAttach) {
+      expect(sourceContract.latestMigration).toBe(
+        sourceContract.migrations.some(
+          (migration) => migration.path === "0549_claude_subscription_usage.sql",
+        )
+          ? "0549_claude_subscription_usage.sql"
+          : sourceContract.migrations.some(
+                (migration) => migration.path === "0548_lost_sandbox_group_continuity.sql",
+              )
+            ? "0548_lost_sandbox_group_continuity.sql"
+            : sourceContract.migrations.some(
+                  (migration) => migration.path === "0546_organization_integration_primitives.sql",
+                )
+              ? "0546_organization_integration_primitives.sql"
+              : sourceContract.migrations.some(
+                    (migration) => migration.path === "0545_workspace_claude_models.sql",
+                  )
+                ? "0545_workspace_claude_models.sql"
+                : sourceContract.migrations.some(
+                      (migration) => migration.path === "0544_claude_model_connections.sql",
+                    )
+                  ? "0544_claude_model_connections.sql"
+                  : sourceContract.migrations.some(
+                        (migration) =>
+                          migration.path === "0543_organization_usage_personal_workspaces.sql",
+                      )
+                    ? "0543_organization_usage_personal_workspaces.sql"
+                    : sourceContract.migrations.some(
+                          (migration) => migration.path === "0542_task_note_root_lock_mode.sql",
+                        )
+                      ? "0542_task_note_root_lock_mode.sql"
+                      : sourceContract.migrations.some(
+                            (migration) =>
+                              migration.path === "0541_usage_event_workspace_lock_order.sql",
+                          )
+                        ? "0541_usage_event_workspace_lock_order.sql"
+                        : sourceContract.migrations.some(
+                              (migration) =>
+                                migration.path ===
+                                "0540_external_workspace_member_permission_updates.sql",
+                            )
+                          ? "0540_external_workspace_member_permission_updates.sql"
+                          : sourceContract.migrations.some(
+                                (migration) =>
+                                  migration.path === "0539_scheduled_admission_refusals.sql",
+                              )
+                            ? "0539_scheduled_admission_refusals.sql"
+                            : sourceContract.migrations.some(
+                                  (migration) =>
+                                    migration.path ===
+                                    "0537_slack_interaction_start_message_line.sql",
+                                )
+                              ? "0537_slack_interaction_start_message_line.sql"
+                              : sourceContract.migrations.some(
+                                    (migration) =>
+                                      migration.path ===
+                                      "0536_workspace_integration_primitives.sql",
+                                  )
+                                ? "0536_workspace_integration_primitives.sql"
+                                : sourceContract.migrations.some(
+                                      (migration) =>
+                                        migration.path === "0535_slack_file_upload_operations.sql",
+                                    )
+                                  ? "0535_slack_file_upload_operations.sql"
+                                  : sourceContract.migrations.some(
+                                        (migration) =>
+                                          migration.path ===
+                                          "0534_scheduled_admission_diagnostics.sql",
+                                      )
+                                    ? "0534_scheduled_admission_diagnostics.sql"
+                                    : sourceContract.migrations.some(
+                                          (migration) =>
+                                            migration.path === "0533_turn_surface_analytics.sql",
+                                        )
+                                      ? "0533_turn_surface_analytics.sql"
+                                      : sourceContract.migrations.some(
+                                            (migration) =>
+                                              migration.path ===
+                                              "0532_product_lifecycle_fact_export.sql",
+                                          )
+                                        ? "0532_product_lifecycle_fact_export.sql"
+                                        : sourceContract.migrations.some(
+                                              (migration) =>
+                                                migration.path ===
+                                                "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+                                            )
+                                          ? "0531_session_attach_sandbox_environment_default_variable_sets.sql"
+                                          : sourceContract.migrations.some(
+                                                (migration) =>
+                                                  migration.path ===
+                                                  "0530_scheduled_slack_bot_messages.sql",
+                                              )
+                                            ? "0530_scheduled_slack_bot_messages.sql"
+                                            : sourceContract.migrations.some(
+                                                  (migration) =>
+                                                    migration.path ===
+                                                    "0529_slack_interaction_session_defaults_line.sql",
+                                                )
+                                              ? "0529_slack_interaction_session_defaults_line.sql"
+                                              : sourceContract.migrations.some(
+                                                    (migration) =>
+                                                      migration.path ===
+                                                      "0528_system_update_outbox_claim_order.sql",
+                                                  )
+                                                ? "0528_system_update_outbox_claim_order.sql"
+                                                : sourceContract.migrations.some(
+                                                      (migration) =>
+                                                        migration.path ===
+                                                        "0527_session_attention_excludes_commentary.sql",
+                                                    )
+                                                  ? "0527_session_attention_excludes_commentary.sql"
+                                                  : sourceContract.migrations.some(
+                                                        (migration) =>
+                                                          migration.path ===
+                                                          "0526_automatic_checkpoint_discontinuity.sql",
+                                                      )
+                                                    ? "0526_automatic_checkpoint_discontinuity.sql"
+                                                    : sourceContract.migrations.some(
+                                                          (migration) =>
+                                                            migration.path ===
+                                                            "0525_attached_browser_opaque_generations.sql",
+                                                        )
+                                                      ? "0525_attached_browser_opaque_generations.sql"
+                                                      : sourceContract.migrations.some(
+                                                            (migration) =>
+                                                              migration.path ===
+                                                              "0524_codex_plan_entitlement.sql",
+                                                          )
+                                                        ? "0524_codex_plan_entitlement.sql"
+                                                        : sourceContract.migrations.some(
+                                                              (migration) =>
+                                                                migration.path ===
+                                                                "0523_modal_provider_create_fence.sql",
+                                                            )
+                                                          ? "0523_modal_provider_create_fence.sql"
+                                                          : sourceContract.migrations.some(
+                                                                (migration) =>
+                                                                  migration.path ===
+                                                                  "0522_scoped_machine_update_status.sql",
+                                                              )
+                                                            ? "0522_scoped_machine_update_status.sql"
+                                                            : sourceContract.migrations.some(
+                                                                  (migration) =>
+                                                                    migration.path ===
+                                                                    "0521_verified_signup_trial_runtime_switch.sql",
+                                                                )
+                                                              ? "0521_verified_signup_trial_runtime_switch.sql"
+                                                              : sourceContract.migrations.some(
+                                                                    (migration) =>
+                                                                      migration.path ===
+                                                                      "0520_session_code_search_frozen.sql",
+                                                                  )
+                                                                ? "0520_session_code_search_frozen.sql"
+                                                                : sourceContract.migrations.some(
+                                                                      (migration) =>
+                                                                        migration.path ===
+                                                                        "0519_session_recovery_backlog_excludes_paused.sql",
+                                                                    )
+                                                                  ? "0519_session_recovery_backlog_excludes_paused.sql"
+                                                                  : sourceContract.migrations.some(
+                                                                        (migration) =>
+                                                                          migration.path ===
+                                                                          "0518_member_connection_read_backfill.sql",
+                                                                      )
+                                                                    ? "0518_member_connection_read_backfill.sql"
+                                                                    : sourceContract.migrations.some(
+                                                                          (migration) =>
+                                                                            migration.path ===
+                                                                            "0515_autonomous_learning_defaults.sql",
+                                                                        )
+                                                                      ? "0515_autonomous_learning_defaults.sql"
+                                                                      : "0514_failed_session_variable_set_attach.sql",
+      );
+      expect(failedSessionVariableSetAttach.deploymentMode).toBe("rolling");
+    }
+    // Keep the published-history assertions below scoped to their existing
+    // migration range; the new forward migration is checked explicitly above.
+    let completeSourceContract = failedSessionVariableSetAttach
+      ? {
+          ...sourceContract,
+          fileCount: sourceContract.fileCount - 1,
+          latestMigration:
+            sourceContract.latestMigration === "0514_failed_session_variable_set_attach.sql"
+              ? "0513_message_fork_prefix_compaction.sql"
+              : sourceContract.latestMigration,
+          migrations: sourceContract.migrations.filter(
+            (migration) => migration.path !== "0514_failed_session_variable_set_attach.sql",
+          ),
+        }
+      : sourceContract;
+    const automaticCheckpointDiscontinuityMigration = completeSourceContract.migrations.find(
+      (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
+    );
+    if (automaticCheckpointDiscontinuityMigration)
+      expect(automaticCheckpointDiscontinuityMigration.deploymentMode).toBe("maintenance");
+    const automaticCheckpointDiscontinuity = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0526_automatic_checkpoint_discontinuity.sql",
+    );
+    const autonomousLearningDefaults = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+    );
+    const memberConnectionRead = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0516_member_connection_read.sql",
+    );
+    const memberConnectionReadBackfillIndex = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0517_member_connection_read_backfill_index.sql",
+    );
+    const memberConnectionReadBackfill = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0518_member_connection_read_backfill.sql",
+    );
+    const sessionRecoveryBacklogExcludesPaused = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0519_session_recovery_backlog_excludes_paused.sql",
+    );
+    const sessionCodeSearchFrozen = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0520_session_code_search_frozen.sql",
+    );
+    const modalProviderCreateFence = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0523_modal_provider_create_fence.sql",
+    );
+    const attachedBrowserOpaqueGenerations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0525_attached_browser_opaque_generations.sql",
+    );
+    const codexPlanEntitlement = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0524_codex_plan_entitlement.sql",
+    );
+    const scopedMachineUpdateStatus = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0522_scoped_machine_update_status.sql",
+    );
+    const verifiedSignupTrialRuntimeSwitch = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0521_verified_signup_trial_runtime_switch.sql",
+    );
+    const sessionAttentionExcludesCommentary = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0527_session_attention_excludes_commentary.sql",
+    );
+    const systemUpdateOutboxClaimOrder = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0528_system_update_outbox_claim_order.sql",
+    );
+    const slackInteractionSessionDefaultsLine = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0529_slack_interaction_session_defaults_line.sql",
+    );
+    const scheduledAdmissionDiagnostics = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0534_scheduled_admission_diagnostics.sql",
+    );
+    const slackFileUploadOperations = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0535_slack_file_upload_operations.sql",
+    );
+    const workspaceIntegrationPrimitives = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0536_workspace_integration_primitives.sql",
+    );
+    const slackInteractionStartMessageLine = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0537_slack_interaction_start_message_line.sql",
+    );
+    const scheduledAdmissionRefusals = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0539_scheduled_admission_refusals.sql",
+    );
+    const claudeSubscriptionUsage = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0549_claude_subscription_usage.sql",
+    );
+    const organizationIntegrationPrimitives = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0546_organization_integration_primitives.sql",
+    );
+    const lostSandboxGroupContinuity = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0548_lost_sandbox_group_continuity.sql",
+    );
+    const workspaceClaudeModels = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0545_workspace_claude_models.sql",
+    );
+    const claudeModelConnections = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0544_claude_model_connections.sql",
+    );
+    const usageEventWorkspaceLockOrder = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0541_usage_event_workspace_lock_order.sql",
+    );
+    const organizationUsagePersonalWorkspaces = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0543_organization_usage_personal_workspaces.sql",
+    );
+    const taskNoteRootLockMode = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0542_task_note_root_lock_mode.sql",
+    );
+    const externalWorkspaceMemberPermissionUpdates = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0540_external_workspace_member_permission_updates.sql",
+    );
+    const scheduledSlackBotMessages = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0530_scheduled_slack_bot_messages.sql",
+    );
+    const sessionAttachDefaultVariableSets = completeSourceContract.migrations.some(
+      (migration) =>
+        migration.path === "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+    );
+    const productLifecycleFactExport = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0532_product_lifecycle_fact_export.sql",
+    );
+    const turnSurfaceAnalytics = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0533_turn_surface_analytics.sql",
+    );
     const backgroundCommandText = completeSourceContract.migrations.some(
       (migration) => migration.path === "0506_background_command_text.sql",
     );
@@ -157,6 +455,9 @@ describe("release schema contract", () => {
     );
     const insightsFactReadsHashJoin = completeSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
+    );
+    const messageForkPrefixCompaction = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
     );
     const controlRevisionFrontier = completeSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
@@ -391,6 +692,40 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (claudeSubscriptionUsage ? 1 : 0) +
+        (lostSandboxGroupContinuity ? 1 : 0) +
+        (organizationIntegrationPrimitives ? 1 : 0) +
+        (workspaceClaudeModels ? 1 : 0) +
+        (claudeModelConnections ? 1 : 0) +
+        (organizationUsagePersonalWorkspaces ? 1 : 0) +
+        (usageEventWorkspaceLockOrder ? 1 : 0) +
+        (taskNoteRootLockMode ? 1 : 0) +
+        (externalWorkspaceMemberPermissionUpdates ? 1 : 0) +
+        (scheduledAdmissionRefusals ? 1 : 0) +
+        (slackInteractionStartMessageLine ? 1 : 0) +
+        (workspaceIntegrationPrimitives ? 1 : 0) +
+        (slackFileUploadOperations ? 1 : 0) +
+        (scheduledAdmissionDiagnostics ? 1 : 0) +
+        (turnSurfaceAnalytics ? 1 : 0) +
+        (productLifecycleFactExport ? 1 : 0) +
+        (sessionAttachDefaultVariableSets ? 1 : 0) +
+        (scheduledSlackBotMessages ? 1 : 0) +
+        (slackInteractionSessionDefaultsLine ? 1 : 0) +
+        (systemUpdateOutboxClaimOrder ? 1 : 0) +
+        (sessionAttentionExcludesCommentary ? 1 : 0) +
+        (automaticCheckpointDiscontinuity ? 1 : 0) +
+        (attachedBrowserOpaqueGenerations ? 1 : 0) +
+        (codexPlanEntitlement ? 1 : 0) +
+        (modalProviderCreateFence ? 1 : 0) +
+        (scopedMachineUpdateStatus ? 1 : 0) +
+        (verifiedSignupTrialRuntimeSwitch ? 1 : 0) +
+        (sessionCodeSearchFrozen ? 1 : 0) +
+        (sessionRecoveryBacklogExcludesPaused ? 1 : 0) +
+        (memberConnectionRead ? 1 : 0) +
+        (memberConnectionReadBackfillIndex ? 1 : 0) +
+        (memberConnectionReadBackfill ? 1 : 0) +
+        (autonomousLearningDefaults ? 1 : 0) +
+        (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -674,7 +1009,156 @@ describe("release schema contract", () => {
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
         : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
+      ...(autonomousLearningDefaults
+        ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
+        : {}),
+      ...(memberConnectionRead ? { latestMigration: "0516_member_connection_read.sql" } : {}),
+      ...(memberConnectionReadBackfillIndex
+        ? { latestMigration: "0517_member_connection_read_backfill_index.sql" }
+        : {}),
+      ...(memberConnectionReadBackfill
+        ? { latestMigration: "0518_member_connection_read_backfill.sql" }
+        : {}),
+      ...(sessionRecoveryBacklogExcludesPaused
+        ? {
+            latestMigration: "0519_session_recovery_backlog_excludes_paused.sql",
+          }
+        : {}),
+      ...(sessionCodeSearchFrozen
+        ? { latestMigration: "0520_session_code_search_frozen.sql" }
+        : {}),
+      ...(verifiedSignupTrialRuntimeSwitch
+        ? { latestMigration: "0521_verified_signup_trial_runtime_switch.sql" }
+        : {}),
+      ...(scopedMachineUpdateStatus
+        ? { latestMigration: "0522_scoped_machine_update_status.sql" }
+        : {}),
+      ...(modalProviderCreateFence
+        ? { latestMigration: "0523_modal_provider_create_fence.sql" }
+        : {}),
+      ...(codexPlanEntitlement ? { latestMigration: "0524_codex_plan_entitlement.sql" } : {}),
+      ...(attachedBrowserOpaqueGenerations
+        ? { latestMigration: "0525_attached_browser_opaque_generations.sql" }
+        : {}),
+      ...(automaticCheckpointDiscontinuity
+        ? { latestMigration: "0526_automatic_checkpoint_discontinuity.sql" }
+        : {}),
+      ...(sessionAttentionExcludesCommentary
+        ? { latestMigration: "0527_session_attention_excludes_commentary.sql" }
+        : {}),
+      ...(systemUpdateOutboxClaimOrder
+        ? { latestMigration: "0528_system_update_outbox_claim_order.sql" }
+        : {}),
+      ...(slackInteractionSessionDefaultsLine
+        ? {
+            latestMigration: "0529_slack_interaction_session_defaults_line.sql",
+          }
+        : {}),
+      ...(scheduledSlackBotMessages
+        ? { latestMigration: "0530_scheduled_slack_bot_messages.sql" }
+        : {}),
+      ...(sessionAttachDefaultVariableSets
+        ? {
+            latestMigration: "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+          }
+        : {}),
+      ...(productLifecycleFactExport
+        ? { latestMigration: "0532_product_lifecycle_fact_export.sql" }
+        : {}),
+      ...(turnSurfaceAnalytics ? { latestMigration: "0533_turn_surface_analytics.sql" } : {}),
+      ...(scheduledAdmissionDiagnostics
+        ? { latestMigration: "0534_scheduled_admission_diagnostics.sql" }
+        : {}),
+      ...(slackFileUploadOperations
+        ? { latestMigration: "0535_slack_file_upload_operations.sql" }
+        : {}),
+      ...(workspaceIntegrationPrimitives
+        ? { latestMigration: "0536_workspace_integration_primitives.sql" }
+        : {}),
+      ...(slackInteractionStartMessageLine
+        ? { latestMigration: "0537_slack_interaction_start_message_line.sql" }
+        : {}),
+      ...(scheduledAdmissionRefusals
+        ? { latestMigration: "0539_scheduled_admission_refusals.sql" }
+        : {}),
+      ...(externalWorkspaceMemberPermissionUpdates
+        ? { latestMigration: "0540_external_workspace_member_permission_updates.sql" }
+        : {}),
+      ...(usageEventWorkspaceLockOrder
+        ? { latestMigration: "0541_usage_event_workspace_lock_order.sql" }
+        : {}),
+      ...(taskNoteRootLockMode ? { latestMigration: "0542_task_note_root_lock_mode.sql" } : {}),
+      ...(organizationUsagePersonalWorkspaces
+        ? { latestMigration: "0543_organization_usage_personal_workspaces.sql" }
+        : {}),
+      ...(claudeModelConnections ? { latestMigration: "0544_claude_model_connections.sql" } : {}),
+      ...(workspaceClaudeModels ? { latestMigration: "0545_workspace_claude_models.sql" } : {}),
+      ...(organizationIntegrationPrimitives
+        ? { latestMigration: "0546_organization_integration_primitives.sql" }
+        : {}),
+      ...(lostSandboxGroupContinuity
+        ? { latestMigration: "0548_lost_sandbox_group_continuity.sql" }
+        : {}),
+      ...(claudeSubscriptionUsage ? { latestMigration: "0549_claude_subscription_usage.sql" } : {}),
     });
+    // Keep the historical migration-order probes below scoped to published
+    // history after checking the three forward rollout steps above.
+    completeSourceContract = {
+      ...completeSourceContract,
+      migrations: completeSourceContract.migrations.filter(
+        (migration) =>
+          ![
+            "0516_member_connection_read.sql",
+            "0517_member_connection_read_backfill_index.sql",
+            "0518_member_connection_read_backfill.sql",
+            "0519_session_recovery_backlog_excludes_paused.sql",
+            "0520_session_code_search_frozen.sql",
+            "0521_verified_signup_trial_runtime_switch.sql",
+            "0522_scoped_machine_update_status.sql",
+            "0523_modal_provider_create_fence.sql",
+            "0524_codex_plan_entitlement.sql",
+            "0525_attached_browser_opaque_generations.sql",
+            "0526_automatic_checkpoint_discontinuity.sql",
+            "0527_session_attention_excludes_commentary.sql",
+            "0528_system_update_outbox_claim_order.sql",
+            "0529_slack_interaction_session_defaults_line.sql",
+            "0530_scheduled_slack_bot_messages.sql",
+            "0534_scheduled_admission_diagnostics.sql",
+            "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+            "0532_product_lifecycle_fact_export.sql",
+            "0533_turn_surface_analytics.sql",
+            "0535_slack_file_upload_operations.sql",
+            "0536_workspace_integration_primitives.sql",
+            "0537_slack_interaction_start_message_line.sql",
+            "0539_scheduled_admission_refusals.sql",
+            "0540_external_workspace_member_permission_updates.sql",
+            "0541_usage_event_workspace_lock_order.sql",
+            "0542_task_note_root_lock_mode.sql",
+            "0543_organization_usage_personal_workspaces.sql",
+            "0544_claude_model_connections.sql",
+            "0545_workspace_claude_models.sql",
+
+            "0546_organization_integration_primitives.sql",
+            "0549_claude_subscription_usage.sql",
+            "0548_lost_sandbox_group_continuity.sql",
+          ].includes(migration.path),
+      ),
+    };
+    if (autonomousLearningDefaults) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0515_autonomous_learning_defaults.sql",
+        deploymentMode: "rolling",
+      });
+      completeSourceContract = {
+        ...completeSourceContract,
+        migrations: completeSourceContract.migrations.filter(
+          (migration) => migration.path !== "0515_autonomous_learning_defaults.sql",
+        ),
+      };
+    }
     expect(
       completeSourceContract.migrations.at(
         -1 -
@@ -683,7 +1167,8 @@ describe("release schema contract", () => {
           Number(verifiedSignupTrialCredits) -
           Number(knowledgeIndexFundingWait) -
           Number(knowledgeVisibleIndexStatus) -
-          Number(insightsFactReadsHashJoin),
+          Number(insightsFactReadsHashJoin) -
+          Number(messageForkPrefixCompaction),
       ),
     ).toMatchObject({
       path: backgroundCommandText
@@ -802,7 +1287,8 @@ describe("release schema contract", () => {
             Number(verifiedSignupTrialCredits) -
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
-            Number(insightsFactReadsHashJoin),
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0507_integration_oauth_pending_states.sql",
@@ -816,7 +1302,8 @@ describe("release schema contract", () => {
             Number(verifiedSignupTrialCredits) -
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
-            Number(insightsFactReadsHashJoin),
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0508_deadline_command_workspace_capture.sql",
@@ -829,7 +1316,8 @@ describe("release schema contract", () => {
           -1 -
             Number(knowledgeIndexFundingWait) -
             Number(knowledgeVisibleIndexStatus) -
-            Number(insightsFactReadsHashJoin),
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0509_verified_signup_trial_credits.sql",
@@ -839,7 +1327,10 @@ describe("release schema contract", () => {
     if (knowledgeIndexFundingWait) {
       expect(
         completeSourceContract.migrations.at(
-          -1 - Number(knowledgeVisibleIndexStatus) - Number(insightsFactReadsHashJoin),
+          -1 -
+            Number(knowledgeVisibleIndexStatus) -
+            Number(insightsFactReadsHashJoin) -
+            Number(messageForkPrefixCompaction),
         ),
       ).toMatchObject({
         path: "0510_knowledge_index_funding_wait.sql",
@@ -848,15 +1339,25 @@ describe("release schema contract", () => {
     }
     if (knowledgeVisibleIndexStatus) {
       expect(
-        completeSourceContract.migrations.at(-1 - Number(insightsFactReadsHashJoin)),
+        completeSourceContract.migrations.at(
+          -1 - Number(insightsFactReadsHashJoin) - Number(messageForkPrefixCompaction),
+        ),
       ).toMatchObject({
         path: "0511_knowledge_visible_index_status.sql",
         deploymentMode: "rolling",
       });
     }
     if (insightsFactReadsHashJoin) {
-      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+      expect(
+        completeSourceContract.migrations.at(-1 - Number(messageForkPrefixCompaction)),
+      ).toMatchObject({
         path: "0512_insights_fact_reads_hash_join.sql",
+        deploymentMode: "rolling",
+      });
+    }
+    if (messageForkPrefixCompaction) {
+      expect(completeSourceContract.migrations.at(-1)).toMatchObject({
+        path: "0513_message_fork_prefix_compaction.sql",
         deploymentMode: "rolling",
       });
     }
@@ -1974,6 +2475,15 @@ describe("release schema contract", () => {
     const insightsFactReadsHashJoin = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0512_insights_fact_reads_hash_join.sql",
     );
+    const messageForkPrefixCompaction = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0513_message_fork_prefix_compaction.sql",
+    );
+    const failedSessionVariableSetAttach = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0514_failed_session_variable_set_attach.sql",
+    );
+    const autonomousLearningDefaults = unfilteredSourceContract.migrations.some(
+      (migration) => migration.path === "0515_autonomous_learning_defaults.sql",
+    );
     const controlRevisionFrontier = unfilteredSourceContract.migrations.some(
       (migration) => migration.path === "0505_workspace_control_revision_frontier.sql",
     );
@@ -2101,6 +2611,39 @@ describe("release schema contract", () => {
       (migration) => migration.path === "0472_usage_events_workspace_recent_index.sql",
     );
     let completeSourceContract = await contractWithoutMigrations([
+      "0534_scheduled_admission_diagnostics.sql",
+      "0535_slack_file_upload_operations.sql",
+      "0525_attached_browser_opaque_generations.sql",
+      "0527_session_attention_excludes_commentary.sql",
+      "0528_system_update_outbox_claim_order.sql",
+      "0529_slack_interaction_session_defaults_line.sql",
+      "0530_scheduled_slack_bot_messages.sql",
+      "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+      "0532_product_lifecycle_fact_export.sql",
+      "0533_turn_surface_analytics.sql",
+      "0536_workspace_integration_primitives.sql",
+      "0537_slack_interaction_start_message_line.sql",
+      "0539_scheduled_admission_refusals.sql",
+      "0540_external_workspace_member_permission_updates.sql",
+      "0541_usage_event_workspace_lock_order.sql",
+      "0542_task_note_root_lock_mode.sql",
+      "0543_organization_usage_personal_workspaces.sql",
+      "0544_claude_model_connections.sql",
+      "0545_workspace_claude_models.sql",
+
+      "0546_organization_integration_primitives.sql",
+      "0549_claude_subscription_usage.sql",
+      "0548_lost_sandbox_group_continuity.sql",
+      "0521_verified_signup_trial_runtime_switch.sql",
+      "0522_scoped_machine_update_status.sql",
+      "0523_modal_provider_create_fence.sql",
+      "0524_codex_plan_entitlement.sql",
+      "0526_automatic_checkpoint_discontinuity.sql",
+      "0520_session_code_search_frozen.sql",
+      "0519_session_recovery_backlog_excludes_paused.sql",
+      "0516_member_connection_read.sql",
+      "0517_member_connection_read_backfill_index.sql",
+      "0518_member_connection_read_backfill.sql",
       "0463_host_mcp_resolver_registration.sql",
       "0461_unified_knowledge.sql",
       "0460_host_export_message_attribution.sql",
@@ -2597,6 +3140,42 @@ describe("release schema contract", () => {
       "0510_knowledge_index_funding_wait.sql",
       "0511_knowledge_visible_index_status.sql",
       "0512_insights_fact_reads_hash_join.sql",
+      "0513_message_fork_prefix_compaction.sql",
+      "0514_failed_session_variable_set_attach.sql",
+      "0515_autonomous_learning_defaults.sql",
+      "0516_member_connection_read.sql",
+      "0517_member_connection_read_backfill_index.sql",
+      "0518_member_connection_read_backfill.sql",
+      "0519_session_recovery_backlog_excludes_paused.sql",
+      "0520_session_code_search_frozen.sql",
+      "0521_verified_signup_trial_runtime_switch.sql",
+      "0522_scoped_machine_update_status.sql",
+      "0523_modal_provider_create_fence.sql",
+      "0524_codex_plan_entitlement.sql",
+      "0525_attached_browser_opaque_generations.sql",
+      "0526_automatic_checkpoint_discontinuity.sql",
+      "0527_session_attention_excludes_commentary.sql",
+      "0528_system_update_outbox_claim_order.sql",
+      "0529_slack_interaction_session_defaults_line.sql",
+      "0530_scheduled_slack_bot_messages.sql",
+      "0534_scheduled_admission_diagnostics.sql",
+      "0531_session_attach_sandbox_environment_default_variable_sets.sql",
+      "0532_product_lifecycle_fact_export.sql",
+      "0533_turn_surface_analytics.sql",
+      "0535_slack_file_upload_operations.sql",
+      "0536_workspace_integration_primitives.sql",
+      "0537_slack_interaction_start_message_line.sql",
+      "0539_scheduled_admission_refusals.sql",
+      "0540_external_workspace_member_permission_updates.sql",
+      "0541_usage_event_workspace_lock_order.sql",
+      "0542_task_note_root_lock_mode.sql",
+      "0543_organization_usage_personal_workspaces.sql",
+      "0544_claude_model_connections.sql",
+      "0545_workspace_claude_models.sql",
+
+      "0546_organization_integration_primitives.sql",
+      "0549_claude_subscription_usage.sql",
+      "0548_lost_sandbox_group_continuity.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -3180,8 +3759,26 @@ describe("release schema contract", () => {
         ...completeSourceContract,
         latestMigration: "0512_insights_fact_reads_hash_join.sql",
       };
+    if (messageForkPrefixCompaction)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0513_message_fork_prefix_compaction.sql",
+      };
+    if (failedSessionVariableSetAttach)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0514_failed_session_variable_set_attach.sql",
+      };
+    if (autonomousLearningDefaults)
+      completeSourceContract = {
+        ...completeSourceContract,
+        latestMigration: "0515_autonomous_learning_defaults.sql",
+      };
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (autonomousLearningDefaults ? 1 : 0) +
+        (failedSessionVariableSetAttach ? 1 : 0) +
+        (messageForkPrefixCompaction ? 1 : 0) +
         (insightsFactReadsHashJoin ? 1 : 0) +
         (knowledgeVisibleIndexStatus ? 1 : 0) +
         (knowledgeIndexFundingWait ? 1 : 0) +
@@ -3666,6 +4263,15 @@ describe("release schema contract", () => {
         : {}),
       ...(insightsFactReadsHashJoin
         ? { latestMigration: "0512_insights_fact_reads_hash_join.sql" }
+        : {}),
+      ...(messageForkPrefixCompaction
+        ? { latestMigration: "0513_message_fork_prefix_compaction.sql" }
+        : {}),
+      ...(failedSessionVariableSetAttach
+        ? { latestMigration: "0514_failed_session_variable_set_attach.sql" }
+        : {}),
+      ...(autonomousLearningDefaults
+        ? { latestMigration: "0515_autonomous_learning_defaults.sql" }
         : {}),
     });
     expect(completeSourceContractWithOrganizationWorkspaceManagementEntry.latestMigration).toBe(

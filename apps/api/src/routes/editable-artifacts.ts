@@ -30,6 +30,7 @@ import type { Context, Hono } from "hono";
 import { z } from "zod";
 
 import { ApiHttpError } from "../http/api-error";
+import { USER_CONTENT_SECURITY_HEADERS } from "../http/user-content";
 
 export const EDITABLE_ARTIFACT_HTTP_REQUEST_MAX_BYTES = 4 * 1024;
 export const EDITABLE_ARTIFACT_EXPORT_REQUEST_MAX_BYTES = 260 * 1024;
@@ -616,7 +617,7 @@ export function registerEditableArtifactRoutes(
         "content-length": String(download.byteSize),
         "content-type": download.mimeType,
         etag: `"${download.contentHash}"`,
-        "x-content-type-options": "nosniff",
+        ...USER_CONTENT_SECURITY_HEADERS,
       },
     });
   });
@@ -1067,7 +1068,7 @@ export function editableArtifactHttpError(error: unknown): unknown {
       case "unsupported_format":
         return new ApiHttpError(422, {
           code: "validation_failed",
-          message: "Editable artifact format is not available for this artifact.",
+          message: error.message,
         });
       case "not_ready":
         return new ApiHttpError(409, {
