@@ -1,0 +1,20 @@
+name: Cendra artifact runtime for 528fc5393
+
+# Cendra fork only (Cendra knowledge: a service principal's Knowledge page with two or more sources answers, on the
+# AGENT-OPS slice 3 pin 087b8b39a). Runs upstream's own reusable artifact-runtime workflow, unchanged, for the exact
+# production source 528fc5393 (branch cendra/knowledge-service-multi-hit), so the OpenGeni api image can be built with
+# an artifact-runtime bundle from the same commit. Every job inside checks out and verifies source_sha itself; this
+# commit only adds the caller.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-528fc5393
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 528fc5393632dcb1293e788a140b3366b95dac3f
