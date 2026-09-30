@@ -196,14 +196,20 @@ export async function updateExternalWorkspaceMemberPermissionsForRequest(
       expected.some((permission, index) => permission !== observed[index])
     )
       throw new HTTPException(409, { message: "external workspace member permissions changed" });
-    await grantWorkspaceAccess(tx, {
-      accountId: authority.accountId,
-      workspaceId,
-      subjectId,
-      ...(current.subjectLabel === null ? {} : { subjectLabel: current.subjectLabel }),
-      role: current.role,
-      permissions: [...new Set(payload.permissions)].sort(),
-    });
+    try {
+      await updateExternalWorkspaceMemberOperation(
+        tx,
+        {
+          organizationId: authority.accountId,
+          actorSubjectId: grant.subjectId,
+          workspaceId,
+          membershipId: identity.organizationMembershipId,
+        },
+        { operationId: crypto.randomUUID(), permissions: payload.permissions },
+      );
+    } catch (error) {
+      rethrowExternalWorkspaceOperation(error);
+    }
     const updated = (await listWorkspaceMembers(tx, workspaceId)).find(
       (member) => member.subjectId === subjectId,
     );

@@ -69,6 +69,13 @@ unchanged after response loss; a replay returns the original receipt even after 
 later change, which is not proof of current access. Reusing an operation ID with a
 different body conflicts.
 
+The legacy `PATCH /v1/workspaces/:workspaceId/external-members/:subjectId`
+accepts `{ identity, expectedPermissions, permissions }` and keeps its
+compare-and-set contract. It uses the same permission-update lifecycle, including
+authorization-revision invalidation on narrowing. An empty permission set keeps
+the existing membership with no permissions (migration 0550); empty onboarding
+grants and empty keyed HTTP updates remain invalid.
+
 ## Withdraw access, including a grant still in flight
 
 After withdrawal, use the retained/recovered organization membership ID:

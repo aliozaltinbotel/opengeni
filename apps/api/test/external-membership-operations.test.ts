@@ -3,7 +3,12 @@ import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { OpenGeniClient } from "@opengeni/sdk";
-import { type ApiRouteDeps } from "@opengeni/core";
+import {
+  externalActorContinuationForAuthorization,
+  requireAccessGrantAuthorization,
+  type ApiRouteDeps,
+} from "@opengeni/core";
+import { ExternalLinkWorkSnapshot } from "@opengeni/contracts/external-identities";
 import {
   acquireSharedTestDatabase,
   testSettings,
@@ -18,6 +23,10 @@ import {
   withSessionRlsActorContext,
   createOrganizationApiKey,
   ensureExternalIdentity,
+  grantWorkspaceAccess,
+  beginExternalIdentityLink,
+  confirmExternalIdentityLink,
+  externalLinkWorkSnapshotIsLive,
   type DbClient,
 } from "@opengeni/db";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
@@ -68,6 +77,22 @@ async function fixture(
   } as unknown as ApiRouteDeps;
   registerWorkspaceRoutes(app, deps);
   registerOrganizationMembershipRoutes(app, deps);
+  app.get("/fixture/link-work-snapshot", async (c) => {
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspace.id,
+      "workspace:read",
+    );
+    const continuation = externalActorContinuationForAuthorization(authorization);
+    if (!continuation) throw new Error("Fixture requires verified external continuation");
+    return c.json(
+      ExternalLinkWorkSnapshot.parse({
+        ...continuation,
+        permissions: [...authorization.grant.permissions],
+      }),
+    );
+  });
   let loseNextPath: string | null = null;
   const service = new OpenGeniClient({
     baseUrl: "http://fixture",
@@ -122,6 +147,23 @@ async function fixture(
     cancellation,
     revoke,
     members,
+    linkedSnapshot: async (link: { id: string; revision: number }) => {
+      const response = await app.request("/fixture/link-work-snapshot", {
+        headers: {
+          authorization: `Bearer ${token}`,
+          "x-opengeni-external-actor": encodeURIComponent(
+            JSON.stringify({
+              mode: "linked_native",
+              identity: reference,
+              linkId: link.id,
+              expectedLinkRevision: link.revision,
+            }),
+          ),
+        },
+      });
+      expect(response.status).toBe(200);
+      return ExternalLinkWorkSnapshot.parse(await response.json());
+    },
     patch: (
       body: unknown,
       options: { subjectId?: string; workspaceId?: string; asUser?: boolean } = {},
@@ -554,6 +596,36 @@ test("external permission OCC updates preserve membership and existing session i
   expect(
     (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
   ).toEqual([...command.permissions].sort());
+  const nativeSubjectId = `user:${crypto.randomUUID()}`;
+  const personalWorkspace = await createWorkspace(db.db, {
+    accountId: f.accountId,
+    name: "Linked native owner",
+  });
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, role, status, personal_workspace_id, authorization_revision)
+    values (${f.accountId}, ${nativeSubjectId}, 'member', 'active', ${personalWorkspace.id}, 1)`;
+  await grantWorkspaceAccess(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: nativeSubjectId,
+    permissions: ["workspace:admin"],
+  });
+  const pending = await beginExternalIdentityLink(db.db, f.identity, {
+    permissions: ["workspace:read"],
+  });
+  const link = await confirmExternalIdentityLink(db.db, {
+    accountId: f.accountId,
+    linkId: pending.link.id,
+    nativeSubjectId,
+    request: {
+      challenge: pending.challenge,
+      expectedRevision: pending.link.revision,
+      permissions: ["workspace:read"],
+    },
+  });
+  const frozenSnapshot = await f.linkedSnapshot(link);
+  expect(frozenSnapshot.permissions).toContain("workspace:read");
+  expect(await externalLinkWorkSnapshotIsLive(db.db, frozenSnapshot)).toBe(true);
   expect(
     (
       await f.patch({
@@ -563,6 +635,11 @@ test("external permission OCC updates preserve membership and existing session i
       })
     ).status,
   ).toBe(200);
+  // The retained permission is still granted, but the old accepted revision cannot run.
+  expect(
+    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
+  ).toContain("workspace:read");
+  expect(await externalLinkWorkSnapshotIsLive(db.db, frozenSnapshot)).toBe(false);
   expect(
     await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`,
   ).toEqual(before);
@@ -573,8 +650,52 @@ test("external permission OCC updates preserve membership and existing session i
     found: true,
     subjectId: f.identity.subjectId,
     membershipStatus: "active",
-    membershipAuthorizationRevision: 1,
+    membershipAuthorizationRevision: 2,
   });
+  expect(
+    (await ensureExternalIdentity(db.db, { accountId: f.accountId, ...f.reference }))
+      .authorizationRevision,
+  ).toBe(2);
+});
+
+test("empty external permission OCC updates retain membership and keyed updates reject empty sets", async () => {
+  const f = await fixture(["workspace:admin", "account:admin"]);
+  await f.add();
+  await expect(
+    f.service.updateExternalWorkspaceMember(
+      f.accountId,
+      f.workspace.id,
+      f.identity.organizationMembershipId,
+      { operationId: crypto.randomUUID(), permissions: [] },
+    ),
+  ).rejects.toMatchObject({ status: 422 });
+  const before =
+    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`;
+  const response = await f.patch({
+    identity: f.reference,
+    expectedPermissions: [...f.grant.permissions],
+    permissions: [],
+  });
+  expect(response.status).toBe(200);
+  expect(await response.json()).toMatchObject({
+    subjectId: f.identity.subjectId,
+    permissions: [],
+  });
+  expect(
+    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
+  ).toEqual([]);
+  expect(
+    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`,
+  ).toEqual(before);
+  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
+    found: true,
+    membershipStatus: "active",
+    membershipAuthorizationRevision: 2,
+  });
+  expect(
+    (await ensureExternalIdentity(db.db, { accountId: f.accountId, ...f.reference }))
+      .authorizationRevision,
+  ).toBe(2);
 });
 
 test("concurrent external permission writers cannot overwrite an intervening grant", async () => {
