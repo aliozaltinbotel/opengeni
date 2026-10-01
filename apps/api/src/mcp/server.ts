@@ -595,7 +595,7 @@ class PolicyMcpServer extends McpServer {
 export function slackBotFileContentResult(
   result: Awaited<ReturnType<OpenGeniSlackBotClient["fileContent"]>>,
 ) {
-  if (!("image" in result)) {
+  if (result.image === undefined) {
     return {
       content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
       structuredContent: {
