@@ -1,0 +1,19 @@
+name: Cendra artifact runtime for 474ee6c00
+
+# Exact native execution invocation and authenticated test fixture source. Caller only; the reusable
+# workflow checks out source_sha and verifies it in every target build.
+# Image/runtime Bun remains explicitly1.3.14 in Cendra; this workflow's source
+# build toolchain follows its pinned1.4.0 declaration and is recorded separately.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-474ee6c00
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 474ee6c005cd68d5a3510210e8aacad8b27b6973
