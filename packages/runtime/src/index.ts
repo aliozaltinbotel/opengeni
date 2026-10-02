@@ -4175,8 +4175,10 @@ export type PrepareToolsOptions = {
   attemptToolAuthorize?: AttemptToolAuthorization;
   /** Live accepted-attempt fence, evaluated at execution rather than catalog
    * preparation. Includes model and Codemode calls and runs before consuming
-   * connector approval authority. Does not alter catalog identity. */
-  authorizeAttemptExecution?: () => Promise<void> | void;
+   * connector approval authority. Does not alter catalog identity. The canonical
+   * gateway supplies the exact invocation captured by its prepared lifecycle;
+   * non-gateway capability fences may call this without an invocation. */
+  authorizeAttemptExecution?: (invocation?: Parameters<AttemptToolAuthorization>[0]) => Promise<void> | void;
   /** Attempt-bound connector policy installed into the canonical gateway lifecycle. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   /** Private connector identities for exact-name attempt-local tools. */
@@ -5199,7 +5201,7 @@ async function prepareAttemptToolEnvironment(
             const prior = await definition.lifecycle?.prepare(input);
             return {
               begin: async () => {
-                await options.authorizeAttemptExecution!();
+                await options.authorizeAttemptExecution!({ call: input.call as Parameters<AttemptToolAuthorization>[0]["call"], entry: input.entry });
                 await prior?.begin?.();
               },
               ...(prior?.complete ? { complete: prior.complete } : {}),
