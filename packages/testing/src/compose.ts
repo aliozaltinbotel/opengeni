@@ -1,9 +1,10 @@
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
+import { resolveNatsControlPlaneAuth, type NatsControlPlaneAuth } from "@opengeni/config";
 import { Connection } from "@temporalio/client";
 import { connect as connectNats } from "nats";
 import postgres from "postgres";
-import { writeFile } from "node:fs/promises";
+import { chmod, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,6 +34,8 @@ export type TestServices = {
   /** Restricted opengeni_app URL for starting API/worker entry points. */
   runtimeDatabaseUrl: string;
   natsUrl: string;
+  /** Optional identity for this fixture's authenticated control-plane broker. */
+  natsControlAuth?: NatsControlPlaneAuth;
   temporalHost: string;
   dockerNetwork: string;
   objectStorageEndpoint?: string;
@@ -44,13 +47,30 @@ export type TestServices = {
   down: () => Promise<void>;
 };
 
-export async function startTestServices(
-  options: { temporal?: boolean; objectStorage?: boolean } = {},
-): Promise<TestServices> {
+type TestServicesOptions = {
+  temporal?: boolean;
+  objectStorage?: boolean;
+  natsControlAuth?: NatsControlPlaneAuth;
+};
+
+export async function startTestServices(options: TestServicesOptions = {}): Promise<TestServices> {
+  const natsControlAuth = options.natsControlAuth
+    ? resolveNatsControlPlaneAuth({
+        selfhostedNatsControlUser: options.natsControlAuth.user,
+        selfhostedNatsControlPassword: options.natsControlAuth.password,
+      })
+    : null;
+  if (options.natsControlAuth && !natsControlAuth) {
+    throw new Error("natsControlAuth requires a nonempty user and password");
+  }
+  const resolvedOptions = {
+    ...options,
+    ...(natsControlAuth ? { natsControlAuth } : {}),
+  };
   let lastError: unknown;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
-      return await startTestServicesAttempt(options);
+      return await startTestServicesAttempt(resolvedOptions);
     } catch (error) {
       lastError = error;
       if (!isRetryableComposeStartupError(error) || attempt === 5) {
@@ -62,9 +82,7 @@ export async function startTestServices(
   throw lastError;
 }
 
-async function startTestServicesAttempt(
-  options: { temporal?: boolean; objectStorage?: boolean } = {},
-): Promise<TestServices> {
+async function startTestServicesAttempt(options: TestServicesOptions = {}): Promise<TestServices> {
   const cwd = await makeTempDir("opengeni-compose-");
   const projectName = `opengeni_test_${crypto.randomUUID().replace(/-/g, "").slice(0, 10)}`;
   const ports = {
@@ -76,6 +94,19 @@ async function startTestServicesAttempt(
     minioConsole: await freePort(),
   };
   const composeFile = join(cwd, "compose.yml");
+  if (options.natsControlAuth) {
+    try {
+      await chmod(cwd, 0o700);
+      await writeFile(
+        join(cwd, "nats.conf"),
+        JSON.stringify({ authorization: options.natsControlAuth }),
+        { mode: 0o600 },
+      );
+    } catch (error) {
+      await removeTempDir(cwd);
+      throw error;
+    }
+  }
   if (options.objectStorage ?? false) {
     const fixturesDir = join(dirname(fileURLToPath(import.meta.url)), "../../../deploy/garage");
     await Bun.write(join(cwd, "garage.toml"), Bun.file(join(fixturesDir, "local.toml")));
@@ -85,6 +116,7 @@ async function startTestServicesAttempt(
     composeYaml(ports, {
       temporal: options.temporal ?? true,
       objectStorage: options.objectStorage ?? false,
+      natsControlAuth: Boolean(options.natsControlAuth),
     }),
   );
   const composeUpCommand = [
@@ -127,6 +159,7 @@ async function startTestServicesAttempt(
     databaseUrl: `postgres://opengeni:opengeni@127.0.0.1:${ports.postgres}/opengeni`,
     runtimeDatabaseUrl: `postgres://opengeni_app:opengeni_app@127.0.0.1:${ports.postgres}/opengeni`,
     natsUrl: `nats://127.0.0.1:${ports.nats}`,
+    ...(options.natsControlAuth ? { natsControlAuth: options.natsControlAuth } : {}),
     temporalHost: `127.0.0.1:${ports.temporal}`,
     dockerNetwork: `${projectName}_default`,
     ...(options.objectStorage
@@ -151,7 +184,7 @@ async function startTestServicesAttempt(
 
   try {
     await waitForPostgres(services.databaseUrl);
-    await waitForNats(services.natsUrl);
+    await waitForNats(services.natsUrl, services.natsControlAuth);
     if (options.temporal ?? true) {
       await waitForTemporal(services.temporalHost);
     }
@@ -507,10 +540,14 @@ async function waitForPostgres(databaseUrl: string): Promise<void> {
   );
 }
 
-async function waitForNats(natsUrl: string): Promise<void> {
+async function waitForNats(natsUrl: string, natsControlAuth?: NatsControlPlaneAuth): Promise<void> {
   await waitFor(
     async () => {
-      const nc = await connectNats({ servers: natsUrl, timeout: 1_000 });
+      const nc = await connectNats({
+        servers: natsUrl,
+        timeout: 1_000,
+        ...(natsControlAuth ? { user: natsControlAuth.user, pass: natsControlAuth.password } : {}),
+      });
       await nc.drain();
       return true;
     },
@@ -615,7 +652,7 @@ function composeYaml(
     minio: number;
     minioConsole: number;
   },
-  options: { temporal: boolean; objectStorage: boolean },
+  options: { temporal: boolean; objectStorage: boolean; natsControlAuth: boolean },
 ): string {
   return `services:
   postgres:
@@ -636,8 +673,8 @@ function composeYaml(
   nats:
     image: nats:2-alpine
     pull_policy: never
-    command: ["-m", "8222"]
-    ports:
+    command: ${options.natsControlAuth ? '["-m", "8222", "-c", "/etc/nats/fixture.conf"]' : '["-m", "8222"]'}
+${options.natsControlAuth ? "    volumes:\n      - ./nats.conf:/etc/nats/fixture.conf:ro\n" : ""}    ports:
       - "127.0.0.1:${ports.nats}:4222"
       - "127.0.0.1:${ports.natsMonitor}:8222"
 
