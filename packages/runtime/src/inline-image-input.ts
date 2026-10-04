@@ -5,6 +5,7 @@ import {
   inlineImageContext,
   InlineImageMetadata,
   type InlineImagePart,
+  type SessionEvent,
 } from "@opengeni/contracts";
 import type { CallModelInputFilter, AgentInputItem } from "@openai/agents";
 import { z } from "zod";
@@ -25,7 +26,7 @@ type Bus = {
   subscribe: (
     workspaceId: string,
     sessionId: string,
-    onEvents: (events: { type: string; payload: unknown }[]) => void,
+    onEvents: (events: Pick<SessionEvent, "type" | "turnId" | "payload">[]) => void,
   ) => Promise<() => void>;
   subscribeRequests: (
     subject: string,
@@ -63,6 +64,7 @@ export async function stageInlineImages(
   state.bytes += bytes;
   const id = crypto.randomUUID();
   let raw: readonly InlineImagePart[] | null = parts;
+  let acceptedTurnId: string | null = null;
   let closed = false;
   let unsubscribe: () => void = () => {};
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -82,8 +84,11 @@ export async function stageInlineImages(
   try {
     stopEvents = await bus.subscribe(scope.workspaceId, scope.sessionId, (events) => {
       if (
-        events.some((event) =>
-          ["turn.failed", "turn.cancelled", "turn.superseded"].includes(event.type),
+        events.some(
+          (event) =>
+            acceptedTurnId !== null &&
+            event.turnId === acceptedTurnId &&
+            ["turn.failed", "turn.cancelled", "turn.superseded"].includes(event.type),
         )
       )
         cancel();
@@ -104,6 +109,7 @@ export async function stageInlineImages(
       if (
         !parsed.success ||
         closed ||
+        acceptedTurnId === null ||
         parsed.data.workspaceId !== scope.workspaceId ||
         parsed.data.sessionId !== scope.sessionId
       )
@@ -122,7 +128,17 @@ export async function stageInlineImages(
     cancel();
     throw new Error("INLINE_IMAGE_TRANSPORT_UNAVAILABLE");
   }
-  return { descriptor: { id, images: metadata } satisfies InlineImageDescriptor, cancel };
+  return {
+    descriptor: { id, images: metadata } satisfies InlineImageDescriptor,
+    // The existing acceptance transaction binds before commit/fanout. Its
+    // persistence retry may replace an uncommitted turn id; no turn can consume
+    // bytes until that transaction exposes the exact live attempt.
+    bindTurn: (turnId: string): void => {
+      if (closed) throw new Error("INLINE_IMAGE_INPUT_UNAVAILABLE");
+      acceptedTurnId = z.string().uuid().parse(turnId);
+    },
+    cancel,
+  };
 }
 export async function consumeInlineImages(
   bus: Bus,

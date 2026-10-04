@@ -4072,6 +4072,11 @@ async function acceptSessionUserMessageInFileScope(
         { workspaceId, sessionId },
         images,
         async (scope, id) => {
+          await requireSessionAuthorization(deps, grant, {
+            sessionId: scope.sessionId,
+            operation: "session.append",
+            surface: "core",
+          });
           const currentSession = await requireSession(db, scope.workspaceId, scope.sessionId);
           const currentTurn = await getSessionTurnForAttempt(
             db,
@@ -4129,10 +4134,12 @@ async function acceptSessionUserMessageInFileScope(
         personalConnectionDelegations,
         mcpAccountBindings,
 
-        ...(captureLinkedAuthority
+        ...(captureLinkedAuthority || imageLease
           ? {
-              captureTurnAuthority: (tx: Database, turnId: string) =>
-                captureLinkedAuthority(tx, sessionId, turnId),
+              captureTurnAuthority: async (tx: Database, turnId: string): Promise<void> => {
+                await captureLinkedAuthority?.(tx, sessionId, turnId);
+                imageLease?.bindTurn(turnId);
+              },
             }
           : {}),
         ...(input.personalResourceAttachment

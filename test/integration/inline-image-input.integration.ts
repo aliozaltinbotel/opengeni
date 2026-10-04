@@ -12,13 +12,14 @@ import {
   requireSession,
   getSessionHistoryItems,
   listSessionEvents,
+  getSessionTurnForAttempt,
   dbSql,
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { provisionRoles } from "@opengeni/db/provision-roles";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { testSettings } from "@opengeni/testing";
-import { type InlineImagePart } from "@opengeni/contracts";
+import { type InlineImagePart, type AuthorizeSessionInput } from "@opengeni/contracts";
 const databaseUrl = process.env.PQA_IMAGE_DATABASE_URL!;
 const natsUrl = process.env.PQA_IMAGE_NATS_URL!;
 if (!databaseUrl || !natsUrl) throw new Error("Exact owned PG17/NATS fixture URLs are required");
@@ -398,5 +399,119 @@ test("real HTTP admission, Core NATS, turn activity and provider input keep inli
         byteSize: Buffer.from(base64, "base64").length,
       })),
     ),
+  );
+}, 60_000);
+
+test("host authorization withdrawn after preparation prevents image bytes reaching the provider", async () => {
+  const settings = testSettings({
+    databaseUrl,
+    natsUrl,
+    openaiModel: "gpt-5.6-sol",
+    openaiBaseUrl: `http://127.0.0.1:${provider.port}/v1`,
+    mcpServers: [],
+  });
+  let allowed = true;
+  const denied: AuthorizeSessionInput[] = [];
+  const app = createApp({
+    settings,
+    db: client.db,
+    bus,
+    workflowClient: workflow,
+    sessionAuthorization: {
+      authorizeSession: async (input) => {
+        if (allowed) return { allowed: true };
+        denied.push(input);
+        return { allowed: false, reason: "revoked" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    },
+  });
+  const context = (await (await app.request("/v1/access/me")).json()) as {
+    defaultWorkspaceId: string;
+  };
+  const workspaceId = context.defaultWorkspaceId;
+  const path = `/v1/workspaces/${workspaceId}/sessions`;
+  const created = await app.request(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      startMode: "realtime",
+      tools: [],
+      firstPartyMcpTools: [],
+      bundledSkillIds: [],
+      skills: [],
+      memoryScope: "off",
+      agentAccess: "session",
+      sandboxBackend: "none",
+      model: "gpt-5.6-sol",
+    }),
+  });
+  expect(created.status).toBe(202);
+  const session = (await created.json()) as { id: string; accountId: string };
+  const send = await app.request(`${path}/${session.id}/events`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      type: "user.message",
+      payload: { text: "Assess the evidence.", images },
+    }),
+  });
+  expect(send.status).toBe(202);
+  const [acceptedTurn] = await listSessionTurns(client.db, workspaceId, session.id, 1);
+  const descriptor = readInlineImageDescriptor(acceptedTurn!.metadata)!;
+  const providerRequestsBefore = requests.length;
+  const attemptId = crypto.randomUUID();
+  let retrievals = 0;
+  const workerBus: EventBus = {
+    ...bus,
+    request: async (subject, payload, options) => {
+      if (subject === `opengeni.inline-image.${descriptor.id}`) {
+        const turn = await getSessionTurnForAttempt(client.db, workspaceId, session.id, attemptId);
+        expect(turn?.id).toBe(acceptedTurn!.id);
+        expect(turn?.executionGeneration).toBe(1);
+        retrievals++;
+        allowed = false;
+      }
+      return await bus.request(subject, payload, options);
+    },
+  };
+  const activities = createActivityTestHarness({
+    settings,
+    db: client.db,
+    bus: workerBus,
+    runtime: createProductionAgentRuntime(),
+  });
+  const result = await activities.runAgentTurn({
+    attemptId,
+    accountId: session.accountId,
+    workspaceId,
+    sessionId: session.id,
+    trigger: { kind: "next" },
+    workflowId: `image-r1-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+  });
+  expect(retrievals).toBe(1);
+  expect(requests.length - providerRequestsBefore).toBe(0);
+  expect(denied).toHaveLength(1);
+  expect(denied[0]).toEqual(
+    expect.objectContaining({
+      accountId: session.accountId,
+      workspaceId,
+      target: expect.objectContaining({ sessionId: session.id }),
+      operation: "session.append",
+      surface: "core",
+    }),
+  );
+  expect(result.status).toBe("failed");
+  const events = await listSessionEvents(client.db, workspaceId, session.id, 0, 200);
+  expect(events.some((event) => event.type === "turn.failed")).toBe(true);
+  for (const image of images) expect(JSON.stringify(events)).not.toContain(image.base64);
+  allowed = true;
+  await expect(
+    consumeInlineImages(bus, { workspaceId, sessionId: session.id, attemptId }, descriptor),
+  ).rejects.toThrow("UNAVAILABLE");
+  console.log(
+    "R1_REVOKED_SESSION_AUTHORIZATION_PROVIDER_REQUESTS",
+    requests.length - providerRequestsBefore,
   );
 }, 60_000);
