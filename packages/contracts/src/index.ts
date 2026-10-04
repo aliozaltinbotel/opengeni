@@ -1,3 +1,5 @@
+export * from "./inline-image-input";
+import { InlineImageParts } from "./inline-image-input";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./workspace-integrations";
@@ -16104,6 +16106,8 @@ export type TurnBudgetV1 = z.infer<typeof TurnBudgetV1>;
 
 export const SessionUserMessagePayload = z
   .object({
+    /** Ephemeral tool-less image input; persisted records retain metadata only. */
+    images: InlineImageParts.optional(),
     text: z.string().default(""),
     annotations: SubmittedTimelineAnnotations.default([]),
     // Model-visible application context attached to this exact user message.

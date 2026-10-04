@@ -11,7 +11,7 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
     index?: number,
   ) => void | Promise<void>;
 };
-const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture>();
+const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture | undefined>();
 const captureIndices = new WeakMap<object, number>();
 
 /** The same agent can re-enter runAgentStream after in-activity compaction. */
@@ -26,6 +26,11 @@ export function withModelRequestCapture<T>(
   fn: () => T,
 ): T {
   return capture ? modelRequestCapture.run(capture, fn) : fn();
+}
+
+/** Explicit privacy boundary: inherited diagnostic observers receive no image bytes. */
+export function withoutModelRequestCapture<T>(fn: () => T): T {
+  return modelRequestCapture.run(undefined, fn);
 }
 
 /** Observe the final transport bytes, never reconstruct provider serialization.

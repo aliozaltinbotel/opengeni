@@ -1,3 +1,6 @@
+import { withoutModelRequestCapture } from "./model-request-capture";
+import { inlineImageInputFilter } from "./inline-image-input";
+export * from "./inline-image-input";
 import { measureMcpPhase } from "@opengeni/observability";
 import {
   withPreparedCompactionRequest,
@@ -4178,7 +4181,9 @@ export type PrepareToolsOptions = {
    * connector approval authority. Does not alter catalog identity. The canonical
    * gateway supplies the exact invocation captured by its prepared lifecycle;
    * non-gateway capability fences may call this without an invocation. */
-  authorizeAttemptExecution?: (invocation?: Parameters<AttemptToolAuthorization>[0]) => Promise<void> | void;
+  authorizeAttemptExecution?: (
+    invocation?: Parameters<AttemptToolAuthorization>[0],
+  ) => Promise<void> | void;
   /** Attempt-bound connector policy installed into the canonical gateway lifecycle. */
   connectorActionPolicy?: ConnectorActionPolicyHooks;
   /** Private connector identities for exact-name attempt-local tools. */
@@ -5201,7 +5206,10 @@ async function prepareAttemptToolEnvironment(
             const prior = await definition.lifecycle?.prepare(input);
             return {
               begin: async () => {
-                await options.authorizeAttemptExecution!({ call: input.call as Parameters<AttemptToolAuthorization>[0]["call"], entry: input.entry });
+                await options.authorizeAttemptExecution!({
+                  call: input.call as Parameters<AttemptToolAuthorization>[0]["call"],
+                  entry: input.entry,
+                });
                 await prior?.begin?.();
               },
               ...(prior?.complete ? { complete: prior.complete } : {}),
@@ -8244,6 +8252,11 @@ export type RunAgentStreamOptions = {
   // model call and never touches `state.history`/`originalInput`, so the
   // reconcile dual-write never sees it.
   callModelInputFilter?: CallModelInputFilter;
+  /** Attempt-local images: provider request only, no SDK history or debug capture. */
+  inlineImages?: {
+    parts: readonly import("@opengeni/contracts").InlineImagePart[];
+    metadata: readonly import("@opengeni/contracts").InlineImageMetadata[];
+  };
   /**
    * Observes the exact model-visible prefix after every input filter. Must not
    * throw; capture failures are swallowed so they cannot change inference.
@@ -8455,8 +8468,12 @@ async function runAgentStreamInternal(
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
-    overrides.onModelVisibleContext,
+    overrides.inlineImages ? undefined : overrides.onModelVisibleContext,
   );
+  const captureRun = <T>(fn: () => T): T =>
+    overrides.inlineImages
+      ? withoutModelRequestCapture(fn)
+      : withModelRequestCapture(modelRequestCapture, fn);
   installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -8605,6 +8622,13 @@ async function runAgentStreamInternal(
         measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
         measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
         measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
+        overrides.inlineImages
+          ? inlineImageInputFilter(
+              overrides.inlineImages.parts,
+              overrides.inlineImages.metadata,
+              agentSupportsImageInput.get(agent) !== false,
+            )
+          : undefined,
         // A caller filter may synthesize model input. Re-apply the idempotent
         // canonical bound at the literal final seam before accounting/provider
         // serialization so no extension can bypass the policy.
@@ -8657,7 +8681,7 @@ async function runAgentStreamInternal(
       session: withModelPreparationSessionDiagnostics(agentSession),
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
-    return await withModelRequestCapture(modelRequestCapture, () =>
+    return await captureRun(() =>
       withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
         withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
           recordModelPreparationManifestInventory(
@@ -8668,11 +8692,12 @@ async function runAgentStreamInternal(
             "sandbox_session_manifest_inventory",
             (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
           );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
+          return runScopedRunner(
+            settings,
             agent,
-            prepared.input,
-            ownedRunOptions,
-          );
+            inputWaitYield,
+            Boolean(overrides.inlineImages),
+          ).run(agent, prepared.input, ownedRunOptions);
         }),
       ),
     );
@@ -8769,6 +8794,13 @@ async function runAgentStreamInternal(
       measuredModelInputFilter("input_filter_base", baseModelInputFilterForSettings(settings)),
       measuredModelInputFilter("input_filter_genesis", genesisTitleInputFilter),
       measuredModelInputFilter("input_filter_host", overrides.callModelInputFilter),
+      overrides.inlineImages
+        ? inlineImageInputFilter(
+            overrides.inlineImages.parts,
+            overrides.inlineImages.metadata,
+            agentSupportsImageInput.get(agent) !== false,
+          )
+        : undefined,
       measuredModelInputFilter(
         "input_filter_tool_output",
         boundModelToolOutputsFilterForSettings(settings),
@@ -8819,18 +8851,19 @@ async function runAgentStreamInternal(
       ...(sandboxSessionState ? { sessionState: sandboxSessionState } : {}),
     } as SandboxRunConfig;
   }
-  return await withModelRequestCapture(modelRequestCapture, () =>
+  return await captureRun(() =>
     withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
       withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
         recordModelPreparationManifestInventory(
           "sandbox_agent_manifest_inventory",
           (agent as { defaultManifest?: Manifest }).defaultManifest,
         );
-        return runScopedRunner(settings, agent, inputWaitYield).run(
+        return runScopedRunner(
+          settings,
           agent,
-          prepared.input,
-          runOptions,
-        );
+          inputWaitYield,
+          Boolean(overrides.inlineImages),
+        ).run(agent, prepared.input, runOptions);
       }),
     ),
   );
@@ -8918,12 +8951,14 @@ function runScopedRunner(
   settings: Settings,
   agent: Agent<any, any>,
   inputWaitYield?: InputWaitYieldStream,
+  ephemeralImages = false,
 ): Runner {
   const baseProvider = new MultiProviderModelProvider(settings);
   const lazyRuntime = lazyToolRuntimeForAgent(agent);
   // LazyToolModel already captures the post-hide request. Non-lazy string models
   // resolve through this provider, which is the actual getResponse seam.
   const runner = new Runner({
+    ...(ephemeralImages ? { tracingDisabled: true, traceIncludeSensitiveData: false } : {}),
     modelProvider: lazyRuntime
       ? new LazyToolModelProvider(baseProvider, lazyRuntime)
       : new ModelRequestCaptureProvider(baseProvider),

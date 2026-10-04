@@ -1,3 +1,10 @@
+import {
+  InlineImageParts,
+  inlineImageMetadata,
+  inlineImageContext,
+  type InlineImagePart,
+} from "@opengeni/contracts";
+import { stageInlineImages, readInlineImageDescriptor } from "@opengeni/runtime";
 import { acceptSessionFileAttachments } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
@@ -3698,6 +3705,7 @@ function sessionPromptBoundaryRequestHash(input: {
   connectionAccounts?: McpConnectionAccountSelection[];
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
   commandActor: SessionCommandActor;
+  images?: InlineImagePart[];
   fallback?: TurnFallbackRouteRequestV1;
   turnBudget?: TurnBudgetV1;
 }): string {
@@ -3718,6 +3726,7 @@ function sessionPromptBoundaryRequestHash(input: {
     mcpCredentialUpdates: input.mcpCredentialUpdates,
     connectionAccounts: input.connectionAccounts ?? [],
     personalResourceAttachment: input.personalResourceAttachment ?? null,
+    ...(input.images ? { images: inlineImageMetadata(input.images) } : {}),
     // F-2: present only when declared, so every earlier prompt keeps its exact hash.
     ...(input.fallback !== undefined || input.turnBudget !== undefined
       ? {
@@ -3775,6 +3784,7 @@ async function acceptSessionUserMessageInFileScope(
     expectedDraftRevision?: number | null;
     personalResourceAttachment?: PersonalResourceAttachmentIntent;
     authorization?: AccessGrantAuthorization;
+    images?: InlineImagePart[];
     /** F-2: the turn's declared fallback route and budget. */
     fallback?: TurnFallbackRouteRequestV1;
     turnBudget?: TurnBudgetV1;
@@ -3789,6 +3799,8 @@ async function acceptSessionUserMessageInFileScope(
   replay: boolean;
 }> {
   const { db, bus, workflowClient, objectStorage } = deps;
+  const images = input.images === undefined ? undefined : InlineImageParts.parse(input.images);
+  let imageLease: Awaited<ReturnType<typeof stageInlineImages>> | undefined;
 
   const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const delivery = input.delivery ?? "send";
@@ -3832,6 +3844,7 @@ async function acceptSessionUserMessageInFileScope(
           ? { personalResourceAttachment: input.personalResourceAttachment }
           : {}),
         commandActor,
+        ...(images ? { images } : {}),
         ...(input.fallback !== undefined ? { fallback: input.fallback } : {}),
         ...(input.turnBudget !== undefined ? { turnBudget: input.turnBudget } : {}),
       })
@@ -4044,6 +4057,40 @@ async function acceptSessionUserMessageInFileScope(
       ...(input.connectionAccounts ? { authoritySelections: input.connectionAccounts } : {}),
     });
 
+    if (images) {
+      if (
+        delivery !== "send" ||
+        existingSession.tools.length !== 0 ||
+        existingSession.toolPolicy.mode !== "explicit" ||
+        existingSession.memoryScope !== "off" ||
+        existingSession.agentAccess !== "session"
+      ) {
+        throw new HTTPException(422, { message: "INLINE_IMAGE_TOOLLESS_SESSION_REQUIRED" });
+      }
+      imageLease = await stageInlineImages(
+        bus,
+        { workspaceId, sessionId },
+        images,
+        async (scope, id) => {
+          const currentSession = await requireSession(db, scope.workspaceId, scope.sessionId);
+          const currentTurn = await getSessionTurnForAttempt(
+            db,
+            scope.workspaceId,
+            scope.sessionId,
+            scope.attemptId,
+          );
+          return (
+            currentSession.accountId === grant.accountId &&
+            currentSession.tools.length === 0 &&
+            currentSession.toolPolicy.mode === "explicit" &&
+            currentSession.memoryScope === "off" &&
+            currentSession.agentAccess === "session" &&
+            currentTurn?.executionGeneration === 1 &&
+            readInlineImageDescriptor(currentTurn.metadata)?.id === id
+          );
+        },
+      );
+    }
     const captureLinkedAuthority = prepareExternalLinkTurnAdmission(input.authorization);
     const { accepted, turn, draft, receipt, routing, interruptionCount, replay } =
       await postUserMessageTurn({
@@ -4056,7 +4103,11 @@ async function acceptSessionUserMessageInFileScope(
         sessionId,
         text: input.text,
         annotations,
-        modelContext: input.modelContext ?? null,
+        modelContext: images
+          ? [input.modelContext, inlineImageContext(inlineImageMetadata(images))]
+              .filter(Boolean)
+              .join("\n\n")
+          : (input.modelContext ?? null),
         resources: requestedResources,
         ...(composerDraftResources ? { composerDraftResources } : {}),
         model: input.model ?? null,
@@ -4064,8 +4115,15 @@ async function acceptSessionUserMessageInFileScope(
         latencyMode: input.latencyMode ?? null,
         reasoningEffortFallback: sessionReasoningEffort,
         turnExecutionPolicy,
-        ...(turnRouteDeclaration
-          ? { turnMetadata: metadataWithTurnRouteDeclarationV1({}, turnRouteDeclaration) }
+        ...(turnRouteDeclaration || imageLease
+          ? {
+              turnMetadata: {
+                ...(turnRouteDeclaration
+                  ? metadataWithTurnRouteDeclarationV1({}, turnRouteDeclaration)
+                  : {}),
+                ...(imageLease ? { inlineImageInput: imageLease.descriptor } : {}),
+              },
+            }
           : {}),
         mcpCredentialUpdates,
         personalConnectionDelegations,
@@ -4101,6 +4159,7 @@ async function acceptSessionUserMessageInFileScope(
           ? { schedulePostCommit: deps.schedulePromptPostCommit }
           : {}),
       });
+    if (replay) imageLease?.cancel();
     return {
       accepted,
       turn,
@@ -4111,6 +4170,7 @@ async function acceptSessionUserMessageInFileScope(
       replay,
     };
   } catch (error) {
+    imageLease?.cancel();
     if (input.clientEventId && boundaryRequestHash) {
       const replay = await withWorkspaceSubjectSessionActivityRls(
         db,

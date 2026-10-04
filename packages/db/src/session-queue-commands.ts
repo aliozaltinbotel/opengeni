@@ -1,3 +1,4 @@
+import { InlineImageMetadata } from "@opengeni/contracts";
 import { acceptSessionFileAttachments } from "./session-file-attachments";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
@@ -2141,6 +2142,13 @@ export async function submitHumanPromptInTransaction(
           : {}),
         ...(input.resources.length ? { resources: input.resources } : {}),
         ...(effectiveModelContext ? { modelContext: effectiveModelContext } : {}),
+        ...(input.turnMetadata?.inlineImageInput
+          ? {
+              images: (input.turnMetadata.inlineImageInput as { images: unknown[] }).images.map(
+                (image) => InlineImageMetadata.parse(image),
+              ),
+            }
+          : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),

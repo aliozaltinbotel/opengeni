@@ -95,6 +95,23 @@ Temporal coordinates execution; activities read Postgres obligations, not signal
 Conversation, goals, queues, usage and provider/tool transcripts stay outside
 workflow history; streams use ordinary events.
 
+Tool-less `user.message` image parts are a bounded exception to durable input:
+only an explicit empty tool policy with memory off and session-only agent access
+admits up to two canonical PNG/JPEG/WebP parts (256 KiB each, 512 KiB total).
+The Core holds bytes in memory for at most 60 seconds and hands them once to the
+current first execution attempt through its existing managed NATS request/reply
+connection. Retrieval rechecks account/workspace/session/attempt authority and
+the empty policy; the correlation id is never authority. Pending leases are
+bounded per session and per process (32 scopes, 16 MiB encoded bytes), and expire
+or are released on consumption, cancellation, terminal failure or admission
+failure. No bytes enter Postgres, object storage, Temporal arguments/results,
+SDK history, model context diagnostics or tracing. Durable input retains only
+media type, SHA-256, decoded size and an English untrusted-context marker. A
+copy-on-write runtime filter adds provider `input_image` parts; text-only models
+receive the existing image omission marker. Missing bytes during retry or
+recovery fail closed. Provider failures discard their potentially body-bearing
+cause. This context never grants tools or business authority.
+
 Canonical: `apps/worker/src/workflows/session.ts` and
 [`run-lifecycle.md`](run-lifecycle.md).
 

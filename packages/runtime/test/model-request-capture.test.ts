@@ -12,6 +12,7 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelRequestCapture,
+  withoutModelRequestCapture,
 } from "../src/model-request-capture";
 
 class InnerModel implements Model {
@@ -254,4 +255,21 @@ test("media and encrypted state are unknown token costs, not base64 text estimat
   expect(input.estimatedTokens).toBeNull();
   expect(input.itemEstimatedTokens?.slice(0, 2)).toEqual([null, null]);
   expect(input.itemEstimatedTokens?.[2]).toBeGreaterThan(0);
+});
+
+test("ephemeral input suppresses inherited capture and restores it afterwards", async () => {
+  const inner = new InnerModel();
+  const model = new ModelRequestCaptureModel(inner);
+  const captured: ModelRequest[] = [];
+  await withModelRequestCapture(
+    (request) => {
+      captured.push(request);
+    },
+    async () => {
+      await withoutModelRequestCapture(() => model.getResponse(requestWith("private", [])));
+      expect(captured.length).toBe(0);
+      await model.getResponse(requestWith("ordinary", []));
+    },
+  );
+  expect(captured.map((request) => request.systemInstructions)).toEqual(["ordinary"]);
 });

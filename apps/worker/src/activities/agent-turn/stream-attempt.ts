@@ -1,3 +1,5 @@
+import { getSessionTurnForAttempt } from "@opengeni/db";
+import { consumeInlineImages, readInlineImageDescriptor } from "@opengeni/runtime";
 import { ToolPathPhaseTimer, toolPathPhaseMetricObserver } from "./tool-path-phase-timing";
 import { measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
 import {
@@ -438,6 +440,24 @@ export async function runTurnStreamAttempt(
     parallelSessionTitleFinished = true;
     await parallelSessionTitle?.cancel();
   };
+  const currentImageTurn = Array.isArray((trigger.payload as Record<string, unknown>).images)
+    ? await getSessionTurnForAttempt(db, input.workspaceId, input.sessionId, input.attemptId)
+    : null;
+  const inlineImageDescriptor = currentImageTurn
+    ? readInlineImageDescriptor(currentImageTurn.metadata)
+    : null;
+  if (Array.isArray((trigger.payload as Record<string, unknown>).images) && !inlineImageDescriptor)
+    throw new Error("INLINE_IMAGE_INPUT_UNAVAILABLE");
+  // Retrieval rechecks the exact live attempt at the API owner. A recovery has no bytes.
+  if (inlineImageDescriptor && turnTools.length !== 0)
+    throw new Error("INLINE_IMAGE_TOOLLESS_SESSION_REQUIRED");
+  const ephemeralImages = inlineImageDescriptor
+    ? await consumeInlineImages(
+        bus,
+        { workspaceId: input.workspaceId, sessionId: input.sessionId, attemptId: input.attemptId },
+        inlineImageDescriptor,
+      )
+    : undefined;
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
   const prepareRunAttemptInput = async () => {
     const historyPreparationStartedAt = performance.now();
@@ -819,6 +839,9 @@ export async function runTurnStreamAttempt(
         providerTurn.turnRouteWatch = turnRouteWatch;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
           signal: runtimeCancellationSignal,
+          ...(ephemeralImages && inlineImageDescriptor
+            ? { inlineImages: { parts: ephemeralImages, metadata: inlineImageDescriptor.images } }
+            : {}),
           ...(turnRouteWatch ? { callModelInputFilter: turnRouteWatch.filter } : {}),
           sandboxEnvironment,
           onModelVisibleContext: async (snapshot) => {
@@ -1920,6 +1943,9 @@ export async function runTurnStreamAttempt(
         }
         return result;
       } catch (attemptError) {
+        // Provider error messages may echo request bodies. Never retain those for ephemeral-image turns.
+        // eslint-disable-next-line preserve-caught-error -- the provider cause can expose image bytes
+        if (ephemeralImages) throw new Error("INLINE_IMAGE_PROVIDER_FAILED");
         const overflow = classifyContextWindowOverflowError(attemptError);
         const compactionNeeded = findCompactionNeededError(attemptError);
         const recoveryKind = compactionNeeded

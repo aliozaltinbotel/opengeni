@@ -3531,6 +3531,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         result = await withSiteCommandOrigin(c, workspaceId, () =>
           acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
             text: event.payload.text,
+            ...(event.payload.images ? { images: event.payload.images } : {}),
             annotations: event.payload.annotations,
             modelContext: event.payload.modelContext ?? null,
             resources: event.payload.resources ?? [],
