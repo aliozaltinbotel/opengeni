@@ -1,0 +1,17 @@
+name: Cendra artifact runtime for 4259919ce
+
+# Reuse the unchanged native release builder for the exact reviewed source.
+# This caller builds source-bound inputs only; it never promotes or deploys.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-4259919ce
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 4259919cea1333fb4f6bed9cb3b5101d983ecfa2
