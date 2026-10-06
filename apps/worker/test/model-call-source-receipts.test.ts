@@ -1,6 +1,6 @@
 import postgres from "postgres";
 import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
-import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, ModelSourceRef } from "@opengeni/contracts";
+import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, canonicalModelSourceJson, ModelSourceRef } from "@opengeni/contracts";
 import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput } from "@opengeni/runtime";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -36,17 +36,23 @@ test("persistence removes only native source binding and keeps unknown symbols r
  const hidden=bindModelSourceInput({...json},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:crypto.randomUUID(),sha256:"b".repeat(64)},parents:[],retainedSources:[]});Object.defineProperty(hidden,Symbol("unknown-hidden-owner"),{value:"untrusted",enumerable:false});expect(()=>toPostgresLosslessJson(omitModelSourceInputBinding(hidden))).toThrow("Canonical JSON cannot contain symbol keys");
 });
 
-test("actual SDK transient call/result next receipts retain exact raw and projected sources and refuse source mutants",async()=>{
+for (const streaming of [false, true]) {
+test(`actual SDK transient ${streaming ? "streaming" : "ordinary"} long continuations retain distinct exact sources and refuse source mutants`,async()=>{
  const {buildOpenGeniAgent,prepareAgentTools}=await import("@opengeni/runtime");
  const f=await fixture();let index=0,calls=0;
  const raw={content:[{type:"text" as const,text:"Synthetic exact evidence"}],structuredContent:{passage:"Synthetic exact evidence"}};
  const retained={owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),version:"1",sha256:createHash("sha256").update("Synthetic exact evidence").digest("hex")};
+ // Derive identity coverage from the released schema, including same-id variants.
+ const distinctRetained=[retained,...Object.keys(ModelSourceRef.shape).map(field=>ModelSourceRef.parse({
+  ...retained,[field]:field==="sha256"?createHash("sha256").update("Synthetic distinct digest").digest("hex"):`${retained[field as keyof typeof retained]}:distinct`,
+ })),ModelSourceRef.parse({...retained,version:undefined})];
+ const toolSteps=16;
  const settings=testSettings({sandboxBackend:"none",webSearchEnabled:false,mcpServers:[{id:"cendra-pms",url:"https://synthetic.invalid/mcp",cacheToolsList:false}]});
  const prepared=await prepareAgentTools(settings,[{kind:"mcp",id:"cendra-pms"}],{...f.identity,localMcpServers:[{id:"cendra-pms",server:{
   name:"cendra-pms",cacheToolsList:false,connect:async()=>{},close:async()=>{},invalidateToolsCache:async()=>{},
   listTools:async()=>[{name:"knowledge_search",inputSchema:{type:"object",properties:{},required:[],additionalProperties:false}}],
   callTool:async()=>raw.content,callToolResult:async()=>raw,
- } satisfies MCPServer,modelSourceRefs:()=>[retained]}]});
+ } satisfies MCPServer,modelSourceRefs:()=>distinctRetained}]});
  const receipts:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>[]=[];
  let continuation:ModelRequest|undefined;
  const capture:ModelRequestCapture=()=>{};
@@ -59,7 +65,7 @@ test("actual SDK transient call/result next receipts retain exact raw and projec
  };
  const step=(sent:ModelRequest)=>{
   calls++;
-  if(calls>2)return {outputText:"Synthetic grounded answer"};
+  if(calls>toolSteps)return {outputText:"Synthetic grounded answer"};
   const tool=sent.tools.find(value=>value.type==="function" && value.name.endsWith("__knowledge_search"));
   if(!tool || tool.type!=="function")throw Error("Actual SDK MCP catalog tool missing");
   return {output:[functionCall(tool.name,{},crypto.randomUUID())]};
@@ -69,8 +75,18 @@ test("actual SDK transient call/result next receipts retain exact raw and projec
   const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
   for(const row of rows)bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]});
   const agent=buildOpenGeniAgent(settings,[],{mcpServers:prepared.mcpServers}).clone({model});
-  await withModelRequestCapture(capture,async()=>{const stream=await new Runner({tracingDisabled:true}).run(agent,rows.map(row=>row.item) as ModelRequest["input"],{stream:true,historyOwnership:"external"});for await(const _event of stream){}await stream.completed;});
-  expect(calls).toBe(3);expect(receipts).toHaveLength(3);
+  await withModelRequestCapture(capture,async()=>{
+   const runner=new Runner({tracingDisabled:true}),input=rows.map(row=>row.item) as ModelRequest["input"];
+   if(streaming){const stream=await runner.run(agent,input,{stream:true,historyOwnership:"external",maxTurns:toolSteps+1});for await(const _event of stream){}await stream.completed;}
+   else await runner.run(agent,input,{historyOwnership:"external",maxTurns:toolSteps+1});
+  });
+  expect(calls).toBe(toolSteps+1);expect(receipts).toHaveLength(toolSteps+1);
+  for(const receipt of receipts){
+   for(const node of [...receipt.inputs,...receipt.closure]){
+    expect(node.retainedSources.map(canonicalModelSourceJson)).toEqual([...new Set(node.retainedSources.map(canonicalModelSourceJson))]);
+   }
+  }
+  for(const source of distinctRetained)expect(receipts.at(-1)!.inputs.flatMap(item=>item.retainedSources)).toContainEqual(source);
   expect(receipts[0]!.inputs.flatMap(item=>item.retainedSources)).not.toContainEqual(retained);
   expect(receipts[2]!.inputs.flatMap(item=>item.retainedSources)).toContainEqual(retained);
   if(!continuation || !Array.isArray(continuation.input))throw Error("Actual SDK continuation absent");
@@ -91,15 +107,33 @@ test("actual SDK transient call/result next receipts retain exact raw and projec
    bindings=>{const binding=bindings.find(value=>value.rawToolSource)!;binding.nativeProducerSourceKey=foreignReceipt.sourceKey;binding.rawToolSource!.nativeModelSourceKey=foreignReceipt.sourceKey;},
    bindings=>{const binding=bindings.find(value=>value.rawToolSource)!;binding.nativeProducerSourceKey=title.sourceKey;binding.rawToolSource!.nativeModelSourceKey=title.sourceKey;},
    (bindings,input)=>{const binding=bindings.find(value=>value.rawToolSource)!;(input[binding.ordinal] as {output:unknown}).output="Altered projected source";},
+   ...Object.keys(ModelSourceRef.shape).map(field=>(bindings:typeof actualBindings)=>{
+    const binding=bindings.find(value=>value.rawToolSource)!;
+    const forged=ModelSourceRef.parse({...retained,[field]:field==="sha256"?"f".repeat(64):`${retained[field as keyof typeof retained]}:forged`});
+    binding.retainedSources=[...binding.retainedSources,forged];
+   }),
   ];
   for(const mutate of mutants){
-   const bindings=structuredClone(actualBindings),input=structuredClone(actualInput);mutate(bindings,input);
-   const refused=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},{input,sourceBindings:bindings});
+   const bindings=structuredClone(actualBindings),mutantInput=structuredClone(actualInput);mutate(bindings,mutantInput);
+   const refused=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},{input:mutantInput,sourceBindings:bindings});
    expect(refused.complete).toBe(false);expect(refused.incompleteReasons.length).toBeGreaterThan(0);
+   // An inconsistent full identity must remain visible in refused evidence.
+   const retainedEvidence=new Set(refused.inputs.flatMap(input=>input.retainedSources).map(canonicalModelSourceJson));
+   expect(bindings.flatMap(binding=>binding.retainedSources).map(canonicalModelSourceJson).filter(ref=>!retainedEvidence.has(ref))).toEqual([]);
   }
-  expect(calls).toBe(3);
+  // Erasing the owning row in this disposable fixture must not be hidden by a
+  // previously authenticated receipt graph. Fault injection touches our row only.
+  await shared.admin.begin(async tx=>{
+   await tx`set local session_replication_role=replica`;
+   await tx`delete from session_history_items where id=${rows[0]!.id} and account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId}`;
+  });
+  const erased=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},{input:actualInput,sourceBindings:actualBindings});
+  expect(erased.complete).toBe(false);expect(erased.incompleteReasons).toContain("UNRESOLVED_PARENT");
+  await expect(persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index,executionGeneration:f.identity.executionGeneration+1},{input:actualInput,sourceBindings:actualBindings})).rejects.toThrow();
+  expect(calls).toBe(toolSteps+1);
  } finally {await prepared.close();}
-},30_000);
+},60_000);
+}
 test("real PostgreSQL commits exact-call proof before dispatch; persistence failure prevents dispatch",async()=>{
  const {identity,instructionSelections}=await fixture();const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);let calls=0;
  const model:Model={async getResponse(){calls++;const stored=await readModelCallSourceReceipt(app.db,identity);expect(stored.receipt?.sourceKey).toBe(identity.sourceKey);expect(stored.receipt?.complete).toBe(true);expect(stored.receipt?.inputs.flatMap(item=>item.retainedSources).some(ref=>ref.owner==="workspace_instruction_policy_snapshots" && ref.id===instructionSelections.instructionPolicySnapshotId)).toBe(true);return {usage:new Usage(),output:[],responseId:"provider-1"};},getStreamedResponse():AsyncIterable<StreamEvent>{throw Error("unused");}};

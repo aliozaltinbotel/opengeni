@@ -144,7 +144,11 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           const ancestors=producer.inputs.flatMap(input=>input.sourceRef?[input.sourceRef]:[]);
           for(const ancestor of ancestors)if(!await closure(ancestor,new Set()))reasons.add("UNRESOLVED_PARENT");
           parents.push(...ancestors);
-          retainedSources=[...retainedSources,...producer.inputs.flatMap(input=>input.retainedSources),...producer.closure.flatMap(node=>node.retainedSources)];
+          // Inputs and closure repeat the same evidence across SDK continuations.
+          // Union the full released reference identity; differing owners, ids,
+          // digests or versions remain distinct and all owner checks still run.
+          retainedSources=[...new Map([...retainedSources,...producer.inputs.flatMap(input=>input.retainedSources),...producer.closure.flatMap(node=>node.retainedSources)]
+            .map(ref=>[canonicalModelSourceJson(ref),ref])).values()];
           const raw=binding.rawToolSource;
           if(binding.kind==="TOOL_RESULT") {
             const item=value as {type?:string;callId?:string};
