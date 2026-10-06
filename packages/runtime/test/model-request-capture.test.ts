@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Usage } from "@openai/agents";
+import { Agent, run, Usage } from "@openai/agents";
 import type {
   Model,
   ModelProvider,
@@ -12,6 +12,7 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelRequestCapture,
+  bindModelSourceInput,modelSourceBindings,modelSourceInputBinding,type ModelRequestCapture,
 } from "../src/model-request-capture";
 
 class InnerModel implements Model {
@@ -254,4 +255,15 @@ test("media and encrypted state are unknown token costs, not base64 text estimat
   expect(input.estimatedTokens).toBeNull();
   expect(input.itemEstimatedTokens?.slice(0, 2)).toEqual([null, null]);
   expect(input.itemEstimatedTokens?.[2]).toBeGreaterThan(0);
+});
+
+test("actual SDK preserves pre-transformation source binding and never serializes private metadata",async()=>{
+ const item=bindModelSourceInput({type:"message" as const,role:"user" as const,content:"Synthetic request"},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",sha256:"a".repeat(64)},parents:[],retainedSources:[]});
+ const inner:Model={async getResponse(sent){expect(modelSourceBindings(sent.input)).toHaveLength(1);expect(JSON.stringify(sent.input)).not.toContain("native-model-source-owner");return {usage:new Usage(),output:[{type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:"Synthetic response"}]}]};},async *getStreamedResponse(){throw Error("unused");}};
+ await run(new Agent({name:"source-test",instructions:"Synthetic instruction",model:new ModelRequestCaptureModel(inner)}),[item],{historyOwnership:"external",tracingDisabled:true});expect(modelSourceInputBinding(item)?.sourceRef.id).toBe("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+});
+test("stream source owner precedes dispatch and response observation binds exact object even without id",async()=>{
+ const events:string[]=[];const response={usage:{inputTokens:1,outputTokens:1,totalTokens:2},output:[]};const capture:ModelRequestCapture=()=>{};capture.beforeCall=async()=>{events.push("persist");return "source-stream";};capture.callCompleted=async(key,id,actual)=>{events.push("observe");expect(key).toBe("source-stream");expect(id).toBeNull();expect(actual).toBe(response);};
+ const inner:Model={async getResponse(){throw Error("unused");},async *getStreamedResponse(){events.push("dispatch");yield {type:"response_done",response} as StreamEvent;}};
+ await withModelRequestCapture(capture,async()=>{for await(const _ of new ModelRequestCaptureModel(inner).getStreamedResponse(requestWith("Synthetic instruction",[])))events.push("yield");});expect(events).toEqual(["persist","dispatch","observe","yield"]);
 });

@@ -1,3 +1,4 @@
+import type { ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { ArtifactCatalogListOptions, ArtifactCatalogListResponse } from "./artifact-catalog";
 import type {
   SessionMessageSearchRequest,
@@ -1346,6 +1347,10 @@ export class OpenGeniClient {
   }
 
   /** Exact model-visible prefix captured from the latest provider request. */
+  async getSessionModelSourceBasis(workspaceId:string,sessionId:string,sourceKey:string):Promise<ModelCallSourceBasisResponse> {
+    return this.requestJson<ModelCallSourceBasisResponse>("GET",`/v1/workspaces/${workspaceId}/sessions/${sessionId}/model-source-basis?sourceKey=${encodeURIComponent(sourceKey)}`);
+  }
+
   async getSessionModelContext(
     workspaceId: string,
     sessionId: string,

@@ -81,6 +81,7 @@ export type CompactionPrepDeps = {
   claimedModelUsageSourceKeys: Set<string>;
   emittedModelUsageSourceKeys: Set<string>;
   modelUsageDispatchId: string;
+  beforeModelCallSourceReceipt:(request:import("@openai/agents").ModelRequest,purpose?:"AGENT"|"COMPACTION"|"TITLE")=>Promise<string>;
   turn: ClaimTurnOk["turn"];
   session: ClaimTurnOk["session"];
   turnExecutionPolicy: ClaimTurnOk["turnExecutionPolicy"];
@@ -150,6 +151,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     claimedModelUsageSourceKeys,
     emittedModelUsageSourceKeys,
     modelUsageDispatchId,
+    beforeModelCallSourceReceipt,
     turn,
     session,
     turnExecutionPolicy,
@@ -179,9 +181,10 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
-  const recordCompactionUsage = async (usage: ModelResponseUsage) => {
+  const recordCompactionUsage = async (usage: ModelResponseUsage,nativeSourceKey?:string) => {
     await processCompactionModelUsageEvent({
       usage,
+      ...(nativeSourceKey?{nativeSourceKey}:{}),
       state: compactionUsageState,
       dispatchId: modelUsageDispatchId,
       settings,
@@ -209,9 +212,12 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
     });
   };
   const compactionSummarizerFor = (systemInstructions?: string): CompactionSummarizer => {
+    let successfulSourceKey:string|undefined;
     const summarize: CompactionSummarizer = resolvedModel
-      ? (s: Settings, m: Array<Record<string, unknown>>) =>
-          withProviderRequestContext(() =>
+      ? async (s: Settings, m: Array<Record<string, unknown>>) => {
+          successfulSourceKey=undefined;
+          let sourceKey:string|undefined;
+          const result=await withProviderRequestContext(() =>
             summarizeContextForCompaction(s, m, {
               client: resolvedModel.client,
               provider: resolvedModel.provider,
@@ -219,23 +225,32 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               model: turnExecutionPolicy.upstreamModelId,
               maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
               ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-              onUsage: recordCompactionUsage,
+              beforeModelCallSourceReceipt:async request=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")),
+              onUsage: usage=>recordCompactionUsage(usage,sourceKey),
               ...(systemInstructions ? { systemInstructions } : {}),
               ...(promptCacheKey ? { promptCacheKey } : {}),
               ...(portableResponsesNeedsAgentPrefix
                 ? { preparedRequest: preparedPortableRequest() }
                 : {}),
             }),
-          )
-      : (s: Settings, m: Array<Record<string, unknown>>) =>
-          summarizeContextForCompaction(s, m, {
+          );
+          successfulSourceKey=sourceKey;return result;
+        }
+      : async (s: Settings, m: Array<Record<string, unknown>>) => {
+          successfulSourceKey=undefined;
+          let sourceKey:string|undefined;
+          const result=await summarizeContextForCompaction(s, m, {
             model: turnExecutionPolicy.upstreamModelId,
             maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
             ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-            onUsage: recordCompactionUsage,
+            beforeModelCallSourceReceipt:async request=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")),
+            onUsage: usage=>recordCompactionUsage(usage,sourceKey),
             ...(systemInstructions ? { systemInstructions } : {}),
             ...(promptCacheKey ? { promptCacheKey } : {}),
           });
+          successfulSourceKey=sourceKey;return result;
+        };
+    summarize.successfulModelSourceKey=()=>successfulSourceKey;
     summarize.estimatePrefixTokens = () => {
       if (resolvedModel?.provider.api === "chat") {
         return estimateSerializedValueTokens(systemInstructions ?? "");
@@ -252,23 +267,29 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   // tools → instructions → history. Filled after buildAgent for every
   // compact path (including operator /compact, which now builds the agent
   // first so it does not send empty tools/instructions).
-  const remoteCompactionRequester =
+  let successfulRemoteSourceKey:string|undefined;
+  const remoteCompactionRequester: RemoteCompactionV2Requester | undefined =
     resolvedModel && billingState.isCodexTurn
       ? (s: Settings, m: Array<Record<string, unknown>>) =>
           withCodexRemoteCompaction(async () => {
             if (!remotePrefix.agent) throw new Error("Compaction agent is unavailable");
             const preparedRequest = preparedCompactionRequest(remotePrefix.agent);
-            return requestRemoteCompactionV2(s, m, {
+            successfulRemoteSourceKey=undefined;
+            let sourceKey:string|undefined;
+            const result=await requestRemoteCompactionV2(s, m, {
               client: resolvedModel.client,
               provider: resolvedModel.provider,
               model: turnExecutionPolicy.upstreamModelId,
               preparedRequest,
               captureAgent: remotePrefix.agent,
               signal: cancellationSignal,
-              onUsage: recordCompactionUsage,
+              beforeModelCallSourceReceipt:async request=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")),
+              onUsage: usage=>recordCompactionUsage(usage,sourceKey),
             });
+            successfulRemoteSourceKey=sourceKey;return result;
           })
       : undefined;
+  if(remoteCompactionRequester)remoteCompactionRequester.successfulModelSourceKey=()=>successfulRemoteSourceKey;
   const publishCompactionLiveEvents = async (events: SessionEvent[]) => {
     await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
   };

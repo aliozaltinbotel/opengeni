@@ -125,7 +125,7 @@ export type ChatRespondInput =
   | { requestId: string; skip: true };
 
 /** One earlier message from the product's own history, imported as context on the first send. */
-export type ChatImportedMessage = { role: "user" | "assistant" | "system"; text: string };
+export type ChatImportedMessage = { role: "user" | "assistant" | "system"; text: string; origin?: import("@opengeni/contracts").ImportedMessageOrigin };
 
 export type ChatSendOptions = {
   signal?: AbortSignal | undefined;

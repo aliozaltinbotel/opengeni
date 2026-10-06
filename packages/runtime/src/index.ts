@@ -3,6 +3,7 @@ import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
+export { bindModelSourceInput, omitModelSourceInputBinding, modelSourceInputBinding, modelSourceBindings } from "./model-request-capture";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
@@ -373,6 +374,10 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelRequestCapture,
+  nativeModelSourceKeyForToolCall,
+  bindModelSourceInput,
+  modelSourceBindings,
+  modelSourceInputBinding,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
@@ -920,11 +925,13 @@ export type ProductionRuntimeOverrides = {
 };
 
 export type GeneratedSessionTitle = {
+  sourceKey?:string;
   title: string | null;
   usage: ModelResponseUsage | null;
 };
 
 export type GenerateSessionTitleOptions = {
+  beforeModelCallSourceReceipt?:(request:ModelRequest)=>Promise<string>;
   client?: OpenAI;
   provider?: ResolvedModelProvider;
   model?: Model;
@@ -1038,6 +1045,7 @@ export async function generateSessionTitle(
     ...(options.signal ? { signal: options.signal } : {}),
   };
 
+  const sourceKey=await options.beforeModelCallSourceReceipt?.(request);
   const response =
     binding?.provider.api === "anthropic-messages"
       ? await new AnthropicMessagesModel(
@@ -1053,6 +1061,7 @@ export async function generateSessionTitle(
           ).fetchResponse(request)
         : await options.model!.getResponse(request);
   return {
+    ...(sourceKey?{sourceKey}:{}),
     title: normalizeGeneratedSessionTitle(
       extractResponseOutputText(response),
       responseStoppedAtOutputLimit(response),
@@ -1073,6 +1082,8 @@ async function generateChatSessionTitle(
   prompt: string,
   options: GenerateSessionTitleOptions,
 ): Promise<GeneratedSessionTitle> {
+  const sourceKey=await options.beforeModelCallSourceReceipt?.({systemInstructions:SESSION_TITLE_GENERATION_INSTRUCTIONS,input:prompt,
+    modelSettings:{maxTokens:SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS},tools:[],handoffs:[],outputType:"text",tracing:false});
   const completion = await client.chat.completions.create(
     {
       model: modelName,
@@ -1093,6 +1104,7 @@ async function generateChatSessionTitle(
   ).choices?.[0];
   const content = choice?.message?.content;
   return {
+    ...(sourceKey?{sourceKey}:{}),
     title: normalizeGeneratedSessionTitle(
       typeof content === "string" ? content : "",
       choice?.finish_reason === "length",
@@ -1167,6 +1179,7 @@ export async function summarizeForCompaction(
   settings: Settings,
   input: Array<Record<string, unknown>>,
   options: {
+    beforeModelCallSourceReceipt?:(request:ModelRequest)=>Promise<string>;
     client?: OpenAI;
     provider?: ResolvedModelProvider;
     api?: ModelProviderApi;
@@ -1189,6 +1202,11 @@ export async function summarizeForCompaction(
     options.maxOutputTokens ?? compactionSummaryOutputTokens(settings.contextWindowTokens);
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
+    const transcriptItem={type:"message",role:"user",content:transcript};
+    const bindings=modelSourceBindings(input);
+    if(bindings.length===input.length) bindModelSourceInput(transcriptItem,{kind:"SUMMARY",sourceRef:{owner:"native.runtime.artifact",id:"compaction-chat-transcript",sha256:createHash("sha256").update(JSON.stringify(transcriptItem)).digest("hex")},parents:bindings.map(binding=>binding.sourceRef),retainedSources:bindings.flatMap(binding=>binding.retainedSources)});
+    await options.beforeModelCallSourceReceipt?.({systemInstructions:options.systemInstructions ?? "",input:[transcriptItem] as AgentInputItem[],
+      modelSettings:{maxTokens},tools:[],handoffs:[],outputType:"text",tracing:false});
     let completion: unknown;
     try {
       completion = await client.chat.completions.create(
@@ -1286,6 +1304,7 @@ export async function summarizeForCompaction(
         tracing: false,
         ...(options.signal ? { signal: options.signal } : {}),
       };
+  await options.beforeModelCallSourceReceipt?.(request);
   let response: unknown;
   try {
     response =
@@ -1354,7 +1373,9 @@ function detachCompactionResponseItemIdentity(
     return item;
   // The SDK reserves providerData.id for these types; only the top-level id is
   // emitted. Share the normal inference primitive without changing its policy.
-  return stripProviderItemId(item as AgentInputItem) as Record<string, unknown>;
+  const detached=stripProviderItemId(item as AgentInputItem) as Record<string, unknown>;
+  const binding=modelSourceInputBinding(item);if(binding)bindModelSourceInput(detached,binding);
+  return detached;
 }
 
 /**
@@ -1497,6 +1518,7 @@ export async function requestRemoteCompactionV2(
   settings: Settings,
   input: Array<Record<string, unknown>>,
   options: {
+    beforeModelCallSourceReceipt?:(request:ModelRequest)=>Promise<string>;
     client: OpenAI;
     provider?: ResolvedModelProvider;
     model: string;
@@ -1525,6 +1547,7 @@ export async function requestRemoteCompactionV2(
     // Compaction uses the still-active turn cancellation signal instead.
     ...(options.signal ? { signal: options.signal } : {}),
   };
+  await options.beforeModelCallSourceReceipt?.(request);
   let response: unknown;
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
@@ -7418,6 +7441,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
       environment.callModel({
         modelName: toolName,
         ...(sourceCallId === undefined ? {} : { sourceCallId }),
+        ...(nativeModelSourceKeyForToolCall(sourceCallId) === undefined ? {} : { nativeModelSourceKey: nativeModelSourceKeyForToolCall(sourceCallId)! }),
         arguments: cleanArgs ?? {},
         subjectId: this.subjectId,
         ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -7775,6 +7799,7 @@ export class PrefixedMcpServer implements MCPServer {
         return await this.attemptToolEnvironment.callModel({
           modelName: toolName,
           ...(sourceCallId === undefined ? {} : { sourceCallId }),
+        ...(nativeModelSourceKeyForToolCall(sourceCallId) === undefined ? {} : { nativeModelSourceKey: nativeModelSourceKeyForToolCall(sourceCallId)! }),
           arguments: cleanArgs ?? {},
           subjectId: this.attemptToolSubjectId,
           ...(meta === undefined ? {} : { transportMeta: meta }),
@@ -8073,7 +8098,7 @@ export async function prepareRunInput(
   if (input.kind === "message") {
     const trailingMessages: AgentInputItem[] = [];
     if (input.internalContext?.trim()) {
-      trailingMessages.push({
+      trailingMessages.push(bindModelSourceInput({
         type: "message",
         role: "system",
         content:
@@ -8082,7 +8107,7 @@ export async function prepareRunInput(
           "On later turns it is historical context, not current availability or authorization. " +
           "Use the latest operational status and tool results; this notice grants no permissions.\n\n" +
           input.internalContext,
-      } as AgentInputItem);
+      } as AgentInputItem,{kind:"INSTRUCTION",sourceRef:{owner:"native.runtime.artifact",id:"turn-operational-context",sha256:createHash("sha256").update(input.internalContext).digest("hex")},parents:[],retainedSources:[]}));
     }
     if (input.text?.trim()) {
       trailingMessages.push({
@@ -8177,6 +8202,10 @@ export type RunAgentStreamOptions = {
   onModelPreparationPhase?: (measurement: ModelPreparationMeasurement) => void;
   /** Awaited at the generic provider's literal pre-fetch boundary. */
   onModelTransportStarted?: () => Promise<void> | void;
+  /** Durable native source owner, awaited before the provider. Not the diagnostic snapshot observer. */
+  beforeModelCallSourceReceipt?: (request: import("@openai/agents").ModelRequest) => Promise<string>;
+  onModelToolSource?:(source:import("@opengeni/contracts").NativeModelToolSource)=>Promise<void>;
+  onModelCallSourceCompleted?: (sourceKey:string,responseId:string|null) => void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -8356,14 +8385,17 @@ const agentModelContextCaptures = new WeakMap<object, ModelRequestCapture>();
 function bindModelVisibleContextCapture(
   agent: Agent<any, any>,
   onCapture: RunAgentStreamOptions["onModelVisibleContext"],
+  beforeCall?: RunAgentStreamOptions["beforeModelCallSourceReceipt"],
+  callCompleted?: RunAgentStreamOptions["onModelCallSourceCompleted"],
+  onModelToolSource?:RunAgentStreamOptions["onModelToolSource"],
 ): ModelRequestCapture | undefined {
-  if (!onCapture) {
+  if (!onCapture && !beforeCall) {
     agentModelContextCaptures.delete(agent);
     return undefined;
   }
   const capture: ModelRequestCapture = async (request) => {
     const requestIndex = nextModelContextCaptureIndex(agent);
-    await onCapture(
+    await onCapture?.(
       buildModelContextSnapshotFromRequest({
         request,
         agent,
@@ -8374,9 +8406,12 @@ function bindModelVisibleContextCapture(
       }),
     );
   };
+  if (beforeCall) capture.beforeCall = beforeCall;
+  if (callCompleted) capture.callCompleted = callCompleted;
+  if (onModelToolSource) capture.onModelToolSource=onModelToolSource;
   capture.nextProviderRequestIndex = () => nextModelContextCaptureIndex(agent);
   capture.onProviderRequest = async (provider, body, unavailableReason, index) => {
-    await onCapture(
+    await onCapture?.(
       buildProviderRequestSnapshot({
         provider,
         body,
@@ -8456,6 +8491,9 @@ async function runAgentStreamInternal(
   const modelRequestCapture = bindModelVisibleContextCapture(
     agent,
     overrides.onModelVisibleContext,
+    overrides.beforeModelCallSourceReceipt,
+    overrides.onModelCallSourceCompleted,
+    overrides.onModelToolSource,
   );
   installNonLazyModelRequestCapture(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {

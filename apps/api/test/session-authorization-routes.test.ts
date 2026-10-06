@@ -5,6 +5,7 @@ import {
   type SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import {
+  persistModelCallSourceReceipt,
   bootstrapWorkspace,
   acquireLease,
   claimSessionWorkForAttempt,
@@ -2415,4 +2416,17 @@ test("session schedule projections follow current targets and schedule permissio
   expect(await read(`/sessions/${value.child.id}/lineage`)).toMatchObject({
     sessionHasSchedules: false,
   });
+});
+
+test("model source basis public GET reads exact persisted receipt and enforces host session authorization without writes",async()=>{
+ if(!available)return;const value=await fixture();await initializeSessionStartAtomically(client.db,{accountId:value.grant.accountId,workspaceId:value.grant.workspaceId,sessionId:value.root.id,reasoningEffortFallback:"medium",createdEventPayload:{}});
+ const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(client.db,value.grant.workspaceId,{sessionId:value.root.id,workflowId:`session-${value.root.id}`,workflowRunId:crypto.randomUUID(),dispatchId:crypto.randomUUID(),attemptId,trigger:{kind:"next"}});if(claim.action!=="claimed")throw Error("claim");
+ const identity={accountId:value.grant.accountId,workspaceId:value.grant.workspaceId,sessionId:value.root.id,turnId:claim.turn.id,attemptId,executionGeneration:claim.turn.executionGeneration,sourceKey:crypto.randomUUID(),requestIndex:1};
+ const rows=await getActiveSessionHistoryItems(client.db,value.grant.workspaceId,value.root.id);const receipt=await persistModelCallSourceReceipt(client.db,identity,{input:rows.map(row=>row.item)});
+ const api=appWith();const path=`/v1/workspaces/${identity.workspaceId}/sessions/${identity.sessionId}/model-source-basis`;const headers={authorization:value.authorization};
+ const exact=await api.request(`${path}?sourceKey=${encodeURIComponent(identity.sourceKey)}`,{headers});expect(exact.status).toBe(200);expect((await exact.json()).receipt.id).toBe(receipt.id);
+ const missing=await api.request(`${path}?sourceKey=${crypto.randomUUID()}`,{headers});expect(missing.status).toBe(200);expect((await missing.json()).receipt).toBeNull();
+ expect((await api.request(path,{headers})).status).toBe(400);expect((await api.request(path,{method:"POST",headers})).status).not.toBe(200);expect((await api.request(`${path}?sourceKey=${identity.sourceKey}`)).status).not.toBe(200);
+ const denying:SessionAuthorizationPort={authorizeSession:async()=>({allowed:false,reason:"not_found"}),resolveListScope:async()=>({kind:"all"})};const hidden=await appWith(denying).request(`${path}?sourceKey=${identity.sourceKey}`,{headers});expect(hidden.status).toBe(404);
+ const [count]=await shared!.admin`select count(*)::int as n from model_call_source_receipts where session_id=${identity.sessionId}`;expect(count!.n).toBe(1);
 });

@@ -38,11 +38,12 @@ import {
 } from "./errors";
 import { summarizeToolGatewayInputErrors } from "./input-issues";
 
-export type ToolGatewayExecutionContext = {
+export type ToolGatewayExecutionContext = import("@opengeni/contracts").NativeModelSourceContext & {
   operationId: string;
   caller: ToolGatewayCaller;
   /** Trusted in-process SDK correlation; not operation identity or approval authority. */
   sourceCallId?: string;
+
   /** In-process transport metadata; never part of catalog identity or digest. */
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
@@ -50,7 +51,7 @@ export type ToolGatewayExecutionContext = {
 
 export type ToolGatewayCallContext = Pick<
   ToolGatewayExecutionContext,
-  "sourceCallId" | "transportMeta" | "signal"
+  "sourceCallId" | "nativeModelSourceKey" | "transportMeta" | "signal"
 >;
 
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
@@ -107,10 +108,11 @@ export type ToolGatewayCallLifecycle = {
   }) => Promise<PreparedToolGatewayCallLifecycle | void> | PreparedToolGatewayCallLifecycle | void;
 };
 
-export type ModelToolGatewayCall = {
+export type ModelToolGatewayCall = import("@opengeni/contracts").NativeModelSourceContext & {
   operationId?: string;
   /** Exact SDK call id supplied by the host, never inferred from arguments or metadata. */
   sourceCallId?: string;
+
   modelName: string;
   arguments: Record<string, unknown>;
   subjectId: string;
@@ -307,6 +309,7 @@ export class ToolGateway {
                   ...(context.sourceCallId === undefined
                     ? {}
                     : { sourceCallId: context.sourceCallId }),
+                  ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
                   ...(context.transportMeta === undefined
                     ? {}
                     : { transportMeta: context.transportMeta }),
@@ -351,6 +354,7 @@ export class ToolGateway {
     };
     const context = {
       ...(input.sourceCallId === undefined ? {} : { sourceCallId: input.sourceCallId }),
+      ...(input.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: input.nativeModelSourceKey }),
       ...(input.transportMeta === undefined ? {} : { transportMeta: input.transportMeta }),
       ...(input.signal === undefined ? {} : { signal: input.signal }),
     };

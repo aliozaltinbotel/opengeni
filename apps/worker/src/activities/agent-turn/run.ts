@@ -1,3 +1,5 @@
+import type { ModelRequest } from "@openai/agents";
+import { persistModelCallSourceReceipt, type NativeModelSourceRequest } from "@opengeni/db";
 import {
   getSessionAuthorityProjection,
   readActiveSandbox,
@@ -24,6 +26,7 @@ import {
   withMcpTelemetry,
 } from "@opengeni/observability";
 import {
+  modelSourceBindings,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   materializeSandboxFileDownloads,
@@ -444,6 +447,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         claimedModelUsageSourceKeys,
         emittedModelUsageSourceKeys,
       } = claimed.ok;
+      let nativeSourceRequestIndex=0;
+      let nativeInstructionSelections:NativeModelSourceRequest["instructionSelections"];
+      const beforeModelCallSourceReceipt = async (request:ModelRequest,purpose:"AGENT"|"COMPACTION"|"TITLE"="AGENT") => {
+        const requestIndex=++nativeSourceRequestIndex;
+        const sourceKey=`${modelUsageDispatchId}:source-${randomUUID()}`;
+        await persistModelCallSourceReceipt(db,{accountId:input.accountId,workspaceId:input.workspaceId,sessionId:input.sessionId,
+          turnId:turn.id,attemptId:input.attemptId,executionGeneration:attempt.executionGeneration,sourceKey,requestIndex},
+          {instructions:request.systemInstructions,input:request.input,tools:request.tools,purpose,sourceBindings:modelSourceBindings(request.input),...(purpose!=="TITLE" && nativeInstructionSelections?{instructionSelections:nativeInstructionSelections}:{})});
+        return sourceKey;
+      };
       // F-2: the settlement names a declared budget's end, and a declared fallback's use, by this declaration.
       providerTurn.turnRouteDeclaration = turnRouteDeclaration;
       providerTurn.turnBudgetNarrowedModelCalls = turnBudgetNarrowedModelCalls;
@@ -579,6 +592,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             compactionModelHistoryProjector,
             workspaceModelPolicy,
           } = governance.ok;
+          const sourceContributions=buildCompanyBrainContributionReceiptFor("");
+          nativeInstructionSelections={instructionPolicySnapshotId:sourceContributions.instructionPolicySnapshotId,preferenceSnapshotId:sourceContributions.preferenceSnapshotId,companyProfileSnapshotId:sourceContributions.companyProfileSnapshotId};
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
           // codex account (effectiveCodexCredentialId; pin > workspace-active) at
@@ -1007,6 +1022,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             claimedModelUsageSourceKeys,
             emittedModelUsageSourceKeys,
             modelUsageDispatchId,
+            beforeModelCallSourceReceipt,
             turn,
             session,
             turnExecutionPolicy,
@@ -1544,6 +1560,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             claimedModelUsageSourceKeys,
             emittedModelUsageSourceKeys,
             modelUsageDispatchId,
+            beforeModelCallSourceReceipt,
             turn,
             session,
             turnExecutionPolicy,
@@ -1744,6 +1761,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             claimedModelUsageSourceKeys,
             emittedModelUsageSourceKeys,
             modelUsageDispatchId,
+            beforeModelCallSourceReceipt,
             workerPreparationStartedAt,
             fileDownloadsMaterializedForRun,
             unavailableSandboxFilesNote,

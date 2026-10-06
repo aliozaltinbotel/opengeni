@@ -78,6 +78,8 @@ const MCP_OPERATION_AUTHORITY_TABLES = [
   "scheduled_task_runs",
 ] as const;
 const OWNER_INTERNAL_PRIVATE_ROUTINES = new Set<string>([
+  "guard_model_call_source_receipt()",
+  "guard_history_source_basis_immutable()",
   "read_sender_connection(uuid, uuid, uuid, text)",
   "validate_mcp_account_bindings(jsonb, jsonb)",
   "fence_mcp_account_bindings()",
@@ -909,6 +911,7 @@ export const FORCE_RLS_TABLES = [
   "memory_slack_publication_receipts",
   "memory_slack_publications",
   "model_call_facts",
+  "model_call_source_receipts",
   "network_routes",
   "new_session_drafts",
   "organization_codex_rotation_settings",
@@ -1361,6 +1364,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "model_call_source_receipts",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",

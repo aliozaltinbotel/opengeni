@@ -1,8 +1,14 @@
+import type { ModelSourceBinding, NativeModelToolSource } from "@opengeni/contracts";
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
 export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<void>) & {
+  /** Authoritative, awaited owner; persistence failure prevents calling the model. */
+  beforeCall?: (request: ModelRequest) => Promise<string>;
+  callCompleted?: (sourceKey:string,responseId:string|null,response:object) => void | Promise<void>;
+  toolSourceKeys?: Map<string,string>;
+  onModelToolSource?:(source:NativeModelToolSource)=>Promise<void>;
   nextProviderRequestIndex?: () => number;
   onProviderRequest?: (
     provider: string,
@@ -13,6 +19,44 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
 };
 const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture>();
 const captureIndices = new WeakMap<object, number>();
+const nativeSourceBinding = Symbol("native-model-source-owner");
+/** Symbol metadata follows existing object-spread projections but never JSON/model input. */
+export function bindModelSourceInput<T extends object>(item:T,binding:Omit<ModelSourceBinding,"ordinal">):T {
+  Object.defineProperty(item,nativeSourceBinding,{value:binding,enumerable:true,configurable:true});
+  return item;
+}
+/** Remove only this owner's non-wire binding after durable source refs have been captured. */
+export function omitModelSourceInputBinding<T extends object>(item:T):T {
+  const persisted:T & {[nativeSourceBinding]?:Omit<ModelSourceBinding,"ordinal">}=Object.create(Object.getPrototypeOf(item),Object.getOwnPropertyDescriptors(item));
+  delete persisted[nativeSourceBinding];
+  return persisted;
+}
+export function modelSourceInputBinding(item:unknown):Omit<ModelSourceBinding,"ordinal">|undefined {
+  return item && typeof item==="object" ? (item as {[nativeSourceBinding]?:Omit<ModelSourceBinding,"ordinal">})[nativeSourceBinding] : undefined;
+}
+export function modelSourceBindings(input:unknown):ModelSourceBinding[] {
+  if(!Array.isArray(input)) return [];
+  return input.flatMap((item,ordinal)=>{const binding=modelSourceInputBinding(item);return binding?[{...binding,ordinal}]:[];});
+}
+
+
+export function nativeModelSourceKeyForToolCall(callId: string | undefined): string | undefined {
+  return callId ? modelRequestCapture.getStore()?.toolSourceKeys?.get(callId) : undefined;
+}
+
+function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:string, output:readonly unknown[]):void {
+  if (!capture) return;
+  capture.toolSourceKeys ??= new Map();
+  for (const value of output) {
+    if (!value || typeof value!=="object") continue;
+    const item=value as Record<string,unknown>;
+    const callId=typeof item.callId==="string"?item.callId:typeof item.call_id==="string"?item.call_id:null;
+    if(item.type!=="function_call" || !callId) continue;
+    const prior=capture.toolSourceKeys.get(callId);
+    if(prior && prior!==sourceKey) throw new Error("MODEL_SOURCE_CALL_ID_COLLISION");
+    capture.toolSourceKeys.set(callId,sourceKey);
+  }
+}
 
 /** The same agent can re-enter runAgentStream after in-activity compaction. */
 export function nextModelContextCaptureIndex(agent: object): number {
@@ -135,13 +179,30 @@ export class ModelRequestCaptureModel implements Model {
   async getResponse(request: ModelRequest) {
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
-    return this.inner.getResponse(request);
+    const capture = modelRequestCapture.getStore();
+    const sourceKey = await capture?.beforeCall?.(request);
+    const response = await this.inner.getResponse(request);
+    if (sourceKey) {
+      bindOutputSourceKeys(capture,sourceKey,response.output);
+      await capture?.callCompleted?.(sourceKey,response.responseId ?? null,response);
+    }
+    return response;
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
-    yield* this.inner.getStreamedResponse(request);
+    const capture = modelRequestCapture.getStore();
+    const sourceKey = await capture?.beforeCall?.(request);
+    for await (const event of this.inner.getStreamedResponse(request)) {
+      const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && (event.event as Record<string,unknown>).type==="response.completed" ? (event.event as Record<string,unknown>).response : null;
+      if(sourceKey && candidate && typeof candidate==="object") {
+        const response=candidate as Record<string,unknown>;
+        bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[]);
+        await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response);
+      }
+      yield event;
+    }
   }
 
   getRetryAdvice(args: Parameters<NonNullable<Model["getRetryAdvice"]>>[0]) {
@@ -162,4 +223,9 @@ export class ModelRequestCaptureProvider implements ModelProvider {
     if (model instanceof ModelRequestCaptureModel) return model;
     return new ModelRequestCaptureModel(model);
   }
+}
+
+/** Runs in the same native call owner before the model-visible projection. */
+export async function recordModelToolSource(source:NativeModelToolSource):Promise<void> {
+  await modelRequestCapture.getStore()?.onModelToolSource?.(source);
 }

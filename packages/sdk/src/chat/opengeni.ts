@@ -1,3 +1,4 @@
+import { IMPORTED_HISTORY_CONTEXT_HEADER } from "@opengeni/contracts";
 import { OpenGeniEmbeddingClient as OpenGeniClient } from "../embedding-client";
 import { OpenGeniApiError } from "../errors";
 import type { SendMessageInput } from "../client";
@@ -38,7 +39,7 @@ type ChatInit = {
 export const IMPORTED_HISTORY_MAX_CHARS = 30_000;
 /** Server limit for one message's `modelContext`. */
 const MODEL_CONTEXT_MAX_CHARS = 32_768;
-const IMPORTED_HISTORY_HEADER = "Earlier conversation imported from the product, oldest first:";
+const IMPORTED_HISTORY_HEADER = IMPORTED_HISTORY_CONTEXT_HEADER;
 const IMPORTED_HISTORY_ROLES: ReadonlySet<string> = new Set(["user", "assistant", "system"]);
 
 /**
@@ -147,6 +148,7 @@ export class OpenGeni {
         ...(options.tools !== undefined ? { tools: options.tools } : {}),
         ...create,
         ...(context !== undefined ? { modelContext: context } : {}),
+        ...(createContext===undefined && send.importedHistory ? {importedHistoryOrigins:send.importedHistory.map(message=>message.origin ?? null)} : {}),
         ...messagePolicy(send),
         initialMessage: text,
         requestedSessionId: sessionId,

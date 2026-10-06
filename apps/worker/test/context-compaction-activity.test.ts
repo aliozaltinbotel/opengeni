@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { and, eq } from "drizzle-orm";
 import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import {
   ACTIVE_SESSION_HISTORY_MAX_JSON_BYTES,
@@ -26,6 +27,7 @@ import {
   listSessionSystemUpdatesForTurn,
   peekSessionWork,
   requestSessionCompaction,
+  readModelCallSourceReceipt,
   saveRunState,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
@@ -393,11 +395,19 @@ describe("standalone context compaction execution", () => {
             ],
           },
         },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 2,
+          item: { type: "message", role: "user", content: "Continue verifying the queue" },
+        },
       ]);
     });
     await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
 
     let compactionCalls = 0;
+    const requestSourceKeys: string[] = [];
     let forbiddenRuntimeCalls = 0;
     const forbid = () => {
       forbiddenRuntimeCalls += 1;
@@ -410,6 +420,16 @@ describe("standalone context compaction execution", () => {
           create: async (request: { messages?: Array<{ role?: string; content?: string }> }) => {
             compactionRequest = request;
             compactionCalls += 1;
+            // The actual production before-call hook must commit before this provider port runs.
+            const receipts =
+              await shared.admin`select source_key from model_call_source_receipts where session_id=${session.id} and receipt->>'purpose'='COMPACTION' order by request_index`;
+            expect(receipts).toHaveLength(compactionCalls);
+            requestSourceKeys.push(String(receipts.at(-1)!.source_key));
+            if (compactionCalls === 1) {
+              throw Object.assign(new Error("maximum context length exceeded"), {
+                code: "context_length_exceeded",
+              });
+            }
             return {
               id: "chatcmpl-compaction",
               usage: {
@@ -478,11 +498,16 @@ describe("standalone context compaction execution", () => {
       trigger: { kind: "next" },
     });
 
+    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
+      after: 0,
+      limit: 100,
+    });
+    expect(events.filter((event) => event.type === "turn.failed")).toEqual([]);
     expect(result).toMatchObject({ status: "idle", attemptId });
     if (result.status === "unclaimed") throw new Error("Compaction was not claimed");
     const turn = await getSessionTurn(client.db, grant.workspaceId!, result.turnId);
     expect(turn?.source).toBe("compaction");
-    expect(compactionCalls).toBe(1);
+    expect(compactionCalls).toBe(2);
     expect(compactionRequest?.messages?.[0]).toMatchObject({ role: "system" });
     expect(compactionRequest?.messages?.at(-1)).toMatchObject({ role: "user" });
     expect(forbiddenRuntimeCalls).toBe(0);
@@ -497,16 +522,54 @@ describe("standalone context compaction execution", () => {
     );
     expect(activeHistory.map((row) => row.item)).toEqual([
       { type: "message", role: "user", content: "build the queue correctly" },
+      { type: "message", role: "user", content: "Continue verifying the queue" },
       expect.objectContaining({
         type: "message",
         role: "user",
         content: expect.stringContaining("The user is building a correct queue"),
       }),
     ]);
-    const events = await listSessionEvents(client.db, grant.workspaceId!, session.id, {
-      after: 0,
-      limit: 100,
+    const activeSources = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ basis: schema.sessionHistoryItems.sourceBasis })
+        .from(schema.sessionHistoryItems)
+        .where(
+          and(
+            eq(schema.sessionHistoryItems.accountId, grant.accountId),
+            eq(schema.sessionHistoryItems.workspaceId, grant.workspaceId!),
+            eq(schema.sessionHistoryItems.sessionId, session.id),
+            eq(schema.sessionHistoryItems.active, true),
+          ),
+        ),
+    );
+    const summaryBasis = activeSources.find((row) => row.basis?.kind === "SUMMARY")?.basis;
+    expect(summaryBasis).toBeDefined();
+    const stored = await readModelCallSourceReceipt(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      sourceKey: requestSourceKeys[1]!,
     });
+    expect(stored.receipt?.complete).toBe(true);
+    expect(stored.receipt?.purpose).toBe("COMPACTION");
+    expect(stored.receipt?.turnId).toBe(result.turnId);
+    expect(stored.receipt?.attemptId).toBe(attemptId);
+    expect(
+      summaryBasis!.parents.filter((parent) => parent.owner === "model_call_source_receipts"),
+    ).toEqual([
+      {
+        owner: "model_call_source_receipts",
+        id: stored.receipt!.id,
+        sha256: stored.receipt!.digest,
+      },
+    ]);
+    const failed = await readModelCallSourceReceipt(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      sourceKey: requestSourceKeys[0]!,
+    });
+    expect(summaryBasis!.parents.map((parent) => parent.id)).not.toContain(failed.receipt!.id);
     expect(events.map((event) => event.type)).toContain("session.context.compaction.requested");
     expect(events.map((event) => event.type)).toContain("session.context.compaction.started");
     expect(events.map((event) => event.type)).toContain("session.context.compacted");
@@ -514,7 +577,7 @@ describe("standalone context compaction execution", () => {
     expect(events.filter((event) => event.type === "agent.model.usage")).toEqual([
       expect.objectContaining({
         payload: expect.objectContaining({
-          sourceKey: "chatcmpl-compaction",
+          sourceKey: stored.receipt!.sourceKey,
           inputTokens: 1_234,
           outputTokens: 56,
         }),

@@ -9399,6 +9399,7 @@ export const sessionHistoryItems = pgTable(
     // positions; only the summary uses the half-step. `mode: "number"` maps the
     // postgres.js string back to a JS number so every reader stays numeric.
     position: numeric("position", { mode: "number" }).notNull(),
+    sourceBasis: jsonb("source_basis").$type<import("@opengeni/contracts").ModelHistorySourceBasis>(),
     item: losslessOrderedJson("item_ordered").$type<Record<string, unknown>>().notNull(),
     itemCodecVersion: losslessCodecVersion("item_codec_version"),
     // Live-row flag for client-side context compaction. The read path selects
@@ -12236,6 +12237,7 @@ export const modelCallFacts = pgTable(
     turnId: uuid("turn_id").notNull(),
     turnAttemptId: uuid("turn_attempt_id"),
     sourceKey: text("source_key").notNull(),
+    sourceReceiptId: uuid("source_receipt_id"),
     provider: text("provider").notNull(),
     providerApi: text("provider_api").notNull(),
     model: text("model").notNull(),
@@ -14202,3 +14204,14 @@ export const feedbackSubmissions = pgTable(
     ),
   }),
 );
+
+export const modelCallSourceReceipts = pgTable("model_call_source_receipts", {
+  id: uuid("id").primaryKey(), accountId: uuid("account_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull(), sessionId: uuid("session_id").notNull(),
+  turnId: uuid("turn_id").notNull(), attemptId: uuid("attempt_id").notNull(),
+  executionGeneration: integer("execution_generation").notNull(),
+  sourceKey: text("source_key").notNull(), requestIndex: integer("request_index").notNull(),
+  receipt: jsonb("receipt").$type<import("@opengeni/contracts").ModelCallSourceReceipt>().notNull(),
+  canonical: text("canonical").notNull(), digest: text("digest").notNull(),
+  recordedAt: timestamp("recorded_at", {withTimezone:true}).notNull().defaultNow(),
+});

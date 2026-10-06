@@ -1,3 +1,4 @@
+import { ImportedMessageOrigin } from "./model-call-source-receipts";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./workspace-integrations";
@@ -15639,6 +15640,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       // Standard timeline rendering omits it, while full event/audit reads retain
       // it. This is ordinary user-role content, not secret or privileged input.
       modelContext: z.string().trim().min(1).max(32768).optional(),
+      importedHistoryOrigins: z.array(ImportedMessageOrigin.nullable()).max(16384).optional(),
       // Per-session agent persona/system instructions (org-visible metadata, NOT a
       // secret). Rides the SAME system-level instructions channel the per-workspace
       // agentInstructions rides, composed AFTER the workspace persona so it refines
@@ -18053,3 +18055,5 @@ export * from "./connector-tool-permissions";
 export * from "./mcp-catalog-limits";
 export * from "./skill-catalog-context";
 export * from "./sandbox-recovery";
+
+export * from "./model-call-source-receipts";

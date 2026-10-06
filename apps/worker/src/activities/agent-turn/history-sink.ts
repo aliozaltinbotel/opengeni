@@ -67,6 +67,8 @@ export class TurnHistorySink {
     );
     this.persistedHistoryCount = count;
   }
+  private readonly toolSourcesByCallId=new Map<string,import("@opengeni/contracts").NativeModelToolSource>();
+  recordModelToolSource(source:import("@opengeni/contracts").NativeModelToolSource):void {this.toolSourcesByCallId.set(source.sourceCallId,source);}
   persistedHistoryCount = 0;
   nextHistoryPosition = 0;
   providerArtifactCandidates: Awaited<ReturnType<typeof turnInput>>["providerArtifactCandidates"] =
@@ -135,7 +137,11 @@ export class TurnHistorySink {
               expectedAttemptId: this.deps.attemptId,
               modelToolOutputTruncationTokens:
                 this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
-              items: rows,
+              items:rows.map(row=>{
+                const callId=typeof row.item.callId==="string"?row.item.callId:typeof row.item.call_id==="string"?row.item.call_id:null;
+                const source=callId?this.toolSourcesByCallId.get(callId):undefined;
+                return {...row,...(source && String(row.item.type).includes("result") ? {sourceBasis:{kind:"TOOL_RESULT" as const,parents:[source.rawSourceRef],retainedSources:source.retainedSources,rawToolSource:source}}:{})};
+              }),
             });
             if (!appended) {
               throw new TurnAttemptFencedError(

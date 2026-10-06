@@ -838,6 +838,7 @@ export async function createAndStartSessionWithOutcome(input: {
   surface?: SessionTurnSurface | null;
   /** Create the session shell without an initial user event/agent turn. */
   deferInitialTurn?: boolean;
+  importedHistoryOrigins?: readonly (import("@opengeni/contracts").ImportedMessageOrigin|null)[];
   modelContext?: string | null;
   resources: ResourceRef[];
   skills?: SessionSkill[];
@@ -970,9 +971,11 @@ export async function createAndStartSessionWithOutcome(input: {
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
 }): Promise<CreateSessionOutcome> {
+  if(Object.hasOwn(input.metadata,"nativeImportedHistoryOrigins")) throw new Error("nativeImportedHistoryOrigins is server-owned");
   const sessionMetadata = metadataWithTurnExecutionPolicyV1(
     {
       ...input.metadata,
+      ...(input.importedHistoryOrigins!==undefined ? {nativeImportedHistoryOrigins:input.importedHistoryOrigins} : {}),
       model: input.model,
       reasoningEffort: input.reasoningEffort,
       ...(input.latencyMode !== undefined ? { latencyMode: input.latencyMode } : {}),
@@ -3423,6 +3426,7 @@ async function createSessionForRequestInFileScope(
       surface,
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
+      ...(payload.importedHistoryOrigins ? {importedHistoryOrigins:payload.importedHistoryOrigins} : {}),
       resources,
       skills,
       bundledSkillIds,

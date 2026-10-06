@@ -17,6 +17,7 @@ import {
   type Database,
 } from "@opengeni/db";
 import {
+  bindModelSourceInput,
   projectHistoryForProvider,
   projectRejectedProviderArtifactsFromSerializedRunState,
   projectRejectedReasoningArtifact,
@@ -654,6 +655,7 @@ async function messageInput(
       getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId),
     ),
   ]);
+  for(const row of stored) if(row.sourceSha256) bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256},parents:[],retainedSources:[]});
   const canonicalView = await measureHistoryPreparationPhase(
     preparationOptions,
     "canonical_projection",

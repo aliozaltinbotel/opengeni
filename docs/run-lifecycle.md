@@ -3251,3 +3251,20 @@ Accepted private session uploads additionally use session-specific read grants,
 including for service continuations. Realtime and ordinary human admission share
 that transaction boundary. Original owner and provider ACLs remain separate;
 see [Session attachments](session-attachments.md).
+
+## Exact model-call source basis
+
+The existing worker call owner allocates a fresh native `sourceKey` for each
+agent, compaction and title request. It awaits the attempt-fenced PostgreSQL
+receipt before invoking a provider; persistence failure prevents invocation.
+The transaction contains no provider or host lookup. Observed response/tool IDs
+are associated through that exact request owner, while SDK tool `sourceCallId`
+remains a separate identity. Nested codemode cannot borrow an outer request key.
+
+Producer bindings accompany ordered history before projection. Copy and
+compaction persist parent rows in the existing atomic writers; SDK imports
+without resolvable exact native ancestry remain incomplete. Tool-result source
+metadata is retained before model projection/spill and first enters the next
+call's receipt. A previous complete receipt cannot prove a newly retrieved
+source. Existing historical model facts keep their original key and nullable
+receipt link; no historical basis is backfilled or inferred from headings.

@@ -25,6 +25,7 @@ import {
   latestSkillCatalogContext,
   readSkillCatalogContext,
 } from "@opengeni/contracts";
+import { bindModelSourceInput, modelSourceInputBinding } from "./model-request-capture";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
 
@@ -1376,15 +1377,17 @@ export function findCompactionNeededError(
 export function buildCompactionPromptInput(items: readonly CompactionItem[]): CompactionItem[] {
   return [
     ...items,
-    {
+    bindModelSourceInput({
       type: "message",
       role: "user",
       content: COMPACTION_PROMPT,
-    },
+    },{kind:"INSTRUCTION",sourceRef:{owner:"native.runtime.artifact",id:"compaction-prompt",sha256:createHash("sha256").update(JSON.stringify(COMPACTION_PROMPT)).digest("hex")},parents:[],retainedSources:[]}),
   ];
 }
 
 export type PreparedCompactionPromptInput = {
+  /** Original ordered items actually retained in this successful provider input. */
+  sourceItems: CompactionItem[];
   input: CompactionItem[];
   estimatedInputTokens: number;
   rewrittenToolOutputs: number;
@@ -1417,6 +1420,7 @@ export function projectRemoteCompactionOverflowRetryInput(
         ? candidate
         : item;
     if (replacement !== item) {
+      const binding=modelSourceInputBinding(item);if(binding)bindModelSourceInput(replacement,binding);
       input ??= items.slice(0, index);
       rewrittenToolOutputs += 1;
     }
@@ -1513,6 +1517,7 @@ function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
  */
 export function omitOpaqueArtifactsFromPortableCompactionHistory(
   items: readonly CompactionItem[],
+  onRetained?: (source: CompactionItem, projected: CompactionItem) => void,
 ): CompactionItem[] {
   let changed = false;
   const out: CompactionItem[] = [];
@@ -1530,6 +1535,7 @@ export function omitOpaqueArtifactsFromPortableCompactionHistory(
       }
       changed ||= projected !== item;
       out.push(projected as CompactionItem);
+      onRetained?.(item,projected as CompactionItem);
       continue;
     }
     if (type === "reasoning" && Object.keys(item).length === 1) {
@@ -1537,6 +1543,7 @@ export function omitOpaqueArtifactsFromPortableCompactionHistory(
       continue;
     }
     out.push(item);
+    onRetained?.(item,item);
   }
   return changed ? out : (items as CompactionItem[]);
 }
@@ -1546,7 +1553,8 @@ export function prepareCompactionPromptInput(
   maxInputTokens: number,
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items).slice();
+  const origins = new Map<CompactionItem,CompactionItem>();
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items,(source,projected)=>origins.set(projected,source)).slice();
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
 
@@ -1557,6 +1565,8 @@ export function prepareCompactionPromptInput(
     const before = estimateItemTokens(current);
     const after = estimateItemTokens(replacement);
     if (after >= before) continue;
+    const binding=modelSourceInputBinding(current);if(binding)bindModelSourceInput(replacement,binding);
+    origins.set(replacement,origins.get(current) ?? current);
     history[index] = replacement;
     estimatedInputTokens -= before - after;
     rewrittenToolOutputs += 1;
@@ -1584,6 +1594,7 @@ export function prepareCompactionPromptInput(
   }
 
   return {
+    sourceItems: history.map(item=>origins.get(item) ?? item),
     input: buildCompactionPromptInput(history),
     estimatedInputTokens,
     rewrittenToolOutputs,
@@ -1781,10 +1792,10 @@ export function buildRemoteCompactionV2PromptInput(
 ): CompactionItem[] {
   return [
     ...items,
-    {
+    bindModelSourceInput({
       type: "unknown",
       providerData: { type: "compaction_trigger" },
-    },
+    },{kind:"INSTRUCTION",sourceRef:{owner:"native.runtime.artifact",id:"remote-compaction-trigger",sha256:createHash("sha256").update(JSON.stringify({type:"unknown",providerData:{type:"compaction_trigger"}})).digest("hex")},parents:[],retainedSources:[]}),
   ];
 }
 
