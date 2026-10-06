@@ -1,0 +1,19 @@
+name: Cendra artifact runtime for 2e96edbf
+
+# Exact reviewed native ordinary source-binding fix. Caller only; the reusable
+# workflow checks out source_sha and verifies it in every target build.
+# Image/runtime Bun remains explicitly1.3.14 in Cendra; this workflow's source
+# build toolchain follows its pinned1.4.0 declaration and is recorded separately.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-2e96edbf
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 2e96edbfb2c632c55a54c144d5b52b2cc55f21a9
