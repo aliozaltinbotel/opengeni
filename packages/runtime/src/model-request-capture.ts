@@ -1,4 +1,6 @@
-import type { ModelSourceBinding, NativeModelToolSource } from "@opengeni/contracts";
+import { canonicalModelSourceJson, type ModelSourceBinding, type NativeModelToolSource } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
+import { toSmartString } from "@openai/agents-core/utils";
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
@@ -43,6 +45,17 @@ export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<voi
 const modelRequestCapture = new AsyncLocalStorage<ModelRequestCapture>();
 const captureIndices = new WeakMap<object, number>();
 const nativeSourceBinding = Symbol("native-model-source-owner");
+type InputBinding = Omit<ModelSourceBinding,"ordinal">;
+const producedSources = new WeakMap<ModelRequestCapture, {
+  outputs: Map<string,InputBinding|null>;
+  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:string; modelName?:string}>;
+}>();
+function sourceState(capture:ModelRequestCapture) {
+  let state=producedSources.get(capture);
+  if(!state) {state={outputs:new Map(),tools:new Map()};producedSources.set(capture,state);}
+  return state;
+}
+const inputDigest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
 /** Symbol metadata follows existing object-spread projections but never JSON/model input. */
 export function bindModelSourceInput<T extends object>(item:T,binding:Omit<ModelSourceBinding,"ordinal">):T {
   Object.defineProperty(item,nativeSourceBinding,{value:binding,enumerable:true,configurable:true});
@@ -73,11 +86,45 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
   for (const value of output) {
     if (!value || typeof value!=="object") continue;
     const item=value as Record<string,unknown>;
+    const sha256=inputDigest(item);
+    const binding:InputBinding={kind:"HISTORY_ROW",sourceRef:{owner:"native.runtime.artifact",id:`model-output:${sourceKey}:${sha256}`,sha256},parents:[],retainedSources:[],nativeProducerSourceKey:sourceKey};
+    bindModelSourceInput(item,binding);
+    const outputs=sourceState(capture).outputs;
+    const priorOutput=outputs.get(sha256);
+    outputs.set(sha256,priorOutput!==undefined && priorOutput?.nativeProducerSourceKey!==sourceKey?null:binding);
     const callId=typeof item.callId==="string"?item.callId:typeof item.call_id==="string"?item.call_id:null;
     if(item.type!=="function_call" || !callId) continue;
     const prior=capture.toolSourceKeys.get(callId);
     if(prior && prior!==sourceKey) throw new Error("MODEL_SOURCE_CALL_ID_COLLISION");
     capture.toolSourceKeys.set(callId,sourceKey);
+  }
+}
+
+/** Observe the final SDK function return, after its actual MCP projection. */
+export function recordModelToolProjection(callId:string|undefined,modelName:string,output:unknown):void {
+  const capture=modelRequestCapture.getStore();
+  if(!capture || !callId) return;
+  const tool=sourceState(capture).tools.get(callId);
+  if(!tool || tool.source.nativeModelSourceKey!==capture.toolSourceKeys?.get(callId))return;
+  tool.projection=toSmartString(output);tool.modelName=modelName;
+}
+
+/** SDK continuation objects may be copies. Match only this scope's actual native
+ * output bytes or its exact completed call and final text projection. */
+function restoreProducedSourceBindings(request:ModelRequest,capture:ModelRequestCapture|undefined):void {
+  if(!capture || !Array.isArray(request.input))return;
+  const state=sourceState(capture);
+  for(const value of request.input) {
+    if(!value || typeof value!=="object" || modelSourceInputBinding(value))continue;
+    const item=value as Record<string,unknown>;
+    const sha256=inputDigest(item),model=state.outputs.get(sha256);
+    if(model) {bindModelSourceInput(item,model);continue;}
+    if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
+    const tool=state.tools.get(item.callId);
+    if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName
+      || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson({type:"text",text:tool.projection}))continue;
+    bindModelSourceInput(item,{kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
+      parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult});
   }
 }
 
@@ -200,9 +247,10 @@ export class ModelRequestCaptureModel implements Model {
   constructor(private readonly inner: Model) {}
 
   async getResponse(request: ModelRequest) {
+    const capture = modelRequestCapture.getStore();
+    restoreProducedSourceBindings(request,capture);
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
-    const capture = modelRequestCapture.getStore();
     const sourceKey = await capture?.beforeCall?.(request);
     const response = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => this.inner.getResponse(request));
     if (sourceKey) {
@@ -213,9 +261,10 @@ export class ModelRequestCaptureModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    const capture = modelRequestCapture.getStore();
+    restoreProducedSourceBindings(request,capture);
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
-    const capture = modelRequestCapture.getStore();
     const sourceKey = await capture?.beforeCall?.(request);
     const iterator = withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () =>
       this.inner.getStreamedResponse(request)[Symbol.asyncIterator](),
@@ -260,6 +309,10 @@ export class ModelRequestCaptureProvider implements ModelProvider {
 }
 
 /** Runs in the same native call owner before the model-visible projection. */
-export async function recordModelToolSource(source:NativeModelToolSource):Promise<void> {
-  await modelRequestCapture.getStore()?.onModelToolSource?.(source);
+export async function recordModelToolSource(source:NativeModelToolSource,rawResult?:unknown):Promise<void> {
+  const capture=modelRequestCapture.getStore();
+  const owned=structuredClone(source);
+  const ownedResult=rawResult===undefined?undefined:structuredClone(rawResult);
+  await capture?.onModelToolSource?.(source);
+  if(capture)sourceState(capture).tools.set(owned.sourceCallId,{source:owned,...(ownedResult===undefined?{}:{rawResult:ownedResult})});
 }

@@ -111,7 +111,7 @@ export function wrapAttemptToolExecute(
       const retainedSources=(await sourceRefs?.(result,context) ?? nativeKnowledgeSources(result,identity)).map(ref=>ModelSourceRef.parse(ref));
       await recordModelToolSource({sourceCallId:context.sourceCallId,
         ...(context.nativeModelSourceKey?{nativeModelSourceKey:context.nativeModelSourceKey}:{}),
-        rawSourceRef:{owner:"native.tool.result",id:context.operationId,sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex")},retainedSources});
+        rawSourceRef:{owner:"native.tool.result",id:context.operationId,sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex")},retainedSources},result);
     }
     return await projectAttemptToolResultForCaller(result,context,spill,identity);
   };

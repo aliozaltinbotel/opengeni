@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { canonicalModelSourceJson, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, type ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
+import { canonicalModelSourceJson, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
@@ -106,7 +106,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
     if (values.length>remainingInputs) reasons.add("CAP_EXCEEDED");
     let cursor=0;
     for (const [ordinal,value] of (values.length>remainingInputs?[]:values).entries()) {
-      const binding=request.sourceBindings?.find(binding=>binding.ordinal===ordinal);
+      const binding=request.sourceBindings?.find(candidate=>candidate.ordinal===ordinal);
       const contentSha256=modelSourceContentDigest(value);
       const index=binding?.sourceRef.owner==="session_history_items"?rows.findIndex(row=>row.id===binding.sourceRef.id):rows.findIndex((row,i)=>i>=cursor && modelSourceContentDigest(row.item)===contentSha256);
       const row=index<0?undefined:rows[index];
@@ -117,6 +117,46 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       if (!basis && canonicalModelSourceJson(value).includes("opengeni_context_summary")) {kind="SUMMARY";reasons.add("UNRESOLVED_PARENT");}
       let sourceRef=binding?.sourceRef ?? (row?{owner:"session_history_items",id:row.id,sha256:row.rowSha}:null);
       const parents=[...(basis?.parents??binding?.parents??[])];
+      let retainedSources=basis?.retainedSources ?? binding?.retainedSources ?? [];
+      if(sourceRef?.owner==="native.runtime.artifact" && (binding?.kind==="HISTORY_ROW" || binding?.kind==="TOOL_RESULT") && !binding.nativeProducerSourceKey)
+        reasons.add("UNRESOLVED_PARENT");
+      if(binding?.nativeProducerSourceKey) {
+        // Transient SDK output is admitted only against its exact committed call,
+        // in this still-current attempt. A projection digest is not the raw tool digest.
+        const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(
+          eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),
+          eq(schema.modelCallSourceReceipts.sessionId,identity.sessionId),eq(schema.modelCallSourceReceipts.turnId,identity.turnId),
+          eq(schema.modelCallSourceReceipts.attemptId,identity.attemptId),eq(schema.modelCallSourceReceipts.executionGeneration,identity.executionGeneration),
+          eq(schema.modelCallSourceReceipts.sourceKey,binding.nativeProducerSourceKey))).limit(1);
+        let producer:ModelCallSourceReceipt|null=null;
+        if(stored) {try {producer=validatedStoredModelCallSourceReceipt(stored);}catch { /* Refuse unavailable immutable ancestry. */ }}
+        if(sourceRef?.owner!=="native.runtime.artifact" || sourceRef.sha256!==contentSha256 || !producer || !producer.complete || producer.incompleteReasons.length!==0
+          || producer.purpose!=="AGENT" || producer.requestIndex>=identity.requestIndex
+          || producer.accountId!==identity.accountId || producer.workspaceId!==identity.workspaceId || producer.sessionId!==identity.sessionId
+          || producer.turnId!==identity.turnId || producer.attemptId!==identity.attemptId || producer.executionGeneration!==identity.executionGeneration
+          || producer.sourceKey!==binding.nativeProducerSourceKey || producer.id!==stored?.id) {
+          reasons.add("UNRESOLVED_PARENT");
+        } else {
+          // Reuse authenticated native leaves, while resolving history and nested
+          // compaction ancestry again through their owners rather than a cached graph.
+          for(const node of producer.closure)if(node.sourceRef.owner!=="session_history_items" && node.sourceRef.owner!=="model_call_source_receipts")
+            closureNodes.set(`producer-node:${canonicalModelSourceJson(node.sourceRef)}`,node);
+          const ancestors=producer.inputs.flatMap(input=>input.sourceRef?[input.sourceRef]:[]);
+          for(const ancestor of ancestors)if(!await closure(ancestor,new Set()))reasons.add("UNRESOLVED_PARENT");
+          parents.push(...ancestors);
+          retainedSources=[...retainedSources,...producer.inputs.flatMap(input=>input.retainedSources),...producer.closure.flatMap(node=>node.retainedSources)];
+          const raw=binding.rawToolSource;
+          if(binding.kind==="TOOL_RESULT") {
+            const item=value as {type?:string;callId?:string};
+            if(!raw || item.type!=="function_call_result" || item.callId!==raw.sourceCallId || raw.nativeModelSourceKey!==producer.sourceKey
+              || raw.rawSourceRef.owner!=="native.tool.result" || !ModelSourceRef.safeParse(raw.rawSourceRef).success
+              || binding.rawToolResult===undefined || modelSourceContentDigest(binding.rawToolResult)!==raw.rawSourceRef.sha256
+              || canonicalModelSourceJson(binding.parents)!==canonicalModelSourceJson([raw.rawSourceRef])
+              || canonicalModelSourceJson(binding.retainedSources)!==canonicalModelSourceJson(raw.retainedSources))reasons.add("UNRESOLVED_PARENT");
+            else closureNodes.set(`tool:${raw.rawSourceRef.id}`,{sourceRef:raw.rawSourceRef,kind:"TOOL_RESULT",parents:[],retainedSources:raw.retainedSources});
+          } else if(raw || binding.parents.length!==0 || binding.retainedSources.length!==0)reasons.add("UNRESOLVED_PARENT");
+        }
+      }
       if(typeof value==="string" && request.purpose==="TITLE") {
         const [turn]=await tx.select({prompt:schema.sessionTurns.prompt}).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
         if(turn) {
@@ -126,10 +166,10 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         }
       }
       if(sourceRef?.owner==="native.runtime.artifact") {for(const parent of parents) if(!await closure(parent,new Set())) reasons.add("UNRESOLVED_PARENT");}
-      if(sourceRef?.owner==="native.runtime.artifact") closureNodes.set(`artifact:${sourceRef.id}:${sourceRef.sha256}`,{sourceRef,kind:binding?.kind ?? kind,parents,retainedSources:binding?.retainedSources ?? []});
+      if(sourceRef?.owner==="native.runtime.artifact") closureNodes.set(`artifact:${sourceRef.id}:${sourceRef.sha256}`,{sourceRef,kind:binding?.kind ?? kind,parents,retainedSources});
       if (!sourceRef) reasons.add("UNKNOWN_SOURCE");
       else if (sourceRef.owner!=="native.runtime.artifact" && !await closure(sourceRef,new Set())) reasons.add(kind==="IMPORTED"?"UNATTRIBUTED_IMPORT":"UNRESOLVED_PARENT");
-      inputs.push({ordinal:inputs.length,kind,contentSha256,sourceRef,parents,retainedSources:basis?.retainedSources ?? binding?.retainedSources ?? []});
+      inputs.push({ordinal:inputs.length,kind,contentSha256,sourceRef,parents,retainedSources});
     }
     if (values.length===0) reasons.add("EMPTY_BASIS");
     const payload={version:1 as const,id:randomUUID(),...identity,purpose:request.purpose ?? "AGENT",inputs,closure:[...closureNodes.values()],complete:reasons.size===0,incompleteReasons:[...reasons].sort()};

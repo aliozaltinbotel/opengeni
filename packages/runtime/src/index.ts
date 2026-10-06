@@ -377,6 +377,7 @@ import {
   withModelCallSourceDispatch,
   type BeforeModelCallSourceReceipt,
   nativeModelSourceKeyForToolCall,
+  recordModelToolProjection,
   bindModelSourceInput,
   modelSourceBindings,
   modelSourceInputBinding,
@@ -3315,7 +3316,11 @@ function installModelMcpCallIdentity(agent: ApprovalCapableAgent): void {
             typeof callId === "string" && callId.length > 0
               ? { modelName: tool.name, callId }
               : null,
-            async () => await invoke(runContext, input, details),
+            async () => {
+              const output=await invoke(runContext,input,details);
+              recordModelToolProjection(callId,tool.name,output);
+              return output;
+            },
           );
         },
       };

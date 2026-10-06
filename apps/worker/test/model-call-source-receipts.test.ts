@@ -5,8 +5,8 @@ import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2Pr
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { Usage, type ModelRequest, type Model, type StreamEvent } from "@openai/agents";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { run, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
+import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
@@ -35,6 +35,71 @@ test("persistence removes only native source binding and keeps unknown symbols r
  Object.defineProperty(owned,Symbol("unknown-owner"),{value:"untrusted",enumerable:true});expect(()=>toPostgresLosslessJson(omitModelSourceInputBinding(owned))).toThrow("Canonical JSON cannot contain symbol keys");
  const hidden=bindModelSourceInput({...json},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:crypto.randomUUID(),sha256:"b".repeat(64)},parents:[],retainedSources:[]});Object.defineProperty(hidden,Symbol("unknown-hidden-owner"),{value:"untrusted",enumerable:false});expect(()=>toPostgresLosslessJson(omitModelSourceInputBinding(hidden))).toThrow("Canonical JSON cannot contain symbol keys");
 });
+
+test("actual SDK transient call/result next receipts retain exact raw and projected sources and refuse source mutants",async()=>{
+ const {buildOpenGeniAgent,prepareAgentTools}=await import("@opengeni/runtime");
+ const f=await fixture();let index=0,calls=0;
+ const raw={content:[{type:"text" as const,text:"Synthetic exact evidence"}],structuredContent:{passage:"Synthetic exact evidence"}};
+ const retained={owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),version:"1",sha256:createHash("sha256").update("Synthetic exact evidence").digest("hex")};
+ const settings=testSettings({sandboxBackend:"none",webSearchEnabled:false,mcpServers:[{id:"cendra-pms",url:"https://synthetic.invalid/mcp",cacheToolsList:false}]});
+ const prepared=await prepareAgentTools(settings,[{kind:"mcp",id:"cendra-pms"}],{...f.identity,localMcpServers:[{id:"cendra-pms",server:{
+  name:"cendra-pms",cacheToolsList:false,connect:async()=>{},close:async()=>{},invalidateToolsCache:async()=>{},
+  listTools:async()=>[{name:"knowledge_search",inputSchema:{type:"object",properties:{},required:[],additionalProperties:false}}],
+  callTool:async()=>raw.content,callToolResult:async()=>raw,
+ } satisfies MCPServer,modelSourceRefs:()=>[retained]}]});
+ const receipts:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>[]=[];
+ let continuation:ModelRequest|undefined;
+ const capture:ModelRequestCapture=()=>{};
+ capture.beforeCall=async sent=>{
+  const receipt=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},
+   {instructions:sent.systemInstructions,tools:sent.tools,input:sent.input,sourceBindings:modelSourceBindings(sent.input),instructionSelections:f.instructionSelections});
+  expect(receipt.complete).toBe(true);expect(receipt.incompleteReasons).toEqual([]);
+  expect((await readModelCallSourceReceipt(app.db,{...f.identity,sourceKey:receipt.sourceKey})).receipt).toEqual(receipt);
+  receipts.push(receipt);continuation=sent;return receipt.sourceKey;
+ };
+ const step=(sent:ModelRequest)=>{
+  calls++;
+  if(calls>2)return {outputText:"Synthetic grounded answer"};
+  const tool=sent.tools.find(value=>value.type==="function" && value.name.endsWith("__knowledge_search"));
+  if(!tool || tool.type!=="function")throw Error("Actual SDK MCP catalog tool missing");
+  return {output:[functionCall(tool.name,{},crypto.randomUUID())]};
+ };
+ const model=new ModelRequestCaptureModel({async getResponse(sent){return await new ScriptedModel([step(sent)]).getResponse(sent);},async *getStreamedResponse(sent){yield* new ScriptedModel([step(sent)]).getStreamedResponse(sent);}});
+ try {
+  const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  for(const row of rows)bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]});
+  const agent=buildOpenGeniAgent(settings,[],{mcpServers:prepared.mcpServers}).clone({model});
+  await withModelRequestCapture(capture,async()=>{const stream=await run(agent,rows.map(row=>row.item) as ModelRequest["input"],{stream:true,historyOwnership:"external",tracingDisabled:true});for await(const _event of stream){}await stream.completed;});
+  expect(calls).toBe(3);expect(receipts).toHaveLength(3);
+  expect(receipts[0]!.inputs.flatMap(item=>item.retainedSources)).not.toContainEqual(retained);
+  expect(receipts[2]!.inputs.flatMap(item=>item.retainedSources)).toContainEqual(retained);
+  if(!continuation || !Array.isArray(continuation.input))throw Error("Actual SDK continuation absent");
+  const actualInput=continuation.input,actualBindings=modelSourceBindings(actualInput);
+  const resultBinding=actualBindings.find(binding=>binding.rawToolSource)!;
+  expect(resultBinding.sourceRef.sha256).not.toBe(resultBinding.rawToolSource!.rawSourceRef.sha256);
+  expect(resultBinding.rawToolSource!.rawSourceRef.sha256).toBe(createHash("sha256").update(JSON.stringify(raw)).digest("hex"));
+  const foreign=await fixture();
+  const foreignRows=await getActiveSessionHistoryItemsPaged(app.db,foreign.identity.workspaceId,foreign.identity.sessionId);
+  const foreignReceipt=await persistModelCallSourceReceipt(app.db,foreign.identity,{input:foreignRows.map(row=>row.item)});
+  const title=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},{purpose:"TITLE",input:"Synthetic request"});
+  const mutants:((bindings:typeof actualBindings,input:typeof actualInput)=>void)[]=[
+   bindings=>{bindings.splice(bindings.findIndex(binding=>binding.rawToolSource),1);},
+   bindings=>{delete bindings.find(binding=>binding.rawToolSource)!.nativeProducerSourceKey;},
+   bindings=>{delete bindings.find(binding=>binding.rawToolSource)!.rawToolSource;},
+   bindings=>{bindings.find(binding=>binding.rawToolSource)!.rawToolResult={content:[{type:"text",text:"Altered raw source"}]};},
+   bindings=>{const binding=bindings.find(value=>value.rawToolSource)!;binding.rawToolSource!.rawSourceRef.sha256="f".repeat(64);binding.parents=[binding.rawToolSource!.rawSourceRef];},
+   bindings=>{const binding=bindings.find(value=>value.rawToolSource)!;binding.nativeProducerSourceKey=foreignReceipt.sourceKey;binding.rawToolSource!.nativeModelSourceKey=foreignReceipt.sourceKey;},
+   bindings=>{const binding=bindings.find(value=>value.rawToolSource)!;binding.nativeProducerSourceKey=title.sourceKey;binding.rawToolSource!.nativeModelSourceKey=title.sourceKey;},
+   (bindings,input)=>{const binding=bindings.find(value=>value.rawToolSource)!;(input[binding.ordinal] as {output:unknown}).output="Altered projected source";},
+  ];
+  for(const mutate of mutants){
+   const bindings=structuredClone(actualBindings),input=structuredClone(actualInput);mutate(bindings,input);
+   const refused=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},{input,sourceBindings:bindings});
+   expect(refused.complete).toBe(false);expect(refused.incompleteReasons.length).toBeGreaterThan(0);
+  }
+  expect(calls).toBe(3);
+ } finally {await prepared.close();}
+},30_000);
 test("real PostgreSQL commits exact-call proof before dispatch; persistence failure prevents dispatch",async()=>{
  const {identity,instructionSelections}=await fixture();const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);let calls=0;
  const model:Model={async getResponse(){calls++;const stored=await readModelCallSourceReceipt(app.db,identity);expect(stored.receipt?.sourceKey).toBe(identity.sourceKey);expect(stored.receipt?.complete).toBe(true);expect(stored.receipt?.inputs.flatMap(item=>item.retainedSources).some(ref=>ref.owner==="workspace_instruction_policy_snapshots" && ref.id===instructionSelections.instructionPolicySnapshotId)).toBe(true);return {usage:new Usage(),output:[],responseId:"provider-1"};},getStreamedResponse():AsyncIterable<StreamEvent>{throw Error("unused");}};
