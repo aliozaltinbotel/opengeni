@@ -677,7 +677,7 @@ describe("codex-parity rebuild", () => {
     const active = [user("u1"), assistant("a1"), call("c1"), result("c1")];
     const promptInput = buildCompactionPromptInput(active);
     expect(promptInput.slice(0, -1)).toEqual(active);
-    expect(promptInput.at(-1)).toEqual({
+    expect(JSON.parse(JSON.stringify(promptInput.at(-1)))).toEqual({
       type: "message",
       role: "user",
       content: COMPACTION_PROMPT,

@@ -3282,3 +3282,11 @@ metadata is retained before model projection/spill and first enters the next
 call's receipt. A previous complete receipt cannot prove a newly retrieved
 source. Existing historical model facts keep their original key and nullable
 receipt link; no historical basis is backfilled or inferred from headings.
+
+SDK continuations may clone native output objects. Capture the genuine model
+output and each tool's final `toSmartString` projection at its invocation owner,
+then restore internal symbol bindings only for those exact same-scope bytes and
+call identities. Authenticate transient ancestry against the exact prior complete
+AGENT receipt in the same tenant, session, turn, attempt and generation. Keep the
+raw tool-result digest distinct from the projected input digest; native bindings
+never become model-visible metadata or a separate ledger.
