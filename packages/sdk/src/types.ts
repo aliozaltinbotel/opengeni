@@ -1575,6 +1575,12 @@ export type Session = {
 /** Additive receipt returned by POST /sessions. */
 export type CreateSessionResponse = Session & {
   initialTurnId: string | null;
+  /**
+   * True only when this request committed a new session. Replays and repairs
+   * of an existing session are false. Omitted by older servers means unknown;
+   * HTTP acceptance alone is not evidence of fresh creation.
+   */
+  freshCreated?: boolean | undefined;
 };
 
 export type SessionSummary = Session;

@@ -11145,6 +11145,7 @@
         "$.firstPartyMcpPermissions[]": "ref(Permission)",
         "$.firstPartyMcpTools": "array!",
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
+        "$.freshCreated": "boolean?",
         "$.hasSchedules": "boolean?",
         "$.id": "string!",
         "$.initialMessage": "string!",

@@ -290,7 +290,8 @@ import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
   retryFailedSession,
-  createSessionForRequest,
+  createSessionForRequestWithOutcome,
+  type CreateSessionRequestOutcome,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
@@ -602,7 +603,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         422,
       );
     }
-    let session: Session;
+    let result: CreateSessionRequestOutcome;
     try {
       CreateSessionRequest.parse(payload);
       const origin = await resolveSiteSessionOrigin(
@@ -612,15 +613,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         c.req.header("x-opengeni-site-version"),
       );
       const create = () =>
-        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
-      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
+        createSessionForRequestWithOutcome(deps, grant, workspaceId, payload, authorization);
+      result = await (origin ? withSiteSessionOrigin(origin, create) : create());
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
+    return c.json(
+      {
+        ...(await withEffectivePolicy(deps, workspaceId, grant.subjectId, result.session)),
+        freshCreated: result.outcome === "created",
+      },
+      202,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {

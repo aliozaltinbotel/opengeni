@@ -13081,6 +13081,12 @@ export type Session = z.infer<typeof Session>;
 export const CreateSessionResponse = /* @__PURE__ */ defineSkillContractSchema(() =>
   Session.extend({
     initialTurnId: z.string().uuid().nullable(),
+    /**
+     * True only when this request committed a new session. Replays and repairs
+     * of an existing session are false. Omitted by older servers means unknown;
+     * HTTP acceptance alone is not evidence of fresh creation.
+     */
+    freshCreated: z.boolean().optional(),
   }),
 );
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
