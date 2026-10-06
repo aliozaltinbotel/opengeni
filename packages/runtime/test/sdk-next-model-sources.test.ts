@@ -171,12 +171,13 @@ test("ordinary SDK carried owner rebinds only exact same-capture unambiguous out
     return { capture, model };
   };
   const raw = structuredClone(actual);
-  const owner = producer([raw], "ordinary-owner");
+  const otherRaw = { ...structuredClone(actual), id: "fc_other_carried_owner", callId: crypto.randomUUID(), arguments: '{"query":"Different evidence"}' } as AgentInputItem;
+  const owner = producer([raw, otherRaw], "ordinary-owner");
   await withModelRequestCapture(owner.capture, async () => {
     await owner.model.getResponse(requestWith([]));
     const rawBinding = modelSourceInputBinding(raw)!;
     const rawBytes = JSON.stringify(raw);
-    const projection = stripProviderItemIdsFilter({ modelData: { input: [raw], systemInstructions: "Synthetic instruction" } }).input[0]!;
+    const projection = stripProviderItemId(raw);
     expect(modelSourceInputBinding(projection)).toBe(rawBinding);
     expect(digest(projection)).not.toBe(digest(raw));
     await owner.model.getResponse(requestWith([projection]));
@@ -196,6 +197,7 @@ test("ordinary SDK carried owner rebinds only exact same-capture unambiguous out
       expect(modelSourceInputBinding(item)).toBe(before);
       expect(modelSourceInputBinding(item)!.sourceRef.sha256).not.toBe(digest(item));
     };
+    await rejectRepair(bindModelSourceInput(stripProviderItemId(otherRaw), rawBinding));
     const forged = bindModelSourceInput(stripProviderItemId(structuredClone(actual)), structuredClone(rawBinding));
     await rejectRepair(forged);
     const foreignRaw = structuredClone(actual);
@@ -208,7 +210,7 @@ test("ordinary SDK carried owner rebinds only exact same-capture unambiguous out
       const altered = { ...stripProviderItemId(raw), [field]: `changed:${field}` };
       await rejectRepair(altered as AgentInputItem);
     }
-    await rejectRepair({ ...stripProviderItemId(raw), extra: "unsupported" } as AgentInputItem);
+    await rejectRepair({ ...stripProviderItemId(raw), extra: "unsupported" } as unknown as AgentInputItem);
     // A forged full tuple cannot be laundered through the projection lookup.
     for (const mutant of [
       { ...rawBinding, nativeProducerSourceKey: "foreign-producer" },
@@ -283,6 +285,127 @@ for (const streaming of [false, true]) {
   });
 }
 
+
+test.skipIf(!process.env.OPENGENI_NATIVE_MCP_SOURCE_APP_URL)("ordinary installed SDK Runner id strip admits exact native PG17 continuation after real MCP", async () => {
+  const native = await import("@opengeni/db");
+  const nativeUrl = process.env.OPENGENI_NATIVE_MCP_SOURCE_APP_URL;
+  if (!nativeUrl) throw Error("Native PostgreSQL URL required");
+  const db = native.createDb(nativeUrl, { max: 4 });
+  const scope: { accountId: string; workspaceId: string; sessionId: string; turnId: string; attemptId: string; executionGeneration: number } = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(), turnId: crypto.randomUUID(), attemptId: crypto.randomUUID(), executionGeneration: 1 };
+  let selections: { instructionPolicySnapshotId: string; companyProfileSnapshotId: string; preferenceSnapshotId: string } | undefined;
+  let nativeRows: Awaited<ReturnType<typeof native.getActiveSessionHistoryItemsPaged>> | undefined;
+  if (db) {
+    const role = await db.db.execute(await import("drizzle-orm").then(({ sql }) => sql`select r.rolsuper,r.rolbypassrls,current_setting('server_version_num')::int version from pg_roles r where r.rolname=current_user`));
+    const flags = role[0] as { rolsuper: boolean; rolbypassrls: boolean; version: number };
+    expect(flags.rolsuper).toBe(false); expect(flags.rolbypassrls).toBe(false);
+    expect(flags.version).toBeGreaterThanOrEqual(170000); expect(flags.version).toBeLessThan(180000);
+    const subjectId = crypto.randomUUID();
+    const access = await native.bootstrapWorkspace(db.db, { accountExternalSource: "native-mcp-source", accountExternalId: subjectId, accountName: "Synthetic", workspaceExternalSource: "native-mcp-source", workspaceExternalId: subjectId, workspaceName: "Synthetic", subjectId });
+    scope.accountId = access.workspaceGrants[0]!.accountId; scope.workspaceId = access.workspaceGrants[0]!.workspaceId;
+    const session = await native.createSession(db.db, { accountId: scope.accountId, workspaceId: scope.workspaceId, initialMessage: "Synthetic request", createdBy: { kind: "subject", subjectId }, resources: [], metadata: {}, model: "scripted", reasoningEffort: "low", latencyMode: "standard", sandboxBackend: "none" });
+    scope.sessionId = session.id;
+    await native.initializeSessionStartAtomically(db.db, { ...scope, reasoningEffortFallback: "low", createdEventPayload: {} });
+    const claim = await native.claimSessionWorkForAttempt(db.db, scope.workspaceId, { sessionId: scope.sessionId, workflowId: `session-${scope.sessionId}`, workflowRunId: crypto.randomUUID(), dispatchId: subjectId, attemptId: scope.attemptId, trigger: { kind: "next" } });
+    if (claim.action !== "claimed") throw Error("Native fixture claim refused");
+    scope.turnId = claim.turn.id; scope.executionGeneration = claim.turn.executionGeneration;
+    selections = await native.withSessionRlsActorContext({ subjectId: "worker:native-mcp-source", initiatingHumanSubjectId: subjectId }, async () => ({
+      instructionPolicySnapshotId: (await native.getOrCreateWorkspaceInstructionPolicySnapshot(db.db, scope)).id,
+      companyProfileSnapshotId: (await native.getOrCreateCompanyProfileSnapshot(db.db, scope)).id,
+      preferenceSnapshotId: (await native.getOrCreatePreferenceRegistrySnapshot(db.db, scope)).id,
+    }));
+    nativeRows = await native.getActiveSessionHistoryItemsPaged(db.db, scope.workspaceId, scope.sessionId);
+  }
+  const receipts: Awaited<ReturnType<typeof native.persistModelCallSourceReceipt>>[] = [];
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js");
+  const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
+  const raw = { content: [{ type: "text" as const, text: "Synthetic current evidence" }], structuredContent: { passage: "Synthetic current evidence" } };
+  const providerCalls: string[] = [];
+  const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const server = new McpServer({ name: "synthetic-cendra-pms", version: "1.0.0" });
+    server.registerTool("knowledge_search", { inputSchema: {} }, async () => { providerCalls.push("knowledge_search"); return raw; });
+    const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+    transports.push(transport); await server.connect(transport); return transport.handleRequest(request);
+  } });
+  const url = `http://127.0.0.1:${provider.port}/mcp`;
+  const server = new MCPServerStreamableHttp({ name: "cendra-pms", url, cacheToolsList: false });
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: "strip", mcpServers: [{ id: "cendra-pms", url, cacheToolsList: false }] });
+  let prepared: Awaited<ReturnType<typeof prepareAgentTools>> | undefined;
+  let transportsSent = 0;
+  let rawOutput: AgentInputItem | undefined;
+  const requests: ModelRequest[] = [];
+  try {
+    prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "cendra-pms" }], {
+      ...scope, localMcpServers: [{ id: "cendra-pms", server }],
+    });
+    const capture: ModelRequestCapture = () => {};
+    capture.callCompleted = (_sourceKey, _responseId, response) => {
+      if ("output" in response && Array.isArray(response.output)) rawOutput ??= response.output.find(item => item.type === "function_call");
+    };
+    capture.beforeCall = async request => {
+      requests.push(request);
+      const bindings = modelSourceBindings(request.input);
+      const identity = { ...scope, sourceKey: crypto.randomUUID(), requestIndex: requests.length };
+      const receipt = await native.persistModelCallSourceReceipt(db.db, identity, { purpose: "AGENT", instructions: request.systemInstructions, input: request.input, sourceBindings: bindings, tools: request.tools, instructionSelections: selections! });
+      expect((await native.readModelCallSourceReceipt(db.db, identity)).receipt).toEqual(receipt);
+      // This assertion is the actual native admission; a stale carried digest
+      // produces UNRESOLVED_PARENT here before the second provider transport.
+      if (!receipt.complete) console.log(JSON.stringify({ event: "ordinary-native-source-refused", requestIndex: receipt.requestIndex, incompleteReasons: receipt.incompleteReasons, current: await native.validateRetainedModelSources(db.db, { identity, receipt }), providerTransports: transportsSent }));
+      expect(receipt.complete).toBe(true); expect(receipt.incompleteReasons).toEqual([]);
+      const current = await native.validateRetainedModelSources(db.db, { identity, receipt });
+      expect(current.complete).toBe(true); expect(current.incompleteReasons).toEqual([]);
+      if (requests.length === 2) {
+        if (!Array.isArray(request.input) || !rawOutput) throw Error("Ordinary native output required");
+        const projected = request.input.find(item => item.type === "function_call")!;
+        const binding = modelSourceInputBinding(projected)!;
+        expect(JSON.stringify(projected)).toBe(JSON.stringify(stripProviderItemId(rawOutput)));
+        expect(binding.sourceRef.sha256).toBe(digest(projected));
+        expect(binding.sourceRef.id).toContain(digest(rawOutput));
+        expect(binding.nativeProducerSourceKey).toBe(receipts[0]!.sourceKey);
+        const node = receipt.closure.find(value => value.sourceRef.id === binding.sourceRef.id)!;
+        for (const ancestor of receipts[0]!.inputs.flatMap(value => value.sourceRef ? [value.sourceRef] : [])) expect(node.parents).toContainEqual(ancestor);
+        const tool = bindings.find(value => value.kind === "TOOL_RESULT")!;
+        expect(tool.rawToolSource!.rawSourceRef.sha256).toBe(digest(raw));
+        expect(tool.sourceRef.sha256).not.toBe(digest(raw));
+        expect(tool.nativeProducerSourceKey).toBe(receipts[0]!.sourceKey);
+        console.log(JSON.stringify({ event: "ordinary-native-source-admitted", receiptComplete: receipt.complete, currentComplete: current.complete, rawOutputSha256: digest(rawOutput), projectedSha256: digest(projected), sourceRef: binding.sourceRef, exactProducerSourceKey: binding.nativeProducerSourceKey, requestIndex: receipt.requestIndex }));
+      }
+      receipts.push(receipt); return receipt.sourceKey;
+    };
+    const client = new OpenAI({ apiKey: "synthetic-key", baseURL: "https://synthetic.invalid/v1", maxRetries: 0, fetch: async (_url, init) => {
+      transportsSent++;
+      const body = JSON.parse(String(init?.body)) as { tools: Array<{ name: string }> };
+      const name = body.tools.find(value => value.name.endsWith("__knowledge_search"))!.name;
+      const output = transportsSent === 1 ? [{ type: "function_call", id: "fc_native_ordinary", call_id: crypto.randomUUID(), name, status: "completed", arguments: "{}" }] : [{ type: "message", id: "msg_native_ordinary", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Synthetic answer", annotations: [], logprobs: [] }] }];
+      return new Response(JSON.stringify({ id: `response-${transportsSent}`, status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } });
+    } });
+    const model = new ModelRequestCaptureModel(new OpenAIResponsesModel(client, "synthetic-model"));
+    const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers }).clone({ model });
+    for (const row of nativeRows!) bindModelSourceInput(row.item, { kind: "HISTORY_ROW", sourceRef: { owner: "session_history_items", id: row.id, sha256: row.sourceSha256! }, parents: [], retainedSources: [] });
+    await withModelRequestCapture(capture, () => new Runner({ tracingDisabled: true, callModelInputFilter: stripProviderItemIdsFilter }).run(agent, nativeRows!.map(row => row.item as AgentInputItem), { historyOwnership: "external" }));
+    expect(receipts).toHaveLength(2); expect(transportsSent).toBe(2); expect(providerCalls).toEqual(["knowledge_search"]);
+    const continuation = requests.at(-1)!;
+    const finalReceipt = receipts.at(-1)!;
+    const bindings = modelSourceBindings(continuation.input);
+    const binding = bindings.find(value => value.nativeProducerSourceKey && value.kind === "HISTORY_ROW")!;
+    for (const mutant of [
+      { ...binding, nativeProducerSourceKey: crypto.randomUUID() },
+      { ...binding, sourceRef: { ...binding.sourceRef, sha256: digest(rawOutput) } },
+    ]) {
+      const identity = { ...scope, sourceKey: crypto.randomUUID(), requestIndex: receipts.length + 1 };
+      const refused = await native.persistModelCallSourceReceipt(db.db, identity, { input: continuation.input, sourceBindings: bindings.map(value => value === binding ? mutant : value) });
+      expect(refused.complete).toBe(false); expect(refused.incompleteReasons).toContain("UNRESOLVED_PARENT");
+      expect((await native.validateRetainedModelSources(db.db, { identity, receipt: refused })).incompleteReasons).toContain("RECEIPT_INCOMPLETE");
+    }
+    await native.applySessionTurnSettlement(db.db, scope.workspaceId, { sessionId: scope.sessionId, turnId: scope.turnId, triggerEventId: (await native.getSessionTurn(db.db, scope.workspaceId, scope.turnId))!.triggerEventId, attemptId: scope.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: { output: "Synthetic answer" } }] });
+    expect((await native.validateRetainedModelSources(db.db, { identity: { ...scope, sourceKey: finalReceipt.sourceKey, requestIndex: finalReceipt.requestIndex }, receipt: finalReceipt })).incompleteReasons).toContain("ATTEMPT_NOT_CURRENT");
+    console.log(JSON.stringify({ event: "ordinary-native-source-pg17", receipts: receipts.length, role: "NONSU_NOBYPASSRLS", providerTransports: transportsSent, realMcpCalls: providerCalls.length, completeBeforeDispatch: true, producerAndRawDigestMutants: "REFUSED", settledAttempt: "REFUSED" }));
+  } finally {
+    await prepared?.close(); await server.close();
+    for (const transport of transports) await transport.close();
+    provider.stop(true); await db.close();
+  }
+});
 
 test("production streaming runtime binds genuine loopback MCP calls after SDK projection", async () => {
   const native = await import("@opengeni/db");

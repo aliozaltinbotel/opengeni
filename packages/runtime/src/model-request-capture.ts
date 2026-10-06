@@ -50,11 +50,12 @@ const nativeSourceBinding = Symbol("native-model-source-owner");
 type InputBinding = Omit<ModelSourceBinding,"ordinal">;
 const producedSources = new WeakMap<ModelRequestCapture, {
   outputs: Map<string,InputBinding|null>;
+  outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
   tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:string; modelName?:string}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
-  if(!state) {state={outputs:new Map(),tools:new Map()};producedSources.set(capture,state);}
+  if(!state) {state={outputs:new Map(),outputOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
   return state;
 }
 const inputDigest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -91,7 +92,8 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
     const sha256=inputDigest(item);
     const binding:InputBinding={kind:"HISTORY_ROW",sourceRef:{owner:"native.runtime.artifact",id:`model-output:${sourceKey}:${sha256}`,sha256},parents:[],retainedSources:[],nativeProducerSourceKey:sourceKey};
     bindModelSourceInput(item,binding);
-    const outputs=sourceState(capture).outputs;
+    const {outputs,outputOwners}=sourceState(capture);
+    outputOwners.set(binding,{outputId:binding.sourceRef.id,identity:canonicalModelSourceJson(binding)});
     const priorOutput=outputs.get(sha256);
     outputs.set(sha256,priorOutput!==undefined && priorOutput?.nativeProducerSourceKey!==sourceKey?null:binding);
     // The streaming Runner parses function calls through its installed protocol
@@ -108,6 +110,7 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
       const projectedSha256=inputDigest(projected);
       if(projectedSha256===sha256)continue;
       const projectedBinding:InputBinding={...binding,sourceRef:{...binding.sourceRef,id:`model-output:${sourceKey}:${sha256}:projection:${projectedSha256}`,sha256:projectedSha256}};
+      outputOwners.set(projectedBinding,{outputId:binding.sourceRef.id,identity:canonicalModelSourceJson(projectedBinding)});
       const priorProjection=outputs.get(projectedSha256);
       outputs.set(projectedSha256,priorProjection!==undefined && priorProjection?.sourceRef.id!==projectedBinding.sourceRef.id?null:projectedBinding);
     }
@@ -134,9 +137,20 @@ function restoreProducedSourceBindings(request:ModelRequest,capture:ModelRequest
   if(!capture || !Array.isArray(request.input))return;
   const state=sourceState(capture);
   for(const value of request.input) {
-    if(!value || typeof value!=="object" || modelSourceInputBinding(value))continue;
+    if(!value || typeof value!=="object")continue;
     const item=value as Record<string,unknown>;
     const sha256=inputDigest(item),model=state.outputs.get(sha256);
+    const carried=modelSourceInputBinding(item);
+    if(carried) {
+      if(carried.sourceRef.sha256===sha256)continue;
+      // Ordinary Runner id stripping spreads this owner's symbol along with
+      // the output. Repair only a registered, unchanged binding from this
+      // capture and the same raw output's unambiguous exact projection.
+      const owner=state.outputOwners.get(carried),projection=model?state.outputOwners.get(model):undefined;
+      if(model && owner && projection && owner.outputId===projection.outputId
+        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(model))bindModelSourceInput(item,model);
+      continue;
+    }
     if(model) {bindModelSourceInput(item,model);continue;}
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
