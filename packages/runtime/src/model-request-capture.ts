@@ -2,8 +2,9 @@ import { canonicalModelSourceJson, type ModelSourceBinding, type NativeModelTool
 import { createHash } from "node:crypto";
 import { toSmartString } from "@openai/agents-core/utils";
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
+import { stripProviderItemId } from "./model-input";
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
+import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
 /** One exact source producer; the optional dispatch callback rechecks that same
  * committed source at each literal transport attempt, including HTTP retries. */
@@ -92,6 +93,16 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
     const outputs=sourceState(capture).outputs;
     const priorOutput=outputs.get(sha256);
     outputs.set(sha256,priorOutput!==undefined && priorOutput?.nativeProducerSourceKey!==sourceKey?null:binding);
+    // The SDK clones model output without owner symbols before the production
+    // input filter removes provider ids. Remember only that installed projection
+    // of these actual output bytes; a call id alone never proves provenance.
+    const projected=stripProviderItemId(item as AgentInputItem);
+    if(projected!==item) {
+      const projectedSha256=inputDigest(projected);
+      const projectedBinding:InputBinding={...binding,sourceRef:{...binding.sourceRef,id:`model-output:${sourceKey}:${sha256}:projection:${projectedSha256}`,sha256:projectedSha256}};
+      const priorProjection=outputs.get(projectedSha256);
+      outputs.set(projectedSha256,priorProjection!==undefined && priorProjection?.sourceRef.id!==projectedBinding.sourceRef.id?null:projectedBinding);
+    }
     const callId=typeof item.callId==="string"?item.callId:typeof item.call_id==="string"?item.call_id:null;
     if(item.type!=="function_call" || !callId) continue;
     const prior=capture.toolSourceKeys.get(callId);
