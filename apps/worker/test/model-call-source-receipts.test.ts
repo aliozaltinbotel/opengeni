@@ -5,7 +5,7 @@ import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2Pr
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { run, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
+import { Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
@@ -27,7 +27,7 @@ async function fixture(options:{metadata?:Record<string,unknown>;initialModelCon
  const instructionSelections=await withSessionRlsActorContext({subjectId:"worker:source-receipt",initiatingHumanSubjectId:subjectId},async()=>{const profile=await getOrCreateCompanyProfileSnapshot(app.db,identity);const policy=await getOrCreateWorkspaceInstructionPolicySnapshot(app.db,identity);const preferences=await getOrCreatePreferenceRegistrySnapshot(app.db,identity);return {instructionPolicySnapshotId:policy.id,preferenceSnapshotId:preferences.id,companyProfileSnapshotId:profile.id};});
  return {identity,instructionSelections,subjectId,triggerEventId:claim.turn.triggerEventId,write:{accountId,workspaceId,sessionId:session.id,turnId:claim.turn.id,expectedAttemptId:attemptId,expectedExecutionGeneration:claim.turn.executionGeneration}};
 }
-function request(input:ModelRequest["input"]):ModelRequest{return {systemInstructions:"Synthetic instruction",input,tools:[],handoffs:[],modelSettings:{},outputType:"text",tracing:false};}
+function request(input:ModelRequest["input"]|Record<string,unknown>[]):ModelRequest{return {systemInstructions:"Synthetic instruction",input:input as ModelRequest["input"],tools:[],handoffs:[],modelSettings:{},outputType:"text",tracing:false};}
 test("persistence removes only native source binding and keeps unknown symbols refused",()=>{
  const json={type:"message",role:"user",content:[{type:"input_text",text:"Synthetic exact bytes"}]};
  const owned=bindModelSourceInput({...json},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:crypto.randomUUID(),sha256:"a".repeat(64)},parents:[],retainedSources:[]});
@@ -69,7 +69,7 @@ test("actual SDK transient call/result next receipts retain exact raw and projec
   const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
   for(const row of rows)bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]});
   const agent=buildOpenGeniAgent(settings,[],{mcpServers:prepared.mcpServers}).clone({model});
-  await withModelRequestCapture(capture,async()=>{const stream=await run(agent,rows.map(row=>row.item) as ModelRequest["input"],{stream:true,historyOwnership:"external",tracingDisabled:true});for await(const _event of stream){}await stream.completed;});
+  await withModelRequestCapture(capture,async()=>{const stream=await new Runner({tracingDisabled:true}).run(agent,rows.map(row=>row.item) as ModelRequest["input"],{stream:true,historyOwnership:"external"});for await(const _event of stream){}await stream.completed;});
   expect(calls).toBe(3);expect(receipts).toHaveLength(3);
   expect(receipts[0]!.inputs.flatMap(item=>item.retainedSources)).not.toContainEqual(retained);
   expect(receipts[2]!.inputs.flatMap(item=>item.retainedSources)).toContainEqual(retained);

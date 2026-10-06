@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { run, type MCPServer, type ModelRequest } from "@openai/agents";
+import { Runner, type MCPServer, type ModelRequest } from "@openai/agents";
 import { createHash } from "node:crypto";
 import { ScriptedModel, functionCall, testSettings } from "@opengeni/testing";
 import { buildOpenGeniAgent, prepareAgentTools } from "../src/index";
@@ -50,8 +50,8 @@ for (const streaming of [false, true]) {
       const input = { type: "message" as const, role: "user" as const, content: "Synthetic request" };
       bindModelSourceInput(input, { kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: "initial", sha256: digest(input) }, parents: [], retainedSources: [] });
       await withModelRequestCapture(capture, async () => {
-        if (streaming) { const result = await run(agent, [input], { stream: true, historyOwnership: "external", tracingDisabled: true }); for await (const _event of result) {} await result.completed; }
-        else await run(agent, [input], { historyOwnership: "external", tracingDisabled: true });
+        if (streaming) { const result = await new Runner({tracingDisabled:true}).run(agent, [input], { stream: true, historyOwnership: "external" }); for await (const _event of result) {} await result.completed; }
+        else await new Runner({tracingDisabled:true}).run(agent, [input], { historyOwnership: "external" });
       });
       expect(requests).toHaveLength(2);
     } finally { await prepared.close(); }
