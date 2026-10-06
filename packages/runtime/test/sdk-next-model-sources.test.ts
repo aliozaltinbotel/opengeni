@@ -1,11 +1,161 @@
 import { expect, test } from "bun:test";
-import { Runner, MCPServerStreamableHttp, type MCPServer, type ModelRequest, type AgentInputItem, type StreamEvent } from "@openai/agents";
+import { Runner, MCPServerStreamableHttp, OpenAIResponsesModel, Usage as SDKUsage, type MCPServer, type ModelRequest, type AgentInputItem, type StreamEvent } from "@openai/agents";
+import { protocol, withTrace, NoopTrace } from "@openai/agents-core";
+import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { ScriptedModel, functionCall, testSettings } from "@opengeni/testing";
 import { buildOpenGeniAgent, prepareAgentTools, createProductionAgentRuntime } from "../src/index";
 import { bindModelSourceInput, modelSourceBindings, ModelRequestCaptureModel, withModelRequestCapture, type ModelRequestCapture } from "../src/model-request-capture";
+import { stripProviderItemId, stripProviderItemIdsFilter } from "../src/model-input";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+for (const streaming of [false, true]) {
+  for (const ids of streaming ? ["preserve", "strip"] as const : ["preserve"] as const) {
+    test(`installed Responses SDK ${streaming ? "stream parse" : "ordinary"} continuation preserves source with provider ids ${ids}`, async () => {
+      const callId = crypto.randomUUID();
+      const retained = { owner: "cendra.knowledge.retrieval_use", id: crypto.randomUUID(), version: "1", sha256: digest("Synthetic SDK evidence") };
+      const raw = { content: [{ type: "text" as const, text: "Synthetic SDK evidence" }], structuredContent: { passage: "Synthetic SDK evidence" } };
+      const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: ids, mcpServers: [{ id: "cendra-pms", url: "https://synthetic.invalid/mcp", cacheToolsList: false }] });
+      let toolCalls = 0;
+      const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "cendra-pms" }], {
+        accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(), turnId: crypto.randomUUID(), attemptId: crypto.randomUUID(), executionGeneration: 1,
+        localMcpServers: [{ id: "cendra-pms", server: {
+          name: "cendra-pms", cacheToolsList: false, connect: async () => {}, close: async () => {}, invalidateToolsCache: async () => {},
+          listTools: async () => [{ name: "knowledge_search", inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false } }],
+          callTool: async () => raw.content, callToolResult: async () => { toolCalls++; return raw; },
+        } satisfies MCPServer, modelSourceRefs: () => [retained] }],
+      });
+      let transports = 0;
+      const requests: ModelRequest[] = [];
+      let converted: protocol.FunctionCallItem | undefined;
+      let convertedBytes: string | undefined;
+      const capture: ModelRequestCapture = () => {};
+      capture.callCompleted = (_sourceKey, _responseId, response) => {
+        if (!("output" in response) || !Array.isArray(response.output)) return;
+        for (const item of response.output) {
+          if (item.type === "function_call" && item.callId === callId) {
+            converted = item;
+            convertedBytes = JSON.stringify(item);
+          }
+        }
+      };
+      capture.beforeCall = async request => {
+        requests.push(request);
+        if (!Array.isArray(request.input)) throw Error("Array input required");
+        const bindings = modelSourceBindings(request.input);
+        expect(bindings).toHaveLength(request.input.length);
+        if (requests.length === 2) {
+          const item = request.input.find(value => value.type === "function_call")!;
+          expect(converted).toBeDefined();
+          const expected = streaming ? protocol.FunctionCallItem.parse(converted) : structuredClone(converted!);
+          const projected = ids === "strip" ? stripProviderItemId(expected) : expected;
+          expect(JSON.stringify(item)).toBe(JSON.stringify(projected));
+          if (streaming) expect(Object.keys(item)[0]).toBe("providerData");
+          expect(JSON.stringify(converted)).toBe(convertedBytes!);
+          const binding = bindings.find(value => value.sourceRef.sha256 === digest(item))!;
+          expect(binding.nativeProducerSourceKey).toBe("installed-source-1");
+          expect(binding.sourceRef.id).toContain(digest(converted));
+          const result = bindings.find(value => value.kind === "TOOL_RESULT")!;
+          expect(result.retainedSources).toEqual([retained]);
+          expect(result.rawToolSource!.rawSourceRef.sha256).toBe(digest(raw));
+        }
+        return `installed-source-${requests.length}`;
+      };
+      const client = new OpenAI({ apiKey: "synthetic-key", baseURL: "https://synthetic.invalid/v1", maxRetries: 0, fetch: async (_url, init) => {
+        transports++;
+        const body = JSON.parse(String(init?.body)) as { tools: Array<{ name: string }> };
+        const name = body.tools.find(value => value.name.endsWith("__knowledge_search"))!.name;
+        // Synthetic wire fixture, passed through the installed HTTP/SSE converter
+        // and Runner protocol parser; no live provider or model selection.
+        const output = transports === 1 ? [{ type: "function_call", id: "fc_synthetic", call_id: callId, name, status: "completed", arguments: "{}" }] : [{ type: "message", id: "msg_synthetic", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Synthetic answer", annotations: [], logprobs: [] }] }];
+        const response = { id: `response-${transports}`, status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } };
+        const events = [{ type: "response.created", response: { id: response.id, status: "in_progress", output: [] } }, ...output.map((item, output_index) => ({ type: "response.output_item.done", item, output_index })), { type: "response.completed", response }];
+        return new Response(streaming ? events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("") : JSON.stringify(response), { headers: { "content-type": streaming ? "text/event-stream" : "application/json" } });
+      } });
+      try {
+        const model = new ModelRequestCaptureModel(new OpenAIResponsesModel(client, "synthetic-model"));
+        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers }).clone({ model });
+        const initial = { type: "message" as const, role: "user" as const, content: "Synthetic request" };
+        bindModelSourceInput(initial, { kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: "initial", sha256: digest(initial) }, parents: [], retainedSources: [] });
+        const runner = new Runner({ tracingDisabled: true, ...(ids === "strip" ? { callModelInputFilter: stripProviderItemIdsFilter } : {}) });
+        await withModelRequestCapture(capture, async () => {
+          if (streaming) { const stream = await runner.run(agent, [initial], { stream: true, historyOwnership: "external" }); for await (const _event of stream) {} await stream.completed; }
+          else await runner.run(agent, [initial], { historyOwnership: "external" });
+        });
+        expect(requests).toHaveLength(2); expect(transports).toBe(2); expect(toolCalls).toBe(1);
+      } finally { await prepared.close(); }
+    });
+  }
+}
+
+test("installed SDK projection keeps exact bytes, owner scope and ambiguous-output refusals", async () => {
+  const callId = crypto.randomUUID();
+  const wire = { type: "function_call", id: "fc_control", call_id: callId, name: "mcp_actual__knowledge_search", status: "completed", arguments: '{"query":"Synthetic evidence"}' };
+  const client = new OpenAI({ apiKey: "synthetic-key", baseURL: "https://synthetic.invalid/v1", maxRetries: 0, fetch: async () => new Response(JSON.stringify({ id: "synthetic-response", output: [wire], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } }) });
+  const requestWith = (input: ModelRequest["input"]): ModelRequest => ({ systemInstructions: "Synthetic instruction", input, modelSettings: {}, tools: [], handoffs: [], outputType: "text", tracing: false });
+  const actual = (await withTrace(new NoopTrace(), () => new OpenAIResponsesModel(client, "synthetic-model").getResponse(requestWith([])))).output[0]!;
+  const originalBytes = JSON.stringify(actual);
+  const continued = stripProviderItemId(protocol.FunctionCallItem.parse(actual));
+  expect(digest(continued)).not.toBe(digest(stripProviderItemId(actual)));
+  const captureWithKey = (sourceKey: string): ModelRequestCapture => {
+    const capture: ModelRequestCapture = () => {};
+    capture.beforeCall = async request => {
+      if (request.input.length && modelSourceBindings(request.input).length !== request.input.length) throw Error("UNKNOWN_SOURCE");
+      return sourceKey;
+    };
+    return capture;
+  };
+  const emptyResponse = { usage: new SDKUsage(), output: [] };
+  const capture = captureWithKey("exact-sdk-producer");
+  let calls = 0;
+  const model = new ModelRequestCaptureModel({ async getResponse() { calls++; return calls === 1 ? { usage: new SDKUsage(), output: [structuredClone(actual)] } : emptyResponse; }, getStreamedResponse(): AsyncIterable<StreamEvent> { throw Error("unused"); } });
+  await withModelRequestCapture(capture, async () => {
+    await model.getResponse(requestWith([]));
+    for (const input of [structuredClone(actual), structuredClone(continued)]) {
+      await model.getResponse(requestWith([input]));
+      const binding = modelSourceBindings([input])[0]!;
+      expect(binding.nativeProducerSourceKey).toBe("exact-sdk-producer");
+      expect(binding.sourceRef.sha256).toBe(digest(input));
+      expect(binding.sourceRef.id).toContain(digest(actual));
+    }
+    for (const field of Object.keys(continued)) {
+      for (const operation of ["change", "omit"] as const) {
+        const altered: Record<string, unknown> = structuredClone(continued);
+        if (operation === "omit") delete altered[field]; else altered[field] = `changed:${String(altered[field])}`;
+        await expect(model.getResponse(requestWith([altered] as ModelRequest["input"]))).rejects.toThrow("UNKNOWN_SOURCE");
+      }
+    }
+    const providerIdChanged = { ...structuredClone(continued), providerData: { ...continued.providerData, id: "fc_other_provider" } };
+    for (const altered of [providerIdChanged, { ...structuredClone(continued), extra: "unsupported" }, Object.fromEntries(Object.entries(continued).reverse())]) {
+      await expect(model.getResponse(requestWith([altered] as ModelRequest["input"]))).rejects.toThrow("UNKNOWN_SOURCE");
+    }
+  });
+  expect(JSON.stringify(actual)).toBe(originalBytes);
+  expect(calls).toBe(3);
+  await withModelRequestCapture(captureWithKey("other-scope"), async () => {
+    await expect(model.getResponse(requestWith([structuredClone(continued)]))).rejects.toThrow("UNKNOWN_SOURCE");
+  });
+  const different = { ...actual, arguments: '{"query":"Different evidence"}' };
+  const other = new ModelRequestCaptureModel({ async getResponse() { return { usage: new SDKUsage(), output: [different] }; }, getStreamedResponse(): AsyncIterable<StreamEvent> { throw Error("unused"); } });
+  await withModelRequestCapture(captureWithKey("other-source"), async () => {
+    await other.getResponse(requestWith([]));
+    await expect(model.getResponse(requestWith([structuredClone(continued)]))).rejects.toThrow("UNKNOWN_SOURCE");
+  });
+  const ambiguous = new ModelRequestCaptureModel({ async getResponse() { return { usage: new SDKUsage(), output: [structuredClone(actual), { ...actual, id: "different-raw-id" }] }; }, getStreamedResponse(): AsyncIterable<StreamEvent> { throw Error("unused"); } });
+  await withModelRequestCapture(captureWithKey("ambiguous-source"), async () => {
+    await ambiguous.getResponse(requestWith([]));
+    await expect(model.getResponse(requestWith([structuredClone(continued)]))).rejects.toThrow("UNKNOWN_SOURCE");
+  });
+  let collisionCalls = 0;
+  const collisionCapture = captureWithKey("unused");
+  collisionCapture.beforeCall = async () => `collision-source-${++collisionCalls}`;
+  const collision = new ModelRequestCaptureModel({ async getResponse() { return { usage: new SDKUsage(), output: [structuredClone(actual)] }; }, getStreamedResponse(): AsyncIterable<StreamEvent> { throw Error("unused"); } });
+  await withModelRequestCapture(collisionCapture, async () => {
+    await collision.getResponse(requestWith([]));
+    await expect(collision.getResponse(requestWith([]))).rejects.toThrow("MODEL_SOURCE_CALL_ID_COLLISION");
+  });
+});
 
 for (const streaming of [false, true]) {
   test(`actual SDK ${streaming ? "streaming" : "ordinary"} next call keeps exact model and projected MCP source bindings through clone`, async () => {

@@ -1,6 +1,7 @@
 import { canonicalModelSourceJson, type ModelSourceBinding, type NativeModelToolSource } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { toSmartString } from "@openai/agents-core/utils";
+import { protocol } from "@openai/agents-core";
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { stripProviderItemId } from "./model-input";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -93,12 +94,19 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
     const outputs=sourceState(capture).outputs;
     const priorOutput=outputs.get(sha256);
     outputs.set(sha256,priorOutput!==undefined && priorOutput?.nativeProducerSourceKey!==sourceKey?null:binding);
-    // The SDK clones model output without owner symbols before the production
-    // input filter removes provider ids. Remember only that installed projection
-    // of these actual output bytes; a call id alone never proves provenance.
-    const projected=stripProviderItemId(item as AgentInputItem);
-    if(projected!==item) {
+    // The streaming Runner parses function calls through its installed protocol
+    // schema, changing property order and dropping owner symbols. Register that
+    // exact projection of this output, then the existing provider-id projection.
+    // Each alias retains the original byte digest; input is never canonicalized
+    // or matched by call id alone.
+    const projections=[stripProviderItemId(item as AgentInputItem)];
+    if(item.type==="function_call") {
+      const parsed=protocol.FunctionCallItem.safeParse(item);
+      if(parsed.success)projections.push(parsed.data,stripProviderItemId(parsed.data));
+    }
+    for(const projected of projections) {
       const projectedSha256=inputDigest(projected);
+      if(projectedSha256===sha256)continue;
       const projectedBinding:InputBinding={...binding,sourceRef:{...binding.sourceRef,id:`model-output:${sourceKey}:${sha256}:projection:${projectedSha256}`,sha256:projectedSha256}};
       const priorProjection=outputs.get(projectedSha256);
       outputs.set(projectedSha256,priorProjection!==undefined && priorProjection?.sourceRef.id!==projectedBinding.sourceRef.id?null:projectedBinding);
