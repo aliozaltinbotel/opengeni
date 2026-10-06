@@ -5,13 +5,13 @@ import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { ScriptedModel, functionCall, testSettings } from "@opengeni/testing";
 import { buildOpenGeniAgent, prepareAgentTools, createProductionAgentRuntime } from "../src/index";
-import { bindModelSourceInput, modelSourceBindings, ModelRequestCaptureModel, withModelRequestCapture, type ModelRequestCapture } from "../src/model-request-capture";
+import { bindModelSourceInput, modelSourceInputBinding, modelSourceBindings, ModelRequestCaptureModel, withModelRequestCapture, type ModelRequestCapture } from "../src/model-request-capture";
 import { stripProviderItemId, stripProviderItemIdsFilter } from "../src/model-input";
 
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 
 for (const streaming of [false, true]) {
-  for (const ids of streaming ? ["preserve", "strip"] as const : ["preserve"] as const) {
+  for (const ids of ["preserve", "strip"] as const) {
     test(`installed Responses SDK ${streaming ? "stream parse" : "ordinary"} continuation preserves source with provider ids ${ids}`, async () => {
       const callId = crypto.randomUUID();
       const retained = { owner: "cendra.knowledge.retrieval_use", id: crypto.randomUUID(), version: "1", sha256: digest("Synthetic SDK evidence") };
@@ -154,6 +154,81 @@ test("installed SDK projection keeps exact bytes, owner scope and ambiguous-outp
   await withModelRequestCapture(collisionCapture, async () => {
     await collision.getResponse(requestWith([]));
     await expect(collision.getResponse(requestWith([]))).rejects.toThrow("MODEL_SOURCE_CALL_ID_COLLISION");
+  });
+});
+
+test("ordinary SDK carried owner rebinds only exact same-capture unambiguous output", async () => {
+  const callId = crypto.randomUUID();
+  const wire = { type: "function_call", id: "fc_carried_owner", call_id: callId, name: "synthetic_lookup", status: "completed", arguments: '{"query":"Synthetic evidence"}' };
+  const client = new OpenAI({ apiKey: "synthetic-key", baseURL: "https://synthetic.invalid/v1", maxRetries: 0, fetch: async () => new Response(JSON.stringify({ id: "synthetic-response", output: [wire], usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } }) });
+  const requestWith = (input: ModelRequest["input"]): ModelRequest => ({ systemInstructions: "Synthetic instruction", input, modelSettings: {}, tools: [], handoffs: [], outputType: "text", tracing: false });
+  const actual = (await withTrace(new NoopTrace(), () => new OpenAIResponsesModel(client, "synthetic-model").getResponse(requestWith([])))).output[0]!;
+  const producer = (output: AgentInputItem[], sourceKey: string) => {
+    let calls = 0;
+    const capture: ModelRequestCapture = () => {};
+    capture.beforeCall = async () => sourceKey;
+    const model = new ModelRequestCaptureModel({ async getResponse() { return { usage: new SDKUsage(), output: calls++ === 0 ? output : [] }; }, getStreamedResponse(): AsyncIterable<StreamEvent> { throw Error("unused"); } });
+    return { capture, model };
+  };
+  const raw = structuredClone(actual);
+  const owner = producer([raw], "ordinary-owner");
+  await withModelRequestCapture(owner.capture, async () => {
+    await owner.model.getResponse(requestWith([]));
+    const rawBinding = modelSourceInputBinding(raw)!;
+    const rawBytes = JSON.stringify(raw);
+    const projection = stripProviderItemIdsFilter({ modelData: { input: [raw], systemInstructions: "Synthetic instruction" } }).input[0]!;
+    expect(modelSourceInputBinding(projection)).toBe(rawBinding);
+    expect(digest(projection)).not.toBe(digest(raw));
+    await owner.model.getResponse(requestWith([projection]));
+    const restored = modelSourceInputBinding(projection)!;
+    expect(restored).not.toBe(rawBinding);
+    expect(restored.sourceRef.sha256).toBe(digest(projection));
+    expect(restored.sourceRef.id).toBe(`${rawBinding.sourceRef.id}:projection:${digest(projection)}`);
+    expect(restored.nativeProducerSourceKey).toBe(rawBinding.nativeProducerSourceKey);
+    expect(restored.parents).toEqual(rawBinding.parents);
+    expect(restored.retainedSources).toEqual(rawBinding.retainedSources);
+    expect(JSON.stringify(raw)).toBe(rawBytes);
+    expect(modelSourceInputBinding(raw)).toBe(rawBinding);
+
+    const rejectRepair = async (item: AgentInputItem) => {
+      const before = modelSourceInputBinding(item)!;
+      await owner.model.getResponse(requestWith([item]));
+      expect(modelSourceInputBinding(item)).toBe(before);
+      expect(modelSourceInputBinding(item)!.sourceRef.sha256).not.toBe(digest(item));
+    };
+    const forged = bindModelSourceInput(stripProviderItemId(structuredClone(actual)), structuredClone(rawBinding));
+    await rejectRepair(forged);
+    const foreignRaw = structuredClone(actual);
+    // Even a repeated source-key string and exact bytes do not transfer a
+    // binding object from a different capture owner into this registry.
+    const foreign = producer([foreignRaw], "ordinary-owner");
+    await withModelRequestCapture(foreign.capture, () => foreign.model.getResponse(requestWith([])));
+    await rejectRepair(stripProviderItemId(foreignRaw));
+    for (const field of Object.keys(projection)) {
+      const altered = { ...stripProviderItemId(raw), [field]: `changed:${field}` };
+      await rejectRepair(altered as AgentInputItem);
+    }
+    await rejectRepair({ ...stripProviderItemId(raw), extra: "unsupported" } as AgentInputItem);
+    // A forged full tuple cannot be laundered through the projection lookup.
+    for (const mutant of [
+      { ...rawBinding, nativeProducerSourceKey: "foreign-producer" },
+      { ...rawBinding, parents: [{ ...rawBinding.sourceRef, owner: "forged.parent" }] },
+      { ...rawBinding, retainedSources: [{ ...rawBinding.sourceRef, owner: "forged.retained" }] },
+    ]) await rejectRepair(bindModelSourceInput(stripProviderItemId(structuredClone(actual)), mutant));
+    const savedParents = rawBinding.parents;
+    rawBinding.parents = [{ ...rawBinding.sourceRef, owner: "mutated.parent" }];
+    await rejectRepair(stripProviderItemId(raw));
+    rawBinding.parents = savedParents;
+  });
+  const ambiguousRaw = structuredClone(actual);
+  const ambiguous = producer([ambiguousRaw, { ...structuredClone(actual), id: "different-raw-id" }], "ambiguous-ordinary-owner");
+  await withModelRequestCapture(ambiguous.capture, async () => {
+    await ambiguous.model.getResponse(requestWith([]));
+    const item = stripProviderItemId(ambiguousRaw);
+    const before = modelSourceInputBinding(item)!;
+    await ambiguous.model.getResponse(requestWith([item]));
+    expect(modelSourceInputBinding(item)).toBe(before);
+    expect(before.sourceRef.sha256).not.toBe(digest(item));
   });
 });
 
