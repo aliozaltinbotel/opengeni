@@ -280,8 +280,9 @@ function workspaceAppAuthorityResolver(
     const identity = githubAppBotIdentity(input.settings);
     if (!identity) throw new GitHubRestAuthorityError("GitHub App identity is unavailable");
     if (toolName === "repositories_list") {
+      const headers: Readonly<Record<string, string>> = {};
       return {
-        headers: {},
+        headers,
         connectionId: repository.connectionId,
         actor: { kind: "workspace_app", login: identity.name },
         authorizeProviderRequest: async () => {
@@ -342,8 +343,9 @@ function personalAuthorityResolver(input: {
       toolName === "repositories_list",
     );
     if (toolName === "repositories_list") {
+      const headers: Readonly<Record<string, string>> = {};
       return {
-        headers: {},
+        headers,
         connectionId: repository.connectionId,
         actor: { kind: "personal_oauth", login: current.login },
         authorizeProviderRequest: async () => {

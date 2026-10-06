@@ -100,12 +100,15 @@ export function wrapAttemptToolExecute(
   execute: AttemptToolDefinition["execute"],
   spill?: SpillOversizedModelToolResult,
   identity?: AttemptToolIdentity,
-  sourceRefs?:AttemptToolDefinition["modelSourceRefs"],
+  sourceRefs?: (
+    result: AttemptToolResultValue,
+    context: AttemptToolExecutionContext,
+  ) => readonly import("@opengeni/contracts").ModelSourceRef[] | Promise<readonly import("@opengeni/contracts").ModelSourceRef[]>,
 ): AttemptToolDefinition["execute"] {
   return async (args,context) => {
     const result=await execute(args,context);
     if(context.caller.kind==="model" && context.sourceCallId) {
-      const retainedSources=(sourceRefs?.(result) ?? nativeKnowledgeSources(result,identity)).map(ref=>ModelSourceRef.parse(ref));
+      const retainedSources=(await sourceRefs?.(result,context) ?? nativeKnowledgeSources(result,identity)).map(ref=>ModelSourceRef.parse(ref));
       await recordModelToolSource({sourceCallId:context.sourceCallId,
         ...(context.nativeModelSourceKey?{nativeModelSourceKey:context.nativeModelSourceKey}:{}),
         rawSourceRef:{owner:"native.tool.result",id:context.operationId,sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex")},retainedSources});
@@ -118,9 +121,9 @@ export function wrapAttemptToolDefinitions(
   definitions: readonly AttemptToolDefinition[],
   spill?: SpillOversizedModelToolResult,
 ): AttemptToolDefinition[] {
-  return definitions.map((definition) => ({
+  return definitions.map(({ modelSourceRefs, ...definition }) => ({
     ...definition,
-    execute: wrapAttemptToolExecute(definition.execute, spill, definition.identity,definition.modelSourceRefs),
+    execute: wrapAttemptToolExecute(definition.execute, spill, definition.identity,modelSourceRefs),
   }));
 }
 

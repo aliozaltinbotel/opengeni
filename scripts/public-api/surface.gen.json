@@ -5832,6 +5832,17 @@
       ]
     },
     {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-source-basis",
+      "sdk": [
+        "OpenGeniClient.getSessionModelSourceBasis"
+      ],
+      "request": [],
+      "response": [
+        "ModelCallSourceBasisResponse"
+      ]
+    },
+    {
       "method": "PUT",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/pin",
       "sdk": [
@@ -11039,6 +11050,8 @@
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.goal": "ref(GoalSpec)?",
         "$.idempotencyKey": "string?",
+        "$.importedHistoryOrigins": "array?",
+        "$.importedHistoryOrigins[]": "ref(ImportedMessageOrigin) null",
         "$.initialMessage": "string?",
         "$.installedSkillIds": "array?",
         "$.installedSkillIds[]": "string",
@@ -13257,6 +13270,17 @@
         "$.supersedesRevisionId": "string? null"
       }
     },
+    "ImportedMessageOrigin": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.externalId": "string!",
+        "$.sha256": "string!",
+        "$.source": "string!"
+      }
+    },
     "IncidentTelemetryDataRoute": {
       "io": [
         "input"
@@ -15252,6 +15276,43 @@
         "$.upstreamPayer": "enum!=[\"\\\"connected_subscription\\\"\",\"\\\"deployment\\\"\",\"\\\"organization\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
+    "ModelCallSourceBasisResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.receipt": "ref(ModelCallSourceReceipt)! null",
+        "$.schema": "const!=[\"\\\"cendra.native-source-basis/v1\\\"\"]"
+      }
+    },
+    "ModelCallSourceReceipt": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.attemptId": "string!",
+        "$.closure": "array!",
+        "$.closure[]": "ref(ModelSourceClosureNode)",
+        "$.complete": "boolean!",
+        "$.digest": "string!",
+        "$.executionGeneration": "integer!",
+        "$.id": "string!",
+        "$.incompleteReasons": "array!",
+        "$.incompleteReasons[]": "enum=[\"\\\"CAP_EXCEEDED\\\"\",\"\\\"EMPTY_BASIS\\\"\",\"\\\"UNATTRIBUTED_IMPORT\\\"\",\"\\\"UNAVAILABLE_INPUT\\\"\",\"\\\"UNKNOWN_SOURCE\\\"\",\"\\\"UNRESOLVED_PARENT\\\"\"]",
+        "$.inputs": "array!",
+        "$.inputs[]": "ref(ModelSourceInput)",
+        "$.purpose": "enum!=[\"\\\"AGENT\\\"\",\"\\\"COMPACTION\\\"\",\"\\\"TITLE\\\"\"]",
+        "$.requestIndex": "integer!",
+        "$.sessionId": "string!",
+        "$.sourceKey": "string!",
+        "$.turnId": "string!",
+        "$.version": "const!=[\"1\"]",
+        "$.workspaceId": "string!"
+      }
+    },
     "ModelCapabilitiesV1": {
       "io": [
         "output"
@@ -15491,6 +15552,56 @@
         "$.inputMicrosPerMillionTokens": "integer!",
         "$.marginBps": "integer?",
         "$.outputMicrosPerMillionTokens": "integer!"
+      }
+    },
+    "ModelSourceClosureNode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.kind": "ref(ModelSourceKind)!",
+        "$.parents": "array!",
+        "$.parents[]": "ref(ModelSourceRef)",
+        "$.retainedSources": "array!",
+        "$.retainedSources[]": "ref(ModelSourceRef)",
+        "$.sourceRef": "ref(ModelSourceRef)!"
+      }
+    },
+    "ModelSourceInput": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.contentSha256": "string!",
+        "$.kind": "ref(ModelSourceKind)!",
+        "$.ordinal": "integer!",
+        "$.parents": "array!",
+        "$.parents[]": "ref(ModelSourceRef)",
+        "$.retainedSources": "array!",
+        "$.retainedSources[]": "ref(ModelSourceRef)",
+        "$.sourceRef": "ref(ModelSourceRef)! null"
+      }
+    },
+    "ModelSourceKind": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"COPIED\\\"\",\"\\\"HISTORY_ROW\\\"\",\"\\\"IMPORTED\\\"\",\"\\\"INSTRUCTION\\\"\",\"\\\"KNOWLEDGE\\\"\",\"\\\"MEMORY\\\"\",\"\\\"SUMMARY\\\"\",\"\\\"TOOL_RESULT\\\"\"]"
+      }
+    },
+    "ModelSourceRef": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.owner": "string!",
+        "$.sha256": "string!",
+        "$.version": "string?"
       }
     },
     "MoveDocumentRequest": {
@@ -23751,6 +23862,7 @@
       "HumanInputQuestion": "type",
       "HumanInputQuestionKind": "type",
       "HumanInputResponse": "type",
+      "ImportedMessageOrigin": "type",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InitiatingHuman": "type",
       "InsightsBillingPath": "type",
@@ -23920,6 +24032,8 @@
       "MintEnrollTokenResponse": "type",
       "ModelAvailabilityV1": "type",
       "ModelBillingAttributionV1": "type",
+      "ModelCallSourceBasisResponse": "type",
+      "ModelCallSourceReceipt": "type",
       "ModelCapabilitiesV1": "type",
       "ModelCapabilityStateV1": "type",
       "ModelCapabilitySupportV1": "type",
@@ -23939,6 +24053,8 @@
       "ModelCredentialSourceV1": "type",
       "ModelPricingScheduleV1": "type",
       "ModelPricingV1": "type",
+      "ModelSourceInput": "type",
+      "ModelSourceRef": "type",
       "MoveDocumentRequest": "type",
       "MoveSessionQueueItemRequest": "type",
       "MutateIntegrationFacetRequest": "type",
@@ -27352,6 +27468,7 @@
       "getSessionLineage",
       "getSessionMessagePreview",
       "getSessionModelContext",
+      "getSessionModelSourceBasis",
       "getSessionRetainedArtifact",
       "getSessionRetainedArtifactContent",
       "getSessionTenancyCreateCapabilities",

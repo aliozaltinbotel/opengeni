@@ -226,7 +226,7 @@ export type TurnStreamAttemptDeps = {
   claimedModelUsageSourceKeys: Set<string>;
   emittedModelUsageSourceKeys: Set<string>;
   modelUsageDispatchId: string;
-  beforeModelCallSourceReceipt:(request:import("@openai/agents").ModelRequest,purpose?:"AGENT"|"COMPACTION"|"TITLE")=>Promise<string>;
+  beforeModelCallSourceReceipt: ((request: import("@openai/agents").ModelRequest, purpose?: "AGENT" | "COMPACTION" | "TITLE") => Promise<string>) & Pick<import("@opengeni/runtime").BeforeModelCallSourceReceipt, "beforeProviderDispatch">;
   workerPreparationStartedAt: number;
   fileDownloadsMaterializedForRun: boolean;
   unavailableSandboxFilesNote: string | undefined;
@@ -827,10 +827,10 @@ export async function runTurnStreamAttempt(
           signal: runtimeCancellationSignal,
           ...(turnRouteWatch ? { callModelInputFilter: turnRouteWatch.filter } : {}),
           sandboxEnvironment,
-          beforeModelCallSourceReceipt: async request => {
+          beforeModelCallSourceReceipt: Object.assign(async (request: import("@openai/agents").ModelRequest) => {
             await checkpointBeforeProviderDispatch();
             return await beforeModelCallSourceReceipt(request,"AGENT");
-          },
+          }, beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
           onModelToolSource:async source=>historySink.recordModelToolSource(source),
           onModelCallSourceCompleted: (sourceKey,responseId,response) => {
             sourceKeysByResponse.set(response,sourceKey);
@@ -1915,7 +1915,7 @@ export async function runTurnStreamAttempt(
               modelName: turnExecutionPolicy.upstreamModelId,
               serviceTier,
               signal,
-            }),beforeModelCallSourceReceipt:request=>beforeModelCallSourceReceipt(request,"TITLE")},
+            }),beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {})},
           ),
         ),
       onError: (error) => {

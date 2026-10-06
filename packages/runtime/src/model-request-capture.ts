@@ -3,9 +3,32 @@ import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
+/** One exact source producer; the optional dispatch callback rechecks that same
+ * committed source at each literal transport attempt, including HTTP retries. */
+export type BeforeModelCallSourceReceipt = ((request: ModelRequest) => Promise<string>) & {
+  beforeProviderDispatch?: (sourceKey: string) => Promise<void>;
+};
+const modelSourceDispatch = new AsyncLocalStorage<{ sourceKey: string; authorize: (sourceKey: string) => Promise<void> } | undefined>();
+
+export function withModelCallSourceDispatch<T>(
+  producer: BeforeModelCallSourceReceipt | undefined,
+  sourceKey: string | undefined,
+  operation: () => T,
+): T {
+  if (!producer?.beforeProviderDispatch) return modelSourceDispatch.run(undefined, operation);
+  if (!sourceKey) throw new Error("MODEL_SOURCE_RECEIPT_UNAVAILABLE");
+  return modelSourceDispatch.run({ sourceKey, authorize: producer.beforeProviderDispatch }, operation);
+}
+
+/** Called only at the real provider transport boundary, before request bytes. */
+export async function authorizeModelSourceProviderDispatch(): Promise<void> {
+  const context = modelSourceDispatch.getStore();
+  if (context) await context.authorize(context.sourceKey);
+}
+
 export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<void>) & {
   /** Authoritative, awaited owner; persistence failure prevents calling the model. */
-  beforeCall?: (request: ModelRequest) => Promise<string>;
+  beforeCall?: BeforeModelCallSourceReceipt;
   callCompleted?: (sourceKey:string,responseId:string|null,response:object) => void | Promise<void>;
   toolSourceKeys?: Map<string,string>;
   onModelToolSource?:(source:NativeModelToolSource)=>Promise<void>;
@@ -181,7 +204,7 @@ export class ModelRequestCaptureModel implements Model {
     void notifyModelRequestCapture(request);
     const capture = modelRequestCapture.getStore();
     const sourceKey = await capture?.beforeCall?.(request);
-    const response = await this.inner.getResponse(request);
+    const response = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => this.inner.getResponse(request));
     if (sourceKey) {
       bindOutputSourceKeys(capture,sourceKey,response.output);
       await capture?.callCompleted?.(sourceKey,response.responseId ?? null,response);
@@ -194,14 +217,25 @@ export class ModelRequestCaptureModel implements Model {
     void notifyModelRequestCapture(request);
     const capture = modelRequestCapture.getStore();
     const sourceKey = await capture?.beforeCall?.(request);
-    for await (const event of this.inner.getStreamedResponse(request)) {
-      const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && (event.event as Record<string,unknown>).type==="response.completed" ? (event.event as Record<string,unknown>).response : null;
-      if(sourceKey && candidate && typeof candidate==="object") {
-        const response=candidate as Record<string,unknown>;
-        bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[]);
-        await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response);
+    const iterator = withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () =>
+      this.inner.getStreamedResponse(request)[Symbol.asyncIterator](),
+    );
+    let finished = false;
+    try {
+      while (true) {
+        const next = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => iterator.next());
+        if (next.done) { finished = true; return; }
+        const event = next.value;
+        const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && (event.event as Record<string,unknown>).type==="response.completed" ? (event.event as Record<string,unknown>).response : null;
+        if(sourceKey && candidate && typeof candidate==="object") {
+          const response=candidate as Record<string,unknown>;
+          bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[]);
+          await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response);
+        }
+        yield event;
       }
-      yield event;
+    } finally {
+      if (!finished && iterator.return) await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => iterator.return!());
     }
   }
 

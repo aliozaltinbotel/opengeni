@@ -77,3 +77,13 @@ export type ModelHistorySourceBasis = {
 };
 
 export const IMPORTED_HISTORY_CONTEXT_HEADER = "Earlier conversation imported from the product, oldest first:";
+
+
+/** Host authority over one committed native source receipt. Completeness grants no authority.
+ * The worker awaits this callback for AGENT, COMPACTION and TITLE before provider dispatch.
+ * A rejection prevents that call. Embedded hosts install it in trusted worker dependencies,
+ * never in session/model metadata. Standalone hosts may omit it. */
+export type AuthorizeModelCallSource = (
+  receipt: ModelCallSourceReceipt,
+  context: Readonly<{ signal?: AbortSignal }>,
+) => Promise<void>;

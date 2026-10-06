@@ -60,6 +60,19 @@ input graph coverage, never a host's Knowledge authorization or business outcome
 An exact session-authorized API/SDK read returns one call's receipt; it does not
 substitute a latest attempt snapshot. Historical facts remain unattributed.
 
+Embedded workers may install the public `activityDependencies.authorizeModelCallSource`
+callback. The shared native producer awaits it after committing the exact receipt
+and before every AGENT, COMPACTION or TITLE provider call; rejection or cancellation
+prevents dispatch. Its exact-source callback is rechecked at each literal
+transport attempt, including SDK HTTP retries, inside a per-request async scope.
+The hook receives the stored call identity and cancellation
+signal, never a latest-attempt snapshot, and owns no native business rules. A host
+that requires admission installs the callback in trusted process composition.
+Local MCP registrations may derive `modelSourceRefs` from the exact raw result
+and host execution context; the runtime awaits these before projection/spill and
+source emission. The exact `nativeModelSourceKey` is set after caller transport
+metadata, which cannot replace it or synthesize an absent key.
+
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.
 

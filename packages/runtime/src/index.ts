@@ -374,6 +374,8 @@ import {
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
   withModelRequestCapture,
+  withModelCallSourceDispatch,
+  type BeforeModelCallSourceReceipt,
   nativeModelSourceKeyForToolCall,
   bindModelSourceInput,
   modelSourceBindings,
@@ -381,6 +383,7 @@ import {
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
+export type { BeforeModelCallSourceReceipt } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 import {
   baseModelInputFilterForSettings,
@@ -931,7 +934,7 @@ export type GeneratedSessionTitle = {
 };
 
 export type GenerateSessionTitleOptions = {
-  beforeModelCallSourceReceipt?:(request:ModelRequest)=>Promise<string>;
+  beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
   client?: OpenAI;
   provider?: ResolvedModelProvider;
   model?: Model;
@@ -1046,20 +1049,20 @@ export async function generateSessionTitle(
   };
 
   const sourceKey=await options.beforeModelCallSourceReceipt?.(request);
-  const response =
+  const response = await withModelCallSourceDispatch(options.beforeModelCallSourceReceipt, sourceKey, () =>
     binding?.provider.api === "anthropic-messages"
-      ? await new AnthropicMessagesModel(
+      ? new AnthropicMessagesModel(
           binding.provider,
           binding.modelId,
           instrumentedModelFetch(binding.provider.id, globalThis.fetch),
         ).getResponse(request)
       : binding
-        ? await new CompactionResponsesModel(
+        ? new CompactionResponsesModel(
             binding.client,
             binding.modelId,
             binding.provider,
           ).fetchResponse(request)
-        : await options.model!.getResponse(request);
+        : options.model!.getResponse(request));
   return {
     ...(sourceKey?{sourceKey}:{}),
     title: normalizeGeneratedSessionTitle(
@@ -1084,7 +1087,7 @@ async function generateChatSessionTitle(
 ): Promise<GeneratedSessionTitle> {
   const sourceKey=await options.beforeModelCallSourceReceipt?.({systemInstructions:SESSION_TITLE_GENERATION_INSTRUCTIONS,input:prompt,
     modelSettings:{maxTokens:SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS},tools:[],handoffs:[],outputType:"text",tracing:false});
-  const completion = await client.chat.completions.create(
+  const completion = await withModelCallSourceDispatch(options.beforeModelCallSourceReceipt, sourceKey, () => client.chat.completions.create(
     {
       model: modelName,
       max_tokens: SESSION_TITLE_GENERATION_MAX_OUTPUT_TOKENS,
@@ -1096,7 +1099,7 @@ async function generateChatSessionTitle(
       ...(options.serviceTier ? { service_tier: options.serviceTier } : {}),
     } as any,
     options.signal ? { signal: options.signal } : undefined,
-  );
+  ));
   const choice = (
     completion as {
       choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown } }>;
@@ -1179,7 +1182,7 @@ export async function summarizeForCompaction(
   settings: Settings,
   input: Array<Record<string, unknown>>,
   options: {
-    beforeModelCallSourceReceipt?:(request:ModelRequest)=>Promise<string>;
+    beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
     client?: OpenAI;
     provider?: ResolvedModelProvider;
     api?: ModelProviderApi;
@@ -1205,11 +1208,11 @@ export async function summarizeForCompaction(
     const transcriptItem={type:"message",role:"user",content:transcript};
     const bindings=modelSourceBindings(input);
     if(bindings.length===input.length) bindModelSourceInput(transcriptItem,{kind:"SUMMARY",sourceRef:{owner:"native.runtime.artifact",id:"compaction-chat-transcript",sha256:createHash("sha256").update(JSON.stringify(transcriptItem)).digest("hex")},parents:bindings.map(binding=>binding.sourceRef),retainedSources:bindings.flatMap(binding=>binding.retainedSources)});
-    await options.beforeModelCallSourceReceipt?.({systemInstructions:options.systemInstructions ?? "",input:[transcriptItem] as AgentInputItem[],
+    const sourceKey = await options.beforeModelCallSourceReceipt?.({systemInstructions:options.systemInstructions ?? "",input:[transcriptItem] as AgentInputItem[],
       modelSettings:{maxTokens},tools:[],handoffs:[],outputType:"text",tracing:false});
     let completion: unknown;
     try {
-      completion = await client.chat.completions.create(
+      completion = await withModelCallSourceDispatch(options.beforeModelCallSourceReceipt, sourceKey, () => client.chat.completions.create(
         {
           model,
           max_tokens: maxTokens,
@@ -1222,7 +1225,7 @@ export async function summarizeForCompaction(
           ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
         } as any,
         options.signal ? { signal: options.signal } : undefined,
-      );
+      ));
     } catch (error) {
       throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
     }
@@ -1304,17 +1307,17 @@ export async function summarizeForCompaction(
         tracing: false,
         ...(options.signal ? { signal: options.signal } : {}),
       };
-  await options.beforeModelCallSourceReceipt?.(request);
+  const sourceKey = await options.beforeModelCallSourceReceipt?.(request);
   let response: unknown;
   try {
-    response =
+    response = await withModelCallSourceDispatch(options.beforeModelCallSourceReceipt, sourceKey, () =>
       provider.api === "anthropic-messages"
-        ? await new AnthropicMessagesModel(
+        ? new AnthropicMessagesModel(
             provider,
             model,
             instrumentedModelFetch(provider.id, globalThis.fetch),
           ).getResponse(request)
-        : await new CompactionResponsesModel(client, model, provider).fetchResponse(request);
+        : new CompactionResponsesModel(client, model, provider).fetchResponse(request));
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1518,7 +1521,7 @@ export async function requestRemoteCompactionV2(
   settings: Settings,
   input: Array<Record<string, unknown>>,
   options: {
-    beforeModelCallSourceReceipt?:(request:ModelRequest)=>Promise<string>;
+    beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
     client: OpenAI;
     provider?: ResolvedModelProvider;
     model: string;
@@ -1547,12 +1550,12 @@ export async function requestRemoteCompactionV2(
     // Compaction uses the still-active turn cancellation signal instead.
     ...(options.signal ? { signal: options.signal } : {}),
   };
-  await options.beforeModelCallSourceReceipt?.(request);
+  const sourceKey = await options.beforeModelCallSourceReceipt?.(request);
   let response: unknown;
   try {
     const provider = options.provider ?? configuredProviders(settings)[0];
     if (!provider) throw new Error("Built-in model provider is unavailable");
-    response = await withModelRequestCapture(
+    response = await withModelCallSourceDispatch(options.beforeModelCallSourceReceipt, sourceKey, () => withModelRequestCapture(
       options.captureAgent ? agentModelContextCaptures.get(options.captureAgent) : undefined,
       async () => {
         void notifyModelRequestCapture(request);
@@ -1560,7 +1563,7 @@ export async function requestRemoteCompactionV2(
           request,
         );
       },
-    );
+    ));
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -4098,6 +4101,13 @@ export type PreparedAgentTools = {
 export type LocalMcpServerRegistration = {
   id: string;
   server: MCPServer;
+  /** Host-derived references from the exact raw result before projection or spill.
+   * This trusted registration is independent of result/model/transport metadata. */
+  modelSourceRefs?: (
+    toolName: string,
+    result: Parameters<NonNullable<AttemptToolDefinition["modelSourceRefs"]>>[0],
+    context: Parameters<AttemptToolDefinition["execute"]>[1],
+  ) => readonly import("@opengeni/contracts").ModelSourceRef[] | Promise<readonly import("@opengeni/contracts").ModelSourceRef[]>;
   /** Exact connection identity frozen while constructing the local adapter. */
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
@@ -5192,15 +5202,17 @@ async function prepareAttemptToolEnvironment(
     },
     options.sessionAttachedRemoteMcpTargets,
     options.runMcpCredentials,
+    options.localMcpServers,
   );
   const definitions = installAttemptConnectorActionGatewayLifecycle(
     [
-      ...prepared.definitions.map((definition) => ({
+      ...prepared.definitions.map(({ modelSourceRefs, ...definition }) => ({
         ...definition,
         execute: wrapAttemptToolExecute(
           async (argumentsValue, context) => await definition.execute(argumentsValue, context),
           options.spillOversizedModelToolResult,
           definition.identity,
+          modelSourceRefs,
         ),
       })),
       ...wrapAttemptToolDefinitions(
@@ -5456,9 +5468,10 @@ async function prepareToolGatewayDefinitionsFromServers(
   callIdentity?: McpCallIdentity,
   externalIdentityTargets: readonly { id: string; url: string }[] = [],
   runMcpCredentials?: RunMcpCredentials,
+  localServers: readonly LocalMcpServerRegistration[] = [],
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
-  definitions: ToolGatewayDefinition[];
+  definitions: Array<ToolGatewayDefinition & { modelSourceRefs?: Parameters<typeof wrapAttemptToolExecute>[3] }>;
 }> {
   const preparedServers = servers.map((server) => {
     if (!(server instanceof PrefixedMcpServer)) {
@@ -5473,7 +5486,7 @@ async function prepareToolGatewayDefinitionsFromServers(
   const perServerDefinitions = await boundedParallelMap(
     preparedServers,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
-    async ({ server, config }): Promise<ToolGatewayDefinition[]> => {
+    async ({ server, config }): Promise<Array<ToolGatewayDefinition & { modelSourceRefs?: Parameters<typeof wrapAttemptToolExecute>[3] }>> => {
       const internalIdentity = callIdentity ? { ...callIdentity } : undefined;
       if (internalIdentity) delete internalIdentity.initiatingHumanExternalIdentity;
       const serverIdentity = callIdentity
@@ -5497,6 +5510,7 @@ async function prepareToolGatewayDefinitionsFromServers(
               : {}),
           }
         : undefined;
+      const modelSourceRefs = localServers.find(local => local.id === server.registryId)?.modelSourceRefs;
       const listed = await server.freezeTools();
       return listed.map((tool) => {
         const toolName = server.unprefixedToolName(tool.name);
@@ -5512,6 +5526,7 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
+          ...(modelSourceRefs ? { modelSourceRefs: (result, context) => modelSourceRefs(toolName, result, context) } : {}),
           ...(config.connectionRef ? { requiresProviderPreflight: true } : {}),
           ...(config.connectionRef || server.catalogApprovalAuthority() !== undefined
             ? {
@@ -5593,14 +5608,16 @@ export function attemptToolCallMeta(
     operationId: string;
     caller: Pick<ToolGatewayCaller, "kind">;
     transportMeta?: Record<string, unknown> | null;
+    nativeModelSourceKey?: string;
   },
   callIdentity?: McpCallIdentity,
 ): Record<string, unknown> {
-  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, ...transportMeta } =
+  const { [FIRST_PARTY_MCP_CALLER_META_KEY]: _ignored, nativeModelSourceKey: _ignoredSourceKey, ...transportMeta } =
     context.transportMeta ?? {};
   return {
     ...transportMeta,
     opengeniOperationId: context.operationId,
+    ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
     ...(serverId === "opengeni" ? { [FIRST_PARTY_MCP_CALLER_META_KEY]: context.caller.kind } : {}),
     // Trusted worker scope; spread after transport metadata so a caller cannot spoof it.
     ...(callIdentity
@@ -8203,7 +8220,7 @@ export type RunAgentStreamOptions = {
   /** Awaited at the generic provider's literal pre-fetch boundary. */
   onModelTransportStarted?: () => Promise<void> | void;
   /** Durable native source owner, awaited before the provider. Not the diagnostic snapshot observer. */
-  beforeModelCallSourceReceipt?: (request: import("@openai/agents").ModelRequest) => Promise<string>;
+  beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
   onModelToolSource?:(source:import("@opengeni/contracts").NativeModelToolSource)=>Promise<void>;
   onModelCallSourceCompleted?: (sourceKey:string,responseId:string|null) => void;
   sandboxClient?: unknown;

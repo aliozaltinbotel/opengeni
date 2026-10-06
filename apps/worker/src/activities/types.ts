@@ -1,5 +1,6 @@
 import type { Settings } from "@opengeni/config";
 import type {
+  AuthorizeModelCallSource,
   ConnectionCredentialsPort,
   DocumentAuthorityKind,
   EntitlementsPort,
@@ -145,6 +146,9 @@ export type ControlActivityServices = SharedActivityServices;
 /** Turn workers own the model loop and never construct document parsers. */
 export type TurnActivityServices = SharedActivityServices & {
   runtime: OpenGeniRuntime;
+  /** Trusted host admission of each committed AGENT/COMPACTION/TITLE source receipt.
+   * A configured failure prevents provider dispatch; session metadata cannot select this hook. */
+  authorizeModelCallSource?: AuthorizeModelCallSource;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
 };

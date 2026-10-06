@@ -1,3 +1,5 @@
+import postgres from "postgres";
+import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
 import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, ModelSourceRef } from "@opengeni/contracts";
 import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput } from "@opengeni/runtime";
 import { readFile } from "node:fs/promises";
@@ -10,7 +12,7 @@ import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
 let app:ReturnType<typeof createDb>;
-beforeAll(async()=>{const acquired=await acquireSharedTestDatabase("model-call-source-receipts");if(!acquired)throw Error("PostgreSQL required");shared=acquired;app=createDb(shared.appUrl,{max:4});},180_000);
+beforeAll(async()=>{const external=process.env.OPENGENI_MODEL_SOURCE_TEST_APP_URL;if(external){const adminUrl=process.env.OPENGENI_MODEL_SOURCE_TEST_ADMIN_URL;if(!adminUrl)throw Error("External source receipt fixture requires its exact admin URL");const admin=postgres(adminUrl,{max:1});shared={appUrl:external,adminUrl,admin,release:async()=>{await admin.end();}};app=createDb(external,{max:4});return;}const acquired=await acquireSharedTestDatabase("model-call-source-receipts");if(!acquired)throw Error("PostgreSQL required");shared=acquired;app=createDb(shared.appUrl,{max:4});},180_000);
 afterAll(async()=>{await app?.close();await shared?.release();},60_000);
 async function fixture(options:{metadata?:Record<string,unknown>;initialModelContext?:string;managed?:boolean}={}){
  const suffix=crypto.randomUUID();
@@ -35,7 +37,7 @@ test("persistence removes only native source binding and keeps unknown symbols r
 });
 test("real PostgreSQL commits exact-call proof before dispatch; persistence failure prevents dispatch",async()=>{
  const {identity,instructionSelections}=await fixture();const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);let calls=0;
- const model:Model={async getResponse(){calls++;const stored=await readModelCallSourceReceipt(app.db,identity);expect(stored.receipt?.sourceKey).toBe(identity.sourceKey);expect(stored.receipt?.complete).toBe(true);expect(stored.receipt?.inputs.flatMap(item=>item.retainedSources).some(ref=>ref.owner==="workspace_instruction_policy_snapshots" && ref.id===instructionSelections.instructionPolicySnapshotId)).toBe(true);return {usage:new Usage(),output:[],responseId:"provider-1"};},async *getStreamedResponse():AsyncIterable<StreamEvent>{throw Error("unused");}};
+ const model:Model={async getResponse(){calls++;const stored=await readModelCallSourceReceipt(app.db,identity);expect(stored.receipt?.sourceKey).toBe(identity.sourceKey);expect(stored.receipt?.complete).toBe(true);expect(stored.receipt?.inputs.flatMap(item=>item.retainedSources).some(ref=>ref.owner==="workspace_instruction_policy_snapshots" && ref.id===instructionSelections.instructionPolicySnapshotId)).toBe(true);return {usage:new Usage(),output:[],responseId:"provider-1"};},getStreamedResponse():AsyncIterable<StreamEvent>{throw Error("unused");}};
  const capture:ModelRequestCapture=()=>{};capture.beforeCall=async sent=>{await persistModelCallSourceReceipt(app.db,identity,{instructions:sent.systemInstructions,input:sent.input,tools:sent.tools,instructionSelections});return identity.sourceKey;};
  await withModelRequestCapture(capture,()=>new ModelRequestCaptureModel(model).getResponse(request(rows.map(row=>row.item))));expect(calls).toBe(1);
  capture.beforeCall=async sent=>{await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),executionGeneration:identity.executionGeneration+1},{input:sent.input});return "unreachable";};
@@ -80,7 +82,7 @@ test("compaction refuses missing, foreign, wrong-purpose and mismatched call ide
 test("SDK tool IDs bind to the exact request and cannot borrow a previous request key",async()=>{
  const {identity}=await fixture();let index=0;
  const capture:ModelRequestCapture=()=>{};capture.beforeCall=async sent=>{const sourceKey=`${identity.sourceKey}-${++index}`;await persistModelCallSourceReceipt(app.db,{...identity,sourceKey,requestIndex:index},{input:sent.input});return sourceKey;};
- const inner:Model={async getResponse(){return {usage:new Usage(),responseId:`response-${index}`,output:[{type:"function_call",name:"synthetic",arguments:"{}",callId:`call-${index}`}]}},async *getStreamedResponse():AsyncIterable<StreamEvent>{throw Error("unused");}};
+ const inner:Model={async getResponse(){return {usage:new Usage(),responseId:`response-${index}`,output:[{type:"function_call",name:"synthetic",arguments:"{}",callId:`call-${index}`}]}},getStreamedResponse():AsyncIterable<StreamEvent>{throw Error("unused");}};
  const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
  await withModelRequestCapture(capture,async()=>{const model=new ModelRequestCaptureModel(inner);await model.getResponse(request(rows.map(row=>row.item)));await model.getResponse(request(rows.map(row=>row.item)));expect(nativeModelSourceKeyForToolCall("call-1")).toBe(`${identity.sourceKey}-1`);expect(nativeModelSourceKeyForToolCall("call-2")).toBe(`${identity.sourceKey}-2`);expect(nativeModelSourceKeyForToolCall("missing")).toBeUndefined();});
  expect(nativeModelSourceKeyForToolCall("call-1")).toBeUndefined();
@@ -142,4 +144,57 @@ test("portable/remote compaction and title each record their actual ordered sour
  const requests=[buildCompactionPromptInput(input),buildRemoteCompactionV2PromptInput(input)];
  for(const [index,prepared] of requests.entries()){const receipt=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:index+1},{purpose:"COMPACTION",input:prepared,sourceBindings:modelSourceBindings(prepared)});expect(receipt.complete).toBe(true);expect(receipt.inputs.at(-1)!.sourceRef!.owner).toBe("native.runtime.artifact");expect(receipt.inputs[0]!.sourceRef!.id).toBe(rows[0]!.id);}
  const title=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:3},{purpose:"TITLE",input:"Synthetic request",instructions:"Synthetic title instruction"});expect(title.complete).toBe(true);expect(title.inputs.at(-1)!.parents[0]!.id).toBe(identity.turnId);
+});
+
+
+test("host admission is awaited after exact durable receipt and refuses every model purpose before dispatch", async () => {
+  const { identity } = await fixture();
+  const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  for (const purpose of ["AGENT", "COMPACTION", "TITLE"] as const) {
+    let dispatched = false;
+    const sourceKey = crypto.randomUUID();
+    const refusal = new Error(`HOST_SOURCE_REFUSED_${purpose}`);
+    const attempt = persistAndAuthorizeModelCallSource(app.db, { ...identity, sourceKey }, { purpose, input: purpose === "TITLE" ? "Synthetic request" : rows.map(row => row.item) }, async receipt => {
+      expect(receipt.sourceKey).toBe(sourceKey); expect(receipt.purpose).toBe(purpose);
+      expect((await readModelCallSourceReceipt(app.db, { ...identity, sourceKey })).receipt).toEqual(receipt);
+      throw refusal;
+    }).then(() => { dispatched = true; });
+    await expect(attempt).rejects.toBe(refusal);
+    expect(dispatched).toBe(false);
+  }
+});
+
+
+test("host admission never reuses a prior call and stops cancelled, timed-out or stale work", async () => {
+  const { identity } = await fixture();
+  const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  const nativeRequest = { input: rows.map(row => row.item) };
+  const observed: string[] = [];
+  for (let requestIndex = 1; requestIndex <= 2; requestIndex++) {
+    const sourceKey = crypto.randomUUID();
+    expect(await persistAndAuthorizeModelCallSource(app.db, { ...identity, sourceKey, requestIndex }, nativeRequest, async receipt => { observed.push(receipt.sourceKey); })).toBe(sourceKey);
+  }
+  expect(new Set(observed).size).toBe(2);
+  let release!: () => void;
+  let entered!: () => void;
+  const pendingGuard = new Promise<void>(resolve => { release = resolve; });
+  const guardEntered = new Promise<void>(resolve => { entered = resolve; });
+  const controller = new AbortController();
+  let dispatched = false;
+  const sourceKey = crypto.randomUUID();
+  const pending = persistAndAuthorizeModelCallSource(app.db, { ...identity, sourceKey }, nativeRequest, async (receipt, context) => {
+    expect(receipt.sourceKey).toBe(sourceKey); expect(context.signal).toBe(controller.signal);
+    entered(); await pendingGuard;
+  }, controller.signal).then(() => { dispatched = true; });
+  await guardEntered; controller.abort(new Error("HOST_ADMISSION_DEADLINE"));
+  await expect(pending).rejects.toThrow("Turn operation was cancelled");
+  release(); await Promise.resolve(); expect(dispatched).toBe(false);
+  let called = false;
+  await expect(persistAndAuthorizeModelCallSource(app.db, { ...identity, sourceKey: crypto.randomUUID(), executionGeneration: identity.executionGeneration + 1 }, nativeRequest, async () => { called = true; })).rejects.toThrow();
+  expect(called).toBe(false);
+  const before = new AbortController(); before.abort();
+  await expect(persistAndAuthorizeModelCallSource(app.db, { ...identity, sourceKey: crypto.randomUUID() }, nativeRequest, async () => { called = true; }, before.signal)).rejects.toThrow("Turn operation was cancelled");
+  expect(called).toBe(false);
+  const timeout = new Error("HOST_SOURCE_ADMISSION_TIMEOUT");
+  await expect(persistAndAuthorizeModelCallSource(app.db, { ...identity, sourceKey: crypto.randomUUID() }, nativeRequest, async () => { throw timeout; })).rejects.toBe(timeout);
 });

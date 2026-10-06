@@ -1,4 +1,13 @@
 import { validatedStoredModelCallSourceReceipt, importedHistorySourceBasisTx, persistModelCallSourceReceiptWithFence, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
+import { validateRetainedModelSourcesWithFence, type RetainedModelSourceValidationInput, type RetainedModelSourceValidation } from "./model-retained-source-validation";
+export type { RetainedModelSourceValidation, RetainedModelSourceValidationInput, RetainedModelSourceStatus } from "./model-retained-source-validation";
+/** Facts about exact retained native sources; host authority is checked separately for every request. */
+export async function validateRetainedModelSources(db: Database, input: RetainedModelSourceValidationInput): Promise<RetainedModelSourceValidation> {
+  return validateRetainedModelSourcesWithFence(db, input, async (tx, identity) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, identity);
+    return fence.allowed && fence.session.accountId === identity.accountId;
+  });
+}
 export { readModelCallSourceReceipt, modelSourceContentDigest, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
 export async function persistModelCallSourceReceipt(db:Database,identity:ModelCallSourceIdentity,request:NativeModelSourceRequest) {
  return persistModelCallSourceReceiptWithFence(db,identity,request,async tx=>{

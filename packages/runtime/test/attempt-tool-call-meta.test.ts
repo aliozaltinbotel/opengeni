@@ -112,3 +112,12 @@ test("the attempt gateway marks model and Codemode calls to the first-party serv
     provider.stop(true);
   }
 });
+
+
+test("transport metadata cannot replace or synthesize the exact native model source key", () => {
+  for (const serverId of ["opengeni", "cendra-pms", "github"]) {
+    const context = { operationId, caller: { kind: "model" as const }, transportMeta: { nativeModelSourceKey: "forged" } };
+    expect(attemptToolCallMeta(serverId, { ...context, nativeModelSourceKey: "exact-native-key" }).nativeModelSourceKey).toBe("exact-native-key");
+    expect(attemptToolCallMeta(serverId, context)).not.toHaveProperty("nativeModelSourceKey");
+  }
+});

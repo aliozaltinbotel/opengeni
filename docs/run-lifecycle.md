@@ -3178,6 +3178,20 @@ When a Responses terminal omits its output array, completed stream items are
 reassembled by numeric `output_index`; sparse provider positions are compacted
 to the observed items rather than treated as missing output, while duplicate
 indices still fail closed.
+Each native request first commits its exact source receipt. A configured host
+`activityDependencies.authorizeModelCallSource` callback is then awaited by the
+shared worker producer for agent inference, every compaction mode and title
+sidecars. The producer's `beforeProviderDispatch(sourceKey)` rechecks that exact
+stored receipt at every literal fetch, including internal SDK HTTP retries;
+request scopes cannot borrow another call's source key. Receipt persistence or
+host refusal prevents provider I/O; cancellation
+ends a held admission and a late success cannot resume dispatch. The host owns
+its timeout, current source authorization and fail-closed composition. Native
+receipt completeness describes provenance coverage and grants no permission.
+The source key survives local MCP transport as trusted execution metadata, and
+local `modelSourceRefs(toolName, result, context)` completes before raw result
+source emission or projection. Source callbacks are omitted from catalog data.
+
 For generic providers, an attempt-local async context then awaits the durable
 `started` checkpoint at the literal pre-fetch boundary; request bytes cannot
 reach the wire first. Model-preparation `started` is durable before
