@@ -1,3 +1,5 @@
+import { bindModelSourceInput, modelSourceInputBinding, omitModelSourceInputBinding } from "./model-request-capture";
+
 export type HistoryProviderApi = "responses" | "chat" | "anthropic-messages";
 
 const CHAT_FUNCTION_NAME = /^[a-zA-Z0-9_-]+$/;
@@ -85,11 +87,16 @@ export function projectHistoryForProvider(
     if (!items.some((item) => item.type === "message" && item.role === "developer")) return items;
     // agents-js 0.14's message converter supports system/user/assistant only.
     // The Responses API itself supports developer; use the SDK's raw-item adapter.
-    return items.map((item) =>
-      item.type === "message" && item.role === "developer"
-        ? { type: "unknown", providerData: item }
-        : item,
-    );
+    return items.map((item) => {
+      if (item.type !== "message" || item.role !== "developer") return item;
+      // The SDK raw-item wrapper is a projection of the same durable row. Keep
+      // its provenance on the model input, outside the provider's wire object.
+      // Nesting the enumerable owner marker in providerData both hides its
+      // source binding and makes strict protocol/history normalization refuse it.
+      const binding = modelSourceInputBinding(item);
+      const projected = { type: "unknown", providerData: omitModelSourceInputBinding(item) };
+      return binding ? bindModelSourceInput(projected, binding) : projected;
+    });
   }
 
   if (providerApi === "anthropic-messages") {

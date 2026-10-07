@@ -1,3 +1,5 @@
+import { historyRowsToAppend } from "../src/activities/agent-turn/history";
+import { projectHistoryForProvider } from "../../../packages/runtime/src/provider-history-adapter";
 import { HistoryPrefixGuard } from "../src/activities/agent-turn/history-prefix";
 import postgres from "postgres";
 import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
@@ -8,7 +10,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
-import { applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
+import { submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
@@ -311,3 +313,56 @@ test("durable prefix excludes only native source ownership and preserves content
   Object.defineProperty(bound, Symbol("unknown-hidden-owner"), {value: "untrusted", enumerable: false});
   expect(() => guard.verify([bound])).toThrow("cannot contain symbol keys");
 });
+
+
+test("Responses developer projection retains its exact durable source and passes the history prefix guard", async () => {
+ const {identity,write}=await fixture();
+ const initial=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
+ await appendSessionHistoryItems(app.db,{...write,items:[{position:Math.max(...initial.map(row=>row.position))+1,item:{type:"message",role:"developer",content:"Synthetic reviewed developer instructions"}}]});
+ const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
+ const owned=rows.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]}));
+ const projected=projectHistoryForProvider(owned,"responses");
+ const guard=new HistoryPrefixGuard();guard.seed(projected,projected.length);expect(()=>guard.verify(projected)).not.toThrow();
+ const receipt=await persistModelCallSourceReceipt(app.db,identity,{input:projected,sourceBindings:modelSourceBindings(projected)});
+ expect(receipt.complete).toBe(true);expect(receipt.incompleteReasons).toEqual([]);
+ const developer=rows.find(row=>row.item.role==="developer")!;
+ expect(receipt.inputs.find(item=>item.sourceRef?.id===developer.id)?.sourceRef).toMatchObject({owner:"session_history_items",id:developer.id,sha256:developer.sourceSha256});
+ // Without the exact owner's binding, the wrapped bytes cannot borrow a source.
+ const missing=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:2},{input:projected.map(omitModelSourceInputBinding)});
+ expect(missing.complete).toBe(false);
+},180_000);
+
+
+test("actual SDK source-bound output persists and reloads into the next admitted turn", async () => {
+ const f=await fixture();let identity=f.identity,write=f.write,triggerEventId=f.triggerEventId;
+ const initial=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
+ const sourceBasis={kind:"INSTRUCTION" as const,parents:[{owner:"session_history_items",id:initial[0]!.id,sha256:initial[0]!.sourceSha256!}],retainedSources:[]};
+ await appendSessionHistoryItems(app.db,{...write,items:[{position:Math.max(...initial.map(row=>row.position))+1,item:{type:"message",role:"developer",content:"Synthetic durable instructions"},sourceBasis}]});
+ const {Agent}=await import("@openai/agents");const counts:number[]=[];
+ for(let turn=0;turn<2;turn++) {
+  const stored=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
+  const bound=stored.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]}));
+  const input=projectHistoryForProvider(bound,"responses"),guard=new HistoryPrefixGuard();guard.seed(input,input.length);
+  const capture:ModelRequestCapture=()=>{};
+  capture.beforeCall=async request=>{const receipt=await persistModelCallSourceReceipt(app.db,identity,{input:request.input,sourceBindings:modelSourceBindings(request.input)});expect(receipt.incompleteReasons).toEqual([]);expect(receipt.complete).toBe(true);return receipt.sourceKey;};
+  const result=await withModelRequestCapture(capture,()=>new Runner({tracingDisabled:true}).run(new Agent({name:"source persistence test",model:new ModelRequestCaptureModel(new ScriptedModel([{outputText:`Synthetic answer ${turn}`}]))}),input as ModelRequest["input"],{historyOwnership:"external"}));
+  const history=result.history as Array<Record<string,unknown>>;
+  expect(()=>guard.verify(history)).not.toThrow();
+  const appended=historyRowsToAppend(history,input.length,Math.max(...stored.map(row=>row.position))+1);
+  expect(appended.rows.length).toBeGreaterThan(0);
+  expect(await appendSessionHistoryItems(app.db,{...write,items:appended.rows})).toBe(true);
+  const reloaded=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);counts.push(reloaded.length);
+  expect(reloaded.slice(0,stored.length).map(row=>omitModelSourceInputBinding(row.item))).toEqual(stored.map(row=>omitModelSourceInputBinding(row.item)));
+  expect(reloaded.some(row=>row.item.role==="assistant")).toBe(true);
+  const basis=await shared.admin`select source_basis from session_history_items where session_id=${identity.sessionId} and item->>'role'='developer'`;expect(basis[0]!.source_basis).toEqual(sourceBasis);
+  const foreign={...history.at(-1)!,[Symbol("foreign")]:true};
+  expect(()=>historyRowsToAppend([foreign],0)).toThrow("cannot contain symbol keys");
+  expect((await applySessionTurnSettlement(app.db,identity.workspaceId,{sessionId:identity.sessionId,turnId:identity.turnId,triggerEventId,attemptId:identity.attemptId,turnStatus:"completed",sessionStatus:"idle",activeTurnId:null,events:[{type:"turn.completed",payload:{}}]})).action).toBe("settled");
+  if(turn===0){
+   await withWorkspaceSubjectSessionActivityRls(app.db,identity.workspaceId,f.subjectId,db=>submitHumanPromptInTransaction(db,{accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,subjectId:f.subjectId,actor:{type:"human",subjectId:f.subjectId},operationKey:crypto.randomUUID(),delivery:"send",text:"Synthetic next question",modelContext:null,resources:[],reasoningEffort:"low",reasoningEffortFallback:"low",source:"user"}));
+   const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(app.db,identity.workspaceId,{sessionId:identity.sessionId,workflowId:`session-${identity.sessionId}`,workflowRunId:crypto.randomUUID(),attemptId,dispatchId:crypto.randomUUID(),trigger:{kind:"next"}});if(claim.action!=="claimed")throw Error("next claim");
+   identity={...identity,turnId:claim.turn.id,attemptId,executionGeneration:claim.turn.executionGeneration,sourceKey:crypto.randomUUID(),requestIndex:1};write={...write,turnId:identity.turnId,expectedAttemptId:attemptId,expectedExecutionGeneration:identity.executionGeneration};triggerEventId=claim.turn.triggerEventId;
+  }
+ }
+ expect(counts[1]!).toBeGreaterThan(counts[0]!);
+},180_000);

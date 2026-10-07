@@ -1,4 +1,8 @@
 import { describe, expect, test } from "bun:test";
+import { Agent, Runner, type ModelRequest } from "@openai/agents";
+import { ScriptedModel } from "@opengeni/testing";
+import { bindModelSourceInput, modelSourceBindings, omitModelSourceInputBinding, ModelRequestCaptureModel, withModelRequestCapture, type ModelRequestCapture } from "../src/model-request-capture";
+import { normalizeProtocolJsonValue } from "../src/protocol-json";
 import {
   projectHistoryForProvider,
   ProviderHistoryIncompatibleError,
@@ -112,4 +116,29 @@ describe("projectHistoryForProvider", () => {
     );
     expect(items).toEqual([compaction]);
   });
+});
+
+
+test("Responses developer source survives SDK history without leaking its non-wire marker", async () => {
+  const binding = {kind: "HISTORY_ROW" as const, sourceRef: {owner: "session_history_items", id: "reviewed-developer-row", sha256: "a".repeat(64)}, parents: [], retainedSources: []};
+  const original = bindModelSourceInput({type: "message", role: "developer", content: "Reviewed instructions"}, binding);
+  const projected = projectHistoryForProvider([original], "responses");
+  expect(() => normalizeProtocolJsonValue(omitModelSourceInputBinding(projected[0]!))).not.toThrow();
+  expect(modelSourceBindings(projected)).toEqual([{...binding, ordinal: 0}]);
+  expect(Object.getOwnPropertySymbols(projected[0]!.providerData as object)).toHaveLength(0);
+  expect(Object.getOwnPropertySymbols(original)).toHaveLength(1);
+  let captured: ModelRequest | undefined;
+  const capture: ModelRequestCapture = request => { captured = request; };
+  const model = new ModelRequestCaptureModel(new ScriptedModel([{outputText: "Synthetic answer"}]));
+  const runner = new Runner({tracingDisabled: true});
+  const result = await withModelRequestCapture(capture, () => runner.run(new Agent({name: "source projection test", model}), projected as ModelRequest["input"], {historyOwnership: "external"}));
+  expect(captured).toBeDefined();
+  expect(modelSourceBindings(captured!.input)).toEqual([{...binding, ordinal: 0}]);
+  expect(() => normalizeProtocolJsonValue(omitModelSourceInputBinding(result.history[0]!))).not.toThrow();
+  expect(JSON.stringify(captured!.input)).toBe(JSON.stringify([{type: "unknown", providerData: {type: "message", role: "developer", content: "Reviewed instructions"}}]));
+
+  // The boundary removes only the native owner's marker, never arbitrary symbols.
+  const foreign = {...original, [Symbol("foreign")]: true};
+  const refused = projectHistoryForProvider([foreign], "responses");
+  expect(() => normalizeProtocolJsonValue(omitModelSourceInputBinding(refused[0]!))).toThrow("cannot contain symbol keys");
 });

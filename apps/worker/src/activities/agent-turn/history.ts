@@ -1,5 +1,6 @@
 import {
   normalizeProtocolJsonValue,
+  omitModelSourceInputBinding,
   TURN_OPERATIONAL_NOTICE_PREFIX,
   sanitizeHistoryItemsForModel,
   toolCallIdFromSdkItem,
@@ -50,7 +51,7 @@ export function historyRowsToAppend(
     rows.push({
       position: nextPosition + rows.length,
       item: normalizeProtocolJsonValue(
-        item as Record<string, unknown>,
+        omitModelSourceInputBinding(item as Record<string, unknown>),
         `$[${persistedHistoryCount + offset}]`,
       ),
     });
