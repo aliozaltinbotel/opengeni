@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for f1a505ad
+
+# Exact reviewed native provenance successor; reusable workflow checks every target.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-f1a505ad
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: f1a505ada35dd3b8c0358e3767e8e03fc09ece1c
