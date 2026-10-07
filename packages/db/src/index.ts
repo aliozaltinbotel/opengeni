@@ -1,3 +1,4 @@
+import { ModelSourceRef } from "@opengeni/contracts";
 import { validatedStoredModelCallSourceReceipt, importedHistorySourceBasisTx, persistModelCallSourceReceiptWithFence, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
 import { validateRetainedModelSourcesWithFence, type RetainedModelSourceValidationInput, type RetainedModelSourceValidation } from "./model-retained-source-validation";
 export type { RetainedModelSourceValidation, RetainedModelSourceValidationInput, RetainedModelSourceStatus } from "./model-retained-source-validation";
@@ -42117,8 +42118,15 @@ export async function ensureSessionSkillCatalog(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     catalog: string;
+    retainedSources?: readonly import("@opengeni/contracts").ModelSourceRef[];
   },
 ): Promise<string> {
+  const retainedSources = (input.retainedSources ?? []).map(ref => ModelSourceRef.parse(ref));
+  const catalogItem = skillCatalogContextItem(input.catalog);
+  const digest = createHash("sha256").update(JSON.stringify(catalogItem)).digest("hex");
+  const sourceBasis: import("@opengeni/contracts").ModelHistorySourceBasis = {
+    kind: "INSTRUCTION", parents: [{ owner: "native.runtime.artifact", id: `skill-catalog:${digest}`, sha256: digest }], retainedSources,
+  };
   return withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -42144,6 +42152,7 @@ export async function ensureSessionSkillCatalog(
             id: schema.sessionHistoryItems.id,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+            sourceBasis: schema.sessionHistoryItems.sourceBasis,
           })
           .from(schema.sessionHistoryItems)
           .where(
@@ -42168,10 +42177,13 @@ export async function ensureSessionSkillCatalog(
           : null;
         if (frozen !== undefined) {
           if (previousCatalog === null) throw new Error("Missing durable skill catalog snapshot");
+          if (input.retainedSources !== undefined && !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources))
+            throw new Error("SKILL_CATALOG_RETAINED_SOURCES_CHANGED");
           return previousCatalog;
         }
         let historyId = previous?.id;
-        if (previousCatalog !== input.catalog) {
+        if (previousCatalog !== input.catalog || (input.retainedSources !== undefined
+          && !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources))) {
           const [boundary] = await tx
             .select({ position: schema.sessionHistoryItems.position })
             .from(schema.sessionHistoryItems)
@@ -42216,7 +42228,8 @@ export async function ensureSessionSkillCatalog(
                 sessionId: input.sessionId,
                 turnId: input.turnId,
                 position,
-                item: skillCatalogContextItem(input.catalog),
+                item: catalogItem,
+                sourceBasis,
               },
               "item",
               "itemCodecVersion",

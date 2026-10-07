@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { readSkillCatalogContext, skillCatalogContextItem } from "@opengeni/contracts";
+import { readSkillCatalogContext, skillCatalogContextItem, type ModelSourceRef } from "@opengeni/contracts";
 import {
   createDb,
   bootstrapWorkspace,
@@ -10,6 +10,8 @@ import {
   claimSessionWorkForAttempt,
   ensureSessionSkillCatalog,
   getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
+  persistModelCallSourceReceipt,
   getSessionTurn,
   getSessionTurnForAttempt,
   applySessionTurnSettlement,
@@ -104,8 +106,8 @@ async function fixture() {
       events: [{ type: "turn.completed", payload: {} }],
     });
   const history = () => getActiveSessionHistoryItems(client.db, workspaceId, session.id);
-  const install = (turn: Awaited<ReturnType<typeof claim>>, catalog: string) =>
-    ensureSessionSkillCatalog(client.db, { ...identity(turn), catalog });
+  const install = (turn: Awaited<ReturnType<typeof claim>>, catalog: string, retainedSources?: readonly ModelSourceRef[]) =>
+    ensureSessionSkillCatalog(client.db, { ...identity(turn), catalog, ...(retainedSources === undefined ? {} : {retainedSources}) });
   return { claim, identity, settle, history, install, workspaceId, sessionId: session.id };
 }
 
@@ -234,3 +236,24 @@ test("accepted model context is exact and worker-only behind the live attempt fe
     )?.modelContext,
   ).toBeNull();
 }, 180_000);
+
+
+test("host descriptor origins freeze with the catalog and changed origins append without altering prior history", async () => {
+ const f=await fixture(),first=await f.claim();
+ const ref={owner:"cendra.skill.reviewed_release",id:crypto.randomUUID(),sha256:"a".repeat(64),version:"1"};
+ const catalog='## Skills\n- {"id":"reviewed-skill","name":"Reviewed","description":"Synthetic scoped guidance"}';
+ await f.install(first,catalog,[ref]);
+ const original=await f.history();
+ expect(await f.install(first,catalog,[ref])).toBe(catalog);
+ await expect(f.install(first,catalog,[{...ref,version:"2"}])).rejects.toThrow("SKILL_CATALOG_RETAINED_SOURCES_CHANGED");
+ const rows=await getActiveSessionHistoryItemsPaged(client.db,f.workspaceId,f.sessionId);
+ const {expectedAttemptId,expectedExecutionGeneration,...scope}=f.identity(first);
+ const identity={...scope,attemptId:expectedAttemptId,executionGeneration:expectedExecutionGeneration,sourceKey:crypto.randomUUID(),requestIndex:1};
+ const receipt=await persistModelCallSourceReceipt(client.db,identity,{input:rows.map(row=>row.item)});
+ expect(receipt.complete).toBe(true);
+ expect(receipt.inputs.flatMap(node=>node.retainedSources)).toContainEqual(ref);
+ await f.settle(first);const next=await f.claim();
+ await f.install(next,catalog,[{...ref,version:"2"}]);
+ const after=await f.history();expect(after.slice(0,original.length)).toEqual(original);
+ expect(after.filter(row=>readSkillCatalogContext(row.item)!==null)).toHaveLength(2);
+},180_000);

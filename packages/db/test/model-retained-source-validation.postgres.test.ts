@@ -18,6 +18,8 @@ import {
   createDb,
   createSession,
   createWorkspaceInstructionPolicyDraft,
+  ensureSessionSkillCatalog,
+  appendSessionHistoryItems,
   deleteSessionTreeIfQuiescent,
   ensureManagedAccessForUser,
   forkSessionContent,
@@ -183,8 +185,14 @@ async function settle(f: Awaited<ReturnType<typeof fixture>>) {
   expect(result.action).toBe("settled");
 }
 
-test("lawful historical selections survive COMPACTION, SUMMARY and installed COPIED session history after head changes", async () => {
+test.each([false,true])("lawful historical selections survive COMPACTION, SUMMARY and installed COPIED history; host Skills %s", async (includeSkills) => {
   const f = await fixture(true);
+  const skillRef = {owner:"cendra.skill.reviewed_release",id:crypto.randomUUID(),sha256:modelSourceContentDigest("Synthetic reviewed Skill body"),version:"1"};
+  if(includeSkills) {
+    await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,
+      catalog:'## Skills\n- {"id":"synthetic-skill","name":"Synthetic","description":"Scoped instructions"}',retainedSources:[skillRef]});
+    f.rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  }
   const compaction = await persistModelCallSourceReceipt(
     app.db,
     { ...f.identity, sourceKey: crypto.randomUUID() },
@@ -224,7 +232,7 @@ test("lawful historical selections survive COMPACTION, SUMMARY and installed COP
         receipt: summarized,
       })
     ).complete,
-  ).toBe(true);
+  ).toBe(!includeSkills);
   const policy = await createWorkspaceInstructionPolicyDraft(app.db, {
     ...f.identity,
     kind: "charter",
@@ -291,9 +299,10 @@ test("lawful historical selections survive COMPACTION, SUMMARY and installed COP
   });
   expect(copied.complete).toBe(true);
   const result = await validateRetainedModelSources(app.db, { identity, receipt: copied });
-  expect(result.complete).toBe(true);
+  expect(result.complete).toBe(!includeSkills);
+  if(includeSkills)expect(result.sources).toContainEqual({sourceRef:skillRef,status:"HOST_AUTHORITY_REQUIRED",reason:"HOST_AUTHORITY_REQUIRED"});
   for (const ref of compaction.inputs.flatMap((item) => item.retainedSources))
-    expect(result.sources).toContainEqual({ sourceRef: ref, status: "AVAILABLE", reason: null });
+    expect(result.sources).toContainEqual({ sourceRef: ref, status: ref.owner === "cendra.skill.reviewed_release" ? "HOST_AUTHORITY_REQUIRED" : "AVAILABLE", reason: ref.owner === "cendra.skill.reviewed_release" ? "HOST_AUTHORITY_REQUIRED" : null });
   expect(identity.attemptId).not.toBe(compaction.attemptId);
   // Historical identity is not today's head: this new turn has different native policy entries.
   const currentPolicy = await getOrCreateWorkspaceInstructionPolicySnapshot(app.db, identity);
@@ -322,7 +331,7 @@ test("lawful historical selections survive COMPACTION, SUMMARY and installed COP
         receipt: currentReceipt,
       })
     ).complete,
-  ).toBe(true);
+  ).toBe(!includeSkills);
   // Missing-origin fault injection on this disposable database. The current copied receipt remains
   // byte-exact; no guard/constraint is disabled and no receipt is rewritten or rehashed.
   await admin`delete from model_call_source_receipts where id=${compaction.id}`;
@@ -418,7 +427,7 @@ async function retainedReceipt(f: Awaited<ReturnType<typeof fixture>>, refs: Mod
 test("unknown retained owners and exact Cendra host-owned refs have explicit unresolved states", async () => {
   const f = await fixture();
   const hash = modelSourceContentDigest("Synthetic source");
-  const refs = ["native.unknown.source", "cendra.knowledge.retrieval_use"].map((owner) => ({
+  const refs = ["native.unknown.source", "cendra.knowledge.retrieval_use", "cendra.skill.reviewed_release"].map((owner) => ({
     owner,
     id: crypto.randomUUID(),
     sha256: hash,
@@ -428,6 +437,7 @@ test("unknown retained owners and exact Cendra host-owned refs have explicit unr
   expect(result.complete).toBe(false);
   expect(result.sources.map((source) => source.status)).toEqual([
     "UNKNOWN",
+    "HOST_AUTHORITY_REQUIRED",
     "HOST_AUTHORITY_REQUIRED",
   ]);
   const inexact = await retainedReceipt(f, [
@@ -484,4 +494,26 @@ test("current pause, revocation and lifecycle erasure refuse, without changing i
       })
     ).incompleteReasons,
   ).toContain("ATTEMPT_NOT_CURRENT");
+});
+
+
+test("legacy native Skill catalog and tool result origins are refused without rewriting history", async () => {
+ for(const kind of ["catalog","tool"] as const){
+  const f=await fixture();
+  const write={...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration};
+  const position=Math.max(...f.rows.map(row=>row.position));
+  if(kind==="catalog")await ensureSessionSkillCatalog(app.db,{...write,catalog:'## Skills\n- {"id":"legacy-skill","name":"Legacy","description":"Withdrawable guidance"}'});
+  else {
+   const callId=crypto.randomUUID(),raw={content:[{type:"text",text:"Synthetic reviewed Skill body"}]};
+   const rawSourceRef={owner:"native.tool.result",id:callId,sha256:modelSourceContentDigest(raw)};
+   await appendSessionHistoryItems(app.db,{...write,items:[
+    {position:position+1,item:{type:"function_call",callId,name:"skill_read",arguments:'{"skill":"legacy-skill"}'}},
+    {position:position+2,item:{type:"function_call_result",callId,output:JSON.stringify(raw)},sourceBasis:{kind:"TOOL_RESULT",parents:[rawSourceRef],retainedSources:[],rawToolSource:{sourceCallId:callId,nativeModelSourceKey:f.identity.sourceKey,rawSourceRef,retainedSources:[]}}},
+   ]});
+  }
+  const before=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  const receipt=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2},{input:before.map(row=>row.item)});
+  expect(receipt.complete).toBe(false);expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
+  expect(await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId)).toEqual(before);
+ }
 });

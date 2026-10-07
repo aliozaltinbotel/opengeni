@@ -267,7 +267,7 @@ export async function validateRetainedModelSourcesWithFence(
       }
       const sources: RetainedModelSourceValidation["sources"][number][] = [];
       for (const ref of references.values()) {
-        if (ref.owner === "cendra.knowledge.retrieval_use") {
+        if (ref.owner === "cendra.knowledge.retrieval_use" || ref.owner === "cendra.skill.reviewed_release") {
           sources.push({
             sourceRef: ref,
             status: "HOST_AUTHORITY_REQUIRED",

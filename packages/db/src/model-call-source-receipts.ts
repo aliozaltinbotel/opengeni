@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { canonicalModelSourceJson, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
+import { canonicalModelSourceJson, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
@@ -25,6 +25,26 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
     const rows = await tx.select({id:schema.sessionHistoryItems.id,item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,
       rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
       .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.sessionId,identity.sessionId),eq(schema.sessionHistoryItems.active,true))).orderBy(schema.sessionHistoryItems.position);
+    // These native producers carried instruction text before retained origins were installed.
+    // Preserve their transcript, but never invent origins from the visible body on a later call.
+    const missingSkillOrigin = async (item: unknown, basis: Pick<Basis,"retainedSources"> | null, sessionId: string): Promise<boolean> => {
+      if (basis?.retainedSources?.some(ref => ref.owner === "cendra.skill.reviewed_release")) return false;
+      const catalog = item && typeof item === "object" ? readSkillCatalogContext(item as Record<string,unknown>) : null;
+      if (catalog !== null && catalog.split("\n").some(line => line.startsWith("- {"))) return true;
+      const value = item as { type?: string; callId?: string; call_id?: string; name?: string };
+      if (value?.type !== "function_call_result") return false;
+      if (value.name === "skill_read") return true;
+      const callId = value.callId ?? value.call_id;
+      if (!callId) return false;
+      const [call] = await tx.select({ id: schema.sessionHistoryItems.id }).from(schema.sessionHistoryItems).where(and(
+        eq(schema.sessionHistoryItems.accountId, identity.accountId), eq(schema.sessionHistoryItems.workspaceId, identity.workspaceId),
+        eq(schema.sessionHistoryItems.sessionId, sessionId),
+        sql`${schema.sessionHistoryItems.item}->>'type' = 'function_call'`,
+        sql`coalesce(${schema.sessionHistoryItems.item}->>'callId', ${schema.sessionHistoryItems.item}->>'call_id') = ${callId}`,
+        sql`${schema.sessionHistoryItems.item}->>'name' = 'skill_read'`,
+      )).limit(1);
+      return call !== undefined;
+    };
     const closureNodes = new Map<string, ModelSourceClosureNode>();
     const closure = async (ref:ModelSourceRef, path:Set<string>, depth=0):Promise<boolean> => {
       if (depth>128 || path.size>16384) {reasons.add("CAP_EXCEEDED");return false;}
@@ -53,6 +73,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       const [row] = await tx.select({item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,sessionId:schema.sessionHistoryItems.sessionId,turnId:schema.sessionHistoryItems.turnId,rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
         .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.id,ref.id))).limit(1);
       if (!row || row.rowSha!==ref.sha256) return false;
+      if (await missingSkillOrigin(row.item,row.basis,row.sessionId)) return false;
       if (!row.basis) {
         if (canonicalModelSourceJson(row.item).includes("opengeni_context_summary") || canonicalModelSourceJson(row.item).includes(IMPORTED_HISTORY_CONTEXT_HEADER) || (row.item as {type?:string}).type==="function_call_result") return false;
         closureNodes.set(ref.id,{sourceRef:ref,kind:"HISTORY_ROW",parents:[],retainedSources:[]});
@@ -112,6 +133,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       const row=index<0?undefined:rows[index];
       if (row) cursor=index+1;
       const basis=row?.basis as Basis|null|undefined;
+      if (await missingSkillOrigin(value,basis ?? binding ?? null,identity.sessionId)) reasons.add("UNRESOLVED_PARENT");
       let kind:ModelSourceInput["kind"]=basis?.kind??((value as {type?:string})?.type==="function_call_result"?"TOOL_RESULT":"HISTORY_ROW");
       // Historical derived rows have no owner closure. A summary marker never authenticates ancestry.
       if (!basis && canonicalModelSourceJson(value).includes("opengeni_context_summary")) {kind="SUMMARY";reasons.add("UNRESOLVED_PARENT");}

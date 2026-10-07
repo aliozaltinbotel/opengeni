@@ -30,7 +30,15 @@ enforcement, preserving conversation context.
 Embedded workers can supply an attempt-owned Skill catalog through
 `PreparedAgentTools.skillCatalog` before the worker freezes its durable history
 snapshot. The same prepared tools own the reader; a conflicting frozen snapshot
-is refused before agent construction. See [embedding](embedding.md).
+is refused before agent construction. Host descriptors can carry immutable
+`modelSourceRefs`; the worker persists these outside the visible catalog in its
+history source basis, including an exact check on frozen retries. Skill tool
+results carry the same origins before spill. Copied and compacted descendants
+retain those references. Native validation names exact Cendra Skill origins as
+`HOST_AUTHORITY_REQUIRED`, never native permission; the host checks current
+availability before dispatch. Legacy native Skill catalogs/results without
+origins remain visible as historical transcripts but refuse a complete source
+receipt. See [embedding](embedding.md).
 
 Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors but grant no capabilities or credentials.

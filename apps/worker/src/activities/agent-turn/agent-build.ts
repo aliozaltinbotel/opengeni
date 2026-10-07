@@ -577,6 +577,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const skillCatalog = preparedTools.skillCatalog ?? deps.skillCatalog;
+  if (skillCatalog.some(entry => entry.modelSourceRefs !== undefined) && skillCatalog.some(entry => !entry.modelSourceRefs?.length))
+    throw new Error("SKILL_CATALOG_SOURCE_ORIGIN_MISSING");
   const skillCatalogText = formatSkillCatalog(skillCatalog);
   if (preparedTools.skillCatalog !== undefined) {
     const indexed = skillCatalogEntryIds(skillCatalogText);
@@ -592,6 +594,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
     catalog: skillCatalogText,
+    retainedSources: skillCatalog.filter(entry => skillCatalogEntryIds(skillCatalogText).has(entry.id)).flatMap(entry => entry.modelSourceRefs ?? []),
   });
   if (
     preparedTools.skillCatalog !== undefined &&

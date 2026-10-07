@@ -28,6 +28,7 @@ async function build(input: { override?: readonly SkillCatalogDescriptor[]; froz
   const context = createTurnContext({ settings, cancellationRequestedAt: null });
   context.eventing.preparedTools = prepared;
   let persisted: string | undefined;
+  let retainedSources: unknown;
   let built: BuildAgentOptions | undefined;
   const spies = [
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
@@ -40,6 +41,7 @@ async function build(input: { override?: readonly SkillCatalogDescriptor[]; froz
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, value) => {
       persisted = value.catalog;
+      retainedSources=value.retainedSources;
       return input.frozen ?? value.catalog;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
@@ -99,7 +101,7 @@ async function build(input: { override?: readonly SkillCatalogDescriptor[]; froz
     } catch (caught) {
       error = caught;
     }
-    return { persisted, built, error, ids: context.eventing.modelVisibleSkillIds };
+    return { persisted, retainedSources, built, error, ids: context.eventing.modelVisibleSkillIds };
   } finally {
     for (const spy of spies) spy.mockRestore();
     await prepared.close();
@@ -166,4 +168,19 @@ test.each([
   expect(String(result.error)).toContain("PREPARED_SKILL_CATALOG_EXCEEDS_INDEX_BOUNDS");
   expect(result.persisted).toBeUndefined();
   expect(result.built).toBeUndefined();
+});
+
+
+test("host Skill origins follow exact descriptors into the durable catalog, never into model text", async () => {
+ const ref={owner:"cendra.skill.reviewed_release",id:"reviewed-release",sha256:"a".repeat(64),version:"1"};
+ const result=await build({override:[{...scoped[0]!,modelSourceRefs:[ref]}]});
+ expect(result.error).toBeUndefined();expect(result.retainedSources).toEqual([ref]);
+ expect(result.persisted).toBe(formatSkillCatalog(scoped));expect(result.persisted).not.toContain(ref.owner);
+});
+
+
+test("a partially attributed host index is refused before persistence", async () => {
+ const ref={owner:"cendra.skill.reviewed_release",id:"reviewed-release",sha256:"a".repeat(64),version:"1"};
+ const result=await build({override:[{...scoped[0]!,modelSourceRefs:[ref]},...ambient]});
+ expect(String(result.error)).toContain("SKILL_CATALOG_SOURCE_ORIGIN_MISSING");expect(result.persisted).toBeUndefined();
 });

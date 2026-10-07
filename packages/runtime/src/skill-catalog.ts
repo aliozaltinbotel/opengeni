@@ -2,6 +2,8 @@ export type SkillCatalogDescriptor = Readonly<{
   id: string;
   name: string;
   description: string;
+  /** Immutable host origins for the exact descriptor; excluded from model-visible catalog text. */
+  modelSourceRefs?: readonly import("@opengeni/contracts").ModelSourceRef[];
 }>;
 
 export const SKILL_CATALOG_MAX_BYTES = 32 * 1024;
