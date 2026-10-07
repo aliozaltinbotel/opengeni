@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
 import { buildSummaryItem } from "@opengeni/runtime";
-import { type ModelSourceRef } from "@opengeni/contracts";
+import { readSkillCatalogContext, type ModelSourceRef } from "@opengeni/contracts";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -210,7 +210,8 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
   };
   await applyContextCompaction(app.db, {
     ...write,
-    replacementItems: [],
+    replacementItems: includeSkills ? f.rows.filter(row=>readSkillCatalogContext(row.item)!==null).map(row=>row.item) : [],
+    replacementSourceIds: includeSkills ? f.rows.filter(row=>readSkillCatalogContext(row.item)!==null).map(row=>row.id) : [],
     summaryItem: buildSummaryItem("Synthetic historical summary"),
     summarySourceIds: f.rows.map((row) => row.id),
     summaryModelSourceKey: compaction.sourceKey,

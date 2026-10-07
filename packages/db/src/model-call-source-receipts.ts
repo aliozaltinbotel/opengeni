@@ -27,8 +27,10 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.sessionId,identity.sessionId),eq(schema.sessionHistoryItems.active,true))).orderBy(schema.sessionHistoryItems.position);
     // These native producers carried instruction text before retained origins were installed.
     // Preserve their transcript, but never invent origins from the visible body on a later call.
-    const missingSkillOrigin = async (item: unknown, basis: Pick<Basis,"retainedSources"> | null, sessionId: string): Promise<boolean> => {
+    const missingSkillOrigin = async (item: unknown, basis: {kind?:string;parents?:readonly ModelSourceRef[];retainedSources?:readonly ModelSourceRef[]} | null, sessionId: string): Promise<boolean> => {
       if (basis?.retainedSources?.some(ref => ref.owner === "cendra.skill.reviewed_release")) return false;
+      // A native copy inherits through its authenticated durable parents; the closure below checks each origin.
+      if (basis?.kind === "COPIED" && basis.parents?.some(parent => parent.owner === "session_history_items")) return false;
       const catalog = item && typeof item === "object" ? readSkillCatalogContext(item as Record<string,unknown>) : null;
       if (catalog !== null && catalog.split("\n").some(line => line.startsWith("- {"))) return true;
       const value = item as { type?: string; callId?: string; call_id?: string; name?: string };
