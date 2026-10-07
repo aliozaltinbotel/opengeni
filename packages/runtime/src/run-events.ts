@@ -13,6 +13,7 @@ import {
 } from "@opengeni/contracts";
 
 import { normalizeProtocolJsonValue } from "./protocol-json";
+import { omitModelSourceInputBinding } from "./model-request-capture";
 import { mcpResultFromCustomData } from "./mcp-result-custom-data";
 import { isInternalGenericDispatchRegistrationItem } from "./lazy-tool-transport";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
@@ -474,7 +475,9 @@ function hostedWebSearchToolCallFromResponsesEvent(raw: unknown): NormalizedRunt
   // Codex frequently emits `output_item.added` for web_search_call before the
   // action payload exists. Persist that so the timeline can show "Searching…",
   // then the matching `done` (same id) fills in query/queries via merge.
-  const { status: _status, ...providerData } = item;
+  const { status: _status, ...providerData } = normalizeProtocolJsonValue(
+    omitModelSourceInputBinding(item), '$["event"]["payload"]["raw"]["providerData"]',
+  );
 
   return {
     type: "agent.toolCall.created",
@@ -566,7 +569,8 @@ export function normalizeSdkEvent(
         id: toolCallIdFromSdkItem(raw) ?? raw.id ?? item.id ?? null,
         name: raw.name ?? raw.type ?? "tool",
         arguments: raw.arguments ?? raw.input ?? null,
-        raw,
+        // Project the native-owned marker only; the original SDK item retains ancestry.
+        raw: raw && typeof raw === "object" ? omitModelSourceInputBinding(raw) : raw,
       },
     });
   } else if (item.type === "tool_call_output_item") {
@@ -600,7 +604,8 @@ export function normalizeSdkEvent(
         id: raw.call_id ?? toolCallIdFromSdkItem(raw) ?? raw.id ?? item.id ?? null,
         name: "tool_search",
         arguments: raw.arguments ?? null,
-        raw,
+        // Project the native-owned marker only; the original SDK item retains ancestry.
+        raw: raw && typeof raw === "object" ? omitModelSourceInputBinding(raw) : raw,
       },
     });
   } else if (item.type === "tool_search_output_item") {
@@ -966,7 +971,21 @@ export function serializeHumanInputRequests(
 }
 
 function serializeApprovalInterruption(item: any): unknown {
-  if (typeof item?.toJSON === "function") return item.toJSON();
+  if (typeof item?.toJSON === "function") {
+    const serialized = item.toJSON();
+    // SDK RunItemBase.toJSON retains its rawItem reference. Project only that
+    // exact envelope slot; other metadata still crosses the strict JSON guard.
+    if (serialized && typeof serialized === "object" && serialized.rawItem === item.rawItem
+      && serialized.rawItem && typeof serialized.rawItem === "object") {
+      const projected = Object.create(Object.getPrototypeOf(serialized), Object.getOwnPropertyDescriptors(serialized));
+      Object.defineProperty(projected, "rawItem", {
+        ...Object.getOwnPropertyDescriptor(serialized, "rawItem"),
+        value: omitModelSourceInputBinding(serialized.rawItem),
+      });
+      return projected;
+    }
+    return serialized;
+  }
   return {
     id: approvalIdentifier(item) ?? "approval",
     name: item?.name ?? item?.rawItem?.name ?? "tool",

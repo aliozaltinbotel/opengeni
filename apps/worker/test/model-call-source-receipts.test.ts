@@ -1,5 +1,7 @@
 import { createTurnHistorySink } from "../src/activities/agent-turn/history-sink";
-import { historyRowsToAppend } from "../src/activities/agent-turn/history";
+import { createRuntimeBatcher } from "../src/activities/streaming";
+import { normalizeSdkEvent } from "../../../packages/runtime/src/run-events";
+import { historyRowsToAppend, pendingToolCallFromSdkEvent, completedToolCallFromSdkEvent } from "../src/activities/agent-turn/history";
 import { projectHistoryForProvider } from "../../../packages/runtime/src/provider-history-adapter";
 import { HistoryPrefixGuard } from "../src/activities/agent-turn/history-prefix";
 import postgres from "postgres";
@@ -11,7 +13,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
-import { ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
+import { appendSessionEventsForTurnAttempt, listSessionEvents, ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
@@ -47,9 +49,10 @@ test(`actual SDK transient ${streaming ? "streaming" : "ordinary"} long continua
  const raw={content:[{type:"text" as const,text:"Synthetic exact evidence"}],structuredContent:{passage:"Synthetic exact evidence"}};
  const retained={owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),version:"1",sha256:createHash("sha256").update("Synthetic exact evidence").digest("hex")};
  // Derive identity coverage from the released schema, including same-id variants.
+ // The versionless wire identity omits its optional key; an own undefined value is not durable JSON.
  const distinctRetained=[retained,...Object.keys(ModelSourceRef.shape).map(field=>ModelSourceRef.parse({
   ...retained,[field]:field==="sha256"?createHash("sha256").update("Synthetic distinct digest").digest("hex"):`${retained[field as keyof typeof retained]}:distinct`,
- })),ModelSourceRef.parse({...retained,version:undefined})];
+ })),ModelSourceRef.parse(Object.fromEntries(Object.entries(retained).filter(([field])=>field!=="version")))];
  const toolSteps=16;
  const settings=testSettings({sandboxBackend:"none",webSearchEnabled:false,mcpServers:[{id:"cendra-pms",url:"https://synthetic.invalid/mcp",cacheToolsList:false}]});
  const prepared=await prepareAgentTools(settings,[{kind:"mcp",id:"cendra-pms"}],{...f.identity,localMcpServers:[{id:"cendra-pms",server:{
@@ -81,7 +84,45 @@ test(`actual SDK transient ${streaming ? "streaming" : "ordinary"} long continua
   const agent=buildOpenGeniAgent(settings,[],{mcpServers:prepared.mcpServers}).clone({model});
   await withModelRequestCapture(capture,async()=>{
    const runner=new Runner({tracingDisabled:true}),input=rows.map(row=>row.item) as ModelRequest["input"];
-   if(streaming){const stream=await runner.run(agent,input,{stream:true,historyOwnership:"external",maxTurns:toolSteps+1});for await(const _event of stream){}await stream.completed;}
+   if(streaming){
+    let stream: Awaited<ReturnType<typeof runner.run>> | undefined;
+    const sink=createTurnHistorySink({db:app.db,accountId:f.identity.accountId,workspaceId:f.identity.workspaceId,sessionId:f.identity.sessionId,attemptId:f.identity.attemptId,
+     getTurnId:()=>f.identity.turnId,getExecutionGeneration:()=>f.identity.executionGeneration,getStream:()=>stream,getModelRunSettings:()=>settings,
+     media:{retainNativeGeneratedImagesFromHistory:async()=>{},retainedScreenshotReceiptsByCallId:new Map(),generatedImageReceiptsByProviderItemId:new Map()},
+    } as unknown as Parameters<typeof createTurnHistorySink>[0]);
+    sink.seedHistory(input,rows.length);sink.nextHistoryPosition=Math.max(...rows.map(row=>row.position))+1;
+    let restore:((items:readonly unknown[])=>void)|undefined;
+    capture.callCompleted=(_key,_id,_response,current)=>{restore=current;sink.recordModelSourceRestorer(current);};
+    capture.onModelToolSource=async source=>{sink.recordModelToolSource(source);};
+    const batcher=createRuntimeBatcher(async events=>{
+     const appended=await appendSessionEventsForTurnAttempt(app.db,f.identity.workspaceId,f.identity.sessionId,f.identity.turnId,f.identity.executionGeneration,f.identity.attemptId,events);
+     expect(appended.accepted).toBe(true);expect(appended.events).toHaveLength(events.length);
+    });
+    const running=await runner.run(agent,input,{stream:true,historyOwnership:"external",maxTurns:toolSteps+1});stream=running;
+    for await(const event of running){
+     // Match worker ordering: reconcile completed model/tool history before event projection.
+     if ((event.type === "raw_model_stream_event" && event.data.type === "response_done")
+       || (event.type === "run_item_stream_event" && event.item.type === "tool_call_output_item")) {
+      await sink.reconcileConversationTruth({requireDurable:true});
+     }
+     // Exercise the source-bound SDK object that terminal reconciliation/continuation can expose.
+     if(event.type==="run_item_stream_event")restore?.([event.item.rawItem]);
+     pendingToolCallFromSdkEvent(event);completedToolCallFromSdkEvent(event);
+     for(const normalized of normalizeSdkEvent(event))await batcher.push(normalized);
+    }
+    await running.completed;await batcher.flush();
+    await sink.reconcileConversationTruth({requireDurable:true});
+    const saved=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+    expect(saved.filter(row=>row.item.type==="function_call")).toHaveLength(toolSteps);
+    const answer=saved.find(row=>row.item.role==="assistant")!;
+    const [answerSource]=await shared.admin`select source_basis from session_history_items where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and session_id=${f.identity.sessionId} and id=${answer.id}`;
+    expect(answerSource!.source_basis).toEqual({kind:"HISTORY_ROW",parents:[{owner:"model_call_source_receipts",id:receipts.at(-1)!.id,sha256:receipts.at(-1)!.digest}]});
+    const events=await listSessionEvents(app.db,f.identity.workspaceId,f.identity.sessionId);
+    expect(events.filter(event=>event.type==="agent.toolCall.created")).toHaveLength(toolSteps);
+    expect(events.filter(event=>event.type==="agent.toolCall.output")).toHaveLength(toolSteps);
+    expect(events.filter(event=>event.type==="agent.message.completed")).toHaveLength(1);
+    for(const event of events)expect(()=>toPostgresLosslessJson(event.payload)).not.toThrow();
+   }
    else await runner.run(agent,input,{historyOwnership:"external",maxTurns:toolSteps+1});
   });
   expect(calls).toBe(toolSteps+1);expect(receipts).toHaveLength(toolSteps+1);

@@ -4,10 +4,13 @@ import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-cor
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import { RoutingMutationOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/routing/routing-session";
 import { ModelItem } from "@openai/agents-core/types";
-import { Agent, Runner, tool, type Model, type ModelResponse, type StreamEvent } from "@openai/agents";
+import { Agent, Runner, RunToolApprovalItem, tool, type Model, type ModelResponse, type StreamEvent } from "@openai/agents";
 import { LazyToolModelProvider, installLazyToolRuntime, createResolveMissingFunctionTool } from "../../../packages/runtime/src/lazy-tool-transport";
 import { bindModelSourceInput, modelSourceInputBinding, withModelRequestCapture, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { normalizeProtocolJsonValue } from "../../../packages/runtime/src/protocol-json";
+import { normalizeSdkEvent, serializeApprovals } from "../../../packages/runtime/src/run-events";
+import { createRuntimeBatcher } from "../src/activities/streaming";
+import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 import {
   withWorkspaceGatewayCredential,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -630,6 +633,8 @@ describe("turn exact-content boundaries", () => {
       capture.beforeCall = async () => `inspection-receipt-${calls + 1}`;
       let restoreHistory: ((items: readonly unknown[]) => void) | undefined;
       capture.callCompleted = (_key, _id, _response, restore) => { restoreHistory = restore; };
+      const persistedEvents: unknown[] = [];
+      const batcher = createRuntimeBatcher(async events => { persistedEvents.push(...events.map(toPostgresLosslessJson)); });
       let pendingCount = 0;
       let completedCount = 0;
       await withModelRequestCapture(capture, async () => {
@@ -640,6 +645,7 @@ describe("turn exact-content boundaries", () => {
           // Production terminal reconciliation restores provenance on shared SDK history objects.
           restoreHistory?.((result.state as unknown as { history: unknown[] }).history);
           if (event.type === "run_item_stream_event") restoreHistory?.([event.item.rawItem]);
+          for (const normalized of normalizeSdkEvent(event)) await batcher.push(normalized);
           const pending = pendingToolCallFromSdkEvent(event);
           const completed = completedToolCallFromSdkEvent(event);
           if (pending) {
@@ -666,6 +672,9 @@ describe("turn exact-content boundaries", () => {
         expect(rows.find(row => row.item.type === "function_call")?.nativeProducerSourceKey).toBe("inspection-receipt-1");
         expect(rows.find(row => row.item.type === "message" && row.item.role === "assistant")?.nativeProducerSourceKey).toBe("inspection-receipt-2");
       });
+      await batcher.flush();
+      expect(persistedEvents.filter(event => (event as { type: string }).type === "agent.toolCall.created")).toHaveLength(1);
+      expect(persistedEvents.filter(event => (event as { type: string }).type === "agent.toolCall.output")).toHaveLength(1);
       expect(pendingCount).toBe(1);
       expect(completedCount).toBe(1);
       expect(calls).toBe(2);
@@ -690,6 +699,36 @@ describe("turn exact-content boundaries", () => {
       expect(() => project({ ...raw, [Symbol("foreign")]: true })).toThrow("cannot contain symbol keys");
       expect(() => project({ ...raw, providerData: { [Symbol("foreign")]: true } })).toThrow("cannot contain symbol keys");
       expect(() => project({ ...raw, providerData: raw })).toThrow("cannot contain symbol keys");
+    },
+  );
+
+  test.each(["tool_call_item", "tool_search_call_item", "hosted_web_search", "approval"])(
+    "%s event serialization preserves source ownership and refuses foreign or nested symbols",
+    (kind) => {
+      const raw = bindModelSourceInput({ type: kind === "hosted_web_search" ? "web_search_call" : "function_call",
+        id: "synthetic-search", callId: "synthetic-search", name: "synthetic__inspect", arguments: "{}", status: "completed" }, {
+        kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: "synthetic-output", sha256: "a".repeat(64) },
+        parents: [], retainedSources: [], nativeProducerSourceKey: "synthetic-receipt",
+      });
+      const binding = modelSourceInputBinding(raw);
+      const project = (rawItem: typeof raw) => {
+        if (kind === "approval") return serializeApprovals([new RunToolApprovalItem(rawItem as never, new Agent({ name: "Synthetic approval" }))]);
+        if (kind === "hosted_web_search") return normalizeSdkEvent(new RunRawModelStreamEvent({
+          type: "model", providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+          event: { type: "response.output_item.done", item: rawItem },
+        } as never));
+        return normalizeSdkEvent({ type: "run_item_stream_event", item: { type: kind, rawItem } } as never);
+      };
+      expect(project(raw)).toHaveLength(1);
+      expect(() => toPostgresLosslessJson(project(raw))).not.toThrow();
+      expect(modelSourceInputBinding(raw)).toBe(binding);
+      expect(Object.hasOwn(raw, "status")).toBe(true);
+      expect(() => project({ ...raw, [Symbol("foreign")]: true })).toThrow("cannot contain symbol keys");
+      const hidden = { ...raw };
+      Object.defineProperty(hidden, Symbol("foreign-hidden"), { value: true });
+      expect(() => project(hidden)).toThrow("cannot contain symbol keys");
+      expect(() => project({ ...raw, providerData: { [Symbol("foreign")]: true } } as typeof raw)).toThrow("cannot contain symbol keys");
+      expect(() => project({ ...raw, providerData: raw } as typeof raw)).toThrow("cannot contain symbol keys");
     },
   );
 
