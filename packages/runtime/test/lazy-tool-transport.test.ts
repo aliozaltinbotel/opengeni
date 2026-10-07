@@ -31,15 +31,57 @@ import { formatSkillCatalog } from "../src/skill-catalog";
 import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
 import {
   modelSourceInputBinding,
+  bindModelSourceInput,
+  omitModelSourceInputBinding,
   withModelRequestCapture,
   type ModelRequestCapture,
 } from "../src/model-request-capture";
 import { instrumentedModelFetch } from "../src/model-provider-client";
+import { modelSourceContentDigest } from "@opengeni/db";
 
 const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
 
 describe("lazy model source admission", () => {
+  test("generic projection never repairs mutated bytes or a foreign producer binding", async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
+    await agent.getAllTools(undefined as never);
+    let providerCalls = 0;
+    const inner: Model = {
+      async getResponse() {
+        providerCalls++;
+        return { usage: new Usage(), output: [{ type: "function_call", callId: "projection-guard",
+          name: "tool_invoke", arguments: JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Oslo" } }) }] };
+      },
+      getStreamedResponse() { throw new Error("unused"); },
+    };
+    const capture: ModelRequestCapture = () => {};
+    capture.beforeCall = async request => {
+      for (const item of request.input) {
+        const binding = modelSourceInputBinding(item);
+        if (typeof item === "object" && binding?.sourceRef.sha256 !== modelSourceContentDigest(omitModelSourceInputBinding(item))) {
+          throw new Error("UNRESOLVED_PARENT");
+        }
+      }
+      return "projection-producer";
+    };
+    await withModelRequestCapture(capture, async () => {
+      const model = runtime.wrapModel(inner);
+      const request: ModelRequest = { input: [], modelSettings: {}, tools: [], outputType: "text", tracing: false };
+      const response = await model.getResponse(request);
+      const original = response.output[0]!;
+      const binding = modelSourceInputBinding(original)!;
+      const mutated = { ...original, providerData: { ...original.providerData,
+        "opengeni.lazy_dispatch.v1": { version: 1, arguments: JSON.stringify({ name: WEATHER_TOOL, arguments: { city: "Changed" } }) } } };
+      const foreign = bindModelSourceInput({ ...original }, { ...binding, nativeProducerSourceKey: "foreign-producer" });
+      for (const item of [mutated, foreign]) {
+        await expect(model.getResponse({ ...request, input: [item] })).rejects.toThrow("UNRESOLVED_PARENT");
+      }
+    });
+    expect(providerCalls).toBe(1);
+  });
+
   for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
     for (const stream of [false, true]) {
       test(`${transport} ${stream ? "streaming" : "ordinary"} SDK calls retain the exact prepared request and transformed output source`, async () => {
@@ -67,6 +109,12 @@ describe("lazy model source admission", () => {
         };
         const capture: ModelRequestCapture = () => {};
         capture.beforeCall = async request => {
+          for (const item of request.input) {
+            const binding = modelSourceInputBinding(item);
+            if (binding?.nativeProducerSourceKey && typeof item === "object") {
+              expect(binding.sourceRef.sha256).toBe(modelSourceContentDigest(omitModelSourceInputBinding(item)));
+            }
+          }
           receipts.push(request);
           return `receipt-${receipts.length}`;
         };

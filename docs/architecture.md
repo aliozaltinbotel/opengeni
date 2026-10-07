@@ -102,7 +102,10 @@ ancestry, so retained Skill and Knowledge sources reach the current host validat
 Lazy native search and generic dispatch use that same model-call capture owner:
 input bindings are restored before historical dispatch projection, the receipt
 covers the exact post-hide request, and transformed response items retain that
-call's producer. Literal provider attempts, including retries, recheck the same
+call's producer. Restored generic-dispatch names and arguments are registered
+as exact output projections, with their own content digest and the same producer;
+unrecognized or changed input cannot acquire an origin by recalculating a digest.
+Literal provider attempts, including retries, recheck the same
 source before bytes; lazy tool disclosure never bypasses source admission.
 Legacy generated rows with source-aware calls or earlier Skill use but no producer
 basis remain readable as transcripts and are refused as model context.

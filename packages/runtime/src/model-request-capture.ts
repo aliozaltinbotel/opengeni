@@ -84,7 +84,7 @@ export function nativeModelSourceKeyForToolCall(callId: string | undefined): str
   return callId ? modelRequestCapture.getStore()?.toolSourceKeys?.get(callId) : undefined;
 }
 
-function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:string, output:readonly unknown[]):void {
+function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:string, output:readonly unknown[], projectOutput?: (item: AgentInputItem) => AgentInputItem):void {
   if (!capture) return;
   capture.toolSourceKeys ??= new Map();
   for (const value of output) {
@@ -100,11 +100,15 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
     // The streaming Runner parses output items through its installed protocol
     // schema, changing property order and dropping owner symbols. Register that
     // exact projection of this output, then the existing provider-id projection.
-    // Each alias retains the original byte digest; input is never canonicalized
-    // or matched by call id alone.
+    // Each alias retains its exact digest and the original output owner; input
+    // is never canonicalized or matched by call id alone.
     const projections=[stripProviderItemId(item as AgentInputItem)];
     const parsed=protocol.OutputModelItem.safeParse(item);
     if(parsed.success)projections.push(parsed.data,stripProviderItemId(parsed.data));
+    // Lazy dispatch restores the provider's tool name/arguments on continuation.
+    // Register only that owner's exact projection of this actual output and its
+    // SDK aliases, never repair arbitrary input by recalculating its digest.
+    if(projectOutput)projections.push(...[item as AgentInputItem,...projections].map(projectOutput));
     for(const projected of projections) {
       const projectedSha256=inputDigest(projected);
       if(projectedSha256===sha256)continue;
@@ -280,18 +284,20 @@ export class ModelRequestCaptureModel implements Model {
   constructor(
     private readonly inner: Model,
     private readonly prepareRequest?: (request: ModelRequest) => ModelRequest,
+    private readonly projectOutput?: (item: AgentInputItem) => AgentInputItem,
   ) {}
 
   async getResponse(request: ModelRequest) {
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     request = this.prepareRequest?.(request) ?? request;
+    if(this.prepareRequest && Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
     const response = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => this.inner.getResponse(request));
     if (sourceKey) {
-      bindOutputSourceKeys(capture,sourceKey,response.output);
+      bindOutputSourceKeys(capture,sourceKey,response.output,this.projectOutput);
       await capture?.callCompleted?.(sourceKey,response.responseId ?? null,response,sourceState(capture!).restoreHistorySources);
     }
     return response;
@@ -301,6 +307,7 @@ export class ModelRequestCaptureModel implements Model {
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     request = this.prepareRequest?.(request) ?? request;
+    if(this.prepareRequest && Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
@@ -316,7 +323,7 @@ export class ModelRequestCaptureModel implements Model {
         const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && (event.event as Record<string,unknown>).type==="response.completed" ? (event.event as Record<string,unknown>).response : null;
         if(sourceKey && candidate && typeof candidate==="object") {
           const response=candidate as Record<string,unknown>;
-          bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[]);
+          bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[],this.projectOutput);
           await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response,sourceState(capture!).restoreHistorySources);
         }
         yield event;

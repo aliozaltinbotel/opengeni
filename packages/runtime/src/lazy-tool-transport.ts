@@ -392,6 +392,7 @@ export class LazyToolRuntime {
     const wrapped = new ModelRequestCaptureModel(
       new LazyToolModel(model, this),
       request => prepareLazyToolRequest(request, this),
+      restoreGenericDispatchHistoryItem,
     );
     this.wrappedModels.set(model, wrapped);
     this.wrappedModels.set(wrapped, wrapped);
