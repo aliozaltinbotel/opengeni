@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { withModelRequestCapture, type ModelRequestCapture } from "../src/model-request-capture";
 import { describe, expect, test } from "bun:test";
 import type { AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
@@ -143,4 +145,13 @@ describe("spilledModelToolResult", () => {
     });
     expect(JSON.stringify(projected)).not.toContain("/workspace/tool-results/");
   });
+});
+
+// Raw-result capture must happen before either model compaction or oversized spill.
+test("native source capture preserves exact raw digest and retained refs before spill",async()=>{
+ const raw=oversizedResult();const ref={owner:"fixture.retained_revision",id:OPERATION_ID,version:"1",sha256:createHash("sha256").update("Synthetic source").digest("hex")};
+ const events:string[]=[];const capture:ModelRequestCapture=()=>{};capture.onModelToolSource=async source=>{events.push("capture");expect(source.nativeModelSourceKey).toBe("exact-source");expect(source.rawSourceRef.sha256).toBe(createHash("sha256").update(JSON.stringify(raw)).digest("hex"));expect(source.retainedSources).toEqual([ref]);};
+ const execute=wrapAttemptToolExecute(async()=>raw,async()=>{events.push("spill");return smallResult();},undefined,()=>[ref]);
+ await withModelRequestCapture(capture,()=>execute({}, {...context("model"),sourceCallId:"sdk-call",nativeModelSourceKey:"exact-source"}));expect(events).toEqual(["capture","spill"]);
+ capture.onModelToolSource=async()=>{throw Error("source unavailable");};events.length=0;await expect(withModelRequestCapture(capture,()=>execute({}, {...context("model"),sourceCallId:"sdk-call"}))).rejects.toThrow("source unavailable");expect(events).toEqual([]);
 });

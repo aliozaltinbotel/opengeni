@@ -62,6 +62,7 @@ import {
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
 import { MODEL_ATTACHMENT_REFS_FIELD } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
+import { modelSourceInputBinding } from "../src/model-request-capture";
 
 function user(text: string): CompactionItem {
   return { type: "message", role: "user", content: text };
@@ -676,7 +677,7 @@ describe("codex-parity rebuild", () => {
     const active = [user("u1"), assistant("a1"), call("c1"), result("c1")];
     const promptInput = buildCompactionPromptInput(active);
     expect(promptInput.slice(0, -1)).toEqual(active);
-    expect(promptInput.at(-1)).toEqual({
+    expect(JSON.parse(JSON.stringify(promptInput.at(-1)))).toEqual({
       type: "message",
       role: "user",
       content: COMPACTION_PROMPT,
@@ -1459,7 +1460,8 @@ describe("extractResponseOutputText", () => {
 describe("Codex remote compaction v2 helpers", () => {
   test("appends compaction_trigger via SDK-passthrough unknown item", () => {
     const input = buildRemoteCompactionV2PromptInput([user("a"), assistant("b")]);
-    expect(input.at(-1)).toEqual({
+    expect(modelSourceInputBinding(input.at(-1))?.sourceRef.owner).toBe("native.runtime.artifact");
+    expect(JSON.parse(JSON.stringify(input.at(-1)))).toEqual({
       type: "unknown",
       providerData: { type: "compaction_trigger" },
     });

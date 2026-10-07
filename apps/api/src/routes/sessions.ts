@@ -130,6 +130,7 @@ import {
   getSessionForSubject,
   getSessionGoal,
   getLatestSessionModelContext,
+  readModelCallSourceReceipt,
   getSessionHumanInputRequest,
   getSessionGoalWithContinuation,
   getSessionGoalRevision,
@@ -289,7 +290,8 @@ import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
   retryFailedSession,
-  createSessionForRequest,
+  createSessionForRequestWithOutcome,
+  type CreateSessionRequestOutcome,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
   getActorNewSessionDraft,
@@ -601,7 +603,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         422,
       );
     }
-    let session: Session;
+    let result: CreateSessionRequestOutcome;
     try {
       CreateSessionRequest.parse(payload);
       const origin = await resolveSiteSessionOrigin(
@@ -611,15 +613,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         c.req.header("x-opengeni-site-version"),
       );
       const create = () =>
-        createSessionForRequest(deps, grant, workspaceId, payload, authorization);
-      session = await (origin ? withSiteSessionOrigin(origin, create) : create());
+        createSessionForRequestWithOutcome(deps, grant, workspaceId, payload, authorization);
+      result = await (origin ? withSiteSessionOrigin(origin, create) : create());
     } catch (error) {
       return sessionCreateErrorResponse(c, error);
     }
     // Creation has committed by this point. Keep response projection outside
     // the create-rejection boundary so a post-commit policy read cannot be
     // misreported as though the session itself was rejected.
-    return c.json(await withEffectivePolicy(deps, workspaceId, grant.subjectId, session), 202);
+    return c.json(
+      {
+        ...(await withEffectivePolicy(deps, workspaceId, grant.subjectId, result.session)),
+        freshCreated: result.outcome === "created",
+      },
+      202,
+    );
   });
 
   app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
@@ -1051,6 +1059,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...(activity.get(sessionId) ? { backgroundCommandActivity: activity.get(sessionId) } : {}),
       }),
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-source-basis", async (c) => {
+    const workspaceId=c.req.param("workspaceId");
+    const grant=await requireAccessGrant(c,deps,workspaceId,"sessions:read");
+    const sessionId=c.req.param("sessionId");
+    const sourceKey=c.req.query("sourceKey");
+    if (!z.string().uuid().safeParse(sessionId).success || !sourceKey || sourceKey.length>256) throw new HTTPException(400,{message:"exact model call identity required"});
+    const session=await getSessionForSubject(db,workspaceId,sessionId,grant.subjectId,relatedSessionAccessFor(c));
+    if (!session) throw new HTTPException(404,{message:"session not found"});
+    return c.json(await readModelCallSourceReceipt(db,{accountId:grant.accountId,workspaceId,sessionId,sourceKey}));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
@@ -4909,6 +4928,7 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/background-commands" && verb === "GET") return "session.read";
+  if (suffix === "/model-source-basis" && verb === "GET") return "session.read";
   if (suffix === "/model-context" && verb === "GET") return "session.read";
   if (suffix === "/codex-accounts" && verb === "GET") return "session.read";
   if (/^\/background-commands\/[^/]+$/.test(suffix) && verb === "DELETE") {

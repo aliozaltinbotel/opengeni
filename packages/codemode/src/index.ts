@@ -46,17 +46,20 @@ export type AttemptToolScope = Pick<
   "accountId" | "workspaceId" | "sessionId" | "turnId" | "attemptId" | "executionGeneration"
 >;
 
-export type AttemptToolExecutionContext = {
+export type AttemptToolExecutionContext = import("@opengeni/contracts").NativeModelSourceContext & {
   operationId: string;
   caller: AttemptToolCaller;
   /** Trusted in-process SDK correlation; not operation identity or approval authority. */
   sourceCallId?: string;
+
   /** In-process transport metadata; never part of catalog identity or digest. */
   transportMeta?: Record<string, unknown> | null;
   signal?: AbortSignal;
 };
 
 export type AttemptToolDefinition = Omit<AttemptToolCatalogEntryValue, "codemodePath"> & {
+  /** Host-derived immutable retained-source identities from the actual result; never authority. */
+  modelSourceRefs?:(result:AttemptToolResultValue)=>readonly import("@opengeni/contracts").ModelSourceRef[];
   /** Optional human-readable path. Unsafe/colliding segments are normalized. */
   codemodePath?: readonly string[];
   /** In-process execution lifecycle shared by model MCP and Codemode. */
@@ -82,10 +85,11 @@ export type CreateAttemptToolEnvironmentInput = {
   confirmModelApproval?: (input: { modelName: string; subjectId: string }) => boolean;
 };
 
-export type ModelAttemptToolCall = {
+export type ModelAttemptToolCall = import("@opengeni/contracts").NativeModelSourceContext & {
   operationId?: string;
   /** Exact SDK call id supplied by the host, never inferred from arguments or metadata. */
   sourceCallId?: string;
+
   modelName: string;
   arguments: Record<string, unknown>;
   subjectId: string;

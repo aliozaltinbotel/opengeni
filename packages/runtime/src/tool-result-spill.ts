@@ -1,5 +1,12 @@
+import { createHash } from "node:crypto";
+import { recordModelToolSource } from "./model-request-capture";
 import type { AttemptToolDefinition, AttemptToolExecutionContext } from "@opengeni/codemode";
 import {
+  ModelSourceRef,
+  WorkspaceMemorySearchResponse,
+  KnowledgeEntryRecord,
+  KnowledgeEntryListResponse,
+  KnowledgeSavePreparationResponse,
   ToolResultSpilledReceipt,
   sandboxShellPath,
   type AttemptToolIdentity,
@@ -93,17 +100,42 @@ export function wrapAttemptToolExecute(
   execute: AttemptToolDefinition["execute"],
   spill?: SpillOversizedModelToolResult,
   identity?: AttemptToolIdentity,
+  sourceRefs?: (
+    result: AttemptToolResultValue,
+    context: AttemptToolExecutionContext,
+  ) => readonly import("@opengeni/contracts").ModelSourceRef[] | Promise<readonly import("@opengeni/contracts").ModelSourceRef[]>,
 ): AttemptToolDefinition["execute"] {
-  return async (args, context) =>
-    await projectAttemptToolResultForCaller(await execute(args, context), context, spill, identity);
+  return async (args,context) => {
+    const result=await execute(args,context);
+    if(context.caller.kind==="model" && context.sourceCallId) {
+      const retainedSources=(await sourceRefs?.(result,context) ?? nativeKnowledgeSources(result,identity)).map(ref=>ModelSourceRef.parse(ref));
+      await recordModelToolSource({sourceCallId:context.sourceCallId,
+        ...(context.nativeModelSourceKey?{nativeModelSourceKey:context.nativeModelSourceKey}:{}),
+        rawSourceRef:{owner:"native.tool.result",id:context.operationId,sha256:createHash("sha256").update(JSON.stringify(result)).digest("hex")},retainedSources},result);
+    }
+    return await projectAttemptToolResultForCaller(result,context,spill,identity);
+  };
 }
 
 export function wrapAttemptToolDefinitions(
   definitions: readonly AttemptToolDefinition[],
   spill?: SpillOversizedModelToolResult,
 ): AttemptToolDefinition[] {
-  return definitions.map((definition) => ({
+  return definitions.map(({ modelSourceRefs, ...definition }) => ({
     ...definition,
-    execute: wrapAttemptToolExecute(definition.execute, spill, definition.identity),
+    execute: wrapAttemptToolExecute(definition.execute, spill, definition.identity,modelSourceRefs),
   }));
+}
+
+function nativeKnowledgeSources(result:AttemptToolResultValue,identity?:AttemptToolIdentity):import("@opengeni/contracts").ModelSourceRef[] {
+  if(!identity || !["opengeni","docs"].includes(identity.serverId) || !(identity.toolName.startsWith("knowledge_") || identity.toolName==="memory_search")) return [];
+  let value:unknown=result.structuredContent;
+  if(value===undefined && result.content.length===1 && result.content[0]?.type==="text") {try{value=JSON.parse(result.content[0].text);}catch{return [];}}
+  if(identity.toolName==="memory_search") {
+    const parsed=WorkspaceMemorySearchResponse.safeParse(value);if(!parsed.success)return [];
+    return parsed.data.results.map(({memory})=>({owner:"native.memory.selection",id:memory.id,version:memory.updatedAt,sha256:createHash("sha256").update(JSON.stringify(memory)).digest("hex")}));
+  }
+  const list=KnowledgeEntryListResponse.safeParse(value);const entry=KnowledgeEntryRecord.safeParse(value);const prepared=KnowledgeSavePreparationResponse.safeParse(value);
+  const selections=list.success?list.data.entries:entry.success?[entry.data]:prepared.success?[...prepared.data.matches.published.entries,...prepared.data.matches.needs_review.entries]:[];
+  return selections.map(selection=>({owner:"native.knowledge.selection",id:selection.revision.id,version:String(selection.version),sha256:createHash("sha256").update(JSON.stringify(selection.revision)).digest("hex")}));
 }

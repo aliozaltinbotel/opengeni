@@ -487,3 +487,6 @@ export const CodemodeDispatchAck = z
   })
   .strict();
 export type CodemodeDispatchAck = z.infer<typeof CodemodeDispatchAck>;
+
+/** Native in-process correlation only; never accepted in tool arguments or transport metadata. */
+export type NativeModelSourceContext = { nativeModelSourceKey?: string };

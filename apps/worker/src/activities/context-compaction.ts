@@ -11,6 +11,9 @@ import {
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   compactionSummaryOutputTokens,
   buildSummaryItem,
+  bindModelSourceInput,
+  modelSourceInputBinding,
+  omitModelSourceInputBinding,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
   compactionThresholdTokens,
@@ -65,13 +68,15 @@ export type CompactionSummarizer = ((
 ) => Promise<string>) & {
   /** Model-visible instructions and tool schemas outside the history estimate. */
   estimatePrefixTokens?: () => number;
+  /** Last successful request on this exact callable; reset before each invocation. */
+  successfulModelSourceKey?: () => string | undefined;
 };
 
 /** Returns the opaque Codex remote compaction v2 item. */
-export type RemoteCompactionV2Requester = (
+export type RemoteCompactionV2Requester = ((
   settings: Settings,
   input: CompactionItem[],
-) => Promise<CompactionItem>;
+) => Promise<CompactionItem>) & { successfulModelSourceKey?: () => string | undefined };
 
 export async function maybeCompactContext(
   db: Database,
@@ -175,13 +180,21 @@ export async function maybeCompactContext(
     };
   }
 
-  const canonicalItems = projectRejectedProviderArtifacts(active) as CompactionItem[];
+  for(const row of active) if(row.sourceSha256) bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256},parents:[],retainedSources:[]});
+  const sourceIdsByItem = new Map<CompactionItem,string>();
+  const canonicalItems = active.flatMap(row=>{
+    const projected=projectRejectedProviderArtifacts([row]) as CompactionItem[];
+    for(const item of projected) sourceIdsByItem.set(item,row.id);
+    return projected;
+  });
   const projectForWire = async (input: CompactionItem[]): Promise<CompactionItem[]> => {
     const materialized = options.materializeHistory
       ? await options.materializeHistory(input)
       : input;
+    const projected=options.projectModelInput ? await options.projectModelInput(materialized) : materialized;
+    for(const item of projected) {const binding=modelSourceInputBinding(item);if(binding?.sourceRef.owner==="session_history_items")sourceIdsByItem.set(item,binding.sourceRef.id);}
     return sanitizeHistoryItemsForModel(
-      options.projectModelInput ? await options.projectModelInput(materialized) : materialized,
+      projected,
       settings.modelToolOutputTruncationTokens,
     ) as CompactionItem[];
   };
@@ -232,6 +245,7 @@ export async function maybeCompactContext(
       decision,
       options,
       projectForWire,
+      sourceIdsByItem,
     );
     return prependCompactionEvents(started.events, outcome);
   }
@@ -246,6 +260,7 @@ export async function maybeCompactContext(
     summarize,
     options,
     projectForWire,
+    sourceIdsByItem,
   );
   return prependCompactionEvents(started.events, outcome);
 }
@@ -356,6 +371,7 @@ async function compactContextRemoteV2(
     requestRemoteCompactionV2?: RemoteCompactionV2Requester;
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
+  sourceIdsByItem: ReadonlyMap<CompactionItem,string>,
 ): Promise<MaybeCompactResult> {
   if (!options.requestRemoteCompactionV2) {
     throw new EmptyCompactionSummaryError({
@@ -370,6 +386,7 @@ async function compactContextRemoteV2(
   let providerCalls = 1;
   let rewrittenToolOutputs = 0;
   let compactionItem: CompactionItem;
+  let successfulInput=items;
   try {
     compactionItem = await options.requestRemoteCompactionV2(settings, items);
   } catch (error) {
@@ -378,7 +395,8 @@ async function compactContextRemoteV2(
     if (retry.rewrittenToolOutputs === 0) throw error;
     providerCalls = 2;
     rewrittenToolOutputs = retry.rewrittenToolOutputs;
-    compactionItem = await options.requestRemoteCompactionV2(settings, retry.input);
+    successfulInput=retry.input;
+    compactionItem = await options.requestRemoteCompactionV2(settings, successfulInput);
   }
   const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
   const replacementHistory = buildRemoteV2ReplacementHistory(
@@ -398,6 +416,7 @@ async function compactContextRemoteV2(
       reason: "no_replacement_history",
     });
   }
+  const summaryModelSourceKey = options.requestRemoteCompactionV2.successfulModelSourceKey?.();
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
@@ -405,11 +424,16 @@ async function compactContextRemoteV2(
     turnId: scope.turnId,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
-    replacementItems: replacementHistory.slice(0, summaryIndex),
+    replacementItems: replacementHistory.slice(0, summaryIndex).map(omitModelSourceInputBinding),
     ...(replacementHistory.length > summaryIndex + 1
-      ? { trailingItems: replacementHistory.slice(summaryIndex + 1) }
+      ? { trailingItems: replacementHistory.slice(summaryIndex + 1).map(omitModelSourceInputBinding) }
       : {}),
-    summaryItem: tailItem as Record<string, unknown>,
+    summaryItem: omitModelSourceInputBinding(tailItem),
+    ...(summaryModelSourceKey === undefined ? {} : { summaryModelSourceKey }),
+    ...(successfulInput.every(item=>modelSourceInputBinding(item)?.sourceRef.owner==="session_history_items")
+      ? {summarySourceIds:successfulInput.map(item=>modelSourceInputBinding(item)!.sourceRef.id)} : {}),
+    replacementSourceIds:replacementHistory.slice(0,summaryIndex).map(item=>sourceIdsByItem.get(item) ?? null),
+    trailingSourceIds:replacementHistory.slice(summaryIndex+1).map(item=>sourceIdsByItem.get(item) ?? null),
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
@@ -458,6 +482,7 @@ async function compactContextPortable(
     trigger?: "auto" | "operator" | "proactive" | "overflow";
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
+  sourceIdsByItem: ReadonlyMap<CompactionItem,string>,
 ): Promise<MaybeCompactResult> {
   const estimatedTokensBefore = estimateTokens(items);
   const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
@@ -497,6 +522,7 @@ async function compactContextPortable(
   if (estimatedTokensAfter >= estimatedTokensBefore) {
     return await settleSkippedAfterStart(db, scope, options, "replacement_not_smaller");
   }
+  const summaryModelSourceKey = summarize.successfulModelSourceKey?.();
   const applied = await applyContextCompaction(db, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
@@ -504,11 +530,16 @@ async function compactContextPortable(
     turnId: scope.turnId,
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
-    replacementItems: replacementHistory.slice(0, summaryIndex),
+    replacementItems: replacementHistory.slice(0, summaryIndex).map(omitModelSourceInputBinding),
     ...(replacementHistory.length > summaryIndex + 1
-      ? { trailingItems: replacementHistory.slice(summaryIndex + 1) }
+      ? { trailingItems: replacementHistory.slice(summaryIndex + 1).map(omitModelSourceInputBinding) }
       : {}),
-    summaryItem: summaryItem as Record<string, unknown>,
+    summaryItem: omitModelSourceInputBinding(summaryItem),
+    ...(summaryModelSourceKey === undefined ? {} : { summaryModelSourceKey }),
+    ...(summarized.preparation.sourceItems.every(item=>sourceIdsByItem.has(item))
+      ? {summarySourceIds:summarized.preparation.sourceItems.map(item=>sourceIdsByItem.get(item)!)} : {}),
+    replacementSourceIds:replacementHistory.slice(0,summaryIndex).map(item=>sourceIdsByItem.get(item) ?? null),
+    trailingSourceIds:replacementHistory.slice(summaryIndex+1).map(item=>sourceIdsByItem.get(item) ?? null),
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",

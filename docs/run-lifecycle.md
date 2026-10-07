@@ -3178,6 +3178,20 @@ When a Responses terminal omits its output array, completed stream items are
 reassembled by numeric `output_index`; sparse provider positions are compacted
 to the observed items rather than treated as missing output, while duplicate
 indices still fail closed.
+Each native request first commits its exact source receipt. A configured host
+`activityDependencies.authorizeModelCallSource` callback is then awaited by the
+shared worker producer for agent inference, every compaction mode and title
+sidecars. The producer's `beforeProviderDispatch(sourceKey)` rechecks that exact
+stored receipt at every literal fetch, including internal SDK HTTP retries;
+request scopes cannot borrow another call's source key. Receipt persistence or
+host refusal prevents provider I/O; cancellation
+ends a held admission and a late success cannot resume dispatch. The host owns
+its timeout, current source authorization and fail-closed composition. Native
+receipt completeness describes provenance coverage and grants no permission.
+The source key survives local MCP transport as trusted execution metadata, and
+local `modelSourceRefs(toolName, result, context)` completes before raw result
+source emission or projection. Source callbacks are omitted from catalog data.
+
 For generic providers, an attempt-local async context then awaits the durable
 `started` checkpoint at the literal pre-fetch boundary; request bytes cannot
 reach the wire first. Model-preparation `started` is durable before
@@ -3251,3 +3265,28 @@ Accepted private session uploads additionally use session-specific read grants,
 including for service continuations. Realtime and ordinary human admission share
 that transaction boundary. Original owner and provider ACLs remain separate;
 see [Session attachments](session-attachments.md).
+
+## Exact model-call source basis
+
+The existing worker call owner allocates a fresh native `sourceKey` for each
+agent, compaction and title request. It awaits the attempt-fenced PostgreSQL
+receipt before invoking a provider; persistence failure prevents invocation.
+The transaction contains no provider or host lookup. Observed response/tool IDs
+are associated through that exact request owner, while SDK tool `sourceCallId`
+remains a separate identity. Nested codemode cannot borrow an outer request key.
+
+Producer bindings accompany ordered history before projection. Copy and
+compaction persist parent rows in the existing atomic writers; SDK imports
+without resolvable exact native ancestry remain incomplete. Tool-result source
+metadata is retained before model projection/spill and first enters the next
+call's receipt. A previous complete receipt cannot prove a newly retrieved
+source. Existing historical model facts keep their original key and nullable
+receipt link; no historical basis is backfilled or inferred from headings.
+
+SDK continuations may clone native output objects. Capture the genuine model
+output and each tool's final `toSmartString` projection at its invocation owner,
+then restore internal symbol bindings only for those exact same-scope bytes and
+call identities. Authenticate transient ancestry against the exact prior complete
+AGENT receipt in the same tenant, session, turn, attempt and generation. Keep the
+raw tool-result digest distinct from the projected input digest; native bindings
+never become model-visible metadata or a separate ledger.

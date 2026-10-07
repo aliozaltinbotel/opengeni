@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { normalizeProtocolJsonValue, sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+import { normalizeProtocolJsonValue, omitModelSourceInputBinding, sanitizeHistoryItemsForModel } from "@opengeni/runtime";
 
 /** A position is an append cursor only while the items before it stay identical. */
 export class HistoryPrefixGuard {
@@ -32,7 +32,7 @@ export class HistoryPrefixGuard {
   private keys(items: Array<Record<string, unknown>>, truncationTokens?: number): string[] {
     return sanitizeHistoryItemsForModel(items, truncationTokens).map((item) =>
       createHash("sha256")
-        .update(JSON.stringify(sorted(normalizeProtocolJsonValue(item))))
+        .update(JSON.stringify(sorted(normalizeProtocolJsonValue(omitModelSourceInputBinding(item)))))
         .digest("hex"),
     );
   }

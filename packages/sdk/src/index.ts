@@ -1324,3 +1324,5 @@ export type {
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
 } from "./types";
+
+export type { ModelCallSourceReceipt, ModelCallSourceBasisResponse, ModelSourceRef, ModelSourceInput, ImportedMessageOrigin } from "@opengeni/contracts";

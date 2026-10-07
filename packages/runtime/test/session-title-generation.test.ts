@@ -285,3 +285,11 @@ describe("session title generation", () => {
     }
   });
 });
+
+for(const api of ["responses","chat"] as const) test(`title ${api} source receipt is awaited and failure prevents dispatch`,async()=>{
+ const events:string[]=[];const upstream=providerServer(()=>{events.push("dispatch");return api==="chat"?chatCompletion("Synthetic title","stop"):Response.json({id:"title-response",status:"completed",output:[{type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:"Synthetic title"}]}]});});
+ const settings=testSettings({sandboxBackend:"none"});const selected=provider(upstream.baseUrl,{api});const client=buildProviderClient(selected,settings);
+ const options={client,provider:selected,modelName:"synthetic-title",beforeModelCallSourceReceipt:async(request:import("@openai/agents").ModelRequest)=>{events.push("persist");expect(request.input).toBe("Synthetic request");expect(request.systemInstructions).toBe(SESSION_TITLE_GENERATION_INSTRUCTIONS);await Promise.resolve();return "native-title-source";}};
+ const result=await generateSessionTitle(settings,"Synthetic request",options);expect(result.sourceKey).toBe("native-title-source");expect(events).toEqual(["persist","dispatch"]);
+ await expect(generateSessionTitle(settings,"Synthetic request",{...options,beforeModelCallSourceReceipt:async()=>{throw Error("receipt unavailable");}})).rejects.toThrow("receipt unavailable");expect(upstream.requests).toHaveLength(1);
+});

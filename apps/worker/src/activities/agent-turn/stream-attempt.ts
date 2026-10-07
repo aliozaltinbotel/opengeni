@@ -226,6 +226,7 @@ export type TurnStreamAttemptDeps = {
   claimedModelUsageSourceKeys: Set<string>;
   emittedModelUsageSourceKeys: Set<string>;
   modelUsageDispatchId: string;
+  beforeModelCallSourceReceipt: ((request: import("@openai/agents").ModelRequest, purpose?: "AGENT" | "COMPACTION" | "TITLE") => Promise<string>) & Pick<import("@opengeni/runtime").BeforeModelCallSourceReceipt, "beforeProviderDispatch">;
   workerPreparationStartedAt: number;
   fileDownloadsMaterializedForRun: boolean;
   unavailableSandboxFilesNote: string | undefined;
@@ -329,6 +330,7 @@ export async function runTurnStreamAttempt(
     claimedModelUsageSourceKeys,
     emittedModelUsageSourceKeys,
     modelUsageDispatchId,
+    beforeModelCallSourceReceipt,
     workerPreparationStartedAt,
     fileDownloadsMaterializedForRun,
     unavailableSandboxFilesNote,
@@ -387,6 +389,7 @@ export async function runTurnStreamAttempt(
     if (generated.usage) {
       await processSessionTitleModelUsageEvent({
         usage: generated.usage,
+        ...(generated.sourceKey?{nativeSourceKey:generated.sourceKey}:{}),
         state: sessionTitleUsageState,
         dispatchId: modelUsageDispatchId,
         settings,
@@ -581,6 +584,9 @@ export async function runTurnStreamAttempt(
   // calling runStreamAttempt again; resetting this state there would reuse
   // the first no-response-ID fallback key and suppress a real model call.
   const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
+
+  const sourceKeysByResponseId=new Map<string,string>();
+  const sourceKeysByResponse=new WeakMap<object,string>();
   // Text of the newest assistant message any stream of this activity completed
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
@@ -821,6 +827,16 @@ export async function runTurnStreamAttempt(
           signal: runtimeCancellationSignal,
           ...(turnRouteWatch ? { callModelInputFilter: turnRouteWatch.filter } : {}),
           sandboxEnvironment,
+          beforeModelCallSourceReceipt: Object.assign(async (request: import("@openai/agents").ModelRequest) => {
+            await checkpointBeforeProviderDispatch();
+            return await beforeModelCallSourceReceipt(request,"AGENT");
+          }, beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
+          onModelToolSource:async source=>historySink.recordModelToolSource(source),
+          onModelCallSourceCompleted: (sourceKey,responseId,response) => {
+            sourceKeysByResponse.set(response,sourceKey);
+            if (responseId) sourceKeysByResponseId.set(responseId,sourceKey);
+
+          },
           onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
               accountId: input.accountId,
@@ -1036,6 +1052,13 @@ export async function runTurnStreamAttempt(
           processModelResponseTerminalEvent({
             event: next.value,
             state: modelResponseState,
+            nativeSourceKey: (responseId,event)=>{
+              if(responseId) return sourceKeysByResponseId.get(responseId);
+              if(event.type!=="raw_model_stream_event") return undefined;
+              const data=event.data as Record<string,unknown>;
+              const response=data.type==="response_done"?data.response:(data.event as Record<string,unknown>|undefined)?.response;
+              return response && typeof response==="object" ? sourceKeysByResponse.get(response) : undefined;
+            },
             dispatchId: modelUsageDispatchId,
             settings,
             db,
@@ -1887,12 +1910,12 @@ export async function runTurnStreamAttempt(
           runtime.generateSessionTitle!(
             runSettings,
             sessionTitlePrompt,
-            sessionTitleGenerationOptions({
+            {...sessionTitleGenerationOptions({
               resolvedModel,
               modelName: turnExecutionPolicy.upstreamModelId,
               serviceTier,
               signal,
-            }),
+            }),beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {})},
           ),
         ),
       onError: (error) => {

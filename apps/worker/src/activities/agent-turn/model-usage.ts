@@ -188,6 +188,7 @@ export function assertModelResponseLatencyMode(input: {
 export async function processModelResponseTerminalEvent(input: {
   event: Parameters<typeof modelTerminalResponseFromSdkEvent>[0];
   state: ModelResponseEventState;
+  nativeSourceKey?: (responseId:string|null,event:Parameters<typeof modelTerminalResponseFromSdkEvent>[0])=>string|undefined;
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -230,7 +231,9 @@ export async function processModelResponseTerminalEvent(input: {
   }
 
   const responseOrdinal = input.state.responseCount + 1;
-  const sourceKey = modelUsageSourceKey({
+  const nativeSourceKey=input.nativeSourceKey?.(terminal.responseId ?? null,input.event);
+  if(input.nativeSourceKey && !nativeSourceKey) throw new Error("MODEL_SOURCE_RESPONSE_UNBOUND");
+  const sourceKey = nativeSourceKey ?? modelUsageSourceKey({
     responseId: terminal.responseId,
     dispatchId: input.dispatchId,
     positionalKey: `response-${responseOrdinal}`,
@@ -352,6 +355,7 @@ export async function processModelResponseTerminalEvent(input: {
  */
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage;
+  nativeSourceKey?:string;
   state: CompactionModelUsageEventState;
   sourceKind?: "compaction" | "session-title";
   dispatchId: string | null;
@@ -382,7 +386,7 @@ export async function processCompactionModelUsageEvent(input: {
   | { status: "processed"; sourceKey: string; authoritative: boolean }
 > {
   const usageOrdinal = input.state.usageCount + 1;
-  const sourceKey = modelUsageSourceKey({
+  const sourceKey = input.nativeSourceKey ?? modelUsageSourceKey({
     responseId: input.usage.responseId,
     dispatchId: input.dispatchId,
     positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,

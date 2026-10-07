@@ -1,3 +1,20 @@
+import { validatedStoredModelCallSourceReceipt, importedHistorySourceBasisTx, persistModelCallSourceReceiptWithFence, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
+import { validateRetainedModelSourcesWithFence, type RetainedModelSourceValidationInput, type RetainedModelSourceValidation } from "./model-retained-source-validation";
+export type { RetainedModelSourceValidation, RetainedModelSourceValidationInput, RetainedModelSourceStatus } from "./model-retained-source-validation";
+/** Facts about exact retained native sources; host authority is checked separately for every request. */
+export async function validateRetainedModelSources(db: Database, input: RetainedModelSourceValidationInput): Promise<RetainedModelSourceValidation> {
+  return validateRetainedModelSourcesWithFence(db, input, async (tx, identity) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, identity);
+    return fence.allowed && fence.session.accountId === identity.accountId;
+  });
+}
+export { readModelCallSourceReceipt, modelSourceContentDigest, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
+export async function persistModelCallSourceReceipt(db:Database,identity:ModelCallSourceIdentity,request:NativeModelSourceRequest) {
+ return persistModelCallSourceReceiptWithFence(db,identity,request,async tx=>{
+  const fence=await lockTurnAttemptWriteFenceTx(tx,identity);
+  if(!fence.allowed || fence.session.accountId!==identity.accountId) throw new Error("MODEL_CALL_SOURCE_RECEIPT_ATTEMPT_NOT_CURRENT");
+ });
+}
 import { currentSessionAttachmentReadAccess } from "./database";
 import { readSessionFileAttachments } from "./session-file-attachments";
 export {
@@ -5246,6 +5263,8 @@ export async function recordModelCallFact(
           })
         : null;
       const occurredAt = input.occurredAt ?? new Date();
+      const [sourceReceipt] = await scopedDb.select({id:schema.modelCallSourceReceipts.id}).from(schema.modelCallSourceReceipts)
+        .where(and(eq(schema.modelCallSourceReceipts.accountId,input.accountId),eq(schema.modelCallSourceReceipts.workspaceId,input.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,input.sessionId),eq(schema.modelCallSourceReceipts.turnId,input.turnId),eq(schema.modelCallSourceReceipts.sourceKey,input.sourceKey))).limit(1);
       const [row] = await scopedDb
         .insert(schema.modelCallFacts)
         .values({
@@ -5255,6 +5274,7 @@ export async function recordModelCallFact(
           turnId: input.turnId,
           turnAttemptId: input.turnAttemptId ?? null,
           sourceKey: input.sourceKey,
+          sourceReceiptId: sourceReceipt?.id ?? null,
           provider: input.provider,
           providerApi: input.providerApi,
           model: input.model,
@@ -42355,7 +42375,7 @@ export async function appendSessionHistoryItems(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     modelToolOutputTruncationTokens?: number;
-    items: Array<{ position: number; item: Record<string, unknown> }>;
+    items: Array<{ position: number; item: Record<string, unknown>;sourceBasis?:import("@opengeni/contracts").ModelHistorySourceBasis }>;
   },
 ): Promise<boolean> {
   if (input.items.length === 0) {
@@ -42377,12 +42397,14 @@ export async function appendSessionHistoryItems(
         // Canonicalize once: insertion and exact readback compare the same values.
         const expected = input.items.map((entry) => ({
           position: entry.position,
+          ...(entry.sourceBasis?{sourceBasis:entry.sourceBasis}:{}),
           // This is the canonical model-memory boundary. The pending-call
           // ledger and audit event retain their separate raw/preview forms.
           item: canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
         }));
         const savedFields = {
           position: schema.sessionHistoryItems.position,
+          sourceBasis:schema.sessionHistoryItems.sourceBasis,
           turnId: schema.sessionHistoryItems.turnId,
           // The schema reads ordered JSON, not the legacy JSONB projection.
           item: schema.sessionHistoryItems.item,
@@ -42399,6 +42421,7 @@ export async function appendSessionHistoryItems(
                 turnId: input.turnId,
                 position: entry.position,
                 item: entry.item,
+                ...(entry.sourceBasis?{sourceBasis:entry.sourceBasis}:{}),
               })),
               "item",
               "itemCodecVersion",
@@ -42442,7 +42465,8 @@ export async function appendSessionHistoryItems(
           if (
             !row ||
             row.turnId !== input.turnId ||
-            !isDeepStrictEqual(fromPostgresLosslessJson(row.item, row.itemCodecVersion), entry.item)
+            !isDeepStrictEqual(fromPostgresLosslessJson(row.item, row.itemCodecVersion), entry.item) ||
+            (entry.sourceBasis!==undefined && !isDeepStrictEqual(row.sourceBasis,entry.sourceBasis))
           ) {
             throw new Error(
               `Conversation history persistence conflict at position ${entry.position}`,
@@ -43079,6 +43103,7 @@ export async function getActiveSessionHistoryItems(
 ): Promise<
   Array<{
     id: string;
+    sourceSha256?:string;
     position: number;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt: Date | null;
@@ -43088,6 +43113,7 @@ export async function getActiveSessionHistoryItems(
     const rows = await scopedDb
       .select({
         id: schema.sessionHistoryItems.id,
+            sourceSha256:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
         itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
@@ -43178,6 +43204,7 @@ export async function getActiveSessionHistoryItemsPaged(
 ): Promise<
   Array<{
     id: string;
+    sourceSha256?:string;
     position: number;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt: Date | null;
@@ -43322,6 +43349,7 @@ export async function getActiveSessionHistoryItemsPaged(
 
       const rows: Array<{
         id: string;
+        sourceSha256?:string;
         position: number;
         item: Record<string, unknown>;
         providerArtifactInvalidatedAt: Date | null;
@@ -43330,6 +43358,7 @@ export async function getActiveSessionHistoryItemsPaged(
       for (;;) {
         const page: Array<{
           id: string;
+          sourceSha256?:string;
           position: number;
           item: Record<string, unknown>;
           itemCodecVersion: number | null;
@@ -43337,6 +43366,7 @@ export async function getActiveSessionHistoryItemsPaged(
         }> = await scopedDb
           .select({
             id: schema.sessionHistoryItems.id,
+            sourceSha256:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
             position: schema.sessionHistoryItems.position,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
@@ -43552,6 +43582,12 @@ export async function applyContextCompaction(
     expectedAttemptId: string;
     replacementItems: Array<Record<string, unknown>>;
     summaryItem: Record<string, unknown>;
+    /** Exact source row IDs from the successful summary preparation; absent is unknown. */
+    summarySourceIds?: readonly string[];
+    /** Exact successful COMPACTION request key from the installed call owner; never latest-per-attempt. */
+    summaryModelSourceKey?: string;
+    replacementSourceIds?: readonly (string|null)[];
+    trailingSourceIds?: readonly (string|null)[];
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
@@ -43572,6 +43608,25 @@ export async function applyContextCompaction(
         if (!fence.allowed) {
           return { applied: false as const, reason: fence.reason };
         }
+        const sourceRows = await tx.select({id:schema.sessionHistoryItems.id,item:schema.sessionHistoryItems.item,
+          sha256:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
+          .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,input.accountId),eq(schema.sessionHistoryItems.workspaceId,input.workspaceId),eq(schema.sessionHistoryItems.sessionId,input.sessionId),eq(schema.sessionHistoryItems.active,true))).orderBy(schema.sessionHistoryItems.position);
+        const sourceRef = (row:typeof sourceRows[number]) => ({owner:"session_history_items",id:row.id,sha256:row.sha256});
+        const summaryParents = input.summarySourceIds?.map(id=>sourceRows.find(row=>row.id===id)).filter((row):row is typeof sourceRows[number]=>row!==undefined) ?? [];
+        if(input.summarySourceIds && summaryParents.length!==input.summarySourceIds.length) throw new Error("COMPACTION_SOURCE_ROW_UNAVAILABLE");
+        let summaryCallParent:{owner:string;id:string;sha256:string}|undefined;
+        if(input.summaryModelSourceKey!==undefined) {
+          const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,input.accountId),eq(schema.modelCallSourceReceipts.workspaceId,input.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,input.sessionId),eq(schema.modelCallSourceReceipts.turnId,input.turnId),eq(schema.modelCallSourceReceipts.attemptId,input.expectedAttemptId),eq(schema.modelCallSourceReceipts.executionGeneration,input.expectedExecutionGeneration),eq(schema.modelCallSourceReceipts.sourceKey,input.summaryModelSourceKey))).limit(1);
+          if(!stored)throw new Error("COMPACTION_SOURCE_RECEIPT_UNAVAILABLE");
+          const receipt=validatedStoredModelCallSourceReceipt(stored);
+          if(receipt.id!==stored.id || receipt.purpose!=="COMPACTION" || receipt.sourceKey!==input.summaryModelSourceKey || receipt.accountId!==input.accountId || receipt.workspaceId!==input.workspaceId || receipt.sessionId!==input.sessionId || receipt.turnId!==input.turnId || receipt.attemptId!==input.expectedAttemptId || receipt.executionGeneration!==input.expectedExecutionGeneration)throw new Error("COMPACTION_SOURCE_RECEIPT_MISMATCH");
+          summaryCallParent={owner:"model_call_source_receipts",id:receipt.id,sha256:receipt.digest};
+        }
+        const copiedBasis = (sourceId:string|null|undefined) => {
+          const source=sourceRows.find(row=>row.id===sourceId);
+          if(sourceId && !source) throw new Error("COMPACTION_SOURCE_ROW_UNAVAILABLE");
+          return {kind:"COPIED" as const,parents:source?[sourceRef(source)]:[]};
+        };
         const [{ maxPosition } = { maxPosition: -1 }] = await tx
           .select({
             maxPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1)`,
@@ -43604,6 +43659,7 @@ export async function applyContextCompaction(
                 turnId: null,
                 position: supersededFrom + index,
                 item: omitOutputOnlyHistoryItemFields(item),
+                sourceBasis: copiedBasis(input.replacementSourceIds?.[index]),
                 active: true,
               })),
               "item",
@@ -43621,6 +43677,7 @@ export async function applyContextCompaction(
               turnId: input.turnId,
               position: summaryPosition,
               item: omitOutputOnlyHistoryItemFields(input.summaryItem),
+              sourceBasis:{kind:"SUMMARY",parents:[...summaryParents.map(sourceRef),...(summaryCallParent?[summaryCallParent]:[])]},
               active: true,
             },
             "item",
@@ -43637,6 +43694,7 @@ export async function applyContextCompaction(
                 turnId: null,
                 position: summaryPosition + 1 + index,
                 item: omitOutputOnlyHistoryItemFields(item),
+                sourceBasis: copiedBasis(input.trailingSourceIds?.[index]),
                 active: true,
               })),
               "item",
@@ -72819,6 +72877,7 @@ export async function claimSessionWorkForAttempt(
               eq(schema.sessionHistoryItems.sessionId, sessionId),
             ),
           );
+        const importedSourceBasis=await importedHistorySourceBasisTx(tx,{accountId:session.accountId,workspaceId,context:row.modelContext,metadata:session.metadata});
         await tx.insert(schema.sessionHistoryItems).values(
           withLosslessContentWriteVersion(
             {
@@ -72827,6 +72886,7 @@ export async function claimSessionWorkForAttempt(
               sessionId,
               turnId: row.id,
               position: Number(historyPosition),
+              ...(importedSourceBasis?{sourceBasis:importedSourceBasis}:{}),
               item: omitOutputOnlyHistoryItemFields(
                 durableUserHistoryItem(
                   fromPostgresLosslessText(row.prompt, row.promptCodecVersion),

@@ -4,6 +4,7 @@ import { SandboxAgent } from "@openai/agents/sandbox";
 import OpenAI from "openai";
 import { ScriptedModel, testSettings } from "@opengeni/testing";
 import {
+  bindModelSourceInput,modelSourceBindings,buildCompactionPromptInput,
   buildOpenGeniAgent,
   CompactionNeededError,
   findCompactionNeededError,
@@ -242,3 +243,12 @@ for (const queued of [false, true]) {
     expect(() => preparedCompactionRequest({})).toThrow("prepared model request");
   });
 }
+
+for(const remote of [false,true]) test(`compaction source receipt precedes provider and preserves exact prepared owners (remote=${remote})`,async()=>{
+ const events:string[]=[];const row=bindModelSourceInput({type:"message",role:"user",content:"Synthetic history"},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",sha256:"a".repeat(64)},parents:[],retainedSources:[]});
+ const client={responses:{create:async()=>{events.push("dispatch");return remote?{id:"compact",status:"completed",output:[{type:"compaction",encrypted_content:"opaque"}]}:{id:"summary",output:[{type:"message",role:"assistant",status:"completed",content:[{type:"output_text",text:"Synthetic summary"}]}]};}}} as unknown as OpenAI;
+ const preparedRequest={systemInstructions:"Synthetic instruction",tools:[],handoffs:[],modelSettings:{},outputType:"text" as const,tracing:false};
+ const beforeModelCallSourceReceipt=async(request:ModelRequest)=>{events.push("persist");expect(modelSourceBindings(request.input)).toHaveLength(2);await Promise.resolve();return "native-compaction-source";};
+ const call=(hook:typeof beforeModelCallSourceReceipt)=>remote?requestRemoteCompactionV2(testSettings(),[row],{client,model:"synthetic",preparedRequest,beforeModelCallSourceReceipt:hook}):summarizeForCompaction(testSettings(),buildCompactionPromptInput([row]),{client,api:"responses",model:"synthetic",beforeModelCallSourceReceipt:hook});
+ await call(beforeModelCallSourceReceipt);expect(events).toEqual(["persist","dispatch"]);await expect(call(async()=>{throw Error("receipt unavailable");})).rejects.toThrow("receipt unavailable");expect(events.filter(event=>event==="dispatch")).toHaveLength(1);
+});

@@ -27,7 +27,7 @@ import {
 import { isModelCallFetch, vercelGatewayRoutingFetch } from "./model-provider-transport";
 import { ReplayableJsonOpenAI } from "./replayable-json-body";
 import { recordModelTransportStarted } from "./model-preparation-diagnostics";
-import { captureProviderRequestBody } from "./model-request-capture";
+import { authorizeModelSourceProviderDispatch, captureProviderRequestBody } from "./model-request-capture";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import { observeClaudeUsageResponse } from "./claude-subscription-usage";
 
@@ -402,6 +402,7 @@ export function instrumentedModelFetch(provider: string, inner: typeof fetch): t
     }
     // The attempt-local observer durably checkpoints provider dispatch before
     // this process can place request bytes on the network.
+    await authorizeModelSourceProviderDispatch();
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
     const started = performance.now();

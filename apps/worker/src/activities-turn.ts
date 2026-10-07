@@ -20,6 +20,9 @@ function createTurnActivityServices(
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(services.observability),
           }),
+        ...(dependencies.authorizeModelCallSource
+          ? { authorizeModelCallSource: dependencies.authorizeModelCallSource }
+          : {}),
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
       };
