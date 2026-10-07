@@ -4037,6 +4037,13 @@ export function sandboxRunAs(_settings: Settings): string | undefined {
 }
 
 export type PreparedAgentTools = {
+  /**
+   * Optional host-owned Skill index for this exact attempt. The worker freezes
+   * this catalog before model history is read; [] explicitly admits no Skills.
+   * The host must supply its correspondingly authorized reader through tools.
+   * A different already-frozen turn catalog is refused rather than widened.
+   */
+  skillCatalog?: readonly SkillCatalogDescriptor[];
   /** Shared by eager/deferred MCP, Codemode, and this attempt's Agent. */
   inputWaitYield?: InputWaitYield;
   mcpServers: MCPServer[];

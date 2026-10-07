@@ -40,9 +40,15 @@ Alternatively, a host that owns its catalog and reader supplies `skillCatalog`
 and its authorized `skill_read` through the tool gateway, as the stock worker
 does. An explicit catalog, including `[]`, prevents implicit runtime bundles or
 a duplicate reader. Do not combine that host-owned mode with `skillActivations`.
-The descriptor layer is rendered when the agent is constructed, not appended as
-a history message or rewritten by lazy tool discovery. See
-[turn-attempt catalog timing](run-lifecycle.md).
+Direct runtime construction renders the descriptor layer into agent instructions.
+The stock worker instead freezes it in durable turn history before constructing
+the agent. An embedded worker's `runtime.prepareTools` may return an explicit
+`PreparedAgentTools.skillCatalog`, including `[]`, to replace the native workspace
+catalog before that freeze. The host supplies its matching authorized reader in
+the prepared tools; the catalog itself grants no read or write authority. A retry
+whose durable snapshot differs from the explicit host catalog fails before agent
+construction. Omitting the field preserves standalone behavior. Lazy discovery
+does not rewrite this index. See [turn-attempt catalog timing](run-lifecycle.md).
 
 The stock worker also supplies lazy management and filesystem checkout tools;
 direct runtime construction alone does not provision those workspace services.

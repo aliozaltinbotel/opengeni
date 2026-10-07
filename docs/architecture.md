@@ -27,6 +27,10 @@ verified active-turn user. Task notes coordinate; linking never merges users.
 [Skills](skills-lifecycle.md), [run lifecycle](run-lifecycle.md).
 Skill removal deletes scoped heads/revisions with exact approval and Learning
 enforcement, preserving conversation context.
+Embedded workers can supply an attempt-owned Skill catalog through
+`PreparedAgentTools.skillCatalog` before the worker freezes its durable history
+snapshot. The same prepared tools own the reader; a conflicting frozen snapshot
+is refused before agent construction. See [embedding](embedding.md).
 
 Session `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors but grant no capabilities or credentials.

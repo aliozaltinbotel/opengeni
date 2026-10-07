@@ -576,6 +576,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
+  const skillCatalog = preparedTools.skillCatalog ?? deps.skillCatalog;
+  const skillCatalogText = formatSkillCatalog(skillCatalog);
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -583,8 +585,14 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnId: turn.id,
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
-    catalog: formatSkillCatalog(deps.skillCatalog),
+    catalog: skillCatalogText,
   });
+  if (
+    preparedTools.skillCatalog !== undefined &&
+    modelVisibleSkillCatalogText !== skillCatalogText
+  ) {
+    throw new Error("Prepared Skill catalog differs from the durable turn snapshot");
+  }
   eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
   try {
     eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
@@ -757,7 +765,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               promptCacheKey: input.sessionId,
             }),
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
-        skillCatalog: deps.skillCatalog,
+        skillCatalog,
         skillCatalogInHistory: true,
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
