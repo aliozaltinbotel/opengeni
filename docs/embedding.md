@@ -46,6 +46,8 @@ the agent. An embedded worker's `runtime.prepareTools` may return an explicit
 `PreparedAgentTools.skillCatalog`, including `[]`, to replace the native workspace
 catalog before that freeze. The host supplies its matching authorized reader in
 the prepared tools; the catalog itself grants no read or write authority. A retry
+whose explicit catalog exceeds the native byte or entry bounds is refused before
+any history write; host catalogs are never shortened to fit. A retry
 whose durable snapshot differs from the explicit host catalog fails before agent
 construction. Omitting the field preserves standalone behavior. Lazy discovery
 does not rewrite this index. See [turn-attempt catalog timing](run-lifecycle.md).

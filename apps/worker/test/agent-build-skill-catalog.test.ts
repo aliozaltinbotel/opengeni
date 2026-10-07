@@ -11,6 +11,10 @@ import {
 import { ScriptedModel, testSettings } from "@opengeni/testing";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
+import {
+  SKILL_CATALOG_MAX_BYTES,
+  SKILL_CATALOG_MAX_ENTRIES,
+} from "../../../packages/runtime/src/skill-catalog";
 
 const ambient = [{ id: "ambient", name: "Ambient", description: "Another scope." }];
 const scoped = [{ id: "scoped", name: "Scoped", description: "The accepted scope." }];
@@ -141,4 +145,25 @@ test("standalone retries keep the durable catalog's model-visible identities", a
   const result = await build({ frozen: formatSkillCatalog(scoped) });
   expect(result.error).toBeUndefined();
   expect([...result.ids!]).toEqual(["scoped"]);
+});
+
+test.each([
+  {
+    override: [
+      ...scoped,
+      { id: "hidden", name: "Z", description: "x".repeat(SKILL_CATALOG_MAX_BYTES) },
+    ],
+  },
+  {
+    override: Array.from({ length: SKILL_CATALOG_MAX_ENTRIES + 1 }, (_, i) => ({
+      id: `s${i}`,
+      name: `s${i}`,
+      description: "A",
+    })),
+  },
+])("a host index exceeding a native bound fails before persistence", async ({ override }) => {
+  const result = await build({ override });
+  expect(String(result.error)).toContain("PREPARED_SKILL_CATALOG_EXCEEDS_INDEX_BOUNDS");
+  expect(result.persisted).toBeUndefined();
+  expect(result.built).toBeUndefined();
 });

@@ -578,6 +578,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const skillCatalog = preparedTools.skillCatalog ?? deps.skillCatalog;
   const skillCatalogText = formatSkillCatalog(skillCatalog);
+  if (preparedTools.skillCatalog !== undefined) {
+    const indexed = skillCatalogEntryIds(skillCatalogText);
+    if (skillCatalog.some((entry) => !indexed.has(entry.id))) {
+      throw new Error("PREPARED_SKILL_CATALOG_EXCEEDS_INDEX_BOUNDS");
+    }
+  }
   const modelVisibleSkillCatalogText = await ensureSessionSkillCatalog(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
