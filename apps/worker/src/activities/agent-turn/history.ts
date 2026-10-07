@@ -176,7 +176,9 @@ export function pendingToolCallFromSdkEvent(event: unknown): {
   if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {
     return null;
   }
-  const callItem = normalizeProtocolJsonValue(raw, '$["item"]["rawItem"]');
+  // The SDK item can retain native provenance restored for history/continuation.
+  // Pending receipts persist protocol bytes; keep the binding on the original.
+  const callItem = normalizeProtocolJsonValue(omitModelSourceInputBinding(raw), '$["item"]["rawItem"]');
   return {
     callId,
     callType,
@@ -225,7 +227,7 @@ export function completedToolCallFromSdkEvent(event: unknown): {
   if (typeof callId !== "string" || callId.length === 0) return null;
   return {
     callId,
-    resultItem: normalizeProtocolJsonValue(raw, '$["item"]["rawItem"]'),
+    resultItem: normalizeProtocolJsonValue(omitModelSourceInputBinding(raw), '$["item"]["rawItem"]'),
   };
 }
 

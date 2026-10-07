@@ -4,6 +4,10 @@ import { RunRawModelStreamEvent, ToolCallError, Usage } from "@openai/agents-cor
 import { ModalCommandStartPreDispatchUnavailableError } from "../../../packages/runtime/src/sandbox/providers/modal-command-router-wire";
 import { RoutingMutationOutcomeUnknownError } from "../../../packages/runtime/src/sandbox/routing/routing-session";
 import { ModelItem } from "@openai/agents-core/types";
+import { Agent, Runner, tool, type Model, type ModelResponse, type StreamEvent } from "@openai/agents";
+import { LazyToolModelProvider, installLazyToolRuntime, createResolveMissingFunctionTool } from "../../../packages/runtime/src/lazy-tool-transport";
+import { bindModelSourceInput, modelSourceInputBinding, withModelRequestCapture, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
+import { normalizeProtocolJsonValue } from "../../../packages/runtime/src/protocol-json";
 import {
   withWorkspaceGatewayCredential,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
@@ -596,6 +600,98 @@ describe("turn exact-content boundaries", () => {
     ]);
     expect(Object.hasOwn(hostedToolCall, "output")).toBe(true);
   });
+
+  test.each(["codex_native", "openai_native", "generic_dispatch"] as const)(
+    "%s SDK tool events persist JSON while their original history retains native ancestry",
+    async (transport) => {
+      const name = "synthetic__inspect";
+      const agent = new Agent({ name: "receipt-test", model: "scripted", instructions: "Use the inspection tool.", tools: [tool({
+        name, description: "Inspect the synthetic fixture", strict: false,
+        parameters: { type: "object", properties: {}, additionalProperties: false },
+        execute: () => "inspected",
+      })] });
+      const runtime = installLazyToolRuntime(agent, transport, new Set(["synthetic"]));
+      let calls = 0;
+      const model: Model = {
+        async getResponse() { throw new Error("streaming required"); },
+        async *getStreamedResponse() {
+          calls++;
+          const output: ModelResponse["output"] = calls === 1 ? [{
+            type: "function_call", callId: "synthetic-inspection",
+            name: transport === "generic_dispatch" ? "tool_invoke" : name,
+            arguments: transport === "generic_dispatch" ? JSON.stringify({ name, arguments: {} }) : "{}",
+          }] : [{ type: "message", role: "assistant", status: "completed",
+            content: [{ type: "output_text", text: "Inspection finished" }] }];
+          yield { type: "response_done", response: { id: `inspection-${calls}`,
+            usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 }, output } } as StreamEvent;
+        },
+      };
+      const capture: ModelRequestCapture = () => {};
+      capture.beforeCall = async () => `inspection-receipt-${calls + 1}`;
+      let restoreHistory: ((items: readonly unknown[]) => void) | undefined;
+      capture.callCompleted = (_key, _id, _response, restore) => { restoreHistory = restore; };
+      let pendingCount = 0;
+      let completedCount = 0;
+      await withModelRequestCapture(capture, async () => {
+        const result = await new Runner({ modelProvider: new LazyToolModelProvider({ getModel: () => model }, runtime) })
+          .run(agent, "Inspect the synthetic fixture", { stream: true, maxTurns: 3, historyOwnership: "external",
+            resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime) });
+        for await (const event of result.toStream()) {
+          // Production terminal reconciliation restores provenance on shared SDK history objects.
+          restoreHistory?.((result.state as unknown as { history: unknown[] }).history);
+          if (event.type === "run_item_stream_event") restoreHistory?.([event.item.rawItem]);
+          const pending = pendingToolCallFromSdkEvent(event);
+          const completed = completedToolCallFromSdkEvent(event);
+          if (pending) {
+            pendingCount++;
+            expect(normalizeProtocolJsonValue(pending.callItem)).toEqual(pending.callItem);
+            expect(Object.getOwnPropertySymbols(pending.callItem)).toHaveLength(0);
+            const raw = (event as { item: { rawItem: Record<string, unknown> } }).item.rawItem;
+            const binding = modelSourceInputBinding(raw);
+            expect(binding?.nativeProducerSourceKey).toBe("inspection-receipt-1");
+            // Receipt projection must not mutate the SDK item or erase its provenance.
+            expect(modelSourceInputBinding(raw)).toBe(binding);
+          }
+          if (completed) {
+            completedCount++;
+            expect(normalizeProtocolJsonValue(completed.resultItem)).toEqual(completed.resultItem);
+            expect(Object.getOwnPropertySymbols(completed.resultItem)).toHaveLength(0);
+          }
+        }
+        await result.completed;
+        expect(result.finalOutput).toBe("Inspection finished");
+        const history = result.history;
+        restoreHistory!(history);
+        const rows = historyRowsToAppend(history as Array<Record<string, unknown>>, 0).rows;
+        expect(rows.find(row => row.item.type === "function_call")?.nativeProducerSourceKey).toBe("inspection-receipt-1");
+        expect(rows.find(row => row.item.type === "message" && row.item.role === "assistant")?.nativeProducerSourceKey).toBe("inspection-receipt-2");
+      });
+      expect(pendingCount).toBe(1);
+      expect(completedCount).toBe(1);
+      expect(calls).toBe(2);
+    },
+  );
+
+  test.each(["tool_call_item", "tool_call_output_item"])(
+    "%s receipt projection strips only the owned top-level binding",
+    (type) => {
+      const raw = bindModelSourceInput({ type: type === "tool_call_item" ? "function_call" : "function_call_result",
+        callId: "owned-binding", name: "synthetic__inspect", arguments: "{}", output: "inspected" }, {
+        kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: "synthetic-output", sha256: "a".repeat(64) },
+        parents: [], retainedSources: [], nativeProducerSourceKey: "synthetic-receipt",
+      });
+      const project = (rawItem: object) => {
+        const event = { type: "run_item_stream_event", item: { type, rawItem } };
+        return type === "tool_call_item" ? pendingToolCallFromSdkEvent(event)?.callItem
+          : completedToolCallFromSdkEvent(event)?.resultItem;
+      };
+      expect(Object.getOwnPropertySymbols(project(raw)!)).toHaveLength(0);
+      expect(modelSourceInputBinding(raw)?.nativeProducerSourceKey).toBe("synthetic-receipt");
+      expect(() => project({ ...raw, [Symbol("foreign")]: true })).toThrow("cannot contain symbol keys");
+      expect(() => project({ ...raw, providerData: { [Symbol("foreign")]: true } })).toThrow("cannot contain symbol keys");
+      expect(() => project({ ...raw, providerData: raw })).toThrow("cannot contain symbol keys");
+    },
+  );
 
   test("normalizes pending SDK tool calls before the lossless receipt write", () => {
     const rawItem = {
