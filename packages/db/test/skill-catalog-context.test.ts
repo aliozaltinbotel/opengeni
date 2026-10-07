@@ -10,6 +10,8 @@ import {
   claimSessionWorkForAttempt,
   ensureSessionSkillCatalog,
   getActiveSessionHistoryItems,
+  getSessionTurn,
+  getSessionTurnForAttempt,
   applySessionTurnSettlement,
   applyContextCompaction,
   requestSessionCompaction,
@@ -51,7 +53,7 @@ async function fixture() {
     latencyMode: "standard",
     sandboxBackend: "none",
   });
-  async function claim(maintenance = false) {
+  async function claim(maintenance = false, modelContext?: string) {
     if (maintenance) await requestSessionCompaction(client.db, workspaceId, session.id);
     else
       await withWorkspaceSubjectSessionActivityRls(client.db, workspaceId, grant.subjectId, (db) =>
@@ -64,6 +66,7 @@ async function fixture() {
           operationKey: crypto.randomUUID(),
           delivery: "send",
           text: "work",
+          modelContext: modelContext ?? null,
           resources: [],
           reasoningEffort: "low",
           reasoningEffortFallback: "low",
@@ -103,7 +106,7 @@ async function fixture() {
   const history = () => getActiveSessionHistoryItems(client.db, workspaceId, session.id);
   const install = (turn: Awaited<ReturnType<typeof claim>>, catalog: string) =>
     ensureSessionSkillCatalog(client.db, { ...identity(turn), catalog });
-  return { claim, identity, settle, history, install };
+  return { claim, identity, settle, history, install, workspaceId, sessionId: session.id };
 }
 
 test("catalog changes append without rewriting history; unchanged turns and retries freeze the same snapshot", async () => {
@@ -156,4 +159,78 @@ test("maintenance installs a catalog without inventing user input", async () => 
   const history = await f.history();
   expect(history).toHaveLength(1);
   expect(history[0]!.item.role).toBe("developer");
+}, 180_000);
+
+test("accepted model context is exact and worker-only behind the live attempt fence", async () => {
+  const f = await fixture();
+  const other = await fixture();
+  const acceptedContext = JSON.stringify({
+    contract: "test.accepted-context/1",
+    selection: { propertyIds: [crypto.randomUUID()] },
+    note: "Tesis bağlamı\nAccepted before execution",
+  });
+  const turn = await f.claim(false, acceptedContext);
+  const workerTurn = await getSessionTurnForAttempt(
+    client.db,
+    f.workspaceId,
+    f.sessionId,
+    turn.activeAttemptId!,
+  );
+  expect(workerTurn?.id).toBe(turn.id);
+  expect(workerTurn?.modelContext).toBe(acceptedContext);
+  expect(
+    await getSessionTurnForAttempt(
+      client.db,
+      f.workspaceId,
+      f.sessionId,
+      turn.activeAttemptId!,
+    ),
+  ).toEqual(workerTurn);
+  const publicTurn = await getSessionTurn(client.db, f.workspaceId, turn.id);
+  expect(publicTurn?.id).toBe(turn.id);
+  expect(publicTurn).not.toHaveProperty("modelContext");
+  expect(
+    await getSessionTurnForAttempt(
+      client.db,
+      other.workspaceId,
+      f.sessionId,
+      turn.activeAttemptId!,
+    ),
+  ).toBeNull();
+  expect(
+    await getSessionTurnForAttempt(
+      client.db,
+      f.workspaceId,
+      other.sessionId,
+      turn.activeAttemptId!,
+    ),
+  ).toBeNull();
+  expect(
+    await getSessionTurnForAttempt(
+      client.db,
+      f.workspaceId,
+      f.sessionId,
+      crypto.randomUUID(),
+    ),
+  ).toBeNull();
+  await f.settle(turn);
+  expect(
+    await getSessionTurnForAttempt(
+      client.db,
+      f.workspaceId,
+      f.sessionId,
+      turn.activeAttemptId!,
+    ),
+  ).toBeNull();
+  const next = await f.claim();
+  expect(
+    (
+      await getSessionTurnForAttempt(
+        client.db,
+        f.workspaceId,
+        f.sessionId,
+        next.activeAttemptId!,
+      )
+    )?.modelContext,
+  ).toBeNull();
 }, 180_000);

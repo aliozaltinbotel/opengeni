@@ -6600,6 +6600,8 @@ export type EnqueueSessionTurnInput = {
 
 /** Worker-only turn projection with causal authority omitted from public APIs. */
 export type SessionTurnForExecution = SessionTurn & {
+  /** Accepted, durable model context; data for the host, never authority by itself. */
+  modelContext: string | null;
   personalConnectionDelegations: McpPersonalConnectionDelegation[];
   mcpAccountBindings: McpConnectionAccountBinding[] | null;
   /** Worker-only causal authority; never inferred from the current worker. */
@@ -84741,6 +84743,7 @@ function mapSessionTurnForExecution(
 ): SessionTurnForExecution {
   return {
     ...mapSessionTurn(row),
+    modelContext: row.modelContext ?? null,
     mcpAccountBindings: parseAcceptedMcpAccountBindings(row.mcpAccountBindings),
     initiatingHumanSubjectId: row.initiatingHumanSubjectId ?? null,
     scheduledTaskRunId: row.scheduledTaskRunId ?? null,
