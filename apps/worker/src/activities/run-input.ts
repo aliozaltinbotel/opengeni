@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import {
   getActiveSessionHistoryItemsPaged,
   getFilesForSubject,
+  getTemporaryModelImageFile,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
@@ -306,6 +307,7 @@ function attachmentRefsFromItem(item: Record<string, unknown>): FileResourceRef[
 }
 
 function attachmentReceiptText(ref: FileResourceRef): string {
+  if (ref.asImage === true) return "[Session image]";
   // The durable reference is immutable; live metadata/authority must not rewrite
   // old receipt text. Pixel delivery remains subject to current file authority.
   return (
@@ -432,6 +434,11 @@ export function createModelHistoryAttachmentProjector(
           text: attachmentReceiptText(ref),
         };
         if (!attachment || attachment.kind !== "image") {
+          if (ref.asImage === true) {
+            if (policy.supportsImageInput) throw new Error("Session image bytes are unavailable");
+            return [{ type: "input_text", text:
+              "[Image content omitted because the selected model does not support image input.]" }];
+          }
           return [receipt];
         }
         return [receipt, { type: "input_image", image: attachment.dataUrl }];
@@ -537,6 +544,7 @@ export async function turnInput(
           trigger.workspaceId,
           options.fileAuthority.subjectId,
           resources,
+          trigger.sessionId,
         ),
     );
     const attachmentContext = userMessageAttachmentsContext(fileAttachments);
@@ -762,6 +770,7 @@ async function resolveUserMessageFileAttachments(
   workspaceId: string,
   subjectId: string | null,
   resources: ResourceRef[],
+  sessionId: string,
 ): Promise<UserMessageFileAttachment[]> {
   const fileResources = resources.filter(
     (resource): resource is FileResourceRef => resource.kind === "file",
@@ -773,6 +782,11 @@ async function resolveUserMessageFileAttachments(
     subjectId,
     fileIds: fileResources.map((resource) => resource.fileId),
   });
+  for (const resource of fileResources.filter(ref => ref.asImage === true)) {
+    if (!subjectId || !(await getTemporaryModelImageFile(db, {
+      accountId, workspaceId, subjectId, sessionId, fileId: resource.fileId,
+    }))) throw new Error("Session image custody is unavailable");
+  }
   const fileById = new Map(files.map((file) => [file.id, file]));
   return fileResources.map((resource) => {
     const file = fileById.get(resource.fileId);
@@ -784,7 +798,7 @@ async function resolveUserMessageFileAttachments(
 function userMessageAttachmentsContext(
   attachments: UserMessageFileAttachment[],
 ): string | undefined {
-  const attachedFiles = attachments.map(
+  const attachedFiles = attachments.filter(({ resource }) => resource.asImage !== true).map(
     ({ resource, file }) =>
       `- ${file.filename} (${file.contentType}, ${file.sizeBytes} bytes): ${sandboxFilePath(resource, file)}`,
   );

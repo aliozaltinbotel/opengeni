@@ -842,6 +842,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       "Sandbox agent construction did not install the mandatory turn tool cancellation fence",
     );
   }
+  const outputCap = session.metadata["nativeMaxOutputTokens"];
+  if (outputCap !== undefined) {
+    if (typeof outputCap !== "number" || !Number.isSafeInteger(outputCap) || outputCap <= 0)
+      throw new Error("Invalid immutable session output bound");
+    agent.modelSettings = { ...agent.modelSettings, maxTokens: outputCap };
+  }
   return {
     agent,
     modelVisibleSkillCatalogText,

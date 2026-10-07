@@ -5015,6 +5015,8 @@ export function gitRemotePathAliases(
 
 export const FileResourceRef = z.object({
   kind: z.literal("file"),
+  /** Fetch this temporary file as model image input; only a tool-less session with memory off may admit it. */
+  asImage: z.literal(true).optional(),
   fileId: z.string().uuid(),
   mountPath: z.string().min(1).optional(),
 });
@@ -5214,6 +5216,10 @@ export const FileListResponse = z.object({
 export type FileListResponse = z.infer<typeof FileListResponse>;
 
 export const CreateFileUploadRequest = z.object({
+  /** Preallocated session whose sole creating subject owns this temporary model-image upload and cleanup. */
+  temporaryForSessionId: z.string().uuid().optional(),
+  /** Preallocated temporary input identity permits cleanup after an unknown upload response. */
+  requestedFileId: z.string().uuid().optional(),
   scope: z.enum(["workspace", "personal"]).optional(),
   filename: z.string().min(1),
   contentType: z.string().min(1),
@@ -15691,6 +15697,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       metadata: z.record(z.string(), z.unknown()).default({}),
       model: z.string().min(1).optional(),
       reasoningEffort: ReasoningEffort.optional(),
+      /** Optional output bound, carried unchanged to the routed model request. */
+      maxOutputTokens: z.number().int().positive().optional(),
       latencyMode: LatencyMode.optional(),
       sandboxBackend: SandboxBackend.optional(),
       // The enrolled machine (a sandbox id) to run this session on; seeds the

@@ -308,6 +308,18 @@ operations with metadata-only audit.
 Generated media and editable artifacts are durable workspace artifacts, not
 conversation blobs. Active image history resolves authorized references, including
 compaction input. History preserves JSON key order; JSONB serves queries.
+Opt-in `asImage` refs use that same authorized image projector. Temporary image
+uploads bind a preallocated file/session to the actual uploader in the existing
+signed-upload audit. Image-only session creation requires isolated tool-less
+scope; its validated output bound is immutable session metadata. No image bytes
+or filenames enter durable history. Text-only wires emit the canonical omission
+marker; image-capable wires fail closed on unavailable pixels. Images bypass
+sandbox materialization. The uploader's DELETE revokes reads before object
+cleanup; unsettled cleanup is recovered from audit facts, terminal turns and
+expired leases. Sources: `packages/core/src/domain/sessions.ts`,
+`apps/api/src/routes/files.ts`, `packages/db/src/index.ts`,
+`apps/worker/src/activities/run-input.ts`, and
+`apps/worker/src/activities/agent-turn/{file-resources,agent-build}.ts`.
 
 Canonical: [`run-lifecycle.md`](run-lifecycle.md),
 [`hierarchical-memory.md`](hierarchical-memory.md),

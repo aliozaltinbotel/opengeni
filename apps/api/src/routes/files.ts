@@ -27,6 +27,8 @@ import {
   completeFileUploadCleanup,
   completeFileUpload,
   createFileUpload,
+  revokeTemporaryModelImageFile,
+  listTemporaryModelImageCleanup,
   getFileUpload,
   getGeneratedImageArtifact,
   recordAuditEvent,
@@ -79,7 +81,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/artifacts/*",
   ]) {
     app.use(path, async (c, next) => {
-      const permission = c.req.path.includes("/files/uploads") ? "files:upload" : "files:read";
+      const permission = c.req.method === "DELETE" || c.req.path.includes("/files/uploads") ? "files:upload" : "files:read";
       const access = await requireAccessGrantAuthorization(
         c,
         deps,
@@ -164,6 +166,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       (fileRequestAuthority.get(c.req.raw)?.agent && privateOwner !== null);
     if (personal && !privateOwner)
       throw new HTTPException(403, { message: "Personal uploads require the authenticated owner" });
+    if (payload.temporaryForSessionId &&
+        (!grant.subjectId || !payload.requestedFileId || personal || !["image/jpeg", "image/png", "image/webp"].includes(payload.contentType) ||
+         payload.sizeBytes > 10 * 1024 * 1024 || !/^[a-f0-9]{64}$/i.test(payload.sha256 ?? "")))
+      throw new HTTPException(422, { message: "Temporary model images require workspace scope and bounded finalized metadata" });
     await requireLimit(deps, {
       accountId: grant.accountId,
       workspaceId,
@@ -175,7 +181,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: `file exceeds single PUT limit of ${objectStorage.maxSinglePutSizeBytes} bytes`,
       });
     }
-    const fileId = crypto.randomUUID();
+    if (payload.requestedFileId && !payload.temporaryForSessionId)
+      throw new HTTPException(422, { message: "Preallocated uploads require temporary session custody" });
+    const fileId = payload.requestedFileId ?? crypto.randomUUID();
     const safeFilename = sanitizeFilename(payload.filename);
     const objectKey = `workspaces/${workspaceId}/files/${fileId}/original/${safeFilename}`;
     const signed = await objectStorage.createPutUrl({
@@ -209,6 +217,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       targetId: fileId,
       metadata: {
         fileId,
+        ...(payload.temporaryForSessionId ? { temporaryForSessionId: payload.temporaryForSessionId } : {}),
         contentType: payload.contentType,
         sizeBytes: payload.sizeBytes,
         expiresAt: signed.expiresAt.toISOString(),
@@ -225,6 +234,36 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       201,
     );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/files/temporary-model-images", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    if (!grant.subjectId) throw new HTTPException(403, { message: "Temporary image owner is required" });
+    c.header("cache-control", "no-store");
+    return c.json({ items: await listTemporaryModelImageCleanup(db, {
+      accountId: grant.accountId, workspaceId, subjectId: grant.subjectId,
+    }) });
+  });
+
+  app.delete("/v1/workspaces/:workspaceId/files/:fileId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "files:upload");
+    const sessionId = c.req.query("temporaryForSessionId");
+    if (!grant.subjectId || !sessionId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sessionId))
+      throw new HTTPException(422, { message: "Temporary session binding is required" });
+    if (!objectStorage) throw new HTTPException(503, { message: "object storage is not configured" });
+    const file = await revokeTemporaryModelImageFile(db, {
+      accountId: grant.accountId, workspaceId, subjectId: grant.subjectId,
+      sessionId, fileId: c.req.param("fileId"),
+    });
+    if (!file) throw new HTTPException(404, { message: "Temporary model image not found" });
+    // Failure leaves revoked metadata and the same exact custody available for retry.
+    await objectStorage.deleteObject(file.objectKey);
+    await recordAuditEvent(db, { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId,
+      action: "file.temporary_input.purged", targetType: "workspace_file", targetId: file.id,
+      metadata: { temporaryForSessionId: sessionId } });
+    return c.body(null, 204);
   });
 
   app.post("/v1/workspaces/:workspaceId/files/uploads/:uploadId/complete", async (c) => {
