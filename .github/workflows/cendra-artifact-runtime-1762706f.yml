@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for 1762706f
+
+# Reviewed scoped skill catalog boundary; reusable workflow checks the exact source in every target.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-1762706f
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 1762706f976797318e1cd0aeaf104ccd86f3755b
