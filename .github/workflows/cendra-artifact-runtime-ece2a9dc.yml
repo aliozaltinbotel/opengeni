@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for ece2a9dc
+
+# Exact reviewed native provenance successor; reusable workflow checks every target.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-ece2a9dc
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: ece2a9dc37e89a8cc13285e5651296d6d1913073
