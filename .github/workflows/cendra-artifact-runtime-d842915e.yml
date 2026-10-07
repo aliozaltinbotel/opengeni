@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for d842915e
+
+# Exact reviewed native provenance successor; reusable workflow checks every target.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-d842915e
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: d842915e2055794d1199398eeda84b91e88d2611
