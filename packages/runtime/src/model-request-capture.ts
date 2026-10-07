@@ -277,11 +277,15 @@ function snapshotModelRequestPrefix(request: ModelRequest): ModelRequest {
 }
 
 export class ModelRequestCaptureModel implements Model {
-  constructor(private readonly inner: Model) {}
+  constructor(
+    private readonly inner: Model,
+    private readonly prepareRequest?: (request: ModelRequest) => ModelRequest,
+  ) {}
 
   async getResponse(request: ModelRequest) {
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
+    request = this.prepareRequest?.(request) ?? request;
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
@@ -296,6 +300,7 @@ export class ModelRequestCaptureModel implements Model {
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
+    request = this.prepareRequest?.(request) ?? request;
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);

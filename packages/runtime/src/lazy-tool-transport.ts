@@ -1,4 +1,3 @@
-import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import {
   tool as agentTool,
   toolSearchTool,
@@ -12,7 +11,7 @@ import {
 } from "@openai/agents";
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
-import { notifyModelRequestCapture } from "./model-request-capture";
+import { ModelRequestCaptureModel } from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -388,7 +387,12 @@ export class LazyToolRuntime {
   wrapModel(model: Model): Model {
     const existing = this.wrappedModels.get(model);
     if (existing) return existing;
-    const wrapped = new LazyToolModel(model, this);
+    // Restore source bindings before projecting historical dispatch calls;
+    // capture the exact post-hide request and the transformed SDK response.
+    const wrapped = new ModelRequestCaptureModel(
+      new LazyToolModel(model, this),
+      request => prepareLazyToolRequest(request, this),
+    );
     this.wrappedModels.set(model, wrapped);
     this.wrappedModels.set(wrapped, wrapped);
     return wrapped;
@@ -829,10 +833,7 @@ class LazyToolModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const prepared = prepareLazyToolRequest(request, this.runtime);
-    rememberPreparedModelRequest(prepared);
-    void notifyModelRequestCapture(prepared);
-    const response = await this.inner.getResponse(prepared);
+    const response = await this.inner.getResponse(request);
     if (responseRequiresToolPreparation(response, this.runtime)) {
       await this.runtime.ensurePrepared();
     }
@@ -842,10 +843,7 @@ class LazyToolModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    const prepared = prepareLazyToolRequest(request, this.runtime);
-    rememberPreparedModelRequest(prepared);
-    void notifyModelRequestCapture(prepared);
-    for await (const event of this.inner.getStreamedResponse(prepared)) {
+    for await (const event of this.inner.getStreamedResponse(request)) {
       if (event.type === "response_done") {
         if (responseRequiresToolPreparation(event.response, this.runtime)) {
           await this.runtime.ensurePrepared();

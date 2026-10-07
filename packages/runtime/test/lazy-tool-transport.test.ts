@@ -29,9 +29,119 @@ import { normalizeSdkEvent } from "../src/run-events";
 import { restoreInterruptedRunState } from "../src/index";
 import { formatSkillCatalog } from "../src/skill-catalog";
 import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
+import {
+  modelSourceInputBinding,
+  withModelRequestCapture,
+  type ModelRequestCapture,
+} from "../src/model-request-capture";
+import { instrumentedModelFetch } from "../src/model-provider-client";
 
 const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
+
+describe("lazy model source admission", () => {
+  for (const transport of ["codex_native", "openai_native", "generic_dispatch"] as const) {
+    for (const stream of [false, true]) {
+      test(`${transport} ${stream ? "streaming" : "ordinary"} SDK calls retain the exact prepared request and transformed output source`, async () => {
+        const agent = agentWith(weatherTool());
+        const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+        const requests: ModelRequest[] = [];
+        const receipts: ModelRequest[] = [];
+        const completions: string[] = [];
+        let restoreHistory: ((items: readonly unknown[]) => void) | undefined;
+        const output = (): ModelResponse["output"] => requests.length === 1 ? [{
+          type: "function_call", callId: "source-weather",
+          name: transport === "generic_dispatch" ? "tool_invoke" : WEATHER_TOOL,
+          arguments: JSON.stringify(transport === "generic_dispatch"
+            ? { name: WEATHER_TOOL, arguments: { city: "Oslo" } } : { city: "Oslo" }),
+        }] : [finalMessage("source-checked")];
+        const model: Model = {
+          async getResponse(request) {
+            requests.push(request);
+            return { responseId: `source-${requests.length}`, usage: new Usage(), output: output() };
+          },
+          async *getStreamedResponse(request) {
+            requests.push(request);
+            yield responseDone(`source-${requests.length}`, output());
+          },
+        };
+        const capture: ModelRequestCapture = () => {};
+        capture.beforeCall = async request => {
+          receipts.push(request);
+          return `receipt-${receipts.length}`;
+        };
+        capture.callCompleted = (key, responseId, response, restore) => {
+          completions.push(key);
+          expect(responseId).toBe(`source-${completions.length}`);
+          const items = (response as { output: ModelResponse["output"] }).output;
+          expect(modelSourceInputBinding(items[0])?.nativeProducerSourceKey).toBe(key);
+          if (completions.length === 1) expect((items[0] as { name: string }).name).toBe(WEATHER_TOOL);
+          restoreHistory = restore;
+        };
+        await withModelRequestCapture(capture, async () => {
+          const runner = new Runner({ modelProvider: new LazyToolModelProvider(providerFor(model), runtime) });
+          const options = { historyOwnership: "external" as const, maxTurns: 3,
+            toolNotFoundBehavior: "return_error_to_model" as const,
+            resolveMissingFunctionTool: createResolveMissingFunctionTool(runtime) };
+          const result = stream ? await runner.run(agent, "Check synthetic weather", { ...options, stream: true })
+            : await runner.run(agent, "Check synthetic weather", options);
+          if ("toStream" in result) {
+            for await (const _event of result.toStream()) void _event;
+            await result.completed;
+          }
+          expect(result.finalOutput).toBe("source-checked");
+          expect(completions).toEqual(["receipt-1", "receipt-2"]);
+          restoreHistory!(result.history);
+          const generated = result.history.filter(item => item.type === "function_call" || (item.type === "message" && item.role === "assistant"));
+          expect(generated.map(item => modelSourceInputBinding(item)?.nativeProducerSourceKey)).toEqual(completions);
+        });
+        expect(receipts).toHaveLength(requests.length);
+        requests.forEach((request, index) => expect(request).toBe(receipts[index]));
+        expect(requests[0]!.tools.some(tool => tool.name === WEATHER_TOOL)).toBe(false);
+        const previousCall = requests[1]!.input.find(item => typeof item === "object" && item.type === "function_call");
+        expect(modelSourceInputBinding(previousCall)?.nativeProducerSourceKey).toBe("receipt-1");
+        expect(JSON.stringify(requests)).not.toContain("nativeProducerSourceKey");
+        expect(JSON.stringify(requests)).not.toContain("native-model-source-owner");
+      });
+
+      test(`${transport} ${stream ? "streaming" : "ordinary"} SDK refuses withdrawal at literal dispatch before bytes`, async () => {
+        let bytesSent = 0;
+        let receipts = 0;
+        let completions = 0;
+        const dispatchKeys: string[] = [];
+        const fetch = instrumentedModelFetch("synthetic", Object.assign(async () => {
+          bytesSent++;
+          return Response.json({});
+        }, { preconnect: globalThis.fetch.preconnect }));
+        const model: Model = {
+          async getResponse() { await fetch("https://source.invalid/responses"); return { usage: new Usage(), output: [finalMessage("must not run")] }; },
+          async *getStreamedResponse() { await fetch("https://source.invalid/responses"); yield responseDone("must-not-run", [finalMessage("must not run")]); },
+        };
+        // Exercise explicit Model instances as well as name resolution above.
+        const agent = new Agent({ name: "source-refusal", model, tools: [weatherTool()] });
+        const runtime = installLazyToolRuntime(agent, transport, new Set([SERVER_ID]));
+        const capture: ModelRequestCapture = () => {};
+        capture.beforeCall = Object.assign(async () => { receipts++; return "withdrawn-source"; }, {
+          beforeProviderDispatch: async (key: string) => { dispatchKeys.push(key); throw new Error("HOST_SOURCE_ADMISSION_REFUSED"); },
+        });
+        capture.callCompleted = () => { completions++; };
+        const outcome = withModelRequestCapture(capture, async () => {
+          const runner = new Runner({ modelProvider: new LazyToolModelProvider(providerFor(model), runtime) });
+          if (stream) {
+            const result = await runner.run(agent, "Synthetic withdrawal", { stream: true });
+            for await (const _event of result.toStream()) void _event;
+            await result.completed;
+          } else await runner.run(agent, "Synthetic withdrawal");
+        });
+        await expect(outcome).rejects.toThrow("HOST_SOURCE_ADMISSION_REFUSED");
+        expect(receipts).toBe(1);
+        expect(dispatchKeys).toEqual(["withdrawn-source"]);
+        expect(bytesSent).toBe(0);
+        expect(completions).toBe(0);
+      });
+    }
+  }
+});
 
 function responseDone(id: string, output: ModelResponse["output"]): StreamEvent {
   return {

@@ -99,6 +99,11 @@ current attempt/generation fence; provider JSON carries no source authority.
 Streaming SDK projections restore only exact outputs from the live capture
 registry and refuse ambiguous matches. Selective copies/imports retain receipt
 ancestry, so retained Skill and Knowledge sources reach the current host validator.
+Lazy native search and generic dispatch use that same model-call capture owner:
+input bindings are restored before historical dispatch projection, the receipt
+covers the exact post-hide request, and transformed response items retain that
+call's producer. Literal provider attempts, including retries, recheck the same
+source before bytes; lazy tool disclosure never bypasses source admission.
 Legacy generated rows with source-aware calls or earlier Skill use but no producer
 basis remain readable as transcripts and are refused as model context.
 
