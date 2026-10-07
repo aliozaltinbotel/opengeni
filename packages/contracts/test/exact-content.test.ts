@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SessionEvent, stableJson } from "../src";
+import { SessionEvent, stableJson, CreateSessionRequest, SessionUserMessagePayload, SteerSessionMessageRequest } from "../src";
 
 function exactContentCorpus(): string[] {
   const tokenLike = ["gh", "p_", "A".repeat(24)].join("");
@@ -111,4 +111,18 @@ describe("exact internal content contracts", () => {
     expect(JSON.parse((parsed.payload as typeof payload).arguments).cmd).toBe(exactCommand);
     expect(exactCommand).not.toContain("[redacted]");
   });
+});
+
+
+test("host message source refs are exact typed JSON evidence, optional for ordinary callers", () => {
+  const refs = [{owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),sha256:"a".repeat(64),version:"1"}];
+  expect(CreateSessionRequest.parse({initialMessage:"Selected passage",initialMessageModelSourceRefs:refs}).initialMessageModelSourceRefs).toEqual(refs);
+  expect(CreateSessionRequest.parse({initialMessage:"Ordinary message"}).initialMessageModelSourceRefs).toBeUndefined();
+  expect(CreateSessionRequest.safeParse({startMode:"realtime",initialMessageModelSourceRefs:refs}).success).toBe(false);
+  for(const schema of [SessionUserMessagePayload,SteerSessionMessageRequest]) {
+    expect(schema.parse({text:"Selected passage",messageModelSourceRefs:refs}).messageModelSourceRefs).toEqual(refs);
+    expect(schema.parse({text:"Ordinary message"}).messageModelSourceRefs).toBeUndefined();
+    expect(schema.safeParse({text:"Passage",messageModelSourceRefs:[{...refs[0],sha256:"invalid"}]}).success).toBe(false);
+    expect(schema.safeParse({text:"Passage",messageModelSourceRefs:[{...refs[0],authority:true}]}).success).toBe(false);
+  }
 });

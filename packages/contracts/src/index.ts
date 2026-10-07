@@ -1,4 +1,4 @@
-import { ImportedMessageOrigin } from "./model-call-source-receipts";
+import { ImportedMessageOrigin, ModelSourceRef } from "./model-call-source-receipts";
 export * from "./artifact-catalog";
 export * from "./claude-subscription-usage";
 export * from "./workspace-integrations";
@@ -15638,6 +15638,8 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
        * inherit omission and may only narrow (workspace > user > off). */
       memoryScope: SessionMemoryScope.default("workspace"),
       initialMessage: z.string().min(1).optional(),
+      /** Provenance for this exact initial message and modelContext; never authority. */
+      initialMessageModelSourceRefs: z.array(ModelSourceRef).max(16384).optional(),
       // Creates the durable session shell without fabricating a user message or
       // starting an underlying agent turn. Realtime can then become the first
       // interaction and use the ordinary Send/Steer path when it delegates.
@@ -15801,6 +15803,9 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
         path: ["initialMessage"],
         message: "initialMessage is required unless startMode is realtime",
       });
+    }
+    if (value.initialMessageModelSourceRefs?.length && value.initialMessage === undefined) {
+      context.addIssue({ code: "custom", path: ["initialMessageModelSourceRefs"], message: "Source references require an initial message" });
     }
     if (value.startMode === "realtime" && value.initialMessage !== undefined) {
       context.addIssue({
@@ -16116,6 +16121,8 @@ export const SessionUserMessagePayload = z
     annotations: SubmittedTimelineAnnotations.default([]),
     // Model-visible application context attached to this exact user message.
     // It is retained in full event/history data but omitted by standard UI.
+    /** Exact message/context origins, checked by the host before provider dispatch. */
+    messageModelSourceRefs: z.array(ModelSourceRef).max(16384).optional(),
     modelContext: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),
@@ -16170,6 +16177,8 @@ export const SteerSessionMessageRequest = z
     text: z.string().default(""),
     annotations: SubmittedTimelineAnnotations.default([]),
     // Same model-visible message context as a queued user.message.
+    /** Exact message/context origins, checked by the host before provider dispatch. */
+    messageModelSourceRefs: z.array(ModelSourceRef).max(16384).optional(),
     modelContext: z.string().trim().min(1).max(32768).optional(),
     resources: z.array(ResourceRef).default([]),
     model: z.string().min(1).optional(),

@@ -834,6 +834,7 @@ export async function createAndStartSessionWithOutcome(input: {
   workspaceId: string;
   visibility?: "user_private" | "workspace_shared";
   initialMessage: string;
+  initialMessageModelSourceRefs?: import("@opengeni/contracts").ModelSourceRef[] | undefined;
   /** Content-free product surface the create request entered through. */
   surface?: SessionTurnSurface | null;
   /** Create the session shell without an initial user event/agent turn. */
@@ -1102,6 +1103,7 @@ export async function createAndStartSessionWithOutcome(input: {
       visibility: input.visibility ?? "workspace_shared",
       initialMessage: input.initialMessage,
       initialModelContext: input.modelContext ?? null,
+      initialMessageModelSourceRefs: input.initialMessageModelSourceRefs,
       resources: input.resources,
       skills: input.skills ?? [],
       bundledSkillIds: input.bundledSkillIds,
@@ -1200,6 +1202,7 @@ export async function createAndStartSessionWithOutcome(input: {
       visibility: input.visibility ?? "workspace_shared",
       initialMessage: input.initialMessage,
       initialModelContext: input.modelContext ?? null,
+      initialMessageModelSourceRefs: input.initialMessageModelSourceRefs,
       resources: input.resources,
       skills: input.skills ?? [],
       bundledSkillIds: input.bundledSkillIds,
@@ -1637,6 +1640,7 @@ type PostUserMessageTurnInput = {
   sessionId: string;
   text: string;
   annotations?: TimelineAnnotation[];
+  messageModelSourceRefs?: import("@opengeni/contracts").ModelSourceRef[] | undefined;
   modelContext?: string | null;
   resources: ResourceRef[];
   /** Actor-owned resources used only for the exact durable-draft fence. */
@@ -1845,6 +1849,7 @@ export async function postUserMessageTurn(
               text: input.text,
               annotations: input.annotations ?? [],
               modelContext: input.modelContext ?? null,
+              messageModelSourceRefs: input.messageModelSourceRefs,
               resources: input.resources,
               ...(input.composerDraftResources
                 ? { composerDraftResources: input.composerDraftResources }
@@ -2457,6 +2462,9 @@ async function createSessionForRequestInFileScope(
           ? { activeManagedHumanSubjectId: replayManagedHumanSubjectId }
           : {}),
         createIdempotencyKey: payload.idempotencyKey,
+        initialMessage: payload.initialMessage ?? "",
+        initialModelContext: payload.modelContext ?? null,
+        initialMessageModelSourceRefs: payload.initialMessageModelSourceRefs,
         selectedInstalledSkillIds: payload.installedSkillIds ?? [],
         initialAgentLearning: payload.agentLearning,
         ...sessionScope,
@@ -3423,6 +3431,7 @@ async function createSessionForRequestInFileScope(
       workspaceId,
       visibility: effectiveVisibility,
       initialMessage: payload.initialMessage ?? "",
+      initialMessageModelSourceRefs: payload.initialMessageModelSourceRefs,
       surface,
       deferInitialTurn: payload.startMode === "realtime",
       modelContext: payload.modelContext ?? null,
@@ -3691,6 +3700,7 @@ function sessionPromptBoundaryRequestHash(input: {
   expectedDraftRevision: number | null;
   text: string;
   annotations: SubmittedTimelineAnnotation[];
+  messageModelSourceRefs?: import("@opengeni/contracts").ModelSourceRef[] | undefined;
   modelContext: string | null;
   resources: ResourceRef[];
   composerDraftResources?: ResourceRef[];
@@ -3712,6 +3722,7 @@ function sessionPromptBoundaryRequestHash(input: {
     text: input.text,
     annotations: input.annotations,
     modelContext: input.modelContext,
+    ...(input.messageModelSourceRefs?.length ? { messageModelSourceRefs: input.messageModelSourceRefs } : {}),
     resources: input.resources,
     composerDraftResourcesProvided: input.composerDraftResources !== undefined,
     composerDraftResources: input.composerDraftResources ?? [],
@@ -3758,6 +3769,7 @@ async function acceptSessionUserMessageInFileScope(
   input: {
     text: string;
     annotations?: SubmittedTimelineAnnotation[];
+    messageModelSourceRefs?: import("@opengeni/contracts").ModelSourceRef[] | undefined;
     modelContext?: string | null;
     resources?: ResourceRef[];
     /** Actor-owned resources used only for the exact durable-draft fence. */
@@ -3824,6 +3836,7 @@ async function acceptSessionUserMessageInFileScope(
         text: input.text,
         annotations: input.annotations ?? [],
         modelContext: input.modelContext ?? null,
+        messageModelSourceRefs: input.messageModelSourceRefs,
         resources: requestedResources,
         ...(composerDraftResources ? { composerDraftResources } : {}),
         model: input.model ?? null,
@@ -4061,6 +4074,7 @@ async function acceptSessionUserMessageInFileScope(
         text: input.text,
         annotations,
         modelContext: input.modelContext ?? null,
+        messageModelSourceRefs: input.messageModelSourceRefs,
         resources: requestedResources,
         ...(composerDraftResources ? { composerDraftResources } : {}),
         model: input.model ?? null,

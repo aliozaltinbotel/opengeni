@@ -5,6 +5,7 @@ import {
   WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
+  ModelSourceRef,
   McpPersonalConnectionDelegations,
   PersonalResourceAttachmentSummary,
   TimelineAnnotations,
@@ -1735,6 +1736,7 @@ export async function submitHumanPromptInTransaction(
     expectedDraftRevision?: number | null;
     text: string;
     annotations?: TimelineAnnotation[];
+    messageModelSourceRefs?: ModelSourceRef[] | undefined;
     modelContext?: string | null;
     resources: ResourceRef[];
     /** Actor-owned resources used only for the exact durable-draft fence. */
@@ -1806,6 +1808,7 @@ export async function submitHumanPromptInTransaction(
     turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  const messageModelSourceRefs = ModelSourceRef.array().max(16384).parse(input.messageModelSourceRefs ?? []);
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -1813,6 +1816,7 @@ export async function submitHumanPromptInTransaction(
     text: input.text,
     annotations,
     modelContext: input.modelContext ?? null,
+    ...(messageModelSourceRefs.length > 0 ? { messageModelSourceRefs } : {}),
     resources: withCanonicalResourceMountPaths(input.resources),
     ...(input.composerDraftResources
       ? {
@@ -2111,6 +2115,13 @@ export async function submitHumanPromptInTransaction(
     editedSourceModelContext !== undefined
       ? editedSourceModelContext
       : (input.modelContext ?? null);
+  // Editing preserves hidden context and its retained origins from the exact withdrawn turn.
+  const effectiveMessageModelSourceRefs = editedSourceTurn
+    ? ModelSourceRef.array().max(16384).parse(editedSourceTurn.metadata?.nativeMessageModelSourceRefs ?? [])
+    : messageModelSourceRefs;
+  const sourceTurnMetadata = { ...input.turnMetadata };
+  delete sourceTurnMetadata.nativeMessageModelSourceRefs;
+  if (effectiveMessageModelSourceRefs.length > 0) sourceTurnMetadata.nativeMessageModelSourceRefs = effectiveMessageModelSourceRefs;
   const existingQueued = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
   const routing: SessionPromptRouting =
     effectiveDelivery === "steer"
@@ -2141,6 +2152,7 @@ export async function submitHumanPromptInTransaction(
           : {}),
         ...(input.resources.length ? { resources: input.resources } : {}),
         ...(effectiveModelContext ? { modelContext: effectiveModelContext } : {}),
+        ...(effectiveMessageModelSourceRefs.length > 0 ? { messageModelSourceRefs: effectiveMessageModelSourceRefs } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
@@ -2185,8 +2197,8 @@ export async function submitHumanPromptInTransaction(
             (session.latencyMode as LatencyMode),
           sandboxBackend: session.sandboxBackend,
           metadata: input.turnExecutionPolicy
-            ? metadataWithTurnExecutionPolicyV1(input.turnMetadata ?? {}, input.turnExecutionPolicy)
-            : (input.turnMetadata ?? {}),
+            ? metadataWithTurnExecutionPolicyV1(sourceTurnMetadata, input.turnExecutionPolicy)
+            : sourceTurnMetadata,
           lineage: { actor: input.actor.type },
           ...initiatorColumns(frozenInitiator),
           initiatingHumanSubjectId: acceptedInitiatingHumanSubjectId,

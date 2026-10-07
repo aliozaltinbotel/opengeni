@@ -73,3 +73,22 @@ test("new creates strip retired metadata and historical nonempty identities cann
     await shared.admin`select count(*)::int as count from sessions where workspace_id = ${grant.workspaceId}`;
   expect(count!.count).toBe(1);
 });
+
+
+test("attributed initial messages freeze exact content and origins across keyed creation replay", async () => {
+  const id=crypto.randomUUID();
+  const grant=(await bootstrapWorkspace(client.db,{accountExternalSource:"test",accountExternalId:id,accountName:"Attributed create",workspaceExternalSource:"test",workspaceExternalId:id,workspaceName:"Attributed create",subjectId:`user:source-${id}`})).workspaceGrants[0]!;
+  const refs=[{owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),sha256:"a".repeat(64),version:"1"}];
+  const input={accountId:grant.accountId,workspaceId:grant.workspaceId,createIdempotencyKey:id,initialMessage:"Selected passage",initialModelContext:"Selected context",initialMessageModelSourceRefs:refs,resources:[],metadata:{nativeInitialMessageModelSourceRefs:[{forged:true}]},model:"test",reasoningEffort:"medium" as const,latencyMode:"standard" as const,sandboxBackend:"none" as const};
+  const first=await createSessionWithIdempotencyKeyResult(client.db,input);
+  if(first.denied)throw Error("Unexpected admission denial");
+  const replay=await createSessionWithIdempotencyKeyResult(client.db,input);
+  if(replay.denied)throw Error("Unexpected replay denial");
+  expect(replay.created).toBe(false);
+  expect(replay.session.id).toBe(first.session.id);
+  const [stored]=await shared.admin`select metadata from sessions where id=${first.session.id}`;
+  expect(stored!.metadata.nativeInitialMessageModelSourceRefs).toEqual(refs);
+  for(const change of [{initialMessage:"Different passage"},{initialModelContext:"Different context"},{initialMessageModelSourceRefs:[]},{initialMessageModelSourceRefs:[{...refs[0]!,sha256:"b".repeat(64)}]}]) {
+    await expect(createSessionWithIdempotencyKeyResult(client.db,{...input,...change})).rejects.toThrow("Session create idempotency key was reused with a different request");
+  }
+});

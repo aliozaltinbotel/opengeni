@@ -8234,7 +8234,7 @@ export type RunAgentStreamOptions = {
   /** Durable native source owner, awaited before the provider. Not the diagnostic snapshot observer. */
   beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
   onModelToolSource?:(source:import("@opengeni/contracts").NativeModelToolSource)=>Promise<void>;
-  onModelCallSourceCompleted?: (sourceKey:string,responseId:string|null,response:object) => void;
+  onModelCallSourceCompleted?: ModelRequestCapture["callCompleted"];
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;

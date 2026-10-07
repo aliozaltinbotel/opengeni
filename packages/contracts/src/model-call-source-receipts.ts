@@ -73,7 +73,7 @@ export type NativeModelToolSource = {
   retainedSources:ModelSourceRef[];
 };
 export type ModelHistorySourceBasis = {
-  kind:"SUMMARY"|"COPIED"|"IMPORTED"|"TOOL_RESULT"|"INSTRUCTION";
+  kind:"SUMMARY"|"COPIED"|"IMPORTED"|"TOOL_RESULT"|"INSTRUCTION"|"HISTORY_ROW";
   parents:ModelSourceRef[]; retainedSources?:ModelSourceRef[];
   rawToolSource?:NativeModelToolSource;
 };

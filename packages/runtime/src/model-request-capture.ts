@@ -33,7 +33,7 @@ export async function authorizeModelSourceProviderDispatch(): Promise<void> {
 export type ModelRequestCapture = ((request: ModelRequest) => void | Promise<void>) & {
   /** Authoritative, awaited owner; persistence failure prevents calling the model. */
   beforeCall?: BeforeModelCallSourceReceipt;
-  callCompleted?: (sourceKey:string,responseId:string|null,response:object) => void | Promise<void>;
+  callCompleted?: (sourceKey:string,responseId:string|null,response:object,restoreHistorySources:(items:readonly unknown[])=>void) => void | Promise<void>;
   toolSourceKeys?: Map<string,string>;
   onModelToolSource?:(source:NativeModelToolSource)=>Promise<void>;
   nextProviderRequestIndex?: () => number;
@@ -49,13 +49,14 @@ const captureIndices = new WeakMap<object, number>();
 const nativeSourceBinding = Symbol("native-model-source-owner");
 type InputBinding = Omit<ModelSourceBinding,"ordinal">;
 const producedSources = new WeakMap<ModelRequestCapture, {
+  restoreHistorySources: (items:readonly unknown[])=>void;
   outputs: Map<string,InputBinding|null>;
   outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
   tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:string; modelName?:string}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
-  if(!state) {state={outputs:new Map(),outputOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
+  if(!state) {state={restoreHistorySources:items=>restoreProducedSourceBindings(items,capture),outputs:new Map(),outputOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
   return state;
 }
 const inputDigest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -96,16 +97,14 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
     outputOwners.set(binding,{outputId:binding.sourceRef.id,identity:canonicalModelSourceJson(binding)});
     const priorOutput=outputs.get(sha256);
     outputs.set(sha256,priorOutput!==undefined && priorOutput?.nativeProducerSourceKey!==sourceKey?null:binding);
-    // The streaming Runner parses function calls through its installed protocol
+    // The streaming Runner parses output items through its installed protocol
     // schema, changing property order and dropping owner symbols. Register that
     // exact projection of this output, then the existing provider-id projection.
     // Each alias retains the original byte digest; input is never canonicalized
     // or matched by call id alone.
     const projections=[stripProviderItemId(item as AgentInputItem)];
-    if(item.type==="function_call") {
-      const parsed=protocol.FunctionCallItem.safeParse(item);
-      if(parsed.success)projections.push(parsed.data,stripProviderItemId(parsed.data));
-    }
+    const parsed=protocol.OutputModelItem.safeParse(item);
+    if(parsed.success)projections.push(parsed.data,stripProviderItemId(parsed.data));
     for(const projected of projections) {
       const projectedSha256=inputDigest(projected);
       if(projectedSha256===sha256)continue;
@@ -133,10 +132,10 @@ export function recordModelToolProjection(callId:string|undefined,modelName:stri
 
 /** SDK continuation objects may be copies. Match only this scope's actual native
  * output bytes or its exact completed call and final text projection. */
-function restoreProducedSourceBindings(request:ModelRequest,capture:ModelRequestCapture|undefined):void {
-  if(!capture || !Array.isArray(request.input))return;
+function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelRequestCapture|undefined):void {
+  if(!capture)return;
   const state=sourceState(capture);
-  for(const value of request.input) {
+  for(const value of input) {
     if(!value || typeof value!=="object")continue;
     const item=value as Record<string,unknown>;
     const sha256=inputDigest(item),model=state.outputs.get(sha256);
@@ -152,6 +151,7 @@ function restoreProducedSourceBindings(request:ModelRequest,capture:ModelRequest
       continue;
     }
     if(model) {bindModelSourceInput(item,model);continue;}
+    if(state.outputs.has(sha256))throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
     if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName
@@ -281,21 +281,21 @@ export class ModelRequestCaptureModel implements Model {
 
   async getResponse(request: ModelRequest) {
     const capture = modelRequestCapture.getStore();
-    restoreProducedSourceBindings(request,capture);
+    if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
     const response = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => this.inner.getResponse(request));
     if (sourceKey) {
       bindOutputSourceKeys(capture,sourceKey,response.output);
-      await capture?.callCompleted?.(sourceKey,response.responseId ?? null,response);
+      await capture?.callCompleted?.(sourceKey,response.responseId ?? null,response,sourceState(capture!).restoreHistorySources);
     }
     return response;
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
     const capture = modelRequestCapture.getStore();
-    restoreProducedSourceBindings(request,capture);
+    if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
@@ -312,7 +312,7 @@ export class ModelRequestCaptureModel implements Model {
         if(sourceKey && candidate && typeof candidate==="object") {
           const response=candidate as Record<string,unknown>;
           bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[]);
-          await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response);
+          await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response,sourceState(capture!).restoreHistorySources);
         }
         yield event;
       }

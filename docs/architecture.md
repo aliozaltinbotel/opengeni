@@ -80,10 +80,27 @@ transport attempt, including SDK HTTP retries, inside a per-request async scope.
 The hook receives the stored call identity and cancellation
 signal, never a latest-attempt snapshot, and owns no native business rules. A host
 that requires admission installs the callback in trusted process composition.
+Hosts may attach typed `initialMessageModelSourceRefs` on session creation and
+`messageModelSourceRefs` on Send/Steer. These identities cover the accepted message
+and its model context; native admission freezes them in the event/turn and first
+history row before inference. Attributed keyed retries must preserve the exact
+content and ordered references. Queue editing retains the hidden context's origins.
+References are evidence only: the same current host source admission remains
+mandatory, including inherited history; they grant no authority by themselves.
+
 Local MCP registrations may derive `modelSourceRefs` from the exact raw result
 and host execution context; the runtime awaits these before projection/spill and
 source emission. The exact `nativeModelSourceKey` is set after caller transport
 metadata, which cannot replace it or synthesize an absent key.
+
+Model-generated history persists a `HISTORY_ROW` basis with its exact producing
+AGENT call receipt as parent. The history writer resolves that receipt under the
+current attempt/generation fence; provider JSON carries no source authority.
+Streaming SDK projections restore only exact outputs from the live capture
+registry and refuse ambiguous matches. Selective copies/imports retain receipt
+ancestry, so retained Skill and Knowledge sources reach the current host validator.
+Legacy generated rows with source-aware calls or earlier Skill use but no producer
+basis remain readable as transcripts and are refused as model context.
 
 Postgres commits precede notifications. NATS transports fanout, invalidations,
 request/reply and machine streams—not durable commit evidence.

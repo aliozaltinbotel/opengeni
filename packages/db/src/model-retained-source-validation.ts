@@ -197,7 +197,7 @@ export async function validateRetainedModelSourcesWithFence(
               parent.digest !== ref.sha256 ||
               !parent.complete ||
               parent.incompleteReasons.length ||
-              parent.purpose !== "COMPACTION"
+              parent.purpose !== (origin.closure.some(node => node.sourceRef.owner === "model_call_source_receipts" && node.sourceRef.id === ref.id && node.sourceRef.sha256 === ref.sha256 && node.kind === "HISTORY_ROW") ? "AGENT" : "COMPACTION")
             )
               reasons.add("ORIGIN_INEXACT");
             else origins.set(parent.id, parent);

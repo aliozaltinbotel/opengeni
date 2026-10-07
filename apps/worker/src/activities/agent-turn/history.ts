@@ -1,6 +1,7 @@
 import {
   normalizeProtocolJsonValue,
   omitModelSourceInputBinding,
+  modelSourceInputBinding,
   TURN_OPERATIONAL_NOTICE_PREFIX,
   sanitizeHistoryItemsForModel,
   toolCallIdFromSdkItem,
@@ -23,7 +24,7 @@ export function historyRowsToAppend(
   nextPosition: number = persistedHistoryCount,
   toolOutputTruncationTokens?: number,
 ): {
-  rows: Array<{ position: number; item: Record<string, unknown> }>;
+  rows: Array<{ position: number; item: Record<string, unknown>; nativeProducerSourceKey?: string }>;
   nextWatermark: number;
   nextPosition: number;
 } {
@@ -37,7 +38,7 @@ export function historyRowsToAppend(
   // at their original positions: deleting them rewrites the model-visible prefix
   // on the next turn and during compaction. Unscoped synthetic system messages
   // still cannot silently become permanent conversation instructions.
-  const rows: Array<{ position: number; item: Record<string, unknown> }> = [];
+  const rows: Array<{ position: number; item: Record<string, unknown>; nativeProducerSourceKey?: string }> = [];
   for (const [offset, item] of modelReady.slice(persistedHistoryCount).entries()) {
     if (item.type === "message" && item.role === "system") {
       const content =
@@ -48,7 +49,9 @@ export function historyRowsToAppend(
             : "";
       if (!content.startsWith(TURN_OPERATIONAL_NOTICE_PREFIX)) continue;
     }
+    const binding = modelSourceInputBinding(item);
     rows.push({
+      ...(binding?.kind === "HISTORY_ROW" && binding.nativeProducerSourceKey ? {nativeProducerSourceKey: binding.nativeProducerSourceKey} : {}),
       position: nextPosition + rows.length,
       item: normalizeProtocolJsonValue(
         omitModelSourceInputBinding(item as Record<string, unknown>),

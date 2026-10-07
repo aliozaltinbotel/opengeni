@@ -832,7 +832,8 @@ export async function runTurnStreamAttempt(
             return await beforeModelCallSourceReceipt(request,"AGENT");
           }, beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
           onModelToolSource:async source=>historySink.recordModelToolSource(source),
-          onModelCallSourceCompleted: (sourceKey,responseId,response) => {
+          onModelCallSourceCompleted: (sourceKey,responseId,response,restoreHistorySources) => {
+            historySink.recordModelSourceRestorer(restoreHistorySources);
             sourceKeysByResponse.set(response,sourceKey);
             if (responseId) sourceKeysByResponseId.set(responseId,sourceKey);
 

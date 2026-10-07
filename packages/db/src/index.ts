@@ -33319,6 +33319,7 @@ async function setScheduledTaskAuthorityRlsContext(
 }
 
 export type SessionCreateInput = {
+  initialMessageModelSourceRefs?: ModelSourceRef[] | undefined;
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
@@ -33668,6 +33669,9 @@ async function existingSessionForCreateKey(
 }
 
 type SessionCreateReplayIdentity = {
+  initialMessageModelSourceRefs?: ModelSourceRef[] | undefined;
+  initialMessage?: string | undefined;
+  initialModelContext?: string | null | undefined;
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
   requestedSessionId?: string;
@@ -33726,6 +33730,13 @@ function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
   input: SessionCreateReplayIdentity,
 ): void {
+  const oldRefs = ModelSourceRef.array().max(16384).parse(existing.metadata?.nativeInitialMessageModelSourceRefs ?? []);
+  const newRefs = ModelSourceRef.array().max(16384).parse(input.initialMessageModelSourceRefs ?? []);
+  if (stableJson(oldRefs) !== stableJson(newRefs)
+    || ((oldRefs.length > 0 || newRefs.length > 0)
+      && (fromPostgresLosslessText(existing.initialMessage, existing.initialMessageCodecVersion) !== input.initialMessage
+        || (existing.initialModelContext ?? null) !== (input.initialModelContext ?? null))))
+    throw new SessionCreateIdempotencyConflictError();
   if (
     stableJson(existing.metadata?.[SESSION_CREATE_AGENT_LEARNING_METADATA_KEY] ?? {}) !==
     stableJson(input.initialAgentLearning ?? {})
@@ -33872,6 +33883,9 @@ async function createSessionInTransaction(
     ),
     selectedInstalledSkillIds,
   );
+  delete sessionMetadata.nativeInitialMessageModelSourceRefs;
+  const initialMessageModelSourceRefs = ModelSourceRef.array().max(16384).parse(input.initialMessageModelSourceRefs ?? []);
+  if (initialMessageModelSourceRefs.length > 0) sessionMetadata.nativeInitialMessageModelSourceRefs = initialMessageModelSourceRefs;
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
   if (createRequestedVisibility === "user_private") {
@@ -33919,6 +33933,9 @@ async function createSessionInTransaction(
       // before any first-turn repair so a retry cannot hide a requested-ID
       // conflict behind an apparently successful replay.
       assertSessionCreateReplayIdentity(existing, {
+        initialMessage: input.initialMessage,
+        initialModelContext: input.initialModelContext,
+        initialMessageModelSourceRefs: input.initialMessageModelSourceRefs,
         initialAgentLearning: input.initialAgentLearning,
         bundledSkillIds: input.bundledSkillIds,
         ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
@@ -34396,6 +34413,9 @@ export type InitializedSessionCreateReplay =
 export async function getInitializedSessionCreateReplay(
   db: Database,
   input: {
+    initialMessageModelSourceRefs?: ModelSourceRef[] | undefined;
+    initialMessage?: string | undefined;
+    initialModelContext?: string | null | undefined;
     initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
     agentAccess?: SessionAgentAccess;
     scopeSubjectId?: SessionScopeSubjectId | null;
@@ -42388,7 +42408,7 @@ export async function appendSessionHistoryItems(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     modelToolOutputTruncationTokens?: number;
-    items: Array<{ position: number; item: Record<string, unknown>;sourceBasis?:import("@opengeni/contracts").ModelHistorySourceBasis }>;
+    items: Array<{ position: number; item: Record<string, unknown>;sourceBasis?:import("@opengeni/contracts").ModelHistorySourceBasis;nativeProducerSourceKey?:string }>;
   },
 ): Promise<boolean> {
   if (input.items.length === 0) {
@@ -42408,13 +42428,29 @@ export async function appendSessionHistoryItems(
         });
         if (!allowed.allowed) return false;
         // Canonicalize once: insertion and exact readback compare the same values.
-        const expected = input.items.map((entry) => ({
-          position: entry.position,
-          ...(entry.sourceBasis?{sourceBasis:entry.sourceBasis}:{}),
-          // This is the canonical model-memory boundary. The pending-call
-          // ledger and audit event retain their separate raw/preview forms.
-          item: canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
-        }));
+        const expected = [];
+        for (const entry of input.items) {
+          let sourceBasis = entry.sourceBasis;
+          if (sourceBasis?.kind === "HISTORY_ROW") throw new Error("MODEL_OUTPUT_SOURCE_BASIS_REQUIRES_PRODUCER");
+          if (entry.nativeProducerSourceKey !== undefined) {
+            if (sourceBasis !== undefined) throw new Error("MODEL_OUTPUT_SOURCE_BASIS_CONFLICT");
+            const [stored] = await tx.select().from(schema.modelCallSourceReceipts).where(and(
+              eq(schema.modelCallSourceReceipts.accountId,input.accountId),eq(schema.modelCallSourceReceipts.workspaceId,input.workspaceId),
+              eq(schema.modelCallSourceReceipts.sessionId,input.sessionId),eq(schema.modelCallSourceReceipts.turnId,input.turnId),
+              eq(schema.modelCallSourceReceipts.attemptId,input.expectedAttemptId),eq(schema.modelCallSourceReceipts.executionGeneration,input.expectedExecutionGeneration),
+              eq(schema.modelCallSourceReceipts.sourceKey,entry.nativeProducerSourceKey))).limit(1);
+            if (!stored) throw new Error("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
+            const producer = validatedStoredModelCallSourceReceipt(stored);
+            if (!producer.complete || producer.incompleteReasons.length || producer.purpose !== "AGENT"
+              || producer.id !== stored.id || producer.accountId !== input.accountId || producer.workspaceId !== input.workspaceId
+              || producer.sessionId !== input.sessionId || producer.turnId !== input.turnId || producer.attemptId !== input.expectedAttemptId
+              || producer.executionGeneration !== input.expectedExecutionGeneration || producer.sourceKey !== entry.nativeProducerSourceKey
+              || producer.requestIndex !== stored.requestIndex) throw new Error("MODEL_OUTPUT_PRODUCER_INEXACT");
+            sourceBasis = {kind:"HISTORY_ROW",parents:[{owner:"model_call_source_receipts",id:producer.id,sha256:producer.digest}]};
+          }
+          expected.push({position:entry.position,...(sourceBasis ? {sourceBasis} : {}),
+            item:canonicalizePersistedHistoryItem(entry.item,input.modelToolOutputTruncationTokens)});
+        }
         const savedFields = {
           position: schema.sessionHistoryItems.position,
           sourceBasis:schema.sessionHistoryItems.sourceBasis,
@@ -68582,6 +68618,8 @@ export async function initializeSessionStartAtomically(
                     type: "user.message",
                     payload: {
                       ...initialPayload,
+                      ...(Array.isArray(session.metadata?.nativeInitialMessageModelSourceRefs)
+                        ? { messageModelSourceRefs: session.metadata.nativeInitialMessageModelSourceRefs } : {}),
                       ...(session.initialModelContext
                         ? { modelContext: session.initialModelContext }
                         : {}),
@@ -68719,9 +68757,11 @@ export async function initializeSessionStartAtomically(
                   latencyMode: input.turnExecutionPolicy?.latencyMode ?? session.latencyMode,
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
-                  metadata: input.turnExecutionPolicy
-                    ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
-                    : {},
+                  metadata: {
+                    ...(input.turnExecutionPolicy ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy) : {}),
+                    ...(Array.isArray(session.metadata?.nativeInitialMessageModelSourceRefs)
+                      ? { nativeMessageModelSourceRefs: session.metadata.nativeInitialMessageModelSourceRefs } : {}),
+                  },
                   lineage: {},
                   ...initiatorColumns(creator),
                   initiatingHumanSubjectId: initialTurnInitiatingHumanSubjectId,
@@ -72891,6 +72931,18 @@ export async function claimSessionWorkForAttempt(
             ),
           );
         const importedSourceBasis=await importedHistorySourceBasisTx(tx,{accountId:session.accountId,workspaceId,context:row.modelContext,metadata:session.metadata});
+        const messageHistoryItem = omitOutputOnlyHistoryItemFields(durableUserHistoryItem(
+          fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
+          Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
+          TimelineAnnotations.parse(row.annotations), row.modelContext,
+          SessionGoalSnapshot.parse(row.goalSnapshot), row.createdAt,
+        ));
+        const messageDigest = createHash("sha256").update(JSON.stringify(messageHistoryItem)).digest("hex");
+        const messageModelSourceRefs = ModelSourceRef.array().max(16384).parse(row.metadata?.nativeMessageModelSourceRefs ?? []);
+        const messageSourceBasis = messageModelSourceRefs.length > 0
+          ? { ...(importedSourceBasis ?? { kind: "INSTRUCTION" as const, parents: [{ owner: "native.runtime.artifact", id: `host-message:${row.id}:${messageDigest}`, sha256: messageDigest }] }),
+              retainedSources: [...(importedSourceBasis?.retainedSources ?? []), ...messageModelSourceRefs] }
+          : importedSourceBasis;
         await tx.insert(schema.sessionHistoryItems).values(
           withLosslessContentWriteVersion(
             {
@@ -72899,19 +72951,8 @@ export async function claimSessionWorkForAttempt(
               sessionId,
               turnId: row.id,
               position: Number(historyPosition),
-              ...(importedSourceBasis?{sourceBasis:importedSourceBasis}:{}),
-              item: omitOutputOnlyHistoryItemFields(
-                durableUserHistoryItem(
-                  fromPostgresLosslessText(row.prompt, row.promptCodecVersion),
-                  Array.isArray(row.resources) ? (row.resources as ResourceRef[]) : [],
-                  TimelineAnnotations.parse(row.annotations),
-                  row.modelContext,
-                  SessionGoalSnapshot.parse(row.goalSnapshot),
-                  // Acceptance time, not claim time: a queued message keeps the
-                  // moment the user sent it.
-                  row.createdAt,
-                ),
-              ),
+              ...(messageSourceBasis?{sourceBasis:messageSourceBasis}:{}),
+              item: messageHistoryItem,
             },
             "item",
             "itemCodecVersion",

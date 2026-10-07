@@ -1,5 +1,5 @@
 import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
-import { sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
+import { bindModelSourceInput, modelSourceInputBinding, sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
@@ -67,6 +67,10 @@ export class TurnHistorySink {
     );
     this.persistedHistoryCount = count;
   }
+  // SDK streaming parses responses and drops non-wire symbols. Restore only
+  // exact outputs observed by this attempt's live native capture registries.
+  private readonly modelSourceRestorers = new Set<(items:readonly unknown[])=>void>();
+  recordModelSourceRestorer(restore:(items:readonly unknown[])=>void):void {this.modelSourceRestorers.add(restore);}
   private readonly toolSourcesByCallId=new Map<string,import("@opengeni/contracts").NativeModelToolSource>();
   recordModelToolSource(source:import("@opengeni/contracts").NativeModelToolSource):void {this.toolSourcesByCallId.set(source.sourceCallId,source);}
   persistedHistoryCount = 0;
@@ -106,6 +110,19 @@ export class TurnHistorySink {
       const rawHistory = (stream.state as { history?: unknown[] }).history;
       if (Array.isArray(rawHistory)) {
         const typedHistory = rawHistory as Array<Record<string, unknown>>;
+        for (const item of typedHistory.slice(this.persistedHistoryCount)) {
+          if (modelSourceInputBinding(item)) continue;
+          let source: ReturnType<typeof modelSourceInputBinding>;
+          for (const restore of this.modelSourceRestorers) {
+            const projected = {...item};
+            restore([projected]);
+            const candidate = modelSourceInputBinding(projected);
+            if (!candidate) continue;
+            if (source && JSON.stringify(source) !== JSON.stringify(candidate)) throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
+            source = candidate;
+          }
+          if (source) bindModelSourceInput(item,source);
+        }
         const verifiedKeys = this.prefix.verify(
           typedHistory,
           this.deps.getModelRunSettings().modelToolOutputTruncationTokens,

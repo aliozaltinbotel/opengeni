@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { canonicalModelSourceJson, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
+import { canonicalModelSourceJson, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
@@ -48,7 +48,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       return call !== undefined;
     };
     const closureNodes = new Map<string, ModelSourceClosureNode>();
-    const closure = async (ref:ModelSourceRef, path:Set<string>, depth=0):Promise<boolean> => {
+    const closure = async (ref:ModelSourceRef, path:Set<string>, depth=0, expectedPurpose:"AGENT"|"COMPACTION"="COMPACTION"):Promise<boolean> => {
       if (depth>128 || path.size>16384) {reasons.add("CAP_EXCEEDED");return false;}
       if([...closureNodes.values()].some(node=>canonicalModelSourceJson(node.sourceRef)===canonicalModelSourceJson(ref) && node.parents.length===0))return true;
       if(ref.owner==="native.runtime.artifact") {closureNodes.set(`artifact-parent:${ref.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources:[]});return true;}
@@ -57,36 +57,51 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.id,ref.id))).limit(1);
         if(!stored)return false;
         let receipt:ModelCallSourceReceipt;try{receipt=validatedStoredModelCallSourceReceipt(stored);}catch{return false;}
-        if(receipt.digest!==ref.sha256 || receipt.id!==stored.id || receipt.accountId!==identity.accountId || receipt.workspaceId!==identity.workspaceId || receipt.sessionId!==stored.sessionId || receipt.turnId!==stored.turnId || receipt.attemptId!==stored.attemptId || receipt.executionGeneration!==stored.executionGeneration || receipt.sourceKey!==stored.sourceKey || receipt.purpose!=="COMPACTION" || !receipt.complete)return false;
+        if(receipt.digest!==ref.sha256 || receipt.id!==stored.id || receipt.accountId!==identity.accountId || receipt.workspaceId!==identity.workspaceId || receipt.sessionId!==stored.sessionId || receipt.turnId!==stored.turnId || receipt.attemptId!==stored.attemptId || receipt.executionGeneration!==stored.executionGeneration || receipt.sourceKey!==stored.sourceKey || receipt.purpose!==expectedPurpose || !receipt.complete)return false;
         const next=new Set(path);next.add(ref.id);
         const parents=receipt.inputs.flatMap(input=>input.sourceRef?[input.sourceRef]:[]);
-        closureNodes.set(`receipt:${ref.id}`,{sourceRef:ref,kind:"SUMMARY",parents,retainedSources:receipt.inputs.flatMap(input=>input.retainedSources)});
+        closureNodes.set(`receipt:${ref.id}`,{sourceRef:ref,kind:receipt.purpose==="AGENT"?"HISTORY_ROW":"SUMMARY",parents,retainedSources:receipt.inputs.flatMap(input=>input.retainedSources)});
         // Artifacts/selection nodes are authenticated by the exact stored request digest. History and nested
         // call parents are still recursively resolved from their owners, so a cached graph cannot hide absence.
         for(const node of receipt.closure) {
           if(node.sourceRef.owner!=="session_history_items" && node.sourceRef.owner!=="model_call_source_receipts")closureNodes.set(`receipt-node:${canonicalModelSourceJson(node.sourceRef)}`,node);
         }
         for(const node of receipt.closure) {
-          if((node.sourceRef.owner==="session_history_items" || node.sourceRef.owner==="model_call_source_receipts") && !await closure(node.sourceRef,next,depth+1))return false;
+          if((node.sourceRef.owner==="session_history_items" || node.sourceRef.owner==="model_call_source_receipts") && !await closure(node.sourceRef,next,depth+1,node.kind==="HISTORY_ROW"?"AGENT":"COMPACTION"))return false;
         }
         return parents.length>0;
       }
       if (ref.owner!=="session_history_items" || !/^[a-f0-9-]{36}$/.test(ref.id) || path.has(ref.id)) return false;
-      const [row] = await tx.select({item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,sessionId:schema.sessionHistoryItems.sessionId,turnId:schema.sessionHistoryItems.turnId,rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
+      const [row] = await tx.select({item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,sessionId:schema.sessionHistoryItems.sessionId,turnId:schema.sessionHistoryItems.turnId,position:schema.sessionHistoryItems.position,rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
         .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.id,ref.id))).limit(1);
       if (!row || row.rowSha!==ref.sha256) return false;
       if (await missingSkillOrigin(row.item,row.basis,row.sessionId)) return false;
       if (!row.basis) {
+        // A response written by the source-aware runtime, or after a legacy Skill
+        // read/catalog, cannot become source-free merely through selective import.
+        const generated = row.item.role === "assistant" || row.item.type === "reasoning";
+        if (generated) {
+          const [producer] = row.turnId ? await tx.select({id:schema.modelCallSourceReceipts.id}).from(schema.modelCallSourceReceipts).where(and(
+            eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),
+            eq(schema.modelCallSourceReceipts.sessionId,row.sessionId),eq(schema.modelCallSourceReceipts.turnId,row.turnId))).limit(1) : [];
+          if (producer) return false;
+          const [skill] = await tx.select({id:schema.sessionHistoryItems.id}).from(schema.sessionHistoryItems).where(and(
+            eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),
+            eq(schema.sessionHistoryItems.sessionId,row.sessionId),sql`${schema.sessionHistoryItems.position} < ${row.position}`,
+            sql`((${schema.sessionHistoryItems.item}->>'type'='message' and ${schema.sessionHistoryItems.item}->>'role'='developer' and starts_with(${schema.sessionHistoryItems.item}->>'content',${SKILL_CATALOG_CONTEXT_PREFIX}) and strpos(${schema.sessionHistoryItems.item}->>'content','- {')>0) or (${schema.sessionHistoryItems.item}->>'type'='function_call' and ${schema.sessionHistoryItems.item}->>'name'='skill_read'))`)).limit(1);
+          if (skill) return false;
+        }
         if (canonicalModelSourceJson(row.item).includes("opengeni_context_summary") || canonicalModelSourceJson(row.item).includes(IMPORTED_HISTORY_CONTEXT_HEADER) || (row.item as {type?:string}).type==="function_call_result") return false;
         closureNodes.set(ref.id,{sourceRef:ref,kind:"HISTORY_ROW",parents:[],retainedSources:[]});
         return true;
       }
       closureNodes.set(ref.id,{sourceRef:ref,kind:row.basis.kind,parents:row.basis.parents,retainedSources:row.basis.retainedSources ?? []});
       if (!Array.isArray(row.basis.parents)||row.basis.parents.length===0) return false;
-      if(row.basis.kind==="SUMMARY" && row.basis.parents.filter(parent=>parent.owner==="model_call_source_receipts").length!==1)return false;
+      if(row.basis.kind==="HISTORY_ROW" && row.basis.parents.length!==1)return false;
+      if((row.basis.kind==="SUMMARY" || row.basis.kind==="HISTORY_ROW") && row.basis.parents.filter(parent=>parent.owner==="model_call_source_receipts").length!==1)return false;
       const next = new Set(path);next.add(ref.id);
       for (const parent of row.basis.parents) {
-        if(row.basis.kind==="SUMMARY" && parent.owner==="model_call_source_receipts") {
+        if((row.basis.kind==="SUMMARY" || row.basis.kind==="HISTORY_ROW") && parent.owner==="model_call_source_receipts") {
           const [scope]=await tx.select({sessionId:schema.modelCallSourceReceipts.sessionId,turnId:schema.modelCallSourceReceipts.turnId}).from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.id,parent.id))).limit(1);
           if(!scope || scope.sessionId!==row.sessionId || scope.turnId!==row.turnId)return false;
         }
@@ -96,7 +111,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           const [sourceReceipt]=await tx.select({id:schema.modelCallSourceReceipts.id}).from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,row.sessionId),eq(schema.modelCallSourceReceipts.turnId,row.turnId),eq(schema.modelCallSourceReceipts.sourceKey,raw.nativeModelSourceKey))).limit(1);
           if(!sourceReceipt) return false;
           closureNodes.set(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[],retainedSources:raw.retainedSources});
-        } else if (!await closure(parent,next,depth+1)) return false;
+        } else if (!await closure(parent,next,depth+1,row.basis.kind==="HISTORY_ROW"?"AGENT":"COMPACTION")) return false;
       }
       return true;
     };
@@ -186,11 +201,12 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         }
       }
       if(typeof value==="string" && request.purpose==="TITLE") {
-        const [turn]=await tx.select({prompt:schema.sessionTurns.prompt}).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
+        const [turn]=await tx.select({prompt:schema.sessionTurns.prompt,metadata:schema.sessionTurns.metadata}).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
         if(turn) {
           sourceRef={owner:"native.runtime.artifact",id:`title-input:${contentSha256}`,sha256:contentSha256};
           const parent={owner:"session_turns",id:identity.turnId,sha256:modelSourceContentDigest(turn.prompt)};parents.push(parent);
-          closureNodes.set(`turn:${identity.turnId}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources:[]});
+          retainedSources=ModelSourceRef.array().max(16384).parse(turn.metadata?.nativeMessageModelSourceRefs ?? []);
+          closureNodes.set(`turn:${identity.turnId}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
         }
       }
       if(sourceRef?.owner==="native.runtime.artifact") {for(const parent of parents) if(!await closure(parent,new Set())) reasons.add("UNRESOLVED_PARENT");}

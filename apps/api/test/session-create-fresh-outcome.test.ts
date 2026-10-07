@@ -12,6 +12,13 @@ import {
 import type { SessionWorkflowClient } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  claimSessionWorkForAttempt,
+  getActiveSessionHistoryItemsPaged,
+  persistModelCallSourceReceipt,
+  getOrCreateCompanyProfileSnapshot,
+  getOrCreateWorkspaceInstructionPolicySnapshot,
+  getOrCreatePreferenceRegistrySnapshot,
+  withSessionRlsActorContext,
   createDb,
   createSessionWithIdempotencyKeyResult,
   getSession,
@@ -409,3 +416,55 @@ describe("REST committed fresh session outcome (real PostgreSQL, real API compos
     });
   }, 60_000);
 });
+
+
+test("public host message origins survive create/send/steer into exact first-call receipt", async () => {
+  for(const mode of ["create","send","steer"] as const) {
+    const {grant,request}=await fixture();
+    const refs=[{owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),sha256:"a".repeat(64),version:"1"}];
+    const createPayload=mode==="create"
+      ? {...request,initialMessageModelSourceRefs:refs,modelContext:"Selected document passage"}
+      : {...request,initialMessage:undefined,startMode:"realtime"};
+    const created=await post(grant,createPayload);
+    expect(created.status).toBe(202);
+    const session=await created.json();
+    if(mode==="create") {
+      expect((await post(grant,createPayload)).status).toBe(202);
+      expect((await post(grant,{...createPayload,initialMessageModelSourceRefs:[]})).status).toBe(409);
+      expect((await post(grant,{...createPayload,initialMessage:"Altered passage"})).status).toBe(409);
+    } else {
+      const eventId=crypto.randomUUID();
+      const payload={text:"Selected host passage",modelContext:"Selected document context",messageModelSourceRefs:refs,clientEventId:eventId};
+      // Keep the bearer in memory and use the real authenticated HTTP boundary.
+      const auth=await bearer(grant);
+      const submit=async(body:typeof payload)=>fetch(`${server.url}v1/workspaces/${grant.workspaceId}/sessions/${session.id}/${mode==="send"?"events":"steer"}`,{
+        method:"POST",headers:{authorization:auth,"content-type":"application/json",[OPENGENI_API_CONTRACT_HEADER]:OPENGENI_API_CONTRACT_REVISION},
+        body:JSON.stringify(mode==="send"?{type:"user.message",clientEventId:eventId,payload:{text:body.text,modelContext:body.modelContext,messageModelSourceRefs:body.messageModelSourceRefs}}:body),
+      });
+      const accepted=await submit(payload);expect(accepted.ok).toBe(true);
+      expect((await submit(payload)).ok).toBe(true);
+      expect((await submit({...payload,messageModelSourceRefs:[]})).status).toBe(409);
+    }
+    const attemptId=crypto.randomUUID();
+    const claim=await claimSessionWorkForAttempt(client.db,grant.workspaceId,{sessionId:session.id,workflowId:`session-${session.id}`,workflowRunId:crypto.randomUUID(),attemptId,dispatchId:crypto.randomUUID(),trigger:{kind:"next"}});
+    expect(claim.action).toBe("claimed");if(claim.action!=="claimed")throw Error("Attributed turn claim refused");
+    const rows=await getActiveSessionHistoryItemsPaged(client.db,grant.workspaceId,session.id);
+    const [attributed]=await shared.admin`select source_basis from session_history_items where account_id=${grant.accountId} and workspace_id=${grant.workspaceId} and session_id=${session.id} and turn_id=${claim.turn.id}`;
+    expect(attributed?.source_basis?.retainedSources).toEqual(refs);
+    const [event]=await shared.admin`select payload from session_events where id=${claim.turn.triggerEventId} and workspace_id=${grant.workspaceId}`;
+    expect(event!.payload.messageModelSourceRefs).toEqual(refs);
+    const identity={accountId:grant.accountId,workspaceId:grant.workspaceId,sessionId:session.id,turnId:claim.turn.id,attemptId,executionGeneration:claim.turn.executionGeneration,sourceKey:crypto.randomUUID(),requestIndex:1};
+    const instructionSelections=await withSessionRlsActorContext({subjectId:"worker:message-source-test",initiatingHumanSubjectId:grant.subjectId},async()=>({
+      companyProfileSnapshotId:(await getOrCreateCompanyProfileSnapshot(client.db,identity)).id,
+      instructionPolicySnapshotId:(await getOrCreateWorkspaceInstructionPolicySnapshot(client.db,identity)).id,
+      preferenceSnapshotId:(await getOrCreatePreferenceRegistrySnapshot(client.db,identity)).id,
+    }));
+    const receipt=await persistModelCallSourceReceipt(client.db,identity,{instructions:"Synthetic source verification",input:rows.map(row=>row.item),instructionSelections});
+    expect(receipt.incompleteReasons).toEqual([]);
+    expect(receipt.complete).toBe(true);
+    expect(receipt.inputs.flatMap(node=>node.retainedSources)).toContainEqual(refs[0]!);
+    const title=await persistModelCallSourceReceipt(client.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:2},{instructions:"Generate a short title",input:["Selected host passage"],purpose:"TITLE",instructionSelections});
+    expect(title.incompleteReasons).toEqual([]);
+    expect(title.inputs.flatMap(node=>node.retainedSources)).toContainEqual(refs[0]!);
+  }
+},120_000);

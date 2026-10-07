@@ -1,3 +1,4 @@
+import { createTurnHistorySink } from "../src/activities/agent-turn/history-sink";
 import { historyRowsToAppend } from "../src/activities/agent-turn/history";
 import { projectHistoryForProvider } from "../../../packages/runtime/src/provider-history-adapter";
 import { HistoryPrefixGuard } from "../src/activities/agent-turn/history-prefix";
@@ -10,7 +11,7 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
-import { submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
+import { ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
@@ -366,3 +367,85 @@ test("actual SDK source-bound output persists and reloads into the next admitted
  }
  expect(counts[1]!).toBeGreaterThan(counts[0]!);
 },180_000);
+
+
+test.each([false,true])("selective import of an actual SDK response retains its exact producing Skill call and reaches current host refusal; streaming %s", async (streaming) => {
+ const f=await fixture();const {identity,write}=f;
+ const skill={owner:"cendra.skill.reviewed_release",id:crypto.randomUUID(),sha256:createHash("sha256").update("Synthetic reviewed Skill").digest("hex"),version:"1"};
+ await ensureSessionSkillCatalog(app.db,{...write,catalog:'## Skills\n- {"id":"synthetic","name":"Synthetic","description":"Reviewed instructions"}',retainedSources:[skill]});
+ const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
+ const input=projectHistoryForProvider(rows.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]})),"responses");
+ const capture:ModelRequestCapture=()=>{};let sourceReceipt:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>|undefined;
+ capture.beforeCall=async request=>{sourceReceipt=await persistModelCallSourceReceipt(app.db,identity,{input:request.input,sourceBindings:modelSourceBindings(request.input)});expect(sourceReceipt.complete).toBe(true);return sourceReceipt.sourceKey;};
+ let restoreHistorySources:((items:readonly unknown[])=>void)|undefined;
+ capture.callCompleted=(_sourceKey,_responseId,_response,restore)=>{restoreHistorySources=restore;};
+ const {Agent}=await import("@openai/agents");
+ const result=await withModelRequestCapture(capture,async()=>{
+  const runner=new Runner({tracingDisabled:true}),agent=new Agent({name:"Skill-informed output",model:new ModelRequestCaptureModel(new ScriptedModel([{outputText:"Synthetic Skill-informed answer"}]))});
+  if(streaming){const stream=await runner.run(agent,input as ModelRequest["input"],{stream:true,historyOwnership:"external"});for await(const _event of stream){}await stream.completed;return stream;}
+  return runner.run(agent,input as ModelRequest["input"],{historyOwnership:"external"});
+ });
+ const sink=createTurnHistorySink({db:app.db,accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,attemptId:identity.attemptId,
+  getTurnId:()=>identity.turnId,getExecutionGeneration:()=>identity.executionGeneration,getStream:()=>({state:{history:result.history}}),getModelRunSettings:()=>testSettings({sandboxBackend:"none"}),
+  media:{retainNativeGeneratedImagesFromHistory:async()=>{},retainedScreenshotReceiptsByCallId:new Map(),generatedImageReceiptsByProviderItemId:new Map()},
+ } as unknown as Parameters<typeof createTurnHistorySink>[0]);
+ expect(restoreHistorySources).toBeDefined();sink.recordModelSourceRestorer(restoreHistorySources!);
+ sink.seedHistory(input,input.length);sink.nextHistoryPosition=Math.max(...rows.map(row=>row.position))+1;
+ await sink.reconcileConversationTruth({requireDurable:true});
+ const saved=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);const answer=saved.find(row=>row.item.role==="assistant")!;
+ const body=typeof answer.item.content==="string"?answer.item.content:(answer.item.content as {text:string}[]).map(part=>part.text).join("\n");
+ const imported=await createSession(app.db,{accountId:identity.accountId,workspaceId:identity.workspaceId,initialMessage:"Continue only this imported answer",initialModelContext:`${IMPORTED_HISTORY_CONTEXT_HEADER}\nassistant: ${body}`,createdBy:{kind:"subject",subjectId:f.subjectId},resources:[],metadata:{nativeImportedHistoryOrigins:[{source:"session_history_items",externalId:answer.id,sha256:answer.sourceSha256!}]},model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
+ await initializeSessionStartAtomically(app.db,{accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:imported.id,reasoningEffortFallback:"low",createdEventPayload:{}});
+ const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(app.db,identity.workspaceId,{sessionId:imported.id,workflowId:`session-${imported.id}`,workflowRunId:crypto.randomUUID(),dispatchId:crypto.randomUUID(),attemptId,trigger:{kind:"next"}});if(claim.action!=="claimed")throw Error("import claim");
+ const next={...identity,sessionId:imported.id,turnId:claim.turn.id,attemptId,executionGeneration:claim.turn.executionGeneration,sourceKey:crypto.randomUUID()};
+ const importedRows=await getActiveSessionHistoryItemsPaged(app.db,next.workspaceId,next.sessionId);
+ const receipt=await persistModelCallSourceReceipt(app.db,next,{input:importedRows.map(row=>row.item)});
+ expect(receipt.complete).toBe(true);
+ expect(receipt.closure.flatMap(node=>node.retainedSources)).toContainEqual(skill);
+ expect(receipt.closure.map(node=>node.sourceRef)).toContainEqual({owner:"model_call_source_receipts",id:sourceReceipt!.id,sha256:sourceReceipt!.digest});
+ const native=await validateRetainedModelSources(app.db,{identity:next,receipt});
+ expect(native.sources).toContainEqual({sourceRef:skill,status:"HOST_AUTHORITY_REQUIRED",reason:"HOST_AUTHORITY_REQUIRED"});
+ // The current host owner withdraws this exact release; no cached earlier admission can dispatch it.
+ let dispatched=0,hostChecks=0;const withdrawn=new Set([skill.id]);
+ const replay:ModelRequestCapture=()=>{};
+ replay.beforeCall=request=>persistAndAuthorizeModelCallSource(app.db,{...next,sourceKey:crypto.randomUUID(),requestIndex:2},{input:request.input},async current=>{hostChecks++;if(current.closure.flatMap(node=>node.retainedSources).some(ref=>ref.owner===skill.owner&&withdrawn.has(ref.id)))throw Error("CURRENT_SKILL_WITHDRAWN");});
+ const model=new ModelRequestCaptureModel({async getResponse(request){dispatched++;return new ScriptedModel([{outputText:"must not run"}]).getResponse(request);},async *getStreamedResponse(){throw Error("unused");}});
+ await expect(withModelRequestCapture(replay,()=>model.getResponse(request(importedRows.map(row=>row.item))))).rejects.toThrow("CURRENT_SKILL_WITHDRAWN");
+ expect(hostChecks).toBe(1);expect(dispatched).toBe(0);
+},180_000);
+
+
+test("model output ancestry refuses foreign calls, wrong purpose, invented basis and source-managed legacy omission", async () => {
+ const f=await fixture(),foreign=await fixture();
+ const foreignRows=await getActiveSessionHistoryItemsPaged(app.db,foreign.identity.workspaceId,foreign.identity.sessionId);
+ await persistModelCallSourceReceipt(app.db,foreign.identity,{input:foreignRows.map(row=>row.item)});
+ const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId),position=Math.max(...rows.map(row=>row.position))+1;
+ const item={type:"message",role:"assistant",content:"Synthetic generated answer"};
+ await expect(appendSessionHistoryItems(app.db,{...f.write,items:[{position,item,nativeProducerSourceKey:foreign.identity.sourceKey}]})).rejects.toThrow("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
+ const compaction=await persistModelCallSourceReceipt(app.db,f.identity,{purpose:"COMPACTION",input:rows.map(row=>row.item)});
+ await expect(appendSessionHistoryItems(app.db,{...f.write,items:[{position,item,nativeProducerSourceKey:compaction.sourceKey}]})).rejects.toThrow("MODEL_OUTPUT_PRODUCER_INEXACT");
+ await expect(appendSessionHistoryItems(app.db,{...f.write,items:[{position,item,sourceBasis:{kind:"HISTORY_ROW",parents:[{owner:"model_call_source_receipts",id:compaction.id,sha256:compaction.digest}]}}]})).rejects.toThrow("MODEL_OUTPUT_SOURCE_BASIS_REQUIRES_PRODUCER");
+ // A legacy unannotated row is retained for transcript reads, but cannot prove model ancestry.
+ expect(await appendSessionHistoryItems(app.db,{...f.write,items:[{position,item}]})).toBe(true);
+ const legacy=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+ const receipt=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2},{input:legacy.map(row=>row.item)});
+ expect(receipt.complete).toBe(false);expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
+},180_000);
+
+
+test("live output registry refuses changed bytes and ambiguous producer identities without weakening symbol fences", async () => {
+ const output={type:"message" as const,role:"assistant" as const,status:"completed" as const,content:[{type:"output_text" as const,text:"Synthetic exact response"}]};
+ const capture:ModelRequestCapture=()=>{};const restorers:Array<(items:readonly unknown[])=>void>=[];
+ capture.beforeCall=async()=>crypto.randomUUID();capture.callCompleted=(_key,_id,_response,restore)=>{restorers.push(restore);};
+ const model=new ModelRequestCaptureModel(new ScriptedModel([{output:[output]}]));
+ await withModelRequestCapture(capture,()=>model.getResponse(request([])));
+ const changed={...omitModelSourceInputBinding(output),content:[{type:"output_text",text:"Changed bytes"}]};
+ restorers[0]!([changed]);expect(modelSourceBindings([changed])).toEqual([]);
+ const foreign=JSON.parse(JSON.stringify(output)) as Record<string,unknown>;Object.defineProperty(foreign,Symbol("foreign"),{value:true,enumerable:false});
+ restorers[0]!([foreign]);expect(()=>historyRowsToAppend([foreign],0)).toThrow("cannot contain symbol keys");
+ // Two calls produce identical bytes; a symbol-free SDK copy cannot guess which call owns it.
+ await withModelRequestCapture(capture,()=>model.getResponse(request([])));
+ const ambiguous=JSON.parse(JSON.stringify(output)) as Record<string,unknown>;
+ expect(()=>restorers[0]!([ambiguous])).toThrow("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
+ expect(modelSourceBindings([ambiguous])).toEqual([]);
+});
