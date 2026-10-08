@@ -143,6 +143,10 @@ describe("release schema contract", () => {
     if (failedSessionVariableSetAttach) {
       expect(sourceContract.latestMigration).toBe(
         sourceContract.migrations.some(
+          (migration) => migration.path === "0552_recurring_temporary_image_cleanup_fairness.sql",
+        )
+          ? "0552_recurring_temporary_image_cleanup_fairness.sql"
+          : sourceContract.migrations.some(
           (migration) => migration.path === "0551_model_call_source_receipts.sql",
         )
           ? "0551_model_call_source_receipts.sql"
@@ -406,6 +410,9 @@ describe("release schema contract", () => {
     );
     const scheduledAdmissionRefusals = completeSourceContract.migrations.some(
       (migration) => migration.path === "0539_scheduled_admission_refusals.sql",
+    );
+    const recurringTemporaryImageCleanupFairness = completeSourceContract.migrations.some(
+      (migration) => migration.path === "0552_recurring_temporary_image_cleanup_fairness.sql",
     );
     const modelCallSourceReceipts = completeSourceContract.migrations.some(
       (migration) => migration.path === "0551_model_call_source_receipts.sql",
@@ -711,6 +718,7 @@ describe("release schema contract", () => {
     );
     expect(completeSourceContract).toMatchObject({
       fileCount:
+        (recurringTemporaryImageCleanupFairness ? 1 : 0) +
         (modelCallSourceReceipts ? 1 : 0) +
         (externalWorkspaceMemberEmptyPermissionUpdates ? 1 : 0) +
         (claudeSubscriptionUsage ? 1 : 0) +
@@ -1130,6 +1138,9 @@ describe("release schema contract", () => {
       ...(modelCallSourceReceipts
         ? { latestMigration: "0551_model_call_source_receipts.sql" }
         : {}),
+      ...(recurringTemporaryImageCleanupFairness
+        ? { latestMigration: "0552_recurring_temporary_image_cleanup_fairness.sql" }
+        : {}),
     });
     // Keep the historical migration-order probes below scoped to published
     // history after checking the three forward rollout steps above.
@@ -1172,6 +1183,7 @@ describe("release schema contract", () => {
             "0549_claude_subscription_usage.sql",
             "0550_external_workspace_member_empty_permission_updates.sql",
             "0551_model_call_source_receipts.sql",
+            "0552_recurring_temporary_image_cleanup_fairness.sql",
             "0548_lost_sandbox_group_continuity.sql",
           ].includes(migration.path),
       ),
@@ -2664,6 +2676,7 @@ describe("release schema contract", () => {
       "0549_claude_subscription_usage.sql",
       "0550_external_workspace_member_empty_permission_updates.sql",
       "0551_model_call_source_receipts.sql",
+      "0552_recurring_temporary_image_cleanup_fairness.sql",
       "0548_lost_sandbox_group_continuity.sql",
       "0521_verified_signup_trial_runtime_switch.sql",
       "0522_scoped_machine_update_status.sql",
@@ -3209,6 +3222,7 @@ describe("release schema contract", () => {
       "0550_external_workspace_member_empty_permission_updates.sql",
       "0548_lost_sandbox_group_continuity.sql",
       "0551_model_call_source_receipts.sql",
+      "0552_recurring_temporary_image_cleanup_fairness.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

@@ -1,4 +1,4 @@
-import { ModelSourceRef } from "@opengeni/contracts";
+import { ModelSourceRef, FileResourceRef } from "@opengeni/contracts";
 import { validatedStoredModelCallSourceReceipt, importedHistorySourceBasisTx, persistModelCallSourceReceiptWithFence, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
 import { validateRetainedModelSourcesWithFence, type RetainedModelSourceValidationInput, type RetainedModelSourceValidation } from "./model-retained-source-validation";
 export type { RetainedModelSourceValidation, RetainedModelSourceValidationInput, RetainedModelSourceStatus } from "./model-retained-source-validation";
@@ -6841,6 +6841,102 @@ function assertGeneratedWorkspaceFileMatches(
   }
 }
 
+/** Temporary model input custody reuses the immutable signed-upload audit owner. */
+export async function getTemporaryModelImageFile(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; sessionId: string; fileId: string },
+): Promise<FileAsset | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [audit] = await scopedDb.select({ id: schema.auditEvents.id })
+      .from(schema.auditEvents).where(and(
+        eq(schema.auditEvents.accountId, input.accountId),
+        eq(schema.auditEvents.workspaceId, input.workspaceId),
+        eq(schema.auditEvents.subjectId, input.subjectId),
+        eq(schema.auditEvents.action, "file.signed_upload.issued"),
+        eq(schema.auditEvents.targetType, "workspace_file"),
+        eq(schema.auditEvents.targetId, input.fileId),
+        sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' = ${input.sessionId}`,
+      )).limit(1);
+    if (!audit) return null;
+    const [session] = await scopedDb.select({ creator: schema.sessions.createdBySubjectId,
+      resources: schema.sessions.resources }).from(schema.sessions).where(and(
+        eq(schema.sessions.accountId, input.accountId),
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      )).limit(1);
+    // Unknown create outcomes may be cleaned before the shell exists. Existing
+    // shells must agree with the uploader and the exact immutable image ref.
+    if (session && (session.creator !== input.subjectId ||
+        !session.resources.some((ref) => { const parsed = FileResourceRef.safeParse(ref); return parsed.success && parsed.data.fileId === input.fileId && parsed.data.asImage === true; })))
+      return null;
+    const [file] = await scopedDb.select().from(schema.files).where(and(
+      eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+      eq(schema.files.id, input.fileId), isNull(schema.files.privateOwnerSubjectIds),
+    )).limit(1);
+    if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.contentType) ||
+        file.sizeBytes > 10 * 1024 * 1024 || !/^[a-f0-9]{64}$/i.test(file.sha256 ?? "")) return null;
+    return mapFile(file);
+  });
+}
+
+/** Recover crash/unknown-response cleanup from existing upload and purge audit facts. */
+export async function listTemporaryModelImageCleanup(
+  db: Database, input: { accountId: string; workspaceId: string; subjectId: string },
+): Promise<Array<{ fileId: string; sessionId: string }>> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.selectDistinct({ fileId: schema.auditEvents.targetId,
+      sessionId: sql<string>`${schema.auditEvents.metadata}->>'temporaryForSessionId'` })
+      .from(schema.auditEvents).where(and(
+        eq(schema.auditEvents.accountId, input.accountId), eq(schema.auditEvents.workspaceId, input.workspaceId),
+        eq(schema.auditEvents.subjectId, input.subjectId), eq(schema.auditEvents.action, "file.signed_upload.issued"),
+        eq(schema.auditEvents.targetType, "workspace_file"),
+        sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
+        sql`EXISTS(SELECT 1 FROM ${schema.files} AS temporary_file WHERE temporary_file.account_id = ${input.accountId}
+          AND temporary_file.workspace_id = ${input.workspaceId} AND temporary_file.id::text = ${schema.auditEvents.targetId}
+          AND (temporary_file.status = 'failed' OR ${schema.auditEvents.occurredAt} < now() - interval '5 minutes'
+            OR EXISTS(SELECT 1 FROM ${schema.sessionTurns} AS finished_turn WHERE finished_turn.workspace_id = ${input.workspaceId}
+              AND finished_turn.session_id::text = ${schema.auditEvents.metadata}->>'temporaryForSessionId'
+              AND finished_turn.status IN ('completed','failed','cancelled','superseded'))))`,
+        sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS purged WHERE purged.account_id = ${input.accountId}
+          AND purged.workspace_id = ${input.workspaceId} AND purged.subject_id = ${input.subjectId}
+          AND purged.target_id = ${schema.auditEvents.targetId} AND purged.action = 'file.temporary_input.purged')`,
+      )).limit(100);
+    return rows.flatMap(row => row.fileId ? [{ fileId: row.fileId, sessionId: row.sessionId }] : []);
+  });
+}
+
+/** Revoke reads and fence finalize in the same upload→file lock order as completion. */
+export async function revokeTemporaryModelImageFile(
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string; sessionId: string; fileId: string },
+): Promise<FileAsset | null> {
+  if (!(await getTemporaryModelImageFile(db, input))) return null;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const uploads = await tx.select().from(schema.fileUploads).where(and(
+        eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
+        eq(schema.fileUploads.fileId, input.fileId),
+      )).orderBy(asc(schema.fileUploads.id)).for("update");
+      if (uploads.length === 0) return null;
+      const [file] = await tx.select().from(schema.files).where(and(
+        eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+        eq(schema.files.id, input.fileId), isNull(schema.files.privateOwnerSubjectIds),
+      )).for("update").limit(1);
+      if (!file || !(await getTemporaryModelImageFile(tx, input))) return null;
+      const now = new Date();
+      await tx.update(schema.fileUploads).set({ status: "cleanup_pending", updatedAt: now }).where(and(
+        eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
+        eq(schema.fileUploads.fileId, input.fileId), inArray(schema.fileUploads.status, ["pending", "completed", "failed"]),
+      ));
+      const [row] = await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(and(
+        eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+        eq(schema.files.id, input.fileId),
+      )).returning();
+      return row ? mapFile(row) : null;
+    }),
+  );
+}
+
 export async function getFile(
   db: Database,
   workspaceId: string,
@@ -6906,6 +7002,12 @@ export async function requireFileForSubject(
               isNotNull(schema.files.privateOwnerSubjectIds),
             ),
             eq(schema.files.id, input.fileId),
+            sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS temporary_input
+              WHERE temporary_input.account_id = ${schema.files.accountId}
+                AND temporary_input.workspace_id = ${schema.files.workspaceId}
+                AND temporary_input.target_id = ${schema.files.id}::text
+                AND temporary_input.action = 'file.signed_upload.issued'
+                AND temporary_input.metadata->>'temporaryForSessionId' IS NOT NULL)`,
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid,
@@ -7020,6 +7122,12 @@ export async function listFilesForSubject(
               : input.scope === "personal"
                 ? isNotNull(schema.files.privateOwnerSubjectIds)
                 : undefined,
+            sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS temporary_input
+              WHERE temporary_input.account_id = ${schema.files.accountId}
+                AND temporary_input.workspace_id = ${schema.files.workspaceId}
+                AND temporary_input.target_id = ${schema.files.id}::text
+                AND temporary_input.action = 'file.signed_upload.issued'
+                AND temporary_input.metadata->>'temporaryForSessionId' IS NOT NULL)`,
             sql`google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, ${schema.files.id})`,
             after
               ? sql`(${schema.files.createdAt}, ${schema.files.id}) < (${after.at}::text::timestamptz, ${after.id}::uuid)`
@@ -7086,6 +7194,12 @@ export async function getFilesForSubject(
               isNotNull(schema.files.privateOwnerSubjectIds),
             ),
             inArray(schema.files.id, ids),
+            sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS temporary_input
+              WHERE temporary_input.account_id = ${schema.files.accountId}
+                AND temporary_input.workspace_id = ${schema.files.workspaceId}
+                AND temporary_input.target_id = ${schema.files.id}::text
+                AND temporary_input.action = 'file.signed_upload.issued'
+                AND temporary_input.metadata->>'temporaryForSessionId' IS NOT NULL)`,
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid,
@@ -7108,13 +7222,25 @@ export async function getFilesForSubject(
       const access = currentSessionAttachmentReadAccess();
       if (!access) return ordinary;
       const missing = ids.filter((id) => !ordinary.some((file) => file.id === id));
+      const temporaryRows = missing.length === 0 ? [] : await scopedDb.select({ fileId: schema.auditEvents.targetId })
+        .from(schema.auditEvents).where(and(eq(schema.auditEvents.accountId, input.accountId),
+          eq(schema.auditEvents.workspaceId, input.workspaceId), inArray(schema.auditEvents.targetId, missing),
+          eq(schema.auditEvents.action, "file.signed_upload.issued"),
+          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`));
+      const temporaryIds = new Set(temporaryRows.flatMap(row => row.fileId ? [row.fileId] : []));
+      const images: FileAsset[] = [];
+      if (input.subjectId) for (const fileId of temporaryIds) {
+        const image = await getTemporaryModelImageFile(scopedDb, { accountId: input.accountId,
+          workspaceId: input.workspaceId, subjectId: input.subjectId, sessionId: access.sessionId, fileId });
+        if (image?.status === "ready") images.push(image);
+      }
       const shared = await readSessionFileAttachments(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        fileIds: missing,
+        fileIds: missing.filter(id => !temporaryIds.has(id)),
         access,
       });
-      return [...ordinary, ...shared];
+      return [...ordinary, ...shared, ...images];
     },
   );
 }
@@ -8399,6 +8525,24 @@ async function completeFileUploadCleanupInOwnerScope(
           .limit(1);
         if (!upload || upload.fileId !== input.fileId) {
           return false;
+        }
+        const [temporaryInput] = await tx.select({ id: schema.auditEvents.id }).from(schema.auditEvents).where(and(
+          eq(schema.auditEvents.accountId, input.accountId), eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.targetId, input.fileId), eq(schema.auditEvents.action, "file.signed_upload.issued"),
+          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
+        )).limit(1);
+        // Signed URL expiry does not bound a PUT already in flight. Keep this
+        // existing owner recurring until the provider proves completion/cancellation.
+        if (temporaryInput) {
+          await tx.update(schema.fileUploads).set({ status: "cleanup_pending", updatedAt: new Date() }).where(and(
+            eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
+            eq(schema.fileUploads.id, input.uploadId),
+          ));
+          await tx.update(schema.files).set({ status: "failed", updatedAt: new Date() }).where(and(
+            eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+          ));
+          return true;
         }
         if (upload.status === input.terminalStatus) {
           return true;

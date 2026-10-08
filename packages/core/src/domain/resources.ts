@@ -22,6 +22,7 @@ import {
 import {
   areGitHubRepositoriesAllowedForWorkspace,
   requireFileForSubject,
+  getTemporaryModelImageFile,
   withSessionRlsActorContext,
   type SessionRlsActorContext,
   type Database,
@@ -165,6 +166,7 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
       normalized = {
         kind: "file",
         fileId: resource.fileId,
+        ...(resource.asImage === true ? { asImage: true as const } : {}),
         mountPath,
       };
     } else {
@@ -457,6 +459,7 @@ export async function validateFileResources(
   subjectId: string | null,
   resources: ResourceRef[],
   privateFileContext?: SessionRlsActorContext,
+  temporaryModelImageSessionId?: string,
 ): Promise<void> {
   return withSessionRlsActorContext(
     privateFileContext ?? {
@@ -473,12 +476,14 @@ export async function validateFileResources(
           throw new HTTPException(422, { message: `duplicate file resource: ${resource.fileId}` });
         }
         fileIds.add(resource.fileId);
-        const file = await requireFileForSubject(db, {
-          accountId,
-          workspaceId,
-          subjectId: privateFileContext?.initiatingHumanSubjectId ?? subjectId,
-          fileId: resource.fileId,
-        }).catch(() => null);
+        const file = resource.asImage === true
+          ? subjectId && temporaryModelImageSessionId ? await getTemporaryModelImageFile(db, {
+              accountId, workspaceId, subjectId, sessionId: temporaryModelImageSessionId, fileId: resource.fileId,
+            }) : null
+          : await requireFileForSubject(db, {
+              accountId, workspaceId, subjectId: privateFileContext?.initiatingHumanSubjectId ?? subjectId,
+              fileId: resource.fileId,
+            }).catch(() => null);
         if (!file) {
           throw new HTTPException(422, { message: `unknown file resource: ${resource.fileId}` });
         }

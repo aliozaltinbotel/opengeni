@@ -30,7 +30,7 @@ export function runtimeResourcesForTurn(
 ): ResourceRef[] {
   return mergeResourceRefs(
     sessionResources.filter((resource) => resource.kind !== "file"),
-    [...currentTurnResources],
+    currentTurnResources.filter((resource) => resource.kind !== "file" || resource.asImage !== true),
   );
 }
 
@@ -139,7 +139,7 @@ export async function sandboxFileDownloadsForRun(
     return [];
   }
   const fileResources = resources.filter(
-    (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file",
+    (resource): resource is Extract<ResourceRef, { kind: "file" }> => resource.kind === "file" && resource.asImage !== true,
   );
   if (fileResources.length === 0) {
     return [];

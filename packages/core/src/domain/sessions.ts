@@ -1,4 +1,4 @@
-import { acceptSessionFileAttachments } from "@opengeni/db";
+import { acceptSessionFileAttachments, getTemporaryModelImageFile } from "@opengeni/db";
 import { knowledgeContextForAccess } from "./knowledge";
 import {
   getSessionEvent,
@@ -2313,7 +2313,37 @@ async function createSessionForRequestInFileScope(
     requested: requestOptions.surface,
   });
   payload.metadata = sessionCreationMetadata(payload.metadata);
+  // Only the validated public field sets this immutable model output bound.
+  delete payload.metadata["nativeMaxOutputTokens"];
+  if (payload.maxOutputTokens !== undefined)
+    payload.metadata["nativeMaxOutputTokens"] = payload.maxOutputTokens;
   const creationMetadata = externalCreationMetadata(payload.metadata, authorization, grant);
+  const imageResources = payload.resources.filter(
+    (resource) => resource.kind === "file" && resource.asImage === true,
+  );
+  if (imageResources.length > 0) {
+    if (payload.policyRole !== "evidence-assessor" || !payload.requestedSessionId || !grant.subjectId ||
+        payload.agentAccess !== "session" || payload.memoryScope !== "off" ||
+        payload.rigId !== null || payload.sandboxBackend !== "none" ||
+        (payload.variableSetIds?.length ?? 0) !== 0 ||
+        payload.personalResourceAttachment !== undefined || payload.targetSandboxId !== undefined ||
+        payload.goal !== undefined ||
+        payload.tools.length !== 0 || payload.mcpServers.length !== 0 ||
+        payload.firstPartyMcpTools?.length !== 0 || payload.skills.length !== 0 ||
+        (payload.installedSkillIds?.length ?? 0) !== 0 ||
+        payload.bundledSkillIds?.length !== 0 || grant.metadata?.["sessionId"] !== undefined ||
+        payload.resources.length !== imageResources.length)
+      throw new HTTPException(422, { message: "Image-only sessions require isolated tool-less scope" });
+    for (const resource of imageResources) {
+      if (resource.kind !== "file") continue;
+      const file = await getTemporaryModelImageFile(unresolvedDeps.db, {
+        accountId: grant.accountId, workspaceId, subjectId: grant.subjectId,
+        sessionId: payload.requestedSessionId, fileId: resource.fileId,
+      });
+      if (!file || file.status !== "ready")
+        throw new HTTPException(422, { message: "Session image is unavailable" });
+    }
+  }
   const externalBeforeCreateCommit = externalContinuationCommitAuthorizer(authorization);
 
   if (hasReservedOpenGeniSlackBotSessionMetadata(payload.metadata)) {
@@ -2813,6 +2843,7 @@ async function createSessionForRequestInFileScope(
     personalResourceSubjectId ?? grant.subjectId,
     resources,
     attachmentOwnerContext,
+    payload.requestedSessionId,
   );
   // Every selected Variable Set is independently authorized. Scope does not
   // affect precedence: explicit order is low-to-high and later sets win name

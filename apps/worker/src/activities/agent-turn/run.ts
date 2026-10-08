@@ -628,7 +628,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceModelPolicy,
           } = governance.ok;
           const sourceContributions=buildCompanyBrainContributionReceiptFor("");
-          nativeInstructionSelections={instructionPolicySnapshotId:sourceContributions.instructionPolicySnapshotId,preferenceSnapshotId:sourceContributions.preferenceSnapshotId,companyProfileSnapshotId:sourceContributions.companyProfileSnapshotId};
+          nativeInstructionSelections=sourceContributions===null?undefined:{instructionPolicySnapshotId:sourceContributions.instructionPolicySnapshotId,preferenceSnapshotId:sourceContributions.preferenceSnapshotId,companyProfileSnapshotId:sourceContributions.companyProfileSnapshotId};
 
           // A codex-subscription turn resolves the bearer for THIS turn's effective
           // codex account (effectiveCodexCredentialId; pin > workspace-active) at
@@ -1556,6 +1556,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               const companyBrainContributionReceipt = buildCompanyBrainContributionReceiptFor(
                 modelVisibleSkillCatalogText,
               );
+              if (companyBrainContributionReceipt === null) {
+                eventing.companyBrainContextContributions = [];
+                return;
+              }
               eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
                 companyBrainContributionReceipt,
               );
