@@ -203,7 +203,8 @@ describe("tool-path phase timing", () => {
         "historySink.reconcileConversationTruth({ requireDurable: true })",
       ],
       ["terminal_history_reconciliation", "historySink.reconcileConversationTruth()"],
-      ["ensure_run_allowed", "ensureRunAllowed("],
+      // Upstream moved the run-allowed gate to per-model-call admission; the phase follows it.
+      ["ensure_run_allowed", "admitModelCall)"],
     ] as const) {
       const at = source.indexOf(`toolPathPhases.measure("${phase}"`);
       expect(at).toBeGreaterThan(-1);
@@ -211,6 +212,7 @@ describe("tool-path phase timing", () => {
       expect(source.indexOf(call, at) - at).toBeLessThan(160);
     }
     expect(source).toContain("toolPathPhases.measureTerminal(() =>");
+    expect(source).toContain("const admitModelCall = () =>\n      ensureRunAllowedBetweenModelCalls({");
     expect(source).toContain(
       "await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event));",
     );

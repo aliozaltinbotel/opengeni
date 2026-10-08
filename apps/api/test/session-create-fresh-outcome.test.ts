@@ -9,7 +9,7 @@ import {
   type AccessGrant,
   type Permission,
 } from "@opengeni/contracts";
-import type { SessionWorkflowClient } from "@opengeni/core";
+import { resolveSessionAgentConfigForCreate, type SessionWorkflowClient } from "@opengeni/core";
 import {
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -39,6 +39,7 @@ let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
 let server: ReturnType<typeof Bun.serve>;
 let appRole: string;
+let appSettings: ReturnType<typeof testSettings>;
 
 beforeAll(async () => {
   const appUrl = process.env.OPENGENI_SESSION_CREATE_TEST_APP_URL;
@@ -56,15 +57,16 @@ beforeAll(async () => {
   client = createDb(shared.appUrl, { max: 8 });
   appRole = decodeURIComponent(new URL(shared.appUrl).username);
   const noop = async () => undefined;
+  appSettings = testSettings({
+    databaseUrl: shared.appUrl,
+    productAccessMode: "managed",
+    delegationSecret: secret,
+    sandboxBackend: "none",
+    // Exercise the production API-contract fence, not its test bypass.
+    environment: "development",
+  });
   const app = createApp({
-    settings: testSettings({
-      databaseUrl: shared.appUrl,
-      productAccessMode: "managed",
-      delegationSecret: secret,
-      sandboxBackend: "none",
-      // Exercise the production API-contract fence, not its test bypass.
-      environment: "development",
-    }),
+    settings: appSettings,
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {
@@ -256,7 +258,22 @@ describe("REST committed fresh session outcome (real PostgreSQL, real API compos
 
   test("repairing an existing keyed birth returns false even when start state changes", async () => {
     const { grant, request } = await fixture();
+    // The keyed birth mirrors what this API writes for the same request, including the agent
+    // configuration it freezes at creation (upstream 0559); a differing configuration is a
+    // different request by design, not a repair.
+    const [workspace] = await shared.admin<{ settings: unknown }[]>`
+      select settings from workspaces where id = ${grant.workspaceId}`;
+    const agentConfig = resolveSessionAgentConfigForCreate({
+      settings: appSettings,
+      creator: "api",
+      request: undefined,
+      instructions: undefined,
+      workspaceSettings: workspace?.settings ?? {},
+      parent: null,
+      goal: false,
+    }).config;
     const existing = await createSessionWithIdempotencyKeyResult(client.db, {
+      agentConfig,
       requestedSessionId: request.requestedSessionId,
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,

@@ -73,7 +73,7 @@ function productionRoute() {
     "db",
     `
     const { requireAccessGrantAuthorization, CreateSessionRequest, resolveSiteSessionOrigin,
-      withSiteSessionOrigin, createSessionForRequest, sessionCreateErrorResponse,
+      withSiteSessionOrigin, createSessionForRequestWithOutcome, sessionCreateErrorResponse,
       withEffectivePolicy, measureSessionCreatePhase } = ports;
     ${code}
     return handler;
@@ -127,7 +127,8 @@ function routeFixture() {
     withSiteSessionOrigin: () => {
       throw new Error("Unexpected Site scope");
     },
-    createSessionForRequest: (...args: unknown[]) => {
+    // Cendra fork (ea564b0a7): the route reports whether this request freshly created the session.
+    createSessionForRequestWithOutcome: (...args: unknown[]) => {
       calls.push({ name: "create", args });
       return hold.create.promise;
     },
@@ -175,14 +176,14 @@ test("exact production route retains authorization, create and post-commit proje
       f.payload,
       f.authorization,
     ]);
-    f.hold.create.resolve(session);
+    f.hold.create.resolve({ session, outcome: "created" });
     await flush();
     expect(f.calls.at(-1)).toEqual({
       name: "projection",
       args: [f.deps, "workspace", "private-subject", session],
     });
     f.hold.projection.resolve(projected);
-    expect(await running).toEqual({ body: projected, status: 202 });
+    expect(await running).toEqual({ body: { ...projected, freshCreated: true }, status: 202 });
     expect(f.o.names).toEqual([
       "api.session_create.authorization",
       "api.session_create.body_read",
@@ -193,7 +194,7 @@ test("exact production route retains authorization, create and post-commit proje
     expect(JSON.stringify(f.o.endings)).not.toContain("private-");
   } finally {
     f.hold.authorization.resolve(f.authorization);
-    f.hold.create.resolve(session);
+    f.hold.create.resolve({ session, outcome: "created" });
     f.hold.projection.resolve(projected);
     await running.catch(() => undefined);
   }
@@ -218,16 +219,16 @@ test("the production Site branch retains request-local provenance without export
     ...f.ports,
     resolveSiteSessionOrigin: async () => origin,
     withSiteSessionOrigin,
-    createSessionForRequest: async () => {
+    createSessionForRequestWithOutcome: async () => {
       await Promise.resolve();
       metadata = sessionCreationMetadata({});
-      return session;
+      return { session, outcome: "replayed" };
     },
   };
   const running = productionRoute()(ports, f.deps, f.db)(f.c);
   f.hold.authorization.resolve(f.authorization);
   f.hold.projection.resolve(session);
-  expect(await running).toEqual({ body: session, status: 202 });
+  expect(await running).toEqual({ body: { ...session, freshCreated: false }, status: 202 });
   expect(metadata).toEqual({ _opengeniSiteOrigin: origin });
   expect(sessionCreationMetadata({})).toEqual({});
   expect(JSON.stringify(f.o.endings)).not.toContain("private");
@@ -245,7 +246,7 @@ test("create failure remains in the rejection envelope, projection failure remai
       expect(await running).toEqual({ createError: failure });
       expect(f.calls.some((c) => c.name === "projection")).toBe(false);
     } else {
-      f.hold.create.resolve({ id: "committed" });
+      f.hold.create.resolve({ session: { id: "committed" }, outcome: "created" });
       await flush();
       f.hold.projection.reject(failure);
       await expect(running).rejects.toBe(failure);

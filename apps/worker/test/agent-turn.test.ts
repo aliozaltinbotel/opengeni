@@ -5819,9 +5819,11 @@ describe("transient provider error classifier", () => {
       param: null,
     });
     expect(isTransientProviderError(observed)).toBe(true);
+    // Upstream (since the 2026-10-08 sync) also names the provider condition of a transient failure.
     expect(agentRunFailurePayload(observed)).toEqual({
       error: "An error occurred while processing the request.",
       code: "provider_unavailable",
+      providerCondition: "unavailable",
       retryable: true,
     });
     // By kind alone: any wording, and wrapped as a cause.
