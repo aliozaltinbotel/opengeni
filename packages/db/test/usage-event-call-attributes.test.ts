@@ -131,18 +131,35 @@ function callInput(
 }
 
 describe("model.call usage attributes (real PostgreSQL)", () => {
-  test("persist with the row, replay identically, and refuse a differing replay", async () => {
+  test("persist with the row, replay identically, keep the first price, and refuse different usage", async () => {
     const turn = await startedTurn("replay");
     const attributes = callAttributes();
     const first = await recordUsageEvent(app.db, callInput(turn, attributes));
     expect(first.attributes).toEqual(attributes);
     const replay = await recordUsageEvent(app.db, callInput(turn, attributes));
     expect(replay.id).toBe(first.id);
+    // A replay after a price schedule deploy: the same call priced again. The first price stands.
+    const repriced = await recordUsageEvent(
+      app.db,
+      callInput(
+        turn,
+        callAttributes({
+          estimatedProviderCostMicros: 15_000,
+          priceVersion: `schedule-sha256:${"b".repeat(64)}`,
+        }),
+      ),
+    );
+    expect(repriced.id).toBe(first.id);
+    expect(repriced.attributes).toEqual(attributes);
+    // Different usage for the same key is a different fact: refused.
     await expect(
       recordUsageEvent(
         app.db,
-        callInput(turn, callAttributes({ estimatedProviderCostMicros: 15_000 })),
+        callInput(turn, callAttributes({ outputTokens: 501, totalTokens: 1501 })),
       ),
+    ).rejects.toThrow("idempotency key resolved to different attributes");
+    await expect(
+      recordUsageEvent(app.db, callInput(turn, callAttributes({ model: "gpt-5.6-other" }))),
     ).rejects.toThrow("idempotency key resolved to different attributes");
     const [stored] = await shared.admin<Array<{ attributes: unknown }>>`
       select attributes from usage_events where id = ${first.id}`;

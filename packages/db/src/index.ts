@@ -5061,12 +5061,15 @@ export async function recordUsageEvent(
           throw new Error("recordUsageEvent: idempotency key resolved to a different origin");
         }
         // Attributes are never rewritten by a replay (the conflict update does not
-        // name them, and 0553's trigger refuses a change): the first write stands,
-        // and a replay that presents different facts for the same key is refused.
+        // name them, and 0553's trigger refuses a change): the first write stands.
+        // A replay is compared on the call's identity and usage only: its price is
+        // the schedule's at the time of the replay, so a replay after a price
+        // schedule deploy keeps the first recorded price instead of refusing the
+        // key forever. Different identity or usage for the same key is refused.
         if (
           input.attributes &&
-          usageAttributesCanonical(row.attributes ?? null) !==
-            usageAttributesCanonical(input.attributes)
+          usageAttributesReplayIdentity(row.attributes ?? null) !==
+            usageAttributesReplayIdentity(input.attributes)
         ) {
           throw new Error("recordUsageEvent: idempotency key resolved to different attributes");
         }
@@ -5074,6 +5077,30 @@ export async function recordUsageEvent(
       }
       throw new Error("Failed to record usage event");
     },
+  );
+}
+
+/**
+ * The price a call was recorded at, set by the schedule current when it was written: never part of
+ * the replay comparison (the first recorded price stands).
+ */
+const USAGE_ATTRIBUTE_PRICE_KEYS: ReadonlySet<string> = new Set([
+  "estimatedProviderCostMicros",
+  "pricingSource",
+  "priceVersion",
+  "rateMicrosPerMillionBytes",
+]);
+
+/** The canonical text of a usage attributes object without its price fields. */
+function usageAttributesReplayIdentity(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return usageAttributesCanonical(value);
+  }
+  const record = value as Record<string, unknown>;
+  return usageAttributesCanonical(
+    Object.fromEntries(
+      Object.entries(record).filter(([key]) => !USAGE_ATTRIBUTE_PRICE_KEYS.has(key)),
+    ),
   );
 }
 
