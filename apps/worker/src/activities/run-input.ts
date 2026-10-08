@@ -747,6 +747,7 @@ export async function userMessageTextWithAttachments(
   subjectId: string | null,
   text: string,
   resources: ResourceRef[],
+  sessionId: string | null = null,
 ): Promise<string> {
   const fileAttachments = await resolveUserMessageFileAttachments(
     db,
@@ -754,6 +755,7 @@ export async function userMessageTextWithAttachments(
     workspaceId,
     subjectId,
     resources,
+    sessionId,
   );
   const attachmentContext = userMessageAttachmentsContext(fileAttachments);
   return attachmentContext ? [text, "", attachmentContext].join("\n") : text;
@@ -770,7 +772,7 @@ async function resolveUserMessageFileAttachments(
   workspaceId: string,
   subjectId: string | null,
   resources: ResourceRef[],
-  sessionId: string,
+  sessionId: string | null,
 ): Promise<UserMessageFileAttachment[]> {
   const fileResources = resources.filter(
     (resource): resource is FileResourceRef => resource.kind === "file",
@@ -783,7 +785,7 @@ async function resolveUserMessageFileAttachments(
     fileIds: fileResources.map((resource) => resource.fileId),
   });
   for (const resource of fileResources.filter(ref => ref.asImage === true)) {
-    if (!subjectId || !(await getTemporaryModelImageFile(db, {
+    if (!subjectId || !sessionId || !(await getTemporaryModelImageFile(db, {
       accountId, workspaceId, subjectId, sessionId, fileId: resource.fileId,
     }))) throw new Error("Session image custody is unavailable");
   }

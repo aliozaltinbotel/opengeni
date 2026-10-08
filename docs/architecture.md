@@ -311,7 +311,11 @@ compaction input. History preserves JSON key order; JSONB serves queries.
 Opt-in `asImage` refs use that same authorized image projector. Temporary image
 uploads bind a preallocated file/session to the actual uploader in the existing
 signed-upload audit. Image-only session creation requires isolated tool-less
-scope; its validated output bound is immutable session metadata. No image bytes
+scope, an explicit null rig, no variable sets or sandbox, and no ongoing goal;
+its validated output bound is immutable session metadata. Admitted assessor
+image turns select no tenant-authored rules, preferences or memory, and record
+no Company Brain material-selection receipt. Current authority and model-policy
+checks remain mandatory, and the actual SDK agent exposes no tools. No image bytes
 or filenames enter durable history. Text-only wires emit the canonical omission
 marker; image-capable wires fail closed on unavailable pixels. Images bypass
 sandbox materialization. The uploader's DELETE revokes reads before object

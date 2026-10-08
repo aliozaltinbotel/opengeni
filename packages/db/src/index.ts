@@ -6892,7 +6892,7 @@ export async function listTemporaryModelImageCleanup(
         eq(schema.auditEvents.targetType, "workspace_file"),
         sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
         sql`EXISTS(SELECT 1 FROM ${schema.files} AS temporary_file WHERE temporary_file.account_id = ${input.accountId}
-          AND temporary_file.workspace_id = ${input.workspaceId} AND temporary_file.id = ${schema.auditEvents.targetId}
+          AND temporary_file.workspace_id = ${input.workspaceId} AND temporary_file.id::text = ${schema.auditEvents.targetId}
           AND (temporary_file.status = 'failed' OR ${schema.auditEvents.occurredAt} < now() - interval '5 minutes'
             OR EXISTS(SELECT 1 FROM ${schema.sessionTurns} AS finished_turn WHERE finished_turn.workspace_id = ${input.workspaceId}
               AND finished_turn.session_id::text = ${schema.auditEvents.metadata}->>'temporaryForSessionId'

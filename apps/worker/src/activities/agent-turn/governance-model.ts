@@ -102,7 +102,7 @@ export type GovernanceModelOk = {
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
-  ) => ReturnType<typeof buildCompanyBrainContributionReceipt>;
+  ) => ReturnType<typeof buildCompanyBrainContributionReceipt> | null;
   logicalSandboxSettings: Settings;
   verifiedRigProviderImageId: string | undefined;
   runSettings: Settings;
@@ -178,6 +178,9 @@ export async function prepareGovernanceAndModel(
   } = deps;
 
   const runtimePreparationStartedAt = performance.now();
+  // Native admission and the attachment projector independently bind these refs to current uploader/session custody.
+  const isolatedAssessment = session.policyRole === "evidence-assessor" && session.resources.length > 0 &&
+    session.resources.every(resource => resource.kind === "file" && resource.asImage === true);
 
   // Personal Rig/Variable Set authority is revalidated immediately before
   // any direct resource read. The database function is a zero-row no-op for
@@ -220,9 +223,9 @@ export async function prepareGovernanceAndModel(
       : Promise.resolve(null),
     Promise.all([
       getWorkspace(db, input.workspaceId),
-      getOrCreateCompanyProfileSnapshot(db, governanceClaims),
-      getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
-      preferenceSnapshotForTurn(
+      isolatedAssessment ? null : getOrCreateCompanyProfileSnapshot(db, governanceClaims),
+      isolatedAssessment ? null : getOrCreateWorkspaceInstructionPolicySnapshot(db, governanceClaims),
+      isolatedAssessment ? null : preferenceSnapshotForTurn(
         turn,
         async () => await getOrCreatePreferenceRegistrySnapshot(db, governanceClaims),
       ),
@@ -247,12 +250,13 @@ export async function prepareGovernanceAndModel(
     workspace.settings,
     codeSearchDeploymentPolicy(capabilitySettings),
   );
-  const contextSelection = await resolveCompanyBrainContextSelection(db, governanceClaims);
-  const workspaceAgentInstructions = contextSelection.legacyWorkspaceInstructions;
-  const memoryPromptMode = contextSelection.receipt.memoryPromptMode;
+  // No selection is made or recorded when none of this tenant-authored material is composed.
+  const contextSelection = isolatedAssessment ? null : await resolveCompanyBrainContextSelection(db, governanceClaims);
+  const workspaceAgentInstructions = contextSelection?.legacyWorkspaceInstructions ?? null;
+  const memoryPromptMode = contextSelection?.receipt.memoryPromptMode ?? "retrieval_only";
   assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
-  const companyProfileIncluded = contextSelection.receipt.companyProfileIncluded;
-  const workspaceGovernance = renderWorkspaceGovernanceContext(
+  const companyProfileIncluded = contextSelection?.receipt.companyProfileIncluded ?? false;
+  const workspaceGovernance = instructionPolicySnapshot === null ? null : renderWorkspaceGovernanceContext(
     {
       companyProfile: companyProfileSnapshot,
       instructionPolicy: instructionPolicySnapshot,
@@ -264,10 +268,13 @@ export async function prepareGovernanceAndModel(
     },
   );
   const structuredWorkspacePolicyActive =
-    hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
-  const workspaceMemory = contextSelection.workspaceMemory;
-  const buildCompanyBrainContributionReceiptFor = (skillCatalogText: string) =>
-    buildCompanyBrainContributionReceipt({
+    instructionPolicySnapshot !== null && hasActiveWorkspaceInstructionPolicy(instructionPolicySnapshot);
+  const workspaceMemory = contextSelection?.workspaceMemory ?? null;
+  const buildCompanyBrainContributionReceiptFor = (skillCatalogText: string) => {
+    if (isolatedAssessment) return null;
+    if (contextSelection === null || instructionPolicySnapshot === null || companyProfileSnapshot === null)
+      throw new Error("Selected Company Brain context is unavailable");
+    return buildCompanyBrainContributionReceipt({
       contextSelectionReceiptId: contextSelection.receipt.id,
       attemptId: input.attemptId,
       turnId: turn.id,
@@ -282,14 +289,14 @@ export async function prepareGovernanceAndModel(
       skillActivations: [],
       skillCatalogText,
     });
+  };
   try {
     // Portable operator compaction runs before tool/skill preparation, so its
     // exact Company Brain prefix contains governance and standing memory but
     // no runtime skill catalog. Later compaction paths replace this summary
     // after the complete skill activation set is resolved.
-    eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor(""),
-    );
+    const receipt = buildCompanyBrainContributionReceiptFor("");
+    eventing.companyBrainContextContributions = receipt === null ? [] : summarizeCompanyBrainContributions(receipt);
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }

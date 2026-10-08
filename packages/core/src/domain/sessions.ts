@@ -2324,6 +2324,10 @@ async function createSessionForRequestInFileScope(
   if (imageResources.length > 0) {
     if (!payload.requestedSessionId || !grant.subjectId ||
         payload.agentAccess !== "session" || payload.memoryScope !== "off" ||
+        payload.rigId !== null || payload.sandboxBackend !== "none" ||
+        (payload.variableSetIds?.length ?? 0) !== 0 ||
+        payload.personalResourceAttachment !== undefined || payload.targetSandboxId !== undefined ||
+        payload.goal !== undefined ||
         payload.tools.length !== 0 || payload.mcpServers.length !== 0 ||
         payload.firstPartyMcpTools?.length !== 0 || payload.skills.length !== 0 ||
         (payload.installedSkillIds?.length ?? 0) !== 0 ||

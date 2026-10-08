@@ -203,6 +203,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     codexContext,
   } = deps;
   const preparedTools = eventing.preparedTools!;
+  const isolatedAssessment = session.policyRole === "evidence-assessor" && session.resources.length > 0 &&
+    session.resources.every(resource => resource.kind === "file" && resource.asImage === true);
   // Durable recovery truth is read for every attempt, including reconstruction
   // after compaction. It is never inferred from transcript tool successes.
   const sessionInstructions = await recoveryAwareSessionInstructions(
@@ -604,9 +606,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
   }
   eventing.modelVisibleSkillIds = skillCatalogEntryIds(modelVisibleSkillCatalogText);
   try {
-    eventing.companyBrainContextContributions = summarizeCompanyBrainContributions(
-      buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText),
-    );
+    const receipt = buildCompanyBrainContributionReceiptFor(modelVisibleSkillCatalogText);
+    eventing.companyBrainContextContributions = receipt === null ? [] : summarizeCompanyBrainContributions(receipt);
   } catch {
     // Contribution telemetry must never change model execution semantics.
   }
@@ -676,7 +677,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         ...(serviceTier ? { serviceTier } : {}),
         ...(textVerbosity ? { textVerbosity } : {}),
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
-        humanInputEnabled: agentHumanInputEnabled,
+        humanInputEnabled: isolatedAssessment ? false : agentHumanInputEnabled,
         missingSessionTitleHint,
         sandboxEnvironment,
         ...(preparedTools.attemptToolCatalog
@@ -741,9 +742,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         // whenever the provider declares it runnable and is independent of the
         // session's MCP allow-list; the effective context window drives the
         // compaction threshold.
-        hostedWebSearch,
-        ...imageGenerationOption,
-        ...videoGenerationOption,
+        hostedWebSearch: isolatedAssessment ? false : hostedWebSearch,
+        ...(isolatedAssessment ? {} : imageGenerationOption),
+        ...(isolatedAssessment ? {} : videoGenerationOption),
         lazyToolTransport,
         ...(eventing.toolPreparationReady
           ? { toolPreparationReady: eventing.toolPreparationReady }
@@ -842,7 +843,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       "Sandbox agent construction did not install the mandatory turn tool cancellation fence",
     );
   }
-  const outputCap = session.metadata["nativeMaxOutputTokens"];
+  if (isolatedAssessment && (agent.tools.length > 0 || agent.mcpServers.length > 0))
+    throw new Error("Isolated image assessment assembled executable tools");
+  const outputCap = session.metadata?.["nativeMaxOutputTokens"];
   if (outputCap !== undefined) {
     if (typeof outputCap !== "number" || !Number.isSafeInteger(outputCap) || outputCap <= 0)
       throw new Error("Invalid immutable session output bound");

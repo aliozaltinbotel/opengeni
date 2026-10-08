@@ -165,6 +165,7 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
       normalized = {
         kind: "file",
         fileId: resource.fileId,
+        ...(resource.asImage === true ? { asImage: true as const } : {}),
         mountPath,
       };
     } else {
