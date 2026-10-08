@@ -8500,6 +8500,9 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   // sandbox warm-time metering (P2.1) — mirrors contracts UsageEventType.
   "sandbox.warm_seconds",
   "sandbox.warm_cost",
+  // per-call AI usage (one row per provider call; facts in `attributes`).
+  "model.call",
+  "embedding.call",
 ] as const;
 
 export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];
@@ -8521,6 +8524,8 @@ export type UsageEvent = {
   recordedAt: string;
   exportedToBillingAt: string | null;
   billingProviderEventId: string | null;
+  /** Per-call facts of a `model.call` / `embedding.call` row; absent or null otherwise. */
+  attributes?: Record<string, unknown> | null | undefined;
 };
 
 export type EntitlementValue = boolean | string | number | string[];

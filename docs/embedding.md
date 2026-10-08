@@ -1127,6 +1127,18 @@ Usage field limits are enforced only when the optional usage export is enabled; 
 new fact fails its source transaction instead of committing a poison export row, while standalone
 mode retains its prior input behavior.
 
+Every provider model call also writes one `model.call` usage row (quantity 1, unit `call`,
+idempotency key `usage:model.call:{turnId}:{sourceKey}`) on every billing path, and every embedding
+request one `embedding.call` row. Their `usage.attributes` carry the call's own facts as
+`ModelCallUsageAttributes` / `EmbeddingCallUsageAttributes` (`packages/contracts`): provider, API,
+model, the token pools the provider reported (null when it did not), the estimated provider-rate cost
+(null when the call cannot be priced, never 0), its pricing source and schedule identity, the
+billing path and the outcome. Attributes are written once with the row (0668 refuses a change) and
+the export copies them unchanged; every other usage type exports `attributes: null`. A stream whose
+terminal responses reported no usage at all writes one `scope: "aggregate"` row standing for those
+calls. Realtime voice records no call: the browser talks to the provider directly, so the server
+observes no usage frame.
+
 Transient sink failures release the lease with exponential backoff and eventually block the named
 consumer visibly instead of dropping rows. `resumeHostExportConsumer` is explicit. A genuinely
 poisonous head record can be moved with `deadLetterHostExportHead`; only the exact leased head can be

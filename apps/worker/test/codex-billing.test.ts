@@ -276,9 +276,14 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
-      // Exactly one event: a zero-cost audit marker. NO model.tokens row (it would
-      // feed the Opengeni token cap a codex turn is exempt from).
-      expect(recorded).toEqual([{ eventType: "model.cost", quantity: 0, unit: "usd_micros" }]);
+      // Exactly two events: the call's own per-call fact (MAINT-P09-430; quantity 1
+      // call, never a token or cost quantity) and a zero-cost audit marker. NO
+      // model.tokens row (it would feed the Opengeni token cap a codex turn is
+      // exempt from).
+      expect(recorded).toEqual([
+        { eventType: "model.call", quantity: 1, unit: "call" },
+        { eventType: "model.cost", quantity: 0, unit: "usd_micros" },
+      ]);
       expect(debitSpy).not.toHaveBeenCalled();
     } finally {
       recordSpy.mockRestore();
@@ -348,6 +353,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         sourceKey: "response-1",
       });
       expect(recorded).toEqual([
+        { eventType: "model.call", quantity: 1 },
         { eventType: "model.tokens", quantity: 1500 },
         { eventType: "model.cost", quantity: 0 },
       ]);
@@ -400,7 +406,23 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         });
       }
 
-      expect(recordSpy).not.toHaveBeenCalled();
+      // MAINT-P09-430: each call still records its per-call fact, with every
+      // malformed pool rejected to null and no cost (unknown, never 0); no
+      // token, cost or debit quantity is created.
+      const calls = recordSpy.mock.calls.map(([, input]) => input);
+      expect(calls.map((input) => input.eventType)).toEqual(
+        malformedUsages.map(() => "model.call"),
+      );
+      for (const input of calls) {
+        expect(input.quantity).toBe(1);
+        expect(input.attributes).toMatchObject({
+          inputTokens: null,
+          outputTokens: null,
+          totalTokens: null,
+          estimatedProviderCostMicros: null,
+          pricingSource: null,
+        });
+      }
       expect(debitSpy).not.toHaveBeenCalled();
     } finally {
       recordSpy.mockRestore();
