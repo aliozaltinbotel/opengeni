@@ -5,8 +5,10 @@ import {
   type WorkspaceInstructionPolicyListResponse,
 } from "@opengeni/sdk";
 import { useNavigate } from "@tanstack/react-router";
+import { resolveWorkspaceDefaultAgentIdentity } from "@opengeni/contracts";
 import {
   ArrowUpRightIcon,
+  BotIcon,
   Building2Icon,
   HistoryIcon,
   PencilIcon,
@@ -33,6 +35,7 @@ import { RelativeTime } from "@/components/ui/relative-time";
 import { RevisionHistory, type Revision } from "@/components/ui/revision-history";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
+import { canManageWorkspaceSettings } from "@/lib/permissions";
 import { createWorkspaceInstructionSave } from "@/lib/workspace-instruction-save";
 import { activeGlobalWorkspaceInstructionHead } from "@/lib/workspace-instructions";
 import { promptCopy, useAgentBrainPromptCatalog } from "@/routes/agent-brain-prompt";
@@ -220,6 +223,7 @@ export function InstructionsTab({
   return (
     <div className="flex min-w-0 flex-col gap-4 pt-6">
       <RowList label="Always applied to every agent" columns={INSTRUCTION_COLUMNS} flush>
+        <AgentIdentityRow workspaceId={workspaceId} />
         <ListRow
           leading={<LogoTile icon={<ScrollTextIcon />} />}
           title={personal ? "Instructions for your Personal workspace" : "Workspace instructions"}
@@ -253,7 +257,12 @@ export function InstructionsTab({
         />
       </RowList>
       <InlineHelp>
-        Both are added to every chat and schedule in {workspaceName}, before anything agents look
+        Every prompt in {workspaceName} starts with who the agent is, then your organization, then
+        these instructions, then anything set for one chat. Instructions take priority over
+        Opengeni's default way of working, but never over its safety rules or how it runs tools.
+      </InlineHelp>
+      <InlineHelp>
+        These are added to every chat and schedule in {workspaceName}, before anything agents look
         up. Facts go in the <HelpLink onClick={onGoToLibrary}>Library</HelpLink>, and step-by-step
         procedures in Skills, in{" "}
         <InAppHelpLink href={`/workspaces/${workspaceId}/plugins?section=skills`}>
@@ -346,7 +355,11 @@ export function InstructionsPage({
       <DetailPageBody>
         <DetailSection>
           {loading ? (
-            <div aria-label="Loading the instructions" className="flex flex-col gap-2">
+            <div
+              role="status"
+              aria-label="Loading the instructions"
+              className="flex flex-col gap-2"
+            >
               <Skeleton className="h-4 w-32" />
               <Skeleton className="h-3.5 w-3/5" />
               <Skeleton className="h-3.5 w-2/5" />
@@ -404,7 +417,7 @@ export function IdentityPage({
   const navigate = useNavigate();
   const identity = useCompanyProfileInventory(client, workspaceId);
   const profile = identity.response?.activeRevision?.profile ?? null;
-  const settings = `/workspaces/${workspaceId}/organization?section=knowledge`;
+  const settings = `/workspaces/${workspaceId}/organization?section=identity`;
   return (
     <DetailPage back={{ label: "Instructions", onClick: onBack }}>
       <DetailPageHeader
@@ -473,7 +486,53 @@ export function IdentityPage({
   );
 }
 
-/** "Ask OpenGeni…": starts a chat that proposes the change, on the workspace's model. */
+/**
+ * "Who the agent is": the workspace's default agent identity for new chats.
+ * It is edited with the rest of the agent defaults, in workspace settings, so
+ * the row opens that page for the admins who can change it.
+ */
+function AgentIdentityRow({ workspaceId }: { workspaceId: string }) {
+  const context = useAppContext();
+  const navigate = useNavigate();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const canManage = canManageWorkspaceSettings(
+    context.accessContext,
+    workspace,
+    context.managedSelfContext,
+  );
+  const resolved = resolveWorkspaceDefaultAgentIdentity(
+    workspace?.settings,
+    workspace?.agentInstructions,
+  );
+  return (
+    <ListRow
+      leading={<LogoTile icon={<BotIcon />} />}
+      title="Who the agent is"
+      meta={[
+        resolved.identity
+          ? firstLine(resolved.identity)
+          : "Opengeni's general assistant (the default)",
+        resolved.source === "legacy_agent_instructions"
+          ? "from this workspace's earlier custom persona"
+          : null,
+        canManage ? null : "Only workspace admins can change this",
+      ]}
+      {...(canManage
+        ? {
+            indicator: "open" as const,
+            onOpen: () =>
+              void navigate({
+                to: "/workspaces/$workspaceId/settings",
+                params: { workspaceId },
+                search: { section: "general", view: "agent-defaults" },
+              }),
+          }
+        : {})}
+    />
+  );
+}
+
+/** "Ask Opengeni…": starts a chat that proposes the change, on the workspace's model. */
 function AskOpenGeniDialog({
   open,
   onOpenChange,

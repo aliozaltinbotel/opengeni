@@ -102,7 +102,7 @@ fn home_dir() -> Option<PathBuf> {
 const CREDENTIALS_FILE: &str = "credentials.json";
 
 /// Directory containing one independently replaceable credential document per
-/// OpenGeni deployment/workspace connection. Separate files avoid a global
+/// Opengeni deployment/workspace connection. Separate files avoid a global
 /// read-modify-write race when two `connect` commands run concurrently and let
 /// the running agent notice additions/removals without restarting.
 const CONNECTIONS_DIR: &str = "connections";
@@ -114,7 +114,7 @@ const CONNECTION_SCHEMA_VERSION: u32 = 1;
 /// processes are already separated by pid.
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-/// One local connection to one workspace on one OpenGeni deployment.
+/// One local connection to one workspace on one Opengeni deployment.
 ///
 /// `api_url` is part of the identity because two independent deployments may
 /// legitimately contain the same workspace UUID. The runtime credentials stay
@@ -327,7 +327,7 @@ pub fn save_credentials(creds: &StoredCredentials) -> Result<PathBuf, ConfigErro
     Ok(path)
 }
 
-/// Loads every configured OpenGeni connection, ordered by local connection id.
+/// Loads every configured Opengeni connection, ordered by local connection id.
 ///
 /// A pre-multi-connection `credentials.json` is migrated exactly once into the
 /// new per-connection directory using `legacy_api_url` as its deployment origin.
@@ -421,6 +421,51 @@ pub fn find_connection(
 /// Each connection owns its own file, so adding workspace B can never overwrite
 /// workspace A—even when their UUIDs happen to match on different deployments.
 pub fn save_connection(connection: &StoredConnection) -> Result<PathBuf, ConfigError> {
+    let _lock = connection_store_lock()?;
+    save_connection_unlocked(connection)
+}
+
+fn connection_store_lock() -> Result<std::fs::File, ConfigError> {
+    let path = connections_dir()?.join(".write.lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let file = options.open(&path).map_err(|e| ConfigError::io(&path, e))?;
+    fs2::FileExt::lock_exclusive(&file).map_err(|e| ConfigError::io(&path, e))?;
+    Ok(file)
+}
+
+/// A renewal response must never resurrect a disconnected machine or overwrite
+/// a concurrent, explicitly authorized re-enrollment. All connection writers use
+/// the same OS lock; network I/O happens before acquiring it.
+pub fn save_renewed_connection(
+    expected: &StoredConnection,
+    renewed: &StoredConnection,
+) -> Result<bool, ConfigError> {
+    let _lock = connection_store_lock()?;
+    let path = connections_dir()?.join(format!("{}.json", expected.connection_id));
+    if expected.connection_id != renewed.connection_id {
+        return Ok(false);
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(ConfigError::io(&path, e)),
+    };
+    let current: StoredConnection =
+        serde_json::from_slice(&bytes).map_err(|source| ConfigError::Parse { path, source })?;
+    if &current != expected {
+        return Ok(false);
+    }
+    save_connection_unlocked(renewed)?;
+    Ok(true)
+}
+
+fn save_connection_unlocked(connection: &StoredConnection) -> Result<PathBuf, ConfigError> {
     let dir = connections_dir()?;
     let path = dir.join(format!("{}.json", connection.connection_id));
     validate_connection(&path, connection)?;
@@ -514,6 +559,7 @@ pub fn remove_connection(
         return Ok(None);
     }
     let connection = matches.into_iter().next().expect("one match");
+    let _lock = connection_store_lock()?;
     let path = config_dir()?
         .join(CONNECTIONS_DIR)
         .join(format!("{}.json", connection.connection_id));
@@ -717,6 +763,31 @@ mod tests {
     }
 
     #[test]
+    fn late_renewal_cannot_overwrite_reconnect_or_resurrect_disconnect() {
+        let _guard = with_temp_config();
+        let original = StoredConnection::new("https://one.example", sample());
+        save_connection(&original).expect("initial connection");
+        let mut renewed = original.clone();
+        renewed.credentials.nats_bearer = "oge_renewed".into();
+        assert!(save_renewed_connection(&original, &renewed).expect("renew"));
+        assert!(!save_renewed_connection(&original, &renewed).expect("stale response"));
+        let mut reconnected = renewed.clone();
+        reconnected.credentials.nats_bearer = "oge_reconnected".into();
+        save_connection(&reconnected).expect("explicit reconnect");
+        assert!(!save_renewed_connection(&renewed, &original).expect("reconnect wins"));
+        assert_eq!(
+            load_connections("https://one.example").unwrap(),
+            vec![reconnected.clone()]
+        );
+        remove_connection(&reconnected.connection_id, "https://one.example").expect("disconnect");
+        assert!(!save_renewed_connection(&reconnected, &renewed).expect("disconnect wins"));
+        assert_eq!(
+            load_connections("https://one.example").unwrap(),
+            Vec::<StoredConnection>::new()
+        );
+    }
+
+    #[test]
     fn legacy_single_credentials_migrate_without_losing_the_secret() {
         let _guard = with_temp_config();
         save_credentials(&sample()).expect("legacy save");
@@ -779,9 +850,10 @@ mod tests {
             .expect("remove")
             .expect("present");
         assert_eq!(removed, connection);
-        assert!(load_connections("https://unused.example")
-            .expect("load")
-            .is_empty());
+        assert_eq!(
+            load_connections("https://unused.example").expect("load"),
+            Vec::<StoredConnection>::new()
+        );
     }
 
     #[cfg(unix)]
@@ -831,7 +903,7 @@ mod tests {
         };
         let stored = StoredCredentials::from_proto(proto, "beta");
         assert_eq!(stored.update_channel, "beta");
-        assert!(stored.resume_token.is_empty());
+        assert_eq!(stored.resume_token, "");
         assert!(stored.consented_screen_control);
         // The proto relay producer token now threads straight through (M8b).
         assert_eq!(stored.relay_token, "ogr_producer");

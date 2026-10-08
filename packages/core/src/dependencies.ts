@@ -3,6 +3,7 @@ import type {
   ConnectionCredentialsPort,
   Document,
   DocumentAuthorityKind,
+  EntitlementsPort,
   GitHubAppApiPort,
   ScheduledTask,
   ScheduledTaskTriggerType,
@@ -13,6 +14,7 @@ import type { Database, SessionWorkflowWakeDeliveryResult } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
+import type { UserPresenceRecorder } from "./user-presence";
 import type { createObjectStorage } from "@opengeni/storage";
 import type { ManagedAuth } from "./managed-auth-type";
 import type { ManagedAuthSessionAdapter } from "./managed-auth-session-sets";
@@ -68,13 +70,23 @@ export type SessionWorkflowClient = {
     workflowId: string;
     workflowWakeRevision: number;
   }) => Promise<void>;
-  syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
+  syncScheduledTask: (input: {
+    task: ScheduledTask;
+    /**
+     * Compensate under the same per-schedule writer lock. Return the error to
+     * throw only after this transaction commits; lock/commit failures bypass
+     * that receipt. A failing compensation must roll back its own savepoint.
+     */
+    onFailure?: (tx: Database, error: unknown) => Promise<Error>;
+  }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
   triggerScheduledTask: (input: {
     task: ScheduledTask;
     agentRunUsageIdempotencyKey: string;
     triggerWorkflowId: string;
     initiator: TurnInitiator;
+    /** Server-frozen caller ceiling for this run, independent of task ownership. */
+    credentialRestriction?: "developer_setup";
     triggerType?: Extract<
       ScheduledTaskTriggerType,
       "manual" | "initial" | "provider_event" | "retry" | "repair"
@@ -144,6 +156,8 @@ export type AppDependencies = {
    */
   catalogSourceSettings?: Settings;
   db: Database;
+  /** Read-only host funding admission; unset uses the standalone billing ledger. */
+  entitlements?: EntitlementsPort | null;
   /**
    * Host-composed editable artifact engine. Standalone startup binds the same
    * native kernel/DB/object-store implementation; embedded hosts may inject an
@@ -169,6 +183,11 @@ export type AppDependencies = {
   documentIndexer?: DocumentIndexClient;
   documentServices?: DocumentServices;
   observability?: Observability;
+  /**
+   * Throttled server-side presence for canonical managed browser sessions
+   * (`createUserPresenceRecorder`). Analytics only; never an authorization input.
+   */
+  userPresence?: UserPresenceRecorder | null;
   readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
   githubStateSecret?: string;
   /**
@@ -177,7 +196,7 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
-  /** Optional provider seam for the separately registered OpenGeni Lens App. */
+  /** Optional provider seam for the separately registered Opengeni Lens App. */
   prReviewGithubAppApi?: GitHubAppApiPort;
   /**
    * Optional host-owned connection credential seam. API-side consumers use
@@ -198,6 +217,8 @@ export type AppDependencies = {
   managedEmailTransport?: ManagedEmailTransport;
   /** Injectable Codex HTTP transport for deterministic API/provider tests. */
   codexFetch?: typeof fetch;
+  /** Injectable transport for customer OpenAI/Azure connection checks. */
+  directModelFetch?: typeof fetch;
   /** Injectable GitHub transport for deterministic personal-OAuth tests. */
   githubPersonalFetch?: typeof fetch;
   /** Injectable credential-free GitHub transport for public repository verification tests. */
@@ -214,6 +235,8 @@ export type AppDependencies = {
   apiIntegrationOAuthFetch?: typeof fetch;
   /** Injectable specification/introspection transport, still network-policy checked. */
   apiIntegrationSourceFetch?: typeof fetch;
+  /** Injectable bounded MCP initialization/tools-list probe for Connect tests. */
+  mcpCapabilityProbe?: import("./domain/capabilities").McpCapabilityProbe;
   atlassianFetch?: typeof fetch;
   /** Injectable MCP OAuth setup deadline for deterministic stalled-provider tests. */
   oauthStartDeadlineMs?: number;
@@ -269,6 +292,7 @@ export type AcceptSessionUserMessageDependencies = Pick<
   | "bus"
   | "sessionAuthorization"
   | "schedulePromptPostCommit"
+  | "observability"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

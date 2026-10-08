@@ -14,20 +14,25 @@
 import {
   CAPABILITY_DESCRIPTORS,
   DEFAULT_FIRST_PARTY_MCP_TOOLS,
+  FIRST_PARTY_MCP_TOOL_CAPABILITIES,
+  isDerivedAgentToolOwner,
   mergeResourceRefs,
   Permission,
   stableJson,
+  type AgentCapabilities,
   type CapabilityDescriptor,
   type FirstPartyMcpToolName,
   type MachineView,
 } from "@opengeni/contracts";
 import type {
+  AgentConfigRequest,
   CreateSessionRequest,
   NewSessionDraftOptions,
   NewSessionSelectionHistory,
   PersonalResourceAttachmentIntent,
 } from "@opengeni/sdk";
 
+import { capabilityOn, draftFromRequest } from "@/lib/agent-capabilities";
 import { sessionMcpPermissionGroups } from "@/lib/permissions";
 import type {
   GoalSpec,
@@ -117,6 +122,16 @@ export type SessionDraft = {
   customMcpPermissions: boolean;
   mcpPermissions: Set<string>;
   firstPartyMcpTools: Set<FirstPartyMcpToolName>;
+  /**
+   * "Customize for this chat" capabilities. Undefined follows the workspace's
+   * defaults and sends no `agent` at all.
+   */
+  agentCapabilities?: AgentCapabilities;
+  /**
+   * This chat's own instructions, from a draft another page prepared (the
+   * signup setup chat). Not edited in the composer; sent as `agent.instructions`.
+   */
+  agentInstructions?: string;
 };
 
 /**
@@ -165,10 +180,47 @@ function explicitFirstPartyTools(
   firstPartyMcpTools?: FirstPartyMcpToolName[];
 } {
   const selected = [...draft.firstPartyMcpTools];
-  return selected.length === defaultFirstPartyMcpTools.length &&
+  if (
+    selected.length === defaultFirstPartyMcpTools.length &&
     defaultFirstPartyMcpTools.every((tool) => draft.firstPartyMcpTools.has(tool))
-    ? {}
-    : { firstPartyMcpTools: selected };
+  ) {
+    return {};
+  }
+  if (draft.agentCapabilities === undefined) return { firstPartyMcpTools: selected };
+  // A chat with its own capabilities never names a tool of one that is off.
+  const values = draftFromRequest(draft.agentCapabilities).values;
+  return {
+    firstPartyMcpTools: selected.filter((tool) => {
+      const owner = FIRST_PARTY_MCP_TOOL_CAPABILITIES[tool];
+      return isDerivedAgentToolOwner(owner) || capabilityOn(values, owner);
+    }),
+  };
+}
+
+/**
+ * The composer's connector policy for a chat with its own capabilities:
+ * Workspace connectors off sends no connector choice at all (the server then
+ * attaches none), and a built-in server of a capability that is off is left
+ * out instead of being refused. Applied to the draft and the create alike, so
+ * the draft snapshot the server checks matches the request.
+ */
+export function fitToolPolicyToAgentCapabilities<
+  Policy extends { tools: ToolRef[]; toolsProvided: boolean; excludedMcpServerIds?: string[] },
+>(policy: Policy, capabilities: AgentCapabilities | undefined): Policy {
+  if (capabilities === undefined) return policy;
+  const values = draftFromRequest(capabilities).values;
+  if (!values.workspaceConnectors) {
+    const { excludedMcpServerIds: _excluded, ...rest } = policy;
+    return { ...rest, tools: [], toolsProvided: false } as unknown as Policy;
+  }
+  return {
+    ...policy,
+    tools: policy.tools.filter(
+      (tool) =>
+        !(tool.id === "files" && !values.workspaceFiles) &&
+        !(tool.id === "docs" && !values.knowledge),
+    ),
+  };
 }
 
 /** True once the draft can be submitted: a connected machine needs a picked
@@ -353,6 +405,7 @@ export function buildCreateSessionRequest(
     ...(input.submission.connectionAccounts
       ? { connectionAccounts: input.submission.connectionAccounts }
       : {}),
+    ...(input.submission.agent ? { agent: input.submission.agent } : {}),
     ...(input.targetSandboxId ? { targetSandboxId: input.targetSandboxId } : {}),
     ...(input.workingDir ? { workingDir: input.workingDir } : {}),
     ...(input.channelId ? { channelId: input.channelId } : {}),
@@ -433,6 +486,7 @@ export function submissionFromSessionDraft(
         ...(goal ? { goal } : {}),
         ...mcp,
         ...visibleTools,
+        ...agentExtras(draft),
       },
       options: {
         targetSandboxId: draft.compute.sandboxId,
@@ -459,6 +513,7 @@ export function submissionFromSessionDraft(
       ...(goal ? { goal } : {}),
       ...mcp,
       ...visibleTools,
+      ...agentExtras(draft),
     },
     options: {
       targetSandboxId: null,
@@ -499,6 +554,7 @@ export function newSessionDraftOptionsFromSessionDraft(
       ...(goal ? { goal } : {}),
       ...permissions,
       ...visibleTools,
+      ...agentExtras(draft),
     };
   }
 
@@ -518,6 +574,17 @@ export function newSessionDraftOptionsFromSessionDraft(
     ...(goal ? { goal } : {}),
     ...permissions,
     ...visibleTools,
+    ...agentExtras(draft),
+  };
+}
+
+function agentExtras(draft: SessionDraft): { agent?: AgentConfigRequest } {
+  if (draft.agentCapabilities === undefined && draft.agentInstructions === undefined) return {};
+  return {
+    agent: {
+      ...(draft.agentCapabilities !== undefined ? { capabilities: draft.agentCapabilities } : {}),
+      ...(draft.agentInstructions !== undefined ? { instructions: draft.agentInstructions } : {}),
+    },
   };
 }
 
@@ -571,6 +638,12 @@ export function sessionDraftFromNewSessionDraftOptions(
       options.firstPartyMcpTools === undefined
         ? base.firstPartyMcpTools
         : new Set(options.firstPartyMcpTools),
+    ...(options.agent?.capabilities !== undefined
+      ? { agentCapabilities: options.agent.capabilities }
+      : {}),
+    ...(options.agent?.instructions !== undefined
+      ? { agentInstructions: options.agent.instructions }
+      : {}),
   };
 }
 

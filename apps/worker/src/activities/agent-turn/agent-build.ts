@@ -10,11 +10,13 @@ import {
   getSessionTurnForAttempt,
   ensureSessionReasoningConfiguration,
   ensureSessionSkillCatalog,
+  sessionHasToolRouterHistory,
 } from "@opengeni/db";
 import { recoveryAwareSessionInstructions } from "./recovery-warning";
 import {
   formatSkillCatalog,
   skillCatalogEntryIds,
+  type AgentPromptToolAvailability,
   type AttemptConnectorActionBinding,
   type BuildAgentOptions,
   type ConnectorActionPolicyHooks,
@@ -52,13 +54,13 @@ import {
 } from "../image-generation-references";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
-import { VideoGenerationRejectedResult } from "@opengeni/contracts";
+import { VideoGenerationRejectedResult, resolveAgentToolFamilies } from "@opengeni/contracts";
 
 import {
   structuredToolTransportForTurn,
-  hostedWebSearchForTurn,
   connectedSubscriptionImageGenerationAuthority,
   textVerbosityForTurn,
+  reasoningSummaryForTurn,
 } from "./tool-policy";
 import type { ClaimTurnOk } from "./claim";
 import type { GovernanceModelOk } from "./governance-model";
@@ -78,6 +80,7 @@ import type {
 import { SESSION_TITLE_MODEL_TOOL_NAME } from "./session-title";
 import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { resolveVideoReferenceSandboxAccess } from "./video-reference-sandbox";
+import { turnWebSearchPlan } from "./web-search";
 
 export type BuildTurnAgentDeps = {
   /** NPD-013: the in-attempt fallback's build does not ask for the session title a second time (fallbackRunInputs). */
@@ -113,6 +116,7 @@ export type BuildTurnAgentDeps = {
   supportsImageInput: GovernanceModelOk["supportsImageInput"];
   agentHumanInputEnabled: GovernanceModelOk["agentHumanInputEnabled"];
   workspaceAgentInstructions: GovernanceModelOk["workspaceAgentInstructions"];
+  workspaceAgentIdentity: GovernanceModelOk["workspaceAgentIdentity"];
   workspaceGovernance: GovernanceModelOk["workspaceGovernance"];
   structuredWorkspacePolicyActive: GovernanceModelOk["structuredWorkspacePolicyActive"];
   workspaceMemory: GovernanceModelOk["workspaceMemory"];
@@ -137,6 +141,11 @@ export type BuildTurnAgentDeps = {
   preparationIndependentToolNames: readonly string[];
   /** The attempt's tool catalog includes the Jev-backed code_search tool. */
   codeSearchAvailable: boolean;
+  /**
+   * Frozen clause availability for the modular instructions; undefined for
+   * sessions without an agent configuration. Rendering input only.
+   */
+  promptToolAvailability?: AgentPromptToolAvailability | undefined;
   videoGenerationAcceptancesByCallId: Map<string, { operationId: string; requestDigest: string }>;
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
@@ -175,6 +184,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     supportsImageInput,
     agentHumanInputEnabled,
     workspaceAgentInstructions,
+    workspaceAgentIdentity,
     workspaceGovernance,
     structuredWorkspacePolicyActive,
     workspaceMemory,
@@ -196,6 +206,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     trigger,
     preparationIndependentToolNames,
     codeSearchAvailable,
+    promptToolAvailability,
     videoGenerationAcceptancesByCallId,
     activeSandboxBackend,
     groupBoxBackend,
@@ -207,11 +218,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     session.resources.every(resource => resource.kind === "file" && resource.asImage === true);
   // Durable recovery truth is read for every attempt, including reconstruction
   // after compaction. It is never inferred from transcript tool successes.
-  const sessionInstructions = await recoveryAwareSessionInstructions(
-    db,
-    input.workspaceId,
-    session,
-  );
+  // These scoped reads are independent. Keep the second live video-policy
+  // read here rather than reusing tool preparation's earlier policy snapshot.
+  const [sessionInstructions, videoGenerationPolicy] = await Promise.all([
+    recoveryAwareSessionInstructions(db, input.workspaceId, session),
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+  ]);
 
   const missingSessionTitleHint =
     deps.suppressMissingSessionTitleHint !== true &&
@@ -245,7 +257,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           },
         }
       : {};
-  const hostedWebSearch = hostedWebSearchForTurn(resolvedModel, runSettings.webSearchEnabled);
+  // Fallback mode (the default) keeps hosted search exactly as resolved; the
+  // operator's `replace` mode withholds it in favour of provider tools.
+  const hostedWebSearch = turnWebSearchPlan(resolvedModel, runSettings).hostedWebSearch;
   const resolveImageReferences = async (
     references: Parameters<typeof resolveImageGenerationReferencesForTool>[0]["references"],
   ) =>
@@ -288,7 +302,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     // Never expose a paid image operation unless its permanent artifact can
     // be committed. Failing after provider execution would leave an
     // unrecoverable outcome-unknown operation with no user-visible image.
-    if (!objectStorage) return {};
+    if (!objectStorage || !resolveAgentToolFamilies(session.agent).media) return {};
     if (nativeImageProviderBinding) {
       media.nativeImageGenerationRetention = {
         ...nativeImageProviderBinding,
@@ -404,12 +418,11 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
       },
     };
   })();
-  const videoGenerationPolicy = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
   const videoGenerationEnabled =
     videoGenerationPolicy.defaultModelId !== null &&
     videoGenerationPolicy.enabledModelIds.length > 0;
   let videoGenerationCredential: VideoGenerationCredentialLease | null = null;
-  if (objectStorage && videoGenerationEnabled) {
+  if (objectStorage && videoGenerationEnabled && resolveAgentToolFamilies(session.agent).media) {
     if (videoGenerationPolicy.fundingSource === "opengeni_credits") {
       videoGenerationCredential = managedVideoGenerationCredentialLease(eventing.modelRunSettings);
     } else if (videoGenerationPolicy.fundingSource === "workspace_gateway") {
@@ -438,6 +451,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           workspaceId: input.workspaceId,
           subjectId,
           sessionId: input.sessionId,
+          turnId: turn.id,
           authoritySnapshot,
         });
         const selected = providerTurn.effectiveXaiCredentialId
@@ -466,6 +480,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               workspaceId: input.workspaceId,
               subjectId,
               sessionId: input.sessionId,
+              turnId: turn.id,
               authoritySnapshot,
               credentialId: selected.credentialId,
               pinSource: "policy",
@@ -577,6 +592,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
+  const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const skillCatalog = preparedTools.skillCatalog ?? deps.skillCatalog;
   if (skillCatalog.some(entry => entry.modelSourceRefs !== undefined) && skillCatalog.some(entry => !entry.modelSourceRefs?.length))
@@ -646,6 +662,13 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           effort: turn.reasoningEffort,
         })
       : turn.reasoningEffort;
+  const toolRouterInHistory = session.agent
+    ? await sessionHasToolRouterHistory(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      })
+    : false;
   const agent = (() => {
     const agentConstructionStartedAt = performance.now();
     let agentConstructionOutcome: "completed" | "failed" = "completed";
@@ -672,7 +695,12 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
             }
           : {}),
         ...(preparedTools.inputWaitYield ? { inputWaitYield: preparedTools.inputWaitYield } : {}),
+        ...(session.agent ? { agentConfig: session.agent, toolRouterInHistory } : {}),
+        ...(session.agent && promptToolAvailability
+          ? { agentPromptToolAvailability: promptToolAvailability }
+          : {}),
         reasoningEffort: requestReasoningEffort,
+        ...(reasoningSummary ? { reasoningSummary } : {}),
         latencyMode: turnExecutionPolicy.latencyMode,
         ...(serviceTier ? { serviceTier } : {}),
         ...(textVerbosity ? { textVerbosity } : {}),
@@ -763,8 +791,8 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
               // tool. Gateway Responses routes likewise expose ordinary function
               // tools, not OpenAI-hosted sandbox tools. Tell buildAgent to use
               // function apply_patch and wrap successful view_image results as
-              // typed input_image content. Chat wires have no proven typed image
-              // result transport and therefore receive no view_image tool.
+              // typed input_image content. The Chat adapter projects tool images
+              // into a labelled image envelope after the paired tool results.
               structuredToolTransport: structuredToolTransportForTurn(resolvedModel),
               ...(promptCacheKey ? { promptCacheKey } : {}),
             }
@@ -777,6 +805,16 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
         onRetainableSessionImageOutput: media.retainSessionImageAtToolBoundary,
         skillCatalog,
         skillCatalogInHistory: true,
+        // A session with an agent configuration composes the modular prompt
+        // (identity, base behavior, runtime mechanics, capability modules);
+        // its workspace identity survives instruction policies. Null keeps
+        // the legacy composition below byte-for-byte.
+        ...(session.agent
+          ? {
+              agentConfig: session.agent,
+              ...(workspaceAgentIdentity ? { workspaceAgentIdentity } : {}),
+            }
+          : {}),
         ...(!structuredWorkspacePolicyActive && workspaceAgentInstructions
           ? { instructionsTemplate: workspaceAgentInstructions }
           : {}),

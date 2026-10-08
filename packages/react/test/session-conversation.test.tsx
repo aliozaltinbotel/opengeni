@@ -8,8 +8,65 @@ import type { ComposerOptimisticMessage } from "../src/hooks/use-composer";
 import { fakeClient, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 import { latestQuestionClient } from "./fixtures/latest-question-client";
+import { archivedTranscriptEvents } from "./fixtures/archived-transcript";
 
 registerDom();
+
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await flush(10);
+  }
+}
+
+test("imported archives retain the timeline and expose no execution controls", async () => {
+  let mutations = 0;
+  const client = fakeClient({
+    getSession: async () =>
+      ({
+        id: SESSION_ID,
+        status: "idle",
+        importedArchive: {
+          importId: "old-host/chat-42",
+          importedAt: "2026-10-01T06:30:00.000Z",
+          readOnly: true,
+        },
+      }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () => archivedTranscriptEvents(),
+    sendMessage: async () => {
+      mutations++;
+      throw new Error("must not send");
+    },
+    steerMessage: async () => {
+      mutations++;
+      throw new Error("must not steer");
+    },
+  });
+  const view = await renderComponent(
+    <SessionConversation
+      client={client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+      modelPicker={false}
+    />,
+  );
+  try {
+    await flush(100);
+    expect(view.container.textContent).toContain("Archived conversation · Read only");
+    expect(view.container.textContent).toContain("Will users still see their past chats?");
+    expect(view.container.textContent).toContain("日本語もそのまま残ります。");
+    expect(view.container.querySelector("textarea")).toBeNull();
+    expect(view.container.querySelector("[data-og-conversation-composer]")).toBeNull();
+    expect(view.container.querySelector("[data-og-conversation-inputs]")).toBeNull();
+    expect(mutations).toBe(0);
+  } finally {
+    await view.unmount();
+  }
+});
 
 test("an outer host resolver overrides conversation download defaults", async () => {
   const client = fakeClient({
@@ -91,6 +148,40 @@ test("proxy sandbox capability disables default downloads in the complete conver
   }
 });
 
+test("contextual navigation stays unavailable when initial history has no mounted prompt", async () => {
+  const fixture = latestQuestionClient("pending");
+  const listEvents = fixture.client.listEvents;
+  let releaseHistory!: () => void;
+  const history = new Promise<void>((resolve) => {
+    releaseHistory = resolve;
+  });
+  fixture.client.listEvents = async (...args) => {
+    if (!args[2]?.includeTypes) await history;
+    return listEvents(...args);
+  };
+  const view = await renderComponent(
+    <SessionConversation
+      client={fixture.client}
+      workspaceId={WORKSPACE_ID}
+      sessionId={SESSION_ID}
+    />,
+  );
+  try {
+    await flush(100);
+    expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
+    releaseHistory();
+    await waitFor(
+      () => view.container.querySelector("[data-og-wide-table-message]") !== null,
+      "history did not render",
+    );
+    expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
+    expect(fixture.reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(false);
+  } finally {
+    releaseHistory();
+    await view.unmount();
+  }
+});
+
 for (const mode of [
   "pending",
   "started",
@@ -98,13 +189,16 @@ for (const mode of [
   "legacy-running",
   "legacy-settled",
 ] as const) {
-  test(`Latest question reaches the real ${mode} destination through SessionConversation`, async () => {
+  test(`unmounted ${mode} prompts do not cause global navigation through SessionConversation`, async () => {
     const { client, turn, reads } = latestQuestionClient(mode);
     const view = await renderComponent(
       <SessionConversation client={client} workspaceId={WORKSPACE_ID} sessionId={SESSION_ID} />,
     );
     try {
-      await flush(100);
+      await waitFor(
+        () => view.container.querySelector("[data-og-wide-table-message]") !== null,
+        "history did not render",
+      );
       if (mode === "pending") {
         const queueButton = [...view.container.querySelectorAll<HTMLButtonElement>("button")].find(
           (button) => button.textContent?.includes("1 queued"),
@@ -112,51 +206,18 @@ for (const mode of [
         if (queueButton?.getAttribute("aria-expanded") === "true")
           await actRun(() => queueButton.click());
       }
-      const latest = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
-      expect(latest).not.toBeNull();
-      await actRun(() => latest!.click());
-      await flush(120);
-      expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(true);
-      if (mode === "pending") {
-        expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).toBe(turn.id);
-        expect(
-          view.container.querySelector('[data-og-session-chrome-panel="queue"]'),
-        ).not.toBeNull();
-        expect(
-          view.container.querySelector("[data-og-timeline-scroller]")?.textContent,
-        ).not.toContain("Newest queued question");
-      } else {
-        const prompts = [...view.container.querySelectorAll("[data-og-prompt]")].map(
-          (item) => item.textContent,
-        );
-        expect(
-          prompts.some((text) =>
-            text?.includes(
-              mode === "withdrawn" ? "Previous valid question" : "Newest queued question",
-            ),
-          ),
-        ).toBe(true);
-        if (mode === "withdrawn")
-          expect(prompts.some((text) => text?.includes("Newest queued question"))).toBe(false);
-      }
+      expect(view.container.querySelector("[data-og-prompt]")).toBeNull();
+      expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
+      expect(reads.some((read) => read.includeTypes?.includes("user.message"))).toBe(false);
+      expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).not.toBe(turn.id);
     } finally {
       await view.unmount();
     }
   });
 }
 
-test("deferred queued refresh cannot reopen or focus the queue after Jump to start", async () => {
+test("Jump to start loads history without redirecting focus to a pending queue item", async () => {
   const fixture = latestQuestionClient("pending");
-  let release!: (snapshot: SessionQueueSnapshot) => void;
-  const deferred = new Promise<SessionQueueSnapshot>((resolve) => {
-    release = resolve;
-  });
-  let deferRefresh = false;
-  let reads = 0;
-  fixture.client.getQueue = async () => {
-    if (deferRefresh && ++reads === 2) return deferred;
-    return fixture.snapshot;
-  };
   const view = await renderComponent(
     <SessionConversation
       client={fixture.client}
@@ -178,15 +239,9 @@ test("deferred queued refresh cannot reopen or focus the queue after Jump to sta
     await flush(20);
     const start = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-start]");
     expect(start).not.toBeNull();
-    deferRefresh = true;
-    await actRun(() =>
-      view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]")!.click(),
-    );
-    await flush(30);
-    expect(reads).toBe(2);
+    expect(view.container.querySelector("[data-og-jump-to-question]")).toBeNull();
     await actRun(() => start!.click());
     await flush(40);
-    release(fixture.snapshot);
     await flush(80);
     expect((document.activeElement as HTMLElement)?.dataset.queueTurnId).not.toBe(fixture.turn.id);
     expect(view.container.querySelector('[data-og-session-chrome-open="true"]')).toBeNull();
@@ -194,7 +249,6 @@ test("deferred queued refresh cannot reopen or focus the queue after Jump to sta
       "Previous valid question",
     );
   } finally {
-    release(fixture.snapshot);
     await view.unmount();
   }
 });
@@ -246,6 +300,41 @@ test("queued delivery failures remain visible and retryable; acknowledged queue 
       },
     ),
   ).toHaveLength(0);
+});
+
+test("definitively refused messages offer editing, not an unchanged retry", () => {
+  let edits = 0;
+  const items = conversationTimeline(
+    [],
+    { queue: [], snapshot: null },
+    {
+      optimisticMessages: [
+        {
+          clientEventId: "refused-credit-message",
+          delivery: "send",
+          destination: "chat",
+          text: "preserved prompt",
+          annotations: [],
+          resources: [],
+          occurredAt: new Date(0).toISOString(),
+          state: "failed",
+          error: "Out of credits",
+          retryable: false,
+        },
+      ],
+      retryOptimisticMessage: () => {
+        throw Error("A credit refusal must not expose Retry");
+      },
+      restoreOptimisticMessage: () => {
+        edits += 1;
+      },
+    },
+  );
+  const item = items[0]!;
+  if (item.kind !== "user-message") throw Error("Expected refused message");
+  expect(item.delivery?.onRetry).toBeUndefined();
+  item.delivery?.onEdit?.();
+  expect(edits).toBe(1);
 });
 
 test("complete conversation loads queue and provides queue actions beside composer", async () => {
@@ -331,11 +420,8 @@ test("complete conversation loads queue and provides queue actions beside compos
     const latestQuestion = view.container.querySelector<HTMLButtonElement>(
       "[data-og-jump-to-question]",
     );
-    expect(latestQuestion).not.toBeNull();
-    expect(view.container.querySelectorAll("[data-og-jump-to-question]")).toHaveLength(1);
-    await actRun(() => latestQuestion!.click());
-    await flush(30);
-    expect(latestQuestionLookups).toBe(1);
+    expect(latestQuestion).toBeNull();
+    expect(latestQuestionLookups).toBe(0);
     const disclosure = view.container.querySelector<HTMLButtonElement>(
       "[data-og-user-message-disclosure]",
     )!;
@@ -397,7 +483,16 @@ test("complete conversation surfaces tool approvals and wires attachments when u
           turnId: "44444444-4444-4444-8444-444444444444",
           occurredAt: "2026-09-07T00:00:00Z",
           payload: {
-            approvals: [{ rawItem: { callId: "call-1", name: "deploy" }, name: "deploy" }],
+            approvals: [
+              {
+                rawItem: {
+                  callId: "call-1",
+                  name: "deploy",
+                  arguments: { environment: "test" },
+                },
+                name: "deploy",
+              },
+            ],
           },
         },
       ] as never,
@@ -424,7 +519,7 @@ test("complete conversation surfaces tool approvals and wires attachments when u
     await flush(200);
     expect(view.container.querySelector("[aria-label='Attach files']")).not.toBeNull();
     const approve = [...view.container.querySelectorAll("button")].find(
-      (node) => node.textContent === "Approve",
+      (node) => node.textContent === "Approve action",
     );
     expect(approve).toBeDefined();
     await actRun(() => approve!.click());
@@ -461,22 +556,243 @@ test("the model picker follows the proxy's modelSelection flag and the modelPick
       "[aria-label='Model and effort'], [aria-label='Loading model catalog…']",
     );
   for (const [modelSelection, prop, expected] of [
-    [undefined, undefined, true],
+    // End users only see the picker on an explicit offer.
+    [undefined, undefined, false],
+    [true, undefined, true],
     [false, undefined, false],
     [false, true, true],
-    [undefined, false, false],
+    [undefined, true, true],
+    [true, false, false],
   ] as const) {
     const view = await renderComponent(
       <SessionConversation
         sessionId={SESSION_ID}
         client={clientWith(modelSelection)}
         workspaceId={WORKSPACE_ID}
+        modelPickerProps={{
+          messages: { label: "Model and effort" },
+          groupPresentation: { opengeni_credits: { label: "Host models" } },
+        }}
         {...(prop === undefined ? {} : { modelPicker: prop })}
       />,
     );
     try {
       await flush(150);
       expect(picker(view.container) !== null).toBe(expected);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the complete conversation forwards only picker appearance without replacing policy callbacks", async () => {
+  let modelMutations = 0;
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "idle" }) as never,
+    getQueue: async () =>
+      ({ version: 1, effectiveControl: null, items: [], pendingInputs: [] }) as never,
+    getWorkspaceModelCatalog: async () => ({ models: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* (_workspace, _session, options) {
+      await new Promise<void>((resolve) =>
+        options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+      );
+      yield* [];
+    },
+  });
+  for (const customized of [false, true]) {
+    // Extra JS properties must not take over the conversation's policy wiring.
+    const appearance = {
+      groupPresentation: {
+        opengeni_credits: { label: "Host models", icon: <svg data-testid="host-model-mark" /> },
+      },
+      messages: { label: "Choose a model" },
+      model: "untrusted/model",
+      onModelChange: () => {
+        modelMutations++;
+      },
+    };
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker
+        {...(customized ? { modelPickerProps: appearance } : {})}
+      />,
+    );
+    try {
+      await flush(150);
+      const trigger = view.container.querySelector(
+        `button[aria-label="${customized ? "Choose a model" : "Model and effort"}"]`,
+      )!;
+      expect(trigger).not.toBeNull();
+      expect(trigger.textContent).toContain("Model X");
+      expect(trigger.textContent).not.toContain("untrusted/model");
+      expect(
+        trigger.querySelector(
+          customized
+            ? '[aria-label="Host models"] [data-testid="host-model-mark"]'
+            : '[aria-label="Models"] .lucide-sparkles',
+        ),
+      ).not.toBeNull();
+      expect(modelMutations).toBe(0);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("live voice is opt-in and needs an available voice model", async () => {
+  const base = fakeClient({});
+  const voiceModel = {
+    id: "opengeni-azure/gpt-live-1",
+    label: "GPT Live 1",
+    provider: "OpenGeni",
+    description: "Realtime voice with session delegation",
+    available: true,
+    unavailableReason: null,
+    recommended: true,
+  } as const;
+  const effectiveControl = {
+    state: "active",
+    controlVersion: 0,
+    controlEtag: "active-0",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: null,
+    settlement: null,
+  };
+  const scenario = (input: {
+    realtimeVoice?: boolean;
+    models?: Array<typeof voiceModel | Record<string, unknown>> | null;
+  }) => {
+    let catalogReads = 0;
+    const client = fakeClient({
+      getClientConfig: async () =>
+        ({
+          ...(await base.getClientConfig()),
+          ...(input.realtimeVoice === undefined ? {} : { realtimeVoice: input.realtimeVoice }),
+        }) as never,
+      getSession: async () => ({ id: SESSION_ID, status: "idle", effectiveControl }) as never,
+      getQueue: async () =>
+        ({ version: 1, effectiveControl, items: [], pendingInputs: [] }) as never,
+      listHumanInputRequests: async () => [],
+      streamEvents: async function* (
+        _workspace: string,
+        _session: string,
+        options?: { signal?: AbortSignal },
+      ) {
+        await new Promise<void>((resolve) =>
+          options?.signal?.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        yield* [];
+      },
+      ...(input.models === null
+        ? {}
+        : {
+            getWorkspaceRealtimeModelCatalog: async () => {
+              catalogReads++;
+              return { models: input.models ?? [voiceModel] } as never;
+            },
+          }),
+    } as never);
+    return { client, reads: () => catalogReads };
+  };
+  const voiceButton = (container: HTMLElement) =>
+    container.querySelector(
+      "[data-og-conversation-composer] [data-testid='realtime-primary-action']",
+    );
+  for (const [label, input, prop, shown, read] of [
+    // Opt-in: a call spends credits and prompts for the microphone.
+    ["off by default", {}, undefined, false, false],
+    ["host prop on", {}, true, true, true],
+    ["proxy offers voice", { realtimeVoice: true }, undefined, true, true],
+    ["proxy turned voice off", { realtimeVoice: false }, undefined, false, false],
+    ["proxy off beats host prop", { realtimeVoice: false }, true, false, false],
+    ["host prop off beats proxy offer", { realtimeVoice: true }, false, false, false],
+    [
+      "only unavailable models",
+      { models: [{ ...voiceModel, available: false, unavailableReason: "Add credits" }] },
+      true,
+      false,
+      true,
+    ],
+    ["client without voice", { models: null }, true, false, false],
+  ] as const) {
+    const { client, reads } = scenario(input as never);
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        {...(prop === undefined ? {} : { realtimeVoice: prop })}
+      />,
+    );
+    try {
+      if (shown) {
+        await waitFor(() => voiceButton(view.container) !== null, `${label}: voice button`);
+        expect(voiceButton(view.container)!.getAttribute("aria-label")).toBe(
+          "Start voice with GPT Live 1",
+        );
+      } else {
+        await flush(200);
+        expect(voiceButton(view.container)).toBeNull();
+      }
+      expect(reads() > 0).toBe(read);
+    } finally {
+      await view.unmount();
+    }
+  }
+});
+
+test("the embedded working indicator uses neutral copy unless the host overrides it", async () => {
+  const turnId = "44444444-4444-4444-8444-444444444444";
+  const startedAt = new Date().toISOString();
+  const event = (sequence: number, type: string, payload: Record<string, unknown> = {}) => ({
+    id: `55555555-5555-4555-8555-${String(sequence).padStart(12, "0")}`,
+    workspaceId: WORKSPACE_ID,
+    sessionId: SESSION_ID,
+    sequence,
+    type,
+    turnId,
+    occurredAt: startedAt,
+    payload,
+  });
+  const client = fakeClient({
+    getSession: async () => ({ id: SESSION_ID, status: "running" }) as never,
+    getQueue: async () => ({ items: [], pendingInputs: [] }) as never,
+    listHumanInputRequests: async () => [],
+    streamEvents: async function* () {},
+    listEvents: async () =>
+      [
+        event(1, "user.message", { text: "Hi" }),
+        event(2, "turn.queued", { turnId }),
+        event(3, "turn.started"),
+      ] as never,
+  });
+  const phrase = (container: HTMLElement) =>
+    container.querySelector(".og-genie-phrase")?.textContent ?? null;
+  for (const [genieLoading, expected] of [
+    [undefined, "Thinking…"],
+    [{ phrases: [] }, "Thinking…"],
+    [{ phrases: ["Un instant…"] }, "Un instant…"],
+  ] as const) {
+    const view = await renderComponent(
+      <SessionConversation
+        sessionId={SESSION_ID}
+        client={client}
+        workspaceId={WORKSPACE_ID}
+        modelPicker={false}
+        {...(genieLoading ? { genieLoading } : {})}
+      />,
+    );
+    try {
+      await waitFor(() => phrase(view.container) !== null, "working indicator");
+      expect(phrase(view.container)).toBe(expected);
     } finally {
       await view.unmount();
     }

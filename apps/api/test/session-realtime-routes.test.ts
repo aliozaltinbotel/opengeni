@@ -1,21 +1,27 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { freezeSessionRealtimeConnectionAccounts } from "@opengeni/core";
 import {
   activateSessionRealtimeConnectionInTransaction,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
   completeSessionRealtimeConnectionInTransaction,
   createDb,
+  createConnection,
   createSession,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
+  ensureManagedAccessForUser,
   setActiveCodexCredential,
   upsertCodexSubscriptionCredential,
   withWorkspaceRls,
+  withSessionRlsActorContext,
   type Database,
   type DbClient,
 } from "@opengeni/db";
 import { readTurnExecutionPolicyV1, signDelegatedAccessToken } from "@opengeni/contracts";
+import { and, eq } from "drizzle-orm";
+import * as schema from "@opengeni/db/schema";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -36,6 +42,8 @@ const settings = testSettings({
   environmentsEncryptionKey: encryptionKey.toString("base64"),
   codexSubscriptionEnabled: true,
   vercelAiGatewayApiKey: "gateway-test-key",
+  azureLiveEndpoint: "https://voice.example.test",
+  azureLiveApiKey: "synthetic-azure-key",
 });
 
 let shared: SharedTestDatabase;
@@ -90,6 +98,14 @@ beforeAll(async () => {
         });
       }
       providerCalls += 1;
+      if (request.url === "https://voice.example.test/openai/v1/live/sessions") {
+        expect(request.headers.get("api-key")).toBe("synthetic-azure-key");
+        return Response.json({
+          transport: {
+            sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+          },
+        });
+      }
       if (request.url.endsWith("/v1/realtime/client-secrets")) {
         const body = (await request.json()) as { model?: string; expiresIn?: number };
         expect(request.headers.get("authorization")).toBe("Bearer gateway-test-key");
@@ -115,7 +131,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture() {
+async function fixture(withConnector = false) {
   const suffix = crypto.randomUUID();
   const subjectId = `user:${suffix}`;
   const access = await bootstrapWorkspace(client.db, {
@@ -149,6 +165,18 @@ async function fixture() {
   });
   await ensureCodexRotationSettings(client.db, grant.accountId, grant.workspaceId!);
   await setActiveCodexCredential(client.db, grant.workspaceId!, credential.id);
+  const connector = withConnector
+    ? await createConnection(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        providerDomain: "mcp.example.test",
+        kind: "oauth2",
+        credentialEncrypted: encryptEnvironmentValue(
+          encryptionKey,
+          JSON.stringify({ access_token: "fixture-only" }),
+        ),
+      })
+    : null;
   const session = await createSession(client.db, {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId!,
@@ -159,6 +187,29 @@ async function fixture() {
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "none",
+    ...(connector
+      ? {
+          tools: [{ kind: "mcp" as const, id: "test-connector" }],
+          mcpServers: [
+            {
+              id: "test-connector",
+              url: "https://mcp.example.test/",
+              name: null,
+              allowedTools: null,
+              timeoutMs: null,
+              cacheToolsList: false,
+              requireApproval: null,
+              headersEncrypted: {},
+              connectionRef: {
+                connectionId: connector.id,
+                providerDomain: connector.providerDomain,
+                kind: "oauth2" as const,
+                subjectScope: "workspace" as const,
+              },
+            },
+          ],
+        }
+      : {}),
   });
   const token = await signDelegatedAccessToken(DELEGATION_SECRET, {
     accountId: grant.accountId,
@@ -172,6 +223,7 @@ async function fixture() {
     workspaceId: grant.workspaceId!,
     sessionId: session.id,
     subjectId,
+    connector,
     headers: {
       authorization: `Bearer ${token}`,
       "content-type": "application/json",
@@ -180,6 +232,125 @@ async function fixture() {
 }
 
 describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
+  test("verified human voice admission freezes personal accounts; delegated bearers cannot borrow them", async () => {
+    const userId = `voice-personal-${crypto.randomUUID()}`;
+    const subjectId = `user:${userId}`;
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Voice owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const connection = await createConnection(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      subjectId,
+      providerDomain: "mcp.personal.test",
+      kind: "oauth2",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ access_token: "fixture-only" }),
+      ),
+      createdBySubjectId: subjectId,
+    });
+    const session = await withSessionRlsActorContext({ subjectId }, () =>
+      createSession(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        initialMessage: "Personal connector",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createdBy: { kind: "subject", subjectId },
+        createdByContext: {},
+        tools: [{ kind: "mcp", id: "personal-connector" }],
+        mcpServers: [
+          {
+            id: "personal-connector",
+            url: "https://mcp.personal.test/",
+            name: null,
+            allowedTools: null,
+            timeoutMs: null,
+            cacheToolsList: false,
+            requireApproval: null,
+            headersEncrypted: {},
+            connectionRef: {
+              connectionId: connection.id,
+              providerDomain: connection.providerDomain,
+              kind: "oauth2",
+              subjectScope: "subject",
+            },
+          },
+        ],
+      }),
+    );
+    const input = {
+      db: client.db,
+      settings,
+      grant,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+    };
+    const accounts = await withSessionRlsActorContext({ subjectId }, () =>
+      freezeSessionRealtimeConnectionAccounts(input),
+    );
+    expect(accounts.mcpAccountBindings).toMatchObject([
+      { connectionId: connection.id, ownerSubjectId: subjectId, subjectScope: "subject" },
+    ]);
+    expect(accounts.personalConnectionDelegations).toMatchObject([
+      {
+        connectionId: connection.id,
+        ownerSubjectId: subjectId,
+        serverId: accounts.mcpAccountBindings![0]!.serverId,
+      },
+    ]);
+    const delegated = await withSessionRlsActorContext({ subjectId }, () =>
+      freezeSessionRealtimeConnectionAccounts({
+        ...input,
+        grant: { ...grant, metadata: { ...grant.metadata, delegated: true } },
+      }),
+    );
+    expect(delegated.mcpAccountBindings).toEqual([]);
+    expect(delegated.personalConnectionDelegations).toEqual([]);
+  });
+
+  test("voice start freezes native accounts from the verified request before delegation", async () => {
+    const value = await fixture(true);
+    const response = await app.request(
+      `http://api.example.test/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`,
+      {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          operationId: crypto.randomUUID(),
+          browserInstanceId: "browser-accounts",
+          ownerKey: `owner-${crypto.randomUUID()}`,
+          model: "gpt-live-1-boulder-alpha",
+        }),
+      },
+    );
+    expect(response.status).toBe(201);
+    const result = (await response.json()) as { mode: { id: string } };
+    const [mode] = await withWorkspaceRls(client.db, value.workspaceId, (db) =>
+      db
+        .select()
+        .from(schema.sessionRealtimeModes)
+        .where(
+          and(
+            eq(schema.sessionRealtimeModes.id, result.mode.id),
+            eq(schema.sessionRealtimeModes.workspaceId, value.workspaceId),
+          ),
+        ),
+    );
+    expect(mode!.mcpAccountBindings).toMatchObject([
+      { connectionId: value.connector!.id, subjectScope: "workspace", ownerSubjectId: null },
+    ]);
+    expect(mode!.personalConnectionDelegations).toEqual([]);
+  });
+
   test("starts, heartbeats, and ends one mode with live publication and an exact normal-mode wake", async () => {
     const value = await fixture();
     const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
@@ -398,89 +569,92 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(await replay.text()).toContain("rotate with a new operation");
   });
 
-  test("durably completes a provider answer and replays it without a second provider call", async () => {
-    const value = await fixture();
-    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
-    const proof = {
-      operationId: crypto.randomUUID(),
-      browserInstanceId: `browser-${crypto.randomUUID()}`,
-      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
-      model: "gpt-live-1-boulder-alpha",
-    };
-    const startedResponse = await app.request(base, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify(proof),
-    });
-    const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
-    const request = {
-      realtimeId: started.mode.id,
-      operationId: crypto.randomUUID(),
-      browserInstanceId: proof.browserInstanceId,
-      ownerKey: proof.ownerKey,
-      expectedVersion: started.mode.version,
-      expectedConnectionEpoch: 1,
-      rotate: false,
-      browserActivation: "required",
-      sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
-      version: "v3",
-    };
-    const callsBefore = providerCalls;
-    const first = await app.request(`${base}/webrtc`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify(request),
-    });
-    expect(first.status).toBe(200);
-    const answer = (await first.json()) as {
-      sdp: string;
-      connectionId: string;
-      connectionEpoch: number;
-      modeVersion: number;
-      replay: boolean;
-    };
-    expect(answer).toMatchObject({
-      sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
-      connectionEpoch: 1,
-      modeVersion: started.mode.version,
-      replay: false,
-    });
-    expect(providerCalls).toBe(callsBefore + 1);
-
-    const replay = await app.request(`${base}/webrtc`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify(request),
-    });
-    expect(replay.status).toBe(200);
-    expect(await replay.json()).toMatchObject({
-      sdp: answer.sdp,
-      connectionId: answer.connectionId,
-      replay: true,
-    });
-    expect(providerCalls).toBe(callsBefore + 1);
-
-    const activated = await app.request(
-      `${base}/${started.mode.id}/connections/${answer.connectionId}/activate`,
-      {
+  test.each(["gpt-live-1-boulder-alpha", "opengeni-azure/gpt-live-1"])(
+    "durably completes %s and replays without a second provider call",
+    async (model) => {
+      const value = await fixture();
+      const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+      const proof = {
+        operationId: crypto.randomUUID(),
+        browserInstanceId: `browser-${crypto.randomUUID()}`,
+        ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+        model,
+      };
+      const startedResponse = await app.request(base, {
         method: "POST",
         headers: value.headers,
-        body: JSON.stringify({
-          browserInstanceId: proof.browserInstanceId,
-          ownerKey: proof.ownerKey,
-          operationId: request.operationId,
-          expectedVersion: started.mode.version,
-          expectedConnectionEpoch: 1,
-          connectionEpoch: answer.connectionEpoch,
-        }),
-      },
-    );
-    expect(activated.status).toBe(200);
-    expect(await activated.json()).toMatchObject({
-      mode: { version: started.mode.version, connectionEpoch: 1 },
-      replay: false,
-    });
-  });
+        body: JSON.stringify(proof),
+      });
+      const started = (await startedResponse.json()) as { mode: { id: string; version: number } };
+      const request = {
+        realtimeId: started.mode.id,
+        operationId: crypto.randomUUID(),
+        browserInstanceId: proof.browserInstanceId,
+        ownerKey: proof.ownerKey,
+        expectedVersion: started.mode.version,
+        expectedConnectionEpoch: 1,
+        rotate: false,
+        browserActivation: "required",
+        sdp: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        version: "v3",
+      };
+      const callsBefore = providerCalls;
+      const first = await app.request(`${base}/webrtc`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify(request),
+      });
+      expect(first.status).toBe(200);
+      const answer = (await first.json()) as {
+        sdp: string;
+        connectionId: string;
+        connectionEpoch: number;
+        modeVersion: number;
+        replay: boolean;
+      };
+      expect(answer).toMatchObject({
+        sdp: "v=0\r\na=answer:provider-fixture\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        connectionEpoch: 1,
+        modeVersion: started.mode.version,
+        replay: false,
+      });
+      expect(providerCalls).toBe(callsBefore + 1);
+
+      const replay = await app.request(`${base}/webrtc`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify(request),
+      });
+      expect(replay.status).toBe(200);
+      expect(await replay.json()).toMatchObject({
+        sdp: answer.sdp,
+        connectionId: answer.connectionId,
+        replay: true,
+      });
+      expect(providerCalls).toBe(callsBefore + 1);
+
+      const activated = await app.request(
+        `${base}/${started.mode.id}/connections/${answer.connectionId}/activate`,
+        {
+          method: "POST",
+          headers: value.headers,
+          body: JSON.stringify({
+            browserInstanceId: proof.browserInstanceId,
+            ownerKey: proof.ownerKey,
+            operationId: request.operationId,
+            expectedVersion: started.mode.version,
+            expectedConnectionEpoch: 1,
+            connectionEpoch: answer.connectionEpoch,
+          }),
+        },
+      );
+      expect(activated.status).toBe(200);
+      expect(await activated.json()).toMatchObject({
+        mode: { version: started.mode.version, connectionEpoch: 1 },
+        replay: false,
+      });
+    },
+  );
 
   test("mints one single-use Gateway token behind the same owner and activation fences", async () => {
     const value = await fixture();

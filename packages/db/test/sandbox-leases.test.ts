@@ -5010,6 +5010,197 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     }
   }, 60_000);
 
+  // Production 2026-10-05: a worker shutdown cancelled the spawner after Modal
+  // create returned. It terminated its unpublished box but died before
+  // failWarmingToCold, so the warming-death reaper drained the attributed
+  // instance, found it missing, and the replacement attempt failed every turn
+  // with restore_unrecoverable although no workspace had ever existed.
+  for (const archived of [false, true]) {
+    test(`(8a-unpublished) a missing UNPUBLISHED warming box does not poison the group (archive=${archived})`, async () => {
+      if (!available) return;
+      const { accountId, workspaceId, groupId } = await freshWorkspace();
+      const scope = { accountId, workspaceId, sandboxGroupId: groupId };
+      let archiveRevision: string | null = null;
+      if (archived) {
+        // A prior published box drained with a complete durable archive.
+        await acquireLease(db, {
+          ...scope,
+          kind: "turn",
+          holderId: "archived-owner",
+          backend: "modal",
+          leaseTtlMs: 45_000,
+        });
+        await commitWarmingToWarm(db, {
+          ...scope,
+          expectedEpoch: 0,
+          instanceId: "sb-archived-source",
+          resumeBackendId: "modal",
+          resumeState: {
+            backendId: "modal",
+            sessionState: { providerState: { sandboxId: "sb-archived-source" } },
+          },
+          leaseTtlMs: 45_000,
+        });
+        await releaseLeaseHolder(db, {
+          ...scope,
+          kind: "turn",
+          holderId: "archived-owner",
+          idleGraceMs: 0,
+        });
+        const draining = (await readLease(db, workspaceId, groupId))!;
+        const archive = Buffer.from("UNPUBLISHED_WARMING_ARCHIVE").toString("base64");
+        const descriptor = archiveDescriptor(archive, 1_900_000_000_000);
+        archiveRevision = descriptor.revision;
+        const captureId = crypto.randomUUID();
+        const claim = await claimWorkspaceArchiveCapture(db, {
+          ...scope,
+          captureId,
+          expectedEpoch: draining.leaseEpoch,
+          expectedInstanceId: "sb-archived-source",
+          liveness: "draining",
+          captureTimeoutMs: 60_000,
+          minIntervalMs: 0,
+        });
+        expect(claim.status).toBe("claimed");
+        const persisted = await persistDrainSnapshotRaw(db, {
+          ...scope,
+          expectedEpoch: draining.leaseEpoch,
+          expectedInstanceId: "sb-archived-source",
+          expectedWorkspaceGeneration: 0,
+          captureId,
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        });
+        expect(persisted.wrote).toBe(true);
+        expect(
+          (
+            await confirmDrainCold(db, {
+              ...scope,
+              expectedEpoch: draining.leaseEpoch,
+              expectedCaptureId: captureId,
+            })
+          ).wentCold,
+        ).toBe(true);
+      }
+
+      // The dying attempt wins the cold->warming election and records its box.
+      const dying = await acquireLease(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:dying",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+        warmingLeaseTtlMs: 120_000,
+      });
+      expect(dying.role).toBe("spawner");
+      const rematerializationId = archived ? crypto.randomUUID() : null;
+      if (rematerializationId) {
+        const begun = await beginSandboxRematerialization(db, {
+          ...scope,
+          expectedEpoch: dying.lease.leaseEpoch,
+          rematerializationId,
+        });
+        expect(begun.status).toBe("started");
+      }
+      const recorded = await recordWarmingSandboxCreated(db, {
+        ...scope,
+        expectedEpoch: dying.lease.leaseEpoch,
+        rematerializationId,
+        instanceId: "sb-unpublished",
+        resumeBackendId: "modal",
+        resumeState: {
+          backendId: "modal",
+          sessionState: { providerState: { sandboxId: "sb-unpublished" } },
+        },
+        leaseTtlMs: 45_000,
+        warmingLeaseTtlMs: 120_000,
+      });
+      expect(recorded.recorded).toBe(true);
+      const generationBefore = (
+        await admin<{ workspace_generation: string }[]>`
+          select workspace_generation from sandbox_leases
+          where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`
+      )[0]!.workspace_generation;
+
+      // Its worker exits before publication or failWarmingToCold: the warming
+      // lease expires and the reaper converts it to an immediate drain (c2).
+      await releaseLeaseHolder(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:dying",
+        idleGraceMs: 0,
+      });
+      await admin`
+        update sandbox_leases set expires_at = now() - interval '1 second'
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      const reaped = await reapStaleLeaseHolders(db, {
+        workspaceId,
+        viewerHolderTtlMs: 90_000,
+        idleGraceMs: 45_000,
+      });
+      const drained = reaped.drained.find((row) => row.sandboxGroupId === groupId);
+      expect(drained?.instanceId).toBe("sb-unpublished");
+
+      // The replacement attempt arrives while the reaper owns the box.
+      const waiting = await acquireLease(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:replacement",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(waiting).toMatchObject({ role: "fenced", reason: "provider_recovery_in_progress" });
+
+      // The reaper's provider probe returns typed NotFound.
+      const cold = await confirmDrainCold(db, {
+        ...scope,
+        expectedEpoch: drained!.leaseEpoch,
+        providerMissingBeforeCapture: true,
+      });
+      expect(cold).toMatchObject({ wentCold: true, unpublishedProviderLost: true });
+
+      const lease = (await readLease(db, workspaceId, groupId))!;
+      expect(lease.liveness).toBe("cold");
+      expect(lease.instanceId).toBeNull();
+      expect(lease.recovery.restore.status).not.toBe("unrecoverable");
+      expect(lease.recovery.workspace.status).not.toBe("unrecoverable");
+      expect(lease.recovery.provider.status).not.toBe("missing");
+      if (archived) {
+        expect(lease.recovery.archive.status).toBe("available");
+        expect(lease.recovery.restore).toMatchObject({
+          status: "pending",
+          selectedRevision: archiveRevision,
+        });
+      } else {
+        expect(lease.recovery.archive.status).toBe("none");
+        expect(lease.recovery.restore.status).toBe("not_required");
+      }
+      // No lost-workspace evidence was minted for a box that never existed
+      // as a workspace, and no generation moved.
+      const audits = await admin<{ n: number }[]>`
+        select count(*)::int as n from audit_events
+        where workspace_id = ${workspaceId} and target_id = ${groupId}
+          and action = 'sandbox.provider_missing_before_capture'`;
+      expect(audits[0]?.n).toBe(0);
+      const generationAfter = (
+        await admin<{ workspace_generation: string }[]>`
+          select workspace_generation from sandbox_leases
+          where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`
+      )[0]!.workspace_generation;
+      expect(generationAfter).toBe(generationBefore);
+
+      const retry = await acquireLease(db, {
+        ...scope,
+        kind: "turn",
+        holderId: "turn-attempt:replacement",
+        backend: "modal",
+        leaseTtlMs: 45_000,
+      });
+      expect(retry.role).toBe("spawner");
+      expect(retry.lease.leaseEpoch).toBeGreaterThan(drained!.leaseEpoch);
+    }, 60_000);
+  }
+
   test("(8b) a provider-loss cold commit adopts the exact late capture callback", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -5496,6 +5687,230 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(row?.refcount).toBe(2);
   });
 
+  test("deployment repin between turns preserves warm group image until the cold successor election", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const base = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      backend: "modal",
+      imagePolicy: "new_creates_only" as const,
+      leaseTtlMs: 45_000,
+    };
+    const first = await acquireLease(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-1",
+      image: "pin-A",
+    });
+    expect(first).toMatchObject({ role: "spawner", lease: { image: "pin-A" } });
+    const committed = await commitWarmingToWarm(db, {
+      ...base,
+      expectedEpoch: first.lease.leaseEpoch,
+      instanceId: "sb-pin-A",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "sb-pin-A" } },
+      },
+    });
+    expect(committed.committed).toBe(true);
+    const epoch = committed.lease!.leaseEpoch;
+    await acquireLease(db, {
+      ...base,
+      kind: "viewer",
+      holderId: "keeper",
+      image: "pin-A",
+    });
+    await releaseLeaseHolder(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-1",
+      idleGraceMs: 45_000,
+    });
+
+    // The deployment pin changes while no turn runs, but a viewer holds the box.
+    const second = await acquireLease(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-2",
+      image: "pin-B",
+    });
+    expect(second).toMatchObject({
+      role: "attached",
+      lease: {
+        image: "pin-A",
+        instanceId: "sb-pin-A",
+        leaseEpoch: epoch,
+        rotationRequestedAt: null,
+        refcount: 2,
+        resumeState: committed.lease!.resumeState,
+      },
+    });
+    const direct = await acquireLease(db, {
+      ...base,
+      kind: "direct",
+      holderId: "direct-after-repin",
+      image: "pin-B",
+    });
+    expect(direct).toMatchObject({ role: "attached", lease: { image: "pin-A" } });
+    for (const holderId of ["browser-session:after-repin", "computer-session:after-repin"]) {
+      expect(
+        await acquireLease(db, {
+          ...base,
+          kind: "interaction",
+          holderId,
+          image: "pin-B",
+          expectedEpoch: epoch,
+        }),
+      ).toMatchObject({
+        role: "attached",
+        lease: {
+          image: "pin-A",
+          instanceId: "sb-pin-A",
+          leaseEpoch: epoch,
+          rotationRequestedAt: null,
+          resumeState: committed.lease!.resumeState,
+        },
+      });
+    }
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "stale-epoch",
+        image: "pin-B",
+        expectedEpoch: epoch + 1,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "superseded" });
+
+    // New groups use the new pin immediately, independently of the warm group.
+    expect(
+      await acquireLease(db, {
+        ...base,
+        sandboxGroupId: crypto.randomUUID(),
+        kind: "turn",
+        holderId: "new-group",
+        image: "pin-B",
+      }),
+    ).toMatchObject({ role: "spawner", lease: { image: "pin-B" } });
+
+    for (const [kind, holderId] of [
+      ["turn", "turn-2"],
+      ["direct", "direct-after-repin"],
+      ["interaction", "browser-session:after-repin"],
+      ["interaction", "computer-session:after-repin"],
+      ["viewer", "keeper"],
+    ] as const) {
+      await releaseLeaseHolder(db, { ...base, kind, holderId, idleGraceMs: 45_000 });
+    }
+    // An idle-grace arrival re-arms the same provider, not the newly selected pin.
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "turn-3",
+        image: "pin-B",
+      }),
+    ).toMatchObject({
+      role: "rearmed",
+      lease: { image: "pin-A", instanceId: "sb-pin-A", leaseEpoch: epoch },
+    });
+    await releaseLeaseHolder(db, {
+      ...base,
+      kind: "turn",
+      holderId: "turn-3",
+      idleGraceMs: 45_000,
+    });
+    const captureId = crypto.randomUUID();
+    expect(
+      await claimWorkspaceArchiveCapture(db, {
+        ...base,
+        captureId,
+        expectedEpoch: epoch,
+        expectedInstanceId: "sb-pin-A",
+        liveness: "draining",
+        captureTimeoutMs: 45_000,
+        minIntervalMs: 0,
+      }),
+    ).toMatchObject({ status: "claimed" });
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "capture-fenced",
+        image: "pin-B",
+        captureWaitMs: 0,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "capture_in_progress" });
+    await releaseWorkspaceArchiveCapture(db, {
+      ...base,
+      captureId,
+      expectedEpoch: epoch,
+      expectedInstanceId: "sb-pin-A",
+    });
+    await admin`update sandbox_leases set rotation_requested_at = now(), rotation_reason = 'operator'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "rotation-fenced",
+        image: "pin-B",
+        captureWaitMs: 0,
+      }),
+    ).toMatchObject({ role: "fenced", reason: "rotation_in_progress" });
+    // The fixture's provider teardown is complete; only now may a new creator
+    // stamp pin-B on the existing group.
+    expect(await confirmDrainCold(db, { ...base, expectedEpoch: epoch })).toEqual({
+      wentCold: true,
+    });
+    expect(
+      await acquireLease(db, {
+        ...base,
+        kind: "turn",
+        holderId: "successor",
+        image: "pin-B",
+      }),
+    ).toMatchObject({
+      role: "spawner",
+      lease: { image: "pin-B", instanceId: null, leaseEpoch: epoch + 1 },
+    });
+  });
+
+  test("racing deployment pins attach to the elected warming image without relabeling it", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const arrivals = await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        acquireLease(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "turn",
+          holderId: `pin-race-${index}`,
+          backend: "modal",
+          image: index % 2 === 0 ? "pin-A" : "pin-B",
+          imagePolicy: "new_creates_only",
+          leaseTtlMs: 45_000,
+        }),
+      ),
+    );
+    const creators = arrivals.filter((arrival) => arrival.role === "spawner");
+    expect(creators).toHaveLength(1);
+    expect(arrivals.filter((arrival) => arrival.role === "attached")).toHaveLength(11);
+    const image = creators[0]!.lease.image!;
+    expect(["pin-A", "pin-B"]).toContain(image);
+    expect(arrivals.every((arrival) => arrival.lease.image === image)).toBe(true);
+    expect(await readLease(db, workspaceId, groupId)).toMatchObject({
+      image,
+      liveness: "warming",
+      refcount: 12,
+      rotationRequestedAt: null,
+    });
+  });
+
   test("(11) image B3: a solo image change preserves the box/checkpoint and requests capture-and-drain rotation", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
@@ -5885,6 +6300,21 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
         kind: "turn",
         holderId: "newcomer",
         backend: "modal",
+        rigVersionId: "bbbb2222-2222-4222-8222-222222222222",
+        leaseTtlMs: 45_000,
+      }),
+    ).rejects.toThrow(SandboxRigConflictError);
+    // Ambient image-pin continuity cannot weaken a required rig-version fence.
+    await expect(
+      acquireLease(db, {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        kind: "turn",
+        holderId: "repinned-newcomer",
+        backend: "modal",
+        image: "pin-B",
+        imagePolicy: "new_creates_only",
         rigVersionId: "bbbb2222-2222-4222-8222-222222222222",
         leaseTtlMs: 45_000,
       }),

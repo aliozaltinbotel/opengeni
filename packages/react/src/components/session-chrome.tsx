@@ -26,6 +26,8 @@ import { ChildSessionLink } from "./child-session-link";
  *
  * Inbox and queue stay separate segments. Queue hover actions wire to
  * `UseTurnQueueResult` (`editTurn` / `steerTurn` / `moveTurn` / `removeTurn`).
+ * The collapsed queue chip previews the latest queued message beside its Steer
+ * action; open queue rows keep Steer visible and reveal the rest on hover.
  * Inbox has no product dismiss API; pass `onDismissIncoming` when the host
  * wants a visible action (dev harness may use a local dummy).
  *
@@ -73,7 +75,15 @@ import type { ComposerOptimisticMessage, ComposerState } from "../hooks/use-comp
 import type { UseGoalResult } from "../hooks/use-goal";
 import type { UseTurnQueueResult } from "../hooks/use-turn-queue";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
 import { formatClockTime } from "../lib/format";
+import {
+  countAuthoritativeQueuedTurns,
+  isAuthoritativeQueuedTurn,
+  QUEUE_REPLACE_DRAFT_COPY,
+  queuedTurnPresentation,
+  queueNeighborAnchors,
+} from "../queue-presentation-model";
 import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QUEUE_ITEM_CONTENT_UNAVAILABLE, queueItemContent } from "./queue-item-content";
 import { TimelineAnnotationsChip, type TimelineAnnotationLike } from "./timeline-annotations";
@@ -142,11 +152,6 @@ type GoalPillState =
   | "invariant_broken"
   | "completed";
 
-type QueuedTurnPresentation = {
-  kind: "prompt" | "realtime_voice" | "realtime_voice_handoff";
-  text: string;
-};
-
 const GOAL_LABEL: Record<GoalPillState, string> = {
   pursuing: "Pursuing",
   waiting: "Waiting",
@@ -161,13 +166,20 @@ const GOAL_LABEL: Record<GoalPillState, string> = {
 
 /**
  * Short pill suffix per `pausedReason`. `max_auto_continuations` is pacing
- * (new input resumes it); `limits` is budget/admission; `user_pause`/`api` is
+ * (new input resumes it); `limits` is an unspecified legacy admission gate; `user_pause`/`api` is
  * the human's own override; `agent` is the model declaring it is blocked on a
  * human decision. Unknown or legacy reasons keep the bare "Paused".
  */
 const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
   max_auto_continuations: "cap",
-  limits: "budget",
+  limits: "limits",
+  model_unavailable: "model",
+  model_policy: "policy",
+  credits: "credits",
+  budget: "budget",
+  usage_limit: "usage limit",
+  usage_policy: "limits",
+  allowance: "allowance",
   user_pause: "manually",
   api: "manually",
   agent: "agent",
@@ -176,7 +188,15 @@ const GOAL_PAUSED_REASON_SUFFIX: Record<string, string> = {
 const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
   max_auto_continuations:
     "Paused at the automatic continuation cap. New input (a child result, an agent message, or your prompt) resumes it; you can also resume it here.",
-  limits: "Paused because budget or usage limits block another run. Resume once limits allow.",
+  limits: "Paused by an admission limit. Resume when the blocker is resolved.",
+  model_unavailable:
+    "The selected model is unavailable. Choose an available model before resuming.",
+  model_policy: "The selected model is blocked by policy. Choose an allowed model before resuming.",
+  credits: "Insufficient Opengeni credits. Add credits before resuming.",
+  budget: "Monthly model spending limit reached. Resume when the spending limit allows.",
+  usage_limit: "Monthly agent run limit reached. Resume when the run limit allows.",
+  usage_policy: "The application's usage policy blocks another run. Resume when it allows.",
+  allowance: "Opengeni usage allowance exhausted. Resume when your allowance is available.",
   user_pause:
     "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
   api: "Paused manually by a person or an API call. Resume to let the goal continue on its own.",
@@ -184,6 +204,7 @@ const GOAL_PAUSED_REASON_EXPLANATION: Record<string, string> = {
 };
 
 type GoalPillRecord = Pick<SessionGoal, "status" | "pausedReason"> & {
+  rationale?: SessionGoal["rationale"];
   continuation?: SessionGoal["continuation"] | null | undefined;
 };
 
@@ -211,6 +232,8 @@ export function sessionChromeGoalPillExplanation(
     return "Resolve the session failure, then use Continue or send a message to continue this active goal.";
   }
   if (state === "paused") {
+    const rationale = record?.rationale?.trim();
+    if (rationale) return rationale;
     return record?.pausedReason
       ? (GOAL_PAUSED_REASON_EXPLANATION[record.pausedReason] ?? null)
       : null;
@@ -219,6 +242,9 @@ export function sessionChromeGoalPillExplanation(
     return continuation?.nextAttemptAt
       ? `Continues at ${formatClockTime(continuation.nextAttemptAt)}.`
       : "Waiting to continue automatically.";
+  }
+  if (state === "waiting" && continuation?.reason === "system_work_pending") {
+    return "Waiting for other session work to finish before the goal continues automatically.";
   }
   if (state === "held" && continuation?.reason === "held_for_input") {
     const reason = continuation.holdReason?.trim();
@@ -230,35 +256,7 @@ export function sessionChromeGoalPillExplanation(
   return null;
 }
 
-function queuedTurnPresentation(turn: SessionTurn): QueuedTurnPresentation {
-  const realtimeDelegation = objectValue(turn.metadata.realtimeDelegation);
-  const inputTranscript = realtimeDelegation?.inputTranscript;
-  if (typeof inputTranscript === "string" && inputTranscript.trim()) {
-    return { kind: "realtime_voice", text: inputTranscript.trim() };
-  }
-  if (objectValue(turn.metadata.realtimeTailFlush)) {
-    return { kind: "realtime_voice_handoff", text: "Remaining voice context" };
-  }
-  return { kind: "prompt", text: turn.prompt };
-}
-
-function isSteeringTurn(turn: SessionTurn): boolean {
-  return turn.metadata.delivery === "steer";
-}
-
-function isAuthoritativeQueuedTurn(
-  turn: SessionTurn,
-  mutationFor: UseTurnQueueResult["mutationFor"],
-): boolean {
-  return !isSteeringTurn(turn) && mutationFor(turn.id) !== "steer";
-}
-
-export function countAuthoritativeQueuedTurns(
-  turns: readonly SessionTurn[],
-  mutationFor: UseTurnQueueResult["mutationFor"],
-): number {
-  return turns.filter((turn) => isAuthoritativeQueuedTurn(turn, mutationFor)).length;
-}
+export { countAuthoritativeQueuedTurns };
 
 function isOptimisticQueuedMessage(
   message: ComposerOptimisticMessage,
@@ -322,12 +320,6 @@ export function sessionChromeShouldOfferQueue(input: {
   );
 }
 
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 /** Select pill state from the goal's authoritative continuation projection. */
 export function sessionChromeGoalPillState(
   goalStatus: "active" | "paused" | "completed",
@@ -349,7 +341,12 @@ export function sessionChromeGoalPillState(
   // next evaluation at `nextAttemptAt`) is an ordinary scheduled state.
   if (continuation.state === "scheduled") return "scheduled";
   if (continuation.state === "blocked") {
-    if (continuation.reason === "human_turn_running") return "waiting";
+    if (
+      continuation.reason === "human_turn_running" ||
+      continuation.reason === "system_work_pending"
+    ) {
+      return "waiting";
+    }
     // `held_for_input` is the agent's own wait_for_input hold (waiting for child
     // results / external input until a deadline); it shares the Held pill.
     return continuation.reason === "workstream_paused" || continuation.reason === "held_for_input"
@@ -453,6 +450,7 @@ export function SessionChrome({
   defaultActive = null,
   onActiveChange,
 }: SessionChromeProps) {
+  const formatError = useErrorMessage();
   const [activityRequested, setActivityOpen] = useState(
     Boolean(defaultActive && ["incoming", "agents", "commands"].includes(defaultActive)),
   );
@@ -803,6 +801,22 @@ export function SessionChrome({
   }, [active, signals]);
 
   const open = active !== null;
+  // Collapsed queue chip shows the latest queued message so a Send that lands
+  // in the queue is visible without opening the list; Steer acts on that
+  // message once the server has confirmed it.
+  const latestOptimisticQueued = optimisticQueued[optimisticQueued.length - 1];
+  const latestQueuedTurn = queuedTurns[queuedTurns.length - 1];
+  const queuePeek: { text: string | null; turnId: string | null } | null =
+    queue.error || queue.mutationError
+      ? null
+      : latestOptimisticQueued
+        ? { text: latestOptimisticQueued.text.trim() || null, turnId: null }
+        : latestQueuedTurn
+          ? {
+              text: queuedTurnPresentation(latestQueuedTurn).text.trim() || null,
+              turnId: latestQueuedTurn.id,
+            }
+          : null;
 
   if (signals.length === 0 && !stopping) return null;
 
@@ -826,6 +840,7 @@ export function SessionChrome({
         onRefresh={queue.refresh}
         onClearMutationError={queue.clearMutationError}
         onRetryOptimistic={composer?.retryOptimisticMessage}
+        onRestoreOptimistic={composer?.restoreOptimisticMessage}
         onRemoveOptimistic={composer?.removeOptimisticMessage}
         readOnly={!canMutateQueue}
         mutationFor={queue.mutationFor}
@@ -1027,7 +1042,14 @@ export function SessionChrome({
                         <span className={cn("shrink-0", toneClass(signal.tone, selected))}>
                           {signal.icon}
                         </span>
-                        <span className={cn("font-medium text-og-fg", "min-w-0 truncate")}>
+                        <span
+                          className={cn(
+                            "font-medium text-og-fg",
+                            signal.id === "queue" && queuePeek?.text && !selected
+                              ? "shrink-0"
+                              : "min-w-0 truncate",
+                          )}
+                        >
                           {signal.id === "goal" ? "Goal · " : null}
                           {signal.id === "goal"
                             ? goalState === "pursuing"
@@ -1039,6 +1061,21 @@ export function SessionChrome({
                                 : `${queuedTurns.length + optimisticQueued.length} queued`
                               : signal.label}
                         </span>
+                        {signal.id === "queue" && queuePeek?.text && !selected ? (
+                          <AnimatePresence initial={false} mode="popLayout">
+                            <motion.span
+                              key={queuePeek.text}
+                              data-testid="session-chrome-queue-peek"
+                              className="min-w-0 max-w-[min(24rem,60vw)] truncate text-og-fg-muted"
+                              initial={reduceMotion ? false : { opacity: 0, y: 3 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, transition: { duration: crossfadeDuration } }}
+                              transition={{ duration: crossfadeDuration, ease }}
+                            >
+                              {queuePeek.text}
+                            </motion.span>
+                          </AnimatePresence>
+                        ) : null}
                       </button>
                       {signal.id === "goal" && goal && record && !readOnly ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
@@ -1072,19 +1109,27 @@ export function SessionChrome({
                             <Trash2Icon className="size-3" />
                           </IconAction>
                         </div>
-                      ) : signal.id === "queue" && canMutateQueue && queuedTurns[0] ? (
+                      ) : signal.id === "queue" && canMutateQueue && queuePeek && !selected ? (
                         <div className="flex shrink-0 items-center pr-1 pl-0.5">
                           <IconAction
-                            label="Steer first queued message"
+                            label="Steer latest queued message"
                             analyticsAction="steer"
                             text="Steer"
                             tip={QUEUE_STEER_TIP}
                             disabled={
-                              queue.mutating || Boolean(queue.mutationFor(queuedTurns[0].id))
+                              !queuePeek.turnId ||
+                              queue.mutating ||
+                              Boolean(queue.mutationFor(queuePeek.turnId))
                             }
-                            onClick={() => void queue.steerTurn(queuedTurns[0]!.id)}
+                            onClick={() => {
+                              if (queuePeek.turnId) void queue.steerTurn(queuePeek.turnId);
+                            }}
                           >
-                            <CornerDownRightIcon className="size-3" />
+                            {queuePeek.turnId && queue.mutationFor(queuePeek.turnId) === "steer" ? (
+                              <Loader2Icon className="size-3 animate-og-spin" />
+                            ) : (
+                              <CornerDownRightIcon className="size-3" />
+                            )}
                           </IconAction>
                         </div>
                       ) : null}
@@ -1191,7 +1236,7 @@ export function SessionChrome({
           </AnimatePresence>
           {goal?.mutationError ? (
             <p role="alert" className="px-3 pb-2 text-og-xs text-og-danger">
-              Goal action not confirmed. {goal.mutationError.message}
+              Goal action not confirmed. {formatError(goal.mutationError)}
             </p>
           ) : null}
           <div
@@ -1333,6 +1378,7 @@ function QueuePanel({
   onRefresh,
   onClearMutationError,
   onRetryOptimistic,
+  onRestoreOptimistic,
   onRemoveOptimistic,
   readOnly,
   mutationFor,
@@ -1351,6 +1397,7 @@ function QueuePanel({
   onRefresh: () => Promise<void>;
   onClearMutationError: () => void;
   onRetryOptimistic?: ((clientEventId: string) => void) | undefined;
+  onRestoreOptimistic?: ((clientEventId: string) => void) | undefined;
   onRemoveOptimistic?: ((clientEventId: string) => void) | undefined;
   readOnly: boolean;
   mutationFor: UseTurnQueueResult["mutationFor"];
@@ -1395,8 +1442,7 @@ function QueuePanel({
         const voice = presentation.kind !== "prompt";
         const pending = mutationFor(turn.id);
         const settling = !interactiveTurnIds.has(turn.id);
-        const beforeUp = index > 0 ? (turns[index - 1]?.id ?? null) : null;
-        const beforeDown = index < turns.length - 1 ? (turns[index + 2]?.id ?? null) : null;
+        const { beforeUp, beforeDown } = queueNeighborAnchors(turns, index);
         const showActions = !readOnly && (onEdit || onSteer || onRemove || onMove);
         const confirmingReplace = replaceDraftFor === turn.id;
         return (
@@ -1422,27 +1468,59 @@ function QueuePanel({
                 annotations={turn.annotations ?? []}
               />
               {showActions ? (
-                <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
-                  {onMove && turns.length > 1 ? (
-                    <>
+                <div className="flex shrink-0 items-center gap-0.5">
+                  {/* Reorder, edit and delete stay on hover; Steer is always visible. */}
+                  <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100 max-sm:opacity-100">
+                    {onMove && turns.length > 1 ? (
+                      <>
+                        <IconAction
+                          label={`Move queued prompt ${index + 1} up`}
+                          tip="Move up"
+                          disabled={settling || pending !== null || index === 0}
+                          onClick={() => onMove(turn.id, beforeUp)}
+                        >
+                          <ArrowUpIcon className="size-3" />
+                        </IconAction>
+                        <IconAction
+                          label={`Move queued prompt ${index + 1} down`}
+                          tip="Move down"
+                          disabled={settling || pending !== null || index >= turns.length - 1}
+                          onClick={() => onMove(turn.id, beforeDown)}
+                        >
+                          <ArrowDownIcon className="size-3" />
+                        </IconAction>
+                      </>
+                    ) : null}
+                    {onEdit ? (
                       <IconAction
-                        label={`Move queued prompt ${index + 1} up`}
-                        tip="Move up"
-                        disabled={settling || pending !== null || index === 0}
-                        onClick={() => onMove(turn.id, beforeUp)}
+                        label={`Edit queued prompt ${index + 1}`}
+                        tip={QUEUE_EDIT_TIP}
+                        disabled={settling || pending !== null}
+                        onClick={() => onEdit(turn)}
                       >
-                        <ArrowUpIcon className="size-3" />
+                        {pending === "edit" ? (
+                          <Loader2Icon className="size-3 animate-og-spin" />
+                        ) : (
+                          <PencilIcon className="size-3" />
+                        )}
                       </IconAction>
+                    ) : null}
+                    {onRemove ? (
                       <IconAction
-                        label={`Move queued prompt ${index + 1} down`}
-                        tip="Move down"
-                        disabled={settling || pending !== null || index >= turns.length - 1}
-                        onClick={() => onMove(turn.id, beforeDown)}
+                        label={`Remove queued prompt ${index + 1}`}
+                        tip={QUEUE_DELETE_TIP}
+                        disabled={settling || pending !== null}
+                        onClick={() => onRemove(turn.id)}
+                        danger
                       >
-                        <ArrowDownIcon className="size-3" />
+                        {pending === "delete" ? (
+                          <Loader2Icon className="size-3 animate-og-spin" />
+                        ) : (
+                          <Trash2Icon className="size-3" />
+                        )}
                       </IconAction>
-                    </>
-                  ) : null}
+                    ) : null}
+                  </div>
                   {onSteer ? (
                     <IconAction
                       label={`Steer queued prompt ${index + 1}`}
@@ -1459,59 +1537,27 @@ function QueuePanel({
                       )}
                     </IconAction>
                   ) : null}
-                  {onEdit ? (
-                    <IconAction
-                      label={`Edit queued prompt ${index + 1}`}
-                      tip={QUEUE_EDIT_TIP}
-                      disabled={settling || pending !== null}
-                      onClick={() => onEdit(turn)}
-                    >
-                      {pending === "edit" ? (
-                        <Loader2Icon className="size-3 animate-og-spin" />
-                      ) : (
-                        <PencilIcon className="size-3" />
-                      )}
-                    </IconAction>
-                  ) : null}
-                  {onRemove ? (
-                    <IconAction
-                      label={`Remove queued prompt ${index + 1}`}
-                      tip={QUEUE_DELETE_TIP}
-                      disabled={settling || pending !== null}
-                      onClick={() => onRemove(turn.id)}
-                      danger
-                    >
-                      {pending === "delete" ? (
-                        <Loader2Icon className="size-3 animate-og-spin" />
-                      ) : (
-                        <Trash2Icon className="size-3" />
-                      )}
-                    </IconAction>
-                  ) : null}
                 </div>
               ) : null}
             </div>
             {confirmingReplace ? (
               <div className="rounded-og-sm border border-og-status-waiting/30 bg-og-status-waiting/10 p-2 text-og-xs text-og-fg">
-                <p>Your composer already has a draft. Replace it with this queued prompt?</p>
-                <p className="mt-0.5 text-og-fg-muted">
-                  The current draft will be permanently discarded; this queued prompt is preserved
-                  until you confirm.
-                </p>
+                <p>{QUEUE_REPLACE_DRAFT_COPY.title}</p>
+                <p className="mt-0.5 text-og-fg-muted">{QUEUE_REPLACE_DRAFT_COPY.detail}</p>
                 <div className="mt-2 flex justify-end gap-1.5">
                   <button
                     type="button"
                     className="rounded-og-sm px-2 py-1 font-medium hover:bg-og-surface-3/70 focus-visible:ring-2 focus-visible:ring-og-accent/40"
                     onClick={onCancelReplace}
                   >
-                    Keep current draft
+                    {QUEUE_REPLACE_DRAFT_COPY.keep}
                   </button>
                   <button
                     type="button"
                     className="rounded-og-sm border border-og-primary-border bg-og-primary text-og-primary-fg px-2 py-1 font-medium hover:bg-og-primary-hover focus-visible:ring-2 focus-visible:ring-og-accent/40"
                     onClick={onConfirmReplace}
                   >
-                    Replace and edit
+                    {QUEUE_REPLACE_DRAFT_COPY.replace}
                   </button>
                 </div>
               </div>
@@ -1536,23 +1582,39 @@ function QueuePanel({
             <span className="shrink-0 font-og-mono text-[10px] leading-4 text-og-fg-subtle">
               {turns.length + index + 1}
             </span>
-            <CompactQueueItemContent text={message.text} annotations={message.annotations} />
+            <div className="min-w-0 flex-1">
+              <CompactQueueItemContent text={message.text} annotations={message.annotations} />
+              {message.state === "failed" && message.error ? (
+                <p className="break-words text-og-xs">{message.error}</p>
+              ) : null}
+            </div>
             <span className="sr-only">
               {message.state === "failed"
-                ? "Not confirmed"
+                ? message.outcomeUnknown
+                  ? "Not confirmed"
+                  : "Message not sent"
                 : message.state === "sending"
                   ? "Placing in queue"
                   : "Queued"}
             </span>
             {message.state === "failed" ? (
               <div className="flex shrink-0 items-center gap-1 text-[10px]">
-                {onRetryOptimistic ? (
+                {message.retryable !== false && onRetryOptimistic ? (
                   <button
                     type="button"
                     className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                     onClick={() => onRetryOptimistic(message.clientEventId)}
                   >
                     Retry
+                  </button>
+                ) : null}
+                {message.retryable === false && onRestoreOptimistic ? (
+                  <button
+                    type="button"
+                    className="rounded-og-sm px-1.5 py-1 font-medium hover:bg-og-surface-2 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                    onClick={() => onRestoreOptimistic(message.clientEventId)}
+                  >
+                    Edit message
                   </button>
                 ) : null}
                 {onRemoveOptimistic ? (
@@ -1648,6 +1710,7 @@ function GoalPanel({
   elapsed: string | null;
   readOnly: boolean;
 }) {
+  const formatError = useErrorMessage();
   const record = goal.goal;
   if (!record) return null;
   const canToggle = !readOnly && (record.status === "active" || record.status === "paused");
@@ -1680,7 +1743,7 @@ function GoalPanel({
       ) : null}
       {record.continuation?.lastError ? (
         <p className="rounded-og-sm bg-og-status-waiting/10 px-1.5 py-1 text-og-xs leading-4 text-og-status-waiting">
-          {record.continuation.lastError}
+          {formatError(record.continuation.lastError)}
         </p>
       ) : null}
       <div className="flex flex-wrap items-center justify-between gap-1.5 pt-0.5">

@@ -9,6 +9,7 @@ export type RailFooterMenuConfig = {
   managed: boolean;
   analytics: boolean;
   documentationUrl: string | null;
+  supportEmail?: string;
   /** Grants sessions:create in the workspace, which is what enables Send feedback. */
   canSendFeedback?: boolean;
   pendingInvitations?: number;
@@ -35,6 +36,12 @@ export async function loadRailFooterMenuHarness() {
     WorkspaceNav: () => null,
   }));
 
+  // The usage row renders only while the workspace has a limit for you; it
+  // has its own coverage and would otherwise fetch usage here.
+  mock.module("@/components/usage/usage-entry", () => ({
+    AccountUsageMenuItem: () => null,
+  }));
+
   mock.module("@/context", () => ({
     useAppContext: () => ({
       client: {},
@@ -45,6 +52,7 @@ export async function loadRailFooterMenuHarness() {
           ? { consentRequired: true, providers: { posthog: { key: "phc_test" } } }
           : null,
         documentationUrl: footer.documentationUrl,
+        supportEmail: footer.supportEmail,
       },
       authSession: null,
       accessContext: {

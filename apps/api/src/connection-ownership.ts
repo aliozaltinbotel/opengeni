@@ -1,14 +1,27 @@
 import type { ConnectionOwnership } from "@opengeni/contracts";
 import {
   externalActorContinuationForAuthorization,
+  isVerifiedDelegatedHumanAuthorization,
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { HTTPException } from "hono/http-exception";
+
+/** Signing in to a third-party provider is the person's own step in the
+ * browser; an agent acting as them through the organization MCP server is told
+ * to finish it there. */
+export function requireProviderConsentInBrowser(access: AccessGrantAuthorization): void {
+  if (isVerifiedDelegatedHumanAuthorization(access))
+    throw new HTTPException(403, {
+      message:
+        "Signing in to a provider has to be done by the person in the Opengeni app in a browser.",
+    });
+}
 
 /** A verified external actor must not enter a native callback that has no
  * corresponding key/identity reauthorization proof. Remove at an entry point
  * only when that provider's signed continuation and commit fence are wired. */
 export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void {
+  requireProviderConsentInBrowser(access);
   if (externalActorContinuationForAuthorization(access))
     throw new HTTPException(422, {
       message: "This provider does not yet support external-user OAuth continuation",
@@ -37,9 +50,9 @@ export function requireLegacyOAuthActor(access: AccessGrantAuthorization): void 
  */
 
 /**
- * Subject namespaces OpenGeni itself mints for machines. This is deliberately
+ * Subject namespaces Opengeni itself mints for machines. This is deliberately
  * NOT an allow-list of human subjects: `docs/embedding.md` states that
- * `subjectId` "remains opaque to OpenGeni" and that the kind must not be
+ * `subjectId` "remains opaque to Opengeni" and that the kind must not be
  * inferred from a subject-id prefix "because the host owns that namespace", so
  * a trusted embedding host legitimately signs `human_session` over an opaque
  * subject that is not `user:`-prefixed. Restricting personal ownership to

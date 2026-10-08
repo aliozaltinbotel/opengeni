@@ -11,6 +11,7 @@ import {
   getOrCreateWorkspaceInstructionPolicySnapshot,
   PreferenceRegistryInitiatorError,
   resolveSessionAttemptPersonalResources,
+  freezeAgentLearningPolicy,
 } from "@opengeni/db";
 import {
   projectHistoryForProvider,
@@ -44,10 +45,12 @@ import {
 } from "../generated-images";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { retryWhileMissing } from "@opengeni/storage";
+import { measureTurnStartupPhase } from "../../observability-metrics";
 import { WorkspaceModelPolicyBlockedError } from "@opengeni/runtime";
 import {
   evaluateWorkspaceModelPolicy,
   resolveWorkspaceAgentHumanInputEnabled,
+  resolveWorkspaceDefaultAgentIdentity,
   type MediaGenerationResult,
 } from "@opengeni/contracts";
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
@@ -57,14 +60,17 @@ import {
   lazyToolTransportForTurn,
   openAiHostedImageProviderBindingForTurn,
   modelAttachmentInputPolicyForTurn,
+  resolveAcceptedTurnModel,
 } from "./tool-policy";
 
 import type { ClaimTurnOk } from "./claim";
 import type { EventingState, WorkspaceRefState } from "./turn-context";
 
 export type GovernanceModelDeps = {
+  learningPolicy: Awaited<ReturnType<typeof freezeAgentLearningPolicy>>;
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
   runtime: ActivityServices["runtime"];
   objectStorage: ActivityServices["objectStorage"];
   eventing: EventingState;
@@ -97,6 +103,12 @@ export type GovernanceModelOk = {
   /** Deployment and workspace allow the Jev-backed code_search tool. */
   codeSearchEnabled: boolean;
   workspaceAgentInstructions: string | null | undefined;
+  /**
+   * Modular composer identity tier: the explicit workspace default identity,
+   * else the frozen legacy persona without `{{core}}`. Never dropped by
+   * instruction policies (only read for sessions with an agent configuration).
+   */
+  workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
   workspaceMemory: string | null | undefined;
@@ -163,6 +175,7 @@ export async function prepareGovernanceAndModel(
   const {
     input,
     db,
+    observability,
     runtime,
     objectStorage,
     eventing,
@@ -253,11 +266,16 @@ export async function prepareGovernanceAndModel(
   // No selection is made or recorded when none of this tenant-authored material is composed.
   const contextSelection = isolatedAssessment ? null : await resolveCompanyBrainContextSelection(db, governanceClaims);
   const workspaceAgentInstructions = contextSelection?.legacyWorkspaceInstructions ?? null;
+  // The workspace's agent identity is tenant-authored as well: an isolated assessment composes none.
+  const workspaceAgentIdentity = isolatedAssessment
+    ? null
+    : resolveWorkspaceDefaultAgentIdentity(workspace.settings, workspaceAgentInstructions).identity;
   const memoryPromptMode = contextSelection?.receipt.memoryPromptMode ?? "retrieval_only";
   assertWorkspaceHumanInputAllowed(agentHumanInputEnabled, "resume", humanInputResume !== null);
   const companyProfileIncluded = contextSelection?.receipt.companyProfileIncluded ?? false;
   const workspaceGovernance = instructionPolicySnapshot === null ? null : renderWorkspaceGovernanceContext(
     {
+      learningPolicy: deps.learningPolicy,
       companyProfile: companyProfileSnapshot,
       instructionPolicy: instructionPolicySnapshot,
       preferences: preferenceSnapshot,
@@ -326,12 +344,21 @@ export async function prepareGovernanceAndModel(
     openaiReasoningEffort: turn.reasoningEffort,
     sandboxBackend: turn.sandboxBackend,
   };
-  const runSettings = await settingsWithSessionMcpServersForRun(
-    db,
-    input.workspaceId,
-    input.sessionId,
-    input.attemptId,
-    baseRunSettings,
+  const runSettings = await measureTurnStartupPhase(
+    observability,
+    {
+      phase: "session_mcp_settings",
+      provider: turnExecutionPolicy.providerId,
+      backend: turn.sandboxBackend,
+    },
+    () =>
+      settingsWithSessionMcpServersForRun(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        input.attemptId,
+        baseRunSettings,
+      ),
   );
 
   // Multi-provider per-turn routing → the provider gating (compaction mode,
@@ -347,10 +374,11 @@ export async function prepareGovernanceAndModel(
   // a chat-only Fireworks model. Resolving against the default-model settings
   // keeps gating consistent with the router. Cost accounting covers registry
   // models via configuredModelPricing.
-  const resolvedModel = runtime.resolveTurnModel(
-    capabilitySettings,
-    turnExecutionPolicy.productModelId,
-  );
+  //
+  // The accepted policy is then projected back onto the resolved shape: a
+  // turn frozen before hosted web search was enabled keeps its frozen tool set
+  // on every attempt, so recovery never adds a tool mid-turn.
+  const resolvedModel = resolveAcceptedTurnModel(runtime, capabilitySettings, turnExecutionPolicy);
   const providerApi = resolvedModel?.provider.api ?? "responses";
   const nativeImageProviderBinding =
     providerApi === "responses"
@@ -358,10 +386,8 @@ export async function prepareGovernanceAndModel(
       : null;
   const lazyToolTransport = lazyToolTransportForTurn(resolvedModel);
   const modelInputPolicy = modelAttachmentInputPolicyForTurn(resolvedModel);
-  // Use the proven wire capability, not the catalogue modality alone. Chat
-  // providers may advertise vision, but OpenGeni intentionally has no typed
-  // image transport for that wire yet; exposing view_image there would turn
-  // pixels into a multi-megabyte text/base64 function result.
+  // The shared input policy combines model modality with the supported wire
+  // transport, including typed image projection for vision-capable Chat models.
   const supportsImageInput = modelInputPolicy.supportsImageInput;
   media.modelCanReceiveRetainedSessionImages = supportsImageInput;
   const attachmentProjector = createModelHistoryAttachmentProjector(
@@ -491,6 +517,7 @@ export async function prepareGovernanceAndModel(
       agentHumanInputEnabled,
       codeSearchEnabled,
       workspaceAgentInstructions,
+      workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
       workspaceMemory,

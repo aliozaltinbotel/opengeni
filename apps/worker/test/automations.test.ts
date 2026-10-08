@@ -75,6 +75,87 @@ function services(): () => Promise<ActivityServices> {
 }
 
 describe("automation dispatch activity", () => {
+  test("setup-restricted accepted templates freeze the marker into generated turn policy", async () => {
+    const restrictedRun: AutomationRunExecution = {
+      ...run,
+      acceptedExecution: {
+        ...run.acceptedExecution,
+        sessionTemplate: {
+          ...run.acceptedExecution.sessionTemplate,
+          credentialRestriction: "developer_setup",
+          metadata: {
+            credentialRestriction: "none",
+            turnExecutionPolicyV1: { credentialRestriction: "none" },
+          },
+        },
+      },
+    };
+    let createInput: Record<string, unknown> | null = null;
+    const activity = createAutomationActivities(services(), {
+      claim: async () => restrictedRun,
+      settle: async () => undefined,
+      admit: async () => null,
+      assertModelPolicy: async () => undefined,
+      assertAuthority: async () => undefined,
+      recordUsage: async () => undefined,
+      readWorkspace: async () => ({ settings: {} }) as never,
+      createSession: (async (input) => {
+        createInput = input as unknown as Record<string, unknown>;
+        return {
+          session: { id: sessionId },
+          outcome: "created",
+          replay: false,
+          changed: true,
+        } as never;
+      }) as typeof import("@opengeni/core").createAndStartSessionWithOutcome,
+    });
+    expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+      action: "started",
+      sessionId,
+    });
+    expect(createInput).toMatchObject({
+      turnExecutionPolicy: { credentialRestriction: "developer_setup" },
+      firstPartyMcpPermissions: [],
+      firstPartyMcpTools: [],
+    });
+  });
+
+  test("restricted accepted templates cannot delegate forbidden explicit key/secret/organization scopes", async () => {
+    const settle = mock(async () => undefined);
+    const createSession = mock(async () => {
+      throw new Error("forbidden template must not create a session");
+    });
+    for (const permission of [
+      "api_keys:manage",
+      "secrets:read",
+      "account:admin",
+      "billing:manage",
+      "workspace:create",
+    ] as const) {
+      const activity = createAutomationActivities(services(), {
+        claim: async () => ({
+          ...run,
+          acceptedExecution: {
+            ...run.acceptedExecution,
+            sessionTemplate: {
+              ...run.acceptedExecution.sessionTemplate,
+              credentialRestriction: "developer_setup",
+              firstPartyMcpPermissions: [permission],
+            },
+          },
+        }),
+        settle,
+        createSession: createSession as never,
+      });
+      expect(await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).toEqual({
+        action: "failed",
+        reason: "credential_restriction_violation",
+      });
+    }
+    expect(createSession).not.toHaveBeenCalled();
+    expect(settle).toHaveBeenCalledTimes(5);
+  });
+
   test("atomically binds an ordinary idempotent session to the exact accepted authority", async () => {
     const assertAuthority = mock(async () => undefined);
     const settle = mock(async () => undefined);
@@ -87,6 +168,7 @@ describe("automation dispatch activity", () => {
       assertModelPolicy: async () => undefined,
       assertAuthority,
       recordUsage,
+      readWorkspace: async () => ({ settings: {} }) as never,
       createSession: (async (input) => {
         createInput = input as unknown as Record<string, unknown>;
         await input.beforeCreateCommit?.({} as never, sessionId);
@@ -119,6 +201,7 @@ describe("automation dispatch activity", () => {
       surface: "automation",
     });
     expect(createInput).not.toHaveProperty("requestedSessionId");
+    expect(createInput?.["turnExecutionPolicy"]).not.toHaveProperty("credentialRestriction");
     expect(assertAuthority).toHaveBeenCalledWith(expect.anything(), {
       workspaceId,
       runId,
@@ -163,6 +246,7 @@ describe("automation dispatch activity", () => {
         assertModelPolicy: async () => undefined,
         assertAuthority: async () => undefined,
         recordUsage: async () => undefined,
+        readWorkspace: async () => ({ settings: {} }) as never,
         createSession: (async (input) => {
           createInput = input as unknown as Record<string, unknown>;
           return {
@@ -219,6 +303,7 @@ describe("automation dispatch activity", () => {
         throw new AutomationAuthorityRevokedError();
       },
       recordUsage: async () => undefined,
+      readWorkspace: async () => ({ settings: {} }) as never,
       createSession: (async (input) => {
         await input.beforeCreateCommit?.({} as never, sessionId);
         throw new Error("unreachable");
@@ -312,6 +397,78 @@ describe("automation dispatch activity", () => {
       reason: "dispatch_failed",
     });
     expect(settle).not.toHaveBeenCalled();
+  });
+});
+
+describe("automation agent configuration", () => {
+  function agentRun(agent: unknown): AutomationRunExecution {
+    return {
+      ...run,
+      acceptedExecution: {
+        ...run.acceptedExecution,
+        sessionTemplate: {
+          ...run.acceptedExecution.sessionTemplate,
+          firstPartyMcpTools: ["wait_for_input", "goal_set", "knowledge_search"],
+          tools: [{ kind: "mcp", id: "acme" }],
+          ...(agent === undefined ? {} : { agent }),
+        } as never,
+      },
+    };
+  }
+
+  async function dispatch(
+    execution: AutomationRunExecution,
+  ): Promise<{ createInput: Record<string, unknown> | null; settle: ReturnType<typeof mock> }> {
+    let createInput: Record<string, unknown> | null = null;
+    const settle = mock(async () => undefined);
+    const readWorkspace = mock(async () => ({ settings: {} }) as never);
+    const activity = createAutomationActivities(
+      async () => ({
+        ...(await services()()),
+        settings: testSettings({ sandboxBackend: "none" }),
+      }),
+      {
+        claim: async () => execution,
+        settle,
+        admit: async () => null,
+        assertModelPolicy: async () => undefined,
+        assertAuthority: async () => undefined,
+        recordUsage: async () => undefined,
+        readWorkspace,
+        createSession: (async (input) => {
+          createInput = input as unknown as Record<string, unknown>;
+          return {
+            session: { id: sessionId, createdBy: {}, createdByContext: {} },
+            outcome: "created",
+            replay: false,
+            changed: true,
+          } as never;
+        }) as never,
+      },
+    );
+    await activity.dispatchAutomationRun({ accountId, workspaceId, runId });
+    return { createInput, settle };
+  }
+
+  test("an omitted template agent resolves all and keeps the template tools", async () => {
+    const { createInput } = await dispatch(agentRun(undefined));
+    expect(createInput).toMatchObject({
+      agentConfig: { from: "all", source: "deployment_default" },
+      firstPartyMcpTools: ["wait_for_input", "goal_set", "knowledge_search"],
+      tools: [{ kind: "mcp", id: "acme" }],
+      instructions: "Complete only this automation.",
+    });
+  });
+
+  test("a template agent resolves and narrows the template's own tools", async () => {
+    const { createInput } = await dispatch(
+      agentRun({ capabilities: { from: "none", goals: true }, identity: "Ops bot" }),
+    );
+    expect(createInput).toMatchObject({
+      agentConfig: { from: "none", identity: "Ops bot", source: "request" },
+      firstPartyMcpTools: ["wait_for_input", "goal_set"],
+      tools: [{ kind: "mcp", id: "acme" }],
+    });
   });
 });
 

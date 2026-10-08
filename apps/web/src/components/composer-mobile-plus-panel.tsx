@@ -2,6 +2,7 @@ import type { FirstPartyMcpToolName } from "@opengeni/contracts";
 import {
   AudioLinesIcon,
   BoxIcon,
+  ChevronLeftIcon,
   ChevronRightIcon,
   EyeIcon,
   GitBranchIcon,
@@ -9,9 +10,11 @@ import {
   PlugIcon,
   ServerIcon,
   SettingsIcon,
+  SlidersHorizontalIcon,
 } from "lucide-react";
 import {
   useEffect,
+  useRef,
   Suspense,
   cloneElement,
   isValidElement,
@@ -25,14 +28,10 @@ import {
   COMPOSER_MENU_PANEL_CLASS,
   ComposerMenuHeader,
   ComposerMenuRowsSkeleton,
-  MenuBackButton,
   lazyComposerPanel,
 } from "@/components/ui/composer-menu";
-import { MENU_CHEVRON_CLASS } from "@/components/ui/menu-styles";
+import { MENU_BACK_BUTTON_CLASS, MENU_CHEVRON_CLASS } from "@/components/ui/menu-styles";
 const loadAgentLearning = () => import("@/components/knowledge/agent-learning-settings");
-const AgentLearningSettingsEditor = lazyComposerPanel(() =>
-  loadAgentLearning().then((module) => module.AgentLearningSettingsEditor),
-);
 const AgentLearningDraftEditor = lazyComposerPanel(() =>
   loadAgentLearning().then((module) => module.AgentLearningDraftEditor),
 );
@@ -47,9 +46,16 @@ import {
 import { isComposerConnector, type McpServerOption } from "@/lib/session-tools";
 
 import type { SessionConnectorsMenuProps } from "@/components/session-connectors-menu-body";
+import { ConnectorAction } from "@/components/ui/composer-menu-action";
+import {
+  ComposerCapabilitiesMenuBody,
+  type ComposerAgentCapabilities,
+} from "@/components/composer-capabilities-menu-body";
+import { capabilitySummary } from "@/lib/agent-capabilities";
 
 export type Panel =
   | "root"
+  | "capabilities"
   | "tools"
   | "repos"
   | "voice"
@@ -89,12 +95,22 @@ export type ComposerPlusProps = {
     value: import("@opengeni/sdk").AgentLearningOverrides;
     onChange: (value: import("@opengeni/sdk").AgentLearningOverrides) => void;
   };
+  /**
+   * An existing chat: "Chat settings" opens the chat's Agent tab, the one
+   * place for its identity, capabilities and Agent learning.
+   */
   chatSettings?: {
     workspaceId: string;
     sessionId: string;
     scope: "workspace" | "personal";
     canEdit: boolean;
+    onOpen: () => void;
   };
+  /**
+   * Agent settings are on for this server: "+" shows Capabilities (with the
+   * connectors nested under Workspace connectors) instead of Connectors.
+   */
+  agentCapabilities?: ComposerAgentCapabilities;
   disabled?: boolean;
   fileUploadsEnabled: boolean;
   servers: McpServerOption[];
@@ -136,11 +152,25 @@ export function ComposerMobilePlusPanel(
     setPanel: (panel: Panel) => void;
     setOpen: (open: boolean) => void;
     dialogOpen: boolean;
+    dialogFocusOwnerRef: { current: boolean };
   },
 ) {
   const { triggerRef, panel, setPanel, setOpen, dialogOpen } = props;
-  // Chat settings opens without a load: fetch its editor while the menu is open.
-  // A composer rendered outside the app (a preview harness) has no client.
+  const returnFocusTo = useRef<Panel | null>(null);
+  useEffect(() => {
+    const previous = returnFocusTo.current;
+    if (!previous || previous === panel) return;
+    returnFocusTo.current = null;
+    const frame = requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[role="menu"] [data-composer-panel="${previous}"]`)
+        ?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [panel]);
+  // Chat settings opens without a load: fetch the editor (and, for an existing
+  // chat, its settings for the Agent tab) while the menu is open. A composer
+  // rendered outside the app (a preview harness) has no client.
   const client = useOptionalAppContext()?.client ?? null;
   const chatSettings = props.chatSettings;
   const draftChatSettings = Boolean(props.draftChatSettings);
@@ -166,18 +196,31 @@ export function ComposerMobilePlusPanel(
   const repositories = props.repositories;
   const voiceModel = props.voiceModel;
 
-  const backButton = (
-    <MenuBackButton
-      onClick={(event) => {
-        event.preventDefault();
-        setPanel("root");
+  // In a menu, Back is a menu item: arrow keys reach it and it is announced as
+  // part of the menu. In a dialog it is a plain button. Going back returns
+  // focus to the item that opened the panel.
+  const backAction = (label: string, target: Panel) => (
+    <ConnectorAction
+      presentation={dialogOpen ? "dialog" : "menu"}
+      keepOpen
+      label={label}
+      className={`${MENU_BACK_BUTTON_CLASS} w-8 gap-0 p-0`}
+      onAction={() => {
+        returnFocusTo.current = panel;
+        setPanel(target);
       }}
-    />
+    >
+      <ChevronLeftIcon aria-hidden="true" className="size-4" />
+    </ConnectorAction>
   );
+  const backButton = backAction("Back", "root");
+  const backToCapabilities = backAction("Back to capabilities", "capabilities");
+  const agentCapabilities = props.agentCapabilities;
 
   return (
     <ComposerPanelContent
       dialog={dialogOpen}
+      dialogFocusOwnerRef={props.dialogFocusOwnerRef}
       panel={panel}
       triggerRef={triggerRef}
       side={props.menuSide ?? (props.expandedPanelPresentation === "dialog" ? "bottom" : "top")}
@@ -200,8 +243,32 @@ export function ComposerMobilePlusPanel(
               Add photos & files
             </DropdownMenuItem>
           ) : null}
-          {
+          {agentCapabilities ? (
             <DropdownMenuItem
+              data-composer-panel="capabilities"
+              className="cursor-pointer"
+              disabled={props.disabled || agentCapabilities.disabled}
+              onSelect={(event) => {
+                event.preventDefault();
+                setPanel("capabilities");
+                props.onOpenConnectors?.();
+              }}
+            >
+              <SlidersHorizontalIcon className="size-4" />
+              Capabilities
+              <DropdownMenuMeta className="max-w-[9rem] truncate">
+                {agentCapabilities.customized
+                  ? capabilitySummary(
+                      agentCapabilities.draft.values,
+                      agentCapabilities.availability,
+                    ).replace(" capabilities", "")
+                  : "Default"}
+              </DropdownMenuMeta>
+              <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
+            </DropdownMenuItem>
+          ) : (
+            <DropdownMenuItem
+              data-composer-panel="tools"
               className="cursor-pointer"
               disabled={props.disabled || props.toolsDisabled}
               onSelect={(event) => {
@@ -217,9 +284,10 @@ export function ComposerMobilePlusPanel(
               </DropdownMenuMeta>
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
-          }
+          )}
           {repositories ? (
             <DropdownMenuItem
+              data-composer-panel="repos"
               className="cursor-pointer"
               disabled={props.disabled || repositories.disabled}
               onSelect={(event) => {
@@ -235,6 +303,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {props.variableSets ? (
             <DropdownMenuItem
+              data-composer-panel="variables"
               className="cursor-pointer"
               disabled={props.disabled}
               onSelect={(event) => {
@@ -269,6 +338,7 @@ export function ComposerMobilePlusPanel(
           ) : null}
           {voiceModel ? (
             <DropdownMenuItem
+              data-composer-panel="voice"
               className="cursor-pointer"
               disabled={props.disabled || voiceModel.disabled}
               onSelect={(event) => {
@@ -284,8 +354,23 @@ export function ComposerMobilePlusPanel(
               <ChevronRightIcon className={MENU_CHEVRON_CLASS} />
             </DropdownMenuItem>
           ) : null}
-          {props.chatSettings || props.draftChatSettings ? (
+          {props.chatSettings ? (
+            // One place per chat: its Agent tab, not a second copy here.
             <DropdownMenuItem
+              data-composer-panel="settings"
+              className="cursor-pointer"
+              onSelect={() => {
+                setOpen(false);
+                props.chatSettings?.onOpen();
+              }}
+            >
+              <SettingsIcon className="size-4" />
+              Chat settings
+              <DropdownMenuMeta>Agent tab</DropdownMenuMeta>
+            </DropdownMenuItem>
+          ) : props.draftChatSettings ? (
+            <DropdownMenuItem
+              data-composer-panel="settings"
               className="cursor-pointer"
               onSelect={(event) => {
                 event.preventDefault();
@@ -298,6 +383,15 @@ export function ComposerMobilePlusPanel(
             </DropdownMenuItem>
           ) : null}
         </>
+      ) : panel === "capabilities" && agentCapabilities ? (
+        <ComposerCapabilitiesMenuBody
+          capabilities={agentCapabilities}
+          presentation={dialogOpen ? "dialog" : "menu"}
+          leading={backButton}
+          connectorsSelected={toolsSelected}
+          connectorsTotal={connectors.length}
+          onOpenConnectors={() => setPanel("tools")}
+        />
       ) : panel === "tools" ? (
         <SessionToolsMenuBody
           {...props.connectorActions}
@@ -308,7 +402,7 @@ export function ComposerMobilePlusPanel(
           customizing={props.connectorCustomizing}
           onCustomizingChange={props.onConnectorCustomizingChange}
           onChange={props.onToolSelectionChange}
-          leading={backButton}
+          leading={agentCapabilities ? backToCapabilities : backButton}
         />
       ) : panel === "repos" && repositories ? (
         withLeading(repositories.panel, backButton)
@@ -332,32 +426,22 @@ export function ComposerMobilePlusPanel(
         })
       ) : panel === "voice" && voiceModel ? (
         withLeading(voiceModel.panel, backButton)
-      ) : panel === "settings" ? (
+      ) : panel === "settings" && props.draftChatSettings ? (
         <>
           <ComposerMenuHeader title="Chat settings" leading={backButton} />
           <div className="min-h-0 overflow-y-auto overscroll-contain px-2.5 pb-1.5">
             <p className="mb-3 text-xs text-fg-muted">
-              Choose what agents can add or update in this chat.
+              Agent learning for this chat: whether agents' changes to knowledge, instructions and
+              skills apply right away or wait for your OK.
             </p>
             <Suspense
               fallback={<ComposerMenuRowsSkeleton rows={3} size="tile" label="Loading settings" />}
             >
-              {props.chatSettings ? (
-                <AgentLearningSettingsEditor
-                  compact
-                  key={props.chatSettings.sessionId}
-                  workspaceId={props.chatSettings.workspaceId}
-                  scope={props.chatSettings.scope}
-                  source={{ kind: "chat", id: props.chatSettings.sessionId }}
-                  canEdit={props.chatSettings.canEdit}
-                />
-              ) : props.draftChatSettings ? (
-                <AgentLearningDraftEditor
-                  compact
-                  {...props.draftChatSettings}
-                  disabled={props.disabled}
-                />
-              ) : null}
+              <AgentLearningDraftEditor
+                compact
+                {...props.draftChatSettings}
+                disabled={props.disabled}
+              />
             </Suspense>
           </div>
         </>
@@ -369,6 +453,7 @@ export function ComposerMobilePlusPanel(
 /** The dialog's accessible name for each drill-in (the root is never a dialog). */
 export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
   root: "Composer actions",
+  capabilities: "Capabilities",
   tools: "Connectors",
   repos: "Repositories",
   voice: "Voice model",
@@ -380,6 +465,7 @@ export const PANEL_DIALOG_TITLE: Record<Panel, string> = {
 
 function ComposerPanelContent(props: {
   dialog: boolean;
+  dialogFocusOwnerRef: { current: boolean };
   side: "top" | "bottom";
   panel: Panel;
   triggerRef: { current: HTMLButtonElement | null };
@@ -412,6 +498,9 @@ function ComposerPanelContent(props: {
 
   return (
     <DropdownMenuContent
+      onCloseAutoFocus={(event) => {
+        if (props.dialogFocusOwnerRef.current) event.preventDefault();
+      }}
       align="start"
       side={props.side}
       sideOffset={8}

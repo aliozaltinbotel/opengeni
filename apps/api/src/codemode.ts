@@ -14,22 +14,26 @@ import {
   type CodemodeOperation,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { hasPermission, requireSessionAuthorization } from "@opengeni/core";
+import { hasPermission, isDeveloperSetupGrant, requireSessionAuthorization } from "@opengeni/core";
 import {
+  CodemodeToolApprovalRequiredError,
   getActiveSessionTurnForExecution,
   getAttemptToolCatalog,
   getCodemodeOperation,
+  readTurnCodemodeOperation,
   submitCodemodeOperation,
+  type SessionTurnForExecution,
 } from "@opengeni/db";
 import { getSession } from "@opengeni/db";
 import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyDelegationSecret,
-  type Settings,
+  type FirstPartyMcpToolPolicySettings,
 } from "@opengeni/config";
 import {
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   signDelegatedAccessToken,
+  readTurnExecutionPolicyV1,
   siteSessionPath,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -37,6 +41,7 @@ import {
   type Session,
 } from "@opengeni/contracts";
 import { permissionsRequiredByFirstPartyTools } from "./mcp/first-party-tool-permissions";
+import { isPreparedMcpConnectPath, preparedMcpProxyPermissions } from "./prepared-mcp-permissions";
 
 /** The REST authority a Codemode SDK proxy token may ever carry. */
 export const CODEMODE_SESSION_PROXY_PERMISSION_CEILING = [
@@ -55,7 +60,7 @@ export const CODEMODE_SESSION_PROXY_PERMISSION_CEILING = [
  * exactly as its MCP surface would.
  */
 export function codemodeSessionProxyPermissions(
-  settings: Pick<Settings, "defaultFirstPartyMcpTools" | "allowedFirstPartyMcpTools">,
+  settings: FirstPartyMcpToolPolicySettings,
   session: Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions">,
 ): Permission[] {
   const sessionPermissions = session.firstPartyMcpPermissions ?? [
@@ -78,17 +83,48 @@ export async function codemodeSessionRequest(
   grant: AccessGrant,
   request: Request,
   path: string,
+  resolveProxySettings?: (session: Session) => FirstPartyMcpToolPolicySettings,
 ): Promise<Request> {
   siteSessionPath(path, grant.workspaceId, request.method);
-  const { authority } = await requireActiveCodemodeCatalog(deps, grant);
+  const { authority, turn, catalog } = await requireActiveCodemodeCatalog(deps, grant);
   const session = await getSession(deps.db, authority.workspaceId, authority.sessionId);
   const secret = resolveFirstPartyDelegationSecret(deps.settings);
   if (!session || !secret) throw new CodemodeAuthorityError("invalid_grant");
-  const permissions = codemodeSessionProxyPermissions(deps.settings, session);
+  const permissions = codemodeSessionProxyPermissions(
+    resolveProxySettings?.(session) ?? deps.settings,
+    session,
+  );
+  if (
+    isPreparedMcpConnectPath(
+      siteSessionPath(path, grant.workspaceId, request.method),
+      request.method,
+    )
+  ) {
+    const selection = allowedFirstPartyMcpToolsForSession(
+      resolveProxySettings?.(session) ?? deps.settings,
+      session.firstPartyMcpTools,
+    );
+    if (selection.includes("custom_mcp_setup_request"))
+      permissions.push(
+        ...preparedMcpProxyPermissions(
+          catalog,
+          session.firstPartyMcpPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
+        ),
+      );
+  }
+  const turnPolicy = readTurnExecutionPolicyV1(turn.metadata);
+  const initialPolicy = readTurnExecutionPolicyV1(session.metadata);
+  const restricted =
+    isDeveloperSetupGrant(grant) ||
+    (turnPolicy.kind === "valid" &&
+      turnPolicy.policy.credentialRestriction === "developer_setup") ||
+    (initialPolicy.kind === "valid" &&
+      initialPolicy.policy.credentialRestriction === "developer_setup");
   const token = await signDelegatedAccessToken(secret, {
     ...authority,
     permissions,
     principalKind: "agent_attempt",
+    ...(restricted ? { credentialRestriction: "developer_setup" as const } : {}),
     exp: Math.floor(Date.now() / 1000) + 60,
   });
   const target = new URL(request.url);
@@ -206,7 +242,11 @@ export function requireMatchingCodemodeCatalog(
 export async function requireActiveCodemodeCatalog(
   deps: ApiRouteDeps,
   grant: AccessGrant,
-): Promise<{ authority: CodemodeGrantAuthority; catalog: AttemptToolCatalog }> {
+): Promise<{
+  authority: CodemodeGrantAuthority;
+  catalog: AttemptToolCatalog;
+  turn: SessionTurnForExecution;
+}> {
   if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError("invalid_grant");
   const authority = codemodeAuthorityForGrant(grant)!;
   await requireSessionAuthorization(deps, grant, {
@@ -236,7 +276,7 @@ export async function requireActiveCodemodeCatalog(
       attemptId: authority.attemptId,
     }),
   );
-  return { authority, catalog };
+  return { authority, catalog, turn: active };
 }
 
 export async function submitAndDispatchCodemodeCall(
@@ -244,11 +284,12 @@ export async function submitAndDispatchCodemodeCall(
   grant: AccessGrant,
   rawRequest: unknown,
 ): Promise<CodemodeCallSubmissionValue> {
-  const request = CodemodeCallRequest.parse(rawRequest);
+  const { durableApproval, ...request } = CodemodeCallRequest.parse(rawRequest);
   const { authority, catalog } = await requireActiveCodemodeCatalog(deps, grant);
   if (request.catalogDigest !== catalog.digest) throw new CodemodeCatalogStaleError();
   const submitted = await submitCodemodeOperation(deps.db, {
     ...authority,
+    ...(durableApproval ? { durableApproval: true } : {}),
     call: {
       ...request,
       caller: { kind: "codemode", subjectId: authority.subjectId },
@@ -299,15 +340,19 @@ export async function readCodemodeOperation(
   deps: ApiRouteDeps,
   grant: AccessGrant,
   operationId: string,
+  options: { durableApproval?: boolean } = {},
 ): Promise<CodemodeOperation | null> {
-  if (!isCodemodeGrant(grant)) throw new CodemodeAuthorityError("invalid_grant");
-  const authority = codemodeAuthorityForGrant(grant)!;
-  return await getCodemodeOperation(deps.db, {
-    accountId: authority.accountId,
-    workspaceId: authority.workspaceId,
-    attemptId: authority.attemptId,
+  const { authority } = await requireActiveCodemodeCatalog(deps, grant);
+  const operation = await readTurnCodemodeOperation(deps.db, {
+    ...authority,
+    callerSubjectId: authority.subjectId,
     operationId,
   });
+  if (operation?.state === "waiting_for_approval" && !options.durableApproval)
+    throw new CodemodeToolApprovalRequiredError();
+  if (!operation || options.durableApproval) return operation;
+  const { durableApproval: _capability, approvalRequestId: _requestId, ...legacy } = operation;
+  return legacy;
 }
 
 function terminal(operation: CodemodeOperation): boolean {

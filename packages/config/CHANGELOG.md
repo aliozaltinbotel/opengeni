@@ -1,5 +1,232 @@
 # @opengeni/config
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- 1a05862: A model stream that stalls mid-response no longer leaves a turn `running` indefinitely. Generic OpenAI-compatible streams (built-in OpenAI/Azure and registry chat/responses providers) now fail after 5 minutes without a response byte, or 10 minutes of keepalive-only traffic without model progress, measured only while the consumer is waiting. Both reset on activity and are configurable (`OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS`, `OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS`, or per registry provider `streamIdleTimeoutMs` / `streamProgressTimeoutMs`). The stall, and a fetch-layer "The operation timed out." error, now classify as retryable provider failures, so the same turn recovers within the existing finite five-attempt budget instead of failing terminally.
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/codex@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 9145bad: Connector catalogs no longer offer connectors that cannot connect on the current deployment. Some providers refuse OAuth self-registration (Asana, HubSpot, Front, Box, Dropbox, Canva, Vercel, and others). When the deployment has no operator-registered OAuth client for such a provider, the catalog reports `runtime.operatorOAuthClient.configured: false` and connector discovery hides the row. Rows that are already connected stay visible.
+- Updated dependencies [9145bad]
+- Updated dependencies [f290348]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 664eabf: Stop offering features whose backend this deployment does not run. The new `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED` setting (default `false`; Helm sets it from `artifactMaterializer.enabled`) removes `editable_artifact_export` and `editable_artifact_export_status` from the first-party tool ceiling when no materializer drains export jobs, and an explicit session request for them is dropped rather than rejected. The Gmail bridge offers `watch_mailbox` only when `OPENGENI_GMAIL_WATCH_TOPIC_NAME` is set.
+- 673bb53: Add provider-agnostic web search. When a deployment names a search provider (TinyFish, Exa, Tavily, Firecrawl, Brave, Jina, or self-hosted SearXNG), models without hosted search receive `web_search` and `web_fetch` tools; hosted search stays the default where it exists, and `replace` mode can swap it. Priced calls are credit-billed at provider cost plus 5%. Off until configured.
+
+### Patch Changes
+
+- 2a65d6e: Turning on hosted web search for an existing model no longer fails turns accepted under the old definition. An accepted turn whose digest matches the current model with `capabilities.hostedTools.webSearch` set back to `{ upstream: "unknown", runnable: false }` still verifies, and it keeps running without the tool; the next accepted turn gets web search. New export: `configuredModelForAcceptedTurnExecutionPolicy`. Turning web search off and every other definition change still fail closed.
+- Updated dependencies [bd9521c]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- 4cd01cd: Every organization is now session-tenancy activated (rolling migration 0611): private ("Only me") sessions, visibility changes, forks, and personal-resource grants no longer require a per-organization activation receipt, and the owner/admin Only-me setting defaults to enabled when an organization has never changed it (owners and admins can still turn it off). `OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED` and `Settings.organizationTenancyCanonicalActivationEnabled` are retired (the variable is accepted and ignored with a warning), the runtime posture no longer has an activation startup interlock, and the `db:activate-session-tenancy` operator command is removed.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+  - @opengeni/contracts@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 3.4.0
+
+### Minor Changes
+
+- a651f55: Complete the reviewed Gmail tool surface under the existing OAuth scopes: exact attachment and original message downloads, individual message search, draft updates/deletion, label lifecycle, atomic and batch organization, trash/restore, imports, history, optional operator-configured watches and settings reads. Bind draft sends and workspace-file attachment inputs to reviewed hashes, preserve MIME metadata and report bounded body projections explicitly.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+
+### Patch Changes
+
+- aa41b15: Use hosted Atlassian MCP for Jira and Confluence agent access. Retire native API tools and Knowledge sync admission while preserving historical wire types, encrypted grants, imported Documents and cleanup paths. Existing native schedules no longer fetch provider content; pending authorization attempts settle without exchanging a native grant. Google Drive integration is unchanged.
+- af57cf9: Use canonical ComputerSession frames and actions for screen and window viewers. Preserve the painted frame fence, reflect authorized human input availability, and enforce human sandbox input policy on each action while retaining separate agent tool authority. Older controllers keep frame viewing behind an encrypted proxy without receiving RFB input grants.
+
+  App-only viewers require an explicit current input posture before enabling mutations. Refresh rechecks permission without starting a stream or native action, and physical machine screen-control consent remains separate from viewing.
+
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- fa0a9ef: Allow `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS=0` to explicitly disable new idle-command containment. Preserve the existing unset and positive-window behavior, provider-deadline containment, and already enrolled drains.
+- 6cdc0aa: Agent configuration is always on. The `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` and `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` settings are removed: `agent` is admitted on every surface, and a top-level session that omits it resolves to the workspace default or `{ capabilities: "all" }`. The client config still reports `agentConfig.enabled` and `defaultForNewSessions` (deprecated, always `true`).
+- b32b5f6: Fill verified GPT-6.1 Sol, Grok 4.5–4.7, and native Claude comparison-only list-price schedules. Keep the original debit-default table unchanged and gate new rates by trusted provider routes, including bare models. Preserve native and Gateway tier boundaries separately without changing external payer classification, debit authority, or accepted model definitions.
+
+  Add forward-only list-cost class snapshots with explicit provenance, observed counters, native Claude TTL rates, and disclosed latency rounding. Add an explicitly approximate historical class allocator that uses current class rates only as weights and preserves each stored list total exactly. Missing historical prices or class counters remain null; no historical total repricing or charged-class attribution is inferred.
+
+- 8323e90: Run Slack account MCP tools through a reviewed Web API bridge while preserving OAuth, exact account authority, and tool approvals. Add scope-aware discovery and shared app/workspace request quotas for unlisted pilots. Preserve bot reaction and message tasks under throttled optional context, and remove unavailable generic Real-time Search.
+
+  Migration 0597 requires stopped application processes and matching role provisioning before starting this release.
+
+- Updated dependencies [aa41b15]
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3395acc]
+- Updated dependencies [18216d2]
+- Updated dependencies [746464c]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/codex@0.2.33
+  - @opengeni/xai-subscription@0.1.6
+
+## 3.3.0
+
+### Minor Changes
+
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+
+### Patch Changes
+
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- 4a63d4f: A Modal box kept warm only by legacy background commands (a dev server, a command whose large output is still draining, a stopped command the provider no longer answers for) is no longer held until the provider deadline kills it uncaptured, which left the session unable to restore. Once every session of the sandbox group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default 30 minutes; above the idle grace, below the rotation lead, and before an explicit Modal idle timeout), the reaper checkpoints the current workspace excluding exactly those commands, stops the box, and settles the commands `lost` with reason `idle_containment`. The next turn restores the saved workspace. "Unused" comes from durable facts only: no open turn or pending approval or human-input request, no pending quiescence, no `wait_for_input` or unclaimed turn-starting input within the window (counted from the wait deadline and the input creation), no other holder or writer, and the newest turn, holder change and write older than the window. A command the agent is waiting on keeps running until the provider-deadline backstop. That backstop now also captures behind a cancelled, failed or superseded owner without a quiescence receipt, instead of letting the box die uncaptured. Rolling migration 0547 stamps holder changes on the lease and adds a health-independent containment inventory, replacing the separate unobservable-command and stopping-with-provider-errors predicates; pre-0547 workers keep their unchanged inventory. Commands settled by containment, by provider-deadline rotation (`provider_deadline_containment`), by provider loss during that drain, by provider loss seen while routing, or by the operator cold-loss reconciliation now get `session.command.finished` and the agent notice in the same transaction, for example "`bun run dev` was stopped because nobody used this session for 30 minutes and nothing was waiting on it; the workspace was saved. Restart it if you still need it." Previously those settlements were silent. Supervised commands keep their own proof gate. The reaper exports `opengeni_sandbox_command_containment_total{outcome}`.
+- 91cc03e: Correct native Claude model effort levels and defaults, apply per-model context
+  and output limits, and preserve terminal provider rejections and prompt stream
+  cancellation.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/codex@0.2.32
+
+## 3.2.1
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/codex@0.2.31
+
+## 3.2.0
+
+### Minor Changes
+
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [6a97313]
+  - @opengeni/contracts@5.5.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/xai-subscription@0.1.5
+
 ## 3.1.1
 
 ### Patch Changes

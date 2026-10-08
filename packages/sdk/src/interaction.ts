@@ -66,7 +66,7 @@ export type InteractionControlFailure = {
   message: string;
 };
 
-/** Decodes the bounded typed control-failure details emitted by OpenGeni. Raw
+/** Decodes the bounded typed control-failure details emitted by Opengeni. Raw
  * provider/OS detail is intentionally absent; both correlation ids are opaque. */
 export function interactionControlFailureFromError(
   error: unknown,
@@ -1055,7 +1055,7 @@ export type InteractionFrameStreamAttachment<RelayKind extends 3 | 4 = 3 | 4> =
 
 export type ComputerFrameStreamAttachment =
   | InteractionFrameStreamAttachment<4>
-  | { kind: "direct_rfb"; url: string; protocols: string[] };
+  | { kind: "direct_rfb"; url: string; protocols: string[]; inputAllowed: boolean };
 
 export type BrowserSessionAttachment = {
   browserSessionId: string;
@@ -1114,9 +1114,13 @@ export type ComputerSessionCapabilities = {
   screenCapture: boolean;
   semanticActions: boolean;
   pointerInput: boolean;
+  /** Causal count-2 input requires its exact confirmed first operation. Absent means unsupported. */
+  pointerClickContinuation?: boolean | undefined;
   keyboardInput: boolean;
   clipboard: boolean;
   backgroundActions: boolean;
+  /** Raw window input stays in the background. Absent means foreground-only. */
+  backgroundInput?: boolean | undefined;
   parallelApps: boolean;
 };
 
@@ -1215,6 +1219,9 @@ export type ComputerAction =
       deltaX?: number | undefined;
       deltaY?: number | undefined;
       button?: "left" | "right" | "middle" | undefined;
+      /** Click only; 2 delivers one second click pair after a completed first click. */
+      clickCount?: 1 | 2 | undefined;
+      continuationOfOperationId?: string | undefined;
     }
   | { type: "keyboard"; action: "type" | "press"; value: string }
   | {
@@ -1264,8 +1271,17 @@ export type ComputerSessionAttachment = {
   computerSessionId: string;
   controllerGeneration: string;
   targetId: string;
+  /** Viewer posture when attached; actions still reauthorize the live source. */
+  inputAllowed?: boolean | undefined;
   stream: ComputerFrameStreamAttachment;
   expiresAt: string;
+};
+
+/** Caller-specific hint only; every action still requires live authorization. */
+export type ComputerSessionInputPosture = {
+  computerSessionId: string;
+  controllerGeneration: string;
+  inputAllowed: boolean;
 };
 
 export type ComputerSessionAttachmentRequest = {
@@ -1500,6 +1516,13 @@ export interface InteractionTransport {
     request?: BrowserOpenTargetRequest,
     options?: OpenGeniRequestOptions,
   ): Promise<BrowserObservation>;
+  /** Optional for custom transports predating metadata-only tab opening. */
+  openBrowserTargetWithInventory?(
+    workspaceId: string,
+    browserSessionId: string,
+    request?: BrowserOpenTargetRequest,
+    options?: OpenGeniRequestOptions,
+  ): Promise<BrowserTargetListResponse>;
   selectBrowserTarget(
     workspaceId: string,
     browserSessionId: string,
@@ -1600,6 +1623,11 @@ export interface InteractionTransport {
     computerSessionId: string,
     options?: OpenGeniRequestOptions,
   ): Promise<ComputerSession>;
+  getComputerInputPosture?(
+    workspaceId: string,
+    computerSessionId: string,
+    options?: OpenGeniRequestOptions,
+  ): Promise<ComputerSessionInputPosture>;
   readComputerClipboard(
     workspaceId: string,
     computerSessionId: string,
@@ -2550,6 +2578,13 @@ export class ComputerSessionResource {
     options: OpenGeniRequestOptions = {},
   ): Promise<ComputerSessionAttachment> {
     return await this.transport.attachComputerSession(this.workspaceId, this.id, request, options);
+  }
+
+  async inputPosture(options: OpenGeniRequestOptions = {}): Promise<ComputerSessionInputPosture> {
+    if (!this.transport.getComputerInputPosture) {
+      throw new Error("Computer input posture requires a current interaction transport.");
+    }
+    return await this.transport.getComputerInputPosture(this.workspaceId, this.id, options);
   }
 
   async heartbeat(options: OpenGeniRequestOptions = {}): Promise<ComputerSessionHeartbeatResponse> {

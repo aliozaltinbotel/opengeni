@@ -267,6 +267,7 @@ export async function attachViewer(
       },
       os: session.sandboxOs,
       image: sandboxRuntime.image,
+      imagePolicy: "new_creates_only",
       rigVersionId: session.rigVersionId,
       leaseTtlMs,
       warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
@@ -281,7 +282,7 @@ export async function attachViewer(
       throw new HTTPException(error.reason === "balance" ? 402 : 429, {
         message:
           error.reason === "balance"
-            ? "insufficient OpenGeni credits for an idle sandbox viewer"
+            ? "insufficient Opengeni credits for an idle sandbox viewer"
             : "workspace sandbox warm allowance exhausted",
         cause: error,
       });

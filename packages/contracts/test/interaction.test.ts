@@ -19,8 +19,10 @@ import {
   ComputerActionRequest,
   ComputerActionReceipt,
   ComputerClipboard,
+  ComputerSessionCapabilities,
   ComputerSessionAttachment,
   ComputerSessionAttachmentRequest,
+  ComputerSessionInputPosture,
   ComputerTargetListResponse,
   CreateNetworkRouteRequest,
   CreateSiteAuthConnectionRequest,
@@ -86,6 +88,40 @@ function observation() {
 }
 
 describe("interaction contracts", () => {
+  test("preserves optional background input capability without changing native defaults", () => {
+    const native = {
+      semanticObservation: true,
+      appDiscovery: true,
+      appLaunch: true,
+      windowCapture: true,
+      screenCapture: true,
+      semanticActions: true,
+      pointerInput: true,
+      keyboardInput: true,
+      clipboard: true,
+      backgroundActions: true,
+      parallelApps: true,
+    };
+    expect(ComputerSessionCapabilities.parse(native)).toEqual(native);
+    expect(ComputerSessionCapabilities.parse({ ...native, backgroundInput: true })).toEqual({
+      ...native,
+      backgroundInput: true,
+    });
+    expect(
+      ComputerSessionCapabilities.safeParse({ ...native, backgroundInput: "true" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionCapabilities.parse({ ...native, pointerClickContinuation: true }),
+    ).toEqual({
+      ...native,
+      pointerClickContinuation: true,
+    });
+    expect(
+      ComputerSessionCapabilities.safeParse({ ...native, pointerClickContinuation: "true" })
+        .success,
+    ).toBe(false);
+  });
+
   test("keeps public actions actor-free and defaults new browsers to headless", () => {
     expect(
       CreateBrowserSessionRequest.parse({
@@ -308,6 +344,35 @@ describe("interaction contracts", () => {
       },
     };
     expect(ComputerActionRequest.parse(pointer)).toEqual(pointer);
+    for (const clickCount of [1, 2] as const) {
+      const counted = {
+        ...pointer,
+        action: {
+          ...pointer.action,
+          clickCount,
+          ...(clickCount === 2
+            ? { continuationOfOperationId: "22222222-2222-4222-8222-222222222222" }
+            : {}),
+        },
+      };
+      expect(ComputerActionRequest.parse(counted)).toEqual(counted);
+    }
+    for (const change of [
+      { clickCount: 0 },
+      { clickCount: 3 },
+      { clickCount: 2 },
+      { clickCount: 1, continuationOfOperationId: "22222222-2222-4222-8222-222222222222" },
+      { clickCount: 2, continuationOfOperationId: "not-an-operation" },
+      { action: "double_click", clickCount: 2 },
+      { action: "move", clickCount: 1 },
+      { action: "drag", clickCount: 2, endX: 90, endY: 50 },
+      { action: "scroll", clickCount: 2, deltaY: 100 },
+    ]) {
+      expect(
+        ComputerActionRequest.safeParse({ ...pointer, action: { ...pointer.action, ...change } })
+          .success,
+      ).toBe(false);
+    }
     expect(
       ComputerActionRequest.safeParse({
         ...pointer,
@@ -402,6 +467,84 @@ describe("interaction contracts", () => {
           protocols: ["binary"],
         },
       }).success,
+    ).toBe(false);
+  });
+
+  test("defaults old RFB attachments to view only and preserves explicit input scope", () => {
+    const attachment = {
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      targetId: "screen:0",
+      expiresAt: "2026-08-10T10:02:00.000Z",
+      stream: {
+        kind: "direct_rfb",
+        url: "wss://computer.example.test/rfb",
+        protocols: ["binary", "opengeni.computer.rfb.v1", "opengeni.auth.fixture"],
+      },
+    };
+    for (const inputAllowed of [undefined, false, true]) {
+      const parsed = ComputerSessionAttachment.parse({
+        ...attachment,
+        stream: { ...attachment.stream, ...(inputAllowed === undefined ? {} : { inputAllowed }) },
+      });
+      expect(parsed.stream.kind).toBe("direct_rfb");
+      if (parsed.stream.kind === "direct_rfb")
+        expect(parsed.stream.inputAllowed).toBe(inputAllowed === true);
+    }
+    expect(
+      ComputerSessionAttachment.safeParse({
+        ...attachment,
+        stream: { ...attachment.stream, inputAllowed: "true" },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("preserves canonical attachment input posture and accepts older frame responses", () => {
+    const attachment = {
+      computerSessionId,
+      controllerGeneration: "controller-2",
+      targetId: "screen:0",
+      expiresAt: "2026-08-10T10:02:00.000Z",
+      stream: {
+        kind: "direct_websocket",
+        url: "wss://computer.example.test/frames",
+        protocols: ["opengeni.computer.v1", "opengeni.auth.fixture"],
+      },
+    };
+    for (const inputAllowed of [undefined, false, true]) {
+      const parsed = ComputerSessionAttachment.parse({
+        ...attachment,
+        ...(inputAllowed === undefined ? {} : { inputAllowed }),
+      });
+      expect(parsed.inputAllowed).toBe(inputAllowed);
+      expect(parsed.stream.kind).toBe("direct_websocket");
+    }
+    expect(
+      ComputerSessionAttachment.safeParse({ ...attachment, inputAllowed: "true" }).success,
+    ).toBe(false);
+  });
+
+  test("requires exact resource/controller and an explicit boolean input posture", () => {
+    const posture = {
+      computerSessionId,
+      controllerGeneration: "controller-1",
+      inputAllowed: false,
+    };
+    expect(ComputerSessionInputPosture.parse(posture)).toEqual(posture);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, inputAllowed: undefined }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, inputAllowed: "true" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, controllerGeneration: "" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, computerSessionId: "other" }).success,
+    ).toBe(false);
+    expect(
+      ComputerSessionInputPosture.safeParse({ ...posture, controlToken: "unexpected" }).success,
     ).toBe(false);
   });
 

@@ -341,6 +341,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     await authorizeSourceSession(deps, grant, request.sessionId, "session.control");
     const origin = requestOrigin(context, deps.settings);
     const authority = browserAuthorityRoot(deps);
+    let prepared: Awaited<ReturnType<typeof prepareBrowserSessionCreate>> | null = null;
 
     try {
       assertEphemeralBrowserCreateEnabled(
@@ -358,7 +359,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         );
       }
       if (existing) assertCreateReplay(request, existing.session);
-      let prepared = existing
+      prepared = existing
         ? await prepareBrowserSessionCreate(
             deps.db,
             browserCreateInput(grant, workspaceId, request, existing.session.placement),
@@ -591,6 +592,18 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         parsed.operation.state === "completed" && !parsed.operation.replayed ? 201 : 200,
       );
     } catch (error) {
+      if (prepared) {
+        // The operation lock fences a concurrent dispatch. Once a controller
+        // binding exists, retain its exact receipt for physical reconciliation.
+        await failBrowserSessionOperation(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          operationId: request.operationId,
+          browserSessionId: prepared.session.id,
+          onlyIfPreparedCreate: true,
+          error: interactionFailure(error),
+        }).catch(() => undefined);
+      }
       throw browserRouteError(error);
     }
   });
@@ -637,6 +650,28 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         "browser.control",
         async ({ sessionClient }) =>
           BrowserObservation.parse(await sessionClient.openTarget(request.url)),
+      );
+      return context.json(result, 201);
+    },
+  );
+
+  app.post(
+    "/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/targets/open-with-inventory",
+    async (context) => {
+      const { workspaceId, grant, browserSessionId } = await browserRoutePreamble(
+        context,
+        "sessions:control",
+      );
+      const request = await parseJsonBody(context, BrowserOpenTargetRequest);
+      const result = await withActiveBrowserController(
+        context,
+        grant,
+        workspaceId,
+        browserSessionId,
+        "session.control",
+        "browser.control",
+        async ({ sessionClient }) =>
+          BrowserTargetListResponse.parse(await sessionClient.openTargetWithInventory(request.url)),
       );
       return context.json(result, 201);
     },
@@ -1045,7 +1080,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
               "This browser engine does not render page screenshots; use semantic observation",
             );
           }
-          return await sessionClient.capture(targetId, captureOptions);
+          try {
+            return await sessionClient.capture(targetId, captureOptions);
+          } catch (error) {
+            throw browserScreenshotError(error);
+          }
         },
       );
       return browserScreenshotResponse(frame);
@@ -2808,6 +2847,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         deviceId: expectedPlacement.deviceId,
       });
       if (device.state !== "connected") {
+        recordAttachedBrowserUnavailable(deps.observability, "disconnected");
         throw new BrowserSessionStateError("Attached browser is disconnected");
       }
       const enrollment = await getLiveEnrollmentConnection(
@@ -2816,9 +2856,11 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         device.enrollmentId,
       );
       if (!enrollment || enrollment.status !== "active" || !enrollment.connectionInstanceId) {
+        recordAttachedBrowserUnavailable(deps.observability, "machine_unavailable");
         throw new BrowserSessionStateError("Attached browser machine is unavailable");
       }
       if (!enrollment.workspaceRoot) {
+        recordAttachedBrowserUnavailable(deps.observability, "no_workspace_root");
         throw new BrowserSessionStateError(
           "Attached browser machine has not reported an absolute workspace root",
         );
@@ -3288,6 +3330,7 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
             placement,
             client,
             tokens,
+            authorizationOperation,
           );
           result = await callback(controller);
         }
@@ -3398,11 +3441,65 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
     placement: BrowserPlacement,
     client: BrowserControlClient,
     tokens: ReturnType<typeof deriveBrowserSessionControllerTokens>,
+    authorizationOperation: SessionAuthorizationOperation,
   ): Promise<void> {
     if (browserSessionStorageMode(record.session) === "ephemeral_context") {
       throw new BrowserSessionStateError(
         "Ephemeral browser context was lost; create a new BrowserSession. Its identity and operations cannot be restored or replayed.",
       );
+    }
+    const transport = browserRuntimeTransport(record.session, placement.transport);
+    const recoverWorkingDirectory =
+      transport.kind === "managed" &&
+      transport.engine === "chromium" &&
+      !transport.ephemeralPartition &&
+      browserSessionStorageMode(record.session) === "private_profile";
+    if (recoverWorkingDirectory) {
+      // Missing controller memory cannot admit a stale source, token, placement
+      // or route snapshot. Reuse the existing durable authority before recovery.
+      await authorizeSourceSession(
+        routeDeps,
+        grant,
+        record.sourceSessionId,
+        authorizationOperation,
+      );
+      const current = await getBrowserSessionControlRecord(routeDeps.db, {
+        accountId: grant.accountId,
+        workspaceId: record.session.workspaceId,
+        browserSessionId: record.session.id,
+      });
+      if (
+        current.sourceSessionId !== record.sourceSessionId ||
+        current.session.lifecycle !== "active" ||
+        current.session.controller?.controllerGeneration !== binding.controllerGeneration ||
+        current.session.controller.placementInstanceId !== placement.placementInstanceId ||
+        current.session.controller.controllerId !== binding.controllerId ||
+        current.tokenGeneration !== record.tokenGeneration ||
+        !sameInteractionPlacement(current.session.placement, record.session.placement) ||
+        current.session.driverId !== record.session.driverId ||
+        current.session.engine !== record.session.engine ||
+        current.session.headless !== record.session.headless ||
+        current.session.linkedComputerSessionId !== record.session.linkedComputerSessionId ||
+        current.session.networkRouteId !== record.session.networkRouteId ||
+        JSON.stringify(current.networkRouteAuthority) !==
+          JSON.stringify(record.networkRouteAuthority)
+      ) {
+        throw new BrowserSessionStateError("BrowserSession controller authority changed");
+      }
+      if (record.session.placement.kind === "connected_machine") {
+        const source = await requireSourceSession(
+          routeDeps,
+          record.session.workspaceId,
+          record.sourceSessionId,
+        );
+        if (source.activeSandboxId !== record.session.placement.sandboxId) {
+          return await throwBrowserSourcePlacementChanged(
+            grant,
+            record.sourceSessionId,
+            record.session.placement.sandboxId,
+          );
+        }
+      }
     }
     const linkedComputer = await ensureLinkedComputerController(
       routeDeps,
@@ -3423,13 +3520,25 @@ export function registerBrowserSessionRoutes(app: Hono, deps: ApiRouteDeps): voi
         record.session.headless,
         linkedComputer !== null,
       );
+      if (
+        recoverWorkingDirectory &&
+        !(await touchBrowserSessionController(routeDeps.db, {
+          accountId: grant.accountId,
+          workspaceId: record.session.workspaceId,
+          browserSessionId: record.session.id,
+          controllerGeneration: binding.controllerGeneration,
+        }))
+      ) {
+        throw new BrowserSessionStateError("BrowserSession controller authority changed");
+      }
       await client.createSession({
         browserSessionId: record.session.id,
         controllerGeneration: binding.controllerGeneration,
         tokenGeneration: record.tokenGeneration,
         ...tokens,
         headed: !record.session.headless,
-        transport: browserRuntimeTransport(record.session, placement.transport),
+        transport,
+        ...(recoverWorkingDirectory ? { recoverExistingWorkingDirectory: true } : {}),
         ...(linkedComputer ? { linkedComputer } : {}),
         ...(networkRoute ? { networkRoute } : {}),
       });
@@ -4008,6 +4117,7 @@ async function ensureInteractionHolder(
     },
     os: placement.lease.os,
     image: sandboxRuntime.image,
+    imagePolicy: "new_creates_only",
     rigVersionId: sourceSession.rigVersionId,
     leaseTtlMs: deps.settings.sandboxLeaseTtlMs,
     expectedEpoch: placement.lease.leaseEpoch,
@@ -4445,6 +4555,22 @@ export function parseBrowserScreenshotOptions(
     ...(format === null ? {} : { format }),
     ...(parsedQuality === null ? {} : { quality: parsedQuality }),
   };
+}
+
+/** Keep a definite read timeout useful without publishing driver diagnostics. */
+export function browserScreenshotError(error: unknown): unknown {
+  if (error instanceof BrowserControlRequestError && error.error.code === "timeout") {
+    const failure = new ApiHttpError(504, {
+      code: "upstream_unavailable",
+      message:
+        "This tab did not produce a screenshot in time. Other browser operations may still work.",
+      retryable: error.retryable,
+      outcomeUnknown: false,
+    });
+    failure.cause = error;
+    return failure;
+  }
+  return error;
 }
 
 export function browserScreenshotResponse(
@@ -5013,6 +5139,22 @@ async function recordBrowserDownloadFileUsage(
     sourceResourceId: file.id,
     idempotencyKey: `file.uploaded:${workspaceId}:${file.id}`,
   });
+}
+
+/** A user's own attached browser could not be reached for an operation. */
+function recordAttachedBrowserUnavailable(
+  observability: ApiRouteDeps["observability"],
+  reason: "disconnected" | "machine_unavailable" | "no_workspace_root",
+): void {
+  try {
+    observability?.incrementCounter({
+      name: "opengeni_attached_browser_unavailable_total",
+      help: "Browser operations refused because the user's attached browser (or its machine) was unreachable, by closed reason.",
+      labels: { reason },
+    });
+  } catch {
+    // Telemetry never changes the refusal.
+  }
 }
 
 function browserRouteError(error: unknown): HTTPException {

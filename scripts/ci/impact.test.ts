@@ -34,6 +34,7 @@ const FAILED_SESSION_RECOVERY_E2E = "test/e2e/failed-session-recovery.browser.e2
 const SESSION_LOADING_STARTUP_E2E = "test/e2e/session-loading-startup.browser.e2e.ts";
 const COMPOSER_MENUS_E2E = "test/e2e/composer-menus.browser.e2e.ts";
 const COMPOSER_KEYBOARD_E2E = "test/e2e/composer-keyboard.browser.e2e.ts";
+const COMPOSER_FOCUS_HANDOFF_E2E = "test/e2e/composer-focus-handoff.browser.e2e.ts";
 const CONNECTOR_ACCOUNTS_E2E = "test/e2e/connector-accounts.browser.e2e.ts";
 const PERSONAL_WORKSPACE_ACCESSIBILITY_E2E =
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts";
@@ -221,7 +222,13 @@ describe("fail-closed change impact", () => {
     expect(plan.browserAcceptanceLanes).toEqual([]);
     expect(plan.artifactRuntimeRequired).toBe(false);
     expect(plan.buildPackages).toEqual([]);
-    expect(plan.guards).toEqual(["format", "docs-refs", "generated-fonts", "public-hygiene"]);
+    expect(plan.guards).toEqual([
+      "format",
+      "docs-refs",
+      "generated-fonts",
+      "public-hygiene",
+      "subscription-contract",
+    ]);
   });
 
   test.each([
@@ -244,6 +251,7 @@ describe("fail-closed change impact", () => {
     expect(plan.guards).toContain("migration-ordinals");
     expect(plan.guards).toContain("migration-schema-contract");
     expect(plan.guards).toContain("migration-test-budgets");
+    expect(plan.guards).toContain("subscription-contract");
     expect(plan.guards).toContain("public-api");
     expect(plan.guards).toContain("sdk-compat");
     expect(plan.reasons.some((reason) => reason.path === path)).toBe(true);
@@ -266,6 +274,20 @@ describe("fail-closed change impact", () => {
     expect(web.guards).not.toContain("sdk-compat");
   });
 
+  test("the subscription contract guard runs on docs-only and focused plans", () => {
+    const contract = createImpactPlan(["docs/subscription-accounts.md"]);
+    expect(contract.mode).toBe("docs");
+    expect(contract.guards).toContain("subscription-contract");
+    for (const path of [
+      "packages/testing/src/subscription-reference-model.ts",
+      "apps/web/src/main.tsx",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.guards, path).toContain("subscription-contract");
+    }
+  });
+
   test("empty and invalid change sets fail closed", () => {
     for (const changed of [[], ["../outside.ts"], ["/absolute.ts"], ["bad\\path.ts"]]) {
       expect(createImpactPlan(changed).mode).toBe("full");
@@ -283,6 +305,7 @@ describe("fail-closed change impact", () => {
     expect(sdk.e2eTests).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -291,6 +314,7 @@ describe("fail-closed change impact", () => {
       CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
       COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
@@ -298,6 +322,9 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/developer-settings.browser.e2e.ts",
+      "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -327,6 +354,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
@@ -564,6 +592,19 @@ describe("fail-closed change impact", () => {
     expect(plan.artifactRuntimeRequired).toBe(false);
   });
 
+  test("error presentation coverage follows its fixture and shared client dependencies", () => {
+    const fixture = "test/e2e/error-branding.browser.e2e.ts";
+    for (const path of [
+      fixture,
+      "packages/react/demo/error-branding-test-harness.tsx",
+      "packages/react/src/lib/error-message.ts",
+      "packages/sdk/src/errors.ts",
+    ]) {
+      expect(createImpactPlan([path]).e2eTests, path).toContain(fixture);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).not.toContain(fixture);
+  });
+
   test("compact session view follows its web fixture dependencies without widening leaf plans", () => {
     for (const path of [
       COMPACT_SESSION_VIEW_E2E,
@@ -690,6 +731,34 @@ describe("fail-closed change impact", () => {
     );
   });
 
+  test("composer focus handoff follows its real keyboard fixture without widening leaf plans", () => {
+    expect(discoverTestFiles().e2e).toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+    expect(usesBrowserRunner(COMPOSER_FOCUS_HANDOFF_E2E)).toBe(true);
+    expect(readFileSync("scripts/run-browser-e2e.ts", "utf8")).toContain(
+      `"./${COMPOSER_FOCUS_HANDOFF_E2E}"`,
+    );
+    for (const path of [
+      COMPOSER_FOCUS_HANDOFF_E2E,
+      "apps/web/test/composer-keyboard.html",
+      "apps/web/test/composer-keyboard-fixture.tsx",
+      "apps/web/test/composer-keyboard-context.ts",
+      "apps/web/test/composer-keyboard.vite.config.ts",
+      "apps/web/src/components/composer-mobile-plus.tsx",
+      "apps/web/src/components/composer-mobile-plus-panel.tsx",
+      "apps/web/src/components/session/new-session-settings-menu.tsx",
+      "packages/react/src/index.ts",
+      "packages/sdk/src/client.ts",
+      "packages/testing/src/process.ts",
+    ]) {
+      const plan = createImpactPlan([path]);
+      expect(plan.mode, path).toBe("focused");
+      expect(plan.e2eTests, path).toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+      expect(plan.unitTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+      expect(plan.integrationTests, path).not.toContain(COMPOSER_FOCUS_HANDOFF_E2E);
+    }
+    expect(createImpactPlan(["packages/browserd/src/index.ts"]).e2eTests).toEqual([]);
+  });
+
   test("connector account controls follow web dependencies without widening leaf plans", () => {
     for (const path of [
       CONNECTOR_ACCOUNTS_E2E,
@@ -795,6 +864,7 @@ describe("fail-closed change impact", () => {
     expect(tests.e2e).toEqual([
       "packages/react/test/timeline-search.browser.e2e.ts",
       AI_GATEWAY_CONNECTION_E2E,
+      "test/e2e/annotation-scroll.browser.e2e.ts",
       "test/e2e/appearance.browser.e2e.ts",
       ARTIFACT_LIBRARY_E2E,
       "test/e2e/capability-catalog.browser.e2e.ts",
@@ -803,6 +873,7 @@ describe("fail-closed change impact", () => {
       CLAUDE_SUBSCRIPTION_E2E,
       "test/e2e/code-editor.browser.e2e.ts",
       COMPACT_SESSION_VIEW_E2E,
+      COMPOSER_FOCUS_HANDOFF_E2E,
       COMPOSER_KEYBOARD_E2E,
       COMPOSER_MENUS_E2E,
       "test/e2e/composer-pane.browser.e2e.ts",
@@ -810,6 +881,9 @@ describe("fail-closed change impact", () => {
       "test/e2e/connected-machine-removal.browser.e2e.ts",
       CONNECTOR_ACCOUNTS_E2E,
       CRYPTO_RANDOM_UUID_E2E,
+      "test/e2e/developer-settings.browser.e2e.ts",
+      "test/e2e/embedded-artifact-viewer.browser.e2e.ts",
+      "test/e2e/error-branding.browser.e2e.ts",
       FAILED_SESSION_RECOVERY_E2E,
       "test/e2e/lossless-message.browser.e2e.ts",
       "test/e2e/managed-actor-response.browser.e2e.ts",
@@ -839,6 +913,7 @@ describe("fail-closed change impact", () => {
       "test/e2e/slack-access-link.browser.e2e.ts",
       "test/e2e/slack-installation-binding.browser.e2e.ts",
       "test/e2e/slack-settings.browser.e2e.ts",
+      "test/e2e/usage-allowances.browser.e2e.ts",
       "test/e2e/workspace-pause-timers.browser.e2e.ts",
       WORKSPACE_SWITCHER_TRIGGER_E2E,
     ]);
@@ -955,7 +1030,7 @@ describe("deterministic bounded execution", () => {
     expect(usesBrowserRunner("test/e2e/sandbox.e2e.ts")).toBe(false);
   });
 
-  test("test environments scrub ambient OpenGeni state and preserve only fail-closed DB intent", () => {
+  test("test environments scrub ambient Opengeni state and preserve only fail-closed DB intent", () => {
     expect(
       sanitizedTestEnvironment({
         PATH: "/bin",
@@ -1237,7 +1312,7 @@ describe("workflow fail-closed contracts", () => {
     expect(step).toContain("matrix.lane == 'interaction'");
     expect(step).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
     expect(step).toContain(
-      "--test-name-pattern 'desktop expanded header keeps icon-only search inline'",
+      "--test-name-pattern 'desktop expanded header keeps icon-only search inline|restores.*focus|mobile result navigation'",
     );
     expect(step).toContain("./test/e2e/session-search.browser.e2e.ts");
     expect(ci).toContain("name: session-search-header-evidence");

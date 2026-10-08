@@ -13,6 +13,7 @@ import {
   workflowInfo,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
+import { validProviderOverloadRecoveryDelay } from "../activities/agent-turn/provider-recovery-policy";
 import {
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_MESSAGE,
   ESCAPED_MCP_TIMEOUT_RECOVERY_FAILURE_TYPE,
@@ -365,7 +366,19 @@ export function postClaimDatabaseRecoveryDetail(
   const hasProviderRecoveryCount = detail.providerRecoveryCount !== undefined;
   const hasProviderFailureCode = detail.providerFailureCode !== undefined;
   if (
+    (detail.sandboxSetupOutcomeUnknown !== undefined &&
+      detail.sandboxSetupOutcomeUnknown !== true) ||
+    (detail.sandboxSetupRecoveryExhausted !== undefined &&
+      detail.sandboxSetupRecoveryExhausted !== true) ||
+    (detail.sandboxSetupOutcomeUnknown === true && detail.sandboxSetupRecoveryExhausted === true) ||
+    ((detail.sandboxSetupOutcomeUnknown === true ||
+      detail.sandboxSetupRecoveryExhausted === true) &&
+      hasProviderRecoveryCount) ||
     hasProviderRecoveryCount !== hasProviderFailureCode ||
+    !validProviderOverloadRecoveryDelay(
+      detail.providerFailureCode,
+      detail.providerRecoveryContinueDelayMs,
+    ) ||
     (hasProviderRecoveryCount &&
       (!Number.isSafeInteger(detail.providerRecoveryCount) ||
         (detail.providerRecoveryCount ?? 0) <= 0 ||
@@ -705,6 +718,28 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       ...(safeObservation ? { observerAccountId: input.accountId } : {}),
     });
     if (peek.kind === "unavailable" || peek.kind === "attempt-owned") {
+      if (
+        peek.kind === "attempt-owned" &&
+        "ownerActivityState" in peek &&
+        peek.ownerActivityState === "settled" &&
+        patched("session-settled-owner-recovery-v1")
+      ) {
+        const reconciliation = await activity.reconcileSettledSessionAttempt({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: peek.turnId,
+          attemptId: peek.attemptId,
+          executionGeneration: peek.executionGeneration,
+          // Continue-as-new observers carry no owner authority. Always use
+          // the DB-stored original run/activity, not this observer's run.
+          workflowId: peek.activityRef.workflowId,
+          workflowRunId: peek.activityRef.workflowRunId,
+          activityId: peek.activityRef.activityId,
+        });
+        if (reconciliation.action === "recovering") continue;
+        if (reconciliation.action === "exceeded") return;
+      }
       // No terminal/idle projection and no successor dispatch. Restoration
       // need not produce a wake, so retain the observer with a bounded timer
       // instead of closing and stranding durable work. Signals interrupt the
@@ -1300,18 +1335,23 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       // Neither path replays model or tool side effects speculatively.
       if (!failure || failure.action === "unclaimed" || failure.action === "recovering") {
         unclaimedAttemptFailures += 1;
-        await condition(() => {
-          const current = {
-            wakeups,
-            interruptionWakeups,
-            approvalWakeups,
-            capacityWakeups,
-          };
-          return classifiedPreClaimFailure
-            ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
-            : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
-                current.wakeups !== retryWakeBaseline.wakeups;
-        }, retryDelayMs);
+        await condition(
+          () => {
+            const current = {
+              wakeups,
+              interruptionWakeups,
+              approvalWakeups,
+              capacityWakeups,
+            };
+            return classifiedPreClaimFailure
+              ? unclaimedAttemptWakeChanged(retryWakeBaseline, current)
+              : current.interruptionWakeups !== retryWakeBaseline.interruptionWakeups ||
+                  current.wakeups !== retryWakeBaseline.wakeups;
+          },
+          failure?.action === "recovering"
+            ? (failure.continueDelayMs ?? retryDelayMs)
+            : retryDelayMs,
+        );
         return true;
       }
       unclaimedAttemptFailures = 0;

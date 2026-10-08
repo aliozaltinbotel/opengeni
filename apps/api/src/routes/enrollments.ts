@@ -37,6 +37,7 @@ import {
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
   RemoveEnrollmentRequest,
+  RenewEnrollmentRequest,
   RevokeEnrollmentResponse,
   type EnrollmentArch,
   type EnrollmentOs,
@@ -65,8 +66,32 @@ import {
   mintEnrollToken,
   pollDeviceEnrollment,
   startDeviceEnrollment,
+  renewEnrollmentCredentials,
   toLookupResponse,
 } from "../sandbox/enrollment";
+
+const ENROLLMENT_OUTCOMES = new Set([
+  "ok",
+  "authorized",
+  "expired",
+  "denied",
+  "disabled",
+  "invalid",
+  "unauthorized",
+]);
+
+/** Machine enrollment decisions that never surface as an HTTP error status. */
+function recordEnrollment(deps: ApiRouteDeps, flow: string, outcome: string): void {
+  try {
+    deps.observability?.incrementCounter({
+      name: "opengeni_machine_enrollment_total",
+      help: "Connected Machine enrollment decisions by flow (device_start, device_poll, token_exchange, renew) and closed outcome.",
+      labels: { flow, outcome: ENROLLMENT_OUTCOMES.has(outcome) ? outcome : "other" },
+    });
+  } catch {
+    // Telemetry never changes the enrollment decision.
+  }
+}
 
 export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db } = deps;
@@ -105,6 +130,22 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
   }
 
+  // Machine authentication: signed install-key proof + current enrollment grant.
+  app.post("/v1/enrollments/renew", async (c) => {
+    assertSelfhostedEnabled();
+    rateLimit(c, exchangeLimiter);
+    const parsed = RenewEnrollmentRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) throw new HTTPException(400, { message: "invalid renewal request" });
+    const credentials = await renewEnrollmentCredentials({ db, settings }, parsed.data);
+    recordEnrollment(deps, "renew", credentials ? "ok" : "unauthorized");
+    if (!credentials)
+      throw new HTTPException(401, {
+        message: "machine renewal not authorized",
+      });
+    c.header("Cache-Control", "no-store");
+    return c.json(EnrollTokenExchangeResponse.parse({ credentials }), 200);
+  });
+
   // ── POST /enrollments/device/start (agent-side, user-unauthenticated) ───────
   app.post("/v1/enrollments/device/start", async (c) => {
     assertSelfhostedEnabled();
@@ -137,6 +178,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         verificationOrigin: settings.publicBaseUrl ?? new URL(c.req.url).origin,
       },
     );
+    recordEnrollment(deps, "device_start", "ok");
     return c.json(result, 201);
   });
 
@@ -152,6 +194,8 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
       { db, settings },
       { deviceCode: parsed.data.deviceCode },
     );
+    // `pending` is the normal polling loop; count only decisions.
+    if (result.state !== "pending") recordEnrollment(deps, "device_poll", result.state);
     return c.json(result, 200);
   });
 
@@ -221,6 +265,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
         canOfferDisplay: body.canOfferDisplay,
       },
     );
+    recordEnrollment(deps, "token_exchange", result.ok ? "ok" : result.reason);
     if (!result.ok) {
       if (result.reason === "disabled") {
         // The credential plane is off for this deployment (no signing secret).

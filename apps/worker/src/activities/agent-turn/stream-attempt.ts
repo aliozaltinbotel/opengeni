@@ -1,10 +1,22 @@
 import { ToolPathPhaseTimer, toolPathPhaseMetricObserver } from "./tool-path-phase-timing";
-import { measureMcpPhase, withMcpCallIdentity } from "@opengeni/observability";
 import {
+  agentToolCallOutcome,
+  agentToolMetricFamily,
+  interactionInterventionMetricObserver,
+  measureMcpPhase,
+  recordAgentToolCall,
+  withMcpCallIdentity,
+  type AgentToolMetricFamily,
+} from "@opengeni/observability";
+import {
+  appendSessionHistoryItems,
+  sessionTurnFinalReplyFacts,
+  sessionTurnHasFinalReplyNudge,
   getSessionEvent,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
   getWorkspace,
+  listTurnCodemodeApprovals,
   recordUsageEvent,
   registerPendingSessionToolCall,
   recordPendingSessionToolCallResult,
@@ -16,6 +28,7 @@ import {
   updateSessionTitleWithEvent,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
+import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
   AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
@@ -74,6 +87,8 @@ import {
   generatedImageFromSdkEvent,
   isCompletedGeneratedImageSdkEvent,
 } from "../generated-images";
+import { programmaticApproval, programmaticContinuationNote } from "../programmatic-approvals";
+import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
 import { ToolResultSpill } from "./tool-result-spill";
 import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
@@ -86,25 +101,28 @@ import {
 import {
   OPEN_SUFFIX_RUN_STATE_BLOB,
   resolveWorkspaceAgentHumanInputEnabled,
+  withPublicApprovalFields,
   type RetainedArtifactMetadata,
   type SessionEvent,
   type SessionTurn,
 } from "@opengeni/contracts";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
+import { createModelCallAdmission } from "./model-call-admission";
 
 import {
   assertWorkspaceHumanInputAllowed,
   stableHumanInputRequestId,
   stableInteractionInterventionId,
   stableInteractionInterventionOperationId,
-  BudgetExhaustedError,
-  ensureRunAllowed,
+  ensureRunAllowedBetweenModelCalls,
 } from "./admission";
 import {
+  assertProviderOverloadRecoveryActive,
   compactionFailureReason,
   safeErrorDiagnostic,
   compactionFailureReasonFromError,
   compactionFailureTurnEventPayload,
+  modelPreparationFailureEventPayload,
   isCompactionSummaryFailure,
   PostCompactionContinuationEmptyError,
   shouldRecoverCompactionProviderFailure,
@@ -117,6 +135,7 @@ import {
   completedToolCallFromSdkEvent,
 } from "./history";
 import {
+  aggregateCreditPolicyRevision,
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
@@ -129,6 +148,7 @@ import {
   emitModelCallUsage,
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
+  recordAuthoritativeModelUsageMetrics,
 } from "./model-usage";
 import {
   sessionTitleGenerationOptions,
@@ -142,6 +162,7 @@ import {
 import { inputWaitReply, latestDurableTurnMessageText } from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
 import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
 import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
@@ -188,7 +209,7 @@ export type TurnStreamAttemptDeps = {
   toolResultSpill: ToolResultSpill;
   claimedResult: ClaimedResult;
   flushRuntimeBatcher: () => Promise<void>;
-  finalizeTurnOpStreamOps: () => Promise<void>;
+  finalizeTurnOpStreamOps: (toolCallIds?: readonly string[]) => Promise<void>;
   runWorkspaceMutationForSandbox: <T>(
     sandbox: ResumedTurnSandbox,
     operation: string,
@@ -238,6 +259,7 @@ export type TurnStreamAttemptDeps = {
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
   turn: Pick<SessionTurn, "initiator" | "initiatorContext"> & {
+    initiatingHumanSubjectId: string | null;
     id: string;
     executionGeneration: number;
     model: string;
@@ -380,6 +402,8 @@ export async function runTurnStreamAttempt(
   );
   let parallelSessionTitle: ReturnType<typeof startParallelSessionTitleGeneration> | null = null;
   let parallelSessionTitleFinished = false;
+  let creditPolicyRevision: number | undefined;
+  let titleCreditPolicyRevision: number | undefined;
   const finishParallelSessionTitle = async (): Promise<void> => {
     if (parallelSessionTitleFinished) return;
     parallelSessionTitleFinished = true;
@@ -389,6 +413,7 @@ export async function runTurnStreamAttempt(
     if (generated.usage) {
       await processSessionTitleModelUsageEvent({
         usage: generated.usage,
+        creditPolicyRevision: titleCreditPolicyRevision,
         ...(generated.sourceKey?{nativeSourceKey:generated.sourceKey}:{}),
         state: sessionTitleUsageState,
         dispatchId: modelUsageDispatchId,
@@ -442,6 +467,8 @@ export async function runTurnStreamAttempt(
     await parallelSessionTitle?.cancel();
   };
   let runInput: Awaited<ReturnType<typeof turnInput>>["input"] | null = null;
+  let codemodeContinuationNote: string | undefined;
+  let programmaticApprovalAcknowledged = false;
   const prepareRunAttemptInput = async () => {
     const historyPreparationStartedAt = performance.now();
     let historyPreparationOutcome: "completed" | "failed" = "completed";
@@ -454,6 +481,8 @@ export async function runTurnStreamAttempt(
           subjectId: fileAuthoritySubjectId,
         },
         recovering: turn.executionGeneration > 1,
+        programmaticApprovalAcknowledged,
+        ...(codemodeContinuationNote ? { codemodeContinuationNote } : {}),
         ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
@@ -591,14 +620,49 @@ export async function runTurnStreamAttempt(
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
   let workerPreparationTotalRecorded = false;
+  let toolsExecuted = false;
+  let finalReplyNudged = false;
+  const revalidateModelCallAdmission = async () => {
+    await historySink.reconcileConversationTruth({ requireDurable: true });
+    // Cendra tool-path timing (b24faac92): the run-allowed gate moved from each terminal response to this
+    // per-model-call admission upstream; its phase follows it while the attempt's timer exists.
+    const admitModelCall = () =>
+      ensureRunAllowedBetweenModelCalls({
+        modelId: resolvedModel?.configured.id ?? turn.model,
+        settings,
+        db,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        isExternallyBilledTurn: billingState.isExternallyBilledTurn,
+        entitlements,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        initiatingHumanSubjectId: turn.initiatingHumanSubjectId,
+      });
+    creditPolicyRevision = eventing.toolPathPhases
+      ? await eventing.toolPathPhases.measure("ensure_run_allowed", admitModelCall)
+      : await admitModelCall();
+  };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
-  }): Promise<RunAgentTurnResult> => {
+  }): Promise<RunAgentTurnResult | "reply_nudge"> => {
     if (!runInput) {
       throw new Error("Run input was not prepared");
     }
-    const responseCountBeforeStream = modelResponseState.responseCount;
+    // The previous stream was persisted before compaction; the sink is now
+    // seeded from its durable replacement. Do not reconcile the old prefix
+    // against that replacement while checking the next stream's admission.
     eventing.stream = undefined;
+    // Compaction commits its paid usage and replacement history before this
+    // boundary, both during preparation and in-activity recovery. Revalidate
+    // the accepted turn's frozen human before another stream can dispatch.
+    if (options.requireTerminalModelResponse) await revalidateModelCallAdmission();
+    const modelCallAdmission = createModelCallAdmission({
+      signal: runtimeCancellationSignal,
+      admit: revalidateModelCallAdmission,
+    });
+    const responseCreditPolicyRevisions = new Set<number | undefined>();
+    const responseCountBeforeStream = modelResponseState.responseCount;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
     // it emits any result for that response. Keep that response-local batch
@@ -606,6 +670,11 @@ export async function runTurnStreamAttempt(
     // calls. Durable recovery remains call/result based and needs no batch
     // schema or compatibility state.
     let currentToolBatchCallIds = new Set<string>();
+    // Content-free per-call family + start time for opengeni_agent_tool_calls_total.
+    const toolCallMetricStarts = new Map<
+      string,
+      { family: AgentToolMetricFamily; startedAtMs: number }
+    >();
     let currentToolBatchCompletedCallIds = new Set<string>();
     let streamSawPerResponseUsage = false;
     // Deltas learn the phase a provider declares when it announces a message;
@@ -622,6 +691,16 @@ export async function runTurnStreamAttempt(
     const providerPublishesNativeRequestEvents =
       resolvedModel?.provider.kind === "codex-subscription" ||
       resolvedModel?.provider.kind === "xai-subscription";
+    // Bounded provider label for the streaming SLIs — the resolved registry
+    // provider id (or the built-in OpenAI/Azure provider), never a raw
+    // user-supplied model string. Created before the stream starts so the
+    // first request's model entry and provider dispatch are observed.
+    const streamTiming = new StreamTimingMetrics(observability, {
+      provider: streamProvider,
+    });
+    // Native Codex/SuperGrok transports report their literal dispatch through
+    // the shared turn context; generic transports use the wire-dispatch clock.
+    eventing.providerDispatchObserver = () => streamTiming.onProviderDispatch();
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -685,6 +764,13 @@ export async function runTurnStreamAttempt(
           count: turnTools.length,
         });
       }
+      // The required audit itself may have consumed the remaining window.
+      // This awaited observer still owns the literal pre-fetch boundary.
+      assertProviderOverloadRecoveryActive({
+        failureCode: attempt.providerRecoveryPolicyCode,
+        providerRecoveryCount: attempt.providerRecoveryCount,
+        recoveryStartedAt: attempt.providerRecoveryStartedAt,
+      });
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
@@ -824,6 +910,14 @@ export async function runTurnStreamAttempt(
             : null);
         providerTurn.turnRouteWatch = turnRouteWatch;
         return await runtime.runStream(agent, runInput!, eventing.modelRunSettings, {
+          beforeModelRequest: () => {
+            streamTiming.onModelRequestEntry();
+            return modelCallAdmission.beforeModelRequest();
+          },
+          onModelResponse: (event) => {
+            responseCreditPolicyRevisions.add(creditPolicyRevision);
+            return modelCallAdmission.onModelResponse(event);
+          },
           signal: runtimeCancellationSignal,
           ...(turnRouteWatch ? { callModelInputFilter: turnRouteWatch.filter } : {}),
           sandboxEnvironment,
@@ -943,6 +1037,13 @@ export async function runTurnStreamAttempt(
           ...(!providerPublishesNativeRequestEvents
             ? {
                 onModelTransportStarted: recordFallbackProviderDispatchAtWire,
+                onModelTransportDispatched: (clock) => {
+                  streamTiming.onProviderDispatch();
+                  eventing.initialModelWireDispatch.record(
+                    { provider: streamProvider, dispatchId },
+                    clock,
+                  );
+                },
               }
             : {}),
           ...(eventing.toolCancellationFenceRef.current
@@ -972,13 +1073,13 @@ export async function runTurnStreamAttempt(
     if (leases.xai.lost) {
       throw new Error("xAI credential lease expired before the model run");
     }
-    eventing.stream = await withProviderRequestContext(runStreamOnce);
-    // Bounded provider label for the streaming SLIs — the resolved registry
-    // provider id (or the built-in OpenAI/Azure provider), never a raw
-    // user-supplied model string.
-    const streamTiming = new StreamTimingMetrics(observability, {
-      provider: streamProvider,
-    });
+    try {
+      eventing.stream = await withProviderRequestContext(runStreamOnce);
+    } catch (error) {
+      modelCallAdmission.fail(error);
+      modelCallAdmission.close();
+      throw error;
+    }
     eventing.toolPathPhases = new ToolPathPhaseTimer(toolPathPhaseMetricObserver(observability));
     const toolPathPhases = eventing.toolPathPhases;
     eventing.batcher = createRuntimeBatcher(
@@ -1020,6 +1121,7 @@ export async function runTurnStreamAttempt(
             attemptId: input.attemptId,
             dispatchId,
             executionGeneration: attempt.executionGeneration,
+            ...eventing.initialModelWireDispatch.payload({ provider: streamProvider, dispatchId }),
           },
         },
       ]);
@@ -1037,6 +1139,7 @@ export async function runTurnStreamAttempt(
         }
         await settleFallbackProviderFirstByte();
         let stableToolCallIdsToClear: string[] | null = null;
+        let newlyDurableToolCallId: string | null = null;
         let completedCurrentToolBatch = false;
         let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
         let normalizedSdkEvents: ReturnType<typeof normalizeSdkEvent> | null = null;
@@ -1051,6 +1154,7 @@ export async function runTurnStreamAttempt(
           : null;
         const responseResult = await toolPathPhases.measureTerminal(() =>
           processModelResponseTerminalEvent({
+            creditPolicyRevision,
             event: next.value,
             state: modelResponseState,
             nativeSourceKey: (responseId,event)=>{
@@ -1119,10 +1223,23 @@ export async function runTurnStreamAttempt(
                   attemptId: input.attemptId,
                   dispatchId,
                   executionGeneration: attempt.executionGeneration,
+                  ...eventing.initialModelWireDispatch.payload({
+                    provider: streamProvider,
+                    dispatchId,
+                  }),
                 },
               },
             ]);
             attempt.providerRecoveryCount = 0;
+          }
+          if (attempt.providerRecoveryObservation) {
+            recordProviderRecoveryOutcome(observability, {
+              route: attempt.modelMetricRoute,
+              cause: attempt.providerRecoveryObservation.cause,
+              outcome: "recovered",
+              elapsedMs: Date.now() - attempt.providerRecoveryObservation.startedAt,
+            });
+            attempt.providerRecoveryObservation = undefined;
           }
           const rawStreamHistory = (eventing.stream.state as { history?: unknown[] }).history;
           if (Array.isArray(rawStreamHistory)) {
@@ -1142,37 +1259,10 @@ export async function runTurnStreamAttempt(
           );
           turnLifecycleMetricsFor(observability).progress({ attemptId: input.attemptId });
           modelCheckpointMemoryCollector.schedule(observability);
-          try {
-            await toolPathPhases.measure("ensure_run_allowed", () =>
-              ensureRunAllowed(
-                settings,
-                db,
-                input.accountId,
-                input.workspaceId,
-                billingState.isExternallyBilledTurn,
-                entitlements,
-                billingState.chargesOpenGeniCredits,
-                billingState.countsTowardTokenCap,
-              ),
-            );
-          } catch (limitError) {
-            // Capture the run state at the boundary so the budget valve in
-            // the outer catch can end this segment gracefully with full
-            // conversation context preserved for the post-top-up resume.
-            let serializedRunState: string | null = null;
-            try {
-              serializedRunState = media.compactMediaRunState(
-                String(eventing.stream.state.toString()),
-              );
-            } catch {
-              serializedRunState = null;
-            }
-            throw new BudgetExhaustedError(
-              limitError instanceof Error ? limitError.message : String(limitError),
-              serializedRunState,
-            );
-          }
         }
+        // Release after settlement. The producer checks fresh admission before
+        // its next request; a final response keeps the revision it ran under.
+        modelCallAdmission.settle(next.value);
         const durableSdkEvent = generatedImageReceipt
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
@@ -1211,6 +1301,7 @@ export async function runTurnStreamAttempt(
         }
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
         if (completedToolCall) {
+          toolsExecuted = true;
           retainedScreenshotMetadata =
             media.retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
           const typedScreenshot = retainedScreenshotMetadata
@@ -1337,6 +1428,7 @@ export async function runTurnStreamAttempt(
               "turn attempt ended while recording a tool-call result",
             );
           }
+          if (recorded.recorded) newlyDurableToolCallId = completedToolCall.callId;
           const videoAcceptance = videoGenerationAcceptancesByCallId.get(completedToolCall.callId);
           if (videoAcceptance && startVideoGenerationWorkflow) {
             try {
@@ -1405,6 +1497,35 @@ export async function runTurnStreamAttempt(
               runSettings.mcpServers,
               withMcpToolDisplayMetadata(preparedServers, event.payload),
             );
+            const created = event.payload as {
+              id?: unknown;
+              name?: unknown;
+              toolName?: unknown;
+              toolFamily?: unknown;
+            };
+            if (typeof created.id === "string") {
+              toolCallMetricStarts.set(created.id, {
+                family: agentToolMetricFamily(
+                  typeof created.toolFamily === "string" ? created.toolFamily : null,
+                  typeof created.name === "string"
+                    ? created.name
+                    : typeof created.toolName === "string"
+                      ? created.toolName
+                      : null,
+                ),
+                startedAtMs: performance.now(),
+              });
+            }
+          }
+          if (event.type === "agent.toolCall.output") {
+            const id = (event.payload as { id?: unknown }).id;
+            const started = typeof id === "string" ? toolCallMetricStarts.get(id) : undefined;
+            if (typeof id === "string") toolCallMetricStarts.delete(id);
+            recordAgentToolCall(observability, {
+              family: started?.family ?? "other",
+              outcome: agentToolCallOutcome(event.payload),
+              ...(started ? { durationMs: performance.now() - started.startedAtMs } : {}),
+            });
           }
           streamTiming.onEvent(event.type);
           if (event.type === "agent.toolCall.output") {
@@ -1454,8 +1575,17 @@ export async function runTurnStreamAttempt(
             media.retainedSessionImageKindsByCallId.delete(callId);
           }
         }
+        if (newlyDurableToolCallId) {
+          // The exact call/result receipt and structural output event are now
+          // durable even when parallel SDK history is still non-monotonic.
+          // Release only this result owner's completed foreground ops. A
+          // missing/duplicate receipt cannot license new output collection;
+          // the complete-turn hook remains its later durability boundary.
+          await finalizeTurnOpStreamOps([newlyDurableToolCallId]);
+        }
       }
     } catch (error) {
+      modelCallAdmission.fail(error);
       // Event processing can fail while SDK completion is still pending.
       // Close this stream before any failure publication; a legitimate
       // compaction retry may start a new, independently fenced generation.
@@ -1478,6 +1608,10 @@ export async function runTurnStreamAttempt(
               attemptId: input.attemptId,
               dispatchId,
               executionGeneration: attempt.executionGeneration,
+              ...eventing.initialModelWireDispatch.payload({
+                provider: streamProvider,
+                dispatchId,
+              }),
             },
           },
         ]);
@@ -1502,15 +1636,13 @@ export async function runTurnStreamAttempt(
         await eventing.publish!([
           {
             type: "turn.startup.phase.failed",
-            payload: {
-              phase: "model_preparation",
-              durationMs: Math.round(durationMs),
-            },
+            payload: modelPreparationFailureEventPayload(error, durationMs),
           },
         ]);
       }
       throw error;
     } finally {
+      modelCallAdmission.close();
       if (!streamDone) {
         // ReadableStream cancellation synchronously trips the Agents SDK's
         // abort controller, but its returned promise may wait for an
@@ -1532,7 +1664,10 @@ export async function runTurnStreamAttempt(
     // External Codemode stays reachable until finalization. Close wait
     // admission before any terminal output/history decision, and drain an
     // already-admitted wait before consulting the actual runner-yield latch.
-    await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
+    // Drain trusted receipts before deciding whether an empty stream may need
+    // a handoff. Do not terminally seal the attempt until that decision: the
+    // one same-turn stream still uses the ordinary input-wait admission gate.
+    await eventing.preparedTools?.inputWaitYield?.drainForHandoff(runtimeCancellationSignal);
     if (
       options.requireTerminalModelResponse &&
       !eventing.preparedTools?.inputWaitYield?.yielded &&
@@ -1554,6 +1689,12 @@ export async function runTurnStreamAttempt(
     if (!streamSawPerResponseUsage) {
       const aggregateUsage = eventing.stream.state.usage;
       const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
+      const aggregatePolicyRevision = aggregateCreditPolicyRevision({
+        responseRevisions: responseCreditPolicyRevisions,
+        lastAdmittedRevision: creditPolicyRevision,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        totalTokens: normalizedAggregateUsage.totalTokens,
+      });
       const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
       const aggregateSourceKey = modelUsageSourceKey({
         responseId: null,
@@ -1576,6 +1717,7 @@ export async function runTurnStreamAttempt(
           leaseLostMessage: "Provider credential lease expired during the active turn",
           recordUsage: async () => {
             const billing = await recordModelUsageAndDebitCredits(settings, db, {
+              creditPolicyRevision: aggregatePolicyRevision,
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
@@ -1590,6 +1732,7 @@ export async function runTurnStreamAttempt(
               sourceKey: aggregateSourceKey,
               latencyMode: turnExecutionPolicy.latencyMode,
               observability,
+              metricProvider: resolvedModel?.provider.id ?? settings.openaiProvider,
             });
             const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
             const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
@@ -1628,6 +1771,14 @@ export async function runTurnStreamAttempt(
                 billing,
                 contextContributions: eventing.companyBrainContextContributions,
               });
+              recordAuthoritativeModelUsageMetrics({
+                observability,
+                settings,
+                provider: aggregateProvider,
+                model: turn.model,
+                externallyBilled: billingState.isExternallyBilledTurn,
+                billing,
+              });
             }
             if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
               recordModelInputTokens(observability, streamProvider, aggregateInput);
@@ -1644,9 +1795,21 @@ export async function runTurnStreamAttempt(
         });
       }
     }
-    if (eventing.stream.interruptions.length > 0) {
+    const programmaticPending = (
+      await listTurnCodemodeApprovals(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+      })
+    )
+      .filter((operation) => operation.state === "waiting_for_approval")
+      .map(programmaticApproval);
+    if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0) {
+      await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
       await historySink.reconcileConversationTruth({ requireDurable: true });
-      const approvals = runtime.serializeApprovals(eventing.stream.interruptions);
+      const sdkApprovals = runtime.serializeApprovals(eventing.stream.interruptions);
+      const approvals = [...sdkApprovals, ...programmaticPending];
       const humanInputInterruptions =
         runtime.serializeHumanInputRequests?.(eventing.stream.interruptions) ?? [];
       const interactionInterventionInterruptions =
@@ -1726,28 +1889,34 @@ export async function runTurnStreamAttempt(
       const interruptionCallIds = interruptionCallIdsFromPause({
         humanInputRequests,
         interactionInterventionRequests,
-        pendingApprovals,
+        pendingApprovals: [
+          ...sdkApprovals,
+          ...interactionInterventionInterruptions.map((interruption) => interruption.approval),
+        ],
       });
       assertOpenSuffixResumable(suffixMembers, interruptionCallIds);
       const suffixByCallId = new Map(suffixMembers.map((member) => [member.callId, member]));
-      const attached = await attachOpenSuffixToPendingToolCalls(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        executionGeneration: attempt.executionGeneration,
-        attemptId: input.attemptId,
-        members: interruptionCallIds.map((callId) => {
-          const member = suffixByCallId.get(callId)!;
-          return {
-            callId,
-            interruptionKind: interruptionKindForCallItem(
-              member.callItem as Record<string, unknown>,
-            ),
-            reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
-          };
-        }),
-      });
+      const attached =
+        interruptionCallIds.length === 0
+          ? { accepted: true }
+          : await attachOpenSuffixToPendingToolCalls(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration: attempt.executionGeneration,
+              attemptId: input.attemptId,
+              members: interruptionCallIds.map((callId) => {
+                const member = suffixByCallId.get(callId)!;
+                return {
+                  callId,
+                  interruptionKind: interruptionKindForCallItem(
+                    member.callItem as Record<string, unknown>,
+                  ),
+                  reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+                };
+              }),
+            });
       if (!attached.accepted) {
         return claimedResult({ status: "cancelled" });
       }
@@ -1762,9 +1931,11 @@ export async function runTurnStreamAttempt(
                     type: "session.requiresAction" as const,
                     payload: {
                       approvals: approvals.map((approval) =>
-                        withMcpToolDisplayMetadata(
-                          eventing.preparedTools?.mcpServers ?? [],
-                          approval,
+                        withPublicApprovalFields(
+                          withMcpToolDisplayMetadata(
+                            eventing.preparedTools?.mcpServers ?? [],
+                            approval,
+                          ),
                         ),
                       ),
                     },
@@ -1789,6 +1960,13 @@ export async function runTurnStreamAttempt(
       ) {
         return claimedResult({ status: "cancelled" });
       }
+      // Agent-requested human handoffs open here, in the worker, never through
+      // the API intervention route, so they are counted at their durable boundary.
+      const observeIntervention = interactionInterventionMetricObserver(observability);
+      for (const interruption of interactionInterventionInterruptions) {
+        if (interruption.input.operation !== "request") continue;
+        observeIntervention({ kind: interruption.input.kind, outcome: "opened" });
+      }
       // The interruption and its preceding tool results are now durable.
       await finalizeTurnOpStreamOps();
       control.activityStatus = "requires_action";
@@ -1799,6 +1977,60 @@ export async function runTurnStreamAttempt(
     const finalOutput = String(
       requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded),
     );
+    const durableReplyFacts =
+      !inputWaitYielded && finalOutput.trim().length === 0
+        ? await sessionTurnFinalReplyFacts(db, input.workspaceId, input.sessionId, activeTurnId)
+        : { toolsExecuted: false, completedGoal: false };
+    let emptyFinalReply = false;
+    if (
+      needsFinalReply({
+        output: finalOutput,
+        inputWaitYielded:
+          inputWaitYielded || eventing.preparedTools?.inputWaitYield?.requested === true,
+        interrupted: false, // interruption settlement returned above
+        maintenance: turn.source === "compaction",
+        toolsExecuted: toolsExecuted || finalReplyNudged || durableReplyFacts.toolsExecuted,
+        completedGoal: durableReplyFacts.completedGoal,
+      })
+    ) {
+      await historySink.reconcileConversationTruth({ requireDurable: true });
+      // Consult retained truth, including inactive compacted rows, so an
+      // attempt replacement or compaction cannot spend this bound again.
+      if (
+        finalReplyNudged ||
+        (await sessionTurnHasFinalReplyNudge(
+          db,
+          input.workspaceId,
+          input.sessionId,
+          activeTurnId,
+          finalReplyNudge(activeTurnId).content[0]!.text,
+        ))
+      ) {
+        // A second empty response is a delivery-quality notice, not failed
+        // execution: preserve goal continuation and later machine-input wakes.
+        emptyFinalReply = true;
+      } else {
+        const appended = await appendSessionHistoryItems(db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          expectedExecutionGeneration: attempt.executionGeneration,
+          expectedAttemptId: input.attemptId,
+          items: [
+            {
+              position: await nextSessionHistoryPosition(db, input.workspaceId, input.sessionId),
+              item: finalReplyNudge(activeTurnId),
+            },
+          ],
+        });
+        if (!appended) throw new TurnAttemptFencedError("turn ended before final reply handoff");
+        finalReplyNudged = true;
+        await prepareRunAttemptInput();
+        return "reply_nudge";
+      }
+    }
+    await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);
     // The final output is the newest message this stream completed, already
     // durable with its provider identity and phase. A phase-less settlement
     // copy is published only when this stream did not complete that text.
@@ -1833,7 +2065,11 @@ export async function runTurnStreamAttempt(
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
           {
             type: "turn.completed",
-            payload: { output: finalOutput, ...(reply === null ? {} : { reply }) },
+            payload: {
+              output: finalOutput,
+              ...(reply === null ? {} : { reply }),
+              ...(emptyFinalReply ? { emptyFinalReply: true } : {}),
+            },
           },
           { type: "session.status.changed", payload: { status: "idle" } },
         ],
@@ -1862,7 +2098,41 @@ export async function runTurnStreamAttempt(
     return claimedResult({ status: "idle" });
   };
 
+  // Recover committed waits/results before any model dispatch, including crash replacement.
+  // A new attempt uses its own signed caller; origin provenance never changes.
+  // Join-on-use: lazy MCP preparation is awaited only when stored work must resume.
+  const codemodeOperations = await CodemodeAttemptDispatcher.resumeApproved(
+    db,
+    {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      attemptId: input.attemptId,
+      executionGeneration: attempt.executionGeneration,
+    },
+    `sandbox:${input.attemptId}`,
+    trigger.type === "user.approvalDecision"
+      ? (trigger.payload as { approvalId: string }).approvalId
+      : undefined,
+    async () => {
+      await eventing.toolPreparationReady;
+      return eventing.codemodeDispatcher;
+    },
+  );
+  codemodeContinuationNote = programmaticContinuationNote(codemodeOperations);
+  programmaticApprovalAcknowledged =
+    trigger.type === "user.approvalDecision" &&
+    codemodeOperations.some(
+      (operation) =>
+        operation.operationId === (trigger.payload as { approvalId?: unknown }).approvalId,
+    );
+  const pendingProgrammaticApprovals = codemodeOperations
+    .filter((operation) => operation.state === "waiting_for_approval")
+    .map(programmaticApproval);
   const openSuffixResume = await settleOpenSuffixResumeIfNeeded({
+    additionalApprovals: pendingProgrammaticApprovals,
+    programmaticApprovalAcknowledged,
     db,
     agent,
     accountId: input.accountId,
@@ -1894,6 +2164,9 @@ export async function runTurnStreamAttempt(
   ) {
     return claimedResult({ status: "cancelled" });
   }
+  // Preparation may have spent the last allowance on a completed summary.
+  // Neither the title sidecar nor ordinary inference may dispatch afterward.
+  await revalidateModelCallAdmission();
   if (
     turn.source !== "compaction" &&
     generateSessionTitleInParallel &&
@@ -1904,6 +2177,7 @@ export async function runTurnStreamAttempt(
       turnExecutionPolicy.providerId,
       turnExecutionPolicy.latencyMode,
     );
+    titleCreditPolicyRevision = creditPolicyRevision;
     parallelSessionTitle = startParallelSessionTitleGeneration({
       signal: runtimeCancellationSignal,
       generate: async (signal) =>
@@ -1931,11 +2205,19 @@ export async function runTurnStreamAttempt(
   }
   try {
     let retriedAfterCompaction = false;
+    finalReplyNudged = await sessionTurnHasFinalReplyNudge(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      activeTurnId,
+      finalReplyNudge(activeTurnId).content[0]!.text,
+    );
     while (true) {
       try {
         const result = await runStreamAttempt({
           requireTerminalModelResponse: retriedAfterCompaction,
         });
+        if (result === "reply_nudge") continue;
         if (retriedAfterCompaction) {
           observability.info("context compaction recovery succeeded after in-activity retry", {
             sessionId: input.sessionId,

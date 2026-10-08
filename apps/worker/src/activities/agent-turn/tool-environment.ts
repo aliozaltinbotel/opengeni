@@ -1,7 +1,7 @@
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
-import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import {
   resolveInitiatingHuman,
+  buildSlackApiRateLimiter,
   beginConnectorActionExecution,
   getExternalLinkTurnAuthorization,
   getSessionTurnForAttempt,
@@ -9,22 +9,13 @@ import {
   listSkillDescriptors,
   completeConnectorActionExecution,
   getScheduledVariableSetExpectedGenerationForAttempt,
-  getWorkspaceModelPolicy,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  organizationModelProviderConnectionActiveForWorkspace,
   persistAttemptToolCatalog,
   prepareConnectorActionApproval,
   recordUsageEvent,
   previewConnectorActionApproval,
   namedSubjectHasLiveWorkspaceAuthority,
   updateSessionTitleWithEvent,
-  withCodexAppsRequestAuthorization,
-  workspaceCodexSubscriptionActive,
-  workspaceVercelAiGatewayConnectionActive,
-  workspaceOpenRouterConnectionActive,
-  workspaceXaiSubscriptionActiveForAuthority,
+  codexAppsRequestAuth,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import {
@@ -56,10 +47,10 @@ import { readMcpOperation } from "../mcp-operation-reader";
 import { createOperationReadAttemptToolDefinition } from "./mcp-operation-read-tool";
 import { buildGitHubRestMcpForTurn } from "../../github-rest-mcp";
 import { materializeConnectorAttachmentsInChannel } from "../connector-attachments";
+import { materializeGmailFile, readGmailFileFromChannel } from "../gmail-files";
+import { objectStorageForSandboxDownloads } from "./file-resources";
 import { allowedFirstPartyMcpToolsForSession, type Settings } from "@opengeni/config";
 import { CodemodeAttemptDispatcher } from "../codemode-dispatcher";
-import { buildCodexTokenResolver } from "../codex-auth";
-import { CODEX_CLIENT_VERSION } from "@opengeni/codex";
 import { mergeResourceRefs } from "../common";
 import {
   workspaceSessionToolPolicyDefaultServerIds,
@@ -68,10 +59,13 @@ import {
   buildApiIntegrationMcpServers,
   resolveCatalogSettings,
   resolveWorkspaceModelSelection,
+  loadWorkspaceModelSelectionInput,
   withFrozenPersonalConnectionDelegations,
   resolveTurnToolPolicy,
   scheduledTurnMcpServerIds,
   hasPermission,
+  requireExplicitPermissionDelegation,
+  createWebSearchBilling,
 } from "@opengeni/core";
 import { loadWorkspaceEnvironmentForRunWithCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
@@ -84,19 +78,19 @@ import {
 } from "../../observability-metrics";
 import { ToolResultSpill } from "./tool-result-spill";
 import { createTurnMediaArtifacts } from "./media-artifacts";
+import { promptToolAvailabilityForTurn } from "./prompt-tool-availability";
 import { SandboxChannelAService } from "@opengeni/runtime/sandbox";
 import { sandboxRunAs } from "@opengeni/runtime";
 import {
+  bundledSkillSelectionForAgentConfig,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  resolveAgentToolFamilies,
   type ResourceRef,
+  type Permission,
   type ToolAuthNeededPayload,
 } from "@opengeni/contracts";
 
-import {
-  rollingSafeToolAuthNeededPayload,
-  shouldPublishToolAuthNeededForTurn,
-  xaiCatalogReadinessAuthority,
-} from "./admission";
+import { rollingSafeToolAuthNeededPayload, shouldPublishToolAuthNeededForTurn } from "./admission";
 import { unavailableMcpOperationalContext } from "./errors";
 import { runtimeResourcesForTurn } from "./file-resources";
 import { waitForTurnOperation } from "./sandbox-provision";
@@ -122,9 +116,24 @@ import { resolveTurnSandboxAccess } from "./turn-sandbox-access";
 import { createListModelsAttemptToolDefinition } from "./list-models";
 import { createRefreshCredentialsAttemptToolDefinition } from "./refresh-credentials";
 import { codeSearchToolDefinitions, codeSearchWorkspaceFromChannel } from "./code-search";
+import { turnWebSearchPlan, webSearchToolDefinitions } from "./web-search";
 import { createWorkspaceSkillTools } from "./skill-tools";
 import { loadConfiguredBundledSkills } from "./skill-selection";
 import { guardSkillFilesystem } from "./skill-transfer";
+import { turnCredentialRestriction } from "./credential-restriction";
+
+/** A linked turn's immutable policy must survive array and token boundaries. */
+export function linkedTurnFirstPartyPermissions(
+  selected: Permission[] | null,
+  linked: { permissions: Permission[]; permissionMode?: "legacy" | "explicit" } | null,
+): Permission[] | null {
+  if (!linked) return selected;
+  const permissions = (selected ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter((permission) =>
+    hasPermission(linked.permissions, permission, linked.permissionMode),
+  );
+  requireExplicitPermissionDelegation(linked, permissions);
+  return permissions;
+}
 
 export type PrepareTurnToolPolicyDeps = {
   input: RunAgentTurnInput;
@@ -243,7 +252,17 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     droppedIds: resolvedToolPolicy.effectivePolicy.droppedIds,
     droppedCount: resolvedToolPolicy.effectivePolicy.counts.dropped,
   });
-  const effectivePolicyTools = resolvedToolPolicy.toolRefs;
+  const families = resolveAgentToolFamilies(session.agent, {
+    productServerIds: new Set([
+      ...session.mcpServers.map((server) => server.id),
+      ...(session.toolPolicy.mode !== "workspace_default"
+        ? session.tools.map((tool) => tool.id)
+        : []),
+    ]),
+  });
+  const effectivePolicyTools = resolvedToolPolicy.toolRefs.filter(
+    (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
+  );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
   // §7.6 connection-credential provider — load (and decrypt) selected Variable Sets via the
   // host `sandboxSecrets` provider when bound; unset → today's local decrypt. Preserve the
@@ -410,6 +429,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const runSettings = accountRoutes.settings;
   const turnTools = accountRoutes.tools;
+  const credentialRestriction = turnCredentialRestriction(turnExecutionPolicy, session.metadata);
   const toolContextPreparationStartedAt = performance.now();
   throwIfWorkerShuttingDown();
   throwIfTurnCancelled();
@@ -538,31 +558,10 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   });
   const localMcpServers = [...apiIntegrationMcpServers, ...githubRestMcp.localMcpServers];
   const codexAppsAuth = codexAppsCredentialId
-    ? (() => {
-        const resolver = buildCodexTokenResolver(
-          db,
-          runSettings,
-          input.workspaceId,
-          codexAppsCredentialId,
-        );
-        return {
-          clientVersion: CODEX_CLIENT_VERSION,
-          withAuthorization: async <T>(
-            use: (token: { accessToken: string; chatgptAccountId: string | null }) => Promise<T>,
-          ): Promise<T> => {
-            const snapshot = await resolver.getToken();
-
-            return await withCodexAppsRequestAuthorization(
-              db,
-              {
-                workspaceId: input.workspaceId,
-                credentialId: codexAppsCredentialId,
-              },
-              async () => await use(snapshot),
-            );
-          },
-        };
-      })()
+    ? codexAppsRequestAuth(db, runSettings, {
+        workspaceId: input.workspaceId,
+        credentialId: codexAppsCredentialId,
+      })
     : undefined;
   const linkedAuthority = await getExternalLinkTurnAuthorization(
     db,
@@ -574,19 +573,30 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   );
   if (linkedAuthority && !linkedAuthority.authorized)
     throw new Error("Native identity link was revoked");
-  const effectiveFirstPartyPermissions = linkedAuthority
-    ? (session.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS).filter(
-        (permission) => hasPermission(linkedAuthority.permissions, permission),
-      )
-    : session.firstPartyMcpPermissions;
-  const selectedFirstPartyMcpTools = allowedFirstPartyMcpToolsForSession(
-    runSettings,
-    session.firstPartyMcpTools,
+  const effectiveFirstPartyPermissions = linkedTurnFirstPartyPermissions(
+    session.firstPartyMcpPermissions,
+    linkedAuthority,
   );
+  // Background-command tools need compute: the effective route of this turn,
+  // a managed sandbox or an attached Connected Machine, not the durable home.
+  const toolFamilies = resolveAgentToolFamilies(session.agent, {
+    sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
+  });
+  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
+    allowedFirstPartyMcpToolsForSession(runSettings, session.firstPartyMcpTools),
+  );
+  // Frozen with the selection and ceiling above; instructions only.
+  const promptToolAvailability = promptToolAvailabilityForTurn({
+    agentConfig: session.agent,
+    selectedFirstPartyMcpTools,
+    firstPartyPermissions: effectiveFirstPartyPermissions,
+  });
   const titleToolPlan = sessionTitleToolPlan({
+    agentConfig: session.agent,
     tools: turnTools,
     selectedFirstPartyMcpTools,
     shouldRequestTitle: shouldRequestMissingSessionTitle({
+      agentConfig: session.agent,
       title: session.title,
       titleSource: session.titleSource,
       firstPartyMcpTools: selectedFirstPartyMcpTools,
@@ -639,9 +649,20 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         outcome,
       }),
   };
-  const skillConfiguration = await getWorkspaceVideoGenerationPolicy(db, input.workspaceId);
+  // Independent scoped reads after the native-link authority check. Both
+  // finish before assembling the Skill index or preparing executable tools.
+  const [skillConfiguration, sharedSkillDescriptors] = await Promise.all([
+    getWorkspaceVideoGenerationPolicy(db, input.workspaceId),
+    listSkillDescriptors(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
+    }),
+  ]);
   const bundledSkills = loadConfiguredBundledSkills({
-    bundledSkillIds: session.bundledSkillIds,
+    // Rows that could not freeze the "none" default at create (scheduled
+    // generated sessions, pre-existing rows) get the same rule here.
+    bundledSkillIds: bundledSkillSelectionForAgentConfig(session.bundledSkillIds, session.agent),
     firstPartyTools: selectedFirstPartyMcpTools,
     videoGenerationEnabled:
       skillConfiguration.defaultModelId !== null && skillConfiguration.enabledModelIds.length > 0,
@@ -653,25 +674,23 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       artifact: skill,
     })),
   ];
-  const sharedSkillDescriptors = await listSkillDescriptors(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    ...(deps.fileAuthoritySubjectId ? { subjectId: deps.fileAuthoritySubjectId } : {}),
-  });
-  const skillCatalog = [
-    ...sharedSkillDescriptors
-      .filter((entry) => entry.activationMode === "workspace_managed")
-      .map((entry) => ({
-        id: entry.id,
-        name: entry.title,
-        description: entry.description,
-      })),
-    ...selectedSkills.map((entry) => ({
-      id: entry.id,
-      name: entry.artifact.name,
-      description: entry.artifact.description || entry.artifact.name,
-    })),
-  ];
+  const skillCatalog =
+    toolFamilies.skills === false
+      ? []
+      : [
+          ...sharedSkillDescriptors
+            .filter((entry) => entry.activationMode === "workspace_managed")
+            .map((entry) => ({
+              id: entry.id,
+              name: entry.title,
+              description: entry.description,
+            })),
+          ...selectedSkills.map((entry) => ({
+            id: entry.id,
+            name: entry.artifact.name,
+            description: entry.artifact.description || entry.artifact.name,
+          })),
+        ];
   const skillTools = createWorkspaceSkillTools({
     db,
     settings: runSettings,
@@ -802,7 +821,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     backend: activeSandboxBackend ?? groupBoxBackend,
     machineWorkspaceRoot: sandboxState.machinePrimarySession?.workspaceRoot ?? null,
     observability,
-    // OpenGeni's Jev key pays for these calls whatever model billing the
+    // Opengeni's Jev key pays for these calls whatever model billing the
     // workspace uses; record them per workspace so the cost stays visible.
     recordUsage: async (usage) => {
       const shared = {
@@ -850,6 +869,25 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       );
     },
   });
+  const attemptToolFamilies = resolveAgentToolFamilies(session.agent, {
+    hasSkills: skillCatalog.length > 0,
+  });
+  // Provider web search: only where the turn has no hosted search (or the
+  // operator chose `replace`), only when a provider is configured, and only
+  // when the session's agent configuration allows web search (filtered below).
+  const webSearchTools = webSearchToolDefinitions({
+    settings: runSettings,
+    tools: turnWebSearchPlan(resolvedModel, runSettings).providerTools,
+    scope: {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      attemptId: input.attemptId,
+    },
+    billing: createWebSearchBilling({ db, settings: runSettings }),
+    observability,
+  });
   const attemptToolDefinitions = [
     ...(operationReadStore
       ? [
@@ -883,82 +921,15 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       load: async () => {
         const currentCatalog = await resolveCatalogSettings(db, catalogSourceSettings);
         const currentSettings = currentCatalog.settings;
-        const xaiReadinessAuthority = xaiCatalogReadinessAuthority(turn, credentialSubjectId);
-        const [
-          connectionModelRestrictions,
-          policy,
-          codexSubscriptionActive,
-          xaiSubscriptionActive,
-          workspaceGatewayConnectionActive,
-          workspaceGatewayCustomModels,
-          openRouterConnectionActive,
-          workspaceOpenRouterCustomModels,
-          organizationGatewayConnectionActive,
-          organizationGatewayCustomModels,
-          organizationOpenRouterConnectionActive,
-          organizationOpenRouterCustomModels,
-        ] = await Promise.all([
-          getWorkspaceConnectionModelRestrictions(
-            db,
-            input.workspaceId,
-            xaiReadinessAuthority?.subjectId ?? credentialSubjectId ?? "worker:model-access",
-            xaiReadinessAuthority?.authoritySnapshot,
-          ),
-          getWorkspaceModelPolicy(db, input.workspaceId),
-          workspaceCodexSubscriptionActive(db, currentSettings, input.workspaceId),
-          xaiReadinessAuthority && currentSettings.supergrokSubscriptionEnabled
-            ? workspaceXaiSubscriptionActiveForAuthority(db, currentSettings, {
-                workspaceId: input.workspaceId,
-                ...xaiReadinessAuthority,
-              })
-            : false,
-          workspaceVercelAiGatewayConnectionActive(db, input.workspaceId),
-          listWorkspaceGatewayCustomModels(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }),
-          workspaceOpenRouterConnectionActive(db, input.workspaceId),
-          listWorkspaceOpenRouterCustomModels(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-          }),
-          organizationModelProviderConnectionActiveForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "vercel_gateway",
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "vercel_gateway",
-          }),
-          organizationModelProviderConnectionActiveForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "openrouter",
-          }),
-          listOrganizationModelProviderCustomModelsForWorkspace(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            providerKind: "openrouter",
-          }),
-        ]);
+        const selectionInput = await loadWorkspaceModelSelectionInput(db, currentSettings, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: turn.initiatingHumanSubjectId ?? credentialSubjectId ?? "worker:model-access",
+          xaiAuthoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
+          claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
+        });
         return {
-          selections: resolveWorkspaceModelSelection({
-            connectionModelRestrictions,
-            settings: currentSettings,
-            policy,
-            codexSubscriptionActive,
-            xaiSubscriptionActive,
-            workspaceGatewayConnectionActive,
-            workspaceGatewayCustomModels,
-            workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-            workspaceOpenRouterCustomModels,
-            organizationGatewayConnectionActive,
-            organizationGatewayCustomModels,
-            organizationOpenRouterConnectionActive,
-            organizationOpenRouterCustomModels,
-          }),
+          selections: resolveWorkspaceModelSelection(selectionInput),
           modelNotes: currentCatalog.modelNotes,
         };
       },
@@ -986,6 +957,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       : []),
     ...createFirstPartyInteractionAttemptToolDefinitions({
       settings: runSettings,
+      ...(credentialRestriction ? { credentialRestriction } : {}),
       scope: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -997,7 +969,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ...(effectiveFirstPartyPermissions ? { permissions: effectiveFirstPartyPermissions } : {}),
       selectedTools: selectedFirstPartyMcpTools,
       subjectId: "worker:first-party-mcp",
-      subjectLabel: "OpenGeni worker",
+      subjectLabel: "Opengeni worker",
       ...(interactionInterventionResume
         ? { interventionResume: interactionInterventionResume }
         : {}),
@@ -1006,7 +978,8 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       ? [googleDrivePublicationTool]
       : []),
     ...codeSearchTools,
-  ];
+    ...webSearchTools,
+  ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,
@@ -1045,10 +1018,12 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "Connector attachment sandbox is unavailable",
     );
     const sandbox = sandboxAccess.sandbox;
+    const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
     const runAs = sandboxRunAs(runSettings);
     const channel = new SandboxChannelAService({
       session: sandboxAccess.session,
-      workspaceRoot: "/workspace",
+      workspaceRoot: machineRoot ?? "/workspace",
+      ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
       leaseEpoch: sandboxAccess.leaseEpoch,
       emit: async (events) => {
         await eventing.publish?.(events, true);
@@ -1081,6 +1056,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   try {
     eventing.preparedTools = await waitForTurnOperation(
       runtime.prepareTools(githubRestMcp.settings, githubRestMcp.tools, {
+        ...(credentialRestriction ? { credentialRestriction } : {}),
         mcpAccountLabels: accountRoutes.accountLabels,
         accountId: input.accountId,
         workspaceId: input.workspaceId,
@@ -1092,7 +1068,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         attemptId: input.attemptId,
         executionGeneration: attempt.executionGeneration,
         subjectId: "worker:first-party-mcp",
-        subjectLabel: "OpenGeni worker",
+        subjectLabel: "Opengeni worker",
         ...(credentialSubjectId ? { credentialSubjectId } : {}),
         initiatingHumanSubjectId: turn.initiatingHumanSubjectId ?? null,
         initiatingHumanExternalIdentity: initiatingHuman?.externalIdentity ?? null,
@@ -1105,6 +1081,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
         ...(deps.runMcpCredentials ? { runMcpCredentials: deps.runMcpCredentials } : {}),
         ...(codexAppsAuth ? { codexAppsAuth } : {}),
         resolveCredential,
+        slackRateLimit: buildSlackApiRateLimiter(db, githubRestMcp.settings),
         ...(operationPersistence ? { mcpOperationPersistence: operationPersistence } : {}),
         ...(linkedAuthority
           ? {
@@ -1126,6 +1103,44 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
           : {}),
         onAuthNeeded: publishToolAuthNeeded,
         materializeConnectorAttachments,
+        materializeGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          if (!deps.objectStorage) throw new Error("Gmail file delivery requires object storage");
+          return await materializeGmailFile(request, {
+            workspaceId: input.workspaceId,
+            storage: deps.objectStorage,
+            downloadStorage: objectStorageForSandboxDownloads(
+              runSettings,
+              deps.objectStorage,
+              deps.activeSandboxBackend ?? deps.groupBoxBackend,
+            ),
+            materialize: materializeConnectorAttachments,
+            onCleanupFailure: (key) =>
+              console.warn("[gmail] Temporary transfer cleanup requires operator retry", {
+                objectKey: key,
+              }),
+          });
+        },
+        readGmailFile: async (request) => {
+          throwIfWorkerShuttingDown();
+          throwIfTurnCancelled();
+          const access = await resolveTurnSandboxAccess(
+            sandboxState,
+            media.sdkOwnedSandboxSession,
+            "Gmail attachment filesystem is unavailable",
+          );
+          const runAs = sandboxRunAs(runSettings);
+          const machineRoot = sandboxState.machinePrimarySession?.workspaceRoot;
+          const channel = new SandboxChannelAService({
+            session: access.session,
+            workspaceRoot: machineRoot ?? "/workspace",
+            ...(machineRoot ? { providerPathMode: "workspace-relative" as const } : {}),
+            leaseEpoch: access.leaseEpoch,
+            ...(runAs ? { runAs } : {}),
+          });
+          return await readGmailFileFromChannel(channel, request);
+        },
         refreshOwnedCommand: async (commandId) => {
           throwIfWorkerShuttingDown();
           throwIfTurnCancelled();
@@ -1222,6 +1237,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       {},
       (name) => mcpToolDisplayMetadata(tools.mcpServers, name),
       (entry) => toolFamilyForCatalogIdentity(entry, runSettings.mcpServers),
+      tools.inputWaitYield,
     );
     eventing.codemodeDispatcher.start();
   };
@@ -1248,6 +1264,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
       "skill_read",
     ],
     codeSearchAvailable: codeSearchTools.length > 0,
+    promptToolAvailability,
     skillCatalog,
   };
 }

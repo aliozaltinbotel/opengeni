@@ -86,6 +86,29 @@
   .og-root :where(button, input[type="button"], input[type="submit"], input[type="reset"]) {
     appearance: button;
   }
+  /* Host global element styles (`ul { list-style: disc; margin }`,
+     `p { line-height: 1.8 }`, `li { margin-top }`) must not reach SDK markup.
+     The root class gives one class of specificity: above host element
+     selectors, but tied with (and emitted before) component utilities, which
+     therefore still win. */
+  .og-root :where(ul, ol, menu) {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  .og-root :where(li, p, blockquote, figure, dl, dd, pre, h1, h2, h3, h4, h5, h6) {
+    margin: 0;
+    padding: 0;
+    font-size: inherit;
+    line-height: inherit;
+  }
+  .og-root :where(h1, h2, h3, h4, h5, h6) {
+    font-weight: inherit;
+  }
+  .og-root,
+  .og-root :where(*, ::before, ::after) {
+    box-sizing: border-box;
+  }
 }
 
 @theme inline {
@@ -577,6 +600,55 @@
 
   .og-composer-footer:has([data-transcription-capturing]) .og-composer-actions {
     display: none;
+  }
+
+  /* A saved recording or voice error needs its explanation to be readable:
+     give it the controls row (Send stays) instead of an ellipsis. */
+  .og-composer-footer:has([data-transcription-attention])
+    .og-composer-controls
+    > :not([data-transcription-attention]) {
+    display: none;
+  }
+
+  /* Host extras (live voice, custom actions) step aside too; Pause/Stop/Send stay. */
+  .og-composer-footer:has([data-transcription-attention])
+    .og-composer-actions
+    > :not(:is([data-analytics-action], :has([data-analytics-action]))) {
+    display: none;
+  }
+
+  .og-composer-footer
+    [data-transcription-attention]
+    :is(.og-transcription-recovered-label, .og-transcription-error-label) {
+    max-width: min(15rem, 52vw);
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-height: 1.2;
+  }
+
+  /* A failed live-voice start explains itself in the row until dismissed. */
+  .og-composer-footer:has([data-realtime-attention]) .og-composer-controls {
+    display: none;
+  }
+
+  .og-composer-footer:has([data-realtime-attention]) .og-composer-actions,
+  .og-composer-footer .og-realtime-control:has([data-realtime-attention]),
+  .og-composer-footer [data-realtime-attention] {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .og-composer-footer:has([data-realtime-attention])
+    .og-composer-actions
+    > :not(:has([data-realtime-attention])) {
+    flex-shrink: 0;
+  }
+
+  .og-composer-footer [data-realtime-attention] .og-realtime-failure-label {
+    max-width: none;
+    -webkit-line-clamp: 3;
   }
 }
 

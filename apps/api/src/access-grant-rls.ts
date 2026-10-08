@@ -4,16 +4,38 @@ import {
   SessionAuthorizationDeniedError,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { freezeAgentLearningPolicy, withSessionRlsActorContext } from "@opengeni/db";
+import {
+  freezeAgentLearningPolicy,
+  withSessionRlsActorContext,
+  withCreditDebitAttribution,
+  type CreditDebitAttribution,
+  currentCreditDebitAttribution,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
+/**
+ * Trusted payer for a non-agent grant: an authenticated human session pays as
+ * that human; keys and services are service work. An agent attempt must be
+ * resolved through the validated middleware context installed below.
+ */
+export function creditDebitAttributionForGrant(grant: AccessGrant): CreditDebitAttribution {
+  if (grant.principalKind === "agent_attempt") return currentCreditDebitAttribution();
+  return grant.principalKind === "human_session"
+    ? { kind: "human", initiatingHumanSubjectId: grant.subjectId }
+    : ["service", "api_key", "configured_key", "mcp_gateway"].includes(grant.principalKind ?? "")
+      ? { kind: "service" }
+      : { kind: "unknown" };
+}
+
 export async function withAccessGrantSessionRlsContext<T>(
-  deps: ApiRouteDeps,
+  deps: Pick<ApiRouteDeps, "db">,
   grant: AccessGrant,
   fn: () => Promise<T>,
 ): Promise<T> {
   if (grant.principalKind !== "agent_attempt") {
-    return await withSessionRlsActorContext({ subjectId: grant.subjectId }, fn);
+    return await withCreditDebitAttribution(creditDebitAttributionForGrant(grant), () =>
+      withSessionRlsActorContext({ subjectId: grant.subjectId }, fn),
+    );
   }
   const callerSessionId = grant.metadata?.sessionId;
   if (typeof callerSessionId !== "string") {
@@ -32,13 +54,22 @@ export async function withAccessGrantSessionRlsContext<T>(
         executionGeneration: actor.executionGeneration,
       },
     });
-    return await withSessionRlsActorContext(
+    return await withCreditDebitAttribution(
       {
-        subjectId: actor.subjectId,
-        initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
-        privateFileOwnerSubjectId: learning.defaultScope === "personal" ? learning.subjectId : null,
+        kind: "turn",
+        turnId: actor.turnId,
+        initiatingHumanSubjectId: actor.initiatingHumanSubjectId ?? null,
       },
-      fn,
+      () =>
+        withSessionRlsActorContext(
+          {
+            subjectId: actor.subjectId,
+            initiatingHumanSubjectId: actor.initiatingHumanSubjectId,
+            privateFileOwnerSubjectId:
+              learning.defaultScope === "personal" ? learning.subjectId : null,
+          },
+          fn,
+        ),
     );
   } catch (error) {
     if (error instanceof SessionAuthorizationDeniedError) {

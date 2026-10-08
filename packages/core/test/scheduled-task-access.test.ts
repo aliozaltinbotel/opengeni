@@ -188,7 +188,7 @@ describe("scheduled task connector accounts", () => {
   });
 });
 
-describe("agent-created task OpenGeni tools (migration 0428 creator policy)", () => {
+describe("agent-created task Opengeni tools (migration 0428 creator policy)", () => {
   const settings = testSettings({
     defaultFirstPartyMcpTools: ["sessions_list", "rig_list", "browser_read"],
   });
@@ -242,6 +242,19 @@ describe("agent-created task OpenGeni tools (migration 0428 creator policy)", ()
       permissionsRequiredByTools,
     });
     expect(plan.missing).toEqual(["rig_list", "browser_read"]);
+    expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
+  });
+  test("an explicit admin permission cannot widen scheduled task tools on refresh", () => {
+    const plan = planScheduledTaskOpenGeniTools({
+      creatorPolicy: {
+        firstPartyMcpTools: ["sessions_list"],
+        firstPartyMcpPermissions: ["sessions:read", "rigs:use"],
+      },
+      settings,
+      grantPermissions: ["workspace:admin", "sessions:read"],
+      grantPermissionMode: "explicit",
+      permissionsRequiredByTools,
+    });
     expect(plan.policy?.firstPartyMcpPermissions).toEqual(["sessions:read"]);
   });
 

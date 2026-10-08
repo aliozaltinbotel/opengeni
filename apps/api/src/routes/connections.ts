@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { verifyDirectModelAccess } from "@opengeni/core";
 import {
   assertClaudeWorkspaceCredential,
   prepareClaudeWorkspaceCredential,
@@ -27,6 +28,9 @@ import {
 import {
   WORKSPACE_OPENROUTER_CONNECTION_DOMAIN,
   WORKSPACE_OPENROUTER_CONNECTION_ROLE,
+  WORKSPACE_OPPER_CONNECTION_DOMAIN,
+  WORKSPACE_OPPER_CONNECTION_ROLE,
+  opperCredentialProblem,
   VERCEL_AI_GATEWAY_CONNECTION_DOMAIN,
   VERCEL_AI_GATEWAY_CONNECTION_ROLE,
 } from "@opengeni/config";
@@ -41,6 +45,7 @@ import {
 import {
   API_INTEGRATION_OAUTH_CREDENTIAL_ROLE,
   ApiIntegrationOAuthStartRequest,
+  DirectModelProviderMetadata,
   ConnectionResponse,
   CreateConnectionRequest,
   FikenInstallRequest,
@@ -51,6 +56,8 @@ import {
   ListConnectionsResponse,
   OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
   OPENROUTER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY,
+  OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY,
   OpenGeniSlackBotInstallRequest,
   OAuthStartRequest,
   OAuthStartResponse,
@@ -98,6 +105,7 @@ import {
   withWorkspaceSubjectRls,
   type Database,
   encryptEnvironmentValue,
+  brokeredCredentialBundleProblem,
   getConnectionMetadata,
   listConnectionsMetadata,
   listSlackInstallationBindings,
@@ -147,6 +155,7 @@ import {
   assertPersonalConnectionOwnerPrincipal,
   isPersonalConnectionOwnerPrincipal,
   requireLegacyOAuthActor,
+  requireProviderConsentInBrowser,
 } from "../connection-ownership";
 import { canonicalProviderDomain } from "../integrations/provider-domain";
 import { externalActorContinuationForAuthorization } from "@opengeni/core";
@@ -204,9 +213,19 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/connections/accounts", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "connections:read");
+    const includeInactive = c.req.query("includeInactive");
+    if (
+      includeInactive !== undefined &&
+      includeInactive !== "true" &&
+      includeInactive !== "false"
+    ) {
+      throw new HTTPException(400, { message: "includeInactive must be true or false" });
+    }
     return c.json(
       ListConnectionsResponse.parse({
-        connections: await listOwnConnectionAccountsForGrant(db, grant),
+        connections: await listOwnConnectionAccountsForGrant(db, grant, {
+          includeInactive: includeInactive === "true",
+        }),
       }),
     );
   });
@@ -246,6 +265,44 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = access.grant;
     const beforeCommit = externalContinuationCommitAuthorizer(access);
     const payload = await parseRequestJson(c, CreateConnectionRequest);
+    if (
+      payload.metadata?.directModelProvider !== undefined ||
+      String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
+    ) {
+      const config = DirectModelProviderMetadata.safeParse(payload.metadata?.directModelProvider);
+      const domain = config.success
+        ? new URL(config.data.endpoint ?? "https://api.openai.com/v1").hostname
+        : null;
+      if (
+        !config.success ||
+        payload.subjectId !== null ||
+        payload.kind !== "api_key" ||
+        canonicalProviderDomain(payload.providerDomain) !== domain ||
+        payload.metadata?.credentialRole !== `direct_${config.data.provider}` ||
+        typeof payload.credential.apiKey !== "string" ||
+        !payload.credential.apiKey.trim() ||
+        !payload.operationId ||
+        payload.expiresAt
+      ) {
+        throw new HTTPException(422, {
+          message:
+            "Invalid OpenAI or Azure OpenAI connection: provide a key, model, and official provider endpoint",
+        });
+      }
+      payload.metadata = { ...payload.metadata, directModelProvider: config.data };
+      if (payload.verifyModelAccess) {
+        await verifyDirectModelAccess(
+          config.data,
+          payload.credential.apiKey as string,
+          deps.directModelFetch,
+        );
+      }
+    } else if (payload.verifyModelAccess) {
+      throw new HTTPException(422, {
+        message: "Model checks require an OpenAI or Azure OpenAI connection",
+      });
+    }
+    const directModelKey = payload.metadata?.directModelProvider !== undefined;
     // All writes in this closure must use the caller-owned scoped transaction.
     // eslint-disable-next-line no-shadow
     const persist = async (db: Database) => {
@@ -283,6 +340,11 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
         kind: payload.kind,
         metadata: payload.metadata,
       });
+      // Validated model keys store `{ apiKey }` for model execution. Generic
+      // integration credentials still require an explicit broker destination.
+      if (!workspaceProviderKind && !directModelKey)
+        assertBrokeredApiKeyCredential(payload.kind, payload.credential);
+      if (workspaceProviderKind === "opper") assertOpperCredential(payload.credential);
       const connection = workspaceProviderKind
         ? await (async () => {
             const provider = workspaceProviderApiKeyConnectionSpec(workspaceProviderKind);
@@ -381,7 +443,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
       kind: payload.kind,
       metadata: payload.metadata,
     });
-    return modelKey
+    return modelKey || directModelKey
       ? commit(db)
       : withOrganizationIntegrationAcquisition(
           db,
@@ -943,6 +1005,16 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             c.req.param("connectionId"),
             grant.subjectId,
           );
+          if (
+            initial?.metadata.directModelProvider !== undefined ||
+            payload.metadata?.directModelProvider !== undefined ||
+            String(payload.metadata?.credentialRole ?? "").startsWith("direct_")
+          ) {
+            throw new HTTPException(422, {
+              message:
+                "Disconnect and reconnect OpenAI or Azure OpenAI to replace its key or deployment",
+            });
+          }
           // Model-key rotation owns an advisory -> credential-row prefix. Do
           // not take its row first or change that excluded lane's lock order.
           if (!initial || !workspaceProviderApiKeyConnectionKind(initial)) {
@@ -977,7 +1049,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
             if (!destination.success || !destinationOnlyUpdate) {
               throw new HTTPException(422, {
                 message:
-                  "use the dedicated OpenGeni Slack bot reinstall flow to update this connection",
+                  "use the dedicated Opengeni Slack bot reinstall flow to update this connection",
               });
             }
             const destinationSelection = destination.data;
@@ -1073,7 +1145,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
                 message:
                   targetWorkspaceProviderKind === "vercel_gateway"
                     ? "use the Vercel AI Gateway connect flow to create this connection"
-                    : "use the OpenRouter connect flow to create this connection",
+                    : targetWorkspaceProviderKind === "opper"
+                      ? "use the Opper connect flow to create this connection"
+                      : "use the OpenRouter connect flow to create this connection",
               });
             }
             assertNotDirectPersonalSlackOAuth(providerDomain, kind);
@@ -1156,6 +1230,8 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               metadata: existing.metadata,
               credential: payload.credential,
             });
+            if (existingWorkspaceProviderKind === "opper")
+              assertOpperCredential(payload.credential);
             const key = requireEnvironmentEncryption(settings);
             const grantedScopes = payload.grantedScopes ?? existing.grantedScopes;
             const expiresAt =
@@ -1230,6 +1306,9 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
               (payload.status === "active" && existing.status !== "active"))
           ) {
             assertOrganizationIntegrationAllowed(policy, null);
+          }
+          if (payload.credential !== undefined) {
+            assertBrokeredApiKeyCredential(payload.kind ?? existing?.kind, payload.credential);
           }
           const connection = await updateConnection(db, {
             workspaceId,
@@ -1396,6 +1475,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireProviderConsentInBrowser(access);
     const grant = access.grant;
     const parsed = OAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -1425,6 +1505,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     assertIntegrationsEnabled();
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "connections:write");
+    requireProviderConsentInBrowser(access);
     const grant = access.grant;
     const parsed = ApiIntegrationOAuthStartRequest.safeParse(await c.req.json());
     if (!parsed.success) {
@@ -1490,7 +1571,7 @@ export function registerConnectionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(
       IntegrationClientMetadata.parse({
         client_id: metadataUrl,
-        client_name: "OpenGeni",
+        client_name: "Opengeni",
         redirect_uris: [`${baseUrl}/v1/integrations/oauth/callback`],
         token_endpoint_auth_method: "none",
         grant_types: ["authorization_code", "refresh_token"],
@@ -1529,7 +1610,7 @@ async function persistOpenGeniSlackBotConnection(input: {
     throw new SlackInstallCallbackError(
       422,
       "connection_conflict",
-      "connectionId is not an OpenGeni Slack bot connection",
+      "connectionId is not an Opengeni Slack bot connection",
       "principal_validation",
     );
   }
@@ -1834,13 +1915,40 @@ function workspaceProviderApiKeyConnectionKind(input: {
   ) {
     return "openrouter";
   }
+  if (
+    providerDomain === WORKSPACE_OPPER_CONNECTION_DOMAIN &&
+    input.metadata?.credentialRole === WORKSPACE_OPPER_CONNECTION_ROLE
+  ) {
+    return "opper";
+  }
   return null;
+}
+
+/** Opper management keys are refused by inference routes; never store one as a model key. */
+function assertOpperCredential(credential: Record<string, unknown>): void {
+  const apiKey = typeof credential.apiKey === "string" ? credential.apiKey : "";
+  const problem = opperCredentialProblem(apiKey);
+  if (problem) throw new HTTPException(422, { message: problem });
+}
+
+/**
+ * A brokered api_key Connection is usable only through `headers` or
+ * `placements`; anything else was previously accepted and then failed every
+ * tool call with a misleading "connect an account" auth-needed notice.
+ */
+function assertBrokeredApiKeyCredential(
+  kind: string | undefined,
+  credential: Record<string, unknown>,
+): void {
+  if (kind !== "api_key") return;
+  const problem = brokeredCredentialBundleProblem(credential);
+  if (problem) throw new HTTPException(422, { message: problem });
 }
 
 function assertNotReservedSlackBotMetadata(metadata: Record<string, unknown> | undefined): void {
   if (hasReservedOpenGeniSlackBotMetadata(metadata)) {
     throw new HTTPException(422, {
-      message: "OpenGeni Slack bot metadata is reserved for the dedicated connection flow",
+      message: "Opengeni Slack bot metadata is reserved for the dedicated connection flow",
     });
   }
 }
@@ -1905,6 +2013,8 @@ function workspaceProviderCredentialMetadata(
     [OPENROUTER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _openRouterOperationDigest,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _operationId,
     [VERCEL_AI_GATEWAY_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _operationDigest,
+    [OPPER_CREDENTIAL_OPERATION_ID_METADATA_KEY]: _opperOperationId,
+    [OPPER_CREDENTIAL_OPERATION_DIGEST_METADATA_KEY]: _opperOperationDigest,
     ...effectiveMetadata
   } = metadata ?? {};
   for (const role of ["anthropic", "claude_subscription"]) {

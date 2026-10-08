@@ -1,9 +1,11 @@
 import type {
+  AllowanceExhaustedRefusal,
   HumanInputQuestion,
   HumanInputResponse,
   MediaGenerationResult,
   ResourceRef,
   SessionStatus,
+  Session,
   TimelineAnnotation,
   TimelineAnnotationSource,
   ToolAuthNeededPayload,
@@ -56,6 +58,7 @@ export type UserMessageItem = {
         state: "sending" | "queued" | "failed";
         error?: string | undefined;
         onRetry?: (() => void) | undefined;
+        onEdit?: (() => void) | undefined;
         onRemove?: (() => void) | undefined;
       }
     | undefined;
@@ -171,6 +174,12 @@ export type WorkerItem = {
   action: "spawn" | "message";
   /** The worker's initial message / the message sent to it, when parseable. */
   prompt: string | null;
+  /**
+   * The title the manager gave a spawned worker (`session_create` `title`),
+   * when present. Hosts can supply a live title for any session id; this is
+   * the timeline's own fallback so a spawn names its agent even offline.
+   */
+  title?: string | null | undefined;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
   /** Bounded structured failure retained from session_create/session_send_message. */
@@ -221,13 +230,21 @@ export type StartupPhaseItem = {
   id: string;
   turnId: string | null;
   phase: StartupPhase;
+  /** Live presentation only: accepted work waiting for its first worker claim. */
+  dispatchWait?: Session["dispatchWait"];
+  /** Renderer-only elapsed anchor when acceptance preceded recorded startup spans. */
+  loadingStartedAt?: string | undefined;
   status: "running" | "complete" | "failed" | "cancelled";
   startedAt: string;
   completedAt: string | null;
   durationMs: number | null;
   /** Sandbox origin and rig marker outcomes refine the settled label only. */
   outcome: "created" | "restored" | "resumed" | "skipped" | null;
-  blockedReason?: "rotation_in_progress" | undefined;
+  blockedReason?:
+    | "capture_in_progress"
+    | "rotation_in_progress"
+    | "provider_recovery_in_progress"
+    | undefined;
   occurredAt: string;
 };
 
@@ -391,6 +408,12 @@ export type NoticeItem = {
   /** Optional evidence kept inspectable without overwhelming the main rail. */
   details?: { label: string; value: unknown };
   action?: { label: string; url: string };
+  /**
+   * A usage ceiling refused further work. `text` keeps the canonical sentence
+   * for plain-text consumers; `MessageTimeline` renders this structured row
+   * (customizable with `renderAllowanceExhausted` / `allowanceExhaustedLabels`).
+   */
+  allowance?: AllowanceExhaustedRefusal;
   occurredAt: string;
 };
 
@@ -486,7 +509,7 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  /** Host-owned bindings must never be routed into OpenGeni's native reconnect flow. */
+  /** Host-owned bindings must never be routed into Opengeni's native reconnect flow. */
   authoritySource?: ToolAuthNeededPayload["authoritySource"] | null | undefined;
   reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
@@ -574,6 +597,12 @@ export type TimelineGroup =
         responseStartedAt?: string;
         waiting?: { label: string; since: string };
         details: TimelineGroup[];
+        /**
+         * While the turn is live, its progress notes stay readable above the
+         * work row and are also listed in `details`. These are their item ids,
+         * so an expanded work disclosure can fold the outside copies away.
+         */
+        liveNoteIds?: string[];
       };
     }
   | {

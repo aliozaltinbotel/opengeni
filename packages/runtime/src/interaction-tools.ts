@@ -9,6 +9,10 @@ import {
   BrowserActionReceipt,
   BrowserClipboard,
   BrowserDiagnosticBatch,
+  BrowserDownload,
+  BrowserDownloadListResponse,
+  BrowserDownloadSaveRequest,
+  BrowserDownloadSaveResponse,
   BrowserDomReadResponse,
   BrowserDomReadLocator,
   BrowserDomReadSelector,
@@ -66,7 +70,13 @@ import type {
   AttemptToolExecutionContext,
   AttemptToolScope,
 } from "@opengeni/codemode";
-import { OpenGeniApiError, OpenGeniClient, type InteractionTransport } from "@opengeni/sdk";
+import {
+  OpenGeniApiError,
+  OpenGeniClient,
+  interactionControlFailureFromError,
+  type InteractionControlFailure,
+  type InteractionTransport,
+} from "@opengeni/sdk";
 import { z } from "zod";
 import { browserActionInputJsonSchema } from "./browser-action-json-schema";
 import { guardedMcpFetch } from "./mcp-network";
@@ -279,6 +289,8 @@ const TOOL_PERMISSION = {
   browser_act: "sessions:control",
   browser_clipboard: "sessions:read",
   browser_debug: "sessions:read",
+  browser_downloads: "sessions:read",
+  browser_download_save: ["sessions:control", "files:upload"],
   browser_auth: "sessions:control",
   interaction_request_human: "sessions:control",
   browser_identity: "sessions:control",
@@ -290,7 +302,7 @@ const TOOL_PERMISSION = {
   computer_clipboard: "sessions:read",
   computer_act: "sessions:control",
   computer_lifecycle: "sessions:control",
-} as const satisfies Record<InteractionAttemptToolName, Permission>;
+} as const satisfies Record<InteractionAttemptToolName, Permission | readonly Permission[]>;
 
 const DiscoveryInput = z
   .object({
@@ -393,6 +405,9 @@ const BrowserTabsInput = z.discriminatedUnion("operation", [
     })
     .strict(),
 ]);
+const BrowserTabsOutput = BrowserTargetListResponse.safeExtend({
+  mutationObservation: CompactBrowserObservation.optional(),
+});
 
 const BrowserObserveInput = z
   .object({
@@ -618,6 +633,26 @@ const ComputerLifecycleInput = z
 
 const TERMINAL_LIFECYCLES = new Set(["ended", "failed"]);
 
+const BrowserDownloadsInput = z
+  .object({
+    browserSessionId: z.string().uuid(),
+    operation: z.enum(["list", "get"]).default("list"),
+    downloadId: z.string().uuid().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.operation === "get") !== (value.downloadId !== undefined)) {
+      context.addIssue({
+        code: "custom",
+        path: ["downloadId"],
+        message: "downloadId is required only for operation=get",
+      });
+    }
+  });
+const BrowserDownloadSaveInput = BrowserDownloadSaveRequest.omit({ operationId: true })
+  .extend({ browserSessionId: z.string().uuid(), downloadId: z.string().uuid() })
+  .strict();
+
 export type CreateInteractionAttemptToolsInput = {
   transport: InteractionTransport;
   workspaceId: string;
@@ -681,6 +716,7 @@ export function createInteractionAttemptToolDefinitions(
           raw,
           context,
           options.execute,
+          options.readOnly,
         ),
     });
   };
@@ -768,18 +804,21 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "tabs"],
     title: "Manage browser tabs",
     description:
-      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation.",
+      "List, open, logically select, or close tabs in one exact BrowserSession. Selection changes the BrowserSession's default target, not the visible desktop tab. New attached-Chrome tabs open in the background. Use browser_act activate only when foregrounding the owned tab is explicitly intended. Closing a tab does not release the browser process; use browser_lifecycle for session cleanup. Returns the authoritative complete tab list after the operation. Open/select also return mutationObservation, the operation's compact page snapshot. Reuse its refs and generations for immediate actions; refresh after later page changes.",
     input: BrowserTabsInput,
-    output: BrowserTargetListResponse,
+    output: BrowserTabsOutput,
     readOnly: false,
     idempotent: false,
     execute: async (value) => {
+      let mutationObservation: z.infer<typeof BrowserObservation> | undefined;
       if (value.operation === "open") {
-        await input.transport.openBrowserTarget(input.workspaceId, value.browserSessionId, {
-          ...(value.url ? { url: value.url } : {}),
-        });
+        mutationObservation = await input.transport.openBrowserTarget(
+          input.workspaceId,
+          value.browserSessionId,
+          { ...(value.url ? { url: value.url } : {}) },
+        );
       } else if (value.operation === "select") {
-        await input.transport.selectBrowserTarget(
+        mutationObservation = await input.transport.selectBrowserTarget(
           input.workspaceId,
           value.browserSessionId,
           value.targetId,
@@ -791,7 +830,16 @@ export function createInteractionAttemptToolDefinitions(
           value.targetId,
         );
       }
-      return await input.transport.listBrowserTargets(input.workspaceId, value.browserSessionId);
+      const tabs = await input.transport.listBrowserTargets(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      return mutationObservation
+        ? {
+            ...tabs,
+            mutationObservation: projectBrowserObservation(mutationObservation, "compact"),
+          }
+        : tabs;
     },
   });
 
@@ -962,7 +1010,7 @@ export function createInteractionAttemptToolDefinitions(
     codemodePath: ["interaction", "browser", "act"],
     title: "Act in browser tab",
     description:
-      "Perform one semantic-first browser action or bounded batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
+      "Perform one semantic-first browser action or bounded batch. Prefer action={type:'batch',actions:[...],fenceEachAction:true} for predictable edits in the same observed document, such as filling known form fields before one authorized submit. Pause for new page state, a dialog, or a decision instead of batching steps that depend on an unseen result. Reuse a page observation, when present, from tab open/select or a prior action; browser_open returns only session/tab metadata, so observe when page content is needed. Observe again after page changes or when needed content was omitted. If an action reports outcome_unknown, inspect the outcome and do not replay the batch. Use viewport to set page width, height, desktop/mobile layout and touch emulation, then check the measured viewport in the returned observation; emulation does not prove physical mobile-browser behavior. Use history back/forward for tab navigation; keypress shortcuts are page input and may not navigate browser history. The explicit activate action foregrounds the target in the user's desktop browser; use only when that is intended. Permission actions set a managed browser's web permission for this tab's exact current top-level origin. Omit generation fences to fetch fresh generation metadata without scanning accessibility; supplying all three fences skips that state read while preserving controller validation. The default receipt includes a compact accessibility view with explicit omissions; set view=full for the complete observation, or view=none when no post-action tree is needed.",
     input: BrowserActInput,
     output: BrowserAgentActionReceipt,
     readOnly: false,
@@ -1036,6 +1084,82 @@ export function createInteractionAttemptToolDefinitions(
           ...(value.limit !== undefined ? { limit: value.limit } : {}),
         },
       ),
+  });
+
+  add({
+    name: "browser_downloads",
+    codemodePath: ["interaction", "browser", "downloads"],
+    title: "Inspect browser downloads",
+    description:
+      "List browser-produced files or get one exact download by id. Metadata identifies completed bytes and their SHA-256; diagnostics alone do not expose a download id or file bytes. Use browser_download_save to materialize a completed download in its source session's workspace. Attached browsers and Lightpanda do not expose managed downloads.",
+    input: BrowserDownloadsInput,
+    output: z.union([BrowserDownloadListResponse, BrowserDownload]),
+    readOnly: true,
+    idempotent: true,
+    execute: async (value) => {
+      if (value.operation === "get") {
+        const download = await input.transport.getBrowserDownload(
+          input.workspaceId,
+          value.browserSessionId,
+          value.downloadId!,
+        );
+        if (
+          download.browserSessionId !== value.browserSessionId ||
+          download.id !== value.downloadId
+        ) {
+          throw new Error("Browser download belongs to another resource");
+        }
+        return download;
+      }
+      const response = await input.transport.listBrowserDownloads(
+        input.workspaceId,
+        value.browserSessionId,
+      );
+      if (
+        response.browserSessionId !== value.browserSessionId ||
+        response.downloads.some(
+          (download) =>
+            download.browserSessionId !== value.browserSessionId ||
+            download.controllerGeneration !== response.controllerGeneration,
+        )
+      ) {
+        throw new Error("Browser downloads belong to another session binding");
+      }
+      return response;
+    },
+  });
+
+  add({
+    name: "browser_download_save",
+    codemodePath: ["interaction", "browser", "downloadSave"],
+    title: "Save browser download to workspace",
+    description:
+      "Save one exact completed managed browser download to a portable relative path in the browser's source session workspace. Requires sessions:control and files:upload. Returns the materialized destinationPath, fileId and integrity metadata; read the saved bytes with ordinary workspace file tools. Existing files are protected unless overwrite=true. The attempt operation id fences retries; uncertain outcomes must reconcile that same operation. Attached browsers and Lightpanda cannot publish managed downloads.",
+    input: BrowserDownloadSaveInput,
+    output: BrowserDownloadSaveResponse,
+    readOnly: false,
+    idempotent: true,
+    execute: async (value, context) => {
+      const response = await input.transport.saveBrowserDownload(
+        input.workspaceId,
+        value.browserSessionId,
+        value.downloadId,
+        {
+          operationId: context.operationId,
+          destinationPath: value.destinationPath,
+          overwrite: value.overwrite,
+        },
+      );
+      if (
+        response.download.browserSessionId !== value.browserSessionId ||
+        response.download.id !== value.downloadId ||
+        response.operationId !== context.operationId ||
+        response.destinationPath !== value.destinationPath
+      ) {
+        throw new Error("Browser download save returned another operation binding");
+      }
+      return response;
+    },
   });
 
   add({
@@ -1477,12 +1601,13 @@ export type CreateFirstPartyInteractionAttemptToolsInput = Omit<
   scope: AttemptToolScope;
   subjectId?: string;
   subjectLabel?: string;
+  credentialRestriction?: "developer_setup";
   fetch?: typeof globalThis.fetch;
 };
 
 /**
  * Construct the canonical Browser/Computer attempt definitions against the
- * ordinary OpenGeni control plane. MCP/Codemode never receive controller keys,
+ * ordinary Opengeni control plane. MCP/Codemode never receive controller keys,
  * raw CDP, or provider credentials; every call re-signs exact attempt authority.
  */
 export function createFirstPartyInteractionAttemptToolDefinitions(
@@ -1517,6 +1642,9 @@ export function createFirstPartyInteractionAttemptToolDefinitions(
         turnId: input.scope.turnId,
         attemptId: input.scope.attemptId,
         executionGeneration: input.scope.executionGeneration,
+        ...(input.credentialRestriction
+          ? { credentialRestriction: input.credentialRestriction }
+          : {}),
         exp: Math.floor(Date.now() / 1_000) + 60 * 60,
       });
       const headers = new Headers(init?.headers);
@@ -1611,8 +1739,27 @@ async function openBrowser(
     !created &&
     !targets.some((target) => sameBrowserUrl(target.url, value.initialUrl!))
   ) {
-    await transport.openBrowserTarget(workspaceId, session.id, { url: value.initialUrl });
-    targets = (await transport.listBrowserTargets(workspaceId, session.id)).targets;
+    if (!transport.openBrowserTargetWithInventory) {
+      throw new Error("browser transport does not support metadata-only tab opening");
+    }
+    const inventory = BrowserTargetListResponse.parse(
+      await transport.openBrowserTargetWithInventory(workspaceId, session.id, {
+        url: value.initialUrl,
+      }),
+    );
+    const controllerGeneration = session.controller?.controllerGeneration;
+    if (
+      inventory.browserSessionId !== session.id ||
+      inventory.controllerGeneration !== controllerGeneration ||
+      inventory.targets.some(
+        (target) =>
+          target.browserSessionId !== session.id ||
+          target.controllerGeneration !== controllerGeneration,
+      )
+    ) {
+      throw new Error("browser transport returned inventory for another session binding");
+    }
+    targets = inventory.targets;
   }
   return { session, targets };
 }
@@ -1814,6 +1961,14 @@ function selectAgentNodes(
 
 function projectBrowserObservation(
   observation: z.infer<typeof BrowserObservation>,
+  view: "compact",
+): z.infer<typeof CompactBrowserObservation>;
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
+  view: "compact" | "full",
+): z.infer<typeof BrowserAgentObservation>;
+function projectBrowserObservation(
+  observation: z.infer<typeof BrowserObservation>,
   view: "compact" | "full",
 ): z.infer<typeof BrowserAgentObservation> {
   if (view === "full") return observation;
@@ -1915,6 +2070,7 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     value: z.output<TInput>,
     context: AttemptToolExecutionContext,
   ) => Promise<z.input<TOutput> | InteractionExecutionResult<z.input<TOutput>>>,
+  readOnly: boolean,
 ): Promise<AttemptToolResultValue> {
   try {
     const value = inputSchema.parse(raw);
@@ -1936,14 +2092,91 @@ async function safeInteractionExecution<TInput extends z.ZodType, TOutput extend
     if (error instanceof z.ZodError) {
       return interactionErrorResult("invalid_arguments", "Interaction tool arguments are invalid.");
     }
-    if (error instanceof OpenGeniApiError && !error.outcomeUnknown && error.status < 500) {
+    // A failed read is still a useful tool result. Preserve the API's public
+    // explanation; mutations and uncertain outcomes retain their failure path.
+    if (
+      error instanceof OpenGeniApiError &&
+      !error.outcomeUnknown &&
+      (error.status < 500 || readOnly)
+    ) {
+      const controlFailure = interactionToolErrorOutput(error);
+      if (controlFailure) return controlFailure;
       return interactionErrorResult(
         error.code ?? `http_${error.status}`,
         boundedErrorMessage(error.message),
         error.retryable,
+        error.correlationId,
       );
     }
     throw error;
+  }
+}
+
+export type InteractionToolErrorResult = {
+  isError: true;
+  content: [{ type: "text"; text: string }];
+  structuredContent: {
+    error: {
+      code: string;
+      message: string;
+      retryable: boolean;
+      outcomeUnknown: boolean;
+      requestId?: string;
+      details?: {
+        interactionLayer: "connected_machine";
+        interactionSurface: "browser" | "computer";
+        controlFailureCode: InteractionControlFailure["code"];
+        controlRequestId?: string;
+      };
+      guidance: string;
+    };
+  };
+};
+
+/** Preserve the API's closed control-failure projection at the model seam.
+ * Uncertain execution still throws from the tool executor; rendering its error
+ * must not replace that uncertainty with a generic instruction to retry. */
+export function interactionToolErrorOutput(error: unknown): InteractionToolErrorResult | null {
+  try {
+    if (!(error instanceof OpenGeniApiError)) return null;
+    const failure = interactionControlFailureFromError(error);
+    if (!failure && !error.outcomeUnknown) return null;
+    const opaque = (value: unknown): string | undefined =>
+      typeof value === "string" && value.length <= 128 && /^[A-Za-z0-9._:-]+$/u.test(value)
+        ? value
+        : undefined;
+    const requestId = opaque(error.correlationId);
+    const details = failure
+      ? {
+          interactionLayer: failure.layer,
+          interactionSurface: failure.surface,
+          controlFailureCode: failure.code,
+          ...(failure.controlRequestId ? { controlRequestId: failure.controlRequestId } : {}),
+        }
+      : undefined;
+    const projected = {
+      code:
+        typeof error.code === "string" && /^[A-Za-z0-9_]{1,64}$/u.test(error.code)
+          ? error.code
+          : "interaction_request_failed",
+      message: boundedErrorMessage(error.message),
+      retryable: error.retryable,
+      outcomeUnknown: error.outcomeUnknown,
+      ...(requestId ? { requestId } : {}),
+      ...(details ? { details } : {}),
+      guidance: error.outcomeUnknown
+        ? "The request may have completed. Do not repeat actions automatically; inspect the existing session before continuing."
+        : error.retryable
+          ? "Check the existing session before retrying. Keep its identity and do not recreate it to bypass the failure."
+          : "Resolve the reported issue before calling again; this failure is not marked retryable.",
+    };
+    return {
+      isError: true,
+      content: [{ type: "text", text: JSON.stringify({ error: projected }) }],
+      structuredContent: { error: projected },
+    };
+  } catch {
+    return null;
   }
 }
 
@@ -1965,8 +2198,9 @@ function interactionErrorResult(
   code: string,
   message: string,
   retryable = false,
+  requestId?: string,
 ): AttemptToolResultValue {
-  const error = { code, message, retryable };
+  const error = { code, message, retryable, ...(requestId ? { requestId } : {}) };
   return {
     isError: true,
     content: [{ type: "text" as const, text: JSON.stringify({ error }) }],
@@ -1978,15 +2212,23 @@ function jsonSchema(schema: z.ZodType): AttemptToolJsonSchema {
   return z.toJSONSchema(schema, { target: "draft-2020-12" }) as AttemptToolJsonSchema;
 }
 
-function hasToolPermission(permissions: readonly Permission[], required: Permission): boolean {
-  return permissions.includes(required) || permissions.includes("workspace:admin");
+function hasToolPermission(
+  permissions: readonly Permission[],
+  required: Permission | readonly Permission[],
+): boolean {
+  return (
+    permissions.includes("workspace:admin") ||
+    (typeof required === "string" ? [required] : required).every((permission) =>
+      permissions.includes(permission),
+    )
+  );
 }
 
 function firstPartyApiBaseUrl(settings: Settings, workspaceId: string): string {
   const url = new URL(firstPartyMcpInternalWorkspaceUrl(settings, workspaceId));
   const suffix = `/v1/workspaces/${workspaceId}/mcp`;
   if (!url.pathname.endsWith(suffix)) {
-    throw new Error("First-party MCP URL cannot be projected to the OpenGeni API base URL");
+    throw new Error("First-party MCP URL cannot be projected to the Opengeni API base URL");
   }
   url.pathname = url.pathname.slice(0, -suffix.length) || "/";
   url.search = "";

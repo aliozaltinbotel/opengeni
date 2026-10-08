@@ -378,7 +378,7 @@ export type AttachedBrowserDevice = z.infer<typeof AttachedBrowserDevice>;
 
 /** One enrolled machine agent currently reporting its browser-bridge inventory.
  * A bridge with zero devices is operational but has no Chrome profile connected
- * through the OpenGeni extension yet. */
+ * through the Opengeni extension yet. */
 export const AttachedBrowserBridge = z
   .object({
     enrollmentId: z.string().uuid(),
@@ -549,7 +549,7 @@ export const BrowserIdentity = z
   .strict();
 export type BrowserIdentity = z.infer<typeof BrowserIdentity>;
 
-/** A non-secret reference to credential authority held by OpenGeni Connections.
+/** A non-secret reference to credential authority held by Opengeni Connections.
  * The subject and provider bindings are copied when the browser-auth resource is
  * configured so a later agent cannot swap the UUID to another credential. */
 export const InteractionCredentialAuthorityRef = z
@@ -2702,6 +2702,8 @@ const DirectComputerRfbAttachment = z
     kind: z.literal("direct_rfb"),
     url: boundedUrl,
     protocols: z.array(z.string().min(1).max(2_048)).min(2).max(3),
+    /** Absent on an older API means pixel viewing only. */
+    inputAllowed: z.boolean().default(false),
   })
   .strict();
 
@@ -2936,9 +2938,13 @@ export const ComputerSessionCapabilities = z
     screenCapture: z.boolean(),
     semanticActions: z.boolean(),
     pointerInput: z.boolean(),
+    /** A causal count-2 click requires its exact confirmed first operation. */
+    pointerClickContinuation: z.boolean().optional(),
     keyboardInput: z.boolean(),
     clipboard: z.boolean(),
     backgroundActions: z.boolean(),
+    /** Raw window input stays in the background. Absent means foreground-only. */
+    backgroundInput: z.boolean().optional(),
     parallelApps: z.boolean(),
   })
   .strict();
@@ -3093,11 +3099,26 @@ export const ComputerAction = z.discriminatedUnion("type", [
       deltaX: z.number().finite().optional(),
       deltaY: z.number().finite().optional(),
       button: z.enum(["left", "right", "middle"]).optional(),
+      clickCount: z.union([z.literal(1), z.literal(2)]).optional(),
+      continuationOfOperationId: z.string().uuid().optional(),
     })
     .strict()
     .superRefine((action, context) => {
       const hasEnd = action.endX !== undefined || action.endY !== undefined;
       const hasDelta = action.deltaX !== undefined || action.deltaY !== undefined;
+      if (action.action !== "click" && action.clickCount !== undefined) {
+        context.addIssue({
+          code: "custom",
+          message: "pointer clickCount requires click",
+        });
+      }
+      if ((action.clickCount === 2) !== (action.continuationOfOperationId !== undefined)) {
+        context.addIssue({
+          code: "custom",
+          path: ["continuationOfOperationId"],
+          message: "clickCount 2 requires exactly one prior first-click operation",
+        });
+      }
       if (action.action === "drag" && (action.endX === undefined || action.endY === undefined)) {
         context.addIssue({
           code: "custom",
@@ -3194,6 +3215,13 @@ export const ComputerActionCommand = z
       });
     }
     if (command.action.type === "pointer") {
+      if (command.action.continuationOfOperationId === command.operationId) {
+        context.addIssue({
+          code: "custom",
+          path: ["action", "continuationOfOperationId"],
+          message: "a click cannot continue its own operation",
+        });
+      }
       if (command.expectedFrameId !== command.action.frameId) {
         context.addIssue({
           code: "custom",
@@ -3303,11 +3331,25 @@ export const ComputerSessionAttachment = z
     computerSessionId: z.string().uuid(),
     controllerGeneration: opaqueGeneration,
     targetId: boundedOpaqueId,
+    // Viewer posture only. Canonical actions still require live source authority.
+    // Older API responses omit it; their existing action authorization remains.
+    inputAllowed: z.boolean().optional(),
     stream: ComputerFrameStreamAttachment,
     expiresAt: z.string().datetime({ offset: true }),
   })
   .strict();
 export type ComputerSessionAttachment = z.infer<typeof ComputerSessionAttachment>;
+
+/** Caller-specific human input posture, independent of media/native capability.
+ * It is a current-controller hint; every action still reauthorizes. */
+export const ComputerSessionInputPosture = z
+  .object({
+    computerSessionId: z.string().uuid(),
+    controllerGeneration: opaqueGeneration,
+    inputAllowed: z.boolean(),
+  })
+  .strict();
+export type ComputerSessionInputPosture = z.infer<typeof ComputerSessionInputPosture>;
 
 export const ComputerSessionAttachmentRequest = z
   .object({

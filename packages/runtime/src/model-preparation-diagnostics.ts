@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { setTraceProcessors, type Span, type Trace, type TracingProcessor } from "@openai/agents";
+import { beforeModelRequest } from "./model-request-capture";
 
 export type ModelPreparationPhase =
   | "sandbox_agent_preparation"
@@ -56,6 +57,9 @@ type ModelPreparationObservation = {
   repositorySkillDiscoveryEndedAt?: number;
   firstSandboxOperationStartedAt?: number;
   firstSandboxOperationEndedAt?: number;
+  /** When the first model request entered transport. A lazily prepared MCP catalog can be
+   * snapshotted after that, and the runner gap would then include model time, not preparation. */
+  firstModelTransportAt?: number;
   runnerGapRecorded: boolean;
   postMcpGapRecorded: boolean;
   postRepositorySkillDiscoveryGapRecorded: boolean;
@@ -63,7 +67,19 @@ type ModelPreparationObservation = {
 };
 
 const modelPreparationObserver = new AsyncLocalStorage<ModelPreparationObservation>();
-const modelTransportStartedObserver = new AsyncLocalStorage<() => Promise<void> | void>();
+export type ModelTransportDispatchClock = {
+  dispatchedAtUnixMs: number;
+  monotonicTimeMs: number;
+};
+
+const modelTransportStartedObserver = new AsyncLocalStorage<{
+  started: (() => Promise<void> | void) | undefined;
+  dispatched: ((clock: ModelTransportDispatchClock) => void) | undefined;
+}>();
+type ModelTransportAdmission = { refusal?: { error: unknown } };
+type ModelTransportFetch = (...args: Parameters<typeof fetch>) => ReturnType<typeof fetch>;
+const modelTransportAdmission = new AsyncLocalStorage<ModelTransportAdmission>();
+const modelTransportRefusals = new WeakMap<Headers, { error: unknown }>();
 
 class ModelPreparationTraceProcessor implements TracingProcessor {
   async onTraceStart(_trace: Trace): Promise<void> {}
@@ -90,7 +106,7 @@ class ModelPreparationTraceProcessor implements TracingProcessor {
   async forceFlush(): Promise<void> {}
 }
 
-// OpenGeni exports observability through its own OTLP pipeline. Replace the
+// Opengeni exports observability through its own OTLP pipeline. Replace the
 // Agents SDK default batch exporter instead of adding to it: the default has no
 // OpenAI tracing key on Azure/Codex deployments and its async timer can leak a
 // rejected export promise into the SDK's process-global unhandled-rejection
@@ -122,12 +138,85 @@ export function withModelPreparationObserver<T>(
 export function withModelTransportStartedObserver<T>(
   observer: (() => Promise<void> | void) | undefined,
   callback: () => T,
+  dispatched?: (clock: ModelTransportDispatchClock) => void,
 ): T {
-  return observer ? modelTransportStartedObserver.run(observer, callback) : callback();
+  return observer || dispatched
+    ? modelTransportStartedObserver.run({ started: observer, dispatched }, callback)
+    : callback();
+}
+
+/** Mark the first model request of the current preparation scope (see firstModelTransportAt). */
+export function markModelPreparationTransportStarted(): void {
+  try {
+    const observation = modelPreparationObserver.getStore();
+    if (observation && observation.firstModelTransportAt === undefined) {
+      observation.firstModelTransportAt = performance.now();
+    }
+  } catch {
+    // Diagnostics must never affect model dispatch.
+  }
 }
 
 export async function recordModelTransportStarted(): Promise<void> {
-  await modelTransportStartedObserver.getStore()?.();
+  markModelPreparationTransportStarted();
+  try {
+    await beforeModelRequest();
+    await modelTransportStartedObserver.getStore()?.started?.();
+  } catch (error) {
+    const admission = modelTransportAdmission.getStore();
+    if (admission) admission.refusal = { error };
+    throw error;
+  }
+}
+
+/** Synchronous diagnostic at literal fetch entry, after all awaited admission
+ * and request-capture setup. Never join the observer or change outcomes. */
+export function recordModelTransportDispatched(monotonicTimeMs: number): void {
+  const observer = modelTransportStartedObserver.getStore()?.dispatched;
+  if (!observer) return;
+  try {
+    const result = observer({ dispatchedAtUnixMs: Date.now(), monotonicTimeMs }) as unknown;
+    // The contract is synchronous, but an accidentally async diagnostic must
+    // neither be joined nor leak a rejected promise into the provider loop.
+    if (result instanceof Promise) void result.catch(() => undefined);
+  } catch {
+    // A diagnostic cannot fence, retry or fail the provider request.
+  }
+}
+
+/** The OpenAI SDK retries thrown fetch errors and replaces their identity with
+ * APIConnectionError. Carry only our pre-wire refusal through its HTTP-error
+ * path, which honors the retry veto. Native transports keep the original throw.
+ * Each fetch owns its context even when concurrent turns share a cached client.
+ */
+export function sdkModelTransportAdmissionFetch(inner: ModelTransportFetch): ModelTransportFetch {
+  return async (input, init) => {
+    const admission: ModelTransportAdmission = {};
+    return modelTransportAdmission.run(admission, async () => {
+      try {
+        return await inner(input, init);
+      } catch (error) {
+        if (!admission.refusal || admission.refusal.error !== error) throw error;
+        // This is a local SDK handoff, not a provider or public API response.
+        // Identity, not response bytes/headers supplied by a provider, grants
+        // access to the original error at the SDK's status-error boundary.
+        const response = new Response(null, {
+          status: 400,
+          headers: { "x-should-retry": "false" },
+        });
+        modelTransportRefusals.set(response.headers, admission.refusal);
+        return response;
+      }
+    });
+  };
+}
+
+/** Restore the exact host-owned error after the SDK has suppressed retries. */
+export function rethrowModelTransportAdmissionRefusal(headers: Headers): void {
+  const refusal = modelTransportRefusals.get(headers);
+  if (!refusal) return;
+  modelTransportRefusals.delete(headers);
+  throw refusal.error;
 }
 
 /** Record the first routed sandbox operation boundary without publishing an
@@ -165,11 +254,18 @@ export function recordModelPreparationMeasurement(measurement: ModelPreparationM
     if (measurement.phase === "mcp_tools_snapshot") {
       if (!observation.runnerGapRecorded) {
         observation.runnerGapRecorded = true;
-        observation.observer({
-          phase: "runner_before_mcp_tools",
-          outcome: measurement.outcome,
-          durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
-        });
+        // Only a snapshot taken before the first model request is pre-first-token preparation;
+        // a later (lazy) snapshot would charge the model's own time to this gap.
+        if (
+          observation.firstModelTransportAt === undefined ||
+          observation.firstModelTransportAt >= startedAt
+        ) {
+          observation.observer({
+            phase: "runner_before_mcp_tools",
+            outcome: measurement.outcome,
+            durationSeconds: Math.max(0, startedAt - observation.startedAt) / 1_000,
+          });
+        }
       }
       if (
         !observation.sdkAfterSandboxRecorded &&

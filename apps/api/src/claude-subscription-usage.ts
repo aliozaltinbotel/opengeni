@@ -2,7 +2,9 @@ import { parseClaudeUsageResponse, type Settings } from "@opengeni/config";
 import { emptyClaudeUsage } from "@opengeni/config";
 import type { ClaudeSubscriptionUsage } from "@opengeni/contracts";
 import {
-  loadClaudeSubscriptionUsageCredential,
+  resolveClaudeSubscriptionCredential,
+  ClaudeSubscriptionConnectionChanged,
+  ClaudeSubscriptionRefreshUnavailable,
   recordClaudeSubscriptionUsage,
   type ClaudeUsageScope,
   type Database,
@@ -10,21 +12,10 @@ import {
 import { readResponseJsonBounded } from "@opengeni/network";
 import { HTTPException } from "hono/http-exception";
 
-/** No inference calls. Inference-only setup tokens retain their response-header cache. */
-export async function refreshClaudeSubscriptionUsage(
-  db: Database,
-  settings: Settings,
-  scope: ClaudeUsageScope,
+export async function requestClaudeUsage(
+  token: string,
   fetchImpl: typeof fetch = globalThis.fetch,
 ) {
-  const credential = await loadClaudeSubscriptionUsageCredential(db, settings, scope);
-  if (!credential) return emptyClaudeUsage(null);
-  const current = credential.usage;
-  if (
-    current.refreshStatus === "scope_required" ||
-    (current.refreshCheckedAt && Date.now() - Date.parse(current.refreshCheckedAt) < 30_000)
-  )
-    return current;
   const checkedAt = new Date().toISOString();
   let status: ClaudeSubscriptionUsage["refreshStatus"] = "unavailable";
   let observation: ReturnType<typeof parseClaudeUsageResponse> = null;
@@ -32,7 +23,7 @@ export async function refreshClaudeSubscriptionUsage(
     const signal = AbortSignal.timeout(10_000);
     const response = await fetchImpl("https://api.anthropic.com/api/oauth/usage", {
       headers: {
-        authorization: `Bearer ${credential.token}`,
+        authorization: `Bearer ${token}`,
         "content-type": "application/json",
         "cache-control": "no-cache",
       },
@@ -64,6 +55,35 @@ export async function refreshClaudeSubscriptionUsage(
   } catch {
     // Retain the last provider observation; never imply an unavailable quota is zero.
   }
+
+  return { status, observation, checkedAt };
+}
+
+/** No inference calls. Inference-only setup tokens retain their response-header cache. */
+export async function refreshClaudeSubscriptionUsage(
+  db: Database,
+  settings: Settings,
+  scope: ClaudeUsageScope,
+  fetchImpl: typeof fetch = globalThis.fetch,
+) {
+  const credential = await resolveClaudeSubscriptionCredential(db, settings, scope, {
+    fetchImpl,
+  }).catch((error) => {
+    if (error instanceof ClaudeSubscriptionConnectionChanged)
+      throw new HTTPException(409, { message: error.message });
+    if (error instanceof ClaudeSubscriptionRefreshUnavailable)
+      throw new HTTPException(503, { message: error.message });
+    throw error;
+  });
+  if (!credential) return emptyClaudeUsage(null);
+  if ("reconnectRequired" in credential) return credential.usage;
+  const current = credential.usage;
+  if (
+    current.refreshStatus === "scope_required" ||
+    (current.refreshCheckedAt && Date.now() - Date.parse(current.refreshCheckedAt) < 30_000)
+  )
+    return current;
+  const { status, observation, checkedAt } = await requestClaudeUsage(credential.token, fetchImpl);
   const result = await recordClaudeSubscriptionUsage(db, settings, scope, {
     token: credential.token,
     expectedConnectionId: credential.connectionId,

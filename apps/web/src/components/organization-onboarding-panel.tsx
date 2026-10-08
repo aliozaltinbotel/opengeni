@@ -8,7 +8,7 @@ import {
   MailIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
 import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
@@ -22,6 +22,11 @@ import {
   ModelAccessOnboardingPanel,
   type IncludedOnboardingModel,
 } from "@/components/model-access-onboarding";
+import {
+  DeveloperSetupStep,
+  type OnboardingDestination,
+} from "@/components/onboarding/developer-setup-step";
+import { OnboardingUseCaseStep } from "@/components/onboarding/use-case-step";
 import { Button } from "@/components/ui/button";
 import { TechnicalDetails } from "@/components/ui/error-message";
 import { Input } from "@/components/ui/input";
@@ -32,6 +37,12 @@ import {
   userErrorTextWithoutReference,
 } from "@/lib/api-error";
 import { includedDefaultModel } from "@/lib/model-access-onboarding";
+import { onboardingJourney, useOnboardingStep } from "@/lib/onboarding-analytics";
+import {
+  storeOnboardingUseCase,
+  storedOnboardingUseCase,
+  type OnboardingUseCase,
+} from "@/lib/onboarding-use-case";
 import {
   loadModelAccessOnboarding,
   type StartingCreditsOnboarding,
@@ -42,6 +53,8 @@ import {
   type OrganizationInvitationContinuation,
 } from "@/lib/organization-invitation-continuation";
 import type { OrganizationInvitation } from "@/types";
+import { rememberPendingDeveloperSetup } from "@/lib/pending-developer-setup";
+import { rememberSignupUseCase } from "@/lib/signup-starter-set";
 
 export function OrganizationOnboardingPanel({
   onComplete,
@@ -58,8 +71,10 @@ export function OrganizationOnboardingPanel({
   onUseInvitedAccount,
   onSignOut,
   onUseAnotherAccount,
+  initialUseCase,
 }: {
-  onComplete: () => void;
+  /** Leaves onboarding; a destination opens that chat instead of the home page. */
+  onComplete: (destination?: OnboardingDestination) => void;
   client?: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
@@ -80,6 +95,11 @@ export function OrganizationOnboardingPanel({
   onSignOut?: () => Promise<void> | void;
   /** Adds or selects a different browser account without signing this one out. */
   onUseAnotherAccount?: () => void;
+  /**
+   * Skip the "How do you want to use Opengeni?" question with this answer
+   * (previews and embedders). Omitted asks it before the organization name.
+   */
+  initialUseCase?: OnboardingUseCase;
 }) {
   const [state, setState] = useState<SelfServiceOrganizationOnboardingState | null>(
     previewState ?? null,
@@ -99,6 +119,15 @@ export function OrganizationOnboardingPanel({
     organizationId: string;
     personalWorkspaceId: string;
   } | null>(null);
+  const [useCase, setUseCaseState] = useState<OnboardingUseCase | null>(
+    () => initialUseCase ?? (previewState ? null : storedOnboardingUseCase()),
+  );
+  const setUseCase = (choice: OnboardingUseCase | null) => {
+    if (!previewState) storeOnboardingUseCase(choice);
+    setUseCaseState(choice);
+  };
+  // "Add AI agents to my product" continues past the model step to developer setup.
+  const [modelStepDone, setModelStepDone] = useState(false);
   const operationId = useRef(crypto.randomUUID());
   const invitationOperationIds = useRef(new Map<string, string>());
   // An explicit `includedModel` or `startingCredits` (previews, embedders) is
@@ -123,6 +152,18 @@ export function OrganizationOnboardingPanel({
     includedModel: IncludedOnboardingModel | null;
     startingCredits: StartingCreditsOnboarding | null;
   } | null>(null);
+  // Consent-gated onboarding journey; the model step reports itself.
+  useOnboardingStep(
+    state === null || state === "unavailable" || createdSetup
+      ? null
+      : state === "invitation_pending" || invitation
+        ? "invitation"
+        : useCase === null
+          ? "use_case"
+          : "organization_name",
+    undefined,
+    !previewState,
+  );
   const confirmingOrganizationId = createdSetup?.organizationId ?? null;
   const confirmingWorkspaceId = createdSetup?.personalWorkspaceId ?? null;
 
@@ -234,6 +275,7 @@ export function OrganizationOnboardingPanel({
       });
       invitationOperationIds.current.delete(selectedInvitation.id);
       clearOrganizationInvitationContinuation();
+      onboardingJourney().completed("invitation", "joined");
       onComplete();
     } catch (error) {
       setInvitationError(userErrorText(error));
@@ -254,7 +296,26 @@ export function OrganizationOnboardingPanel({
         const created = await completeSelfServiceOrganizationSetup({
           organizationName: normalizedName,
           operationId: operationId.current,
+          ...(useCase ? { useCase } : {}),
         });
+        onboardingJourney().completed("organization_name", "created");
+        // Durable from here on (signup use case + pending developer setup).
+        storeOnboardingUseCase(null);
+        // The new-chat page leads with suggestions for the answer.
+        if (useCase && activeEmail) {
+          rememberSignupUseCase({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            useCase,
+          });
+        }
+        if (useCase === "embed" && activeEmail) {
+          rememberPendingDeveloperSetup({
+            account: activeEmail,
+            organizationId: created.organizationId,
+            organizationName: normalizedName,
+          });
+        }
         setCreatedSetup({
           organizationId: created.organizationId,
           personalWorkspaceId: created.personalWorkspaceId,
@@ -445,17 +506,29 @@ export function OrganizationOnboardingPanel({
       includedModel !== undefined ? includedModel : (live?.includedModel ?? null);
     const effectiveStartingCredits =
       startingCredits !== undefined ? startingCredits : (live?.startingCredits ?? null);
+    const developerSetup = useCase === "embed";
+    if (developerSetup && modelStepDone)
+      return frame(
+        <DeveloperSetupStep
+          client={client}
+          organizationId={createdSetup.organizationId}
+          organizationName={organizationName.trim() || undefined}
+          onComplete={onComplete}
+        />,
+      );
     return frame(
       <ModelAccessOnboardingPanel
         client={client}
         organizationId={createdSetup.organizationId}
+        organizationName={organizationName.trim() || undefined}
         workspaceId={createdSetup.personalWorkspaceId}
         billingMode={billingMode}
         codexEnabled={codexEnabled}
         supergrokEnabled={supergrokEnabled}
         includedModel={effectiveIncludedModel}
         startingCredits={effectiveStartingCredits}
-        onComplete={onComplete}
+        continueToNextStep={developerSetup}
+        onComplete={developerSetup ? () => setModelStepDone(true) : () => onComplete()}
       />,
     );
   }
@@ -474,6 +547,17 @@ export function OrganizationOnboardingPanel({
           </p>
         </div>
       </section>,
+    );
+  }
+
+  if (useCase === null) {
+    return frame(
+      <OnboardingUseCaseStep
+        onChoose={(choice) => {
+          if (!previewState) onboardingJourney().completed("use_case", choice);
+          setUseCase(choice);
+        }}
+      />,
     );
   }
 
@@ -515,8 +599,53 @@ export function OrganizationOnboardingPanel({
           )}
           Create organization
         </Button>
+        {initialUseCase === undefined ? (
+          <Button
+            type="button"
+            variant="ghost"
+            className="mt-2 w-full text-fg-muted"
+            disabled={busy}
+            onClick={() => setUseCase(null)}
+          >
+            Back
+          </Button>
+        ) : null}
       </form>
     </section>,
+  );
+}
+
+/**
+ * The developer setup step again after a reload, a closed tab or another
+ * device: the person chose "Add AI agents to my product" and has not picked
+ * an option or skipped yet. It reuses a live setup key (its token was shown
+ * once) and offers to replace it rather than minting another.
+ */
+export function ResumedDeveloperSetup({
+  client,
+  organizationId,
+  organizationName,
+  activeEmail,
+  onSignOut,
+  onComplete,
+}: {
+  client: ComponentProps<typeof DeveloperSetupStep>["client"];
+  organizationId: string;
+  organizationName?: string | undefined;
+  activeEmail: string | null;
+  onSignOut?: (() => Promise<void> | void) | undefined;
+  onComplete: (destination?: OnboardingDestination) => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <OnboardingAccountHeader email={activeEmail} onSignOut={onSignOut} />
+      <DeveloperSetupStep
+        client={client}
+        organizationId={organizationId}
+        organizationName={organizationName}
+        onComplete={onComplete}
+      />
+    </div>
   );
 }
 

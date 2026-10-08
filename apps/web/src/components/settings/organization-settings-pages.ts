@@ -1,5 +1,6 @@
 import {
   BlocksIcon,
+  ChartColumnIcon,
   CodeIcon,
   CreditCardIcon,
   FingerprintIcon,
@@ -22,7 +23,8 @@ type OrganizationSettingsItem = {
 /**
  * The organization's settings pages: one name and one icon each, in rail order.
  * A page that exists at both scopes wears the same icon in the workspace rail
- * (`settings-rail.tsx`): General, People/Access, Models, Developer, Security.
+ * (`settings-rail.tsx`): General, People/Access, Developer, Security. Models lives
+ * here only: every model setting, a workspace's included, is on that one page.
  */
 export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = [
   { id: "general", label: "General", icon: SlidersHorizontalIcon },
@@ -31,7 +33,8 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
   { id: "identity", label: "Organization identity", icon: FingerprintIcon },
   { id: "models", label: "Models", icon: SparklesIcon },
   { id: "integrations", label: "Integrations", icon: BlocksIcon },
-  { id: "billing", label: "Billing & usage", icon: CreditCardIcon },
+  { id: "insights", label: "Insights", icon: ChartColumnIcon },
+  { id: "billing", label: "Billing", icon: CreditCardIcon },
   { id: "developer", label: "Developer", icon: CodeIcon },
   { id: "security", label: "Security & data", icon: ShieldCheckIcon },
 ];
@@ -42,7 +45,7 @@ export const ORGANIZATION_SETTINGS_ITEMS: readonly OrganizationSettingsItem[] = 
  */
 export const ORGANIZATION_SETTINGS_GROUPS: readonly (readonly OrganizationAdminSection[])[] = [
   ["general", "people", "workspaces", "identity"],
-  ["models", "integrations", "billing", "developer", "security"],
+  ["models", "integrations", "insights", "billing", "developer", "security"],
 ];
 
 export function organizationSettingsLabel(section: OrganizationAdminSection): string {
@@ -63,16 +66,18 @@ export function organizationSettingsDescription(
     case "workspaces":
       return `Shared workspaces in ${organizationName}. Everyone also has a private Personal workspace.`;
     case "models":
-      return "Subscriptions and API keys the organization pays for, and which workspaces can use them.";
+      return `What pays for models in ${organizationName}, and what each workspace starts with and allows.`;
     case "integrations":
       // "Allowed integrations" and its one row say it all.
       return undefined;
     case "identity":
       return "Who the organization is and what it does, for every agent.";
+    case "insights":
+      return `Spend, tokens and model calls across ${organizationName}.`;
     case "billing":
-      return "Credits, plan and usage by workspace.";
+      return "Credits, payments and workspace budgets.";
     case "developer":
-      return "Organization API keys and the integration guide.";
+      return "API keys, webhooks and a credential provider for products built on Opengeni.";
     case "security":
       return "Private chats, how long data is kept, and recovery.";
   }

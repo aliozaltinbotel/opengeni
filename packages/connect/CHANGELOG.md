@@ -1,5 +1,41 @@
 # @opengeni/connect
 
+## 1.4.4
+
+## 1.4.3
+
+## 1.4.2
+
+## 1.4.1
+
+## 1.4.0
+
+## 1.3.0
+
+## 1.2.0
+
+## 1.1.0
+
+## 1.0.2
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.3.2
+
+### Patch Changes
+
+- 946f6c3: Keep OAuth completion polling active when browser isolation detaches the provider window, and discover authentication for custom MCP connection setup from the live endpoint. Resolve tool-permission discovery for selectors with a single matching account, refusing ambiguous account choices.
+
+## 0.3.1
+
+### Patch Changes
+
+- d9ec660: Avoid browser warnings when an isolated sign-in window cannot be closed, and clarify the Claude authorization-code handoff.
+
 ## 0.3.0
 
 ### Minor Changes

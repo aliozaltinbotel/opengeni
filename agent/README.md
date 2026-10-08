@@ -1,7 +1,7 @@
 # `opengeni-agent` — the Connected Machine agent (Rust workspace)
 
 The Rust agent that turns a user's own machine into a **Connected Machine** — a
-first-class, co-equal PRIMARY OpenGeni compute target (the `selfhosted` backend,
+first-class, co-equal PRIMARY Opengeni compute target (the `selfhosted` backend,
 internally). This is a standalone Cargo workspace — it is **not** part of the bun
 monorepo (the bun workspaces glob excludes it, and Cargo build output is gitignored).
 
@@ -9,7 +9,7 @@ monorepo (the bun workspaces glob excludes it, and Cargo build output is gitigno
 [`../docs/architecture.md`](../docs/architecture.md) §3.8 and [`../AGENTS.md`](../AGENTS.md)):
 a machine-targeted turn runs on this agent **directly** — the control plane
 establishes the session on the machine and does **not** create, lease, or bill a
-cloud box for it. It ships no durable OpenGeni credential or platform Git setup,
+cloud box for it. It ships no durable Opengeni credential or platform Git setup,
 so this agent authenticates Git with the machine's **own** credentials. The sole
 transient exception is a renewable exact-attempt Codemode bearer placed only in
 each authorized child exec; this binary exposes `codemode list|call|doctor` there and
@@ -75,6 +75,12 @@ pages or guarantee graceful completion for a permanently stuck controller.
   dir or the direct GitHub-Releases URL). A script served by a deployment also
   defaults `OPENGENI_API_URL` to that deployment's public origin; the committed
   managed-cloud fallback is `https://app.opengeni.ai`.
+  Linux/macOS use an installed minisign/rsign or a capability-tested OpenSSL.
+  Otherwise the installer downloads a temporary upstream minisign 0.11 verifier,
+  authenticates its archive against a SHA-256 pinned in the script before execution,
+  then verifies the agent with the existing signing key. No verifier is installed
+  on the host. `OPENGENI_MINISIGN_BOOTSTRAP_BASE_URL` may point to a mirror of those
+  exact archives; it cannot override their checksum pins.
   [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).
 - **Signing key** — the minisign **public** key is committed at
@@ -109,7 +115,7 @@ pages or guarantee graceful completion for a permanently stuck controller.
   (matrix build → minisign-sign + sha256 → GitHub Release; macOS notarize + Windows
   Authenticode are guarded creds-drop-ins that skip cleanly when absent).
 
-## One agent, many OpenGeni deployments
+## One agent, many Opengeni deployments
 
 Install the binary once, then run the one-liner from every workspace you want
 this machine to serve. `opengeni-agent connect` adds or refreshes only that exact

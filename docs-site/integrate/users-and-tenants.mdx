@@ -1,0 +1,52 @@
+---
+title: "Users, tenants & privacy"
+description: "How your users and tenants map to Opengeni workspaces, who sees which chats, and how to remove access."
+icon: "users-gear"
+---
+
+Your proxy's `resolve` returns your own ids for the signed-in user. Opengeni maps them to a workspace, creates it on first use, and adds the user on their first request. There is no onboarding step.
+
+| `resolve` returns       | Workspace        | Use it when                                        |
+| ----------------------- | ---------------- | -------------------------------------------------- |
+| `{ user, tenant }`      | One per tenant   | A team or customer shares data, tools, and billing |
+| `{ user }`              | One per user     | Each user is their own boundary                    |
+| `{ user, workspaceId }` | The one you name | You already manage workspaces yourself             |
+
+A workspace is where sessions, files, knowledge, and connections live. Hundreds of them are normal.
+
+Return immutable ids from your auth system, never an email or username. Take them from your server-side session, never from the request body or URL.
+
+New users get conversation permissions: read the workspace, create and control their sessions, upload and read files, and attach the tools you pass per session. They never get admin. The API key must hold `members:manage`; a full-access key does.
+
+## Choose who shares chats
+
+Chats are private to the user who started them. Set `chats: "shared"` on the proxy to let everyone in the workspace see each other's chats:
+
+| `chats`               | Who sees a chat           | The agent reaches | Knowledge is saved to         |
+| --------------------- | ------------------------- | ----------------- | ----------------------------- |
+| `"private"` (default) | Only the user             | Its own session   | The user's personal knowledge |
+| `"shared"`            | Everyone in the workspace | The workspace     | The workspace                 |
+
+Private chats must be enabled for your organization. If they are off, the proxy returns an error that says who can turn them on.
+
+## Removing a user
+
+Stop resolving them: a user your `resolve` rejects can't reach Opengeni. Delete their sessions too if you also want their data gone. Removing a tenant: delete its workspace (see [Going to production](/integrate/production#clean-up)).
+
+On sign-out or an account switch, remount the conversation.
+
+## Server-side work
+
+`og.workspaceId({ tenant })` (or `{ user }`) returns the same workspace id the proxy uses, for creating sessions, schedules, or integrations from your server.
+
+## What is enforced where
+
+**Opengeni enforces** workspace membership on every call, private chat ownership, and each member's permissions within your key's.
+
+**Your product enforces** who your users are, which tenant they belong to, and what they may do in your own API. Use `resolve` for identity, `authorizeSession` for per-chat checks, and authorize every tool call your API receives.
+
+The API key can read every session in your organization's shared workspaces. Keep it on your server.
+
+## Advanced
+
+To choose permissions yourself, use the explicit member APIs: `ensureWorkspace`, `addExternalWorkspaceMember`, `updateExternalWorkspaceMember`, and `cancelExternalWorkspaceMemberGrant` (see the [SDK reference](/reference/sdk)).

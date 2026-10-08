@@ -29,6 +29,7 @@ import {
 import {
   FILE_ONLY_MESSAGE_TEXT,
   LightboxProvider,
+  ModelMark,
   useChannels,
   useVariableSets,
   useWorkspaceSessions,
@@ -46,7 +47,14 @@ import {
   type VariableSetAttachmentMetadata,
 } from "@opengeni/sdk";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { ChevronDownIcon, FolderIcon, LockIcon, PlusIcon, ServerCogIcon } from "lucide-react";
+import {
+  ChevronDownIcon,
+  CreditCardIcon,
+  FolderIcon,
+  LockIcon,
+  PlusIcon,
+  ServerCogIcon,
+} from "lucide-react";
 import {
   createElement,
   lazy,
@@ -95,9 +103,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "@/lib/transient-retry";
 import { Select } from "@/components/ui/select";
 import { useConnectionAccounts } from "@/components/capabilities/use-connection-accounts";
-import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import { StatusDot } from "@/components/ui/status-dot";
 import { useAppContext, useLatestCallback } from "@/context";
 import { useBrowserAccountBridgeBlocker } from "@/lib/browser-account-bridge";
 import {
@@ -111,7 +120,6 @@ import {
   type CreateComposerFocusIntent,
 } from "@/lib/create-composer-focus";
 import type { RepoDraft } from "@/lib/session-tools";
-import { displayModel } from "@/lib/format";
 import { composerFallbackModel } from "@/lib/model-access-onboarding";
 import {
   isMachineComputeSelectable,
@@ -124,7 +132,6 @@ import {
   runnableLatencyModesForModel,
   type PickerModelRow,
 } from "@/lib/model-policy";
-import { isCodexProductModel } from "@/lib/session-model";
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { attachManualRepository } from "@/lib/manual-repositories";
 import { hasAccountPermission, hasWorkspacePermission } from "@/lib/permissions";
@@ -138,13 +145,31 @@ import {
   resolvePersonalResourceOwnerScope,
   selectableSessionVariableSets,
 } from "@/lib/personal-resource-attachments";
-import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
+import {
+  recentSessionModelPresentation,
+  recentSessionStatus,
+  recentSessionsForHome,
+  relativeTimeLabel,
+  sessionRepoLabel,
+} from "@opengeni/react/session-list-model";
+import { signupStarterSet } from "@/lib/signup-starter-set";
 import {
   useWorkspaceModelCatalog,
   type WorkspaceModelCatalogState,
 } from "@/lib/use-workspace-model-catalog";
+import { resolveWorkspaceAgentDefaults } from "@opengeni/contracts";
+import { ComposerCapabilitiesChip } from "@/components/composer-capabilities-chip";
+import {
+  capabilityAvailability,
+  capabilitySummary,
+  draftFromRequest,
+  requestFromDraft,
+  workspaceAgentDefaultsDraft,
+  type AgentCapabilityDraft,
+} from "@/lib/agent-capabilities";
 import {
   emptySessionDraft,
+  fitToolPolicyToAgentCapabilities,
   isSessionDraftComputeReady,
   newSessionCreateVisibility,
   newSessionDraftOptionsFromSessionDraft,
@@ -187,6 +212,11 @@ const useCommitSynchronousEffect = typeof window === "undefined" ? useEffect : u
 const EmptyCreditsNotice = lazy(() =>
   import("@/components/credit-required-prompt").then((module) => ({
     default: module.EmptyCreditsNotice,
+  })),
+);
+const CreditTopupPrompt = lazy(() =>
+  import("@/components/credit-required-prompt").then((module) => ({
+    default: module.CreditRequiredPrompt,
   })),
 );
 
@@ -278,10 +308,51 @@ function SessionsIndexRouteContent({
   const [projectNameDraft, setProjectNameDraft] = useState("");
   const { resetSessionView } = context;
   const [message, setMessage] = useState("");
+  const [creditTopupOpen, setCreditTopupOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() =>
     emptySessionDraft(defaultFirstPartyMcpTools, defaultSandboxBackend),
   );
   const personalWorkspace = isPersonalWorkspace(workspace, context.managedSelfContext);
+  const [capabilitiesOpenRequest, setCapabilitiesOpenRequest] = useState<
+    { panel: "capabilities"; nonce: number } | undefined
+  >(undefined);
+  // "+" > Capabilities: the workspace's defaults, or this chat's own choice.
+  const agentAvailability = useMemo(
+    () => capabilityAvailability(context.clientConfig.agentConfig),
+    [context.clientConfig.agentConfig],
+  );
+  const workspaceAgentDraft = useMemo(
+    () =>
+      workspaceAgentDefaultsDraft({
+        capabilities: resolveWorkspaceAgentDefaults(workspace?.settings)?.capabilities,
+        legacyHumanInputOff: workspace?.settings.agentHumanInputEnabled === false,
+      }),
+    [workspace?.settings],
+  );
+  const composerAgentCapabilities = {
+    customized: draft.agentCapabilities !== undefined,
+    draft:
+      draft.agentCapabilities !== undefined
+        ? draftFromRequest(draft.agentCapabilities)
+        : workspaceAgentDraft,
+    availability: agentAvailability,
+    onCustomizedChange: (customized: boolean) =>
+      setDraft((current) => {
+        if (!customized) {
+          const { agentCapabilities: _dropped, ...rest } = current;
+          return rest;
+        }
+        return {
+          ...current,
+          agentCapabilities: requestFromDraft(workspaceAgentDraft, agentAvailability),
+        };
+      }),
+    onChange: (next: AgentCapabilityDraft) =>
+      setDraft((current) => ({
+        ...current,
+        agentCapabilities: requestFromDraft(next, agentAvailability),
+      })),
+  };
   const attachments = useDraftAttachments(
     workspaceId,
     personalWorkspace || draft.visibility === "private" ? "personal" : "workspace",
@@ -765,14 +836,17 @@ function SessionsIndexRouteContent({
     (draft.compute.kind !== "machine" || (!fleet.loading && selectedMachine !== null));
   const persistedToolPolicy = useMemo(
     () =>
-      newSessionDraftToolPolicy({
-        selectedMcpServerIds: context.selectedCapabilityToolIds,
-        workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
-        catalogReady: context.workspaceMcpCatalogReady,
-        customizing: connectorCustomizing,
-        explicit: toolSelectionExplicit,
-        ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
-      }),
+      fitToolPolicyToAgentCapabilities(
+        newSessionDraftToolPolicy({
+          selectedMcpServerIds: context.selectedCapabilityToolIds,
+          workspaceDefaultMcpServerIds: context.workspaceDefaultToolIds,
+          catalogReady: context.workspaceMcpCatalogReady,
+          customizing: connectorCustomizing,
+          explicit: toolSelectionExplicit,
+          ...(!toolSelectionExplicit ? { excludedMcpServerIds: connectorExclusions } : {}),
+        }),
+        draft.agentCapabilities,
+      ),
     [
       context.selectedCapabilityToolIds,
       context.workspaceMcpCatalogReady,
@@ -780,6 +854,7 @@ function SessionsIndexRouteContent({
       toolSelectionExplicit,
       connectorCustomizing,
       connectorExclusions,
+      draft.agentCapabilities,
     ],
   );
   const persistedValue = useMemo(
@@ -1164,9 +1239,7 @@ function SessionsIndexRouteContent({
                 // newer unsent message merely to start a realtime session.
                 const flushed = await newSessionDraft.flush();
                 if (!flushed) {
-                  toast.error("Couldn't save the draft", {
-                    description: draftSaveFailureText(newSessionDraft),
-                  });
+                  reportDraftSaveFailure(newSessionDraft);
                   return null;
                 }
                 const submission = submissionFromSessionDraft(
@@ -1208,7 +1281,8 @@ function SessionsIndexRouteContent({
                       draftConflict = newSessionDraft.captureConflict(error);
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
-                      return draftConflict;
+                      // A brief outage shows the updating notice, not a toast.
+                      return draftConflict || newSessionDraft.reportUnavailable(error);
                     },
                   },
                 );
@@ -1223,7 +1297,8 @@ function SessionsIndexRouteContent({
                 };
               }
               await preserveNewerLocalDraft();
-              toast.error("Couldn't start voice", { description: "Try again." });
+              newSessionDraft.clearError();
+              toast.error("Couldn't start voice", { description: DRAFT_CHANGED_DURING_SEND_TEXT });
               return null;
             }
 
@@ -1231,9 +1306,7 @@ function SessionsIndexRouteContent({
             for (let attempt = 0; attempt < 3; attempt += 1) {
               const flushed = await newSessionDraft.flushForSend(submittedSnapshot);
               if (!flushed) {
-                toast.error("Couldn't save the draft", {
-                  description: draftSaveFailureText(newSessionDraft),
-                });
+                reportDraftSaveFailure(newSessionDraft);
                 return null;
               }
               const submission = submissionFromSessionDraft(
@@ -1275,7 +1348,10 @@ function SessionsIndexRouteContent({
                     draftConflict = newSessionDraft.captureConflict(error);
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
-                    return draftConflict;
+                    // A brief outage shows the updating notice, not a toast.
+                    // An unconfirmed create keeps its idempotency key, so the
+                    // person's next Send cannot start a second session.
+                    return draftConflict || newSessionDraft.reportUnavailable(error);
                   },
                 },
               );
@@ -1321,8 +1397,11 @@ function SessionsIndexRouteContent({
               };
             }
             await preserveNewerLocalDraft();
+            // Each attempt saved the draft before the create refused it, so the
+            // draft is not unsaved: clear that notice and resume autosave.
+            newSessionDraft.clearError();
             toast.error("Couldn't send", {
-              description: "Your message is still here. Try again.",
+              description: DRAFT_CHANGED_DURING_SEND_TEXT,
             });
             return null;
           },
@@ -1483,7 +1562,9 @@ function SessionsIndexRouteContent({
     resolveDraftConflict: newSessionDraft.resolveConflict,
     restoredResources: [],
     removeRestoredResource: () => {},
-    error: newSessionDraft.conflict ? null : newSessionDraft.error,
+    // A brief outage is explained once by the updating notice below the
+    // composer, never as a red error with a request reference.
+    error: newSessionDraft.unavailable || newSessionDraft.conflict ? null : newSessionDraft.error,
     clearError: newSessionDraft.clearError,
     send: async () => await submitNewSession(null),
     steer: async () => {
@@ -1519,6 +1600,9 @@ function SessionsIndexRouteContent({
       : null;
   });
 
+  // A transient outage is covered by the updating notice instead.
+  const accountsFailure = connectionAccounts.error !== null && !connectionAccounts.unavailable;
+
   return createElement(
     LightboxProvider,
     null,
@@ -1531,6 +1615,32 @@ function SessionsIndexRouteContent({
           <h1 className="text-balance text-2xl font-semibold tracking-tight sm:text-3xl">
             What should the agent do?
           </h1>
+          {context.clientConfig.billingMode === "stripe" &&
+          workspace?.accountId &&
+          hasAccountPermission(context.accessContext, workspace.accountId, "billing:manage") ? (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="mt-2"
+                onClick={() => setCreditTopupOpen(true)}
+              >
+                <CreditCardIcon className="size-4" />
+                Add credits
+              </Button>
+              <Suspense fallback={null}>
+                <CreditTopupPrompt
+                  purpose="topup"
+                  open={creditTopupOpen}
+                  workspaceId={workspaceId}
+                  accountId={workspace.accountId}
+                  canBuyCredits
+                  onOpenChange={setCreditTopupOpen}
+                />
+              </Suspense>
+            </>
+          ) : null}
         </section>
 
         {launchSkillCapabilityId ? (
@@ -1547,6 +1657,7 @@ function SessionsIndexRouteContent({
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice
+                creditFunding={selectedPolicyRow?.catalog.creditFunding}
                 workspaceId={workspaceId}
                 accountId={workspace?.accountId ?? null}
                 canBuyCredits={hasAccountPermission(
@@ -1570,132 +1681,156 @@ function SessionsIndexRouteContent({
             fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
             placeholder="Describe a task for the agent…"
             controlsLeading={
-              <ComposerMobilePlus
-                connectorActions={{
-                  accountControls: {
-                    groups: connectionAccounts.availableAccountGroups,
-                    choices: connectionAccounts.accountChoices,
-                    onChoose: connectionAccounts.selectAccount,
-                    loading: connectionAccounts.loading,
-                    error: connectionAccounts.error,
-                    accessDenied: connectionAccounts.accessDenied,
-                    onRefresh: () => void connectionAccounts.refresh(),
+              <>
+                <ComposerMobilePlus
+                  openRequest={capabilitiesOpenRequest}
+                  connectorActions={{
+                    accountControls: {
+                      groups: connectionAccounts.availableAccountGroups,
+                      choices: connectionAccounts.accountChoices,
+                      onChoose: connectionAccounts.selectAccount,
+                      loading: connectionAccounts.loading,
+                      error: connectionAccounts.error,
+                      accessDenied: connectionAccounts.accessDenied,
+                      onRefresh: () => void connectionAccounts.refresh(),
+                      disabled: busy || newSessionDraft.loading,
+                    },
+                  }}
+                  menuSide="bottom"
+                  agentCapabilities={{
+                    ...composerAgentCapabilities,
                     disabled: busy || newSessionDraft.loading,
-                  },
-                }}
-                menuSide="bottom"
-                draftChatSettings={{
-                  workspaceId,
-                  scope:
-                    createVisibility === "private" || personalWorkspace ? "personal" : "workspace",
-                  value: draft.agentLearning ?? {},
-                  onChange: (agentLearning) =>
-                    setDraft((current) => ({ ...current, agentLearning })),
-                }}
-                workspaceId={workspaceId}
-                disabled={busy || newSessionDraft.loading}
-                fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
-                servers={context.toolMcpServers}
-                firstPartyTools={firstPartyToolOptions}
-                selection={{
-                  mcpServerIds: context.selectedCapabilityToolIds,
-                  firstPartyToolIds: draft.firstPartyMcpTools,
-                }}
-                toolsDisabled={busy || newSessionDraft.loading}
-                connectorCustomizing={connectorCustomizing}
-                onConnectorCustomizingChange={(next) => {
-                  if (next) setConnectorCustomizing(true);
-                  else followWorkspaceConnectors();
-                }}
-                onToolSelectionChange={(selection) => {
-                  changeConnectorSelection(selection);
-                }}
-                {...(hasRunsOnChoices(runsOnChoices)
-                  ? {
-                      runsOn: {
-                        summary: runsOnSummary(runsOnChoices),
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <RunsOnMenuBody
-                            {...runsOnChoices}
-                            disabled={busy || newSessionDraft.loading}
-                            onChange={setDraft}
-                            onComputeChange={setExplicitComputeDraft}
-                            onRetryMachines={() => void fleet.refresh()}
-                          />
-                        ),
-                      },
+                  }}
+                  draftChatSettings={{
+                    workspaceId,
+                    scope:
+                      createVisibility === "private" || personalWorkspace
+                        ? "personal"
+                        : "workspace",
+                    value: draft.agentLearning ?? {},
+                    onChange: (agentLearning) =>
+                      setDraft((current) => ({ ...current, agentLearning })),
+                  }}
+                  workspaceId={workspaceId}
+                  disabled={busy || newSessionDraft.loading}
+                  fileUploadsEnabled={context.clientConfig.fileUploads.enabled === true}
+                  servers={context.toolMcpServers}
+                  firstPartyTools={firstPartyToolOptions}
+                  selection={{
+                    mcpServerIds: context.selectedCapabilityToolIds,
+                    firstPartyToolIds: draft.firstPartyMcpTools,
+                  }}
+                  toolsDisabled={busy || newSessionDraft.loading}
+                  connectorCustomizing={connectorCustomizing}
+                  onConnectorCustomizingChange={(next) => {
+                    if (next) setConnectorCustomizing(true);
+                    else followWorkspaceConnectors();
+                  }}
+                  onToolSelectionChange={(selection) => {
+                    changeConnectorSelection(selection);
+                  }}
+                  {...(hasRunsOnChoices(runsOnChoices)
+                    ? {
+                        runsOn: {
+                          summary: runsOnSummary(runsOnChoices),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <RunsOnMenuBody
+                              {...runsOnChoices}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={setDraft}
+                              onComputeChange={setExplicitComputeDraft}
+                              onRetryMachines={() => void fleet.refresh()}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(hasVisibilityChoice({
+                    personalWorkspace,
+                    canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
+                  })
+                    ? {
+                        visibility: {
+                          summary: visibilitySummary(draft.visibility),
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <VisibilityMenuBody
+                              value={draft.visibility}
+                              disabled={busy || newSessionDraft.loading}
+                              onChange={(visibility) =>
+                                setDraft((current) => ({ ...current, visibility }))
+                              }
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        repositories: {
+                          selectedCount:
+                            context.selectedRepoIds.size +
+                            context.selectedPersonalGitHubRepoIds.size +
+                            context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
+                          disabled: busy || newSessionDraft.loading,
+                          panel: (
+                            <WorkspaceRepositoryMenuBody
+                              workspaceId={workspaceId}
+                              disabled={busy || newSessionDraft.loading}
+                              catalogRefresh={repositoryCatalogRefresh}
+                              onConnectWorkspaceApp={githubAppConnect.open}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                  {...(draft.compute.kind === "sandbox"
+                    ? {
+                        variableSets: {
+                          selectedCount: draft.variableSetIds.length,
+                          panel: (
+                            <ManagedSandboxFields
+                              variableSetsOnly
+                              variableSetWorkspaceId={workspaceId}
+                              canAttachVariableSets={canAttachVariableSets}
+                              canUseVariableSets={canUseVariableSets}
+                              draft={draft}
+                              onChange={setDraft}
+                              disabled={busy || newSessionDraft.loading}
+                              variableSets={selectableVariableSets}
+                              rigs={selectableRigs}
+                              personalResourceAccess={{
+                                names: selectedPersonalResourceNames,
+                                visibility: createVisibility,
+                              }}
+                              catalogRecovery={{
+                                error: fixedResourceCatalogError,
+                                refreshing: personalResourceCatalogRefreshPending,
+                                onRetry: () => void refreshPersonalResourceCatalogs(),
+                              }}
+                            />
+                          ),
+                        },
+                      }
+                    : {})}
+                />
+                {composerAgentCapabilities.customized ? (
+                  <ComposerCapabilitiesChip
+                    summary={capabilitySummary(
+                      composerAgentCapabilities.draft.values,
+                      composerAgentCapabilities.availability,
+                    )}
+                    disabled={busy || newSessionDraft.loading}
+                    onOpen={() =>
+                      setCapabilitiesOpenRequest((current) => ({
+                        panel: "capabilities",
+                        nonce: (current?.nonce ?? 0) + 1,
+                      }))
                     }
-                  : {})}
-                {...(hasVisibilityChoice({
-                  personalWorkspace,
-                  canCreatePrivate: tenancyCapabilities?.canCreatePrivate === true,
-                })
-                  ? {
-                      visibility: {
-                        summary: visibilitySummary(draft.visibility),
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <VisibilityMenuBody
-                            value={draft.visibility}
-                            disabled={busy || newSessionDraft.loading}
-                            onChange={(visibility) =>
-                              setDraft((current) => ({ ...current, visibility }))
-                            }
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      repositories: {
-                        selectedCount:
-                          context.selectedRepoIds.size +
-                          context.selectedPersonalGitHubRepoIds.size +
-                          context.manualRepos.filter((repo) => repo.url.trim().length > 0).length,
-                        disabled: busy || newSessionDraft.loading,
-                        panel: (
-                          <WorkspaceRepositoryMenuBody
-                            workspaceId={workspaceId}
-                            disabled={busy || newSessionDraft.loading}
-                            catalogRefresh={repositoryCatalogRefresh}
-                            onConnectWorkspaceApp={githubAppConnect.open}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-                {...(draft.compute.kind === "sandbox"
-                  ? {
-                      variableSets: {
-                        selectedCount: draft.variableSetIds.length,
-                        panel: (
-                          <ManagedSandboxFields
-                            variableSetsOnly
-                            variableSetWorkspaceId={workspaceId}
-                            canAttachVariableSets={canAttachVariableSets}
-                            canUseVariableSets={canUseVariableSets}
-                            draft={draft}
-                            onChange={setDraft}
-                            disabled={busy || newSessionDraft.loading}
-                            variableSets={selectableVariableSets}
-                            rigs={selectableRigs}
-                            personalResourceAccess={{
-                              names: selectedPersonalResourceNames,
-                              visibility: createVisibility,
-                            }}
-                            catalogRecovery={{
-                              error: fixedResourceCatalogError,
-                              refreshing: personalResourceCatalogRefreshPending,
-                              onRetry: () => void refreshPersonalResourceCatalogs(),
-                            }}
-                          />
-                        ),
-                      },
-                    }
-                  : {})}
-              />
+                  />
+                ) : null}
+              </>
             }
             controls={
               <div className="@container/model-controls flex min-w-0 flex-1 items-center gap-1.5">
@@ -1761,14 +1896,24 @@ function SessionsIndexRouteContent({
           {personalWorkspace ? <PrivateWorkspaceNote /> : null}
           {newSessionDraft.conflict ? <NewSessionDraftSyncNotice /> : null}
 
+          {/* A deploy or restart makes Opengeni unreachable for a few seconds.
+              Reads retry quietly first; if it lasts longer, this one calm line
+              replaces every error, the message stays in the composer, and the
+              hooks reconnect on their own so Send works again. */}
+          {newSessionDraft.unavailable || connectionAccounts.unavailable ? (
+            <div role="status" className="mt-3">
+              <Notice tone="info">{OPENGENI_UPDATING_NOTICE}</Notice>
+            </div>
+          ) : null}
+
           {/* Accounts load quietly with the composer: only a problem shows here,
               never a loading line behind an open menu. */}
-          {connectionAccounts.error || connectionAccounts.accountChoiceMessage ? (
+          {accountsFailure || connectionAccounts.accountChoiceMessage ? (
             <div role="alert" className="mt-3">
               <Notice
                 tone="waiting"
                 action={
-                  connectionAccounts.error && !connectionAccounts.accessDenied ? (
+                  accountsFailure && !connectionAccounts.accessDenied ? (
                     <Button
                       variant="outline"
                       size="sm"
@@ -1779,10 +1924,10 @@ function SessionsIndexRouteContent({
                   ) : undefined
                 }
               >
-                {connectionAccounts.error
+                {accountsFailure
                   ? connectionAccounts.accessDenied
                     ? connectionAccounts.error
-                    : "Couldn't check connected accounts. Retry to send your message."
+                    : "Couldn't send your message. Try again."
                   : connectionAccounts.accountChoiceMessage}
               </Notice>
             </div>
@@ -1816,6 +1961,8 @@ function SessionsIndexRouteContent({
 
         <RecentSessions workspaceId={workspaceId} />
         <NewSessionStarters
+          workspaceId={workspaceId}
+          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
           disabled={busy || newSessionDraft.loading}
           onSelect={(prompt) => {
             setMessage(prompt);
@@ -1838,10 +1985,26 @@ function SessionsIndexRouteContent({
   );
 }
 
+/** Send kept losing to a newer draft saved elsewhere (another tab or window). */
+const DRAFT_CHANGED_DURING_SEND_TEXT =
+  "Your message is saved, but this draft kept changing in another tab or window. Check it and send again.";
+
 /** A draft that didn't save: the message is kept, then what to do. */
 function draftSaveFailureText(draft: { conflict: Error | null; error: Error | null }): string {
   if (draft.conflict || !draft.error) return "Your message is still here. Try again.";
   return `Your message is still here. ${userErrorText(draft.error)}`;
+}
+
+/** A failed pre-send draft save: a brief outage shows the updating notice instead of a toast. */
+function reportDraftSaveFailure(draft: {
+  conflict: Error | null;
+  currentError: () => Error | null;
+}): void {
+  const error = draft.currentError();
+  if (isTransientServiceFailure(error)) return;
+  toast.error("Couldn't save the draft", {
+    description: draftSaveFailureText({ conflict: draft.conflict, error }),
+  });
 }
 
 // ── Recent sessions — the quiet main-canvas browser the rail can't be (D4.2) ──
@@ -1852,17 +2015,14 @@ function draftSaveFailureText(draft: { conflict: Error | null; error: Error | nu
 function RecentSessions({ workspaceId }: { workspaceId: string }) {
   const { sessions, pinned } = useWorkspaceSessions({
     limit: 12,
+    // Top-level conversations: sub-agents open from their parent and would
+    // otherwise fill this short page in a workspace that runs many of them.
+    parentSessionId: null,
     pollIntervalMs: 30_000,
   });
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
-  const recent = useMemo(() => {
-    const ordinary = sessions.filter((session) => !session.pinned);
-    const { running, grouped } = groupSessionsForRail(ordinary);
-    // Pins are server-authoritative and intentionally sit above ordinary
-    // recency rows here too. `sessions` retains the historical all-visible-row
-    // contract, so remove its pins before recombining the explicit section.
-    return [...pinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(0, 6);
-  }, [pinned, sessions]);
+  // Pins are server-authoritative and sit above running and recency rows.
+  const recent = useMemo(() => recentSessionsForHome(sessions, pinned, 6), [pinned, sessions]);
 
   if (recent.length === 0) {
     return null;
@@ -1889,43 +2049,6 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
-  queued: "queued",
-  running: "running",
-  recovering: "running",
-  waiting_capacity: "waiting",
-  requires_action: "waiting",
-  idle: "idle",
-  failed: "failed",
-  cancelled: "cancelled",
-};
-
-/** A short `owner/repo` label from the session's first repository resource. */
-function sessionRepoLabel(session: Session): string | null {
-  const repo = session.resources.find((resource) => resource.kind === "repository");
-  if (!repo || repo.kind !== "repository") {
-    return null;
-  }
-  const parts = repo.uri
-    .replace(/\.git$/, "")
-    .split("/")
-    .filter(Boolean);
-  return parts.length >= 2 ? parts.slice(-2).join("/") : (parts.at(-1) ?? null);
-}
-
-function recentSessionModelPresentation(
-  modelId: string,
-  catalogRows: readonly PickerModelRow[],
-): { label: string; billingClass: PickerModelRow["billingClass"] } {
-  const row = findPickerRow([...catalogRows], modelId);
-  return {
-    label: row?.label ?? displayModel(modelId),
-    billingClass:
-      row?.billingClass ??
-      (isCodexProductModel(modelId) ? "codex_subscription" : "opengeni_credits"),
-  };
-}
-
 function RecentSessionRow({
   workspaceId,
   session,
@@ -1939,7 +2062,7 @@ function RecentSessionRow({
   const model = recentSessionModelPresentation(session.model, catalogRows);
   const repo = sessionRepoLabel(session);
   const metaBits = [model.label, repo].filter(Boolean);
-  const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
+  const status = recentSessionStatus(session);
   return (
     <li className="min-w-0">
       <Link
@@ -1947,18 +2070,21 @@ function RecentSessionRow({
         params={{ workspaceId, sessionId: session.id }}
         className="group flex items-center gap-3 rounded-md px-1 py-2.5 transition-colors hover:bg-hover"
       >
-        <StatusDot
-          tone={hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status]}
-          pulse={hasBackgroundCommand || session.status === "running"}
-        />
+        <StatusDot tone={status.tone} pulse={status.pulse} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-sm text-fg group-hover:text-fg">{title}</span>
           {metaBits.length > 0 ? (
             <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-2xs text-fg-subtle">
-              <BillingClassMark
-                billingClass={model.billingClass}
+              <ModelMark
+                model={{ id: session.model, logoUrl: model.logoUrl }}
                 className="size-3 text-fg-muted"
-                aria-label=""
+                fallback={
+                  <BillingClassMark
+                    billingClass={model.billingClass}
+                    className="size-3"
+                    aria-label=""
+                  />
+                }
               />
               <span className="truncate">{metaBits.join(" · ")}</span>
             </span>
@@ -2022,6 +2148,9 @@ function SessionModelControl({
   return (
     <ModelPicker
       hasImageAttachments={hasImageAttachments}
+      onOpenChange={(open) => {
+        if (open) void modelCatalog.refresh();
+      }}
       rows={modelCatalog.rows}
       model={context.model}
       effort={context.reasoningEffort}
@@ -2067,7 +2196,7 @@ function SessionFolderPicker({
       <DropdownMenuTrigger asChild>
         <Button
           type="button"
-          variant="secondary"
+          variant="outline"
           size="sm"
           disabled={disabled}
           aria-label={`Project: ${label}`}

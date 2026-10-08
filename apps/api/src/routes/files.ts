@@ -79,6 +79,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     "/v1/workspaces/:workspaceId/files",
     "/v1/workspaces/:workspaceId/files/*",
     "/v1/workspaces/:workspaceId/artifacts/*",
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/artifacts/*",
   ]) {
     app.use(path, async (c, next) => {
       const permission = c.req.method === "DELETE" || c.req.path.includes("/files/uploads") ? "files:upload" : "files:read";

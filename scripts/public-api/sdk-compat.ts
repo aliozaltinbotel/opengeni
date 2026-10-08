@@ -19,7 +19,8 @@
  *   OPENGENI_SDK_COMPAT_MINORS=3               minor lines under the default policy
  *   OPENGENI_SDK_COMPAT_CACHE_DIR=<dir>        install cache ($TMPDIR/opengeni-sdk-compat)
  *   OPENGENI_SDK_COMPAT_CONCURRENCY=1|2        versions run in parallel (max 2, default 2)
- *   OPENGENI_REQUIRE_REAL_DB=1                 fail (instead of skip) without docker
+ *   OPENGENI_REQUIRE_REAL_DB=1                 fail (instead of skip) without a real fixture
+ *   OPENGENI_TEST_PG_URL=<maintenance-url>     explicit native PostgreSQL fixture
  *
  * Default version policy: the latest stable patch of each of the last N
  * (default 3) stable minor lines WITHIN the major of the npm dist-tag `latest`.
@@ -27,7 +28,8 @@
  * listed explicitly; a published SDK of an older major carries an older API
  * contract revision and is expected to be rejected by design.
  *
- * Requires docker (the shared PostgreSQL test container from @opengeni/testing).
+ * Uses the shared PostgreSQL harness from @opengeni/testing, with either Docker
+ * or the explicitly configured native OPENGENI_TEST_PG_URL fixture.
  * No Temporal, model, or sandbox is needed: the check stops at API acceptance and
  * durable PostgreSQL state (see the header of the test file).
  */
@@ -156,12 +158,22 @@ async function resolveFromRegistry(minors: number): Promise<string[]> {
   if (!response.ok) fail(`npm registry returned ${response.status} for ${PACKAGE}`);
   const body = (await response.json()) as {
     "dist-tags"?: Record<string, string>;
-    versions?: Record<string, unknown>;
+    versions?: Record<string, { deprecated?: unknown } | undefined>;
   };
   const latest = body["dist-tags"]?.latest;
   const latestMatch = latest ? SEMVER.exec(latest) : null;
   if (!latestMatch) fail(`npm dist-tag latest is not a stable version: ${String(latest)}`);
-  const stable = Object.keys(body.versions ?? {}).filter((version) => SEMVER.test(version));
+  // Retired (deprecated) versions and anything newer than latest are not the
+  // supported line: after the 1.0.0 lockstep reset, the old per-package 1.0.1
+  // would otherwise be picked as "the latest 1.0.x".
+  const stable = Object.entries(body.versions ?? {})
+    .filter(
+      ([version, manifest]) =>
+        SEMVER.test(version) &&
+        !manifest?.deprecated &&
+        compareSemver(version, latest as string) <= 0,
+    )
+    .map(([version]) => version);
   return selectPolicyVersions(stable, Number(latestMatch[1]), minors);
 }
 
@@ -245,6 +257,13 @@ function dockerAvailable(): boolean {
     timeout: 15_000,
   });
   return probe.status === 0 && probe.stdout.trim().length > 0;
+}
+
+/** Native fixture availability and posture are verified by the shared harness. */
+export function sdkCompatUsesNativeFixture(
+  environment: Readonly<Record<string, string | undefined>> = process.env,
+): boolean {
+  return Boolean(environment.OPENGENI_TEST_PG_URL?.trim());
 }
 
 function runVersion(version: string, dir: string): Promise<VersionResult> {
@@ -365,7 +384,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(`[sdk-compat] versions: ${versions.join(", ")}`);
-  if (!dockerAvailable()) {
+  if (!sdkCompatUsesNativeFixture() && !dockerAvailable()) {
     if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
       fail("docker is unavailable and OPENGENI_REQUIRE_REAL_DB=1");
     }

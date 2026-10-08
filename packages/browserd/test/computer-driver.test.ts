@@ -2,18 +2,180 @@ import { describe, expect, test } from "bun:test";
 import type { ComputerActionCommand, ComputerSessionCapabilities } from "@opengeni/contracts";
 import { ComputerInteractionController } from "@opengeni/interaction";
 import {
-  NativeComputerDriver,
-  NativeComputerError,
-  type NativeComputerCaptureOptions,
-  type ComputerNativeTransport,
-  type NativeComputerActionCommand,
+  ComputerDriver,
+  ComputerBackendError,
+  type ComputerBackendCaptureOptions,
+  type ComputerBackend,
+  type ComputerBackendActionCommand,
   type NativeComputerHandshake,
 } from "../src";
 
 const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
 
-describe("NativeComputerDriver", () => {
+describe("ComputerDriver", () => {
+  test("does not start helper recovery after a pending read is closed", async () => {
+    const transport = new FixtureNativeTransport();
+    let rejectRead!: (error: Error) => void;
+    let readStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    transport.targets = async () =>
+      await new Promise<ReturnType<typeof target>[]>((_, reject) => {
+        rejectRead = reject;
+        readStarted();
+      });
+    let replacements = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+      clientFactory: async () => {
+        replacements += 1;
+        return new FixtureNativeTransport();
+      },
+    });
+    const outcome = driver.listTargets().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await started;
+    await driver.close();
+    rejectRead(new Error("native computer helper pipe closed"));
+    expect(await outcome).toMatchObject({ code: "controller_lost" });
+    expect(replacements).toBe(0);
+  });
+
+  test("joins retirement and refuses recovery startup when closing during cleanup", async () => {
+    const transport = new FixtureNativeTransport();
+    transport.targetsError = new Error("native computer helper pipe closed");
+    let releaseRetirement!: () => void;
+    let retired!: () => void;
+    const retirementStarted = new Promise<void>((resolve) => {
+      retired = resolve;
+    });
+    const retirement = new Promise<void>((resolve) => {
+      releaseRetirement = resolve;
+    });
+    transport.close = async () => {
+      retired();
+      await retirement;
+      transport.closed = true;
+    };
+    let replacements = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: transport,
+      clientFactory: async () => {
+        replacements += 1;
+        return new FixtureNativeTransport();
+      },
+    });
+    const outcome = driver.listTargets().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await retirementStarted;
+    const closing = driver.close();
+    releaseRetirement();
+    await closing;
+    expect(await outcome).toMatchObject({ code: "controller_lost" });
+    expect(transport.closed).toBe(true);
+    expect(replacements).toBe(0);
+  });
+
+  test("rejects continuation before native delivery unless the active helper advertised support", async () => {
+    for (const supported of [false, true]) {
+      const transport = new FixtureNativeTransport();
+      if (supported) transport.handshake.capabilities.pointerClickContinuation = true;
+      const driver = new ComputerDriver({
+        computerSessionId,
+        controllerGeneration,
+        client: transport,
+      });
+      const continuation: ComputerActionCommand = {
+        ...command(),
+        expectedObservationId: null,
+        expectedFrameId: "frame-1",
+        action: {
+          type: "pointer",
+          action: "click",
+          clickCount: 2,
+          continuationOfOperationId: "22222222-2222-4222-8222-222222222222",
+          frameId: "frame-1",
+          x: 20,
+          y: 10,
+        },
+      };
+      try {
+        if (supported) {
+          await driver.validate(continuation);
+          await driver.dispatch(continuation);
+          expect(transport.validated?.action).toEqual(continuation.action);
+          expect(transport.dispatched?.action).toEqual(continuation.action);
+          expect(transport.dispatched?.operationId).toBe(continuation.operationId);
+        } else {
+          await expect(driver.validate(continuation)).rejects.toMatchObject({
+            code: "unsupported",
+          });
+          await expect(driver.dispatch(continuation)).rejects.toMatchObject({
+            code: "unsupported",
+          });
+          expect(transport.validated).toBeNull();
+          expect(transport.dispatched).toBeNull();
+          const legacy: ComputerActionCommand = {
+            ...continuation,
+            action: { type: "pointer", action: "double_click", frameId: "frame-1", x: 20, y: 10 },
+          };
+          await driver.validate(legacy);
+          await driver.dispatch(legacy);
+          expect(transport.dispatched?.action).toEqual(legacy.action);
+        }
+      } finally {
+        await driver.close();
+      }
+    }
+  });
+
+  test("does not use a retired helper's continuation capability after recovery", async () => {
+    const retired = new FixtureNativeTransport();
+    retired.handshake.capabilities.pointerClickContinuation = true;
+    retired.targetsError = new Error("native computer helper returned a malformed response");
+    const older = new FixtureNativeTransport();
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: retired,
+      clientFactory: async () => older,
+    });
+    try {
+      await driver.listTargets();
+      const continuation: ComputerActionCommand = {
+        ...command(),
+        expectedObservationId: null,
+        expectedFrameId: "frame-1",
+        action: {
+          type: "pointer",
+          action: "click",
+          clickCount: 2,
+          continuationOfOperationId: "22222222-2222-4222-8222-222222222222",
+          frameId: "frame-1",
+          x: 20,
+          y: 10,
+        },
+      };
+      await expect(driver.validate(continuation)).rejects.toMatchObject({ code: "unsupported" });
+      await expect(driver.dispatch(continuation)).rejects.toMatchObject({ code: "unsupported" });
+      expect(retired.closed).toBe(true);
+      expect(older.validated).toBeNull();
+      expect(older.dispatched).toBeNull();
+    } finally {
+      await driver.close();
+    }
+  });
+
   test("captures a sized still before any viewer starts without consuming a live stream", async () => {
     const transport = new FixtureNativeTransport();
     const capture = transport.capture.bind(transport);
@@ -21,7 +183,7 @@ describe("NativeComputerDriver", () => {
       throw new Error("no live stream started");
     };
     transport.captureStill = capture;
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -40,7 +202,7 @@ describe("NativeComputerDriver", () => {
   });
   test("renews a subscription while the last viewer is retiring", async () => {
     const transport = new FixtureNativeTransport();
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -62,7 +224,7 @@ describe("NativeComputerDriver", () => {
 
   test("projects native targets, observations, causal actions, and latest-wins frames", async () => {
     const transport = new FixtureNativeTransport();
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -126,13 +288,13 @@ describe("NativeComputerDriver", () => {
 
   test("preserves definite native lock failures in public receipts", async () => {
     const transport = new FixtureNativeTransport();
-    transport.validateError = new NativeComputerError(
+    transport.validateError = new ComputerBackendError(
       "machine_locked",
       "Unlock the Mac to continue",
       true,
       false,
     );
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -156,7 +318,7 @@ describe("NativeComputerDriver", () => {
   test("primes one frame fence for a cold visual target and reuses warm observations", async () => {
     const transport = new FixtureNativeTransport();
     transport.observationFrameId = null;
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -175,13 +337,13 @@ describe("NativeComputerDriver", () => {
 
   test("preserves a typed native diagnosis when dispatch outcome is unknown", async () => {
     const transport = new FixtureNativeTransport();
-    transport.dispatchError = new NativeComputerError(
+    transport.dispatchError = new ComputerBackendError(
       "outcome_unknown",
       "The exact macOS window did not confirm focus",
       false,
       true,
     );
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -209,7 +371,7 @@ describe("NativeComputerDriver", () => {
   test("settles a successful target-replacing action without fabricating an observation", async () => {
     const transport = new FixtureNativeTransport();
     transport.dispatchObservation = null;
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -233,7 +395,7 @@ describe("NativeComputerDriver", () => {
 
   test("replaces a poisoned native helper once before failing the frame stream", async () => {
     const poisoned = new FixtureNativeTransport();
-    poisoned.startCaptureError = new NativeComputerError(
+    poisoned.startCaptureError = new ComputerBackendError(
       "timeout",
       "ScreenCaptureKit stream startup timed out",
       true,
@@ -241,7 +403,7 @@ describe("NativeComputerDriver", () => {
     );
     const replacement = new FixtureNativeTransport();
     let recoveries = 0;
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: poisoned,
@@ -266,14 +428,14 @@ describe("NativeComputerDriver", () => {
 
   test("stops live capture on a poisoned helper before opening a replacement", async () => {
     const poisoned = new FixtureNativeTransport();
-    poisoned.captureError = new NativeComputerError(
+    poisoned.captureError = new ComputerBackendError(
       "timeout",
       "ScreenCaptureKit frame wait timed out",
       true,
       false,
     );
     const replacement = new FixtureNativeTransport();
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: poisoned,
@@ -301,7 +463,7 @@ describe("NativeComputerDriver", () => {
     poisoned.targetsError = new Error("native computer helper returned a malformed response");
     const replacement = new FixtureNativeTransport();
     let recoveries = 0;
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: poisoned,
@@ -321,9 +483,33 @@ describe("NativeComputerDriver", () => {
     }
   });
 
+  test("retains failed retired-helper cleanup and does not create a replacement", async () => {
+    const poisoned = new FixtureNativeTransport();
+    poisoned.targetsError = new Error("fixture transport failed");
+    poisoned.close = async () => {
+      throw new Error("fixture helper did not stop");
+    };
+    let factories = 0;
+    const driver = new ComputerDriver({
+      computerSessionId,
+      controllerGeneration,
+      client: poisoned,
+      clientFactory: async () => {
+        factories++;
+        return new FixtureNativeTransport();
+      },
+    });
+    await expect(driver.listTargets()).rejects.toThrow(
+      "retired native computer helper cleanup failed",
+    );
+    expect(factories).toBe(0);
+    await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
+    await expect(driver.close()).rejects.toThrow("computer driver cleanup failed");
+  });
+
   test("fans one native source out to independent concurrent frame profiles", async () => {
     const transport = new FixtureNativeTransport();
-    const driver = new NativeComputerDriver({
+    const driver = new ComputerDriver({
       computerSessionId,
       controllerGeneration,
       client: transport,
@@ -370,15 +556,19 @@ describe("NativeComputerDriver", () => {
   });
 });
 
-class FixtureNativeTransport implements ComputerNativeTransport {
+class FixtureNativeTransport implements ComputerBackend {
+  readonly identity = { adapterId: "opengeni.native.linux.v1", platform: "linux" as const };
+  get initialCapabilities() {
+    return this.handshake.capabilities;
+  }
   readonly handshake: NativeComputerHandshake = {
     protocolVersion: 3,
     helperVersion: "fixture",
     platform: "linux",
     capabilities: capabilities(),
   };
-  validated: NativeComputerActionCommand | null = null;
-  dispatched: NativeComputerActionCommand | null = null;
+  validated: ComputerBackendActionCommand | null = null;
+  dispatched: ComputerBackendActionCommand | null = null;
   validateError: Error | null = null;
   startCaptureError: Error | null = null;
   captureError: Error | null = null;
@@ -388,7 +578,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
   closed = false;
   stoppedCaptures = 0;
   teardown: Array<"stop" | "close"> = [];
-  startedCaptureOptions: NativeComputerCaptureOptions[] = [];
+  startedCaptureOptions: ComputerBackendCaptureOptions[] = [];
   observationFrameId: string | null = "frame-1";
   captures = 0;
 
@@ -405,7 +595,7 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     return { ...observation("observation-1"), frameId: this.observationFrameId };
   }
 
-  async capture(_targetId: string, options?: NativeComputerCaptureOptions) {
+  async capture(_targetId: string, options?: ComputerBackendCaptureOptions) {
     if (this.captureError) throw this.captureError;
     this.captures += 1;
     const width = Math.min(20, options?.maxWidth ?? 20);
@@ -423,11 +613,11 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     };
   }
 
-  async captureStill(targetId: string, options: NativeComputerCaptureOptions) {
+  async captureStill(targetId: string, options: ComputerBackendCaptureOptions) {
     return await this.capture(targetId, options);
   }
 
-  async startCapture(_targetId: string, options: NativeComputerCaptureOptions): Promise<void> {
+  async startCapture(_targetId: string, options: ComputerBackendCaptureOptions): Promise<void> {
     if (this.startCaptureError) throw this.startCaptureError;
     this.startedCaptureOptions.push(options);
   }
@@ -441,12 +631,12 @@ class FixtureNativeTransport implements ComputerNativeTransport {
     return { text: "fixture clipboard", truncated: false };
   }
 
-  async validate(nativeCommand: NativeComputerActionCommand): Promise<void> {
+  async validate(nativeCommand: ComputerBackendActionCommand): Promise<void> {
     if (this.validateError) throw this.validateError;
     this.validated = nativeCommand;
   }
 
-  async dispatch(nativeCommand: NativeComputerActionCommand) {
+  async dispatch(nativeCommand: ComputerBackendActionCommand) {
     this.dispatched = nativeCommand;
     if (this.dispatchError) throw this.dispatchError;
     return this.dispatchObservation;

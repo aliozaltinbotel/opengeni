@@ -24,9 +24,10 @@ import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner
 
 /** Sub-pages (an account, a key, a form) bring their own back link and title. */
 function isSubPage(section: WorkspaceSettingsSection, search: Record<string, unknown>): boolean {
-  if (section === "models") return Boolean(search.account || search.view);
   if (section === "api-keys") return Boolean(search.key);
   if (section === "access") return Boolean(search.view);
+  if (section === "general") return search.view === "agent-defaults";
+  if (section === "developer") return Boolean(search.view || search.webhook);
   return false;
 }
 
@@ -113,7 +114,13 @@ export function WorkspaceManagementShell({
       currentPage={currentPage}
       currentScope={rail.scopeOf(location)}
       page={page}
-      layout={location.kind === "page" ? "page" : "settings"}
+      layout={
+        location.kind === "page" ||
+        // Organization Insights is a wide dashboard, like the workspace one.
+        (location.kind === "organization" && rail.organizationSection === "insights")
+          ? "page"
+          : "settings"
+      }
       notice={
         organizationManagementOnly || location.kind === "organization" ? undefined : (
           <WorkspacePausedBanner workspaceId={workspaceId} />

@@ -23,6 +23,14 @@ const mutableContext: { current: Record<string, unknown> } = { current: {} };
 mock.module("@/context", () => ({
   useAppContext: () => {
     const client = mutableContext.current.client as Record<string, unknown>;
+    client.listAvailableOpenGeniSlackBots ??= async () => ({
+      connections: [],
+      organizationSharedConnectionIds: [],
+    });
+    client.getOpenGeniSlackBotOrganizationAccess ??= async () => ({
+      enabled: false,
+      generation: 0,
+    });
     client.connectTransport ??= () =>
       new OpenGeniClient({
         baseUrl: "http://localhost:3000",
@@ -114,7 +122,7 @@ function installedBot(): { bot: ConnectionMetadata; binding: SlackInstallationBi
       slackTeamName: "CloudGeni",
       botId: "B_CLOUDGENI_PREVIEW",
       botUserId: "U_CLOUDGENI_PREVIEW",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       state: "active",
       quarantineReason: null,
       version: 1,
@@ -153,11 +161,13 @@ async function renderAdapter({
   connections,
   bindings,
   contextOverride,
+  sheetOpen = false,
 }: {
   permissions: string[];
   connections: ConnectionMetadata[];
   bindings: SlackInstallationBinding[];
   contextOverride?: Record<string, unknown>;
+  sheetOpen?: boolean;
 }): Promise<{
   model: IntegrationViewModel;
   dialogs: () => React.ReactNode;
@@ -173,7 +183,7 @@ async function renderAdapter({
       connections,
       connectionsLoaded: true,
       slackInstallationBindings: bindings,
-      sheetOpen: false,
+      sheetOpen,
       refresh: async () => {},
       onRuntimeChanged: () => {},
     });
@@ -187,7 +197,9 @@ async function renderAdapter({
   await act(async () => root.render(<Probe />));
   if (!captured) throw new Error("Slack adapter model was not captured");
   return {
-    model: captured,
+    get model() {
+      return captured!;
+    },
     dialogs: () => dialogs,
     unmount: async () => {
       await act(async () => root.unmount());
@@ -199,6 +211,114 @@ async function renderAdapter({
 function optionById(model: IntegrationViewModel, id: string) {
   return model.options.find((option) => option.id === id) ?? null;
 }
+
+test("an organization administrator can explicitly share the installed bot", async () => {
+  const { bot, binding } = installedBot();
+  const permissions = ["connections:read", "connections:write"];
+  const context = appContext(permissions);
+  const access = accessContext(permissions);
+  access.accountGrants = [
+    { accountId: ACCOUNT_ID, subjectId: "subject-a", permissions: ["account:admin"] },
+  ] as AccessContext["accountGrants"];
+  const save = mock(
+    async (_workspace: string, _connection: string, request: { enabled: boolean }) => ({
+      ...request,
+      generation: 1,
+    }),
+  );
+  context.accessContext = access;
+  context.client = {
+    getOpenGeniSlackBotOrganizationAccess: async () => ({ enabled: false, generation: 0 }),
+    setOpenGeniSlackBotOrganizationAccess: save,
+  };
+  const rendered = await renderAdapter({
+    permissions,
+    connections: [bot],
+    bindings: [binding],
+    contextOverride: context,
+    sheetOpen: true,
+  });
+  try {
+    const option = optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption;
+    expect(option.checked).toBe(false);
+    expect(option.disabled).toBe(false);
+    await act(async () => option.onChange(true));
+    expect(save).toHaveBeenCalledWith(WORKSPACE_ID, bot.id, { enabled: true });
+    expect(
+      (optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption).checked,
+    ).toBe(true);
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("workspace administrators can see organization sharing but cannot change it", async () => {
+  const { bot, binding } = installedBot();
+  const permissions = ["workspace:admin", "connections:read", "connections:write"];
+  const context = appContext(permissions);
+  const save = mock(async () => ({ enabled: false, generation: 2 }));
+  context.client = {
+    getOpenGeniSlackBotOrganizationAccess: async () => ({ enabled: true, generation: 1 }),
+    setOpenGeniSlackBotOrganizationAccess: save,
+  };
+  const rendered = await renderAdapter({
+    permissions,
+    connections: [bot],
+    bindings: [binding],
+    contextOverride: context,
+    sheetOpen: true,
+  });
+  try {
+    const option = optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption;
+    expect(option.checked).toBe(true);
+    expect(option.disabled).toBe(true);
+    await act(async () => option.onChange(false));
+    expect(save).not.toHaveBeenCalled();
+  } finally {
+    await rendered.unmount();
+  }
+});
+
+test("an organization administrator can disable sharing while the bot needs reconnecting", async () => {
+  const { bot, binding } = installedBot();
+  bot.status = "needs_reauth";
+  const permissions = ["connections:read", "connections:write"];
+  const context = appContext(permissions);
+  const access = accessContext(permissions);
+  access.accountGrants = [
+    { accountId: ACCOUNT_ID, subjectId: "subject-a", permissions: ["account:admin"] },
+  ] as AccessContext["accountGrants"];
+  context.accessContext = access;
+  const save = mock(
+    async (_workspace: string, _connection: string, request: { enabled: boolean }) => ({
+      ...request,
+      generation: 2,
+    }),
+  );
+  context.client = {
+    getOpenGeniSlackBotOrganizationAccess: async () => ({ enabled: true, generation: 1 }),
+    setOpenGeniSlackBotOrganizationAccess: save,
+  };
+  const rendered = await renderAdapter({
+    permissions,
+    connections: [bot],
+    bindings: [binding],
+    contextOverride: context,
+    sheetOpen: true,
+  });
+  try {
+    const option = optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption;
+    expect(option.checked).toBe(true);
+    expect(option.disabled).toBe(false);
+    await act(async () => option.onChange(false));
+    expect(save).toHaveBeenCalledWith(WORKSPACE_ID, bot.id, { enabled: false });
+    expect(
+      (optionById(rendered.model, "slack-organization-bot") as IntegrationToggleOption).disabled,
+    ).toBe(true);
+  } finally {
+    await rendered.unmount();
+  }
+});
 
 test("setup conflict survives remount and can be dismissed without clearing other search state", async () => {
   window.history.replaceState(
@@ -288,6 +408,69 @@ test("a sibling installation cannot hide the local bot's reconnect action", asyn
 });
 
 describe("useSlackIntegration model selection and gating", () => {
+  test("personal Slack access describes supported reads without promising workspace search", async () => {
+    const rendered = await renderAdapter({
+      permissions: ["sessions:create"],
+      connections: [personalConnection()],
+      bindings: [],
+    });
+    try {
+      expect(rendered.model.access?.items.map((item) => item.name)).toEqual([
+        "Channels and DMs your Slack account can access",
+        "Send messages as you",
+      ]);
+      expect(rendered.model.access?.items[1]?.meta).toBe(
+        "workspace-wide message search is unavailable",
+      );
+      expect(JSON.stringify(rendered.model.access)).not.toContain("Everything");
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("a newer shared Slack row does not hide the viewer's own account", async () => {
+    const own = personalConnection();
+    const shared = {
+      ...personalConnection(),
+      id: "66666666-6666-4666-8666-666666666666",
+      subjectId: null,
+      updatedAt: "2099-10-02T00:00:00.000Z",
+      createdAt: "2099-10-02T00:00:00.000Z",
+    };
+    const rendered = await renderAdapter({
+      permissions: ["sessions:create"],
+      connections: [shared, own],
+      bindings: [],
+    });
+    try {
+      expect(rendered.model.connection.find((fact) => fact.label === "Available to")?.value).toBe(
+        "Only me",
+      );
+      expect(rendered.model.connection.some((fact) => fact.label === "Your account")).toBe(true);
+      expect(rendered.model.connection.some((fact) => fact.label === "Shared account")).toBe(false);
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
+  test("the personal Slack page never uses a stale coworker or another workspace account", async () => {
+    const rendered = await renderAdapter({
+      permissions: ["sessions:create"],
+      connections: [
+        { ...personalConnection(), subjectId: "subject-b" },
+        { ...personalConnection(), workspaceId: "99999999-9999-4999-8999-999999999999" },
+      ],
+      bindings: [],
+    });
+    try {
+      expect(rendered.model.chip.label).toBe("Not connected");
+      expect(rendered.model.connection.some((fact) => fact.label === "Your account")).toBe(false);
+      expect(rendered.model.access).toBeUndefined();
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("admin with an installed bot manages every option", async () => {
     const { bot, binding } = installedBot();
     const rendered = await renderAdapter({
@@ -299,6 +482,10 @@ describe("useSlackIntegration model selection and gating", () => {
       const { model } = rendered;
       expect(model.chip.label).toBe("Connected");
       expect(model.footer.kind).toBe("connected");
+      expect(model.access?.items.some((item) => item.name === "All public channels")).toBe(false);
+      expect(
+        model.access?.items.some((item) => item.name === "Conversations Opengeni has joined"),
+      ).toBe(true);
       const reaction = optionById(model, "slack-reaction") as IntegrationToggleOption;
       expect(reaction.disabled).toBeFalsy();
       expect(reaction.action?.label).toBe("Choose where it works");

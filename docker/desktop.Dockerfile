@@ -1,5 +1,5 @@
 # docker/desktop.Dockerfile
-# OpenGeni canonical DESKTOP sandbox image (Channel B pixel plane + Channel A headless).
+# Opengeni canonical DESKTOP sandbox image (Channel B pixel plane + Channel A headless).
 #
 # Productionized from spikes/desktop-stack (PASSED locally: noVNC vnc.html 200,
 # websockify WS upgrade 101 + RFB banner, OCR'd SECRET123 off the live framebuffer)
@@ -9,7 +9,7 @@
 # The stack (Xvfb -> XFCE -> x11vnc -viewonly -> websockify:6080 -> noVNC) is launched
 # via ensureDisplayStack over `exec` (NOT a container CMD) so it re-establishes
 # idempotently after a snapshot rollover / box re-election. The entrypoint stays
-# `sleep infinity`: OpenGeni / the provider owns the keep-alive root, the stack is a
+# `sleep infinity`: Opengeni / the provider owns the keep-alive root, the stack is a
 # set of idempotent exec commands.
 #
 # MANDATORY (the 07-credentialed finding): DEBIAN_FRONTEND=noninteractive + TZ=Etc/UTC
@@ -88,6 +88,7 @@ COPY examples/chat-quickstart/package.json examples/chat-quickstart/package.json
 COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY examples/embedded-product/package.json examples/embedded-product/package.json
 COPY examples/site-session-embed/package.json examples/site-session-embed/package.json
+COPY examples/tool-server/package.json examples/tool-server/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/artifact-kernel-wasm-document/package.json packages/artifact-kernel-wasm-document/package.json
 COPY packages/artifact-kernel-wasm-presentation/package.json packages/artifact-kernel-wasm-presentation/package.json
@@ -111,10 +112,12 @@ COPY packages/jev/package.json packages/jev/package.json
 COPY packages/network/package.json packages/network/package.json
 COPY packages/observability/package.json packages/observability/package.json
 COPY packages/ogtool/package.json packages/ogtool/package.json
+COPY packages/react-native/package.json packages/react-native/package.json
 COPY packages/react/package.json packages/react/package.json
 COPY packages/runtime/package.json packages/runtime/package.json
 COPY packages/sdk/package.json packages/sdk/package.json
 COPY packages/storage/package.json packages/storage/package.json
+COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/xai-subscription/package.json packages/xai-subscription/package.json

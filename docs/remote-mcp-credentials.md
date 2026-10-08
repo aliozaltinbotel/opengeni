@@ -5,6 +5,87 @@ refresh credentials. Integrating backends provision connections through the
 same connection APIs used by interactive clients, under the canonical actor.
 Personal selections remain bound to the named user captured by accepted work.
 
+Generic OAuth connectors request `offline_access` when the authorization
+server advertises it, alongside the MCP resource scopes. Reviewed provider
+profiles retain their exact scope pins. An expired connection without a refresh
+token needs a new interactive OAuth grant; refresh cannot manufacture one.
+
+SDK transport teardown warnings use `mcp_cleanup_failed`, separately from
+`mcp_transport_failed`. A server that rejects session DELETE (for example, HTTP
+405) may still initialize, list tools, and execute tools successfully. Verify
+those phases before classifying a cleanup warning as connector unavailability.
+
+## Agent-prepared API-key connections
+
+`custom_mcp_setup_request` can retain a complete **non-secret** configuration:
+explicit `ownership` (`personal` or `workspace`), server name, HTTPS endpoint,
+fixed headers, and protected fields mapped into headers. For example:
+
+```json
+{
+  "name": "Records MCP",
+  "endpointUrl": "https://records.example.test/mcp",
+  "headers": [
+    { "name": "X-Client-Version", "value": "2026-01" },
+    { "name": "Authorization", "secret": "apiKey", "prefix": "Bearer " }
+  ],
+  "secretFields": [{ "id": "apiKey", "label": "API key" }]
+}
+```
+
+Put this object in `mcpSetup`, alongside the matching name and endpoint in the
+proposal. The person enters only the missing secret in the inline connection
+card. The card shows its ownership and uses native Connect verification and
+storage, not an OAuth redirect. It never puts the key into chat, timeline events,
+local storage, or React state. Losing actor identity or setup permission removes
+unsent fields. The button verifies MCP initialization and tool discovery before
+claiming connection success. Rejection keeps the configuration and asks for a
+corrected key without saving a partial connection.
+
+An authorized agent that already has the key uses **the same Connect lifecycle**
+without posting a card. From a sandbox program, use the deployment-selected
+Codemode module and `environmentCodemodeClient().sessionRequest`:
+
+1. POST `/v1/workspaces/site-host/connect/attempts` with `providerId: "mcp-headers"`,
+   explicit `ownership`, the `mcpSetup`, a durable `idempotencyKey`, and the
+   application's normal `returnUrl` (not visited for key setup).
+2. POST `/v1/workspaces/site-host/connect/attempts/{id}/advance` with the returned
+   `expectedRevision`, a durable operation `idempotencyKey`, and
+   `action: { type: "credentials", values: { apiKey: secretFromAuthorizedStorage } }`.
+3. Retain the returned attempt ID and read that exact attempt after a lost response.
+   An exact operation replay returns the existing receipt; it does not reconnect
+   or probe again. Corrected credentials are a new operation, not a replay with
+   changed input. Never print the secret or embed it in a tool invocation, source
+   file, error, or command-line argument.
+
+The accepted attempt must have `custom_mcp_setup_request` without an outstanding
+review requirement and all three existing delegated permissions:
+`connections:read`, `connections:write`, and `capabilities:manage`. These are
+intersected with live session selection, capability-family restrictions, the
+causal human's current membership, and deployment/organization policy. The
+agent principal is not converted to a browser user: personal ownership derives
+only from the exact accepted turn's recorded initiating human. Old catalogs
+without the permission snapshot do not acquire new authority. Pause, Cancel,
+attempt replacement, credential restrictions, and live revocation still fence
+the final commit after network verification. No new permission is granted by
+knowing a credential or by posting a proposal.
+
+Both paths encrypt the native connection and install its ordinary connection
+reference atomically with the completion receipt. `complete` plus
+`integrationInstalled` and `mcpCapabilityId` proves setup, not admission to the
+current frozen tool catalog. The card attaches the connector through the normal
+versioned selection update, preserves other selections, and explains that tools
+become available on the next message. If attachment fails after connection,
+retry chat access only; do not ask for or submit the saved key again.
+
+Search/reuse existing catalog connections first, including already-authorized
+OAuth accounts. Adding another native account is distinct from retrying setup;
+`reconnectAccountId` replaces only an explicitly chosen same-scope account with
+version checks. OAuth/device consent remains its existing interactive branch
+when actually needed. Prepared key setup cannot start OAuth, alter unrelated
+credentials, or replace another person's account. No-auth servers use the
+existing catalog installation flow, not an empty credential-header setup.
+
 ## Discovery bounds
 
 Tool discovery shares a 4,096-entry allowance across the prepared catalog. One
@@ -31,7 +112,7 @@ blocks an explicit empty selection until an account is attached or the connector
 is disabled.
 
 The chat account list only controls attachments. Adding or connecting accounts
-belongs on the connector's Capabilities page.
+uses the connector's Capabilities page or a prepared inline Connect card.
 
 An exact `connectionRef.connectionId` remains pinned to that account, including
 custom API instances. Multi-account selectors are unpinned; the explicit
@@ -42,6 +123,12 @@ Legacy unpinned selectors retain their existing eligible-account behavior.
 New catalog OAuth/API-key enables explicitly select this mode. Reconnects retain
 an existing selector or exact pin; adding an account never silently converts an
 existing exact installation into a selector.
+Slack's reviewed Web API bridge retains the official MCP catalog/OAuth identity
+and native accepted-account authority. It requires actual reported user scopes,
+normalizes legacy comma-packed grants, and uses scope-filtered discovery rather
+than authenticating to Slack's hosted MCP endpoint. The shared database quota and
+bot context limits are described in [Slack](slack-bot.md#unlisted-pilot-and-rollout).
+
 The dedicated Slack account setup enables a previously disabled stock Slack
 capability with this selector after successful account connection. Bot setup and
 reconnects of already-enabled capabilities do not rewrite their bindings.
@@ -53,6 +140,27 @@ account label. Personal bindings additionally retain the verified sender;
 workspace bindings never acquire a personal owner. The account-qualified routes
 are separately visible to tool discovery, so selecting a tool also selects its
 account. Missing or revoked accounts do not fall back to another identity.
+
+Creating a session revalidates inherited workspace account identity. If an
+accepted account disappeared, needs reauthorization, or changed authorization
+generation, creation is refused. The first-party tool returns
+`session_create_connection_selection_unavailable` with `retryable: false`;
+HTTP creation returns `SESSION_CREATE_CONNECTION_SELECTION_UNAVAILABLE` (409).
+Repeating the same accepted selection cannot refresh authority. A new authorized
+turn must select current eligible accounts; neither transport silently removes,
+refreshes or substitutes an account. Unknown database failures remain generic.
+
+Initial turns and follow-up messages resolve the same executable connector
+policy before freezing accounts. Workspace-default connectors participate even
+when absent from the stored creation snapshot; explicit lists and connector
+exclusions still limit the accepted accounts.
+
+Starting voice freezes eligible accounts under the authenticated request's
+authority on its durable lease. Live delegations and the final transcript
+handoff copy that exact snapshot, including after automatic lease expiry.
+Historical leases remain unmodified; new connections do not widen an existing
+call's authority. Physical provider use still checks live membership and
+connection revocation.
 
 The accepted binding set follows queued work, continuations, child work and
 scheduled occurrences. New empty sets mean no authenticated account routes;
@@ -75,6 +183,14 @@ Dedicated first-party surfaces, such as personal GitHub repository access and
 Google Drive publication, retain their existing specialized selection contracts;
 they accept at most one account per specialized surface. Generic MCP account
 attachment does not broaden those permissions.
+
+The current-human HTTP/SDK and public MCP gateways project these same stable
+account-qualified routes from the viewer's live eligible connections. A Site's
+retained identities intersect this projection exactly; canonical connector IDs
+never substitute for a requested account. Service gateways expose workspace
+accounts only. Generated API adapters retain each route's exact connection and
+live authority generation. Gateway requests rebuild the projection, and provider
+requests still revalidate the bound connection.
 
 The former host-specific credential callback is removed from API and worker
 startup and from the core package. The direct workspace tool gateway also uses

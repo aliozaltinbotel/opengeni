@@ -1,3 +1,5 @@
+import { allowanceMigrationTail } from "./allowance-migration-tail";
+
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
@@ -35,6 +37,8 @@ export const embeddingMigrationTail = [
   // Compiles against the Knowledge tables and visibility helper from 0461.
   "0468_knowledge_relationship_projection.sql",
   "0469_knowledge_source_discovery.sql",
+  // Patches the read function from withheld 0461; replay after its creation.
+  "0640_knowledge_entry_created_since.sql",
   "0478_sender_owned_connections.sql",
   // Replayed 0402/0433 still consume historical Pack tables. Remove them only
   // after those earlier accepted-work and Skill cutovers have completed.
@@ -55,10 +59,60 @@ export const embeddingMigrationTail = [
   "0515_autonomous_learning_defaults.sql",
   // Patches the 0509 trial grant trigger; replay after it.
   "0521_verified_signup_trial_runtime_switch.sql",
+  // Reuses the revision guard installed by withheld 0521; its validation
+  // follow-up must run after the original promotional-credit routines.
+  "0613_model_scoped_promotional_credits.sql",
+  "0615_credit_promotion_policy_validation.sql",
   // Replaces scheduled-run triggers installed by withheld 0275 and 0478.
   "0534_scheduled_admission_diagnostics.sql",
   // References the files scope identity introduced by withheld 0461.
   "0535_slack_file_upload_operations.sql",
   // Replaces scheduled-run triggers installed by withheld-then-replayed 0534.
   "0539_scheduled_admission_refusals.sql",
+  // Installs inventory read policies with the session-tenancy fence helper
+  // from withheld 0345; replay after it.
+  "0547_idle_command_containment.sql",
+  "0599_paused_recovery_command_containment.sql",
+  // Allowance receipts compile against the withheld Knowledge/embedding and
+  // scheduled-refusal lifecycle. Replay them after those prerequisites.
+  ...allowanceMigrationTail,
+  // Extends the attachment helper from withheld 0499; replay after it.
+  "0560_archived_session_imports.sql",
+  // Patches the scheduled producer fence after its withheld prerequisites.
+  "0561_scheduled_session_agent_identity.sql",
+  // Patches the reaper installed by withheld 0345/0388/0391/0397.
+  "0564_browser_deadline_checkpoints.sql",
+  // Patches the producer fence from withheld 0275/0414/0561; replay after them.
+  "0582_scheduled_setup_policy_identity.sql",
+  // Replaces the private instruction helper from withheld 0466; replay after it.
+  "0584_agent_instruction_size_parity.sql",
+  // Extends the cursor table and meaningful index withheld by these fixtures.
+  "0585_session_attention_cursor.sql",
+  // Clones the 0345 waiter fence and extends the accepted authority ledgers.
+  "0598_claude_subscription_account_pools.sql",
+  // Uses the existing session inventory/capability routines withheld by these fixtures.
+  "0604_insights_raw_usage_api.sql",
+  // Patches the sender-owned capture from withheld 0478 and reads the frozen
+  // subscription authority installed by withheld 0598; replay after both.
+  "0608_receiver_execution_context.sql",
+  // Locks connection tables from withheld 0264 and rewrites the exact receipt
+  // gates in routines from withheld 0306/0345/0478; replay after them.
+  "0611_universal_session_tenancy_activation.sql",
+  // Extends the containment reason installed by withheld 0547; replay after it.
+  "0614_quiescence_command_containment.sql",
+  "0622_organization_slack_bot_delivery.sql",
+  // M2 extends the membership finalizer to revoke legacy Claude rows; replay
+  // only after the deliberately withheld 0598 Claude tables are restored.
+  "0642_shared_subscription_core.sql",
+  "0643_model_call_facts_subscription_connection_index.sql",
+  "0644_subscription_inference_source_settings.sql",
+  "0645_subscription_core_runtime.sql",
+  "0646_subscription_core_people_assignment_read.sql",
+  // The session storage lifecycle extends the withheld 0560 import guards and
+  // reads the 0402 input wait; replay after them.
+  "0649_session_content_archive.sql",
+  "0650_session_archive_activity.sql",
+  "0651_session_event_delta_folding.sql",
+  "0652_session_archive_guard_search_path.sql",
+  "0653_session_archive_tenancy_fence.sql",
 ];

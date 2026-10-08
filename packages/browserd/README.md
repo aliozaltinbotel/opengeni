@@ -1,7 +1,7 @@
 # `@opengeni/browserd`
 
 Placement-resident browser controller. It hides the pinned native driver, owns
-target generations and operation receipts, and exposes only OpenGeni interaction
+target generations and operation receipts, and exposes only Opengeni interaction
 contracts. Raw driver sockets and CDP endpoints are not product APIs.
 
 The pinned `agent-browser` binary owns Chromium/profile lifecycle only. Browserd
@@ -26,6 +26,30 @@ retained for restore unless its lifecycle owner explicitly ends and removes it.
 Recovery scans receipts with bounded keyset reads inside one atomic transaction,
 avoiding simultaneous raw-row and duplicate observation collections. Corruption
 in a later receipt rolls back earlier recovery changes.
+
+An explicit recovery request can reuse an eligible managed Chromium working
+directory after controller restart. Its internal launch journal binds the exact
+session/controller, current tokens and placement, directory identity, launch
+settings, and owned process birth/executable/CDP endpoint. Recovery attaches to a
+proven live process, or launches only after complete proof that the old process
+and other profile writers are absent. Unsettled launch receipts prevent another
+launch. Attached browsers, ephemeral contexts, and unattested directories do not
+enter this path. Accepted interaction commands remain replay-only receipts.
+Live reattachment additionally requires a headless browser's direct lineage to
+the pinned daemon in its exact private socket namespace. Initial headless macOS
+attestation cross-checks the profile lock and CDP browser PID with that lineage,
+process birth and executable. Missing, helper or conflicting daemon lineage is
+refused. Retirement closes both proven processes; uncertain predecessor cleanup
+retains the directory and holder for retry, including after a proved browser stop.
+Explicit close records retirement before process cleanup. If retirement
+settlement fails, other stores close while the exact directory and cleanup
+holder remain available for retry; removal requires completed retirement and
+closed journals.
+
+The API's existing missing-active-controller path sends this recovery intent for
+managed Chromium private profiles after rechecking source access and exact
+controller, token, placement, route, and holder authority. Refused or uncertain
+recovery never falls back to a fresh create or saved-profile restore.
 
 Each Browser/Computer journal authority retains at most 10,000 operations and
 256 MiB of serialized receipts (64 MiB per receipt). Inserts and settlements
@@ -56,11 +80,32 @@ They retain separate tabs and selection instead of failing the entire restore.
 Ordinary URLs and durable profile data restore normally; the immutable source
 checkpoint is unchanged. This does not turn other navigation failures into success.
 
+Profile capture closes Chromium to archive its on-disk state, then restarts it
+when requested. It preserves durable site data, not the live page's DOM or
+JavaScript heap. Unsubmitted form values may be lost during both save-and-restart
+and suspend/resume. The viewer explains this beside profile Save. Automatic
+idle cleanup must not treat a successful profile capture as proof that unfinished
+page work is recoverable. `test/state-restore.e2e.test.ts` exercises this boundary
+with real browser input as well as cookies, local storage and IndexedDB.
+On macOS, capture omits the root `RunningChromeVersion` symlink generated for
+Chrome app shims. It never follows that link; same-named nested files remain
+profile data, and other symlinks still fail capture.
+
 A batch is not a transaction. If an action completes and a later action has a
 definite failure, its receipt remains `outcome_unknown` and reports the completed
 action count and later error code; this is not evidence of controller loss.
 Re-observe the target before continuing, and do not replay the batch. A definite
 failure on the first action still returns `failed` with its original error code.
+
+Chromium `upload` accepts either a file input or the visible control that opens
+its native file picker. Files remain workspace-staged and selection uses the
+browser's native input/change events. Picker interception lasts only for that
+serialized action, stays within the control's frame, and refuses selection if
+that document changes. A single-file input rejects multiple files; directory
+pickers are unsupported. If a click produces no picker or opens a JavaScript
+dialog, its receipt reports `outcome_unknown`, not controller loss: inspect the
+page and do not replay the click. Lightpanda retains direct file-input uploads;
+attached-browser upload availability still follows the placement capability.
 
 For custom listboxes, `press` with a locator explicitly focuses that element
 before sending the key. After opening a menu, omit the locator to navigate its
@@ -97,6 +142,13 @@ authority additionally opens/selects/closes targets and submits the same fenced
 `BrowserActionCommand` used in-process. Admin authority alone creates, rotates,
 lists, and ends sessions. Browser origins are deny-by-default and explicitly
 allowlisted; non-browser placement clients omit `Origin`.
+
+Control clients can explicitly open a tab through
+`POST /v1/browser-sessions/:id/targets/open-with-inventory`. It returns the owned
+tab inventory with session/controller and target/document generations after
+navigation, without collecting an accessibility tree. The ordinary tab-open
+route still returns its page observation. An unsupported controller refuses the
+inventory route; a failed or uncertain open is never replayed on another route.
 
 Both canonical sandbox images compile the service from this package, copy the
 exact `agent-browser` 0.33.2 native binary for the target architecture, verify its

@@ -1,0 +1,131 @@
+---
+title: "Configure the agent"
+description: "Choose what the agent can do, who it is, and how its answers render, with one agent object."
+icon: "sliders"
+---
+
+Every session takes one `agent` object:
+
+```ts
+agent: {
+  identity: "You are Acme Analytics' assistant. You help customers read their dashboards.",
+  instructions: "Lead with the number, then one sentence of context.",
+  capabilities: { from: "none", webSearch: true, knowledge: true },
+  renderer: "opengeni",
+}
+```
+
+Use it when creating a session, in the proxy's `createSession` hook, in the chat facade, on schedules, as the workspace default, and on a running session.
+
+## Capabilities
+
+Start from `"all"` (the default) or `"none"` (the session's own tools plus asking questions and reading Skills), then switch single capabilities:
+
+```ts
+capabilities: "none"
+capabilities: { from: "none", webSearch: true, knowledge: true }
+capabilities: { from: "all", browser: false, workspaceAdmin: false }
+```
+
+| Capability            | Lets the agent                                                      | In `"none"` |
+| --------------------- | ------------------------------------------------------------------- | ----------- |
+| `humanInput`          | Pause and ask the person for a decision or missing detail           | On          |
+| `webSearch`           | Search the public web                                               | Off         |
+| `media`               | Generate images and videos                                          | Off         |
+| `goals`               | Work toward a goal across many turns                                | Off         |
+| `subagents`           | Start, message, and follow other sessions; list models              | Off         |
+| `skills`              | `"read"` installed Skills, or `"manage"` them too                   | `"read"`    |
+| `artifacts`           | Publish files, documents, and Sites people can open                 | Off         |
+| `browser`             | Use a browser or desktop computer                                   | Off         |
+| `schedules`           | Create and manage scheduled tasks                                   | Off         |
+| `knowledge`           | Search and save workspace knowledge, task notes, and instructions   | Off         |
+| `workspaceFiles`      | Read files uploaded to the workspace                                | Off         |
+| `workspaceConnectors` | Use the workspace's connected apps and integrations                 | Off         |
+| `workspaceAdmin`      | Manage variable sets, projects, rigs, machines, and connector setup | Off         |
+
+Your own MCP servers and the integrations you name in `tools` stay available under `"none"`. `"none"` adds no bundled Opengeni guides unless `bundledSkillIds` lists them, so it needs no empty `tools`, `firstPartyMcpTools`, or `bundledSkillIds` lists. Shell, file, and background-command tools come with the sandbox or a Connected Machine; `sandboxBackend: "none"` removes them.
+
+Requesting a capability the server doesn't offer fails with `agent_capability_unavailable`.
+
+## Identity and instructions
+
+- `identity` is who the agent is: its name, your product, its domain and voice. Defaults to the workspace's identity.
+- `instructions` are rules for this agent. They override Opengeni's default working style, but not its safety rules.
+
+Put facts about the current page in the message's `modelContext`, not in instructions.
+
+## Renderer
+
+- `"opengeni"` for `OpenGeniChat` and `SessionConversation`: files, artifacts, and visuals render inline.
+- `"markdown"` for your own chat UI, Slack, or email. The chat facade uses it by default.
+
+## Where it goes
+
+<CodeGroup>
+```ts Proxy
+createSession: async ({ initialMessage, idempotencyKey }, { user }) => ({
+  initialMessage,
+  idempotencyKey,
+  agent: { identity, capabilities: "none" }, // only your tools plus the essentials
+  mcpServers: [{ id: "acme", url: ACME_MCP_URL, headers: await userHeaders(user) }],
+  tools: [{ kind: "mcp", id: "acme" }],
+  sandboxBackend: "none",
+}),
+```
+
+```ts Workspace default
+await og.updateWorkspaceSettings(workspaceId, {
+  sessionAgentDefaults: {
+    capabilities: { from: "all", browser: false, workspaceAdmin: false },
+    identity: "You are Acme's operations agent.",
+  },
+});
+```
+
+```ts Schedule
+await og.createScheduledTask(workspaceId, {
+  name: "Morning digest",
+  schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+  agentConfig: {
+    prompt: "Summarize yesterday's new tickets and flag anything urgent.",
+    agent: { capabilities: { from: "none", knowledge: true } },
+    tools: [{ kind: "mcp", id: "acme" }],
+  },
+});
+```
+
+```ts Running session
+const session = await og.getSession(workspaceId, sessionId);
+await og.updateSessionAgent(workspaceId, sessionId, {
+  agent: { capabilities: { from: "all", webSearch: false } },
+  expectedVersion: session.toolPolicyVersion, // 409 when someone changed it first
+});
+```
+
+</CodeGroup>
+
+A change to a running session applies from its next turn. Sessions an agent creates inherit their parent's settings and can only narrow them.
+
+## Check what the agent can do
+
+```ts
+import type { AgentEffectiveTools } from "@opengeni/sdk";
+
+const session = await og.getSession(workspaceId, sessionId);
+session.agent; // the resolved settings, or null
+const visibility = session.tenancy?.visibility; // "private" | "workspace" | undefined
+const byCapability = new Map<string, AgentEffectiveTools["tools"]>();
+for (const tool of session.effectiveTools?.tools ?? []) {
+  const group = byCapability.get(tool.capability) ?? [];
+  group.push(tool);
+  byCapability.set(tool.capability, group);
+}
+const knowledgeTools = byCapability.get("knowledge") ?? [];
+```
+
+`effectiveTools.tools` is a flat list; group it yourself as above. A missing `effectiveTools` or `tenancy` on an older session means unknown, not off. The Opengeni web app shows the same settings in the session's Agent panel, and the prompt sent in Debug > Context.
+
+<Tip>
+  Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) walks it through these
+  choices and inspects your existing setup first.
+</Tip>

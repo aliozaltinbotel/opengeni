@@ -9,22 +9,33 @@ export type {
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
 export { ApprovalSurface } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceProps, ApprovalSurfaceMessages } from "./components/approval-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
+export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export {
   OpenGeniLinkProvider,
   chainLinkResolvers,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
+  viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
 } from "./components/open-geni-links";
 export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export type { TimelineSearchTarget } from "./components/timeline-search";
 export { createOlderHistoryLoadReceipt } from "./older-history";
 export type { OlderHistoryLoader, OlderHistoryLoadReceipt } from "./older-history";
@@ -43,12 +54,32 @@ export type {
   TurnSummaryOptions,
 } from "./timeline/turn-summary";
 export { QueueSurface } from "./components/queue-surface";
+// The provider too, so a host needs only this entry (the root also exports the
+// workbench, whose editors, terminal and desktop are optional peers).
+export { OpenGeniProvider } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
+// The tool-renderer registry, so custom tool renderers need no root import.
+export { createDefaultToolRegistry, createToolRegistry, defaultToolRegistry } from "./timeline";
+export type {
+  CreateToolRegistryOptions,
+  ToolRegistry,
+  ToolRegistryEntry,
+  ToolRenderer,
+  ToolRendererProps,
+} from "./timeline";
 export { SessionConversation } from "./components/session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
-export type { SessionConversationProps } from "./components/session-conversation";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
+export type {
+  SessionConversationLabels,
+  SessionConversationProps,
+} from "./components/session-conversation";
 export type { QueueSurfaceProps } from "./components/queue-surface";
 export {
   SessionChrome,
@@ -70,3 +101,5 @@ export type { KnowledgeActivityActions } from "./timeline/knowledge-receipt";
 export { StartupTimings } from "./timeline/startup-timings";
 export { useStartupDetails, setStartupDetails } from "./timeline/startup-preference";
 export type { GenieLoadingOptions } from "./timeline/genie-loading";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";

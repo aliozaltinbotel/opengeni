@@ -26,7 +26,7 @@ const provider: ResolvedModelProvider = {
 };
 const request: ModelRequest = {
   input: "A deterministic request for Claude.",
-  systemInstructions: "OpenGeni instructions",
+  systemInstructions: "Opengeni instructions",
   modelSettings: {
     reasoning: { effort: "high" },
     providerData: { prompt_cache_key: "20000000-0000-4000-8000-000000000002" },
@@ -78,13 +78,14 @@ test("subscription wire identity matches the pinned client while request identif
   );
   expect(a.body.system[0].text).not.toContain("cc_prev_req");
   expect(b.body.system[0].text).toContain("cc_prev_req=req_1;");
-  expect(a.body.system[1].text).toBe("OpenGeni instructions");
+  expect(a.body.system[1].text).toBe("Opengeni instructions");
   expect(a.body.system[1].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
   expect(a.body.thinking).toEqual({ type: "adaptive", display: "summarized" });
   expect(a.body.output_config.effort).toBe("high");
   expect(a.body.max_tokens).toBe(32000);
   const betas = a.headers.get("anthropic-beta")!.split(",");
   expect(betas).toContain("claude-code-20250219");
+  expect(betas).toContain("context-1m-2025-08-07");
   expect(betas).toContain("extended-cache-ttl-2025-04-11");
   expect(betas).not.toContain("message-threads-2026-08-12");
   expect(betas).not.toContain("advisor-tool-2026-03-01");
@@ -101,8 +102,9 @@ test("API-key calls do not inherit subscription identity or billing attribution"
       const body = JSON.parse(String(init?.body));
       expect(headers.has("x-app")).toBe(false);
       expect(headers.get("x-api-key")).toBe("test-token");
+      expect(headers.get("anthropic-beta")?.split(",")).toContain("context-1m-2025-08-07");
       expect(body.metadata).toBeUndefined();
-      expect(body.system[0].text).toBe("OpenGeni instructions");
+      expect(body.system[0].text).toBe("Opengeni instructions");
       return Response.json(result);
     }) as typeof fetch,
   );

@@ -5,6 +5,8 @@ import { connect, createServer } from "node:net";
 import { join } from "node:path";
 import type { Readable } from "node:stream";
 import { InteractionControllerError } from "@opengeni/interaction";
+import { readWindowsSeat } from "./cua/windows-seat";
+import { UnsettledCleanupError } from "./cleanup-error";
 
 const START_TIMEOUT_MS = 10_000;
 const STOP_TIMEOUT_MS = 3_000;
@@ -207,7 +209,7 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
           "-geometry",
           "112x34+28+28",
           "-title",
-          "OpenGeni Sandbox",
+          "Opengeni Sandbox",
           "-bg",
           "#101318",
           "-fg",
@@ -275,31 +277,30 @@ export class LinuxVirtualComputerEnvironmentAllocator implements ComputerEnviron
       drain(rfb.stderr);
       await waitForLoopbackPort(rfbPort, rfb, "virtual RFB server");
 
-      let closed = false;
+      let closePromise: Promise<void> | null = null;
       return {
         seatId: `linux-virtual:${context.computerSessionId}`,
         displayId,
         rfbPort,
         environment: sessionEnvironment,
         async close() {
-          if (closed) return;
-          closed = true;
-          const failures = await stopProcessGroups([...processes].reverse());
-          if (failures.length === 0) failures.push(...(await removeDirectories(directories)));
-          if (failures.length > 0) {
-            throw new AggregateError(failures, "virtual ComputerSession cleanup failed");
-          }
+          closePromise ??= (async () => {
+            const failures = await stopProcessGroups([...processes].reverse());
+            if (failures.length === 0) failures.push(...(await removeDirectories(directories)));
+            if (failures.length > 0)
+              throw new UnsettledCleanupError(failures, "virtual ComputerSession cleanup failed");
+          })();
+          await closePromise;
         },
       };
     } catch (error) {
       const cleanup = await stopProcessGroups([...processes].reverse());
       if (cleanup.length === 0) cleanup.push(...(await removeDirectories(directories)));
       if (cleanup.length > 0) {
-        const failure = new Error("virtual ComputerSession allocation and cleanup failed", {
-          cause: error,
-        });
-        Object.defineProperty(failure, "errors", { value: [error, ...cleanup] });
-        throw failure;
+        throw new UnsettledCleanupError(
+          [error, ...cleanup],
+          "virtual ComputerSession allocation and cleanup failed",
+        );
       }
       throw error;
     }
@@ -320,9 +321,15 @@ async function removeDirectories(directories: readonly string[]): Promise<unknow
 
 /** Existing physical/login seat used by connected machines and macOS. */
 export class ExistingComputerEnvironmentAllocator implements ComputerEnvironmentAllocator {
+  constructor(private readonly options: { allowWindows?: boolean } = {}) {}
+
   async allocate(context: ComputerEnvironmentContext): Promise<ComputerEnvironmentLease> {
     const environment = nativeComputerEnvironment(context.baseEnvironment);
     const platform = process.platform;
+    if (platform === "win32" && this.options.allowWindows) {
+      const seat = await readWindowsSeat(environment);
+      return { ...seat, rfbPort: null, environment, async close() {} };
+    }
     if (platform !== "darwin" && platform !== "linux") {
       throw new InteractionControllerError(
         "unsupported",
@@ -437,6 +444,17 @@ export function nativeComputerEnvironment(input: NodeJS.ProcessEnv): NodeJS.Proc
     "GDK_BACKEND",
     "QT_QPA_PLATFORM",
     "__CF_USER_TEXT_ENCODING",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "WINDIR",
+    "windir",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+    "TEMP",
+    "TMP",
+    "ComSpec",
+    "COMSPEC",
   ]);
   const environment: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(input)) {

@@ -11,7 +11,7 @@ import { requestSessionSearch } from "@/lib/session-search-route";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
-  type SessionListResponse,
+  type SessionListEntryResponse as SessionListResponse,
 } from "@opengeni/sdk";
 import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -171,6 +171,9 @@ import {
   visibleForestRows,
   visibleTreeRows,
   summarizeRailNodes,
+  summarizeRailStatusCounts,
+  sessionProjectTotals,
+  type RailStatusCounts,
   SESSION_GROUP_LABELS,
   SESSION_GROUP_ORDER,
   type RailAggregateStatus,
@@ -207,7 +210,8 @@ import {
   type SessionBranchPage,
 } from "@/lib/session-branch-cache";
 import { cn } from "@/lib/utils";
-import type { Channel, Session } from "@/types";
+import type { Channel, Session as SessionDetails } from "@/types";
+import type { RailSession as Session } from "@/lib/session-list-entry";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -247,7 +251,11 @@ export function NewSessionLink(props: {
   );
 }
 
-type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
+type RenameFn = (
+  workspaceId: string,
+  sessionId: string,
+  title: string,
+) => Promise<SessionDetails | null>;
 type PinFn = (
   session: Session,
   pinned: boolean,
@@ -278,7 +286,7 @@ type PendingSessionFocus = {
   action?: "archive";
   settled: boolean;
 };
-type ChildPageState = SessionBranchPage;
+type ChildPageState = SessionBranchPage<Session>;
 
 const EMPTY_SESSION_IDS: ReadonlySet<string> = new Set();
 const ARCHIVED_SESSION_GROUP: SessionPaginationGroup = {
@@ -332,7 +340,8 @@ export function SessionList() {
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
   const openSearchDialog = useCallback(
-    () => requestSessionSearch(rail.workspaceId),
+    (event: MouseEvent<HTMLButtonElement>) =>
+      requestSessionSearch(rail.workspaceId, event.currentTarget),
     [rail.workspaceId],
   );
   const [search, setSearch] = useState("");
@@ -350,8 +359,7 @@ export function SessionList() {
     status: browseStatusPreference,
     showEmptyGroups,
   } = browsePreferences;
-  // "Needs you" narrows the Active list on the client, so it pages exactly
-  // like Active; only the rows shown differ.
+  // Attention filtering belongs before pagination, including project windows.
   const needsYouOnly = browseStatusPreference === "needs-you";
   const browseStatus: "active" | "archived" | "all" = needsYouOnly
     ? "active"
@@ -379,6 +387,7 @@ export function SessionList() {
   // from anywhere in a workstream. Sorting and filtering still operate on
   // root workstreams and preserve their expandable descendant hierarchy.
   const hierarchyMode = search.length === 0;
+  const channelMode = browseGroupBy === "project";
   const clearBrowseControls = useCallback(() => {
     updateBrowsePreferences(DEFAULT_SESSION_BROWSE_PREFERENCES);
   }, [updateBrowsePreferences]);
@@ -387,7 +396,16 @@ export function SessionList() {
   }, []);
 
   const rootPage = useWorkspaceSessions({
-    limit: 50,
+    projection: "summary",
+    // Project windows are fetched independently. Keep discovery to one display
+    // step instead of hydrating hidden workstreams a second time.
+    limit:
+      channelMode && hierarchyMode && browseStatus !== "archived" ? SESSION_GROUP_VISIBLE_STEP : 50,
+    // Filtered root pins carry exact attention membership beyond treeStats' cap.
+    // The separate global pin read still owns the complete shortcut section.
+    includePinned: needsYouOnly || !hierarchyMode,
+    includeTotals: hierarchyMode && browseStatus !== "archived",
+    needsYouOnly,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
     archiveStatus: browseStatus,
@@ -400,8 +418,10 @@ export function SessionList() {
   // pinned child must never make either it or its descendants disappear from
   // the actual tree.
   const globalPinPage = useWorkspaceSessions({
+    projection: "summary",
     limit: 1,
     pinsOnly: true,
+    includeTotals: !hierarchyMode || browseStatus === "archived",
     pollIntervalMs: 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
   });
@@ -447,6 +467,9 @@ export function SessionList() {
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
   const refreshSessionPages = useCallback(async () => {
+    // Cross-document invalidations must not restart suspended list polling.
+    // Visibility/focus reconciliation below re-reads durable state on return.
+    if (document.visibilityState === "hidden") return;
     await Promise.all([refresh(), refreshGlobalPins()]);
   }, [refresh, refreshGlobalPins]);
   // Ordinary rows page independently of the complete pinned section. The
@@ -460,7 +483,7 @@ export function SessionList() {
       hierarchyMode ? "tree" : "search",
       browseGroupBy,
       browseSortBy,
-      browseStatus,
+      browseStatusPreference,
       [paginationDate.getFullYear(), paginationDate.getMonth() + 1, paginationDate.getDate()].join(
         "-",
       ),
@@ -1102,10 +1125,42 @@ export function SessionList() {
     [],
   );
   const browseControlsActive = sessionBrowsePreferencesCustomized(browsePreferences);
-  const needsYouCount = useMemo(() => countNeedsYou(allSessions), [allSessions]);
+  const needsYouCount =
+    (hierarchyMode && browseStatus !== "archived" ? rootPage.totals : globalPinPage.totals)
+      ?.needsYouCount ?? countNeedsYou(allSessions);
+  const projectTotals = useMemo(
+    () =>
+      hierarchyMode && rootPage.totals
+        ? sessionProjectTotals(
+            rootPage.totals,
+            channels.map((channel) => channel.id),
+          )
+        : null,
+    [channels, hierarchyMode, rootPage.totals],
+  );
+  const acceptedAttentionRoots = useMemo(
+    () =>
+      new Set(
+        needsYouOnly
+          ? [...sessions, ...activeGroupContinuations.flatMap(([, page]) => page.sessions)]
+              .filter((session) => session.parentSessionId === null)
+              .map((session) => session.id)
+          : [],
+      ),
+    [needsYouOnly, sessions, activeGroupContinuations],
+  );
   const browseSessions = useMemo(
     () =>
-      (needsYouOnly ? filterNeedsYou(allSessions) : allSessions).filter((session) => {
+      (needsYouOnly
+        ? hierarchyMode
+          ? allSessions.filter(
+              (session) =>
+                acceptedAttentionRoots.has(session.rootSessionId) ||
+                filterNeedsYou([session]).length > 0,
+            )
+          : filterNeedsYou(allSessions)
+        : allSessions
+      ).filter((session) => {
         if (archiveTransitions.has(session.rootSessionId)) return false;
         // Child rows inherit their root's archive membership from the
         // lineage query. Only roots carry the personal archive projection.
@@ -1115,7 +1170,14 @@ export function SessionList() {
           Boolean(session.archived) === (browseStatus === "archived")
         );
       }),
-    [allSessions, archiveTransitions, browseStatus, needsYouOnly],
+    [
+      allSessions,
+      archiveTransitions,
+      browseStatus,
+      needsYouOnly,
+      hierarchyMode,
+      acceptedAttentionRoots,
+    ],
   );
 
   // A complete pins-only page makes presence authoritative, but absence does
@@ -1352,7 +1414,6 @@ export function SessionList() {
   // The hierarchy rail always has the same shape: unfiled Recents first, then
   // workstreams. A workspace with no created workstreams should not fall back
   // to a completely different recency UI.
-  const channelMode = browseGroupBy === "project";
   const projectPaginationGroups = useMemo(
     () => [
       ...channels.map((channel) => sessionPaginationProjectGroup(channel.id, channel.name)),
@@ -1695,7 +1756,11 @@ export function SessionList() {
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
     try {
-      const result = await context.client.deleteSession(rail.workspaceId, sessionPendingDelete.id);
+      const result = await deleteStoppingIfRunning(
+        context.client,
+        rail.workspaceId,
+        sessionPendingDelete.id,
+      );
       deletedRootIds.current.add(sessionPendingDelete.id);
       setArchiveOverrides((current) => {
         if (!current.has(sessionPendingDelete.id)) return current;
@@ -1743,12 +1808,12 @@ export function SessionList() {
       await refreshSessionPages();
       toast.success(
         result.deletedSessionCount === 1
-          ? "Session deleted"
-          : `${result.deletedSessionCount} sessions deleted`,
+          ? "Chat deleted"
+          : `${result.deletedSessionCount} chats deleted`,
       );
       return true;
     } catch (deleteError) {
-      toast.error("Couldn't delete the workstream.", {
+      toast.error("Couldn't delete the chat.", {
         description: deleteError instanceof Error ? deleteError.message : String(deleteError),
       });
       return false;
@@ -1829,7 +1894,7 @@ export function SessionList() {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
         const page = await readLoadedSessionBranchWindow(
           (pageCursor) =>
-            context.client.listSessionPage(rail.workspaceId, {
+            context.client.listSessionSummaryPage(rail.workspaceId, {
               limit: 50,
               parentSessionId,
               ...(pageCursor ? { cursor: pageCursor } : {}),
@@ -2204,7 +2269,7 @@ export function SessionList() {
 
   const loadedSessionIdsRef = useRef<ReadonlySet<string>>(new Set());
   const loadedGroupWindows = useRef(
-    new Map<string, { generation: number; group: SessionPaginationGroup; pages: number }>(),
+    new Map<string, { generation: number; group: SessionPaginationGroup; rows: number }>(),
   );
   loadedSessionIdsRef.current = new Set(allSessions.map((session) => session.id));
   const loadMoreInGroup = useCallback(
@@ -2243,13 +2308,15 @@ export function SessionList() {
         paginationIdentity.current.generation === requestGeneration &&
         groupLoadAttempts.current.get(group.key) === attempt;
 
-      const listPage = async (pageCursor?: string) => {
+      const pageSize = group.kind === "channel" ? SESSION_GROUP_VISIBLE_STEP : 50;
+      const listPage = async (pageCursor?: string, limit = pageSize) => {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
-        const page = await context.client.listSessionPage(rail.workspaceId, {
-          // Cache bounded server pages separately from four-row disclosure.
-          // A page covers the shared discovery window, avoiding repeated
-          // no-progress clicks when that window overlaps this group.
-          limit: 50,
+        const page = await context.client.listSessionSummaryPage(rail.workspaceId, {
+          // Server-filtered projects fetch only the displayed step. Client-only
+          // discovery groups retain larger pages to avoid empty-match reads.
+          limit,
+          includePinned: false,
+          ...(needsYouOnly && group.kind !== "archived" ? { needsYouOnly: true } : {}),
           ...(pageCursor ? { cursor: pageCursor } : {}),
           ...(group.kind !== "archived" && search ? { search } : {}),
           ...(group.kind === "archived" || hierarchyMode ? { parentSessionId: null } : {}),
@@ -2287,11 +2354,15 @@ export function SessionList() {
           if (!window || window.generation !== requestGeneration) return;
           let replacement = emptySessionContinuation(requestGeneration);
           let pagesRead = 0;
+          let rowsRead = 0;
           // Revalidate only the window the user already loaded. Keep the old
           // window visible until its replacement is complete, including when
           // another device moves an old row into an exhausted group.
           do {
-            const read = await listPage(replacement.nextCursor ?? undefined);
+            // Refresh the retained window in bounded full pages, rather than
+            // repeating one network request per four-row disclosure click.
+            const readLimit = Math.min(500, Math.max(pageSize, window.rows - rowsRead));
+            const read = await listPage(replacement.nextCursor ?? undefined, readLimit);
             if (!requestIsCurrent()) return;
             replacement = mergeSessionContinuation(
               replacement,
@@ -2304,7 +2375,8 @@ export function SessionList() {
               read.readGeneration,
             );
             pagesRead += 1;
-          } while (replacement.nextCursor && pagesRead < window.pages);
+            rowsRead += readLimit;
+          } while (replacement.nextCursor && rowsRead < window.rows);
           setGroupContinuations((states) => {
             if (!requestIsCurrent()) return states;
             return new Map(states).set(group.key, {
@@ -2314,7 +2386,10 @@ export function SessionList() {
               ),
             });
           });
-          loadedGroupWindows.current.set(group.key, { ...window, pages: pagesRead });
+          loadedGroupWindows.current.set(group.key, {
+            ...window,
+            rows: Math.max(pageSize, rowsRead),
+          });
           return;
         }
         let pageRead;
@@ -2353,14 +2428,18 @@ export function SessionList() {
             ? pageReadGeneration
             : current.snapshotGeneration;
         const newlyLoaded = newlyLoadedCount();
+        const receivedRowCount = reads.reduce(
+          (count, read) => count + read.page.sessions.length,
+          0,
+        );
         const previousWindow = loadedGroupWindows.current.get(group.key);
         loadedGroupWindows.current.set(group.key, {
           generation: requestGeneration,
           group,
-          pages:
+          rows:
             !rebased && previousWindow?.generation === requestGeneration
-              ? previousWindow.pages + reads.length
-              : reads.length,
+              ? previousWindow.rows + receivedRowCount
+              : Math.max(pageSize, receivedRowCount),
         });
         setGroupContinuations((states) => {
           if (!requestIsCurrent()) return states;
@@ -2439,6 +2518,7 @@ export function SessionList() {
       hierarchyMode,
       pageGeneration,
       paginationBrowseFilter,
+      needsYouOnly,
       rail.workspaceId,
       search,
       browseSortBy,
@@ -2874,6 +2954,21 @@ export function SessionList() {
               showEmptyGroups={showEmptyGroups}
               onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
             />
+            {context.clientConfig.sessionArchive ? (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  onSelect={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/read-only-chats",
+                      params: { workspaceId: rail.workspaceId },
+                    })
+                  }
+                >
+                  Read-only chats
+                </DropdownMenuItem>
+              </>
+            ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
@@ -2988,6 +3083,7 @@ export function SessionList() {
                   channelId={section.channelId}
                   sectionId={`channel-${section.key}`}
                   channelHeader
+                  completeCounts={projectTotals?.get(section.channelId)}
                   project={
                     section.channelId
                       ? channels.find((project) => project.id === section.channelId)
@@ -3231,10 +3327,10 @@ export function SessionList() {
         }
         description={
           sessionPendingDelete?.treeStats?.totalDescendants
-            ? `This permanently deletes the complete workstream and its ${sessionPendingDelete.treeStats.totalDescendants} spawned sessions. This cannot be undone.`
-            : "This permanently deletes the session and its history. This cannot be undone."
+            ? `This permanently deletes the chat and its ${sessionPendingDelete.treeStats.totalDescendants} sub-chats. A running chat is stopped first. This cannot be undone.`
+            : "This permanently deletes the chat and its history. A running chat is stopped first. This cannot be undone."
         }
-        confirmLabel="Delete workstream"
+        confirmLabel="Delete"
         cancelAutoFocus
         onConfirm={onDeleteSession}
       />
@@ -3429,6 +3525,7 @@ function SessionGroup(props: {
   channelId?: string | null;
   /** Folder-styled, collapsible header instead of the recency label. */
   channelHeader?: boolean;
+  completeCounts?: RailStatusCounts | undefined;
   /** Archived folders are navigational only; new chats always start active. */
   allowNewSession?: boolean;
   project?: Channel;
@@ -3472,7 +3569,13 @@ function SessionGroup(props: {
     props.sectionId ?? props.label.toLowerCase().replace(/[^a-z0-9]+/g, "-")
   }`;
   const sectionExpanded = props.channelHeader ? Boolean(props.sectionExpanded) : true;
-  const summary = summarizeRailNodes(props.nodes, props.localDeliveryAttention);
+  const loadedSummary = summarizeRailNodes(props.nodes, props.localDeliveryAttention);
+  const summary = props.completeCounts
+    ? summarizeRailStatusCounts({
+        ...props.completeCounts,
+        sendFailed: loadedSummary.kind === "send_failed" ? loadedSummary.count : 0,
+      })
+    : loadedSummary;
   const collapsedSelection = props.channelHeader
     ? findSessionTreeNode(props.nodes, props.activeSessionId)
     : null;
@@ -4211,7 +4314,7 @@ function SessionRow(props: {
             onSelect={() => props.onRequestDelete(props.session)}
           >
             <Trash2Icon className="size-4" />
-            Delete workstream
+            Delete chat
           </ContextMenuItem>
         ) : null}
         {props.channels.length > 0 &&
@@ -4438,7 +4541,7 @@ function RowActionsMenu({
             onClick={(event) => event.stopPropagation()}
           >
             <Trash2Icon className="size-4" />
-            Delete workstream
+            Delete chat
           </DropdownMenuItem>
         ) : null}
         {canMove ? (
@@ -4499,6 +4602,7 @@ function EmptySessions({ archived = false }: { archived?: boolean }) {
 export function CollapsedSessionsButton() {
   const rail = useRail();
   const { sessions, loading, error } = useWorkspaceSessions({
+    projection: "summary",
     limit: 50,
     pollIntervalMs: 15_000,
   });
@@ -4518,7 +4622,7 @@ export function CollapsedSessionsButton() {
             variant="ghost"
             size="icon-sm"
             aria-label="Search sessions"
-            onClick={() => requestSessionSearch(rail.workspaceId)}
+            onClick={(event) => requestSessionSearch(rail.workspaceId, event.currentTarget)}
             className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
@@ -4576,4 +4680,51 @@ function SessionListSkeleton() {
       ))}
     </div>
   );
+}
+
+/**
+ * Delete a chat, stopping it first when it is still running. The API refuses
+ * to delete a chat with an active turn (409), so the person's "Delete" stops
+ * the chat (terminal cancel) and retries until its turn has wound down. Every
+ * other 409 (saved outputs or forks depend on it, background commands, a
+ * sub-chat) is permanent: surface it as-is and never cancel the chat for it.
+ */
+async function deleteStoppingIfRunning(
+  client: {
+    deleteSession(workspaceId: string, sessionId: string): Promise<{ deletedSessionCount: number }>;
+    cancelSession(
+      workspaceId: string,
+      sessionId: string,
+      options: { reason?: string },
+    ): Promise<unknown>;
+  },
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ deletedSessionCount: number }> {
+  try {
+    return await client.deleteSession(workspaceId, sessionId);
+  } catch (error) {
+    if (!isStillRunningDeleteRefusal(error)) throw error;
+  }
+  await client.cancelSession(workspaceId, sessionId, { reason: "Deleted by user" });
+  const deadline = Date.now() + 30_000;
+  for (let delay = 500; ; delay = Math.min(delay * 2, 4_000)) {
+    await new Promise((resolve) => setTimeout(resolve, delay));
+    try {
+      return await client.deleteSession(workspaceId, sessionId);
+    } catch (error) {
+      if (!isStillRunningDeleteRefusal(error) || Date.now() > deadline) throw error;
+    }
+  }
+}
+
+/** Only "still running" (or a box still shutting down) is worth stopping the chat and retrying for. */
+export function isStillRunningDeleteRefusal(error: unknown): boolean {
+  if (!(error instanceof OpenGeniApiError) || error.status !== 409) return false;
+  const code = error.details?.code;
+  if (typeof code === "string") {
+    return code === "session_delete_active_sessions" || code === "session_delete_live_sandboxes";
+  }
+  // Servers before structured refusal codes: keep the old behaviour only for the running case.
+  return /still running|still shutting down/i.test(error.message);
 }

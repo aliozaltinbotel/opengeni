@@ -195,7 +195,8 @@ describe("settings rail", () => {
       expect(linkLabels(workspaceSection)).toEqual([
         "General",
         "Access",
-        "Models",
+        "Agent learning",
+        "Usage",
         "API keys",
         "Developer",
         "Insights",
@@ -211,7 +212,7 @@ describe("settings rail", () => {
       expect(workspaceSection?.getAttribute("aria-label")).toBe("Workspace");
       expect(
         Array.from(workspaceSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([6, 3]);
+      ).toEqual([7, 3]);
 
       const organizationSection = view.section("organization");
       expect(organizationSection?.firstElementChild?.textContent).toBe("Organization");
@@ -220,15 +221,17 @@ describe("settings rail", () => {
         "People",
         "Workspaces",
         "Organization identity",
+        // Every model setting, each workspace's included, lives on Organization > Models.
         "Models",
         "Integrations",
-        "Billing & usage",
+        "Insights",
+        "Billing",
         "Developer",
         "Security & data",
       ]);
       expect(
         Array.from(organizationSection!.querySelectorAll("ul")).map((list) => list.children.length),
-      ).toEqual([4, 5]);
+      ).toEqual([4, 6]);
       for (const link of Array.from(organizationSection!.querySelectorAll("a"))) {
         expect(link.getAttribute("href")).toBe(`${base}/organization`);
         expect(link.getAttribute("aria-label")).toContain("Acme Robotics organization settings");
@@ -242,7 +245,7 @@ describe("settings rail", () => {
           ?.getAttribute("class")
           ?.split(" ")
           .find((name) => name.startsWith("lucide-") && name !== "lucide");
-      for (const label of ["General", "Models", "Developer"]) {
+      for (const label of ["General", "Developer"]) {
         const workspaceIcon = iconOf(workspaceSection, label);
         expect(workspaceIcon).toBeDefined();
         expect(iconOf(organizationSection, label)).toBe(workspaceIcon);
@@ -270,11 +273,13 @@ describe("settings rail", () => {
     workspacePermissions = ["sessions:create"];
     const view = await renderShell({ kind: "settings", section: null });
     try {
+      // Models shows a member their own Personal workspace's model settings.
       expect(linkLabels(view.section("organization"))).toEqual([
         "Organization identity",
+        "Models",
         "Security & data",
       ]);
-      // Two pages stay one group, not two lone rows.
+      // A short list stays one group, not lone rows.
       expect(view.section("organization")!.querySelectorAll("ul")).toHaveLength(1);
       // Insights needs workspace admin.
       expect(linkLabels(view.section("workspace"))).toContain("General");
@@ -300,6 +305,39 @@ describe("settings rail", () => {
         (link) => link.textContent === "Back to sessions",
       );
       expect(back?.getAttribute("href")).toBe(`${base}/sessions`);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("Agent learning is a workspace settings page: current in the rail, with its own header", async () => {
+    const view = await renderShell({ kind: "settings", section: "learning" });
+    try {
+      const current = view.rail().querySelector('a[aria-current="page"]');
+      expect(current?.textContent).toBe("Agent learning");
+      expect(view.section("workspace")?.contains(current)).toBe(true);
+      expect(view.container.querySelector("h1")?.textContent).toBe("Agent learning");
+      expect(view.container.textContent).toContain(
+        "What agents can change on their own, and what waits for your OK.",
+      );
+      expect(view.container.textContent).toContain("Settings content");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a Personal workspace keeps Agent learning in its rail, for your private-chat modes", async () => {
+    const view = await renderShell(
+      { kind: "settings", section: "learning" },
+      { workspaceId: personalWorkspaceId },
+    );
+    try {
+      const labels = linkLabels(view.section("workspace"));
+      expect(labels).toContain("Agent learning");
+      expect(labels).not.toContain("API keys");
+      expect(view.rail().querySelector('a[aria-current="page"]')?.textContent).toBe(
+        "Agent learning",
+      );
     } finally {
       await view.unmount();
     }
@@ -445,6 +483,7 @@ describe("settings rail", () => {
     expect(workspaceSettingsSectionFromSearch("models")).toBe("models");
     expect(workspaceSettingsSectionFromSearch("members")).toBe("access");
     expect(workspaceSettingsSectionFromSearch("danger")).toBe("general");
+    expect(workspaceSettingsSectionFromSearch("learning")).toBe("learning");
   });
 
   test("an organization admin without workspace access sees General and Access only", async () => {

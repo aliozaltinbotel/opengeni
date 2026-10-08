@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/sdk",
-  "version": "7.4.0",
-  "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
+  "version": "1.4.4",
+  "description": "Framework-agnostic TypeScript SDK for the Opengeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -22,6 +22,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./allowance-refusal": {
+      "types": "./src/allowance-refusal.ts",
+      "default": "./src/allowance-refusal.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -50,9 +54,21 @@
       "types": "./src/knowledge.ts",
       "default": "./src/knowledge.ts"
     },
+    "./usage-allowances": {
+      "types": "./src/usage-allowances.ts",
+      "default": "./src/usage-allowances.ts"
+    },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     "./workspace-integrations": {
       "types": "./src/workspace-integrations.ts",
       "default": "./src/workspace-integrations.ts"
+    },
+    "./session-history-import": {
+      "types": "./src/session-history-import.ts",
+      "default": "./src/session-history-import.ts"
     },
     "./document-authority": {
       "types": "./src/document-authority.ts",
@@ -118,9 +134,25 @@
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
     },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
+    },
     "./chat": {
       "types": "./src/chat/index.ts",
       "default": "./src/chat/index.ts"
+    },
+    "./tenant-workspaces": {
+      "types": "./src/tenant-workspaces.ts",
+      "default": "./src/tenant-workspaces.ts"
+    },
+    "./session-proxy": {
+      "types": "./src/session-proxy.ts",
+      "default": "./src/session-proxy.ts"
+    },
+    "./tool-auth": {
+      "types": "./src/tool-auth.ts",
+      "default": "./src/tool-auth.ts"
     },
     "./next": {
       "types": "./src/adapters/next.ts",
@@ -133,7 +165,12 @@
     "./hono": {
       "types": "./src/adapters/hono.ts",
       "default": "./src/adapters/hono.ts"
-    }
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
+    },
+    "./package.json": "./package.json"
   },
   "publishConfig": {
     "access": "public",
@@ -149,6 +186,7 @@
     "@opengeni/contracts": "workspace:*"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@opengeni/artifact-kernel-wasm-document": "workspace:*",
     "@opengeni/artifact-kernel-wasm-presentation": "workspace:*",
     "@opengeni/artifact-kernel-wasm-spreadsheet": "workspace:*",

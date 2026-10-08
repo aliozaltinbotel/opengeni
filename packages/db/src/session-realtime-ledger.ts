@@ -3,10 +3,12 @@ import { createHash } from "node:crypto";
 
 import {
   LatencyMode,
+  McpPersonalConnectionDelegations,
   ReasoningEffort,
   type SessionRealtimeMode,
   type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -1225,6 +1227,19 @@ async function admitRealtimeDelegationInTransaction(
   if (realtimeDelegationRequestsRoute(incoming) && !explicit) {
     throw new Error("Realtime delegation route was not resolved");
   }
+  const [mode] = await db
+    .select()
+    .from(schema.sessionRealtimeModes)
+    .where(
+      and(
+        eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+        eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+        eq(schema.sessionRealtimeModes.id, input.realtimeId),
+        eq(schema.sessionRealtimeModes.ownerSubjectId, input.ownerSubjectId),
+      ),
+    )
+    .limit(1);
+  if (!mode) throw new Error("Realtime delegation authority snapshot disappeared");
   const provenance = {
     source: "realtime_provider_delegation",
     realtimeId: input.realtimeId,
@@ -1232,10 +1247,15 @@ async function admitRealtimeDelegationInTransaction(
     delegationItemId: incoming.delegationItemId!,
     ledgerEntryId: entryId,
   };
-  const inputTranscript = incoming.payload?.inputTranscript;
-  if (typeof inputTranscript !== "string" || inputTranscript.trim().length === 0) {
-    throw new Error("Realtime delegation input transcript is required");
-  }
+  // Some providers (Azure Live) delegate without echoing the user's words. The
+  // work instructions in `incoming.text` still carry the transcript delta, so a
+  // missing echo only changes the display label; it must never fail the sync
+  // batch, which the browser would retry forever.
+  const rawInputTranscript = incoming.payload?.inputTranscript;
+  const inputTranscript =
+    typeof rawInputTranscript === "string" && rawInputTranscript.trim().length > 0
+      ? rawInputTranscript
+      : "Voice request";
   const admitted = await submitHumanPromptInTransaction(db, {
     accountId,
     workspaceId: input.workspaceId,
@@ -1279,6 +1299,10 @@ async function admitRealtimeDelegationInTransaction(
     },
     source: "api",
     surface: "voice",
+    personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+      mode.personalConnectionDelegations,
+    ),
+    mcpAccountBindings: parseAcceptedMcpAccountBindings(mode.mcpAccountBindings),
   });
   return {
     turnId: admitted.turnId,

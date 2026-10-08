@@ -60,6 +60,7 @@ import {
 } from "@opengeni/runtime";
 import { WorkspaceArchiveIntegrityError } from "@opengeni/runtime/sandbox";
 import type { ObjectStorage } from "@opengeni/storage";
+import { resolveSandboxRoute } from "../src/activities/agent-turn/sandbox-establish";
 import {
   createFreshSandboxReadinessReplacementBudget,
   resumeBoxForTurn,
@@ -193,7 +194,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     // resumeBoxForTurn so the box manifest matches the agent manifest (no
     // provided-session env delta — the ownership regression turn-killer fix).
     const sandboxEnvironment = {
-      GIT_AUTHOR_NAME: "OpenGeni Bot",
+      GIT_AUTHOR_NAME: "Opengeni Bot",
       HOME: "/workspace",
       MY_VAR: "value-xyz",
     };
@@ -937,6 +938,219 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       await pending.catch(() => undefined);
       await keeper.release();
       await dropSession(keeper.established);
+    }
+  }, 60_000);
+
+  // Production 2026-10-05: a rolling worker shutdown cancelled spawners mid
+  // establish. Once a box is published warm it is the group's workspace; the
+  // dying attempt must only drop its holder so the replacement attempt resumes
+  // the same provider box by exact id.
+  test("(2ac) cancellation after warm publication keeps the box for the replacement attempt", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const dyingHolderId = sandboxLeaseHolderIdForAttempt("shutdown-after-publish");
+    const cancellation = new AbortController();
+    const lifecycleCalls: string[] = [];
+    let created: EstablishedSandboxSession | null = null;
+    const ids = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sessionId: groupId,
+      backend: "local" as const,
+    };
+    const dying = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        cancellationSignal: cancellation.signal,
+        verifySpawnedSandboxReadiness: async (established) => {
+          created = established;
+          const session = established.session as Record<string, unknown>;
+          for (const method of ["stop", "shutdown", "delete", "preStop"]) {
+            const original = session[method];
+            if (typeof original !== "function") continue;
+            session[method] = async (...args: unknown[]) => {
+              lifecycleCalls.push(method);
+              return await (original as (...a: unknown[]) => Promise<unknown>).apply(session, args);
+            };
+          }
+        },
+        onSpawnedSandboxPublished: () => {
+          cancellation.abort(new Error("WORKER_SHUTDOWN"));
+        },
+      },
+      ids,
+      "turn",
+      dyingHolderId,
+    );
+    await expect(dying).rejects.toThrow("WORKER_SHUTDOWN");
+    expect(created).not.toBeNull();
+    const createdInstanceId = created!.instanceId;
+    // The published box was neither terminated nor rolled back.
+    expect(lifecycleCalls).toEqual([]);
+    const afterShutdown = await readRow(workspaceId, groupId);
+    expect(["warm", "draining"]).toContain(afterShutdown!.liveness);
+    expect(afterShutdown!.instance_id).toBe(createdInstanceId);
+    expect(await holderCount(workspaceId, groupId, dyingHolderId)).toBe(0);
+
+    const replacementHolderId = sandboxLeaseHolderIdForAttempt("shutdown-replacement");
+    const replacement = await resumeBoxForTurn(
+      { db, settings, verifyAttachedSandboxReadiness: async () => undefined },
+      ids,
+      "turn",
+      replacementHolderId,
+    );
+    try {
+      expect(replacement.established.instanceId).toBe(createdInstanceId);
+      expect(replacement.leaseEpoch).toBe(afterShutdown!.lease_epoch);
+      const recovery = (await readLease(db, workspaceId, groupId))!.recovery;
+      expect(recovery.restore.status).not.toBe("unrecoverable");
+    } finally {
+      await replacement.release();
+      await dropSession(replacement.established);
+      if (created) await dropSession(created);
+    }
+  }, 60_000);
+
+  test("(2ad) a cancelled warming waiter stops polling instead of waiting out the warming budget", async () => {
+    if (!available) return;
+    const settings = testSettings({
+      ...settingsFor(true),
+      sandboxWarmingTimeoutMs: 600_000,
+    });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const ids = {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      sessionId: groupId,
+      backend: "local" as const,
+    };
+    let releaseSpawner: (() => void) | undefined;
+    const spawnerGate = new Promise<void>((resolve) => {
+      releaseSpawner = resolve;
+    });
+    let spawnerReachedReadiness: (() => void) | undefined;
+    const spawnerAtReadiness = new Promise<void>((resolve) => {
+      spawnerReachedReadiness = resolve;
+    });
+    const spawner = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        verifySpawnedSandboxReadiness: async () => {
+          spawnerReachedReadiness?.();
+          await spawnerGate;
+        },
+      },
+      ids,
+      "turn",
+      sandboxLeaseHolderIdForAttempt("slow-spawner"),
+    );
+    await spawnerAtReadiness;
+    const cancellation = new AbortController();
+    const waiterHolderId = sandboxLeaseHolderIdForAttempt("cancelled-waiter");
+    const waiter = resumeBoxForTurn(
+      { db, settings, cancellationSignal: cancellation.signal },
+      ids,
+      "turn",
+      waiterHolderId,
+    );
+    try {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if ((await holderCount(workspaceId, groupId, waiterHolderId)) === 1) break;
+        await Bun.sleep(10);
+      }
+      const abortedAt = performance.now();
+      cancellation.abort(new Error("WORKER_SHUTDOWN"));
+      await expect(waiter).rejects.toThrow("WORKER_SHUTDOWN");
+      expect(performance.now() - abortedAt).toBeLessThan(5_000);
+      expect(await holderCount(workspaceId, groupId, waiterHolderId)).toBe(0);
+    } finally {
+      releaseSpawner?.();
+      const resumed = await spawner;
+      await resumed.release();
+      await dropSession(resumed.established);
+      await waiter.catch(() => undefined);
+    }
+  }, 60_000);
+
+  test("(2ab) owning attempt cancellation aborts native Modal readiness before returning a warm session", async () => {
+    if (!available) return;
+    const settings = testSettings({ ...settingsFor(true), sandboxBackend: "modal" });
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const instanceId = "sb-readiness-cancellation";
+    const leaseEpoch = 7;
+    const holderId = sandboxLeaseHolderIdForAttempt("cancelled-modal-readiness");
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: instanceId } },
+    };
+    await admin`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warm', 0,
+        0, 0, ${instanceId}, 'modal', ${leaseEpoch},
+        'modal', ${JSON.stringify(resumeState)}::jsonb, now() + interval '60 seconds'
+      )`;
+    const cancellation = new AbortController();
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    let probeAborted = false;
+    const pending = resumeBoxForTurn(
+      {
+        db,
+        settings,
+        cancellationSignal: cancellation.signal,
+        establishAttachedSandbox: async () => ({
+          client: {},
+          instanceId,
+          backendId: "modal",
+          sessionState: resumeState.sessionState,
+          session: {
+            verifyExecReadiness: (signal: AbortSignal) =>
+              new Promise<number>((_resolve, reject) => {
+                const abort = () => {
+                  probeAborted = true;
+                  reject(signal.reason);
+                };
+                signal.addEventListener("abort", abort, { once: true });
+                if (signal.aborted) abort();
+                enter();
+              }),
+            execCommand: async () => {
+              throw new Error("SDK readiness must not execute");
+            },
+          },
+        }),
+      },
+      { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "modal" },
+      "turn",
+      holderId,
+    );
+    const result = pending.catch((caught) => caught);
+    try {
+      await entered;
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(1);
+      cancellation.abort(new Error("TURN_ATTEMPT_FINALIZED_DURING_READINESS"));
+      expect((await result).message).toContain("TURN_ATTEMPT_FINALIZED_DURING_READINESS");
+      expect(probeAborted).toBe(true);
+      expect(await holderCount(workspaceId, groupId, holderId)).toBe(0);
+      expect(await readRow(workspaceId, groupId)).toMatchObject({
+        liveness: "draining",
+        lease_epoch: leaseEpoch,
+        instance_id: instanceId,
+      });
+    } finally {
+      cancellation.abort();
+      await result;
     }
   }, 60_000);
 
@@ -2107,6 +2321,114 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     } finally {
       await resumed.release();
       await dropSession(resumed.established);
+    }
+  }, 60_000);
+
+  test("between-turn deployment repin resumes the warm Modal group on its recorded image", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const pin = (byte: string) => `registry.example.com/desktop@sha256:${byte.repeat(64)}`;
+    const routeForPin = async (image: string) => {
+      const settings = testSettings({
+        ...settingsFor(true),
+        sandboxBackend: "modal",
+        modalImageRef: image,
+      });
+      const route = await resolveSandboxRoute({
+        input: { accountId, workspaceId, sessionId: groupId } as never,
+        settings,
+        db,
+        eventing: { modelRunSettings: settings } as never,
+        sandboxState: {} as never,
+        media: {} as never,
+        fileAuthoritySubjectId: null,
+        runSettings: settings,
+        logicalSandboxSettings: settings,
+      });
+      return { settings, route };
+    };
+    const before = await routeForPin(pin("a"));
+    const instanceId = "sb-before-repin";
+    const resumeState = {
+      backendId: "modal",
+      sessionState: { providerState: { sandboxId: instanceId } },
+    };
+    await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "viewer",
+      holderId: "between-turn-keeper",
+      backend: "modal",
+      image: before.route.groupBoxImage,
+      imagePolicy: before.route.groupBoxImagePolicy,
+      leaseTtlMs: 60_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId,
+      resumeBackendId: "modal",
+      resumeState,
+      leaseTtlMs: 60_000,
+    });
+    expect(committed.committed).toBe(true);
+    const resumedInstances: string[] = [];
+    const resumeTurn = async (selected: typeof before, attemptId: string) =>
+      await resumeBoxForTurn(
+        {
+          db,
+          settings: selected.settings,
+          establishAttachedSandbox: async (_settings, envelope, options) => {
+            expect(options?.recovery).toBe("resume-only");
+            expect(envelope).toMatchObject(resumeState);
+            resumedInstances.push(instanceId);
+            return {
+              client: {},
+              session: {},
+              sessionState: resumeState.sessionState,
+              instanceId,
+              backendId: "modal",
+              origin: "resumed",
+            };
+          },
+          verifyAttachedSandboxReadiness: async () => undefined,
+        },
+        {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          sessionId: groupId,
+          backend: selected.route.groupBoxBackend,
+          image: selected.route.groupBoxImage!,
+          imagePolicy: selected.route.groupBoxImagePolicy,
+        },
+        "turn",
+        sandboxLeaseHolderIdForAttempt(attemptId),
+      );
+    const firstTurn = await resumeTurn(before, "turn-before-repin");
+    await firstTurn.release();
+    const after = await routeForPin(pin("b"));
+    expect(after.route.groupBoxImage).toBe(pin("b"));
+    const secondTurn = await resumeTurn(after, "turn-after-repin");
+    try {
+      expect(secondTurn.established.origin).toBe("resumed");
+      expect(secondTurn.established.instanceId).toBe(firstTurn.established.instanceId);
+      expect(secondTurn.leaseEpoch).toBe(firstTurn.leaseEpoch);
+      expect(resumedInstances).toEqual([instanceId, instanceId]);
+      expect(await readLease(db, workspaceId, groupId)).toMatchObject({
+        liveness: "warm",
+        image: pin("a"),
+        instanceId,
+        leaseEpoch: firstTurn.leaseEpoch,
+        rotationRequestedAt: null,
+        turnHolders: 1,
+        viewerHolders: 1,
+      });
+    } finally {
+      await secondTurn.release();
     }
   }, 60_000);
 

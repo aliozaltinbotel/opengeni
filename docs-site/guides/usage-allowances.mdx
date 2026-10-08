@@ -1,0 +1,50 @@
+---
+title: "Usage allowances"
+description: "Give each team a monthly pool and each person a share of it, then show people where they stand with drop-in React components."
+---
+
+A usage allowance caps what a workspace, and each person in it, can spend from your Opengeni credits in a period. Use it for per-seat plans, fair sharing within a team, or a fixed project budget.
+
+## How it works
+
+- **The workspace pool is the hard cap.** Set a monthly (or one-off) amount. When it runs out, new work stops until it resets or you add credits.
+- **Each person gets a share.** Equal by default; an admin can set a different share or a fixed amount.
+- **Shares can add up to more than 100%.** They are ceilings, not reservations; the pool still caps the total.
+- **Top-ups add to the pool** until used, across resets.
+- **Limits apply between model calls.** A running call finishes, so expect a small overshoot.
+- **Running out keeps everything readable.** People see who can raise the limit and when it resets.
+
+## Plans as multiples
+
+If you sell a baseline plan and multiples of it, keep billing on your side and let Opengeni count usage:
+
+1. On a plan or seat change, set the workspace's amount to `seats × baseline × multiple`.
+2. When a customer buys a top-up, grant it with your own operation ID.
+3. When their admin changes a person's share, set that member's share.
+
+Show people percentages ("38% left") rather than amounts. Every read includes a `fraction` and a `status` for this.
+
+## React components
+
+`@opengeni/react/usage` reads the signed-in person's usage through your session proxy:
+
+```tsx
+import { ChatComposer } from "@opengeni/react";
+import { UsageLimitNotice, UsageMeter } from "@opengeni/react/usage";
+
+<UsageMeter workspaceId={workspaceId} />              // "38% left · Resets Nov 1"
+<ChatComposer header={<UsageLimitNotice workspaceId={workspaceId} />} />
+```
+
+- `useUsage()` returns the raw reading and which limit applies first.
+- `UsageMeter` shows shares. Use `formatAmount` to show your own unit; `density="hero"` for a page header.
+- `UsageLimitNotice` appears only near or at a limit. Customize it with `labels` and add a button with `action`.
+- `UsageMemberList` is an admin roster with a share slider per person. Your backend saves the change.
+
+When a turn is refused, the conversation shows a "usage limit reached" row. Customize it with `allowanceExhaustedLabels` or `renderAllowanceExhausted` on `SessionConversation` or `MessageTimeline`.
+
+## In the Opengeni app
+
+Organization owners set each workspace's monthly budget under **Organization settings → Billing**. Workspace admins set member limits under **Workspace settings → Usage**.
+
+For the API, SDK, and webhooks, see the [usage allowances reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/usage-allowances.md).

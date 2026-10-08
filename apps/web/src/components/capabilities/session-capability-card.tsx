@@ -1,4 +1,9 @@
-import { attachSessionCapability } from "./attach-session-capability";
+import {
+  attachSessionCapability,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
+} from "./attach-session-capability";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
@@ -14,7 +19,9 @@ import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
 import { userErrorText } from "@/lib/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
-import type { CapabilityCatalogItem } from "@/types";
+import type { CapabilityCatalogItem, ResourceRef } from "@/types";
+import type { ChatSendContext } from "./session-github-repositories";
+import { SessionGitHubCapabilityCard } from "./session-github-card";
 
 const CodexSubscriptionsCard = lazy(async () => ({
   default: (await import("@/components/models/codex-models")).CodexSubscriptionsCard,
@@ -28,6 +35,10 @@ type SessionCapabilityCardProps = {
   item: AuthNeededItem;
   workspaceId: string;
   sessionId: string;
+  /** The chat's mounted resources, for cards that add a resource to this chat. */
+  resources?: readonly ResourceRef[] | undefined;
+  /** What a composer Send would carry now, for cards that send a human message. */
+  sendContext?: (() => ChatSendContext) | undefined;
 };
 
 export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
@@ -43,6 +54,8 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
         key={`${props.workspaceId}:${props.item.id}`}
         item={props.item}
         workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        onConfigured={props.onConfigured}
         onRegistered={onRegistered}
       />
     );
@@ -63,6 +76,19 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       }
     : props.item;
   const capability = item.capability;
+  if (capability?.id === "api:github-app") {
+    return (
+      <SessionGitHubCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        resources={props.resources}
+        sendContext={props.sendContext}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   const resolved = context.workspaceCapabilityCatalog.find((entry) => entry.id === capability?.id);
   if (capability && resolved?.kind === "mcp" && resolved.authKind === "oauth2") {
     return (
@@ -96,19 +122,13 @@ function ScopedSessionCapabilityCard({
   restoreFocus = false,
 }: SessionCapabilityCardProps & { restoreFocus?: boolean }) {
   const context = useAppContext();
-  const refreshGitHub = context.refreshGitHub;
   const recommendation = item.capability!;
   const [expanded, setExpanded] = useState(false);
   const [complete, setComplete] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [githubError, setGithubError] = useState<string | null>(null);
   const [resolvedItem, setResolvedItem] = useState<CapabilityCatalogItem | null>(null);
   const opener = useRef<HTMLButtonElement>(null);
   const cardRef = useRef<HTMLElement>(null);
-  const githubInFlight = useRef(false);
-  const githubRequestSequence = useRef(0);
-  const active = useRef(true);
-  const github = recommendation.id === "api:github-app";
   useEffect(() => {
     if (!restoreFocus) return;
     // The review dialog's opener is removed when the new connection card
@@ -116,81 +136,17 @@ function ScopedSessionCapabilityCard({
     const frame = requestAnimationFrame(() => opener.current?.focus());
     return () => cancelAnimationFrame(frame);
   }, [restoreFocus]);
-  useEffect(() => {
-    active.current = true;
-    return () => {
-      active.current = false;
-    };
-  }, []);
-  useEffect(() => {
-    if (github && context.githubStatus) setComplete(context.githubStatus.status === "bound");
-  }, [github, context.githubStatus]);
-  useEffect(() => {
-    if (!github) return;
-    const onPageShow = (event: PageTransitionEvent) => {
-      if (!event.persisted || !githubInFlight.current) return;
-      // A cancelled authorization can restore this exact React tree from the
-      // back/forward cache. Its prior request must not navigate or settle a
-      // newer attempt after the card becomes usable again.
-      githubRequestSequence.current += 1;
-      githubInFlight.current = false;
-      setBusy(false);
-      void refreshGitHub(workspaceId);
-    };
-    window.addEventListener("pageshow", onPageShow);
-    return () => window.removeEventListener("pageshow", onPageShow);
-  }, [github, refreshGitHub, workspaceId]);
   const catalogItem =
     resolvedItem ??
     context.workspaceCapabilityCatalog.find((entry) => entry.id === recommendation.id);
   const logo = catalogItem
     ? capabilityLogoSource(catalogItem, (path) => context.client.catalogAssetUrl(path))
-    : github
-      ? capabilityLogoSource({ id: recommendation.id, logoAssetPath: null }, () => null)
-      : null;
+    : null;
   const close = () => {
     setExpanded(false);
   };
   const skill = recommendation.kind === "skill";
   const apiKey = catalogItem ? capabilityConnectPlan(catalogItem).mode === "api_key" : false;
-  async function connectGitHub() {
-    if (githubInFlight.current) return;
-    const requestSequence = ++githubRequestSequence.current;
-    githubInFlight.current = true;
-    setBusy(true);
-    setGithubError(null);
-    let navigating = false;
-    try {
-      const status = await context.client.getGitHubApp(workspaceId, {
-        returnPath: `/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(sessionId)}`,
-      });
-      if (!active.current || requestSequence !== githubRequestSequence.current) return;
-      if (status.status === "bound") {
-        setComplete(true);
-        void context.refreshGitHub(workspaceId);
-        return;
-      }
-      if (!status.linkUrl)
-        throw new Error(
-          status.configured
-            ? "Your account cannot manage this workspace's GitHub connection."
-            : "GitHub is not configured on this deployment.",
-        );
-      navigating = true;
-      window.location.assign(status.linkUrl);
-    } catch (failure) {
-      navigating = false;
-      if (active.current && requestSequence === githubRequestSequence.current) {
-        setGithubError(`Couldn't start GitHub setup. ${userErrorText(failure, "Try again.")}`);
-        setExpanded(true);
-      }
-    } finally {
-      if (requestSequence === githubRequestSequence.current && !navigating) {
-        githubInFlight.current = false;
-        if (active.current) setBusy(false);
-      }
-    }
-  }
   return (
     <SessionCapabilityFrame
       name={catalogItem?.name ?? recommendation.name}
@@ -201,42 +157,29 @@ function ScopedSessionCapabilityCard({
       skill={skill}
       expanded={expanded}
       complete={complete}
-      completeLabel={github ? "Connected to this workspace" : undefined}
       actionLabel={
-        github && busy
-          ? "Opening GitHub…"
-          : catalogItem?.enabled
-            ? "Review"
-            : skill
-              ? "Review skill"
-              : apiKey
-                ? "Add API key"
-                : `Connect ${catalogItem?.name ?? recommendation.name}`
-      }
-      opensDialog={!github}
-      note={
-        github
-          ? "Choose which account and repositories this workspace can access on GitHub."
+        catalogItem?.enabled
+          ? "Review"
           : skill
-            ? "Skill content is reviewed separately from permission to use any integration."
+            ? "Review skill"
             : apiKey
-              ? "Add credentials in the protected form, not in a chat message."
-              : "Review access before signing in. You'll return to this conversation after authorization."
+              ? "Add API key"
+              : `Connect ${catalogItem?.name ?? recommendation.name}`
       }
-      onOpen={() => (github ? void connectGitHub() : setExpanded(true))}
+      note={
+        skill
+          ? "Skill content is reviewed separately from permission to use any integration."
+          : apiKey
+            ? "Add credentials in the protected form, not in a chat message."
+            : "Review access before signing in. You'll return to this conversation after authorization."
+      }
+      onOpen={() => setExpanded(true)}
       onClose={close}
       busy={busy}
       opener={opener}
       cardRef={cardRef}
     >
-      {github ? (
-        <SessionGitHubSetup
-          busy={busy}
-          error={githubError}
-          onRetry={() => void connectGitHub()}
-          onClose={close}
-        />
-      ) : recommendation.id === "mcp:codex_apps" ? (
+      {recommendation.id === "mcp:codex_apps" ? (
         <SessionCodexAppsSetup
           busy={busy}
           setBusy={setBusy}
@@ -297,42 +240,70 @@ function SessionCapabilitySetup({
       ? null
       : hasWorkspacePermission(context.accessContext, workspaceId, "connections:read");
   const [error, setError] = useState<string | null>(null);
+  const subjectId = context.accessContext?.subjectId ?? null;
+  const [parentAccessReview, setParentAccessReview] = useState<{
+    plan: SessionCapabilityAccessPlan;
+    invocation: object;
+  } | null>(null);
   const [authInspection, setAuthInspection] = useState<{
     id: string;
     url: string;
     kind: "oauth2" | "none" | "unknown";
+    message?: string | undefined;
   } | null>(null);
-  const inFlight = useRef(false);
+  const [authInspectionRevision, setAuthInspectionRevision] = useState(0);
+  const inFlight = useRef<object | null>(null);
   const scope = useRef({
     client: context.client,
     workspaceId,
     sessionId,
     canReadConnections,
+    subjectId,
+    authorityKey: catalog.authorityKey,
     alive: true,
   });
   if (
     scope.current.client !== context.client ||
     scope.current.workspaceId !== workspaceId ||
     scope.current.sessionId !== sessionId ||
-    scope.current.canReadConnections !== canReadConnections
+    scope.current.canReadConnections !== canReadConnections ||
+    scope.current.subjectId !== subjectId ||
+    scope.current.authorityKey !== catalog.authorityKey
   ) {
     scope.current = {
       client: context.client,
       workspaceId,
       sessionId,
       canReadConnections,
+      subjectId,
+      authorityKey: catalog.authorityKey,
       alive: true,
     };
   }
+  const parentAccessPlan =
+    parentAccessReview?.invocation === scope.current ? parentAccessReview.plan : null;
   useEffect(() => {
+    // StrictMode replays setup after cleanup. Give the replay a new owner:
+    // reusing the retired object would either keep it dead or revive old work.
+    if (!scope.current.alive) scope.current = { ...scope.current, alive: true };
     const activeScope = scope.current;
+    setParentAccessReview(null);
+    setBusy(false);
     void catalog.refresh();
     return () => {
       activeScope.alive = false;
     };
     // Refetch on a live read-grant change; the hook masks prior rows during render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context.client, workspaceId, sessionId, canReadConnections]);
+  }, [
+    context.client,
+    workspaceId,
+    sessionId,
+    canReadConnections,
+    subjectId,
+    catalog.authorityKey,
+    setBusy,
+  ]);
   const rawItem = catalog.items.find((entry) => entry.id === capabilityId);
   const rawItemId = rawItem?.id;
   const inspectUrl = rawItem?.mcpUrl ?? rawItem?.endpointUrl;
@@ -347,7 +318,7 @@ function SessionCapabilitySetup({
     setAuthInspection(null);
     void context.client.inspectMcpAuthentication(workspaceId, inspectUrl).then(
       (result) => {
-        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: result.kind });
+        if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, ...result });
       },
       () => {
         if (active) setAuthInspection({ id: rawItemId, url: inspectUrl, kind: "unknown" });
@@ -356,7 +327,14 @@ function SessionCapabilitySetup({
     return () => {
       active = false;
     };
-  }, [context.client, workspaceId, rawItemId, inspectUrl, needsAuthInspection]);
+  }, [
+    context.client,
+    workspaceId,
+    rawItemId,
+    inspectUrl,
+    needsAuthInspection,
+    authInspectionRevision,
+  ]);
   const item = useMemo(() => {
     if (!rawItem || !needsAuthInspection) return rawItem;
     const inspection =
@@ -371,7 +349,11 @@ function SessionCapabilitySetup({
           : inspection === "none"
             ? ("none" as const)
             : null,
-      metadata: { ...rawItem.metadata, authDiscovery: inspection },
+      metadata: {
+        ...rawItem.metadata,
+        authDiscovery: inspection,
+        authDiscoveryMessage: inspection === "unknown" ? authInspection?.message : undefined,
+      },
     };
   }, [rawItem, needsAuthInspection, inspectUrl, authInspection]);
   useEffect(() => {
@@ -381,11 +363,13 @@ function SessionCapabilitySetup({
     void context.refreshWorkspaceMcpServers(workspaceId);
   }, [context, workspaceId]);
   async function act(action: ConnectAction) {
-    if (!item || inFlight.current) return;
-    inFlight.current = true;
+    if (!item) return;
+    const invocation = scope.current;
+    if (inFlight.current === invocation) return;
+    inFlight.current = invocation;
     setBusy(true);
     setError(null);
-    const invocation = scope.current;
+    setParentAccessReview(null);
     const current = () => scope.current === invocation && invocation.alive;
     try {
       await performCapabilityAction(
@@ -411,7 +395,19 @@ function SessionCapabilitySetup({
             if (!current()) return;
             if (!updated?.enabled)
               throw new Error("Setup could not be verified. Refresh and try again.");
-            await attachSessionCapability(context.client, workspaceId, sessionId, updated, current);
+            const plan = await prepareSessionCapabilityAccess(
+              context.client,
+              workspaceId,
+              sessionId,
+              updated,
+              current,
+            );
+            if (!current()) return;
+            if (plan.sessions.some((chat) => chat.id !== sessionId && chat.request)) {
+              setParentAccessReview({ plan, invocation });
+              return;
+            }
+            await applySessionCapabilityAccess(context.client, plan, current);
             await onConfigured?.();
             if (current()) onComplete();
           },
@@ -434,26 +430,47 @@ function SessionCapabilitySetup({
       if (current()) await catalog.refresh();
       if (current()) setError(capabilityErrorToast(failure, "Couldn't complete setup").description);
     } finally {
-      inFlight.current = false;
+      if (inFlight.current === invocation) inFlight.current = null;
       if (current()) setBusy(false);
     }
   }
   async function useConnected() {
-    if (!item || inFlight.current) return;
-    inFlight.current = true;
+    if (!item) return;
+    const invocation = scope.current;
+    if (inFlight.current === invocation) return;
+    inFlight.current = invocation;
     setBusy(true);
     setError(null);
-    const invocation = scope.current;
     const current = () => scope.current === invocation && invocation.alive;
     try {
-      await attachSessionCapability(context.client, workspaceId, sessionId, item, current);
+      const plan =
+        parentAccessPlan ??
+        (await prepareSessionCapabilityAccess(
+          context.client,
+          workspaceId,
+          sessionId,
+          item,
+          current,
+        ));
+      if (!current()) return;
+      if (
+        !parentAccessPlan &&
+        plan.sessions.some((chat) => chat.id !== sessionId && chat.request)
+      ) {
+        setParentAccessReview({ plan, invocation });
+        return;
+      }
+      await applySessionCapabilityAccess(context.client, plan, current);
+      if (current()) setParentAccessReview(null);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
     } catch (failure) {
-      if (current())
+      if (current()) {
+        setParentAccessReview(null);
         setError(`Couldn't add this connection. ${userErrorText(failure, "Try again.")}`);
+      }
     } finally {
-      inFlight.current = false;
+      if (inFlight.current === invocation) inFlight.current = null;
       if (current()) setBusy(false);
     }
   }
@@ -504,8 +521,48 @@ function SessionCapabilitySetup({
             "capabilities:manage",
           )}
           onAction={(action) => void act(action)}
+          onRetryAuthInspection={
+            needsAuthInspection
+              ? () => {
+                  setAuthInspection(null);
+                  setAuthInspectionRevision((revision) => revision + 1);
+                }
+              : undefined
+          }
         />
       )}
+      {parentAccessPlan && item ? (
+        <Notice tone="waiting" live="polite">
+          <p>
+            This chat inherits its tool access from its parent. To add {item.name}, enable its tools
+            in these parent chats first:
+          </p>
+          <ul className="mt-2 list-disc pl-5">
+            {parentAccessPlan.sessions
+              .filter((chat) => chat.id !== sessionId && chat.request)
+              .map((chat) => (
+                <li key={chat.id}>
+                  <a
+                    className="underline"
+                    href={`/workspaces/${encodeURIComponent(workspaceId)}/sessions/${encodeURIComponent(chat.id)}`}
+                  >
+                    {chat.title || "Parent chat"}
+                  </a>
+                </li>
+              ))}
+          </ul>
+          <p className="mt-2">
+            Confirming adds {item.name}'s tools to these chats and this chat. Parent chats and
+            future children can then use them. Existing tool choices are preserved; workspace
+            defaults become chat-specific selections where needed. Current turns keep their accepted
+            access.
+          </p>
+          <p className="mt-2">
+            Updates are saved separately. If a later update fails, approved parent changes may
+            already be saved.
+          </p>
+        </Notice>
+      ) : null}
       <div className="mt-2 flex justify-end gap-2">
         {!ownsActionRow ? (
           <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
@@ -514,39 +571,10 @@ function SessionCapabilitySetup({
         ) : null}
         {item?.enabled && health?.state !== "attention" && health?.state !== "unverified" ? (
           <Button size="sm" disabled={busy} onClick={() => void useConnected()}>
-            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}Add tools
+            {busy ? <Loader2Icon className="animate-spin" /> : <CheckIcon />}
+            {parentAccessPlan ? "Enable in parents and add tools" : "Add tools"}
           </Button>
         ) : null}
-      </div>
-    </div>
-  );
-}
-
-function SessionGitHubSetup({
-  busy,
-  error,
-  onRetry,
-  onClose,
-}: {
-  busy: boolean;
-  error: string | null;
-  onRetry: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="space-y-3 p-6 sm:p-8">
-      <p className="text-xs leading-[1.7] text-fg-muted">
-        Choose the account and repositories to share with this workspace on GitHub, then return to
-        this conversation.
-      </p>
-      {error ? <Notice tone="failed">{error}</Notice> : null}
-      <div className="flex justify-end gap-2">
-        <Button size="sm" variant="ghost" disabled={busy} onClick={onClose}>
-          Cancel
-        </Button>
-        <Button size="sm" disabled={busy} onClick={onRetry}>
-          {busy ? <Loader2Icon className="animate-spin" /> : null}Try again
-        </Button>
       </div>
     </div>
   );

@@ -1,5 +1,238 @@
 # @opengeni/codemode
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [6384dbd]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/sdk@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [c0c0f74]
+  - @opengeni/sdk@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/tool-gateway@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/contracts@1.4.2
+- @opengeni/sdk@1.4.2
+- @opengeni/tool-gateway@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- fe1f64d: Codemode terminal settlement takes the session lock prefix before updating its journal row, so it no longer deadlocks against the client's re-notify of the same operation (`POST /codemode/calls` 500s with SQLSTATE 40P01). Submit and claim retry deadlock/serialization victims, an exhausted victim returns a typed retryable 503, and the Codemode client resubmits and re-reads the same operation id after a known-outcome transient 5xx.
+- Updated dependencies [9145bad]
+- Updated dependencies [be95071]
+- Updated dependencies [1f112d5]
+- Updated dependencies [784e862]
+- Updated dependencies [f290348]
+- Updated dependencies [e852eb7]
+  - @opengeni/contracts@1.4.1
+  - @opengeni/sdk@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- Updated dependencies [bd9521c]
+- Updated dependencies [5a0c6f3]
+- Updated dependencies [e0ccba8]
+- Updated dependencies [8e11301]
+- Updated dependencies [ef0f1c8]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+- Updated dependencies [e01662a]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/sdk@1.4.0
+  - @opengeni/tool-gateway@1.4.0
+
+## 1.3.0
+
+### Minor Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+### Patch Changes
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/sdk@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/sdk@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [4d5053f]
+- Updated dependencies [208dec1]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/sdk@1.1.0
+  - @opengeni/tool-gateway@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- Updated dependencies [43da85e]
+- Updated dependencies [4476ca7]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+
+## 0.7.1
+
+### Patch Changes
+
+- Updated dependencies [aa41b15]
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [e6036b3]
+- Updated dependencies [395becb]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3395acc]
+- Updated dependencies [18216d2]
+- Updated dependencies [00000d7]
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [1826595]
+- Updated dependencies [b4d1c5b]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/sdk@7.8.0
+  - @opengeni/tool-gateway@0.1.20
+
+## 0.7.0
+
+### Minor Changes
+
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+
+### Patch Changes
+
+- Updated dependencies [12ef019]
+- Updated dependencies [7798558]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/sdk@7.7.0
+  - @opengeni/tool-gateway@0.1.19
+
+## 0.6.8
+
+### Patch Changes
+
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+
+## 0.6.7
+
+### Patch Changes
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/sdk@7.6.0
+  - @opengeni/tool-gateway@0.1.18
+
+## 0.6.6
+
+### Patch Changes
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/tool-gateway@0.1.17
+
 ## 0.6.5
 
 ### Patch Changes

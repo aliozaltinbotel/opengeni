@@ -1,5 +1,254 @@
 # @opengeni/contracts
 
+## 1.4.4
+
+### Patch Changes
+
+- 6384dbd: Negotiate native desktop click continuation so viewers send the first click immediately and submit the real second click while its HTTP receipt is pending. Require the exact completed first operation plus one-use native delivery proof, preserve painted-frame coordinates and geometry, and reject failed, unknown, expired or unrelated continuations without replay. Later viewer input waits for both outcomes; Linux physical input serializes without queuing independent background AT-SPI actions. Background native mutation admission fences click proof through completion, cancellation and panic so overlapping work cannot restore authority.
+
+  Keep bounded original Window keyboard/clipboard identities across read-only refreshes, with live object, process, geometry and focus revalidation. Preflight whole key batches before input, and reject Window pointer points covered by another X11 client. Preserve uncertain outcomes after any possible input delivery.
+
+## 1.4.3
+
+## 1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 9145bad: Connector catalogs no longer offer connectors that cannot connect on the current deployment. Some providers refuse OAuth self-registration (Asana, HubSpot, Front, Box, Dropbox, Canva, Vercel, and others). When the deployment has no operator-registered OAuth client for such a provider, the catalog reports `runtime.operatorOAuthClient.configured: false` and connector discovery hides the row. Rows that are already connected stay visible.
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+
+## 1.4.0
+
+### Minor Changes
+
+- 08ce841: `ogtool call` prints a tool result's payload once: a text block that only repeats `structuredContent` as JSON is omitted, and `--full` prints the exact result. The rule is exported from `@opengeni/contracts` as `omitStructuredContentTextDuplicates` and is shared with the runtime's model-facing MCP projection and the native Connected Machine client.
+- 673bb53: Add provider-agnostic web search. When a deployment names a search provider (TinyFish, Exa, Tavily, Firecrawl, Brave, Jina, or self-hosted SearXNG), models without hosted search receive `web_search` and `web_fetch` tools; hosted search stays the default where it exists, and `replace` mode can swap it. Priced calls are credit-billed at provider cost plus 5%. Off until configured.
+
+### Patch Changes
+
+- bd9521c: Approval reviews read as one action: multi-item work no longer shows "batch" in titles, a Block reports its own reason and a `blocked` status, and an older request whose saved arguments cannot be recovered still offers Decline so the session never stays stuck.
+
+## 1.3.0
+
+### Minor Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- 414d416: Support explicit organization sharing of installed Slack bots and durable bot posting from ordinary chats. Add bot inventory and organization-access SDK methods, preserve person-chosen scheduled destinations, and keep personal Slack identities separate.
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+
+## 1.1.0
+
+### Minor Changes
+
+- 208dec1: Add `updateArtifactPin(workspaceId, kind, artifactId, pinned)` and optional catalog
+  `pinned` metadata for workspace-shared artifact pins. Catalog pages order matching
+  pins globally before the selected sort without changing content-access authority.
+
+### Patch Changes
+
+- 5fd6c55: A session whose agent starts from `capabilities: "none"` no longer receives the
+  bundled Opengeni guides (`opengeni-help`, `opengeni-client`, ...) when
+  `bundledSkillIds` is omitted; an explicit list still opts in exactly, and
+  `"all"` or legacy configurations keep the bundled defaults. Session create
+  freezes the empty selection so the record, replay, and children agree.
+
+  `command_read` and `command_wait` are now owned by attached compute
+  (`FIRST_PARTY_MCP_TOOL_CAPABILITIES` reports `"sandbox"`) and are attached, and
+  listed in `effectiveTools`, only when a managed sandbox or Connected Machine is
+  attached to the turn. `wait_for_input` and `set_session_title` are unchanged.
+  New exports: `AgentFirstPartyToolOwner`, `isDerivedAgentToolOwner`,
+  `AGENT_SANDBOX_MECHANIC_TOOL_NAMES`, `bundledSkillSelectionForAgentConfig`, and
+  the `sandboxAttached` tool-environment flag.
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- 411b3b5: A scheduled task whose model was retired or removed from the catalog now records each
+  occurrence as a visible failed run with reason `scheduled_model_unavailable` instead of
+  failing the scheduler activity and leaving no run.
+
+## 1.0.2
+
+### Patch Changes
+
+- 4476ca7: Share connected-account identity labels across the web UI and agent MCP bindings. Save Slack username and workspace name from the existing verified authentication response without requesting additional scopes.
+
+  Allow settings to include inactive accounts in the owning user's organization-wide account inventory, while keeping execution account lists active-only by default.
+
+- e16aa17: Use the receiving chat's accepted execution context for ordinary same-user agent updates, so different sender account selections do not fragment batches or change the receiving chat's accounts. Preserve explicit authorization for other users and restricted sources, and add factual model-only notes for known tool selection differences.
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 5.8.0
+
+### Minor Changes
+
+- 692a1f5: Show models by their clean display name and maker logo outside model settings. Add `modelDisplayName`/`modelVendor` (`@opengeni/sdk/model-display`) and `ModelName`/`ModelMark` (`@opengeni/react`). Picker rows, triggers, queue rows and fleet tiles no longer show routing ids, and organization- and workspace-connected copies of one model share one "API keys" group and render identically.
+- e0d4bd4: Extend the dedicated Insights contracts with recorded source/plan and leaf-session dimensions, workspace grouping in both scopes, authorized person amount keys, and inclusive custom UTC calendar-day queries of at most 370 days. Custom dates and their resolved current/prior windows must stay within years 0001 through 9999. Preserve monetary totals, knownness, and ledger-only priors; missing source provenance is other and missing recorded plan snapshots are unknown.
+- 9ca494c: Add the shared Insights usage/calls schemas on a dedicated subpath, with scoped repeated/comma query validation, safe numeric/date bounds, and coherent payer and recorded list-cost coverage. Backend routes and SDK methods are shipped separately.
+- 18216d2: Add secret-free, fresh-only Modal native proof v2 descriptions and the complete fixed prebinding preparation recipe. These structural exports grant no host, provider, capture, Start, replay, or semantic continuation authority and do not activate a producer.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+- 0fba21e: Schedule messages in existing chats without duplicating execution settings. Default conversational scheduling to the calling chat, add lossless message edits and guarded retargeting, and preserve captured account authority. Improve destination controls, exact prompt retrieval and filtered history paging; remove obsolete deployment guidance.
+- 14e95e9: Redeem a Stripe promotion code at checkout: `createBillingCheckout` accepts `promotionCode`, and a fixed-amount USD code sets the credits by itself, so a $100 code buys exactly $100 of credits. Add `getBillingCheckout` to read whether a checkout's credits reached the balance; it also settles a completed checkout whose webhook is late, under the same ledger idempotency key. Organization setup can store the signup answer to "How do you want to use Opengeni?" once per person and organization.
+
+### Patch Changes
+
+- aa41b15: Use hosted Atlassian MCP for Jira and Confluence agent access. Retire native API tools and Knowledge sync admission while preserving historical wire types, encrypted grants, imported Documents and cleanup paths. Existing native schedules no longer fetch provider content; pending authorization attempts settle without exchanging a native grant. Google Drive integration is unchanged.
+- af57cf9: Use canonical ComputerSession frames and actions for screen and window viewers. Preserve the painted frame fence, reflect authorized human input availability, and enforce human sandbox input policy on each action while retaining separate agent tool authority. Older controllers keep frame viewing behind an encrypted proxy without receiving RFB input grants.
+
+  App-only viewers require an explicit current input posture before enabling mutations. Refresh rechecks permission without starting a stream or native action, and physical machine screen-control consent remains separate from viewing.
+
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- c7c09fd: Preserve recorded prior-window monetary totals when model-call facts are missing. Insights prior measures may contain charged or list micros with zero recorded calls and zero coverage; only truly empty priors must be null. UTC zero-length-window rules remain unchanged.
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+- 303ed6c: Preserve an omitted Insights sources facet when parsing interim usage responses. An explicit sources array advertises implemented source/custom support; validation must not manufacture that capability for an older raw backend.
+- 3395acc: Automatically reuse the existing send credential hook for approval/human-input responses, with atomic write-only MCP header updates and no integration changes.
+- 6cdc0aa: Agent configuration is always on. The `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` and `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` settings are removed: `agent` is admitted on every surface, and a top-level session that omits it resolves to the workspace default or `{ capabilities: "all" }`. The client config still reports `agentConfig.enabled` and `defaultForNewSessions` (deprecated, always `true`).
+- 97d4f07: Require an explicit server-enforced screen grant for managed ComputerSession RFB input. Preserve viewing with pixel-only grants, recheck controller and target authority before forwarding packets, and use canonical frames and actions with older controllers. Desktop viewers default old attachments to view only.
+- 8323e90: Run Slack account MCP tools through a reviewed Web API bridge while preserving OAuth, exact account authority, and tool approvals. Add scope-aware discovery and shared app/workspace request quotas for unlisted pilots. Preserve bot reaction and message tasks under throttled optional context, and remove unavailable generic Real-time Search.
+
+  Migration 0597 requires stopped application processes and matching role provisioning before starting this release.
+
+## 5.7.0
+
+### Minor Changes
+
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+- 697263e: The web client beacon (`POST /v1/client-errors`) now also admits closed, content-free operational signals discriminated by `signal`: key requests that failed before any HTTP response (`opengeni_client_request_failures_total{action,reason}`), live-stream health (`opengeni_client_stream_events_total{stream,event}`), and web vitals (`opengeni_client_web_vital{metric,page}` histogram). Error reports are unchanged.
+- 56584f9: Expose additive, defaulted private-chat amount summaries and organization model payer totals. Organization and workspace totals include every usage ledger row, including another member's Only me chats and retained usage for missing or deleted sessions, without changing billing debits.
+
+  Private-chat breakdowns disclose person-level amounts only, never unseen content, titles, session/root identities, or drilldown links; detail and sample lists remain actor-visible. Workspace breakdowns share provider/model filters and are empty for root/session scopes. Organization payer totals use all model facts independently of the capped model list, distinguishing OpenGeni credits, subscriptions, and own-key billing. New lists default to empty for older responses, truncation defaults to false, and unknown cost remains unknown.
+
+  The released v1 cache percentages retain their numeric types and original computation. Nullable cache-contract changes are deferred to a separate follow-up; this release adds no cache deprecation, response-version selector, or breaking-change exception.
+
+- 31e3771: Expose stored Connected Machine command reconciliation diagnostics and unavailable observations through existing session-authorized reads, preserving provider execution and acknowledgement behavior.
+- 479ec20: Add the selectable opengeni-schedules bundled Skill for schedule creation. The
+  Schedules chat shortcut keeps setup guidance in the Skill and sends only the
+  user's scheduling request and time zone.
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+
+### Patch Changes
+
+- 12ef019: Use the human workspace instruction size limit for agent writes too, so localized edits can preserve long existing policies. Keep exact-anchor, baseline, authorization and review safeguards unchanged.
+- 45e1b4f: Advertise background window input separately from background semantic controls. The CUA pilot viewer accepts targeted clicks and typing without offering unsupported foreground focus; existing native backends retain their focus guard.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- d2fe11d: Add capability-gated media instructions and bounded discovery hints so agents can find deferred image tools after an unmatched literal-prefix lookup. Preserve tool-family authorization, approval checks, and deferred schema visibility.
+- cbb3e36: A send that names a model no longer in the live catalog now returns its 422 with `details: { code: "model_unavailable", modelId }` (the status, code and message are unchanged). `@opengeni/react` maps it to plain composer copy, offers Edit message instead of a Retry that cannot succeed, and exports `COMPOSER_MODEL_UNAVAILABLE_MESSAGE` and `isModelUnavailableSubmissionError`.
+- 3a921bf: Allow unused client configuration and capability validators to be removed from browser bundles.
+
+## 5.6.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- 4762e1a: Collect product usage analytics server-side, independent of browser analytics consent.
+
+  Record throttled, batched presence for managed browser sessions and publish `opengeni_active_users{window}` from control workers. Add the `user.active`, `credits.granted` (grant class) and `connection.revoked` (provider class) lifecycle facts, live `opengeni_sessions_created_total{surface,created_by_kind,root}` and `opengeni_user_messages_total{surface}` counters, and database-derived `opengeni_credit_grants_total{grant_class}` / `opengeni_credit_granted_micros_total{grant_class}` that include trigger-written trial grants.
+
+  Add an idempotent operator backfill (`bun run db:backfill-lifecycle-facts`) for lifecycle facts captured before the first lifecycle consumer registered.
+
+  Give the logical workspace capture its own `opengeni_workspace_capture_revision_duration_seconds` histogram so it no longer collides with the physical capture histogram's label set in one worker registry.
+
+## 5.5.0
+
+### Minor Changes
+
+- a6ff780: Add optional direct API-key credential metadata to access contexts, including
+  organization/workspace scope and effective workspace permissions. Export the
+  SDK AccessCredential type and document full organization-key provisioning of
+  workspaces, external members, and asUser sessions without changing existing
+  grants, membership requirements, session visibility, or literal secrets authority.
+- fd5fb34: Let workspace administrators test integration endpoints and see what they inherit. `testWorkspaceWebhook` sends a signed `webhook.test` event (accepted by `verifyWebhookEvent`, never queued), `testWorkspaceCredentialProvider` sends a `credentials.request` with `purpose: "test"` and returns only the names of what a run would get, and `getWorkspaceInheritedIntegrations` lists the organization provider and webhooks that reach a workspace. The web app's Developer settings now explain both integrations, give each webhook and the provider its own page with deliveries and a test, and manage organization-wide registrations under Organization settings > Developer.
+- b45621d: Artifacts and Sites now work inside an embedding product with the same components the OpenGeni console uses. `@opengeni/react/artifacts` gains the console's inline Site/HTML preview (`ChatInteractiveBlock`, `ArtifactSandbox`, `DeferredChatMedia`), `SiteView`, `EditableArtifactView`, and a host-mountable `SessionArtifactViewer`; `SessionConversation` renders `opengeni-site` fences inline and opens agent artifact links through `onOpenArtifact` (`viewerLinkResolver` for a custom timeline). `createSessionProxyHandler({ artifacts: true })` serves only the artifacts OpenGeni lists for the requesting session (read, editor live ticket, Site detail and sandboxed HTML), and client config advertises the live socket URL and browser cache partition. The SDK client adds `withHeaders`, `apiUrl`, and `fetchApi` for host-authenticated transports. Every built-in artifact string is translatable through a `labels` prop (partial `ArtifactLabels`) on `SessionArtifactViewer` and `ChatInteractiveBlock`, or `ArtifactLabelsProvider`. Document and presentation editors compose one projection at a time, so opening an artifact with a long history no longer floods the artifact Worker's request queue.
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+- 3545ca3: Include exact accepted-turn initiator context in signed credential-provider
+  requests, with human/service/agent attribution and bounded causal lineage for
+  children, continuations, and coalesced updates. Preserve initiating-human fields
+  and authorization; expose the additive context through the SDK verifier.
+- 5b48f00: Add recoverable allowance lifecycle state and idempotent clear receipts.
+  Preserve typed allowance scope and reset details in web, MCP, and Slack
+  refusals with administrator-specific remedies.
+  Expose browser-safe refusal helpers through `@opengeni/sdk/allowance-refusal`
+  without widening React's runtime dependency boundary.
+
+  Recheck allowance after paid compaction and align continuation admission with
+  its frozen causal lineage. Keep allowance storage compatible with rolling
+  deployment, preserve settled usage across period edits, harden definer search
+  paths, and order organization locks before tenancy fences.
+
+- 5b48f00: Add workspace and member usage allowances in integer USD micros, with
+  versioned configuration and member rules, operation-keyed credit grants,
+  current/historical usage reads, and a typed allowance-exhaustion error.
+  The session proxy exposes only the authenticated user's own usage read;
+  organization budget authority remains separate from workspace-admin member
+  splits, and agents cannot write allowance policy or grants.
+
+  Document per-seat equal splits, administrator sliders, custom shares,
+  top-ups, monthly team budgets, UTC month-end anchors, frozen causal usage
+  attribution, and model-call soft-ceiling semantics. Shares are oversubscribable
+  ceilings rather than reserved funds; admitted and concurrent calls may
+  overshoot before the next admission check.
+
+  Keep usage reads side-effect-free, retain active accounting windows across
+  period/anchor edits, and evaluate rollover, expiry, and usage notifications
+  through bounded periodic API maintenance. Preserve existing prepaid video
+  billing with exact, idempotent allowance-allocation reversal for matching
+  refunds.
+
+### Patch Changes
+
+- 0bbe2e7: `installApiIntegration` accepts `autoApprovedTools`: selected write or destructive tools of a custom or curated API Integration (a curated definition may forbid specific operations) that run without per-call human approval, so scheduled and other unattended runs no longer wait forever on an approval. It needs `capabilities:manage`, passes organization integration policy again, and is declarative (omit it and every write tool asks again). Connector tool-permission and session approval-policy errors for API Integration ids now point to this setting.
+- 45d1301: Share the complete default model and reasoning-effort fallback between client config and omitted-model session creation when the deployment default is stably blocked.
+
+  Preserve older nonempty allowedModels parsers when no model is admitted by returning one explicit unavailable legacyModelFallback hint, while keeping models as the exact admitted set and leaving creation gates unchanged.
+
+  Keep cookie-only managed browser bootstrap unscoped so account reconciliation can load before actor-fenced workspace reads.
+
+- 45d1301: Resolve caller-scoped client model lists and fresh session creation through the same workspace selection rules, including credential readiness, policy, and connection model permissions. Hide unavailable subscription models from public bootstrap, support an explicit workspace selector in client config, and allow an empty selectable model list.
+- 45d1301: Expose repeated empty final replies as a typed, informational completed-turn notice without failing goals or deferring later updates.
+- 45d1301: Expose goal-tool text limits and purposes in model-facing schemas and descriptions, and give progress statuses an 8 KiB UTF-8 budget without altering stored text.
+- 0bbe2e7: `previewApiIntegration` and `installApiIntegration` accept an inline OpenAPI document: `source: { kind: "openapi_document", sourceKey, document, baseUrl? }` (JSON or YAML, at most 8 MiB). `sourceKey` is the stable installation identity, server URLs must be absolute (or `baseUrl` given), and the preview echoes only the document's SHA-256. Calls still follow the deployment network policy, so a product on a private or loopback address still needs a public tunnel unless the operator enables private targets.
+- 45d1301: Clarify that goal completion records ledger proof, not the user-facing answer, including when late child results arrive after completion.
+- 0bbe2e7: A top-level `createSession` now selects every server it attaches through `mcpServers`, whether `tools` is omitted or explicit (including `tools: []`). Previously an attached server that `tools` did not name was stored but never contacted, so the model reported that no tools were available. An explicit ref for the same id is kept unchanged, so `tools` is only needed to set `eager` or `optional`.
+- 0bbe2e7: Every `session.requiresAction` approval entry now carries the same top-level `id`, `name`, and `arguments`, whether it is the first pause of a turn or a later one after a decision. `id` is the `approvalId` that `sendApprovalDecision` accepts (the pending tool call id). Historical fields (`rawItem`, `raw`) remain for compatibility. The SDK exports this as `SessionApprovalRequest`.
+- 45d1301: Use the same stable model admission predicate for client config and direct session creation. Preserve creation during transient provider health or deployment credential-resolver uncertainty, while exposing optional per-model availability hints for degraded UI display.
+- 5b48f00: Default missing webhook lanes only after signature verification, preserve the
+  public organization webhook event vocabulary while rejecting usage subscriptions,
+  and keep allowance refusal presentation schema-runtime-free for browsers and
+  React Native. Emit the focused integration and refusal entries in published builds.
+
+  Fence the next model dispatch on settled usage and frozen-human admission, refuse
+  fresh delegated work before interruption, and repair workspace-less Knowledge
+  indexing and historical migration fixture dependencies.
+
 ## 5.4.0
 
 ### Minor Changes

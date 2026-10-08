@@ -1,22 +1,13 @@
 import { Link } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
-import {
-  FilePenLineIcon,
-  GalleryHorizontalEndIcon,
-  Loader2Icon,
-  PanelsTopLeftIcon,
-  RefreshCwIcon,
-  Table2Icon,
-  ArrowLeftIcon,
-  FileIcon,
-  ImageIcon,
-} from "lucide-react";
-import { lazy, useEffect, useRef, useState, type ReactNode } from "react";
+import { ArtifactViewerHeader } from "@opengeni/react/artifacts";
+import { Loader2Icon, PanelsTopLeftIcon, RefreshCwIcon } from "lucide-react";
+import { lazy, useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { EditableArtifactRoute } from "@/routes/editable-artifact";
-import { ArtifactLibrary } from "@/components/artifacts/artifact-library";
+import { ArtifactLibrary, type ArtifactPinAction } from "@/components/artifacts/artifact-library";
 import { defaultArtifactFilters, filterArtifactCatalog } from "@/lib/artifact-catalog";
 const RetainedArtifactRoute = lazy(() =>
   import("@/routes/retained-artifact").then((module) => ({
@@ -47,6 +38,7 @@ export function SessionEditableArtifactsWorkspace({
   initialSelectedArtifactId,
   openArtifactRequest,
   onSelectedArtifactIdChange,
+  onPin,
 }: Readonly<{
   workspaceId: string;
   sessionId?: string;
@@ -60,6 +52,7 @@ export function SessionEditableArtifactsWorkspace({
     requestId: number;
   } | null;
   onSelectedArtifactIdChange?: (artifactId: string | null) => void;
+  onPin?: ArtifactPinAction;
 }>) {
   const [selectedArtifactId, setSelectedArtifactId] = useState(
     () => initialSelectedArtifactId ?? artifacts[0]?.id ?? null,
@@ -131,6 +124,7 @@ export function SessionEditableArtifactsWorkspace({
           loading={status === "loading"}
           error={status === "error" ? new Error("The artifact list could not be refreshed.") : null}
           onRetry={onRetry}
+          onPin={onPin}
           onSelect={(item) => {
             const key = `${item.kind}:${item.id}`;
             setSelectedArtifactId(key);
@@ -181,72 +175,60 @@ export function SessionEditableArtifactsWorkspace({
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-fg">
-      <div className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border px-2">
-        {catalogItems.length > 0 ? (
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Browse session artifacts"
-            onClick={() => {
-              setBrowsing(true);
-              onSelectedArtifactIdChange?.(null);
-            }}
-          >
-            <ArrowLeftIcon className="size-4" />
-          </Button>
-        ) : null}
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">
-          {artifactIcon(artifact.modality)}
-        </span>
-        {artifacts.length > 1 ? (
-          <div className="min-w-0 flex-1 [&>span]:block [&>span]:w-full">
-            <Select
-              aria-label="Choose artifact"
-              className="h-8 min-w-0 border-0 bg-transparent pl-1 font-medium shadow-none"
-              value={artifact.catalogItem ? `${artifact.modality}:${artifact.id}` : artifact.id}
-              onChange={(event) => {
-                setSelectedArtifactId(event.target.value);
-                onSelectedArtifactIdChange?.(event.target.value);
-              }}
+      <ArtifactViewerHeader
+        kind={artifact.modality}
+        title={artifact.title}
+        onBack={
+          catalogItems.length > 0
+            ? () => {
+                setBrowsing(true);
+                onSelectedArtifactIdChange?.(null);
+              }
+            : undefined
+        }
+        backLabel="Browse session artifacts"
+        titleSlot={
+          artifacts.length > 1 ? (
+            <div className="min-w-0 flex-1 [&>span]:block [&>span]:w-full">
+              <Select
+                aria-label="Choose artifact"
+                className="h-8 min-w-0 border-0 bg-transparent pl-1 font-medium shadow-none"
+                value={artifact.catalogItem ? `${artifact.modality}:${artifact.id}` : artifact.id}
+                onChange={(event) => {
+                  setSelectedArtifactId(event.target.value);
+                  onSelectedArtifactIdChange?.(event.target.value);
+                }}
+              >
+                {artifacts.map((candidate) => (
+                  <option
+                    key={`${candidate.modality}:${candidate.id}`}
+                    value={
+                      candidate.catalogItem ? `${candidate.modality}:${candidate.id}` : candidate.id
+                    }
+                  >
+                    {candidate.title}
+                  </option>
+                ))}
+              </Select>
+            </div>
+          ) : undefined
+        }
+        actions={
+          status === "error" ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              aria-label="Retry artifact list"
+              title="Retry artifact list"
+              onClick={onRetry}
             >
-              {artifacts.map((candidate) => (
-                <option
-                  key={`${candidate.modality}:${candidate.id}`}
-                  value={
-                    candidate.catalogItem ? `${candidate.modality}:${candidate.id}` : candidate.id
-                  }
-                >
-                  {candidate.title}
-                </option>
-              ))}
-            </Select>
-          </div>
-        ) : (
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium">{artifact.title}</p>
-            <p className="truncate text-xs capitalize text-fg-subtle">
-              {artifact.modality === "site"
-                ? "Site · published preview"
-                : artifact.modality === "image" || artifact.modality === "file"
-                  ? `${artifact.modality} · retained file`
-                  : `${artifact.modality} · shared editor`}
-            </p>
-          </div>
-        )}
-        {status === "error" ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            className="shrink-0"
-            aria-label="Retry artifact list"
-            title="Retry artifact list"
-            onClick={onRetry}
-          >
-            <RefreshCwIcon className="size-4" />
-          </Button>
-        ) : null}
-      </div>
+              <RefreshCwIcon className="size-4" />
+            </Button>
+          ) : null
+        }
+      />
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
         {artifact.modality === "site" ? (
           <ArtifactDetailRoute
@@ -263,15 +245,6 @@ export function SessionEditableArtifactsWorkspace({
       </div>
     </div>
   );
-}
-
-function artifactIcon(modality: SessionEditableArtifactSummary["modality"]): ReactNode {
-  if (modality === "image") return <ImageIcon className="size-4" />;
-  if (modality === "file") return <FileIcon className="size-4" />;
-  if (modality === "site") return <PanelsTopLeftIcon className="size-4" />;
-  if (modality === "document") return <FilePenLineIcon className="size-4" />;
-  if (modality === "spreadsheet") return <Table2Icon className="size-4" />;
-  return <GalleryHorizontalEndIcon className="size-4" />;
 }
 
 function matchesArtifact(artifact: SessionEditableArtifactSummary, selected: string | null) {

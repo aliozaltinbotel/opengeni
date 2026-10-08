@@ -27,16 +27,23 @@
 // real `readActiveSandbox` DAO + a backend resolver without coupling the leaf to
 // `@opengeni/db`.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { SandboxWorkspaceReadNotFoundError } from "@openai/agents/sandbox";
 import { SandboxFilesystemNotFoundError } from "modal";
 import type { ExposedPortEndpoint } from "../stream-port";
-import { ModalCommandStartPreDispatchUnavailableError } from "../providers/modal-command-router-wire";
+import {
+  ModalCommandStartPreDispatchUnavailableError,
+  ModalCommandStartNotDispatchedError,
+} from "../providers/modal-command-router-wire";
 import { isDeepStrictEqual } from "node:util";
 import {
   withProviderCommandHandle,
   withCommandSupervisionReady,
   withSupervisedLaunchReservation,
   ProviderCommandStartRejectedError,
+  ProviderCommandStartOutcomeUnknownError,
+  ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandObservationUnavailableError,
   type ProviderCommandPersistence,
   type ProviderCommandSession,
 } from "../provider-command-session";
@@ -73,6 +80,7 @@ import type {
 } from "../channel-a";
 import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 import { withSandboxProviderOperation } from "../provider-operation-gate";
+import { hasModalCommandStartOutcomeUnknownBoundary } from "../providers/modal-command-start-errors";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -121,9 +129,10 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   resolveExposedPort?(port: number): Promise<ExposedPortEndpoint>;
   serializeSessionState?(): Promise<unknown>;
   /** Release op-stream replay retention only after the caller has durably
-   * accepted every settled result. Routing proxies aggregate this hook across
+   * accepted the supplied tool results (or all settled results when omitted).
+   * Routing proxies aggregate this hook across
    * every Connected Machine backend reached during their lifetime. */
-  finalizeOpStreamOps?(): Promise<void>;
+  finalizeOpStreamOps?(toolCallIds?: readonly string[]): Promise<void>;
 }
 
 /** The resolved active backend for an epoch: the live session + the sandbox id it
@@ -146,7 +155,7 @@ export interface ResolvedActiveBackend {
 }
 
 /** Durable identity assigned to a provider exec that yielded instead of
- * exiting. The UUID is OpenGeni authority; the numeric provider session id is
+ * exiting. The UUID is Opengeni authority; the numeric provider session id is
  * only a locator within the exact copied backend route. */
 export type RoutingRetainedProcess = {
   id: string;
@@ -181,6 +190,13 @@ export type RoutingRetainedProcessAdoption = {
 export type RoutingRetainedProcessTerminalProof =
   | { outcome: "exited"; exitCode: number; reason: "provider_exit_banner" }
   | { outcome: "lost"; exitCode: null; reason: "provider_session_lost_banner" };
+
+export type RoutingCommandDispatchOptions = {
+  /** Call-scoped proof that THIS command's ordinary admission rejected before
+   * its provider invocation. Receives the unchanged rejection, never a rendered
+   * error or post-dispatch fault. Does not release any durable writer. */
+  onMutationAdmissionRefused?: (error: unknown) => void;
+};
 
 export interface RoutingSandboxSessionDeps {
   providerCommandHandle?: (admission: unknown) => number | undefined;
@@ -247,11 +263,11 @@ export interface RoutingSandboxSessionDeps {
     op: string;
     backend: ResolvedActiveBackend;
     admission: unknown;
-    outcome: "resolved" | "rejected";
-    /** Provider result for a resolved call. Never present for rejection. */
+    outcome: "resolved" | "rejected" | "outcome_unknown";
+    /** Provider result for a resolved call. Absent when Start is unknown. */
     result?: unknown;
-    /** Stable candidate generated before durable promotion is attempted. It is
-     * supplied only when the provider returned a positive yielded-session id. */
+    /** Exact candidate for a yielded process or a client-chosen unknown Start.
+     * Unknown Start settlement retains this writer; it does not prove exit. */
     retainedProcess?: RoutingRetainedProcess;
   }) => Promise<void | RoutingMutationSettlementResult>;
   /** Admit one model/user-visible stdin mutation under the already-durable
@@ -277,6 +293,12 @@ export interface RoutingSandboxSessionDeps {
     process: RoutingRetainedProcess;
     proof: RoutingRetainedProcessTerminalProof;
   }) => Promise<void>;
+  /** Read terminal truth for this exact copied process/backend. Missing rows,
+   * failed observations and active rows must never count as physical proof. */
+  isProcessSettled?: (input: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }) => Promise<boolean>;
   /** A terminal result is being returned to the model, not merely drained by
    * control/reaper work. Never invoke this for a running receipt. */
   observeProcessTerminal?: (input: {
@@ -494,6 +516,115 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   ) {
     super(message, options);
     this.retainedProcess = options?.retainedProcess ?? null;
+    const scope = mutationOutputRejection.getStore();
+    if (scope && !scope.unknown) scope.unknown = this;
+  }
+}
+
+const mutationOutputRejection = new AsyncLocalStorage<{
+  error: RoutingMutationOutputRejectedError | null;
+  unknown: Error | null;
+}>();
+
+/** SDK fallbacks may render caught failures. Retain the actual typed rejection
+ * per invocation, stop its later dispatches, and rethrow it after rendering.
+ * Nested invocations share the fence; unrelated invocations never inherit it. */
+export async function withRoutingMutationOutputRejectionFence<T>(
+  invoke: () => Promise<T>,
+): Promise<T> {
+  if (mutationOutputRejection.getStore()) return await invoke();
+  const scope = {
+    error: null as RoutingMutationOutputRejectedError | null,
+    unknown: null as Error | null,
+  };
+  return await mutationOutputRejection.run(scope, async () => {
+    let result: T;
+    try {
+      result = await invoke();
+    } catch (error) {
+      const rejection = scope.unknown ? mutationOutputRejectionFailure(scope, { error }) : null;
+      if (rejection) throw rejection;
+      throw error;
+    }
+    const rejection = mutationOutputRejectionFailure(scope);
+    if (rejection) throw rejection;
+    return result;
+  });
+}
+
+function mutationOutputRejectionFailure(
+  scope: { error: RoutingMutationOutputRejectedError | null; unknown: Error | null } | undefined,
+  caught?: { error: unknown },
+): Error | null {
+  if (!scope?.error) return null;
+  // A settled item never proves that a different item or a partial provider
+  // batch completed. Keep both original typed errors when the SDK rendered them.
+  return scope.unknown
+    ? new AggregateError(
+        [
+          scope.unknown,
+          scope.error,
+          ...(caught && caught.error !== scope.unknown && caught.error !== scope.error
+            ? [caught.error]
+            : []),
+        ],
+        "Sandbox mutation uncertainty remains alongside rejected settled output; no operation was replayed",
+        caught ? { cause: caught.error } : undefined,
+      )
+    : scope.error;
+}
+
+function retainTypedMutationUncertainty(error: unknown): void {
+  const scope = mutationOutputRejection.getStore();
+  if (!scope || scope.unknown) return;
+  try {
+    if (
+      error instanceof RoutingMutationOutcomeUnknownError ||
+      error instanceof ProviderCommandStartOutcomeUnknownError ||
+      error instanceof ProviderCommandInputOutcomeUnknownError ||
+      error instanceof ProviderCommandObservationUnavailableError ||
+      hasModalCommandStartOutcomeUnknownBoundary(error)
+    ) {
+      if (error instanceof Error) scope.unknown = error;
+    }
+  } catch {
+    // A hostile provider graph cannot manufacture a typed boundary.
+  }
+}
+
+function assertNoCaughtMutationOutputRejection(): void {
+  const error = mutationOutputRejectionFailure(mutationOutputRejection.getStore());
+  if (error) throw error;
+}
+
+/** The exact provider outcome was durably settled, but mutable authority
+ * rejected its output. Physical certainty does not permit replay or acceptance. */
+export class RoutingMutationOutputRejectedError extends Error {
+  readonly name = "RoutingMutationOutputRejectedError";
+  readonly code = "sandbox_mutation_output_rejected";
+  readonly retryable = false;
+
+  constructor(
+    public readonly op: string,
+    public readonly reasonCode: string,
+    options?: { cause?: unknown },
+  ) {
+    super(
+      `Workspace mutation "${op}" was physically settled, but its output was rejected by ${reasonCode}; the operation was not replayed`,
+      options,
+    );
+    const scope = mutationOutputRejection.getStore();
+    if (scope && !scope.error) scope.error = this;
+  }
+}
+
+export function isRoutingMutationOutputRejectedError(
+  error: unknown,
+): error is RoutingMutationOutputRejectedError {
+  try {
+    return error instanceof RoutingMutationOutputRejectedError;
+  } catch {
+    return false;
   }
 }
 
@@ -519,6 +650,15 @@ export class RoutingRetainedProcessNotFoundError extends Error {
   constructor(public readonly providerSessionId: number) {
     super(`retained sandbox process ${providerSessionId} is not tracked on its original route`);
   }
+}
+
+export function renderRoutingMutationOutcomeUnknownToolResult(
+  error: RoutingMutationOutcomeUnknownError,
+): string {
+  const locator = error.retainedProcess
+    ? ` Inspect the exact invocation with write_stdin using session_id ${error.retainedProcess.providerSessionId} and empty chars.`
+    : " Inspect state before deciding how to proceed.";
+  return `Sandbox operation outcome unknown; the operation was not replayed. Do not blindly retry the command.${locator} Error: ${error}`;
 }
 
 type PendingParentPromotion = Parameters<
@@ -799,14 +939,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * Callers own the durability point: worker turns invoke this after history is
    * persisted; one-off API calls invoke it after their result has been accepted
    * in memory. A failed backend stays registered so a later durability hook can
-   * retry it, while successful backends are forgotten immediately.
+   * retry it. Scoped hooks retain backends for other results; the complete
+   * boundary forgets successful backends.
    */
-  async finalizeOpStreamOps(): Promise<void> {
+  async finalizeOpStreamOps(toolCallIds?: readonly string[]): Promise<void> {
     const failures: unknown[] = [];
     for (const backend of [...this.opStreamBackends]) {
       try {
-        await backend.finalizeOpStreamOps?.();
-        this.opStreamBackends.delete(backend);
+        await backend.finalizeOpStreamOps?.(toolCallIds);
+        if (toolCallIds === undefined) this.opStreamBackends.delete(backend);
       } catch (error) {
         failures.push(error);
       }
@@ -1070,7 +1211,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         { cause: error },
       );
     }
-    await this.captureRetainedOutput(record, formatExecResult(pending.result));
+    if (pending.result !== undefined)
+      await this.captureRetainedOutput(record, formatExecResult(pending.result));
   }
 
   private confirmDurableRejectedPromotion(
@@ -1151,6 +1293,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       await this.deps.afterProcessMutation?.(pending);
       record.pendingMutationSettlement = null;
     } catch (error) {
+      const durableTerminal =
+        pending.outcome === "resolved" ? durableRetainedProcessTerminal(error) : null;
+      if (durableTerminal) {
+        // The retried settlement committed, but the process was durably
+        // settled terminal first and the pending output was rejected. Report
+        // the stored terminal truth; nothing is replayed.
+        record.pendingMutationSettlement = null;
+        record.pendingTerminal = null;
+        this.retainedProcesses.delete(record.process.providerSessionId);
+        return terminalResult(durableTerminal, record.process.providerSessionId);
+      }
       throw new RoutingMutationOutcomeUnknownError(
         pending.op,
         `Retained-process mutation ${pending.op} still lacks durable physical settlement; no later process mutation was admitted`,
@@ -1180,6 +1333,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   private async dispatchProcessMutationOnce(args: unknown): Promise<string> {
+    assertNoCaughtMutationOutputRejection();
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
     const record = this.retainedProcess(providerSessionId);
@@ -1222,6 +1376,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         write.call(record.backend.session, args),
       );
     } catch (error) {
+      let inputUnknown = false;
+      try {
+        inputUnknown = error instanceof ProviderCommandInputOutcomeUnknownError;
+      } catch {
+        // An unreadable provider graph cannot manufacture typed input proof.
+      }
       if (this.deps.afterProcessMutation) {
         const pending: PendingProcessMutationSettlement = {
           op,
@@ -1236,10 +1396,27 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           record.pendingMutationSettlement = pending;
           throw new RoutingMutationOutcomeUnknownError(
             op,
-            `Retained-process stdin rejected at the provider but lost durable settlement; it was not replayed`,
-            { cause: settlementError },
+            inputUnknown
+              ? "Retained-process stdin acknowledgement and durable settlement unavailable; input may have been accepted. Do not resend stdin."
+              : "Retained-process stdin rejected at the provider but lost durable settlement; it was not replayed",
+            inputUnknown
+              ? {
+                  cause: new AggregateError([error, settlementError]),
+                  retainedProcess: record.process,
+                }
+              : { cause: settlementError },
           );
         }
+      }
+      if (inputUnknown) {
+        // Preserve native input proof across the retained route, including its
+        // genuine byte-range cause and exact locator. Both SDK-facing rendering
+        // and direct tool faults must forbid input replay.
+        throw new RoutingMutationOutcomeUnknownError(
+          op,
+          "Provider stdin acknowledgement unavailable; input may have been accepted and was not resent. Do not resend stdin.",
+          { cause: error, retainedProcess: record.process },
+        );
       }
       throw error;
     }
@@ -1255,6 +1432,19 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       try {
         await this.deps.afterProcessMutation(pending);
       } catch (error) {
+        if (isRoutingMutationOutputRejectedError(error)) throw error;
+        const durableTerminal = durableRetainedProcessTerminal(error);
+        if (durableTerminal) {
+          // The provider call returned and its admission is physically
+          // settled, but durable settlement (the reaper's exact-proof
+          // reconciliation) won the race and recorded the process terminal
+          // first, so this output was rejected. Mirror the admission race:
+          // forget the local route, report the stored terminal truth instead
+          // of the rejected provider bytes, and never replay the provider call.
+          this.retainedProcesses.delete(providerSessionId);
+          await this.deps.observeProcessTerminal?.(record);
+          return terminalResult(durableTerminal, providerSessionId);
+        }
         record.pendingMutationSettlement = pending;
         throw new RoutingMutationOutcomeUnknownError(
           op,
@@ -1478,6 +1668,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     supervisionEligible = false,
+    onMutationAdmissionRefused?: (error: unknown) => void,
   ): Promise<T> {
     const firstOperationObserver = this.deps.onFirstOperation;
     if (this.firstOperationClaimed || !firstOperationObserver) {
@@ -1487,6 +1678,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         fn,
         undefined,
         supervisionEligible,
+        onMutationAdmissionRefused,
       );
     }
     this.firstOperationClaimed = true;
@@ -1500,6 +1692,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         fn,
         timing,
         supervisionEligible,
+        onMutationAdmissionRefused,
       );
       outcome = "completed";
       return result;
@@ -1548,10 +1741,12 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     fn: (session: RoutableBackendSession, backend: ResolvedActiveBackend) => Promise<T>,
     firstOperationTiming?: RoutingSandboxFirstOperationTiming,
     supervisionEligible = false,
+    onMutationAdmissionRefused?: (error: unknown) => void,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
     while (attempt <= this.maxFenceRetries) {
+      assertNoCaughtMutationOutputRejection();
       const resolutionStartedAt = performance.now();
       let resolutionOutcome: RoutingSandboxPhaseOutcome = "failed";
       let backend: ResolvedActiveBackend;
@@ -1618,6 +1813,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
             },
           });
           admissionOutcome = "completed";
+        } catch (error) {
+          // Only this boundary knows that the command never reached provider
+          // dispatch. Keep proof local to this call and preserve the original
+          // error's identity/type for every existing admission-fence consumer.
+          try {
+            onMutationAdmissionRefused?.(error);
+          } catch {
+            // A caller's proof observer cannot change admission or its error.
+          }
+          throw error;
         } finally {
           recordFirstOperationPhase(
             firstOperationTiming,
@@ -1710,9 +1915,50 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           );
         }
       } catch (error) {
+        if (
+          !reservedProcess &&
+          error instanceof ProviderCommandStartOutcomeUnknownError &&
+          mutatesWorkspace &&
+          this.deps.afterMutation
+        ) {
+          const handle = this.deps.providerCommandHandle?.(admission);
+          if (!handle) throw error;
+          const process: RoutingRetainedProcess = {
+            id: crypto.randomUUID(),
+            providerSessionId: handle,
+            providerCommand: error.command,
+          };
+          const record = this.registerRetainedProcess(process, backend);
+          const settlement: PendingParentPromotion = {
+            op,
+            backend,
+            admission,
+            outcome: "outcome_unknown",
+            retainedProcess: process,
+          };
+          record.pendingParentPromotion = settlement;
+          try {
+            const rejected = await this.deps.afterMutation(settlement);
+            if (rejected) this.confirmDurableRejectedPromotion(record, rejected);
+            else record.durable = true;
+            record.pendingParentPromotion = null;
+          } catch (cause) {
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              "Command Start outcome is unknown and exact invocation promotion remains unresolved; it was not replayed",
+              { cause: new AggregateError([error, cause]), retainedProcess: process },
+            );
+          }
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            "Command Start outcome is unknown; its exact invocation is retained and was not replayed",
+            { cause: error, retainedProcess: process },
+          );
+        }
         if (reservedProcess) {
           if (
             (error instanceof ProviderCommandStartRejectedError ||
+              error instanceof ModalCommandStartNotDispatchedError ||
               error instanceof ModalCommandStartPreDispatchUnavailableError) &&
             reservedProcess.providerCommand?.kind === "modal-router-v1"
           ) {
@@ -1841,6 +2087,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           }
           if (retainedRecord) retainedRecord.durable = true;
         } catch (error) {
+          if (isRoutingMutationOutputRejectedError(error) && !retainedRecord) {
+            this.invalidate(backend);
+            throw error;
+          }
           if (
             error instanceof RoutingMutationOutcomeUnknownError &&
             error.retainedProcess !== null
@@ -1967,6 +2217,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       outcome = "ok";
       return result;
     } catch (error) {
+      retainTypedMutationUncertainty(error);
       materializationFailureReason = materializationVerificationDiagnostic(error)?.reason;
       if (isReadOnlyPathProbeMiss(op, error)) {
         outcome = "not_found";
@@ -2035,7 +2286,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
-  async execCommand(args: unknown): Promise<string> {
+  async execCommand(args: unknown, options?: RoutingCommandDispatchOptions): Promise<string> {
     try {
       return await this.dispatch(
         "execCommand",
@@ -2051,6 +2302,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           throw new RoutingUnsupportedError("execCommand", this.cached?.kind ?? "unknown");
         },
         eligibleForSupervision(args),
+        options?.onMutationAdmissionRefused,
       );
     } catch (error) {
       // Render a terminal selfhosted fault as the tool's result (four fields, correct
@@ -2076,7 +2328,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writeStdin(args: unknown): Promise<string> {
     const providerSessionId = providerSessionIdFromArgs(args);
     if (providerSessionId !== null && this.retainedProcesses.has(providerSessionId)) {
-      return await this.dispatchProcessMutation(args);
+      try {
+        return await this.dispatchProcessMutation(args);
+      } catch (error) {
+        // The SDK's write_stdin tool has no configurable errorFunction. Render
+        // genuine routing uncertainty here, before its generic retry advice.
+        // Direct/control methods still throw; this is not an output receipt or
+        // terminal proof and cannot acknowledge bytes or release the writer.
+        if (isRoutingMutationOutcomeUnknownError(error))
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        throw error;
+      }
     }
     return this.dispatch("writeStdin", true, async (s) => {
       if (!s.writeStdin) {
@@ -2103,6 +2365,20 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
+  /** A reaper may have settled the command while a local capture/control receipt
+   * remained pending. Cleanup may consume that same durable proof without
+   * replaying a provider operation or accepting pending output into the model. */
+  async reconcileRetainedProcess(providerSessionId: number): Promise<boolean> {
+    const record = this.retainedProcesses.get(providerSessionId);
+    if (!record || !this.deps.isProcessSettled) return false;
+    if (!(await this.deps.isProcessSettled({ backend: record.backend, process: record.process })))
+      return false;
+    // Do not erase a rival route installed while the durable read was pending.
+    if (this.retainedProcesses.get(providerSessionId) !== record) return false;
+    this.retainedProcesses.delete(providerSessionId);
+    return true;
+  }
+
   /** Local, Docker, and OpenSandbox process ids address an in-memory table on one worker
    * session object. They are not valid durable locators for the independently
    * scheduled reaper, so their yielded handles stay turn-owned until terminal
@@ -2117,7 +2393,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     );
   }
 
-  /** Return only OpenGeni's durable UUID + provider locator. Backend/session
+  /** Return only Opengeni's durable UUID + provider locator. Backend/session
    * objects remain private so a caller cannot forge route authority from this
    * diagnostic handoff. */
   retainedProcessIdentity(providerSessionId: number): RoutingRetainedProcess | null {
@@ -2349,46 +2625,16 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   async writePlacementPrivate(args: unknown): Promise<unknown> {
     const input = placementPrivateWrite(args);
     return this.dispatch("writePlacementPrivate", false, async (session, backend) => {
-      if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
-      if (session.writeFile) return await session.writeFile(input);
-      return await streamPlacementPrivateFile(session, input, backend.kind);
+      return await writePlacementPrivateOnBackend(session, input, backend.kind);
     });
   }
 
-  /** Delete only an OpenGeni placement-private staging file. This narrow
+  /** Delete only an Opengeni placement-private staging file. This narrow
    * control operation cannot be repurposed into a generic mutation bypass. */
   async deletePlacementPrivate(path: string, runAs?: string): Promise<void> {
     const privatePath = placementPrivatePath(path);
-    await this.dispatch("deletePlacementPrivate", false, async (session) => {
-      if (session.deletePlacementPrivate) {
-        await session.deletePlacementPrivate(privatePath, runAs);
-        return;
-      }
-      const args = {
-        cmd: `rm -f ${shellSingleQuote(privatePath)}`,
-        ...(runAs ? { runAs } : {}),
-      };
-      if (session.exec) {
-        const result = await session.exec(args);
-        if (
-          result &&
-          typeof result === "object" &&
-          typeof (result as { exitCode?: unknown }).exitCode === "number" &&
-          (result as { exitCode: number }).exitCode !== 0
-        ) {
-          throw new Error("placement-private cleanup failed");
-        }
-        return;
-      }
-      if (session.execCommand) {
-        const result = await session.execCommand(args);
-        const exitCode = parseExecBannerExitCode(result);
-        if (exitCode !== null && exitCode !== 0) {
-          throw new Error("placement-private cleanup failed");
-        }
-        return;
-      }
-      throw new RoutingUnsupportedError("deletePlacementPrivate", this.cached?.kind ?? "unknown");
+    await this.dispatch("deletePlacementPrivate", false, async (session, backend) => {
+      await deletePlacementPrivateOnBackend(session, privatePath, runAs, backend.kind);
     });
   }
 
@@ -2400,7 +2646,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<WorkspaceFileImportReceipt> {
     return await this.dispatch("importWorkspaceFile", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: withPlacementPrivateControl(session, backend.kind),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2421,7 +2667,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<readonly WorkspaceFileImportReceipt[]> {
     return await this.dispatch("importWorkspaceFiles", true, async (session, backend) => {
       const channel = new SandboxChannelAService({
-        session: session as ChannelASession,
+        session: withPlacementPrivateControl(session, backend.kind),
         workspaceRoot: input.workspaceRoot,
         ...(backend.kind === "selfhosted"
           ? { providerPathMode: "workspace-relative" as const }
@@ -2750,12 +2996,87 @@ function placementPrivateWrite(value: unknown): {
   };
 }
 
+/** Preserve private staging on the already resolved provider. Calling the
+ * routing proxy here would re-resolve between staging, import and cleanup. */
+function withPlacementPrivateControl(
+  session: RoutableBackendSession,
+  backendKind: string,
+): ChannelASession {
+  return new Proxy(session, {
+    get(target, property) {
+      if (property === "writePlacementPrivate") {
+        return async (args: unknown) =>
+          await writePlacementPrivateOnBackend(target, placementPrivateWrite(args), backendKind);
+      }
+      if (property === "deletePlacementPrivate") {
+        return async (path: string, runAs?: string) =>
+          await deletePlacementPrivateOnBackend(
+            target,
+            placementPrivatePath(path),
+            runAs,
+            backendKind,
+          );
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as ChannelASession;
+}
+
+async function writePlacementPrivateOnBackend(
+  session: RoutableBackendSession,
+  input: ReturnType<typeof placementPrivateWrite>,
+  backendKind: string,
+): Promise<unknown> {
+  if (session.writePlacementPrivate) return await session.writePlacementPrivate(input);
+  if (session.writeFile) return await session.writeFile(input);
+  return await streamPlacementPrivateFile(session, input, backendKind);
+}
+
+async function deletePlacementPrivateOnBackend(
+  session: RoutableBackendSession,
+  privatePath: string,
+  runAs: string | undefined,
+  backendKind: string,
+): Promise<void> {
+  if (session.deletePlacementPrivate) {
+    await session.deletePlacementPrivate(privatePath, runAs);
+    return;
+  }
+  const args = {
+    cmd: `rm -f ${shellSingleQuote(privatePath)}`,
+    ...(runAs ? { runAs } : {}),
+  };
+  if (session.exec) {
+    const result = await session.exec(args);
+    if (
+      result &&
+      typeof result === "object" &&
+      typeof (result as { exitCode?: unknown }).exitCode === "number" &&
+      (result as { exitCode: number }).exitCode !== 0
+    ) {
+      throw new Error("placement-private cleanup failed");
+    }
+    return;
+  }
+  if (session.execCommand) {
+    const result = await session.execCommand(args);
+    const exitCode = parseExecBannerExitCode(result);
+    if (exitCode !== null && exitCode !== 0) {
+      throw new Error("placement-private cleanup failed");
+    }
+    return;
+  }
+  throw new RoutingUnsupportedError("deletePlacementPrivate", backendKind);
+}
+
 async function streamPlacementPrivateFile(
   session: RoutableBackendSession,
   input: ReturnType<typeof placementPrivateWrite>,
   backendKind: string,
 ): Promise<void> {
-  if (!session.exec || !session.writeStdin) {
+  const exec = session.exec?.bind(session) ?? session.execCommand?.bind(session);
+  if (!exec || !session.writeStdin) {
     throw new RoutingUnsupportedError("writePlacementPrivate", backendKind);
   }
   const bytes = typeof input.content === "string" ? Buffer.from(input.content) : input.content;
@@ -2766,7 +3087,7 @@ async function streamPlacementPrivateFile(
     ...(input.createParents ? [`install -d -m 0700 -- ${shellSingleQuote(parent)}`] : []),
   ];
   if (bytes.byteLength === 0) {
-    const result = await session.exec({
+    const result = await exec({
       cmd: [
         ...prelude,
         `: > ${shellSingleQuote(input.path)}`,
@@ -2794,7 +3115,7 @@ async function streamPlacementPrivateFile(
     `chmod 0600 -- ${shellSingleQuote(input.path)}`,
     `printf %s ${shellSingleQuote(marker)}`,
   ].join("; ");
-  const started = await session.exec({
+  const started = await exec({
     cmd: command,
     ...(input.runAs ? { runAs: input.runAs } : {}),
     yieldTimeMs: 250,

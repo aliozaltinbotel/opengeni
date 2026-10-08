@@ -8,6 +8,7 @@ import { join } from "node:path";
 import {
   cancellableShellCommand,
   createTurnToolCancellationController,
+  isBareInteractiveShellCommand,
 } from "../src/sandbox/turn-tool-cancellation";
 import { notifyDurableOpOwnershipTransferStarted } from "../src/sandbox/op-correlation";
 import { parseExecResponseBanner } from "../src/sandbox/exec-banner";
@@ -18,6 +19,7 @@ import {
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 import { markPendingCommandSupervised } from "../src/sandbox/provider-command-session";
+import { ModalCommandStartNotDispatchedError } from "../src/sandbox/providers/modal-command-router-wire";
 
 const runContext = {} as never;
 
@@ -67,6 +69,114 @@ async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolea
 }
 
 describe("turn sandbox-tool physical cancellation fence", () => {
+  test.each(["legacy_retry", "legacy_hang", "native_hang"] as const)(
+    "cleanup consumes exact reaper settlement after initial capture fails (%s)",
+    async (mode) => {
+      const controller = createTurnToolCancellationController();
+      let providerCalls = 0;
+      let controls = 0;
+      let recovered = false;
+      let reaped = false;
+      let releaseControl!: () => void;
+      const pendingControl = new Promise<void>((resolve) => {
+        releaseControl = resolve;
+      });
+      const invocationId = crypto.randomUUID();
+      const command = {
+        kind: "modal-router-v1" as const,
+        sandboxId: "sb-original",
+        taskId: "ta-original",
+        execId: crypto.randomUUID(),
+        ...(mode === "native_hang"
+          ? {
+              supervision: {
+                protocol: "native-subreaper-v1" as const,
+                invocationId,
+                nonce: "a".repeat(64),
+                controlPath: `/tmp/opengeni-supervision/${invocationId}.sock`,
+              },
+            }
+          : {}),
+        streams: {
+          stdout: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+          stderr: { byteOffset: 0, utf8Remainder: "", eof: false, exitCode: null },
+        },
+      };
+      const backend = {
+        supportsPty: () => true,
+        execCommand: async () => {
+          if (providerCalls++ === 0) return running(116, "initial output");
+          controls++;
+          if (mode === "legacy_hang") await pendingControl;
+          if (!recovered) throw new Error("original provider control unavailable");
+          return exited(0);
+        },
+        getProviderCommand: () => command,
+        bindProviderCommand() {},
+        cancelSupervisedCommand: async () => {
+          if (mode !== "native_hang") return false;
+          controls++;
+          await pendingControl;
+          throw new Error("late native control failure");
+        },
+        getProviderCommandOutput: () => ({ command, chunks: [] }),
+        captureCommandOutput: async () => {
+          if (!recovered) throw new Error("atomic output capture unavailable");
+          return true;
+        },
+        writeStdin: async () => exited(1),
+      };
+      const route = { session: backend, sandboxId: null, kind: "modal", activeEpoch: 3 };
+      const session = new RoutingSandboxSession({
+        defaultResolved: route,
+        readPointer: async () => ({ activeSandboxId: null, activeEpoch: 3 }),
+        resolveActiveBackend: async () => route,
+        beforeMutation: async () => "parent",
+        afterMutation: async () => {},
+        captureProcessOutput: async () => {},
+        providerCommandPersistence: () => ({
+          load: async () => command,
+          acknowledge: async (value) => value,
+          reserveInput: async () => 1,
+        }),
+        // Represents the exact durable row settled by the independent reaper.
+        isProcessSettled: async () => reaped,
+      });
+      const exec = functionTool("exec_command", async (_context, input) =>
+        session.execCommand(JSON.parse(input)),
+      );
+      const [wrapped] = controller.wrapTools([exec], session) as Array<
+        Extract<Tool<unknown>, { type: "function" }>
+      >;
+      const result = await wrapped!.invoke(
+        runContext,
+        JSON.stringify({ cmd: "node reconcile.mjs", tty: false, yield_time_ms: 0 }),
+      );
+      expect(result).toContain("Provider output atomic capture remains pending");
+      expect(session.hasRetainedProcess(116)).toBe(true);
+      controller.cancel(new Error("turn completed"));
+      const drain = controller.waitForQuiescence();
+      try {
+        expect(
+          await Promise.race([drain.then(() => "drained"), Bun.sleep(150).then(() => "pending")]),
+        ).toBe("pending");
+        const controlsBeforeSettlement = controls;
+        reaped = true;
+        expect(
+          await Promise.race([drain.then(() => "drained"), Bun.sleep(500).then(() => "stuck")]),
+        ).toBe("drained");
+        expect(session.hasRetainedProcess(116)).toBe(false);
+        expect(controls).toBe(controlsBeforeSettlement);
+        expect(providerCalls - (mode === "native_hang" ? 0 : controls)).toBe(1);
+      } finally {
+        // Also release the old implementation's retry loop when reproducing red.
+        recovered = true;
+        releaseControl();
+        await drain;
+      }
+    },
+  );
+
   test("command_input preserves stdin approval and cancellation and is absent without a shell", async () => {
     const controller = createTurnToolCancellationController();
     const write = functionTool("write_stdin", async () => exited(0));
@@ -339,6 +449,84 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(adoptions).toBe(0);
   });
 
+  test("detects only a bare stdin-driven shell as the command's final step", () => {
+    for (const command of [
+      "bash",
+      "bash --noprofile --norc",
+      "kill 205 2>/dev/null || true\nbash --noprofile --norc",
+      "cd /workspace && exec /bin/bash -l",
+      "sh -i",
+      "/usr/bin/zsh -f\n",
+    ])
+      expect(isBareInteractiveShellCommand(command)).toBe(true);
+    for (const command of [
+      "bash -c 'sleep 60'",
+      "bash -lc 'npm start'",
+      "bash ./start.sh",
+      "npm start",
+      "bash\nnpm start",
+      "echo hi | bash",
+      "bash <<'EOF'\necho hi\nEOF",
+      "python3",
+      "",
+    ])
+      expect(isBareInteractiveShellCommand(command)).toBe(false);
+  });
+
+  test("a bare interactive shell stays turn-scoped and finalization stops it", async () => {
+    const controller = createTurnToolCancellationController();
+    let processAlive = true;
+    let adoptions = 0;
+    const signals: string[] = [];
+    const exec = functionTool("exec_command", async (_context, rawInput) => {
+      const cmd = String((JSON.parse(rawInput) as Record<string, unknown>).cmd);
+      if (cmd.includes("command cat '/tmp/opengeni-turn-shell/")) return exited(0, "4400 4400\n");
+      if (cmd.includes("command kill -TERM")) {
+        signals.push("TERM");
+        return exited(0);
+      }
+      if (cmd.includes("command kill -KILL")) {
+        signals.push("KILL");
+        processAlive = false;
+        return exited(0);
+      }
+      if (cmd.includes("command kill -0")) return exited(processAlive ? 75 : 0);
+      return running(120);
+    });
+    const write = functionTool("write_stdin", async () =>
+      processAlive ? running(120, "ok\n") : exited(137),
+    );
+    const [wrappedExec, wrappedWrite] = controller.wrapTools([exec, write], {
+      hasRetainedProcess: (id: number) => id === 120,
+      canAdoptRetainedProcessAsBackgroundCommand: () => true,
+      adoptRetainedProcessAsBackgroundCommand: async () => {
+        adoptions += 1;
+      },
+    }) as Array<Extract<Tool<unknown>, { type: "function" }>>;
+
+    const started = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({
+        cmd: "kill 205 2>/dev/null || true\nbash --noprofile --norc",
+        tty: false,
+        yield_time_ms: 0,
+      }),
+    );
+    expect(started).toContain("Process running with session ID 120");
+    expect(started).toContain("turn-scoped");
+    // Driving the shell through stdin never transfers it to the session.
+    const driven = await wrappedWrite!.invoke(
+      runContext,
+      JSON.stringify({ session_id: 120, chars: "echo ok\n", yield_time_ms: 0 }),
+    );
+    expect(driven).toContain("turn-scoped");
+    expect(adoptions).toBe(0);
+
+    await controller.waitForQuiescence();
+    expect(signals).toEqual(["TERM", "KILL"]);
+    expect(processAlive).toBe(false);
+  });
+
   test("failed background adoption never exposes a live process receipt", async () => {
     const controller = createTurnToolCancellationController();
     const exec = functionTool("exec_command", async () => running(117, "ready\n"));
@@ -357,7 +545,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     ).rejects.toThrow("durable adoption failed");
   });
 
-  test.skipIf(Bun.which("setsid") === null)(
+  test.skipIf(Bun.which("setsid") === null && Bun.which("python3") === null)(
     "promotes a provider shell into an isolated process group before user code",
     async () => {
       const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
@@ -378,6 +566,48 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       expect(exitCode, stderr).toBe(0);
       expect(stdout).toBe("isolated");
       expect(existsSync(markerPath)).toBe(false);
+    },
+  );
+
+  test.skipIf(Bun.which("python3") === null)(
+    "uses Python session isolation without setsid and refuses execution without either helper",
+    async () => {
+      const binDir = mkdtempSync(join(tmpdir(), "opengeni-shell-session-"));
+      const markerPath = `/tmp/opengeni-turn-shell/test-${crypto.randomUUID()}`;
+      const command = cancellableShellCommand(
+        'test "$$" = "$(ps -o pgid= -p "$$" | tr -d \'[:space:]\')" && printf isolated',
+        markerPath,
+      );
+      try {
+        for (const executable of ["mkdir", "rm", "ps", "tr", "python3"]) {
+          symlinkSync(Bun.which(executable)!, join(binDir, executable));
+        }
+        const run = async () => {
+          const child = Bun.spawn(["/bin/sh", "-c", command], {
+            env: { ...process.env, PATH: binDir },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+            child.exited,
+          ]);
+          return { stdout, stderr, exitCode };
+        };
+        const isolated = await run();
+        expect(isolated.exitCode, isolated.stderr).toBe(0);
+        expect(isolated.stdout).toBe("isolated");
+        expect(existsSync(markerPath)).toBe(false);
+        rmSync(join(binDir, "python3"));
+        const refused = await run();
+        expect(refused.exitCode).toBe(125);
+        expect(refused.stdout).toBe("");
+        expect(existsSync(markerPath)).toBe(false);
+      } finally {
+        rmSync(binDir, { recursive: true, force: true });
+      }
     },
   );
 
@@ -728,9 +958,12 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       [exec, functionTool("write_stdin", async () => running(34))],
       session,
     ) as Array<Extract<Tool<unknown>, { type: "function" }>>;
-    await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: command, yield_time_ms: 0 })),
-    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    const result = await wrappedExec!.invoke(
+      runContext,
+      JSON.stringify({ cmd: command, yield_time_ms: 0 }),
+    );
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("session_id 34");
     await wrappedWrite!.invoke(
       runContext,
       JSON.stringify({ session_id: 34, chars: "", yield_time_ms: 0 }),
@@ -781,9 +1014,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    await expect(
-      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
-    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(
+      await wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 })),
+    ).toContain("outcome unknown");
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
 
@@ -852,14 +1085,11 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       Extract<Tool<unknown>, { type: "function" }>
     >;
 
-    const error = await wrappedExec!
+    const result = await wrappedExec!
       .invoke(runContext, JSON.stringify({ cmd: "sleep 60", yield_time_ms: 0 }))
       .catch((caught) => caught);
-    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
-    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
-      id: expect.any(String),
-      providerSessionId: 34,
-    });
+    expect(result).toContain("outcome unknown");
+    expect(result).toContain("session_id 34");
 
     controller.cancel(new Error("turn finalized"));
     await controller.waitForQuiescence();
@@ -1150,7 +1380,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(retained).toBe(false);
   });
 
-  test("abort also cancels a cleanup exec that stalls before provider yield", async () => {
+  test("abort joins cleanup start cancellation before retrying a proven non-dispatch", async () => {
     const abort = new AbortController();
     const controller = createTurnToolCancellationController(abort.signal);
     let rejectOriginal!: (error: Error) => void;
@@ -1195,7 +1425,9 @@ describe("turn sandbox-tool physical cancellation fence", () => {
         if (providerCancellations === 1) {
           rejectOriginal(new Error("original Modal command-router transport closed"));
         } else if (providerCancellations === 2) {
-          rejectCleanup(new Error("cleanup Modal command-router transport closed"));
+          rejectCleanup(
+            new ModalCommandStartNotDispatchedError(new Error("cleanup Start was never sent")),
+          );
           markCleanupCancellationStarted();
           await cleanupCancellation;
         }
@@ -1675,7 +1907,7 @@ describe("turn sandbox-tool cancellation against a real local process", () => {
             `rm -rf '${repoPath}' '${pagerMarker}'`,
             `mkdir -p '${repoPath}'`,
             `git -C '${repoPath}' init -q`,
-            `git -C '${repoPath}' config user.name OpenGeni`,
+            `git -C '${repoPath}' config user.name Opengeni`,
             `git -C '${repoPath}' config user.email opengeni@example.invalid`,
             `printf first > '${repoPath}/file.txt'`,
             `git -C '${repoPath}' add file.txt`,
@@ -1982,6 +2214,7 @@ describe("retained-process stdin faults stay model-visible", () => {
     );
     expect(typeof result).toBe("string");
     expect(result).toContain("RoutingMutationOutcomeUnknownError");
-    expect(result).toContain("outcome is unknown");
+    expect(result).toContain("outcome unknown");
+    expect(result).not.toContain("Please try again");
   });
 });

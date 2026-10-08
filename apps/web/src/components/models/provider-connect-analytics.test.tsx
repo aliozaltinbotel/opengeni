@@ -9,6 +9,7 @@ import {
   ReplaceKeyDialog,
   type ProviderConnection,
 } from "@/components/ai-gateway-connection";
+import { modelsScopeLabels } from "./models-ui";
 import { SuperGrokConnectPage, type SuperGrokPlaces } from "./supergrok-models";
 
 // Radix reads DOM availability before this isolated test installs Happy DOM.
@@ -49,8 +50,90 @@ const submitButton = () =>
 const clickedAction = (element: Element) =>
   analyticsClickEvent(element, window.location.origin)?.properties.action;
 
+test("subscription pools reuse workspace model controls without reading or mutating legacy credentials", async () => {
+  const { useProviderConnection, PROVIDER_CONNECTION_CONFIGS, ProviderCustomModels } =
+    await import("../ai-gateway-connection");
+  const secrets = mock(async () => {
+    throw new Error("Legacy credentials must not be consulted");
+  });
+  const create = mock(async (_workspace: string, _kind: string, input: any) => ({
+    id: "model-fixture",
+    version: 1,
+    ...input,
+  }));
+  const client = {
+    listConnections: secrets,
+    getWorkspaceModelCatalog: secrets,
+    createConnection: secrets,
+    listWorkspaceClaudeCustomModels: async () => ({ models: [] }),
+    createWorkspaceClaudeCustomModel: create,
+  };
+  let state!: ReturnType<typeof useProviderConnection>;
+  function Harness() {
+    state = useProviderConnection({
+      client: client as any,
+      config: PROVIDER_CONNECTION_CONFIGS.claude_subscription,
+      workspaceId: "workspace-fixture",
+      canManageConnection: true,
+      canManageCustomModels: true,
+      catalogConnection: { connected: true, loaded: true, error: null },
+    });
+    return <ProviderCustomModels state={state} />;
+  }
+  await act(async () => root.render(<Harness />));
+  expect(container.textContent).toContain("Claude models");
+  await act(async () => state.addCustomModel("claude-opus-5-5"));
+  expect(create.mock.calls[0]?.[2]).toMatchObject({
+    upstreamModelId: "claude-opus-5-5",
+    label: "Claude Opus 5.5",
+  });
+  expect(await state.saveKey("sk-ant-oat01-fixture")).toBe(false);
+  expect(await state.disconnect()).toBe(false);
+  expect(state.canManageConnection).toBe(false);
+  expect(state.hidden).toBe(true);
+  expect(secrets).toHaveBeenCalledTimes(0);
+});
+
+test("organization subscription model controls keep pool and legacy credentials separate", async () => {
+  const { useOrganizationProviderConnection } =
+    await import("../organization-model-provider-connection");
+  const secrets = mock(async () => {
+    throw new Error("Legacy credentials must not be consulted");
+  });
+  const create = mock(async (_org: string, _kind: string, input: any) => ({
+    id: "model-fixture",
+    version: 1,
+    ...input,
+  }));
+  const client = {
+    getOrganizationModelProviderConnection: secrets,
+    upsertOrganizationModelProviderConnection: secrets,
+    listOrganizationProviderCustomModels: async () => ({ models: [] }),
+    createOrganizationProviderCustomModel: create,
+  };
+  let state!: ReturnType<typeof useOrganizationProviderConnection>;
+  function Harness() {
+    state = useOrganizationProviderConnection({
+      client: client as any,
+      providerKind: "claude_subscription",
+      organizationId: "organization-fixture",
+      catalogConnection: { connected: true, loaded: true, error: null },
+    });
+    return null;
+  }
+  await act(async () => root.render(<Harness />));
+  await act(async () => state.addCustomModel("claude-opus-5-5"));
+  expect(create.mock.calls[0]?.[2]).toMatchObject({
+    upstreamModelId: "claude-opus-5-5",
+    label: "Claude Opus 5.5",
+  });
+  expect(await state.saveKey("sk-ant-oat01-fixture")).toBe(false);
+  expect(await state.disconnect()).toBe(false);
+  expect(secrets).toHaveBeenCalledTimes(0);
+});
+
 test("the API-key provider Connect button carries the provider's connect label", async () => {
-  for (const action of ["connect_ai_gateway", "connect_openrouter"] as const) {
+  for (const action of ["connect_ai_gateway", "connect_openrouter", "connect_opper"] as const) {
     const state = {
       config: {
         title: "Provider",
@@ -77,6 +160,7 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   const places: SuperGrokPlaces = {
     scopeName: "Local",
     organizationName: "Organization",
+    scope: modelsScopeLabels("Organization", false),
     openAccount: () => undefined,
     openConnect: () => undefined,
     openAccess: () => undefined,
@@ -96,7 +180,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
   );
   expect(clickedAction(submitButton())).toBe("connect_supergrok");
 
-  // "Open xAI again" reopens the same sign-in; it is not another connect.
+  // While the code waits, the step holds its own actions: no second connect
+  // button that could be counted again.
   await act(async () =>
     root.render(
       <SuperGrokConnectPage
@@ -106,7 +191,8 @@ test("the SuperGrok Connect button carries connect_supergrok until sign-in start
       />,
     ),
   );
-  expect(submitButton().hasAttribute("data-analytics-action")).toBe(false);
+  expect(container.querySelector('button[type="submit"]')).toBeNull();
+  expect(container.querySelector("[data-analytics-action]")).toBeNull();
 });
 
 test("Claude credentials use distinct accessible forms and explain subscription expiry", async () => {
@@ -116,6 +202,10 @@ test("Claude credentials use distinct accessible forms and explain subscription 
     const state = {
       config,
       canManageConnection: true,
+      accessTarget: {
+        client: {},
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+      },
       saveKey: async () => true,
     } as unknown as ProviderConnection;
     await act(async () =>
@@ -123,6 +213,19 @@ test("Claude credentials use distinct accessible forms and explain subscription 
         <ProviderConnectPage key={kind} state={state} onClose={() => {}} onConnected={() => {}} />,
       ),
     );
+    if (kind === "claude_subscription") {
+      expect(submitButton().textContent).toContain("Sign in to Claude");
+      expect(submitButton().disabled).toBe(false);
+      expect(
+        container
+          .querySelector('input[aria-label="Claude subscription setup token"]')
+          ?.closest('[data-state="closed"]') !== null,
+      ).toBe(true);
+      const setup = [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) =>
+        button.textContent?.includes("Use a setup token"),
+      )!;
+      await act(async () => setup.click());
+    }
     const input = container.querySelector<HTMLInputElement>(
       `input[aria-label="${config.keyAriaLabel}"]`,
     )!;
@@ -138,7 +241,7 @@ test("Claude credentials use distinct accessible forms and explain subscription 
         container.querySelector<HTMLInputElement>('input[aria-label="Create a Claude setup token"]')
           ?.value,
       ).toBe("claude setup-token");
-      expect(container.textContent).toContain("does not refresh");
+      expect(container.textContent).toContain("cannot check current usage");
     }
   }
 });
@@ -152,7 +255,7 @@ test("subscription replacement identifies the credential as a token", async () =
   await act(async () =>
     root.render(<ReplaceKeyDialog state={state} open onOpenChange={() => {}} />),
   );
-  expect(document.body.textContent).toContain("Replace the Claude subscription token");
+  expect(document.body.textContent).toContain("Replace Claude setup token");
   expect(document.body.textContent).not.toContain("Replace the Claude subscription key");
   expect(
     document
@@ -266,16 +369,19 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
+        claude="available"
         gateways={gateways}
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,
     ),
   );
   expect(container.textContent).not.toContain("Shared through your organization");
-  const claude = [...container.querySelectorAll("button")].find(
-    (button) => button.textContent === "Claude subscription",
+  const claude = [...container.querySelectorAll("button")].find((button) =>
+    button.textContent?.startsWith("Claude subscription"),
   )!;
   await act(async () => claude.click());
   expect(pick).toHaveBeenCalledWith("claude_subscription");
@@ -284,7 +390,9 @@ test("workspace connect offers workspace Claude setup only when permitted", asyn
       <ConnectPickerPage
         codexAvailable={false}
         grok="hidden"
-        scopeName="Workspace"
+        target="workspace"
+        title="Connect account"
+        subtitle="Choose what pays for models in Workspace."
         onClose={() => {}}
         onPick={pick}
       />,

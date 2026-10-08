@@ -161,6 +161,7 @@ async function send(
   sessionId: string,
   text: string,
   delivery: "send" | "steer" = "send",
+  model?: string,
 ) {
   const accepted = await withWorkspaceSubjectSessionActivityRls(
     client.db,
@@ -178,6 +179,7 @@ async function send(
           delivery,
           text,
           resources: [],
+          ...(model ? { model } : {}),
           reasoningEffortFallback: "low",
           source: "user",
         }),
@@ -764,6 +766,201 @@ describe("clean session control plane", () => {
     ).toBeInstanceOf(Date);
   });
 
+  test("incomplete SDK setup parks the exact turn without a lease deadline or redispatch", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "preserve uncertain setup");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const turn = await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId, {
+      attemptId,
+      workflowRunId,
+      dispatchId,
+    });
+    expect(turn).not.toBeNull();
+    await shared.admin`update session_turns
+      set metadata = metadata || jsonb_build_object('providerRecoveryCount', 5)
+      where id = ${turn!.id}`;
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: turn!.triggerEventId,
+        attemptId,
+        reason: "sandbox_command_start_outcome_unknown",
+        sandboxSetupOutcomeUnknown: true,
+        detail: { retryable: false, replay: "blocked" },
+      }),
+    ).toMatchObject({ action: "recovering" });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const marker = {
+      version: 1,
+      turnId: turn!.id,
+      attemptId,
+      reason: "sandbox_command_start_outcome_unknown",
+    } as const;
+    // No lease at all is not proof that the unwound helper finished. Ordinary
+    // wakes and direct claim attempts cannot bypass the durable marker.
+    for (let wake = 0; wake < 3; wake++) {
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "admission-blocked",
+        reason: "sandbox_setup_outcome_unknown",
+        ref: marker,
+      });
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+      ).toBeNull();
+    }
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "recovering",
+      executionGeneration: turn!.executionGeneration,
+      activeAttemptId: null,
+      metadata: { providerRecoveryCount: 5, sandboxSetupOutcomeUnknown: marker },
+    });
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "recovering",
+      activeTurnId: turn!.id,
+    });
+  });
+
+  test("proven pre-dispatch exhaustion parks the same turn without resetting or replaying its five-recovery budget", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "preserve exhausted setup");
+    const attemptId = crypto.randomUUID();
+    const workflowId = `session-${session.id}`;
+    const workflowRunId = crypto.randomUUID();
+    const dispatchId = `dispatch-${crypto.randomUUID()}`;
+    const turn = await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId, {
+      attemptId,
+      workflowRunId,
+      dispatchId,
+    });
+    expect(turn).not.toBeNull();
+    await shared.admin`update session_turns
+      set metadata = metadata || jsonb_build_object('providerRecoveryCount', 5)
+      where id = ${turn!.id}`;
+    const input = {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "sandbox_command_start_recovery_exhausted",
+      sandboxSetupRecoveryExhausted: true,
+    } as const;
+    expect(
+      await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        ...input,
+        attemptId: crypto.randomUUID(),
+      }),
+    ).toMatchObject({ action: "stale" });
+    for (const invalid of [
+      { sandboxSetupOutcomeUnknown: true },
+      { providerRecoveryCount: 6 },
+      { triggerEventId: crypto.randomUUID() },
+    ] as const) {
+      await expect(
+        requestSessionTurnRecovery(client.db, grant.workspaceId!, { ...input, ...invalid }),
+      ).rejects.toThrow("unchanged exhausted recovery budget");
+    }
+    expect(await getSessionTurn(client.db, grant.workspaceId!, turn!.id)).toMatchObject({
+      status: "running",
+      activeAttemptId: attemptId,
+      metadata: { providerRecoveryCount: 5 },
+    });
+    expect(await requestSessionTurnRecovery(client.db, grant.workspaceId!, input)).toMatchObject({
+      action: "recovering",
+    });
+    await markSessionAttemptQuiesced(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      attemptId,
+      temporalWorkflowId: workflowId,
+      temporalWorkflowRunId: workflowRunId,
+      temporalActivityId: dispatchId,
+    });
+    const marker = {
+      version: 1,
+      turnId: turn!.id,
+      attemptId,
+      reason: "sandbox_command_start_recovery_exhausted",
+      setupOutcome: "not_started",
+      providerRecoveryCount: 5,
+    } as const;
+    for (let wake = 0; wake < 3; wake++) {
+      expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+        kind: "admission-blocked",
+        reason: "sandbox_setup_recovery_exhausted",
+        ref: marker,
+      });
+      expect(
+        await claimTestSessionWork(client.db, grant.workspaceId!, session.id, workflowId),
+      ).toBeNull();
+    }
+    const parked = await getSessionTurn(client.db, grant.workspaceId!, turn!.id);
+    expect(parked).toMatchObject({
+      status: "recovering",
+      executionGeneration: turn!.executionGeneration,
+      triggerEventId: turn!.triggerEventId,
+      activeAttemptId: null,
+      metadata: { providerRecoveryCount: 5, sandboxSetupRecoveryExhausted: marker },
+    });
+    expect(parked?.metadata).not.toHaveProperty("sandboxSetupOutcomeUnknown");
+    expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+      status: "recovering",
+      activeTurnId: turn!.id,
+      admissionBlock: null,
+    });
+  });
+
+  test.each([0, 4, 6])(
+    "setup exhaustion rejects an unexhausted or mismatched durable count %s",
+    async (count) => {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, "no premature exhaustion");
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        {
+          attemptId,
+        },
+      );
+      expect(turn).not.toBeNull();
+      await shared.admin`update session_turns
+      set metadata = metadata || jsonb_build_object('providerRecoveryCount', ${count}::integer)
+      where id = ${turn!.id}`;
+      await expect(
+        requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          turnId: turn!.id,
+          triggerEventId: turn!.triggerEventId,
+          attemptId,
+          reason: "sandbox_command_start_recovery_exhausted",
+          sandboxSetupRecoveryExhausted: true,
+        }),
+      ).rejects.toThrow("unchanged exhausted recovery budget");
+      const unchanged = await getSessionTurn(client.db, grant.workspaceId!, turn!.id);
+      expect(unchanged).toMatchObject({
+        status: "running",
+        activeAttemptId: attemptId,
+        metadata: { providerRecoveryCount: count },
+      });
+      expect(unchanged?.metadata).not.toHaveProperty("sandboxSetupRecoveryExhausted");
+    },
+  );
+
   test.each(["draining", "warm", "teardown"] as const)(
     "rotation recovery parks until the %s lease transition wakes it",
     async (liveness) => {
@@ -1248,15 +1445,22 @@ describe("clean session control plane", () => {
       { attemptId: firstAttemptId },
     );
     expect(runningTurn?.id).toBe(first.turn.id);
-    await appendSessionEvents(client.db, grant.workspaceId!, session.id, [
-      {
-        type: "turn.started",
-        turnId: runningTurn!.id,
-        turnGeneration: runningTurn!.executionGeneration,
-        payload: { triggerEventId: runningTurn!.triggerEventId },
-      },
-      { type: "agent.message.completed", payload: { text: "previous claimed response" } },
-    ]);
+    const started = await appendSessionEventsForTurnAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      runningTurn!.id,
+      runningTurn!.executionGeneration,
+      firstAttemptId,
+      [
+        {
+          type: "turn.started",
+          payload: { triggerEventId: runningTurn!.triggerEventId },
+        },
+        { type: "agent.message.completed", payload: { text: "previous claimed response" } },
+      ],
+    );
+    expect(started.accepted).toBe(true);
     const queuedText = "delegate this newly queued issue";
     const accepted = await send(grant, session.id, queuedText);
     expect(accepted.turn).toMatchObject({ status: "queued", startedAt: null });
@@ -2279,7 +2483,7 @@ describe("clean session control plane", () => {
     ).toBe(true);
     expect(canonicalMixedOutput.at(-1)).toEqual({
       type: "input_text",
-      text: "[OpenGeni omitted 105 structured array items]",
+      text: "[Opengeni omitted 105 structured array items]",
     });
     expect(JSON.stringify(boundModelToolOutputItem(canonicalMixed))).toBe(
       JSON.stringify(canonicalMixed),
@@ -4141,11 +4345,45 @@ describe("clean session control plane", () => {
   });
 
   test("queue projection attaches only the exact next eligible machine-input batch", async () => {
-    const ordinaryFixture = await fixture();
+    async function acceptedOriginFixture() {
+      const f = await fixture();
+      const sender = await createSession(client.db, {
+        accountId: f.grant.accountId,
+        workspaceId: f.grant.workspaceId!,
+        initialMessage: "Prepare context",
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+      });
+      await send(f.grant, sender.id, "Prepare context", "send", "scripted-model");
+      const caller = await claimTestSessionWork(
+        client.db,
+        f.grant.workspaceId!,
+        sender.id,
+        `session-${sender.id}`,
+      );
+      if (!caller?.activeAttemptId) throw new Error("Originating human turn was not claimed");
+      expect(caller.initiatingHumanSubjectId).toBe(f.grant.subjectId);
+      return {
+        ...f,
+        lineage: {
+          callerSessionId: sender.id,
+          callerTurnId: caller.id,
+          callerAttemptId: caller.activeAttemptId,
+          callerExecutionGeneration: caller.executionGeneration,
+        },
+      };
+    }
+    const ordinaryFixture = await acceptedOriginFixture();
     const ordinaryPrompt = await send(
       ordinaryFixture.grant,
       ordinaryFixture.session.id,
       "Use the incoming result",
+      "send",
+      "scripted-model",
     );
     const ordinary = await addSessionSystemUpdate(client.db, {
       accountId: ordinaryFixture.grant.accountId,
@@ -4156,6 +4394,7 @@ describe("clean session control plane", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `agent-${crypto.randomUUID()}`,
       summary: "New agent context",
+      lineage: ordinaryFixture.lineage,
       payload: {
         type: "agent_message",
         text: "New agent context",
@@ -4163,6 +4402,22 @@ describe("clean session control plane", () => {
       },
     });
     if (!ordinary.added) throw new Error("ordinary system update was not inserted");
+    const missingOrigin = await addSessionSystemUpdate(client.db, {
+      accountId: ordinaryFixture.grant.accountId,
+      workspaceId: ordinaryFixture.grant.workspaceId!,
+      sessionId: ordinaryFixture.session.id,
+      kind: "agent_message",
+      classification: "info",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `agent-${crypto.randomUUID()}`,
+      summary: "Context without an origin",
+      payload: {
+        type: "agent_message",
+        text: "Context without an origin",
+        operationId: crypto.randomUUID(),
+      },
+    });
+    if (!missingOrigin.added) throw new Error("origin-less system update was not inserted");
     expect(
       await getSessionQueueSnapshot(
         client.db,
@@ -4175,9 +4430,39 @@ describe("clean session control plane", () => {
         inputIds: [ordinary.update.id],
       },
     });
+    const ordinaryClaim = await claimTestSessionWork(
+      client.db,
+      ordinaryFixture.grant.workspaceId!,
+      ordinaryFixture.session.id,
+      `session-${ordinaryFixture.session.id}`,
+    );
+    expect(ordinaryClaim?.id).toBe(ordinaryPrompt.turn.id);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          ordinaryFixture.grant.workspaceId!,
+          ordinaryFixture.session.id,
+          ordinaryPrompt.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([ordinary.update.id]);
+    expect(
+      await listOutstandingSessionSystemUpdates(
+        client.db,
+        ordinaryFixture.grant.workspaceId!,
+        ordinaryFixture.session.id,
+      ),
+    ).toMatchObject([{ id: missingOrigin.update.id, state: "pending" }]);
 
-    const agentSteerFixture = await fixture();
-    await send(agentSteerFixture.grant, agentSteerFixture.session.id, "Older queued send");
+    const agentSteerFixture = await acceptedOriginFixture();
+    await send(
+      agentSteerFixture.grant,
+      agentSteerFixture.session.id,
+      "Older queued send",
+      "send",
+      "scripted-model",
+    );
     const agentSteer = await addSessionSystemUpdate(client.db, {
       accountId: agentSteerFixture.grant.accountId,
       workspaceId: agentSteerFixture.grant.workspaceId!,
@@ -4187,6 +4472,7 @@ describe("clean session control plane", () => {
       sourceId: crypto.randomUUID(),
       dedupeKey: `agent-steer-${crypto.randomUUID()}`,
       summary: "Replace the current direction",
+      lineage: agentSteerFixture.lineage,
       payload: {
         type: "agent_steer_instruction",
         instruction: "Replace the current direction",
@@ -4210,6 +4496,7 @@ describe("clean session control plane", () => {
       agentSteerFixture.session.id,
       "Newest human direction",
       "steer",
+      "scripted-model",
     );
     expect(
       await getSessionQueueSnapshot(
@@ -4223,6 +4510,23 @@ describe("clean session control plane", () => {
         inputIds: [agentSteer.update.id],
       },
     });
+    const steerClaim = await claimTestSessionWork(
+      client.db,
+      agentSteerFixture.grant.workspaceId!,
+      agentSteerFixture.session.id,
+      `session-${agentSteerFixture.session.id}`,
+    );
+    expect(steerClaim?.id).toBe(humanSteer.turn.id);
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          agentSteerFixture.grant.workspaceId!,
+          agentSteerFixture.session.id,
+          humanSteer.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual([agentSteer.update.id]);
   });
 
   test("claim persists one exact machine-input batch and failure never requeues it", async () => {
@@ -6065,11 +6369,9 @@ describe("clean session control plane", () => {
       }
     }
 
-    for (const kind of [
-      "child_progress",
-      "background_command_result",
-      "child_terminal_result",
-    ] as const) {
+    // A child_terminal_result now wakes a goalless idle parent (#3439), so it
+    // carries a wake obligation and is not in this list.
+    for (const kind of ["child_progress", "background_command_result"] as const) {
       test(`${kind} without a wake obligation does not block completed idle`, async () => {
         const { grant, child, idleNotices } = await idleChild();
         const operationId = crypto.randomUUID();
@@ -6093,29 +6395,20 @@ describe("clean session control plane", () => {
                   progressNote: "still working",
                 },
               }
-            : kind === "child_terminal_result"
-              ? {
-                  kind,
-                  payload: {
-                    type: kind,
-                    childSessionId: crypto.randomUUID(),
-                    status: "idle" as const,
-                  },
-                }
-              : {
-                  kind,
-                  payload: {
-                    type: kind,
+            : {
+                kind,
+                payload: {
+                  type: kind,
+                  commandId: operationId,
+                  state: "exited" as const,
+                  exitCode: 0,
+                  reason: "completed",
+                  outputLocator: {
+                    eventType: "sandbox.command.output.delta" as const,
                     commandId: operationId,
-                    state: "exited" as const,
-                    exitCode: 0,
-                    reason: "completed",
-                    outputLocator: {
-                      eventType: "sandbox.command.output.delta" as const,
-                      commandId: operationId,
-                    },
                   },
-                }),
+                },
+              }),
         });
         if (!added.added) throw new Error("retained notice was not inserted");
         expect(added.shouldWake).toBe(false);
@@ -7665,7 +7958,7 @@ describe("clean session control plane", () => {
         approvalId: "header-allowed-preview",
         toolName: "header_allowed",
       }),
-    ).toMatchObject({ managed: true, decision: "ask" });
+    ).toMatchObject({ managed: true, decision: "allow" });
     expect(
       await prepareConnectorActionApproval(client.db, firstIdentity, headerBlockedCall),
     ).toMatchObject({ managed: true, decision: "block" });
@@ -7678,13 +7971,14 @@ describe("clean session control plane", () => {
         approvalId: "header-allowed",
         toolName: "header_allowed",
       }),
-    ).toMatchObject({ managed: true, decision: "ask" });
+    ).toMatchObject({ managed: true, decision: "allow" });
     const sensitiveFixture = `sensitive-fixture-${crypto.randomUUID()}`;
     const call = (approvalId: string, action: string, value = sensitiveFixture) => ({
       approvalId,
       connectionId,
       serverId,
       toolName,
+      actionName: action,
       arguments: { action, payload: value },
     });
 
@@ -7697,6 +7991,30 @@ describe("clean session control plane", () => {
       allowed: true,
       managed: false,
     });
+    // A recommended Allow with no explicit rule writes no ledger row or audit
+    // pair; a recommended Ask still creates its durable pending review.
+    const defaultAllow = {
+      ...call("connector-default-allow", "unmanaged"),
+      defaultDecision: "allow" as const,
+    };
+    expect(
+      await prepareConnectorActionApproval(client.db, firstIdentity, defaultAllow),
+    ).toMatchObject({ managed: true, decision: "allow" });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAllow)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAllow)).toEqual({
+      allowed: true,
+      managed: false,
+    });
+    const defaultAsk = {
+      ...call("connector-default-ask", "unmanaged"),
+      defaultDecision: "ask" as const,
+    };
+    expect(await beginConnectorActionExecution(client.db, firstIdentity, defaultAsk)).toMatchObject(
+      { allowed: false, managed: true, reason: "approval_required" },
+    );
     const capabilityWrite = {
       ...call("connector-capability-write", "unmanaged"),
       approvalMode: "connector_write" as const,
@@ -7982,6 +8300,8 @@ describe("clean session control plane", () => {
       creationAttemptId: firstAttemptId,
       executionAttemptId: secondAttemptId,
     });
+    expect(requestsByApproval.has("connector-default-allow")).toBe(false);
+    expect(requestsByApproval.get("connector-default-ask")?.status).toBe("pending");
     expect(requestsByApproval.get(blockCall.approvalId)?.status).toBe("blocked");
     const wildcardRequest = requestsByApproval.get(wildcardBlockCall.approvalId);
     expect(wildcardRequest).toMatchObject({
@@ -8003,7 +8323,11 @@ describe("clean session control plane", () => {
     expect(connectorAuditActions).toContain("connector.action.blocked");
     expect(connectorAuditActions).toContain("connector.action.execution_started");
     expect(connectorAuditActions).toContain("connector.action.execution_completed");
-    expect(JSON.stringify(evidence)).not.toContain(sensitiveFixture);
+    // Exact review bytes are protected session data, never audit metadata.
+    expect(JSON.stringify(evidence.audits)).not.toContain(sensitiveFixture);
+    expect(requestsByApproval.get(askCall.approvalId)?.reviewArguments).toContain(sensitiveFixture);
+    expect(requestsByApproval.get(allowCall.approvalId)?.reviewArguments).toBeNull();
+    expect(requestsByApproval.get(blockCall.approvalId)?.reviewArguments).toBeNull();
     const wildcardAudits = evidence.audits.filter(
       (row) => row.metadata.requestId === wildcardRequest?.id,
     );
@@ -8128,10 +8452,10 @@ describe("clean session control plane", () => {
     );
     expect(request).toMatchObject({
       status: "uncertain",
-      policySource: "explicit",
+      policySource: "default",
       policyDecision: "ask",
       policyId: null,
-      actionName: "create_issue",
+      actionName: "perform_action",
       executionAttemptId: resumedAttemptId,
       outcome: "retry_after_execution_started",
     });

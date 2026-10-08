@@ -1,8 +1,14 @@
 import { IMPORTED_HISTORY_CONTEXT_HEADER } from "@opengeni/contracts";
 import { OpenGeniEmbeddingClient as OpenGeniClient } from "../embedding-client";
 import { OpenGeniApiError } from "../errors";
+import { chatDefaults } from "../chats";
+import {
+  createWorkspaceIdResolver,
+  type WorkspaceIdOptions,
+  type WorkspaceIdTarget,
+} from "../tenant-workspaces";
 import type { SendMessageInput } from "../client";
-import type { CreateSessionRequest, Session, SessionEvent } from "../types";
+import type { CreateSessionRequest, CreateSessionResponse, Session, SessionEvent } from "../types";
 import { ChatPendingFold, ChatTurnFold, asRecord, stringValue } from "./fold";
 import { chatIdempotencyKey, chatSessionId } from "./ids";
 import {
@@ -17,6 +23,7 @@ import {
   type ChatSessionListOptions,
   type ChatSnapshot,
   type ChatTarget,
+  type WorkspaceTarget,
   type OpenGeniOptions,
 } from "./types";
 
@@ -25,7 +32,15 @@ export const DEFAULT_CHAT_SOURCE = "app";
 
 type SubmittedTurn = { after: number; turnId: string | null };
 
+const MISSING_API_KEY_MESSAGE =
+  "Opengeni requires an apiKey. Set OPENGENI_API_KEY in the server environment.";
+
+async function missingApiKeyFetch(): Promise<Response> {
+  throw new TypeError(MISSING_API_KEY_MESSAGE);
+}
+
 type BuildCreate = (text: string, send: ChatSendOptions) => CreateSessionRequest;
+type SubmitCreate = (request: CreateSessionRequest) => Promise<CreateSessionResponse>;
 
 type ChatInit = {
   workspaceId: string;
@@ -33,6 +48,7 @@ type ChatInit = {
   conversation: string | null;
   session: Session | null;
   buildCreate: BuildCreate | null;
+  submitCreate?: SubmitCreate | undefined;
 };
 
 /** Upper bound on the `modelContext` built from `importedHistory`, header included. */
@@ -49,71 +65,163 @@ const IMPORTED_HISTORY_ROLES: ReadonlySet<string> = new Set(["user", "assistant"
  */
 export class OpenGeni {
   readonly client: OpenGeniClient;
+  /**
+   * The organization id: the one passed to the constructor, else the one
+   * derived from the API key once {@link resolveOrganizationId} (or any
+   * workspace lookup) has run. An empty string before that; prefer
+   * `await og.resolveOrganizationId()`.
+   */
   readonly organizationId: string;
   readonly source: string;
   readonly sessions: {
     /** Sessions visible to the selected canonical user, or explicit service caller. */
     list: (options: ChatSessionListOptions) => Promise<Session[]>;
   };
-  private readonly workspaceName: ((tenant: string) => string) | undefined;
-  private readonly workspaces = new Map<string, Promise<string>>();
+  private readonly resolveWorkspaceId: ReturnType<typeof createWorkspaceIdResolver>;
+  private implicitAgentAdmission: boolean | undefined;
+  private pendingOrganizationId: Promise<string> | undefined;
 
   constructor(options: OpenGeniOptions) {
-    if (!options.apiKey) throw new TypeError("OpenGeni requires an apiKey.");
-    if (!options.organizationId) throw new TypeError("OpenGeni requires an organizationId.");
     this.client = new OpenGeniClient({
-      baseUrl: options.baseUrl ?? DEFAULT_OPENGENI_BASE_URL,
-      apiKey: options.apiKey,
-      ...(options.fetch ? { fetch: options.fetch } : {}),
+      // An empty value (a blank `OPENGENI_API_BASE_URL=` in .env) means the default.
+      baseUrl: options.baseUrl?.trim() || DEFAULT_OPENGENI_BASE_URL,
+      // A missing key fails each request, not construction: a module-scope
+      // `new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! })` must not
+      // break `next build` (or any import) where the secret only exists at
+      // runtime.
+      ...(options.apiKey
+        ? { apiKey: options.apiKey, ...(options.fetch ? { fetch: options.fetch } : {}) }
+        : { fetch: missingApiKeyFetch }),
     });
-    this.organizationId = options.organizationId;
+    this.organizationId = options.organizationId?.trim() ?? "";
     this.source = options.source ?? DEFAULT_CHAT_SOURCE;
-    this.workspaceName = options.workspaceName;
+    this.resolveWorkspaceId = createWorkspaceIdResolver(this.client, {
+      organizationId: () => this.resolveOrganizationId(),
+      source: this.source,
+      workspaceName: options.workspaceName,
+      memberPermissions: options.memberPermissions,
+    });
     this.sessions = { list: (listOptions) => this.listSessions(listOptions) };
   }
 
-  /** The workspace id for a tenant (created on first use, cached per instance) or an explicit id. */
-  async workspaceId(
-    target: ChatTarget | { tenant?: string | undefined; workspaceId?: string | undefined },
-  ): Promise<string> {
-    if (target.workspaceId) return target.workspaceId;
-    const tenant = target.tenant;
-    if (!tenant) throw new TypeError("Pass either tenant or workspaceId.");
-    let pending = this.workspaces.get(tenant);
-    if (!pending) {
-      pending = this.client
-        .ensureWorkspace({
-          accountId: this.organizationId,
-          externalSource: this.source,
-          externalId: tenant,
-          name: this.workspaceName?.(tenant) ?? tenant,
-        })
-        .then((response) => response.workspace.id);
-      pending.catch(() => {
-        this.workspaces.delete(tenant);
+  /**
+   * The organization that owns every workspace this facade creates. Uses the
+   * constructor's `organizationId`, else reads it once from the API key
+   * (`GET /v1/access/me`) and caches it.
+   */
+  async resolveOrganizationId(): Promise<string> {
+    if (this.organizationId) return this.organizationId;
+    if (!this.pendingOrganizationId) {
+      const pending = this.client.getAccessContext().then((access) => {
+        const credential = access.credential;
+        if (credential && credential.kind !== "organization_api_key") {
+          throw new TypeError(
+            "Opengeni needs an organization API key to create workspaces; this is a workspace key.",
+          );
+        }
+        const organizationId = credential?.accountId ?? access.defaultAccountId;
+        if (!organizationId) {
+          throw new TypeError(
+            "Could not derive the organization from this API key. Pass organizationId.",
+          );
+        }
+        // Readonly to callers; set once here, from the key's own organization.
+        (this as { organizationId: string }).organizationId = organizationId;
+        return organizationId;
       });
-      this.workspaces.set(tenant, pending);
+      pending.catch(() => {
+        if (this.pendingOrganizationId === pending) this.pendingOrganizationId = undefined;
+      });
+      this.pendingOrganizationId = pending;
     }
-    return await pending;
+    return await this.pendingOrganizationId;
+  }
+
+  /**
+   * Translate your own ids to the Opengeni workspace id, creating the
+   * workspace on first use (cached per instance):
+   * `{ tenant }` is one workspace per tenant, `{ user }` (no tenant) is one
+   * workspace per user, and `{ workspaceId }` is returned as is. Opengeni adds
+   * a tenant workspace's users on their first request; a per-user workspace
+   * gets its one owner from the SDK and admits nobody else.
+   */
+  async workspaceId(
+    target:
+      | ChatTarget
+      | { tenant?: string | undefined; workspaceId?: string | undefined }
+      | WorkspaceTarget,
+  ): Promise<string> {
+    if (target.workspaceId === "" || target.tenant === "") {
+      throw new TypeError("tenant and workspaceId must be non-empty ids.");
+    }
+    if (target.workspaceId) return target.workspaceId;
+    if (target.tenant) {
+      return await this.workspaceIdFor({ tenant: target.tenant }, { isolation: "tenant" });
+    }
+    if ("tenant" in target || "workspaceId" in target) {
+      // A tenant/workspaceId key with no value is a host bug: never silently
+      // fall back to the user's own workspace.
+      throw new TypeError(
+        "tenant or workspaceId is undefined. Pass a non-empty id, or omit the key for one workspace per user.",
+      );
+    }
+    const user = "user" in target ? target.user : undefined;
+    if (user) {
+      return await this.workspaceIdFor({ user }, { isolation: "user" });
+    }
+    throw new TypeError("Pass tenant, user, or workspaceId.");
+  }
+
+  /**
+   * Resolve a tenant workspace or a user's own workspace (user isolation, per
+   * tenant when one is given). A user's own workspace is provisioned with that
+   * user as its only explicit member.
+   */
+  async workspaceIdFor(target: WorkspaceIdTarget, options: WorkspaceIdOptions): Promise<string> {
+    return await this.resolveWorkspaceId(target, options);
+  }
+
+  /** `chats: "isolated"` keeps its tenant-plus-user workspace; a user alone gets their own. */
+  private async isolatedWorkspaceId(target: WorkspaceTarget): Promise<string> {
+    if (target.workspaceId) {
+      throw new TypeError('chats: "isolated" requires a tenant or user, not a workspaceId.');
+    }
+    return await this.workspaceIdFor(
+      { tenant: target.tenant, user: target.user },
+      { isolation: "user" },
+    );
   }
 
   /**
    * Address one conversation; the session is created lazily on the first send.
-   * Identity selects authority, not the conversation address. Workspace
-   * membership must be provisioned by the host's explicit onboarding flow.
+   * Identity selects authority, not the conversation address. The workspace
+   * is the tenant's, the user's own (user only), or the explicit id; Opengeni
+   * adds the user to it on their first request.
    * Legacy user-namespaced conversations remain accessible by their session ID.
    */
   async chat(options: ChatOptions): Promise<Chat> {
     if (!options.conversation) throw new TypeError("chat() requires a conversation id.");
-    const agentAccess = options.agentAccess ?? "session";
+    if (options.chats === "private" && !options.user) {
+      throw new OpenGeniChatError(
+        "chats_requires_user",
+        'chats: "private" requires an authenticated product user. Pass user or use chats: "shared".',
+      );
+    }
+    const legacy = options.chats === undefined && !options.user;
+    const defaults = legacy
+      ? {
+          visibility: "workspace" as const,
+          agentAccess: "session" as const,
+          memoryScope: "off" as const,
+        }
+      : chatDefaults(options.chats ?? "private");
+    const explicitAgent = options.agent !== undefined || options.create?.agent !== undefined;
+    const agentAccess = options.agentAccess ?? defaults.agentAccess;
     const memoryScope =
       options.memory === false
         ? "off"
-        : options.memory === undefined
-          ? agentAccess === "session"
-            ? "off"
-            : agentAccess
-          : options.memory;
+        : (options.memory ??
+          (legacy ? (agentAccess === "session" ? "off" : agentAccess) : defaults.memoryScope));
     if (memoryScope === "user" && !options.user) {
       throw new OpenGeniChatError(
         "memory_scope_requires_user",
@@ -123,7 +231,10 @@ export class OpenGeni {
     const client = options.user
       ? this.client.asUser(options.user, { source: this.source })
       : this.client;
-    const workspaceId = await this.workspaceId(options);
+    const workspaceId =
+      options.chats === "isolated"
+        ? await this.isolatedWorkspaceId(options)
+        : await this.workspaceId(options);
     const sessionId = options.sessionId ?? (await chatSessionId(workspaceId, options.conversation));
     const session = await this.findSession(client, workspaceId, sessionId);
     const buildCreate: BuildCreate = (text, send) => {
@@ -140,13 +251,21 @@ export class OpenGeni {
           : undefined);
       const context = [baseContext, messageContext].filter(Boolean).join("\n\n") || undefined;
       return {
-        agentAccess,
-        memoryScope,
         ...(options.model !== undefined ? { model: options.model } : {}),
         ...(options.instructions !== undefined ? { instructions: options.instructions } : {}),
         ...(options.skills !== undefined ? { skills: options.skills } : {}),
         ...(options.tools !== undefined ? { tools: options.tools } : {}),
         ...create,
+        visibility: create.visibility ?? defaults.visibility,
+        agentAccess: create.agentAccess ?? agentAccess,
+        memoryScope: create.memoryScope ?? memoryScope,
+        agent: {
+          capabilities: create.agent?.capabilities ?? options.agent?.capabilities,
+          identity:
+            create.agent?.identity !== undefined ? create.agent.identity : options.agent?.identity,
+          instructions: create.agent?.instructions ?? options.agent?.instructions,
+          renderer: create.agent?.renderer ?? options.agent?.renderer ?? "markdown",
+        },
         ...(context !== undefined ? { modelContext: context } : {}),
         ...(createContext===undefined && send.importedHistory ? {importedHistoryOrigins:send.importedHistory.map(message=>message.origin ?? null)} : {}),
         ...messagePolicy(send),
@@ -161,7 +280,54 @@ export class OpenGeni {
       conversation: options.conversation,
       session,
       buildCreate,
+      submitCreate: (request) =>
+        this.createChatSession(client, workspaceId, request, explicitAgent),
     });
+  }
+
+  private async createChatSession(
+    client: OpenGeniClient,
+    workspaceId: string,
+    request: CreateSessionRequest,
+    explicitAgent: boolean,
+  ): Promise<CreateSessionResponse> {
+    const { agent, ...withoutAgent } = request;
+    const implicitAgent = !explicitAgent && this.implicitAgentAdmission !== false;
+    try {
+      return await client.createSession(
+        workspaceId,
+        explicitAgent || implicitAgent ? { ...withoutAgent, agent } : withoutAgent,
+      );
+    } catch (error) {
+      // Current servers always admit `agent`. This 422 comes only from older
+      // servers that still had agent configuration behind a deployment flag.
+      if (
+        !(error instanceof OpenGeniApiError) ||
+        error.status !== 422 ||
+        !(
+          error.code === "agent_config_not_enabled" ||
+          (error.code === "SESSION_CREATE_REJECTED" &&
+            error.details?.code === "agent_config_not_enabled")
+        ) ||
+        error.outcomeUnknown
+      )
+        throw error;
+      if (explicitAgent) {
+        throw new OpenGeniApiError(error.status, error.body, {
+          code: error.code,
+          retryable: false,
+          correlationId: error.correlationId,
+          displayMessage:
+            "Explicit agent configuration requires the deployment operator to set " +
+            "OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED=true. The SDK has kept your agent settings unchanged.",
+        });
+      }
+      if (!implicitAgent) throw error;
+      // This exact 422 refused the create. Retry only the implicit renderer,
+      // retaining the session/idempotency keys and every caller-owned field.
+      this.implicitAgentAdmission = false;
+      return await client.createSession(workspaceId, withoutAgent);
+    }
   }
 
   /**
@@ -200,7 +366,10 @@ export class OpenGeni {
   }
 
   private async listSessions(options: ChatSessionListOptions): Promise<Session[]> {
-    const workspaceId = await this.workspaceId(options);
+    const workspaceId =
+      options.chats === "isolated"
+        ? await this.isolatedWorkspaceId(options)
+        : await this.workspaceId(options);
     const client = options.user
       ? this.client.asUser(options.user, { source: this.source })
       : this.client;
@@ -223,6 +392,7 @@ export class Chat {
   readonly conversation: string | null;
   private session: Session | null;
   private readonly buildCreate: BuildCreate | null;
+  private readonly submitCreate: SubmitCreate;
   private pendingTurnId: string | null = null;
 
   constructor(
@@ -234,6 +404,8 @@ export class Chat {
     this.conversation = init.conversation;
     this.session = init.session;
     this.buildCreate = init.buildCreate;
+    this.submitCreate =
+      init.submitCreate ?? ((request) => this.client.createSession(this.workspaceId, request));
   }
 
   /** True once the session exists on the server. */
@@ -379,10 +551,7 @@ export class Chat {
       if (!this.buildCreate) {
         throw new OpenGeniChatError("session_missing", "This session no longer exists.");
       }
-      const created = await this.client.createSession(
-        this.workspaceId,
-        this.buildCreate(text, send),
-      );
+      const created = await this.submitCreate(this.buildCreate(text, send));
       this.session = created;
       if (created.initialMessage === text) {
         return { after: 0, turnId: created.initialTurnId };
@@ -565,3 +734,6 @@ function abortError(): Error {
   error.name = "AbortError";
   return error;
 }
+
+/** Current brand spelling; the established SDK export remains compatible. */
+export { OpenGeni as Opengeni };

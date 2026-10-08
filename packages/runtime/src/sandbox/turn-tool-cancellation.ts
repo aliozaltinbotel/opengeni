@@ -5,12 +5,25 @@ import {
   parseExecBannerExitCode,
   parseExecBannerSessionId,
 } from "./exec-banner";
-import { RoutingMutationOutcomeUnknownError } from "./routing/routing-session";
+import {
+  RoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+  renderRoutingMutationOutcomeUnknownToolResult,
+  type RoutingCommandDispatchOptions,
+} from "./routing/routing-session";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
+  ProviderCommandObservationUnavailableError,
+  ProviderCommandInputOutcomeUnknownError,
+  ProviderCommandStartRejectedError,
+  isProviderCommandObservationUnavailableError,
   type PendingCommandSupervision,
 } from "./provider-command-session";
+import {
+  ModalCommandStartNotDispatchedError,
+  ModalCommandStartPreDispatchUnavailableError,
+} from "./providers/modal-command-router-wire";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
@@ -82,9 +95,15 @@ type ActiveShellSession = {
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
+  /** Never adopt as a session background command; finalization stops it. */
+  turnScoped?: boolean;
 };
 
 type CommandCancellationSession = {
+  execCommand?(
+    args: TurnSandboxCommandArgs,
+    options?: RoutingCommandDispatchOptions,
+  ): Promise<string>;
   /** Resolve the physical cancellation primitive for the current route. A
    * routing proxy must answer from its resolved backend, not from the proxy's
    * always-present method surface or a pre-resolution PTY default. */
@@ -95,6 +114,7 @@ type CommandCancellationSession = {
   supportsPty?(): boolean;
   supportsCommandInput?(providerSessionId: number): boolean;
   hasRetainedProcess?(providerSessionId: number): boolean;
+  reconcileRetainedProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessHasTypedHandleLoss?(providerSessionId: number): boolean;
   /** Whether the provider locator remains controllable from another worker
    * process after this turn returns. */
@@ -110,18 +130,21 @@ type CommandCancellationSession = {
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessMutation?(args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   writeStdinForProcessControl?(args: {
     sessionId: number;
     chars?: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }): Promise<string>;
   execCommandForProcessControl?(
     providerSessionId: number,
@@ -185,10 +208,13 @@ type PendingShellStart = {
   token: string;
   runContext: Parameters<FunctionToolInvoke>[0];
   execInvoke: FunctionToolInvoke;
+  session: CommandCancellationSession | null;
   cancelProviderStart: (() => Promise<void>) | null;
+  /** An exact retained route now owns physical cancellation of this start. */
+  retainedHandoff: boolean;
   settled: boolean;
   settledPromise: Promise<void>;
-  settle(): void;
+  settle(retainedSessionId?: number): void;
   cancellation: Promise<void> | null;
 };
 
@@ -256,6 +282,27 @@ function modelWaitMs(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 0
     ? Math.min(value, TURN_MAX_MODEL_WAIT_MS)
     : TURN_DEFAULT_MODEL_WAIT_MS;
+}
+
+const BARE_INTERACTIVE_SHELL =
+  /^(?:exec\s+)?(?:(?:\/usr)?\/bin\/)?(?:ba|z|da|k|a|fi)?sh(?:\s+(?:-[A-Zabd-z]+|--[a-z][a-z-]*))*$/;
+
+/**
+ * True when the command's final step starts a shell that only reads stdin (for
+ * example `bash --noprofile --norc`): a REPL the model drives with write_stdin
+ * during this turn. Such a shell never exits on its own, so adopting it as a
+ * session background command would keep the sandbox busy indefinitely after
+ * the turn. It stays turn-scoped instead and the ordinary finalization drain
+ * stops it. A `-c` command string, a script argument, or any other trailing
+ * token is not a bare shell and keeps normal background adoption.
+ */
+export function isBareInteractiveShellCommand(command: string): boolean {
+  const steps = command
+    .split(/\n|;|&&|\|\|/)
+    .map((step) => step.trim())
+    .filter((step) => step.length > 0 && !step.startsWith("#"));
+  const last = steps.at(-1);
+  return last !== undefined && BARE_INTERACTIVE_SHELL.test(last);
 }
 
 function execOutput(raw: string): string {
@@ -469,8 +516,14 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
-    '  [ -n "$__opengeni_setsid" ] || exit 125',
-    `  exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    '  if [ -n "$__opengeni_setsid" ]; then',
+    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    "  fi",
+    // macOS has setsid(2), but no setsid executable. The parent is proven
+    // not to be a group leader, so the same process can safely start a session.
+    '  __opengeni_python="$(command -v python3 2>/dev/null)"',
+    '  [ -n "$__opengeni_python" ] || exit 125',
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
     "fi",
     groupLeaderCommand,
   ].join("\n");
@@ -606,6 +659,13 @@ function retainedProcessSession(
  * tool's string result, keeping the run alive instead of failing the turn.
  */
 export function renderDirectToolFault(error: unknown, retainedProcessSessionId?: number): string {
+  if (isRoutingMutationOutputRejectedError(error)) throw error;
+  if (error instanceof ProviderCommandInputOutcomeUnknownError) {
+    return `Command input acknowledgement unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. The input may have been accepted; its outcome is unknown and it was not resent. Do not resend stdin. Inspect the existing command with write_stdin using empty chars.`;
+  }
+  if (isProviderCommandObservationUnavailableError(error)) {
+    return `Command observation unavailable${retainedProcessSessionId === undefined ? "" : ` for session ID ${retainedProcessSessionId}`}. Outcome unknown; the original invocation remains retained. Do not replay the command or resend stdin; observe the existing command.`;
+  }
   try {
     const terminal = error as {
       name?: unknown;
@@ -633,6 +693,8 @@ export function renderDirectToolFault(error: unknown, retainedProcessSessionId?:
   } catch {
     // A hostile error Proxy must not replace the original safe fault renderer.
   }
+  if (error instanceof RoutingMutationOutcomeUnknownError)
+    return renderRoutingMutationOutcomeUnknownToolResult(error);
   const details = error instanceof Error ? error.toString() : String(error);
   return `An error occurred while running the tool. Please try again. Error: ${details}`;
 }
@@ -706,6 +768,7 @@ function wrapComputer<T extends object>(
 
 class TurnToolCancellationControllerImpl implements TurnToolCancellationController {
   private cancelled = false;
+  private readonly observationCancellation = new AbortController();
   private reason: unknown;
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly shellSessions = new Map<number, ActiveShellSession>();
@@ -730,6 +793,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     if (!this.cancelled) {
       this.cancelled = true;
       this.reason = reason;
+      this.observationCancellation.abort(cancellationError(reason));
       this.signal?.removeEventListener("abort", this.onAbort);
     }
     void this.ensureDrain().catch(() => undefined);
@@ -810,6 +874,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               }
               const directArgs = {
                 sessionId: parsed.session_id,
+                signal: this.observationCancellation.signal,
                 ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
                 ...(typeof parsed.yield_time_ms === "number"
                   ? { yieldTimeMs: parsed.yield_time_ms }
@@ -863,6 +928,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             token: markerPath.slice(markerPath.lastIndexOf("/") + 1),
             runContext: lifecycleRunContext,
             execInvoke: invokeExec,
+            session,
             cancelProviderStart: session.cancelPendingExecCommand
               ? session.cancelPendingExecCommand.bind(session)
               : null,
@@ -910,6 +976,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             identityValidated: false,
             cancellation: null,
           });
+          pendingStart?.settle(retainedProcess.providerSessionId);
         }
         pendingStart?.settle();
         throw error;
@@ -971,7 +1038,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         cancellation: null,
       };
       this.shellSessions.set(sessionId, state);
-      pendingStart?.settle();
+      pendingStart?.settle(sessionId);
       const maxOutputTokens = args.maxOutputTokens ?? 20_000;
       const initialOutput = execOutput(initial);
       let output = initialOutput ? appendBoundedOutput("", initialOutput, maxOutputTokens) : "";
@@ -1172,6 +1239,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   token,
                   runContext,
                   execInvoke: tool.invoke,
+                  session: cancellationSession ?? null,
                   cancelProviderStart: cancellationSession?.cancelPendingExecCommand
                     ? cancellationSession.cancelPendingExecCommand.bind(cancellationSession)
                     : null,
@@ -1223,9 +1291,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   identity: null,
                   identityValidated: false,
                   cancellation: null,
+                  ...(isBareInteractiveShellCommand(parsed.cmd) ? { turnScoped: true } : {}),
                 });
+                pendingStart?.settle(retainedProcess.providerSessionId);
               }
               pendingStart?.settle();
+              if (error instanceof RoutingMutationOutcomeUnknownError)
+                return renderRoutingMutationOutcomeUnknownToolResult(error);
               throw error;
             } finally {
               remoteExec?.settle();
@@ -1250,13 +1322,18 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
+                // The exact marker kill is the finalization authority for a
+                // turn-scoped shell; op-stream (remote) launches have none.
+                ...(!useRemoteOpCancellation && isBareInteractiveShellCommand(parsed.cmd)
+                  ? { turnScoped: true }
+                  : {}),
               };
               // Provider retention preserves the physical process but does not
               // transfer it to the session. Keep it turn-owned and cancellable
               // throughout eager waiting; successful adoption removes it below
               // immediately before the running receipt is returned.
               this.shellSessions.set(sessionId, state);
-              pendingStart?.settle();
+              pendingStart?.settle(sessionId);
               return await this.awaitModelFacingShellResult({
                 state,
                 initialOutput: output,
@@ -1298,6 +1375,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               (hasTypedExecHandleLoss(cancellationSession, sessionId) ||
                 this.shellSessions.get(sessionId)?.typedHandleLoss === true);
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
+            let initialObservationFailure: ProviderCommandObservationUnavailableError | undefined;
             if (sessionId !== null && directProcessSession?.writeStdinForProcessMutation) {
               // This bypasses the SDK-built tool, whose default errorFunction
               // renders any thrown execute() failure as the tool's string
@@ -1316,7 +1394,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     : {}),
                 });
               } catch (error) {
-                return renderDirectToolFault(error, sessionId);
+                if (!(error instanceof ProviderCommandObservationUnavailableError))
+                  return renderDirectToolFault(error, sessionId);
+                // The mutation already happened once; only its ensuing read
+                // was unavailable. Continue with empty-input reads, never input.
+                initialObservationFailure = error;
+                output = "";
               }
             } else {
               output = await tool.invoke(runContext, cappedInput, details);
@@ -1378,6 +1461,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               ? await this.awaitModelFacingShellResult({
                   state,
                   initialOutput: output,
+                  ...(initialObservationFailure ? { initialObservationFailure } : {}),
                   startedAt,
                   waitMs: modelWaitMs(parsed?.yield_time_ms),
                   maxOutputTokens:
@@ -1400,13 +1484,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private async awaitModelFacingShellResult(input: {
     state: ActiveShellSession;
     initialOutput: string;
+    initialObservationFailure?: ProviderCommandObservationUnavailableError;
     startedAt: number;
     waitMs: number;
     maxOutputTokens: number;
   }): Promise<string> {
     const { state, startedAt, waitMs, maxOutputTokens } = input;
     const canAdoptInBackground =
-      state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
+      state.turnScoped !== true &&
+      (state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true);
     if (!state.typedHandleLoss && isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
@@ -1416,12 +1502,18 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
     }
-    if (parseExecBannerSessionId(input.initialOutput) !== state.sessionId) {
+    if (
+      !input.initialObservationFailure &&
+      parseExecBannerSessionId(input.initialOutput) !== state.sessionId
+    ) {
       return input.initialOutput;
     }
 
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
+    let observationFailure: ProviderCommandObservationUnavailableError | null =
+      input.initialObservationFailure ?? null;
     for (;;) {
+      if (observationFailure?.readRetryAllowed === false) break;
       if (performance.now() - startedAt >= waitMs) break;
       if (this.cancelled) throw cancellationError(this.reason);
       if (
@@ -1442,23 +1534,37 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const read =
         state.processSession?.writeStdinForProcessRead ??
         state.processSession?.writeStdinForProcessControl;
-      const next = read
-        ? await read.call(state.processSession, {
-            sessionId: state.sessionId,
-            chars: "",
-            yieldTimeMs,
-            maxOutputTokens,
-          })
-        : await state.writeInvoke!(
-            state.runContext,
-            JSON.stringify({
-              session_id: state.sessionId,
+      let next: unknown;
+      try {
+        next = read
+          ? await read.call(state.processSession, {
+              sessionId: state.sessionId,
               chars: "",
-              yield_time_ms: yieldTimeMs,
-              max_output_tokens: maxOutputTokens,
-            }),
-            undefined,
-          );
+              yieldTimeMs,
+              maxOutputTokens,
+              signal: this.observationCancellation.signal,
+            })
+          : await state.writeInvoke!(
+              state.runContext,
+              JSON.stringify({
+                session_id: state.sessionId,
+                chars: "",
+                yield_time_ms: yieldTimeMs,
+                max_output_tokens: maxOutputTokens,
+              }),
+              undefined,
+            );
+      } catch (error) {
+        if (this.cancelled) throw cancellationError(this.reason);
+        if (!(error instanceof ProviderCommandObservationUnavailableError)) throw error;
+        // No terminal proof and no early adoption: spend only the original
+        // foreground wait while preserving the exact turn-owned registration.
+        observationFailure = error;
+        if (!error.readRetryAllowed) break;
+        await delay(Math.min(SHELL_POLL_MS, Math.max(0, waitMs - (performance.now() - startedAt))));
+        continue;
+      }
+      observationFailure = null;
       if (this.cancelled) throw cancellationError(this.reason);
       if (typeof next !== "string")
         throw new Error("Retained command read returned no provider status");
@@ -1481,10 +1587,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       // when an adapter returns a running receipt immediately.
       await delay(Math.min(SHELL_POLL_MS, Math.max(0, remainingMs)));
     }
+    if (observationFailure) {
+      const commandId = state.processSession?.retainedProcessIdentity?.(state.sessionId)?.id;
+      return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
+    }
     if (!canAdoptInBackground) {
-      // Docker/local handles belong to this exact worker session. Keep the
-      // shell registered with the turn fence: finalization must stop and settle
-      // it. Returning control is not durable background-command adoption.
+      // Docker/local handles belong to this exact worker session, and a bare
+      // interactive shell waits on stdin forever. Keep the shell registered
+      // with the turn fence: finalization must stop and settle it. Returning
+      // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
@@ -1569,6 +1680,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       if (this.cancelled) throw cancellationError(this.reason);
       return await operation();
     });
+    return this.retainInFlight(promise);
+  }
+
+  private retainInFlight<T>(promise: Promise<T>): Promise<T> {
     this.inFlight.add(promise);
     void promise
       .finally(() => {
@@ -1579,7 +1694,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   private ensureDrain(): Promise<void> {
-    this.drainPromise ??= this.drain();
+    if (!this.drainPromise) {
+      const drain = this.drain();
+      this.drainPromise = drain;
+      void drain.catch(() => {
+        // A bounded observation failure is not a quiescence receipt. Preserve
+        // every registration, but allow a later drain to observe its SAME
+        // native helper instead of permanently caching a rejected promise.
+        if (this.drainPromise === drain) this.drainPromise = null;
+      });
+    }
     return this.drainPromise;
   }
 
@@ -1622,6 +1746,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     token: string;
     runContext: Parameters<FunctionToolInvoke>[0];
     execInvoke: FunctionToolInvoke;
+    session: CommandCancellationSession | null;
     cancelProviderStart: (() => Promise<void>) | null;
   }): PendingShellStart {
     let resolveSettled!: () => void;
@@ -1632,10 +1757,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       ...input,
       supervision: { managed: false },
       cancellationPath: shellCancellationPath(input.markerPath),
+      retainedHandoff: false,
       settled: false,
       settledPromise,
-      settle: () => {
+      settle: (retainedSessionId) => {
         if (entry.settled) return;
+        // A returned banner or rejected transport is not physical proof. Only
+        // registration on the original retained route transfers cancellation
+        // to shellSessions; unknown starts still require the tombstone helper.
+        entry.retainedHandoff =
+          retainedSessionId !== undefined &&
+          this.shellSessions.get(retainedSessionId)?.processSession != null;
         entry.settled = true;
         resolveSettled();
         this.pendingShellStarts.delete(entry);
@@ -1677,11 +1809,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return;
     }
 
+    // Give the SAME original start's registration a chance to finish before
+    // issuing a new helper. Only retainedHandoff, never this elapsed interval,
+    // permits skipping the tombstone/physical proof path.
+    if (!state.settled) await Promise.race([state.settledPromise, delay(SHELL_POLL_MS)]);
+
     // The transport can be cancelled after Modal accepted the process. Publish
     // the token-specific in-box tombstone first, then terminate only the PGID
     // whose command line contains the same token. Exit 0 is exact absence;
-    // every other result retries and keeps quiescence closed.
-    while (true) {
+    // every other result retries and keeps quiescence closed. Once this exact
+    // start hands off to a retained route, shellSessions owns cancellation;
+    // retrying a new ordinary mutation here can be fenced forever after Steer.
+    // An already-issued helper must PHYSICALLY settle before making that handoff.
+    while (!state.retainedHandoff) {
       try {
         const output = await this.invokePendingShellCancellationCommand(state);
         if (typeof output === "string" && parseExecBannerExitCode(output) === 0) break;
@@ -1696,12 +1836,28 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     await state.settledPromise;
   }
 
-  private async invokePendingShellCancellationCommand(state: PendingShellStart): Promise<unknown> {
-    const observation = state
-      .execInvoke(
-        state.runContext,
-        shellHelperInput(pendingShellCancellationCommand(state)),
-        undefined,
+  private invokePendingShellCancellationCommand(state: PendingShellStart): Promise<unknown> {
+    // Original start registration can remove pendingShellStarts while this
+    // helper is still live. Keep its independent physical join in inFlight,
+    // including across a rejected drain/reconciliation of another command.
+    return this.retainInFlight(this.settlePendingShellCancellationCommand(state));
+  }
+
+  private async settlePendingShellCancellationCommand(state: PendingShellStart): Promise<unknown> {
+    const command = pendingShellCancellationCommand(state);
+    const dispatchProof: { admissionRefusal?: { error: unknown } } = {};
+    // SDK errorFunction may erase an exact retained locator. The same routing
+    // session's direct exec preserves typed uncertainty and ordinary admission;
+    // it does not bypass the writer fence or select a different backend.
+    const observation = Promise.resolve()
+      .then(async () =>
+        state.session?.execCommand
+          ? await state.session.execCommand(shellHelperArgs(command), {
+              onMutationAdmissionRefused: (error) => {
+                dispatchProof.admissionRefusal = { error };
+              },
+            })
+          : await state.execInvoke(state.runContext, shellHelperInput(command), undefined),
       )
       .then(
         (output) => ({ kind: "fulfilled" as const, output }),
@@ -1730,8 +1886,105 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     outcome ??= await observation;
     if (providerCancellation) await providerCancellation;
-    if (outcome.kind === "rejected") throw outcome.error;
-    return outcome.output;
+    if (
+      outcome.kind === "rejected" &&
+      ((dispatchProof.admissionRefusal !== undefined &&
+        Object.is(dispatchProof.admissionRefusal.error, outcome.error)) ||
+        outcome.error instanceof ProviderCommandStartRejectedError ||
+        outcome.error instanceof ModalCommandStartNotDispatchedError ||
+        outcome.error instanceof ModalCommandStartPreDispatchUnavailableError)
+    ) {
+      // Call-scoped routing admission proof or typed provider rejection proves
+      // THIS helper has no process. Error names/messages alone, another call's
+      // refusal, generic transport rejection and rendered errors do not. This
+      // releases only this helper join; exact original settlement still owns
+      // quiescence, and a later retained handoff stops ordinary-helper retries.
+      throw outcome.error;
+    }
+    if (
+      outcome.kind === "fulfilled" &&
+      typeof outcome.output === "string" &&
+      parseExecBannerExitCode(outcome.output) !== null
+    )
+      return outcome.output;
+
+    const sessionId =
+      outcome.kind === "fulfilled" && typeof outcome.output === "string"
+        ? parseExecBannerSessionId(outcome.output)
+        : outcome.kind === "rejected" && outcome.error instanceof RoutingMutationOutcomeUnknownError
+          ? (outcome.error.retainedProcess?.providerSessionId ?? null)
+          : null;
+    const session =
+      sessionId === null ? null : retainedProcessSession(state.session ?? undefined, sessionId);
+    if (sessionId === null || !session?.writeStdinForProcessControl) {
+      // No trusted locator means no exact observation/cancellation authority.
+      // Preserve the physical fence without replaying an ambiguous helper or
+      // fabricating its exit. The worker containment gate remains responsible.
+      return await new Promise<never>(() => {});
+    }
+
+    const identity = session.retainedProcessIdentity?.(sessionId)?.id;
+    if (
+      outcome.kind === "rejected" &&
+      outcome.error instanceof RoutingMutationOutcomeUnknownError &&
+      identity !== undefined &&
+      identity !== outcome.error.retainedProcess?.id
+    )
+      return await new Promise<never>(() => {});
+    const typedHandleLoss = hasTypedExecHandleLoss(session, sessionId);
+    while (true) {
+      if (
+        session.hasRetainedProcess?.(sessionId) !== true ||
+        (identity !== undefined && session.retainedProcessIdentity?.(sessionId)?.id !== identity)
+      )
+        return await new Promise<never>(() => {});
+      try {
+        if (await session.reconcileRetainedProcess?.(sessionId)) return undefined;
+      } catch {
+        // Reconciliation failure leaves this exact helper registered.
+      }
+      const read = Promise.resolve()
+        .then(
+          async () =>
+            await session.writeStdinForProcessControl!({
+              sessionId,
+              chars: "",
+              yieldTimeMs: SHELL_POLL_MS,
+              maxOutputTokens: 128,
+            }),
+        )
+        .then(
+          (output) => ({ kind: "fulfilled" as const, output }),
+          () => ({ kind: "rejected" as const }),
+        );
+      let result;
+      do {
+        result = await Promise.race([read, delay(SHELL_POLL_MS).then(() => null)]);
+        if (result !== null) break;
+        try {
+          if (
+            (identity === undefined ||
+              session.retainedProcessIdentity?.(sessionId)?.id === identity) &&
+            (await session.reconcileRetainedProcess?.(sessionId))
+          )
+            // Exact reaper proof settles only the helper. It supplies no exit
+            // status/token-PGID absence proof for the original command.
+            return undefined;
+        } catch {
+          // A failed durable observation does not settle the helper.
+        }
+      } while (result === null);
+      if (result.kind === "fulfilled" && parseExecBannerExitCode(result.output) !== null)
+        return result.output;
+      if (
+        result.kind === "fulfilled" &&
+        !typedHandleLoss &&
+        isExecSessionLostBanner(result.output, sessionId)
+      )
+        return undefined;
+      // Retry only empty reads of THIS issued helper, never exec or stdin.
+      await delay(SHELL_POLL_MS);
+    }
   }
 
   private registerRemoteExec(
@@ -1784,11 +2037,54 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     return state.cancellation;
   }
 
+  private async reconcileSettledShellSession(state: ActiveShellSession): Promise<boolean> {
+    try {
+      if (await state.processSession?.reconcileRetainedProcess?.(state.sessionId)) {
+        this.shellSessions.delete(state.sessionId);
+        return true;
+      }
+    } catch {
+      // A failed durable read is not exit proof; keep physical cancellation live.
+    }
+    return false;
+  }
+
+  private async awaitShellControl<T>(
+    state: ActiveShellSession,
+    operation: Promise<T>,
+  ): Promise<{ reconciled: true } | { reconciled: false; value: T }> {
+    if (!state.processSession?.reconcileRetainedProcess)
+      return { reconciled: false, value: await operation };
+    // These are idempotent control observations/cancellation, never the original
+    // command. A late failure is contained if independent physical proof wins.
+    const observed = operation.then(
+      (value) => ({ kind: "resolved" as const, value }),
+      (error: unknown) => ({ kind: "rejected" as const, error }),
+    );
+    while (true) {
+      const result = await Promise.race([
+        observed,
+        delay(SHELL_POLL_MS).then(() => ({ kind: "pending" as const })),
+      ]);
+      if (result.kind === "resolved") return { reconciled: false, value: result.value };
+      if (result.kind === "rejected") throw result.error;
+      if (await this.reconcileSettledShellSession(state)) return { reconciled: true };
+    }
+  }
+
   private async cancelShellSessionOnce(state: ActiveShellSession): Promise<void> {
+    if (await this.reconcileSettledShellSession(state)) return;
     // Native supervision is authoritative for supported commands. Never run a
     // numeric PID/PGID helper against a supervised invocation, even when its
     // original shell wrapper happened to create a legacy marker.
-    if (await state.processSession?.cancelSupervisedCommand?.(state.sessionId, "explicit_stop")) {
+    const nativeCancellation = await this.awaitShellControl(
+      state,
+      Promise.resolve(
+        state.processSession?.cancelSupervisedCommand?.(state.sessionId, "explicit_stop"),
+      ),
+    );
+    if (nativeCancellation.reconciled) return;
+    if (nativeCancellation.value) {
       while (state.processSession?.hasRetainedProcess?.(state.sessionId) === true) {
         if (await this.rawWrite(state, "", SHELL_POLL_MS)) {
           await this.forgetShellSessionAfterExactSettlement(state);
@@ -1827,12 +2123,17 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       state.processSession.writeStdinForProcessControl
     ) {
       while (state.processSession.hasRetainedProcess?.(state.sessionId) === true) {
+        if (await this.reconcileSettledShellSession(state)) return;
         try {
-          const output = await state.processSession.execCommandForProcessControl(
-            state.sessionId,
-            shellHelperArgs(retainedShellCancellationCommand(state)),
+          const control = await this.awaitShellControl(
+            state,
+            state.processSession.execCommandForProcessControl(
+              state.sessionId,
+              shellHelperArgs(retainedShellCancellationCommand(state)),
+            ),
           );
-          const exitCode = parseExecBannerExitCode(output);
+          if (control.reconciled) return;
+          const exitCode = parseExecBannerExitCode(control.value);
           if (exitCode === 0 || exitCode === RETAINED_SHELL_MARKER_PENDING_EXIT_CODE) {
             await this.forgetShellSessionAfterExactSettlement(state);
             return;
@@ -1922,25 +2223,31 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     chars: string,
     yieldTimeMs: number,
   ): Promise<boolean> {
+    if (await this.reconcileSettledShellSession(state)) return true;
     if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) return false;
     try {
-      const output = state.processSession?.writeStdinForProcessControl
-        ? await state.processSession.writeStdinForProcessControl({
-            sessionId: state.sessionId,
-            chars,
-            yieldTimeMs,
-            maxOutputTokens: 128,
-          })
-        : await state.writeInvoke!(
-            state.runContext,
-            JSON.stringify({
-              session_id: state.sessionId,
+      const control = await this.awaitShellControl(
+        state,
+        state.processSession?.writeStdinForProcessControl
+          ? state.processSession.writeStdinForProcessControl({
+              sessionId: state.sessionId,
               chars,
-              yield_time_ms: yieldTimeMs,
-              max_output_tokens: 128,
-            }),
-            undefined,
-          );
+              yieldTimeMs,
+              maxOutputTokens: 128,
+            })
+          : state.writeInvoke!(
+              state.runContext,
+              JSON.stringify({
+                session_id: state.sessionId,
+                chars,
+                yield_time_ms: yieldTimeMs,
+                max_output_tokens: 128,
+              }),
+              undefined,
+            ),
+      );
+      if (control.reconciled) return true;
+      const output = control.value;
       if (typeof output !== "string") return false;
       // Preserve legacy missing-handle classification only where the adapter
       // has no typed loss contract. Otherwise only metadata can prove exit.

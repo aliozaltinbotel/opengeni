@@ -15,6 +15,9 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { rawRows, withRlsContext, withWorkspaceRls } from "./database";
 import * as schema from "./schema";
+import { checkWorkspaceAllowance } from "./usage-allowances";
+import { creditDebitAttributionForTurn } from "./credit-debit-attribution";
+import { getSpendableCreditBalance } from "./credit-balances";
 
 export const ACTIVE_VIDEO_GENERATION_STATUSES = [
   "preparing",
@@ -48,7 +51,7 @@ export class VideoGenerationCapacityError extends Error {
 }
 
 export class VideoGenerationCreditError extends Error {
-  constructor(message = "insufficient OpenGeni credits") {
+  constructor(message = "insufficient Opengeni credits") {
     super(message);
     this.name = "VideoGenerationCreditError";
   }
@@ -290,7 +293,7 @@ export async function admitVideoGenerationOperation(
         if (!operation) throw new Error("Video generation operation was not admitted");
         if (input.pricedCostMicros > 0) {
           if (input.fundingSource !== "opengeni_credits" || input.connectionId !== null) {
-            throw new Error("Only OpenGeni-funded video operations may debit credits");
+            throw new Error("Only Opengeni-funded video operations may debit credits");
           }
           await debitVideoGenerationCredits(tx, operation);
         }
@@ -1362,14 +1365,24 @@ async function debitVideoGenerationCredits(
   if (operation.pricedCostMicros <= 0 || operation.fundingSource !== "opengeni_credits") {
     throw new Error("Managed video credit debit has an invalid funding binding");
   }
+  if (!operation.turnId) {
+    throw new VideoGenerationCreditError("Paid video initiating turn is unavailable");
+  }
+  // Model settlement locks the account before the ledger trigger's workspace
+  // allowance fence. Preserve that order during prepaid media admission.
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${operation.accountId}))`);
-  const [balanceRow] = await tx
-    .select({
-      balanceMicros: sql<number>`coalesce(sum(${schema.creditLedgerEntries.amountMicros}), 0)`,
-    })
-    .from(schema.creditLedgerEntries)
-    .where(eq(schema.creditLedgerEntries.accountId, operation.accountId));
-  const balanceMicros = Number(balanceRow?.balanceMicros ?? 0);
+  const attribution = await creditDebitAttributionForTurn(tx, {
+    accountId: operation.accountId,
+    workspaceId: operation.workspaceId,
+    turnId: operation.turnId,
+  });
+  const refusal = await checkWorkspaceAllowance(tx, {
+    accountId: operation.accountId,
+    workspaceId: operation.workspaceId,
+    subjectId: attribution.kind === "turn" ? attribution.initiatingHumanSubjectId : null,
+  });
+  if (refusal) throw Object.assign(new VideoGenerationCreditError(refusal.message), refusal);
+  const { balanceMicros } = await getSpendableCreditBalance(tx, operation.accountId);
   if (!Number.isSafeInteger(balanceMicros) || balanceMicros < operation.pricedCostMicros) {
     throw new VideoGenerationCreditError();
   }
@@ -1385,6 +1398,7 @@ async function debitVideoGenerationCredits(
       sourceId: operation.id,
       idempotencyKey: `credit:video_generation_debit:${operation.id}`,
       metadata: {
+        turnId: operation.turnId,
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,
@@ -1436,6 +1450,7 @@ async function refundVideoGenerationCredits(
       sourceId: operation.id,
       idempotencyKey: `credit:video_generation_refund:${operation.id}`,
       metadata: {
+        turnId: operation.turnId,
         modelId: operation.modelId,
         sourceMode: operation.sourceMode,
         pricedCostMicros: operation.pricedCostMicros,

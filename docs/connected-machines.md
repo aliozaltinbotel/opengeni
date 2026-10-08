@@ -78,11 +78,11 @@ client. The matching UI ships in
 | Backend enum | `docker`/`modal`/`local`/…       | `selfhosted`                                       |
 
 The model that follows from this: a machine-bound session has **no phantom Modal
-"home box"**, **no OpenGeni Git token is distributed to the machine** (it uses
+"home box"**, **no Opengeni Git token is distributed to the machine** (it uses
 its own SSH / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them). The authoritative runner Hello
-already reports its absolute launch root; OpenGeni persists it and resolves an
+already reports its absolute launch root; Opengeni persists it and resolves an
 optional relative session folder once against that root. The SDK manifest,
 exec cwd, filesystem calls, editor, and PTY all use that same host-native path.
 Relative operation paths resolve from it and absolute paths stay literal, so
@@ -100,7 +100,7 @@ from a different target. Provider-independent artifact receipts may still use
 their own portable identity where that receipt contract requires it.
 
 The exact model-visible tool catalog remains available through Codemode without
-installing a machine credential. OpenGeni sends no Codemode manifest pointer or
+installing a machine credential. Opengeni sends no Codemode manifest pointer or
 token file. Instead, the worker snapshots a renewable exact-attempt URL/bearer
 only into each new child exec. It is never written to disk or stable machine
 state. The installed binary exposes its absolute path to that authorized child,
@@ -190,7 +190,7 @@ with bounded backoff; late events from that port cannot invalidate a successor.
 
 Attached Chrome profiles are a separate physical placement. Inventory reports a
 `connectionGeneration` that becomes the BrowserSession/ComputerSession
-`placementInstanceId`. When that generation changes, OpenGeni marks the exact
+`placementInstanceId`. When that generation changes, Opengeni marks the exact
 device's still-live sessions `lost` with `controller_transition_expired` and
 never rebinds the old controller token. In-flight `/end` (`ending`) is left
 to finish physical teardown instead of being rewritten to `lost`. Heartbeats
@@ -395,7 +395,12 @@ means a verified self-update is draining accepted work; `queue_breaker` and
 detail remains an unspecified admission refusal. The same distinction survives
 retry exhaustion and structured tool-error rendering. A self-update on a busy host now ends with retryable `update_busy_work` (or
 `update_busy_uploads`) and immediately reopens admission. It does not wait for
-long-lived servers, cancel accepted work, or restart the host. Request an update
+long-lived servers, cancel accepted work, or restart the host. Open browser and
+computer controllers also keep the host busy, including pending creation and
+shutdown. The agent checks every owned browserd scope through its private
+admin-only idle proof after fencing new routed work; unavailable, crashed, or
+older incompatible controllers return retryable `update_state_unavailable`.
+An empty controller may remain running without blocking an update. Request an update
 again at a safe idle point. Older runners can remain draining indefinitely;
 inspect their accepted operations and coordinate a safe stop/restart with their
 owners instead of killing useful work or increasing concurrency limits.
@@ -535,7 +540,7 @@ affects future operations only. A connection blip detaches the stream without
 killing the command; replay or exact-instance reconciliation collects its
 terminal result after reconnect.
 The session shell capability also preserves an explicit `exec_command.shell`
-selection: OpenGeni sends that shell as direct argv, with the requested login or
+selection: Opengeni sends that shell as direct argv, with the requested login or
 non-login semantics, instead of silently substituting the machine service's
 ambient default shell. Calls that omit `shell` intentionally retain the
 machine-owned `$SHELL`/`ComSpec` default.
@@ -563,7 +568,7 @@ deadline by default), while preserving the active sandbox pointer and epoch.
 
 Connected Machine exec requires a runner that advertises the `op_stream`
 capability and serves the op-stream protocol with
-`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). OpenGeni refuses before
+`OPENGENI_AGENT_OP_STREAM_ENABLED=true` (default on). Opengeni refuses before
 starting a command when op-stream is unavailable or unsupported; it never
 downgrades exec to request/reply. Output streams as sequenced, credit-flowed
 frames the runner retains
@@ -576,6 +581,29 @@ already-running or completed op instead of re-running the command. The
 oversized-reply wall does not apply on this path; output is instead bounded by
 the runner's retention quotas, and exceeding them fails typed with exact
 counters, never silently truncated.
+
+Foreground output can be released within a long turn once the exact tool's
+call/result receipt and structural output event are durable. The receipt preserves
+recovery while a parallel SDK call batch is still incomplete. Only completed
+operations owned by that tool are eligible: parallel results and unscoped setup
+work remain retained until their own durability boundary. Each final
+acknowledgement still follows journal persistence; failed persistence or publish
+keeps the frontier available for retry. Turn completion finalizes remaining
+accepted output. Durably adopted background commands keep their separate output
+capture and terminal-settlement lifecycle.
+
+Background output has an independent durable custody receipt containing its
+verified exit sequence and attach generation. It is recorded only after all
+retained bytes have been captured in PostgreSQL. A terminal-only reconciliation
+queue retries the final acknowledgement against the original operation and
+connection, including after worker loss; a newer enrollment route is never
+substituted. Already captured output takes priority over full replay, so older
+uncaptured results cannot delay final acknowledgements for saved results. Publish
+success leaves the obligation pending until an exact runner
+observation establishes that output is no longer retained. Completion input to
+the model remains independent. Legacy rows require full replay before a receipt
+can be recorded; output lost before capture is explicitly marked unavailable
+without manufacturing consumption or an acknowledgement.
 
 After process exit and pipe drain, the native runner releases both transport-sized
 read buffers before waiting for result collection. Retained output and the terminal
@@ -661,7 +689,7 @@ comes back as `swapped: false` with a `reason` rather than throwing. The next
 turn runs on whatever the pointer resolves to.
 
 An agent turn that started on a Connected Machine does not pre-lease a managed
-group. If that turn explicitly swaps back to `"session"`/`"default"`, OpenGeni
+group. If that turn explicitly swaps back to `"session"`/`"default"`, Opengeni
 preserves the successful pointer change,
 checkpoints completed model/tool truth, and continues the same logical turn in a
 fresh home-primary attempt. The handoff requires no new user message, never
@@ -673,7 +701,7 @@ interrupted/outcome-unknown rather than replayed automatically.
 
 Enrollment turns a user's machine into a `selfhosted` sandbox in the workspace.
 The machine agent is multi-connection: installing it once and connecting another
-workspace—even on a different OpenGeni deployment—adds an independent link and
+workspace—even on a different Opengeni deployment—adds an independent link and
 preserves all existing links. There are two enrollment paths. Both require the
 caller to hold `enrollments:manage`.
 
@@ -692,6 +720,51 @@ not repair an older agent already executing its previous update handoff; those
 installations may require their service manager to start the verified canonical
 executable path after the old process exits.
 `opengeni-agent run` is the explicit foreground alternative.
+
+Self-update requires settled accepted work across every connection. Relay pumps,
+PTY child/IO cleanup, blocking native actions, attached-browser commands and
+their original reply transport retain the opening reservation after a waiter or
+connection generation ends. A timeout or disconnected profile does not prove a
+physical command stopped, and the updater never fabricates a consumer ACK.
+Each counted reply carries its transport receipt in the same publication
+command. Success requires empty internal buffers and a flush of that stream;
+losing the stream fails its attached receipt before reconnect. A replacement
+socket cannot prove that the previous reply was sent.
+Controller admission is fenced atomically during its idle proof; failed or
+deferred updates release only their own fence. Missing settlement makes updates
+unavailable for the running process while ordinary work remains usable. Older
+controller builds without the update-admission transaction cannot authorize
+replacement from an unfenced idle snapshot. A lost fence-release reply retains
+its exact operation owner; ordinary scoped recovery retries only that release
+after host update admission has reopened. Failed helper/factory cleanup and
+forced or nonzero helper termination remain unsettled even after the original
+owner leaves active inventory. Helper EOF joins persistent capture producers;
+missing ScreenCaptureKit stop completion cannot become a successful shutdown.
+The current Windows command-group dependency cannot prove full-job
+exit; commands keep their ordinary results, but accepting a command fences
+subsequent self-update for that process. A positive same-job exit proof is
+required before normal Windows update eligibility can be restored. Unexpected
+controller exit and forced controller termination likewise preserve uncertainty
+after the old controller is removed from the active inventory. They cannot be
+made update-eligible by reconnecting or replacing the controller.
+
+Enrollment approval lasts until it is revoked; it is not a monthly login.
+The command and relay transport credentials last 30 days. The agent renews them
+with seven days remaining, using its existing install key and current enrollment
+generation. A machine returning after a longer offline period uses the same
+renewal path. Revocation, removal and a superseding re-enrollment deny renewal;
+renewal cannot change ownership, scope or screen-control consent. Updated
+credentials load into the existing process, preserving host operations.
+The signed `/v1/enrollments/renew` machine protocol is outside the browser API
+contract-revision fence, like device polling and token exchange. Its install-key,
+enrollment-generation and revocation checks still apply in production.
+
+Deploy the API renewal endpoint before upgrading agents. An older API returns
+404 and the agent retries with jitter while retaining its existing credentials.
+Older agents still need a one-time authorized reconnect after expiration; a
+restart alone cannot refresh credentials. Legacy connection files whose API
+origin has never been confirmed also require an explicit reconnect rather than
+sending their credentials to a guessed deployment.
 
 Mac app installations update the complete signed application, including bundled
 browser/computer helpers. The updater selects the signed manifest's
@@ -751,7 +824,7 @@ const { token, expiresAt, expiresInSeconds } = await client.mintEnrollToken(
     allowScreenControl: false, // bake screen-control consent into the token
   },
 );
-// Run on the machine (the installer dials OpenGeni and exchanges the token for
+// Run on the machine (the installer dials Opengeni and exchanges the token for
 // its own long-lived agent credentials — the token exchange happens on the
 // machine, not through this client):
 //   OPENGENI_API_URL=https://… OPENGENI_ENROLL_TOKEN=<token> \
@@ -935,6 +1008,11 @@ utilities from the agent's `PATH`, with standard `/usr/bin` and `/bin` fallbacks
 so Linux distributions with nonstandard installation paths are supported.
 Attached browsers are unaffected.
 
+Linux managed-browser cleanup matches an exact private profile and executable
+before signaling a process. Rewritten Chromium titles additionally require the
+profile's same-host PID lock; ambiguous titles are refused. Procfs start times
+fence discovery and fresh signal checks against PID reuse.
+
 During initial window layout, an observation may have `viewport: null` while
 semantic content remains available. Subsequent observations report the measured
 geometry when valid; the controller does not substitute guessed dimensions.
@@ -956,6 +1034,19 @@ remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
+
+An attached tab's debugger disconnect invalidates its cached target, document,
+frame and element authority without restarting Chrome or changing other tabs.
+A later read can reattach the same surviving tab with fresh fences. Chrome's
+`canceled_by_user` disconnect requires reconnecting the profile; it is never
+silently overridden. Detachment during pending input or other possible effects preserves an unknown
+outcome and blocks automatic reattachment until the profile reconnects. A late
+reply cannot revive the old attachment, and no input or navigation is replayed.
+Acknowledged partial input followed by a disconnect also remains outcome unknown.
+Queued navigation, DOM changes, emulation and unclassified commands cannot run
+under a replacement debugger attachment.
+Read-only disconnect failures use typed unavailable responses instead of a
+generic internal error.
 
 Native computer protocol version 3 separates `capture_still` (including JPEG and
 size options) from reading an explicitly started live stream. macOS helpers use

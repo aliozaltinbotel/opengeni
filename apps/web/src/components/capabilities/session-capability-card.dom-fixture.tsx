@@ -1,10 +1,11 @@
 // Run explicitly through session-capability-card.test.tsx so Radix sees the DOM at import time.
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import { act } from "react";
+import { act, StrictMode } from "react";
 
 import { CapabilityCatalogItem } from "@opengeni/contracts";
 import type { AuthNeededItem } from "@opengeni/react";
+import type { Session, UpdateSessionToolPolicyRequest } from "@opengeni/sdk";
 
 const catalogItem = CapabilityCatalogItem.parse({
   id: "example",
@@ -43,6 +44,13 @@ const getGitHubApp = mock(async () => ({
   linkUrl: "https://api.example.test/github/connect",
 }));
 const refreshGitHub = mock(async () => {});
+let sessionAccess: Map<string, Session> | null = null;
+const updateSessionToolPolicy = mock(
+  async (_workspaceId: string, _id: string, request: UpdateSessionToolPolicyRequest) =>
+    ({
+      firstPartyMcpTools: request.mode === "explicit" ? request.firstPartyMcpTools : [],
+    }) as Session,
+);
 const context = {
   client: {
     connectTransport: () => ({}),
@@ -77,7 +85,12 @@ const context = {
         return createdCatalogItem;
       },
     ),
-    inspectMcpAuthentication: mock(async () => ({ kind: "none" as const })),
+    inspectMcpAuthentication: mock(
+      async (): Promise<{
+        kind: "oauth2" | "none" | "unknown";
+        message?: string;
+      }> => ({ kind: "none" }),
+    ),
     listConnections: async () => connections,
     listSocialConnections: async () => [],
     listSlackInstallationBindings: async () => [],
@@ -88,21 +101,33 @@ const context = {
     createConnection,
     updateConnection,
     enableCapability,
-    getSession: async () => ({
-      id: "session",
-      workspaceId: "workspace",
-      tenancy: { visibility: "workspace", authorityEpoch: 4 },
-      tools: [{ kind: "mcp", id: "example" }],
-      toolPolicy: { mode: "explicit" },
-      firstPartyMcpTools: [],
-      toolPolicyVersion: 1,
-    }),
+    updateSessionToolPolicy,
+    getSession: async (_workspaceId: string, id: string): Promise<Session> =>
+      sessionAccess?.get(id) ??
+      ({
+        id: "session",
+        workspaceId: "workspace",
+        tenancy: { visibility: "workspace", authorityEpoch: 4 },
+        tools: [{ kind: "mcp", id: "example" }],
+        toolPolicy: { mode: "explicit" },
+        firstPartyMcpTools: [],
+        toolPolicyVersion: 1,
+      } as unknown as Session),
   },
   workspaceCapabilityCatalog: [catalogItem],
   githubStatus: null as { status: string } | null,
+  githubRepos: [],
+  githubCatalogReady: true,
+  githubStatusFailed: false,
+  repoBusy: false,
+  personalGitHubBusy: false,
   refreshGitHub,
+  refreshPersonalGitHub: async () => {},
+  captureWorkspaceInvocation: () => ({ revision: 1 }),
+  workspaces: [],
   refreshWorkspaceMcpServers: async () => {},
   accessContext: {
+    subjectId: "human",
     workspaceGrants: [{ workspaceId: "workspace", permissions: ["connections:read"] }],
   },
 };
@@ -143,6 +168,9 @@ async function render(
   visibility: "private" | "workspace" = "workspace",
   noticeOverride: AuthNeededItem = item,
 ) {
+  sessionAccess = null;
+  updateSessionToolPolicy.mockClear();
+  context.accessContext.subjectId = "human";
   personal = personalAccount;
   liveCatalogItem = currentCatalogItem;
   context.workspaceCapabilityCatalog = [cachedCatalogItem];
@@ -210,12 +238,14 @@ async function render(
   }
   await act(async () =>
     root.render(
-      <SessionCapabilityCard
-        item={notice}
-        workspaceId="workspace"
-        sessionId="session"
-        visibility={visibility}
-      />,
+      <StrictMode>
+        <SessionCapabilityCard
+          item={notice}
+          workspaceId="workspace"
+          sessionId="session"
+          visibility={visibility}
+        />
+      </StrictMode>,
     ),
   );
   return {
@@ -224,7 +254,9 @@ async function render(
     rerender: async (workspaceId: string) => {
       await act(async () =>
         root.render(
-          <SessionCapabilityCard item={notice} workspaceId={workspaceId} sessionId="session" />,
+          <StrictMode>
+            <SessionCapabilityCard item={notice} workspaceId={workspaceId} sessionId="session" />
+          </StrictMode>,
         ),
       );
     },
@@ -243,6 +275,182 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  const fiken = CapabilityCatalogItem.parse({
+    id: "api:fiken",
+    name: "Fiken",
+    kind: "api",
+    source: "built_in",
+    surfaceType: "first_party_fiken",
+    providerDomain: "fiken.no",
+    enabled: true,
+    tools: [{ kind: "mcp", id: "opengeni" }],
+    metadata: { firstPartyMcpTools: ["fiken_companies_list", "fiken_invoices_list"] },
+  });
+  async function renderFiken() {
+    const notice = {
+      ...item,
+      capability: { ...item.capability!, id: fiken.id, name: "Fiken", kind: "api" as const },
+    };
+    const h = await render(false, fiken, fiken, false, "workspace", notice);
+    enabled = true;
+    connections = [
+      { ...row, providerDomain: "fiken.no", metadata: { credentialRole: "fiken_api_token" } },
+    ];
+    sessionAccess = new Map(
+      ["parent", "session"].map((id) => [
+        id,
+        {
+          id,
+          title: id === "parent" ? "Accounting parent" : "Accounting child",
+          parentSessionId: id === "parent" ? null : "parent",
+          tools: [{ kind: "mcp", id: "existing" }],
+          firstPartyMcpTools: ["session_pause"],
+          toolPolicyVersion: 3,
+          toolPolicy: {
+            mode: "explicit",
+            inheritedFromSessionId: id === "parent" ? null : "parent",
+          },
+          effectiveToolPolicy: { mandatoryIds: ["opengeni"] },
+        } as Session,
+      ]),
+    );
+    await act(async () => button(h.container, "Review").click());
+    return h;
+  }
+  test("child Fiken review makes no writes until explicit parent confirmation", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      expect(h.container.textContent).toContain("This chat inherits its tool access");
+      expect(h.container.textContent).toContain("Accounting parent");
+      expect(
+        h.container.querySelector('a[href="/workspaces/workspace/sessions/parent"]'),
+      ).not.toBeNull();
+      expect(h.container.textContent).not.toContain("Ask an admin");
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+      await act(async () => button(h.container, "Enable in parents and add tools").click());
+      expect(updateSessionToolPolicy.mock.calls.map((call) => call[1])).toEqual([
+        "parent",
+        "session",
+      ]);
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(updateConnection).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+  test("canceling parent review makes no policy changes", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      await act(async () => button(h.container, "Cancel").click());
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+  test("stale parent review stays incomplete and requires another review", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      sessionAccess!.get("parent")!.toolPolicyVersion++;
+      await act(async () => button(h.container, "Enable in parents and add tools").click());
+      expect(h.container.textContent).toContain("Chat access changed");
+      expect(button(h.container, "Add tools")).toBeDefined();
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+  test("changing the human actor invalidates a pending parent approval", async () => {
+    const h = await renderFiken();
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      context.accessContext.subjectId = "other-human";
+      await h.rerender("workspace");
+      expect(h.container.textContent).not.toContain("Enable in parents and add tools");
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("retired in-flight preparation cannot block the new actor or clear its work", async () => {
+    const h = await renderFiken();
+    const original = context.client.getSession;
+    let completeRead!: (session: Session) => void;
+    context.client.getSession = async () =>
+      await new Promise<Session>((resolve) => {
+        completeRead = resolve;
+      });
+    try {
+      await act(async () => button(h.container, "Add tools").click());
+      expect(button(h.container, "Add tools").disabled).toBe(true);
+      context.accessContext.subjectId = "other-human";
+      context.client.getSession = original;
+      await h.rerender("workspace");
+      expect(button(h.container, "Add tools").disabled).toBe(false);
+      await act(async () => button(h.container, "Add tools").click());
+      expect(h.container.textContent).toContain("Enable in parents and add tools");
+      await act(async () => completeRead(sessionAccess!.get("session")!));
+      expect(h.container.textContent).toContain("Enable in parents and add tools");
+      expect(updateSessionToolPolicy).not.toHaveBeenCalled();
+    } finally {
+      context.client.getSession = original;
+      await h.close();
+    }
+  });
+
+  test("URL-less setup keeps provider guidance without offering an ineffective retry", async () => {
+    context.client.inspectMcpAuthentication.mockClear();
+    const custom = CapabilityCatalogItem.parse({
+      ...catalogItem,
+      authKind: null,
+      mcpUrl: null,
+      endpointUrl: null,
+      metadata: {},
+    });
+    const h = await render(false, custom, custom);
+    try {
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.textContent).toContain("Check the provider's instructions.");
+      expect(
+        [...h.container.querySelectorAll("button")].some((node) => node.textContent === "Retry"),
+      ).toBe(false);
+      expect(context.client.inspectMcpAuthentication).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
+
+  test("shows discovery failures and retries into OAuth without writing a connection", async () => {
+    let inspections = 0;
+    context.client.inspectMcpAuthentication.mockImplementation(async () => {
+      inspections += 1;
+      return inspections === 1
+        ? {
+            kind: "unknown",
+            message: "The provider returned HTTP 403 while checking how to sign in.",
+          }
+        : { kind: "oauth2" };
+    });
+    const custom = { ...catalogItem, authKind: null, metadata: { authDiscovery: "unknown" } };
+    const h = await render(false, custom, custom);
+    try {
+      await act(async () => button(h.container, "Connect Example").click());
+      expect(h.container.textContent).toContain("HTTP 403");
+      await act(async () => button(h.container, "Retry").click());
+      expect(inspections).toBe(2);
+      expect(h.container.textContent).not.toContain("HTTP 403");
+      expect(button(h.container, "Connect for workspace").disabled).toBe(false);
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(enableCapability).not.toHaveBeenCalled();
+    } finally {
+      context.client.inspectMcpAuthentication.mockImplementation(async () => ({ kind: "none" }));
+      await h.close();
+    }
+  });
+
   test("reviews an agent-suggested URL before a human adds the MCP catalog entry", async () => {
     createdCatalogItem = null;
     context.client.createCapability.mockClear();
@@ -340,6 +548,14 @@ describe("conversation connection card", () => {
     name: "GitHub App",
     providerDomain: "github.com",
   };
+  const allowGitHub = () => {
+    context.accessContext.workspaceGrants = [
+      {
+        workspaceId: "workspace",
+        permissions: ["connections:read", "github:use", "sessions:control"],
+      },
+    ];
+  };
   const githubNotice = {
     ...item,
     capability: {
@@ -351,6 +567,7 @@ describe("conversation connection card", () => {
   } as AuthNeededItem;
 
   test("GitHub's bundled logo and verified binding persist in the conversation card", async () => {
+    allowGitHub();
     context.githubStatus = { status: "bound" };
     const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
     try {
@@ -367,6 +584,7 @@ describe("conversation connection card", () => {
   });
 
   test("a returning GitHub binding refreshes the existing card, including later disconnection", async () => {
+    allowGitHub();
     context.githubStatus = { status: "unbound" };
     const h = await render(false, githubItem, githubItem, false, "workspace", githubNotice);
     try {
@@ -384,6 +602,7 @@ describe("conversation connection card", () => {
   });
 
   test("GitHub starts on one click, visibly waits, ignores a second click, and confirms a binding", async () => {
+    allowGitHub();
     context.githubStatus = null;
     getGitHubApp.mockClear();
     refreshGitHub.mockClear();
@@ -417,6 +636,7 @@ describe("conversation connection card", () => {
   });
 
   test("a BFCache return unlocks GitHub and ignores an old pending status response", async () => {
+    allowGitHub();
     context.githubStatus = null;
     refreshGitHub.mockClear();
     let resolveOldStatus!: (value: Awaited<ReturnType<typeof getGitHubApp>>) => void;
@@ -452,6 +672,7 @@ describe("conversation connection card", () => {
   });
 
   test("GitHub's failed start offers a retry in the existing dialog", async () => {
+    allowGitHub();
     getGitHubApp.mockImplementationOnce(async () => {
       throw new Error("Temporary status failure");
     });

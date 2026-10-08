@@ -1,5 +1,6 @@
 import {
   configuredStaticUsageLimits,
+  canonicalizeConfiguredModelId,
   resolveModelProviderForTurn,
   type Settings,
 } from "@opengeni/config";
@@ -11,11 +12,12 @@ import type {
   TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
+  checkWorkspaceAllowance,
   countActiveApiKeysForWorkspace,
   countActiveOrganizationApiKeysForAccount,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
-  getBillingBalance,
+  getSpendableCreditBalance,
   isCodexBilledTurn,
   recordUsageEvent,
   sumUsageQuantity,
@@ -48,6 +50,8 @@ export function documentEmbeddingCostMicros(settings: Settings, inputBytes: numb
 export type LimitCheckInput = {
   accountId: string;
   workspaceId?: string;
+  /** Frozen causal human, never the API key or service admitting the work. */
+  initiatingHumanSubjectId?: string | null;
   action: LimitAction;
   quantity?: number;
   // The turn's model id, when the action represents an agent turn. The model's
@@ -84,9 +88,13 @@ export async function requireLimit(deps: LimitDependencies, input: LimitCheckInp
   if (decision.allowed) {
     return;
   }
-  throw new HTTPException(decision.code === "insufficient_credits" ? 402 : 429, {
-    message: decision.message,
-  });
+  throw new HTTPException(
+    decision.code === "insufficient_credits" || decision.code === "allowance_exhausted" ? 402 : 429,
+    {
+      message: decision.message,
+      cause: decision,
+    },
+  );
 }
 
 export async function checkLimit(
@@ -113,6 +121,15 @@ export async function checkLimit(
   if (!creditDecision.allowed) {
     return creditDecision;
   }
+  if (isCostlyAction(input.action) && input.workspaceId) {
+    const refusal = await checkWorkspaceAllowance(deps.db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      subjectId: input.initiatingHumanSubjectId ?? null,
+      ...(fundedWithoutCredits ? { fundedWithoutCredits: true } : {}),
+    });
+    if (refusal) return { allowed: false, ...refusal };
+  }
   if (deps.settings.usageLimitsMode !== "static" && deps.settings.usageLimitsMode !== "managed") {
     return { allowed: true };
   }
@@ -128,16 +145,26 @@ async function checkCreditBalance(
   externallyBilled: boolean,
 ): Promise<LimitDecision> {
   if (externallyBilled) {
-    return { allowed: true }; // paid outside OpenGeni — zero OpenGeni credits
+    return { allowed: true }; // paid outside Opengeni — zero Opengeni credits
   }
   if (!usesCreditLimits(deps) || !isCostlyAction(input.action)) {
     return { allowed: true };
   }
-  const balance = await getBillingBalance(deps.db, input.accountId);
+  const balance = await getSpendableCreditBalance(
+    deps.db,
+    input.accountId,
+    input.model ? canonicalizeConfiguredModelId(deps.settings, input.model) : undefined,
+  );
   if (balance.balanceMicros > 0) {
     return { allowed: true };
   }
-  return { allowed: false, code: "insufficient_credits", message: "insufficient OpenGeni credits" };
+  return {
+    allowed: false,
+    code: "insufficient_credits",
+    message: input.model
+      ? "No credits available for this model. Choose a model covered by your promotional credits or add credits."
+      : "No general credits available. Promotional credits cover eligible models only.",
+  };
 }
 
 async function checkStaticCaps(

@@ -59,7 +59,7 @@ describe("sandbox observability contract", () => {
     ).toBe("2Gi");
     expect(stack.grafana.persistence).toMatchObject({ enabled: true, size: "2Gi" });
     expect(stack.grafana.sidecar.dashboards.provider.foldersFromFilesStructure).toBe(true);
-    expect(values.opengeni.dashboards.folder).toBe("/tmp/dashboards/OpenGeni");
+    expect(values.opengeni.dashboards.folder).toBe("/tmp/dashboards/Opengeni");
     const monitoringSelector = {
       [OPENGENI_OBSERVABILITY_DISTRIBUTION.monitoringNamespaceLabel]:
         OPENGENI_OBSERVABILITY_DISTRIBUTION.monitoringNamespaceLabelValue,
@@ -300,6 +300,16 @@ describe("sandbox observability contract", () => {
         "expired_drains",
       ],
       [
+        "opengeni:sandbox_leases_interaction_only:fresh_max",
+        "opengeni_sandbox_leases_interaction_only",
+        "interaction_idle",
+      ],
+      [
+        "opengeni:modal_sandbox_inventory:fresh_max",
+        "opengeni_modal_sandbox_inventory",
+        "modal_provider",
+      ],
+      [
         "opengeni:opensandbox_batchsandboxes:fresh_max",
         "opengeni_opensandbox_batchsandboxes",
         "opensandbox_kubernetes",
@@ -334,13 +344,17 @@ describe("sandbox observability contract", () => {
 
   test("alerts match emitted drain buckets and fail closed on every absent domain", async () => {
     const source = await Bun.file(rulePath).text();
+    const releaseScope =
+      "namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}";
     expect(source).toContain('age_bucket=~"5m_1h|1h_1d|gte_1d"');
     expect(source).toContain("OpenGeniSandboxOperationFailureRatio");
     expect(source).toContain("OpenGeniSandboxLogicalProvisionFailureRatio");
     expect(source).toContain("OpenGeniSandboxUnknownProvisionFailureRatio");
-    expect(source).toContain('opengeni_sandbox_operations_total{outcome=~"ok|failed"}[10m]');
     expect(source).toContain(
-      'opengeni_sandbox_provisions_total{outcome="failed",category="unknown"}[30m]',
+      `opengeni_sandbox_operations_total{${releaseScope},outcome=~"ok|failed"}[10m]`,
+    );
+    expect(source).toContain(
+      `opengeni_sandbox_provisions_total{${releaseScope},outcome="failed",category="unknown"}[30m]`,
     );
     expect(source).toContain("must cover at least three sandbox reaper periods");
     expect(source).toContain("$inventoryFreshnessSeconds");
@@ -353,7 +367,7 @@ describe("sandbox observability contract", () => {
       "expired_drains",
     ]) {
       expect(source).toContain(
-        `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="${domain}"})`,
+        `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{${releaseScope},domain="${domain}"})`,
       );
     }
     const openSandboxStale = source.slice(
@@ -361,10 +375,10 @@ describe("sandbox observability contract", () => {
       source.indexOf("- alert: OpenGeniOpenSandboxPodPending"),
     );
     expect(openSandboxStale).toContain(
-      'absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{domain="opensandbox_kubernetes"})',
+      `absent(opengeni_sandbox_inventory_refresh_timestamp_seconds{${releaseScope},domain="opensandbox_kubernetes"})`,
     );
     expect(source).toContain(
-      'opengeni_sandbox_inventory_refresh_timestamp_seconds{domain!="opensandbox_kubernetes"}',
+      `opengeni_sandbox_inventory_refresh_timestamp_seconds{${releaseScope},domain!~"opensandbox_kubernetes|modal_provider|interaction_idle"}`,
     );
   });
 

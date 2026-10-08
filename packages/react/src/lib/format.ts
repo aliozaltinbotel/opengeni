@@ -1,4 +1,5 @@
-import { OpenGeniApiError } from "@opengeni/sdk";
+import { formatErrorMessage, OpenGeniApiError } from "@opengeni/sdk";
+import { parseProviderRecovery, providerRecoveryExhaustedText } from "./provider-recovery";
 
 const clockTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: "short",
@@ -109,7 +110,13 @@ export function tryParseJson(text: string): unknown {
  * workspace no longer has.
  */
 export const CREDIT_EXHAUSTION_MESSAGE =
-  "Out of Opengeni credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+  "Out of credits — this workspace's balance is empty. Add credits to continue; the conversation is preserved.";
+
+/** A usage ceiling refused the send; the default allowance wording, plus what is safe. */
+export const COMPOSER_MEMBER_ALLOWANCE_MESSAGE =
+  "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.";
+export const COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE =
+  "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.";
 
 /**
  * Actionable composer copy for an edge rejection before a turn is accepted.
@@ -117,20 +124,104 @@ export const CREDIT_EXHAUSTION_MESSAGE =
  * actor-private draft or any finalized attachment.
  */
 export const COMPOSER_PAYMENT_REQUIRED_MESSAGE =
-  "This turn requires Opengeni managed credits, but the account balance is empty. Add credits or choose a connected Codex subscription model, then retry. Your draft and attachments are preserved.";
+  "Your organization doesn't have enough credits to send this message. Add credits or choose a model with another payment source. Your message and attachments are saved.";
+
+/** Trusted, composer-owned guidance; unlike remote diagnostic prose, this is UI copy. */
+export class ComposerStateError extends Error {}
+
+/** A restored request has omitted credentials and must be reconciled, not replayed. */
+export class ComposerReconciliationRequiredError extends ComposerStateError {
+  constructor() {
+    super(
+      "Opengeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+    );
+  }
+}
+
+export class ComposerWorkspaceControlUnavailableError extends Error {
+  constructor() {
+    super("@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.");
+  }
+}
+
+/**
+ * The send named a model that is no longer in the live catalog (retired or
+ * removed). Retrying the same send cannot succeed; the person must choose
+ * another model, and the typed message stays recoverable via Edit message.
+ */
+export const COMPOSER_MODEL_UNAVAILABLE_MESSAGE =
+  "This chat's model is no longer available. Choose another model to continue. Your message is saved.";
+
+/** `details.code` the API sets on a 422 for a model missing from the live catalog. */
+export const MODEL_UNAVAILABLE_DETAIL_CODE = "model_unavailable";
+
+/**
+ * Is this send refusal "the model is no longer available"? Reads the typed
+ * `details.code`, and also the historical message so a refusal persisted
+ * before a reload (only its text survives) or from an older API is recognized.
+ */
+export function isModelUnavailableSubmissionError(error: Error): boolean {
+  if (error instanceof OpenGeniApiError && error.details?.code === MODEL_UNAVAILABLE_DETAIL_CODE) {
+    return true;
+  }
+  return (
+    error.message === COMPOSER_MODEL_UNAVAILABLE_MESSAGE ||
+    /^(?:Opengeni|OpenGeni) API 422: model is not available: /.test(error.message)
+  );
+}
 
 export function composerSubmissionErrorMessage(error: Error): string {
-  return error instanceof OpenGeniApiError &&
-    error.status === 402 &&
-    error.code === "payment_required"
-    ? COMPOSER_PAYMENT_REQUIRED_MESSAGE
-    : error.message;
+  if (error instanceof ComposerReconciliationRequiredError) {
+    return "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.";
+  }
+  if (error instanceof ComposerWorkspaceControlUnavailableError) {
+    return "This client cannot resume the workspace. Ask your administrator for a control-capable client.";
+  }
+  if (error instanceof ComposerStateError) return error.message;
+  if (error instanceof OpenGeniApiError && error.outcomeUnknown) return formatErrorMessage(error);
+  if (isModelUnavailableSubmissionError(error)) return COMPOSER_MODEL_UNAVAILABLE_MESSAGE;
+  if (error instanceof OpenGeniApiError && error.code === "allowance_exhausted") {
+    // OpenGeniAllowanceExhaustedError carries the scope; read it structurally
+    // so this startup-path helper adds no SDK or wording imports.
+    const message =
+      (error as { scope?: unknown }).scope === "workspace"
+        ? COMPOSER_WORKSPACE_ALLOWANCE_MESSAGE
+        : COMPOSER_MEMBER_ALLOWANCE_MESSAGE;
+    return composerErrorReference(error, message);
+  }
+  return isComposerCreditRefusal(error)
+    ? composerErrorReference(error, COMPOSER_PAYMENT_REQUIRED_MESSAGE)
+    : formatErrorMessage(error);
+}
+
+function composerErrorReference(error: Error, message: string): string {
+  return error instanceof OpenGeniApiError && error.correlationId
+    ? `${message} Reference: ${error.correlationId}.`
+    : message;
+}
+
+/** These definitive refusals need a payment, allowance or model change, not an unchanged retry. */
+export function composerSubmissionCanRetry(error: Error): boolean {
+  return !(
+    isComposerCreditRefusal(error) ||
+    isModelUnavailableSubmissionError(error) ||
+    (error instanceof OpenGeniApiError && error.code === "allowance_exhausted")
+  );
+}
+
+function isComposerCreditRefusal(error: Error): boolean {
+  return (
+    (error instanceof OpenGeniApiError &&
+      error.status === 402 &&
+      (error.code === "payment_required" || error.code === "insufficient_credits")) ||
+    isCreditExhaustion(error.message)
+  );
 }
 
 /**
  * Does this failure/completion payload (or raw error string) mean the
- * workspace ran out of OpenGeni credits? Matches the engine's
- * "insufficient OpenGeni credits" text (case-insensitive, substring — it
+ * workspace ran out of Opengeni credits? Matches the engine's
+ * "insufficient Opengeni credits" text (case-insensitive, substring — it
  * arrives both bare and wrapped in "Activity task failed: …") and the
  * budget-exhausted segment limit the engine stamps on a turn it ended early.
  */
@@ -192,6 +283,18 @@ export function presentFailure(payload: Record<string, unknown>): {
   reason: string | null;
   safetyRefusal: boolean;
 } {
+  const databaseFailure =
+    payload.code === "db_deadlock" ||
+    payload.code === "db_serialization_failure" ||
+    payload.code === "db_failure" ||
+    (typeof payload.sqlState === "string" &&
+      /^[0-9A-Z]{5}$/.test(payload.sqlState) &&
+      payload.database !== null &&
+      typeof payload.database === "object" &&
+      !Array.isArray(payload.database));
+  if (databaseFailure) {
+    return { reason: "The service encountered a database error.", safetyRefusal: false };
+  }
   const text = (key: string): string | null => {
     const value = payload[key];
     return typeof value === "string" && value.trim() ? value : null;
@@ -209,6 +312,12 @@ export function presentFailure(payload: Record<string, unknown>): {
       reason: `The model provider blocked this request.${detail || message ? ` ${detail ?? message}` : ""}`,
       safetyRefusal: true,
     };
+  }
+  // Spent automatic retries: name the model and the remedy instead of the
+  // recorded wrapper plus raw provider text (still in the stored event).
+  const recovery = parseProviderRecovery(payload);
+  if (recovery && payload.recoveryExhausted === true) {
+    return { reason: providerRecoveryExhaustedText(recovery), safetyRefusal: false };
   }
   return {
     reason:

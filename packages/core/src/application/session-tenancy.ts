@@ -10,17 +10,17 @@ import {
   type VariableSet,
 } from "@opengeni/contracts";
 import {
+  assertSessionIsNotImported,
   forkSessionContent,
+  getSessionForSubject,
   getRig,
   getPrivateSessionCreatePolicy,
   getSessionEventForSubject,
   isRetryableDatabaseTransportFailure,
   nestedPostgresSqlState,
   replayAppliedSessionFork,
-  sessionTenancyProductActivated,
   SessionTenancyAccessError,
   SessionTenancyInvalidRequestError,
-  SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   type Database,
   type ForkSessionContentResult,
@@ -99,9 +99,10 @@ export async function getManagedHumanSessionCreateCapabilities(
     }
     throw error;
   }
-  // Mirror the database create fence exactly: a managed human's own Personal
-  // workspace needs only the operator readiness receipt, while a shared
-  // organization workspace additionally needs the owner/admin product setting.
+  // Mirror the database create fence exactly: every organization is
+  // session-tenancy activated (migration 0611), so a member's own Personal
+  // workspace is always private-capable, while a shared organization workspace
+  // additionally needs the owner/admin Only-me product setting.
   let activated = false;
   try {
     const policy = await getPrivateSessionCreatePolicy(deps.db, {
@@ -151,9 +152,6 @@ async function requireSessionTenancyMutationGate(
   // missing, shared, or another owner's private session.
   requireVerifiedOwningUser(authorization, workspaceId);
   for (const permission of permissions) requirePermission(authorization.grant, permission);
-  if (!(await sessionTenancyProductActivated(deps.db, workspaceId))) {
-    throw new SessionTenancyNotActivatedError();
-  }
 }
 
 async function publishExactCommittedEvent(
@@ -422,6 +420,13 @@ export async function forkManagedHumanSession(
 
   // Validate all requested runtime resources before committing the independent
   // fork so ordinary authorization failures cannot leave an unusable copy.
+  const source = await getSessionForSubject(
+    deps.db,
+    workspaceId,
+    sourceSessionId,
+    authorization.grant.subjectId,
+  );
+  if (source) assertSessionIsNotImported(source);
   const runtimeConfiguration = runtimeSetupRequested ? await resolveRuntimeConfiguration() : null;
   const result = await runTenancyMutation(
     async () =>

@@ -3,6 +3,7 @@ import {
   modelPickerBillingClassFor,
   type ModelPickerBillingClass,
 } from "@opengeni/sdk/model-picker-order";
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ClientModel, ReasoningEffort, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 
 export type PickerBillingClass = ModelPickerBillingClass;
@@ -16,6 +17,7 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
   billingClassLabel: string;
   selectable: boolean;
   unavailableReason: string | null;
+  fundingHint?: string | undefined;
   provider: string;
   providerLabel: string;
   catalog: TCatalog;
@@ -24,11 +26,20 @@ export type PickerModelRow<TCatalog extends ClientModel = WorkspaceModelCatalogM
 export type LatencyModeId = "standard" | "priority" | "fast";
 
 const BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
-  opengeni_credits: "Opengeni",
+  opengeni_credits: "Models",
   external: "External",
   codex_subscription: "Codex",
   supergrok_subscription: "SuperGrok",
   claude_subscription: "Claude subscription",
+  // Who connected the key (organization or workspace) is a settings fact, not
+  // a model choice: both scopes share one label and one picker group.
+  byok: "API keys",
+  organization_byok: "API keys",
+};
+
+/** Models settings keeps naming who connected the key. */
+const SCOPED_BILLING_CLASS_LABELS: Record<PickerBillingClass, string> = {
+  ...BILLING_CLASS_LABELS,
   byok: "Workspace providers",
   organization_byok: "Organization providers",
 };
@@ -44,10 +55,23 @@ const AVAILABILITY_REASON_LABELS: Record<string, string> = {
 };
 
 export function billingClassForModel(model: ClientModel): PickerBillingClass {
-  if (model.provider === "organization-gateway" || model.provider === "organization-openrouter") {
+  if (
+    model.provider === "organization-gateway" ||
+    model.provider === "organization-openrouter" ||
+    model.provider === "organization-opper"
+  ) {
     return "organization_byok";
   }
-  if (model.provider === "workspace-gateway" || model.provider === "workspace-openrouter") {
+  if (
+    model.provider?.startsWith("workspace-openai-") ||
+    model.provider?.startsWith("workspace-azure-openai-")
+  )
+    return "byok";
+  if (
+    model.provider === "workspace-gateway" ||
+    model.provider === "workspace-openrouter" ||
+    model.provider === "workspace-opper"
+  ) {
     return "byok";
   }
   return modelPickerBillingClassFor(model);
@@ -55,6 +79,11 @@ export function billingClassForModel(model: ClientModel): PickerBillingClass {
 
 export function billingClassLabel(billingClass: PickerBillingClass): string {
   return BILLING_CLASS_LABELS[billingClass];
+}
+
+/** The group label that names the connection scope, for Models settings only. */
+export function scopedBillingClassLabel(billingClass: PickerBillingClass): string {
+  return SCOPED_BILLING_CLASS_LABELS[billingClass];
 }
 
 export function availabilityReasonLabel(
@@ -95,6 +124,30 @@ export function coerceReasoningEffortForModel(
   return defaultEffortForModel(model);
 }
 
+/** Whether the composer offers (and therefore labels) a reasoning-effort choice. */
+export function modelOffersEffortChoice(model: ClientModel): boolean {
+  return (
+    effortOptionsForModel(model).length > 1 && model.capabilities?.reasoning.runnable !== false
+  );
+}
+
+/**
+ * The composer model pill at phone width: the catalog's compact name (falling
+ * back to the display name) and the effort label when effort is a choice.
+ */
+export function compactModelPill(
+  models: readonly ClientModel[],
+  modelId: string,
+  effort: ReasoningEffort | null | undefined,
+): { name: string; effort: string | null } {
+  const row = findPickerRow(projectClientModelRows([...models]), modelId);
+  return {
+    name: row?.shortLabel ?? row?.label ?? modelDisplayName(modelId),
+    effort:
+      row && effort && modelOffersEffortChoice(row.catalog) ? labelReasoningEffort(effort) : null,
+  };
+}
+
 export function runnableLatencyModesForModel(model: ClientModel): LatencyModeId[] {
   const modes = model.capabilities?.latencyModes ?? [];
   return modes.filter((mode) => mode.runnable).map((mode) => mode.id);
@@ -131,9 +184,12 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Opengeni credits";
   }
   if (model.cost === "subscription") {
-    return model.source === "supergrok"
-      ? "SuperGrok subscription · external billing"
-      : "Codex subscription · external billing";
+    return model.credentialSource?.kind === "connected_subscription" &&
+      model.credentialSource.provider === "claude"
+      ? "Claude subscription · external billing"
+      : model.source === "supergrok"
+        ? "SuperGrok subscription · external billing"
+        : "Codex subscription · external billing";
   }
   if (model.cost === "workspace") {
     return workspaceProviderPayerSummary(model);
@@ -152,9 +208,12 @@ export function payerSummaryForModel(model: ClientModel): string {
     return "Opengeni credits · automatic managed route";
   }
   if (billing.upstreamPayer === "connected_subscription") {
-    return model.source === "supergrok"
-      ? "SuperGrok subscription · external billing"
-      : "Codex subscription · external billing";
+    return model.credentialSource?.kind === "connected_subscription" &&
+      model.credentialSource.provider === "claude"
+      ? "Claude subscription · external billing"
+      : model.source === "supergrok"
+        ? "SuperGrok subscription · external billing"
+        : "Codex subscription · external billing";
   }
   if (billing.upstreamPayer === "workspace") {
     return workspaceProviderPayerSummary(model);
@@ -175,13 +234,18 @@ export function advancedSourceSummary(model: ClientModel): string | null {
       : null;
   }
   if (source.kind === "connected_subscription") {
-    return source.provider === "xai"
-      ? "Connected SuperGrok subscription"
-      : "Connected Codex subscription";
+    return source.provider === "claude"
+      ? "Connected Claude subscription"
+      : source.provider === "xai"
+        ? "Connected SuperGrok subscription"
+        : "Connected Codex subscription";
   }
   if (source.kind === "workspace_connection") {
     if (model.provider === "workspace-openrouter") {
       return "Workspace OpenRouter connection";
+    }
+    if (model.provider === "workspace-opper") {
+      return "Workspace Opper connection";
     }
     if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
       return "Workspace Vercel AI Gateway";
@@ -200,9 +264,12 @@ function workspaceProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "workspace-anthropic")
     return "Billed to the workspace Anthropic API account";
   if (model.provider === "workspace-claude-subscription")
-    return "Uses the workspace Claude subscription · no OpenGeni credits";
+    return "Uses the workspace Claude subscription · no Opengeni credits";
   if (model.provider === "workspace-openrouter") {
     return "Billed to the workspace OpenRouter account";
+  }
+  if (model.provider === "workspace-opper") {
+    return "Billed to the workspace Opper account";
   }
   if (model.provider === "workspace-gateway" || model.source === "workspace_gateway") {
     return "Billed to the workspace Vercel account";
@@ -214,14 +281,56 @@ function organizationProviderPayerSummary(model: ClientModel): string {
   if (model.provider === "organization-anthropic")
     return "Billed to the organization Anthropic API account";
   if (model.provider === "organization-claude-subscription")
-    return "Uses the connected Claude subscription · no OpenGeni credits";
+    return "Uses the connected Claude subscription · no Opengeni credits";
   if (model.provider === "organization-openrouter") {
     return "Billed to the organization OpenRouter account";
+  }
+  if (model.provider === "organization-opper") {
+    return "Billed to the organization Opper account";
   }
   if (model.provider === "organization-gateway") {
     return "Billed to the organization Vercel account";
   }
   return "Billed to the organization provider account";
+}
+
+/**
+ * The curated compact label, else a derived one for narrow triggers: the
+ * family-free name for Claude models ("Opus 5.5", the maker's mark beside it
+ * already says Claude), or the name without trailing access and release-stage
+ * qualifiers ("Muse Spark 1.3 Contributor Free" → "Muse Spark 1.3"), which the
+ * picker's groups and descriptions already carry.
+ */
+function compactLabel(catalog: ClientModel): { shortLabel?: string } {
+  if (catalog.shortLabel) return { shortLabel: catalog.shortLabel };
+  const name = modelDisplayName(catalog);
+  if (name.startsWith("Claude ")) return { shortLabel: name.slice("Claude ".length) };
+  const trimmed = withoutTrailingQualifiers(name);
+  return trimmed !== name ? { shortLabel: trimmed } : {};
+}
+
+const TRAILING_QUALIFIERS = new Set([
+  "free",
+  "contributor",
+  "preview",
+  "beta",
+  "experimental",
+  "exp",
+  "latest",
+]);
+
+/** Drops trailing qualifier words ("Free", "Preview", "(free)") while a name remains. */
+function withoutTrailingQualifiers(name: string): string {
+  const words = name.trim().split(/\s+/u);
+  while (words.length > 1) {
+    const last = words
+      .at(-1)!
+      .replace(/^[([]|[)\]]$/gu, "")
+      .toLowerCase();
+    if (!TRAILING_QUALIFIERS.has(last)) break;
+    words.pop();
+  }
+  return words.join(" ");
 }
 
 export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerModelRow[] {
@@ -231,11 +340,19 @@ export function projectPickerRows(models: WorkspaceModelCatalogModel[]): PickerM
       const billingClass = billingClassForModel(catalog);
       return {
         id: catalog.id,
-        label: catalog.label,
-        ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
+        label: modelDisplayName(catalog),
+        ...compactLabel(catalog),
         billingClass,
         billingClassLabel: billingClassLabel(billingClass),
         selectable: catalog.availability.selectable,
+        fundingHint:
+          catalog.creditFunding === "promotional"
+            ? "Free credits"
+            : catalog.creditFunding === "general"
+              ? "Uses credits"
+              : catalog.creditFunding === "unavailable"
+                ? "Needs credits"
+                : undefined,
         unavailableReason: catalog.availability.selectable
           ? null
           : availabilityReasonLabel(catalog.availability.reason),
@@ -252,8 +369,8 @@ export function projectClientModelRows(models: ClientModel[]): PickerModelRow<Cl
     const billingClass = billingClassForModel(catalog);
     return {
       id: catalog.id,
-      label: catalog.label,
-      ...(catalog.shortLabel ? { shortLabel: catalog.shortLabel } : {}),
+      label: modelDisplayName(catalog),
+      ...compactLabel(catalog),
       billingClass,
       billingClassLabel: billingClassLabel(billingClass),
       selectable: true,
@@ -278,13 +395,62 @@ export function findPickerRow<TCatalog extends ClientModel>(
   return rows.find((row) => row.id === modelId) ?? null;
 }
 
+export type GroupPickerRowsOptions = {
+  codexOnly?: boolean;
+  /**
+   * Default true: organization- and workspace-connected keys share one group
+   * and identical copies show once. Models settings passes false.
+   */
+  collapseScopes?: boolean | undefined;
+  /** Kept visible when it has an identical twin (see below). */
+  selectedId?: string | undefined;
+};
+
+/**
+ * Organization- and workspace-connected API keys are one choice for the person
+ * picking a model, so they share one group.
+ */
+function displayGroupFor(billingClass: PickerBillingClass): PickerBillingClass {
+  return billingClass === "organization_byok" ? "byok" : billingClass;
+}
+
+/**
+ * The same model through the same provider kind, whichever scope connected it:
+ * `organization-anthropic/claude-opus-5-5` and `workspace-anthropic/claude-opus-5-5`
+ * share a key, while OpenRouter and the Anthropic API never do (different
+ * accounts and bills).
+ */
+function scopeFreeIdentity(row: PickerModelRow<ClientModel>): string | null {
+  const provider = row.provider.replace(/^(?:organization|workspace)-/, "");
+  if (provider === row.provider) return null;
+  const upstream =
+    row.catalog.deployment?.upstreamModelId ??
+    (row.id.startsWith(`${row.provider}/`) ? row.id.slice(row.provider.length + 1) : row.id);
+  return `${provider}\u0000${upstream}`;
+}
+
+/**
+ * Two rows that are the same model through the same provider kind, connected
+ * by the organization and by the workspace, are one choice: show one. Keep the
+ * current selection, else a selectable row, else the first in picker order.
+ */
+function prefersTwin<TCatalog extends ClientModel>(
+  candidate: PickerModelRow<TCatalog>,
+  current: PickerModelRow<TCatalog>,
+  selectedId: string | undefined,
+): boolean {
+  if (selectedId !== undefined && current.id === selectedId) return false;
+  if (selectedId !== undefined && candidate.id === selectedId) return true;
+  return candidate.selectable && !current.selectable;
+}
+
 export function groupPickerRowsByBillingClass(
   rows: PickerModelRow[],
-  options?: { codexOnly?: boolean },
+  options?: GroupPickerRowsOptions,
 ): Array<{ billingClass: PickerBillingClass; label: string; rows: PickerModelRow[] }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
-  options?: { codexOnly?: boolean },
+  options?: GroupPickerRowsOptions,
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -292,7 +458,7 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
 }>;
 export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   rows: PickerModelRow<TCatalog>[],
-  options?: { codexOnly?: boolean },
+  options?: GroupPickerRowsOptions,
 ): Array<{
   billingClass: PickerBillingClass;
   label: string;
@@ -305,14 +471,26 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
     rows: PickerModelRow<TCatalog>[];
   }> = [];
   for (const row of sorted) {
-    const existing = groups.find((group) => group.billingClass === row.billingClass);
+    const collapse = options?.collapseScopes !== false;
+    const billingClass = collapse ? displayGroupFor(row.billingClass) : row.billingClass;
+    const existing = groups.find((group) => group.billingClass === billingClass);
     if (existing) {
-      existing.rows.push(row);
+      const identity = collapse ? scopeFreeIdentity(row) : null;
+      const twin =
+        identity === null
+          ? -1
+          : existing.rows.findIndex((candidate) => scopeFreeIdentity(candidate) === identity);
+      if (twin < 0) {
+        existing.rows.push(row);
+      } else if (prefersTwin(row, existing.rows[twin]!, options?.selectedId)) {
+        existing.rows[twin] = row;
+      }
       continue;
     }
     groups.push({
-      billingClass: row.billingClass,
-      label: row.billingClassLabel,
+      billingClass,
+      label:
+        billingClass === row.billingClass ? row.billingClassLabel : billingClassLabel(billingClass),
       rows: [row],
     });
   }
@@ -336,3 +514,4 @@ export function groupPickerRowsByBillingClass<TCatalog extends ClientModel>(
   }
   return groups;
 }
+export { modelDisplayName, modelVendor } from "@opengeni/sdk/model-display";

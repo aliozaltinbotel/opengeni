@@ -1,3 +1,4 @@
+import { isDirectModelId } from "@opengeni/contracts";
 import type { ConfiguredModel, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { configuredProviders, resolveModelProvider } from "@opengeni/config";
 import {
@@ -8,14 +9,29 @@ import {
   type ModelRequest,
   type ResponseStreamEvent,
 } from "@openai/agents";
-import OpenAI from "openai";
+import OpenAI, { APIError } from "openai";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { projectChatToolImages } from "./chat-tool-images";
+import { projectHistoryForProvider } from "./provider-history-adapter";
+import {
+  appendChatReasoningDetails,
+  chatReasoning,
+  chatReasoningDetails,
+  primaryChatChoice,
+  projectChatReasoning,
+  withChatReasoning,
+  type ChatReasoning,
+} from "./chat-reasoning";
 import { instrumentedModelFetch } from "./model-provider-client";
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { XAI_SUBSCRIPTION_MODEL_ID_PREFIX } from "@opengeni/xai-subscription";
 
 import { AppendOnlyOpenAIResponsesModel } from "./append-only-responses-model";
 import { recordModelPreparationMeasurement } from "./model-preparation-diagnostics";
+import {
+  ResponsesStreamingTerminalError,
+  responsesStreamingTerminalError,
+} from "./responses-terminal-error";
 import { buildProviderClient } from "./model-provider-client";
 import {
   CodexSubscriptionUnavailableError,
@@ -39,35 +55,107 @@ function chatCompletionFinishReason(value: unknown): unknown {
     : undefined;
 }
 
+function chatRequest(request: ModelRequest): ModelRequest {
+  const input =
+    typeof request.input === "string"
+      ? request.input
+      : (projectHistoryForProvider(request.input, "chat") as ModelRequest["input"]);
+  return projectChatReasoning(
+    projectChatToolImages(input === request.input ? request : { ...request, input }),
+  );
+}
+
 /**
- * Chat-compatible providers can report `finish_reason: "unknown"` after an
- * interrupted generation. The upstream SDK otherwise converts that terminal
- * into an ordinary `response_done`, which can commit a truncated answer. Fail
- * before that boundary so the worker's fenced same-turn recovery owns the
- * continuation and no OpenGeni tool call from the ambiguous response executes.
+ * Opper returns the exact USD cost of each response as `usage.opper.cost.total`
+ * (a JSON number). Convert it to the bounded decimal string the reported-cost
+ * billing path accepts; anything else is ignored.
  */
+export function opperReportedCostUsd(usage: unknown): string | undefined {
+  if (!usage || typeof usage !== "object") return undefined;
+  const opper = (usage as { opper?: unknown }).opper;
+  const cost = opper && typeof opper === "object" ? (opper as { cost?: unknown }).cost : undefined;
+  const total = cost && typeof cost === "object" ? (cost as { total?: unknown }).total : undefined;
+  if (typeof total !== "number" || !Number.isFinite(total) || total < 0 || total >= 1_000_000) {
+    return undefined;
+  }
+  // 12 fraction digits keep sub-micro precision without float noise.
+  const fixed = total.toFixed(12).replace(/0+$/u, "").replace(/\.$/u, "");
+  return fixed === "" ? "0" : fixed;
+}
+
+function withOpperReportedCost<T extends { providerData?: Record<string, any> | undefined }>(
+  response: T,
+  costUsd: string | undefined,
+): T {
+  if (costUsd === undefined) return response;
+  const providerData = response.providerData ?? {};
+  return {
+    ...response,
+    providerData: {
+      ...providerData,
+      provider_metadata: { ...providerData.provider_metadata, opper: { costUsd } },
+    },
+  };
+}
+
+/** Reject ambiguous completion before the SDK can commit output or execute tools. */
 export class OpenGeniChatCompletionsModel extends OpenAIChatCompletionsModel {
   override async getResponse(request: ModelRequest): Promise<ModelResponse> {
-    const response = await super.getResponse(request);
+    const response = await super.getResponse(chatRequest(request));
     if (isUnknownFinishReason(chatCompletionFinishReason(response.providerData))) {
       throw new UnknownModelFinishReasonError();
     }
-    return response;
+    return withOpperReportedCost(
+      {
+        ...response,
+        output: withChatReasoning(
+          response.output,
+          chatReasoning(primaryChatChoice(response.providerData)?.message),
+          chatReasoningDetails(primaryChatChoice(response.providerData)?.message),
+        ),
+      },
+      opperReportedCostUsd(response.providerData?.usage),
+    );
   }
 
   override async *getStreamedResponse(request: ModelRequest): AsyncIterable<ResponseStreamEvent> {
     let finishReason: unknown;
-    for await (const event of super.getStreamedResponse(request)) {
+    let reasoning: ChatReasoning | undefined;
+    let reasoningDetails: Record<string, unknown>[] | undefined;
+    let reportedCostUsd: string | undefined;
+    for await (const event of super.getStreamedResponse(chatRequest(request))) {
       if (event.type === "model") {
+        reportedCostUsd =
+          opperReportedCostUsd((event.event as { usage?: unknown } | undefined)?.usage) ??
+          reportedCostUsd;
         const observed = chatCompletionFinishReason(event.event);
         if (observed !== undefined && observed !== null) {
           finishReason = observed;
         }
+        const delta = chatReasoning(primaryChatChoice(event.event)?.delta);
+        const details = chatReasoningDetails(primaryChatChoice(event.event)?.delta);
+        if (details) appendChatReasoningDetails((reasoningDetails ??= []), details);
+        if (delta)
+          reasoning = {
+            field: delta.field,
+            text: (reasoning?.text ?? "") + delta.text,
+          };
       }
       if (event.type === "response_done" && isUnknownFinishReason(finishReason)) {
         throw new UnknownModelFinishReasonError();
       }
-      yield event;
+      yield event.type === "response_done"
+        ? {
+            ...event,
+            response: withOpperReportedCost<typeof event.response>(
+              {
+                ...event.response,
+                output: withChatReasoning(event.response.output, reasoning, reasoningDetails),
+              },
+              reportedCostUsd,
+            ),
+          }
+        : event;
     }
   }
 }
@@ -81,11 +169,108 @@ export class OpenGeniResponsesModel extends AppendOnlyOpenAIResponsesModel {
     super(client, model);
   }
 
+  protected override _fetchResponse(
+    request: ModelRequest,
+    stream: false,
+  ): Promise<OpenAI.Responses.Response>;
+  protected _fetchResponse(
+    request: ModelRequest,
+    stream: true,
+  ): Promise<AsyncIterable<OpenAI.Responses.ResponseStreamEvent>>;
+  protected async _fetchResponse(
+    request: ModelRequest,
+    stream: boolean,
+  ): Promise<OpenAI.Responses.Response | AsyncIterable<OpenAI.Responses.ResponseStreamEvent>> {
+    if (!stream || !this.ownsResponsesTerminalClassification()) {
+      // Subscription transports retain the SDK's request-id and error handling.
+      return await super._fetchResponse(request, stream as false);
+    }
+    // Reuse the SDK's full request conversion, but retain its HTTP receipt
+    // before the SDK's stream wrapper discards the response headers.
+    const built = this._buildResponsesCreateRequest(request, true);
+    const internal = (request as ModelRequest & { _internal?: { runnerManagedRetry?: boolean } })
+      ._internal;
+    const pending = this._client.responses.create(
+      built.requestData as OpenAI.Responses.ResponseCreateParamsStreaming,
+      {
+        headers: built.sdkRequestHeaders,
+        signal: built.signal,
+        ...(built.transportExtraQuery ? { query: built.transportExtraQuery } : {}),
+        ...(internal?.runnerManagedRetry === true ? { maxRetries: 0 } : {}),
+      },
+    );
+    if (typeof pending.withResponse !== "function") {
+      // The SDK also permits custom clients returning only the stream promise.
+      // Such clients cannot supply HTTP evidence, but must remain usable.
+      return this.classifiedResponseStream(await pending, new Headers(), null);
+    }
+    const receipt = await pending.withResponse();
+    return this.classifiedResponseStream(
+      receipt.data,
+      receipt.response.headers,
+      receipt.request_id,
+    );
+  }
+
+  private async *classifiedResponseStream(
+    stream: AsyncIterable<OpenAI.Responses.ResponseStreamEvent>,
+    headers: Headers,
+    requestId: string | null,
+  ): AsyncIterable<OpenAI.Responses.ResponseStreamEvent> {
+    try {
+      for await (const event of stream) {
+        const failure = responsesStreamingTerminalError(event, headers);
+        if (failure) throw failure;
+        // response.done is supported by the pinned terminal reducer but absent
+        // from the OpenAI wire declaration.
+        const eventType: string = event.type;
+        if (
+          requestId &&
+          (eventType === "response.completed" || eventType === "response.done") &&
+          "response" in event &&
+          event.response &&
+          !("_request_id" in event.response)
+        ) {
+          // Match the SDK's successful-terminal request-id attachment without
+          // making transport metadata enumerable in provider/model data.
+          try {
+            Object.defineProperty(event.response, "_request_id", {
+              value: requestId,
+              enumerable: false,
+            });
+          } catch {
+            // Frozen custom response objects remain usable, as in the SDK.
+          }
+        }
+        yield event;
+      }
+    } catch (error) {
+      // The OpenAI parser can throw a top-level `error` before yielding it.
+      // Convert inside the stream, before the Agents SDK's span error handler,
+      // so even enabled model tracing receives only the structural message.
+      if (error instanceof APIError && error.status === undefined && error.error) {
+        throw new ResponsesStreamingTerminalError("response.error", error.error, headers);
+      }
+      throw error;
+    }
+  }
+
+  private ownsResponsesTerminalClassification(): boolean {
+    return this.provider.kind !== "codex-subscription" && this.provider.kind !== "xai-subscription";
+  }
+
   protected override _buildResponsesCreateRequest(request: ModelRequest, stream: boolean) {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     try {
-      return super._buildResponsesCreateRequest(request, stream);
+      const input =
+        typeof request.input === "string"
+          ? request.input
+          : (projectHistoryForProvider(request.input, "responses") as ModelRequest["input"]);
+      return super._buildResponsesCreateRequest(
+        input === request.input ? request : { ...request, input },
+        stream,
+      );
     } catch (error) {
       outcome = "failed";
       throw error;
@@ -239,6 +424,9 @@ export class MultiProviderModelProvider implements ModelProvider {
       if (modelName.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) {
         throw new XaiSubscriptionUnavailableError(modelName);
       }
+    }
+    if (modelName && isDirectModelId(modelName)) {
+      throw new Error("The selected OpenAI or Azure OpenAI connection is unavailable");
     }
     // Preserve the legacy unlisted-model fallback, but bind it through the same
     // typed request-policy model as every configured Responses call. This keeps

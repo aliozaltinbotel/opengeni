@@ -1,4 +1,9 @@
+import { Section, SectionStack, SectionVariantProvider } from "@/components/ui/section";
+import { SettingRow } from "@/components/ui/setting-row";
+import { ModelPolicyPicker, projectPickerRows } from "@opengeni/react";
+import type { WorkspaceModelCatalogModel, ReasoningEffort, LatencyMode } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { directModelConnectionSpec, type CreateConnectionRequest } from "@opengeni/contracts";
 import { ChevronsUpDownIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -11,14 +16,71 @@ import { CreateOrganizationDialog } from "@/components/rail/create-organization-
 import { OrganizationSwitcherLine } from "@/components/rail/switcher-block";
 import { SetupAccountRoute } from "@/routes/setup-account";
 import { SignInMethodsPreview } from "@/dev/sign-in-methods-preview";
+import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
+import { CouponRedeem } from "@/components/credits/coupon-redeem";
+import type { BillingCheckoutStatus } from "@opengeni/sdk";
+import { CreditsCelebrationDialog } from "@/components/credits/checkout-credits-celebration";
 
 // Local-only fixtures. No provider credentials or real payments are used.
+let previewModel: Record<string, unknown> | null = null;
+let previewCouponRedeemedAt: number | null = null;
+const previewCreditScope = {
+  label: "Launch credits",
+  eligibleModelIds: ["gpt-6-luna", "gpt-6-sol"],
+};
+const scopedCreditPreview = () => new URLSearchParams(window.location.search).get("scoped") === "1";
 const previewMethods = {
   async getBilling() {
     return { mode: "stripe" as const, balance: { balanceMicros: 0 } };
   },
-  async createBillingCheckout({ amountUsd }: { amountUsd: number }) {
-    return { url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}` };
+  async createBillingCheckout({
+    amountUsd,
+    promotionCode,
+  }: {
+    amountUsd?: number;
+    promotionCode?: string;
+  }) {
+    if (promotionCode) {
+      // `LAUNCH100` is a $100 code here; anything else is refused like Stripe would.
+      if (promotionCode.trim().toUpperCase() !== "LAUNCH100") {
+        throw new Error("That code isn't valid or has expired.");
+      }
+      previewCouponRedeemedAt = Date.now();
+      return {
+        checkoutSessionId: "cs_preview_coupon",
+        url: `${window.location.origin}/dev/onboarding?view=checkout&amount=100&coupon=1`,
+        amountUsd: 100,
+        ...(scopedCreditPreview() ? { promotionalScope: previewCreditScope } : {}),
+      };
+    }
+    return {
+      checkoutSessionId: "cs_preview_purchase",
+      url: `${window.location.origin}/dev/onboarding?view=checkout&amount=${amountUsd}`,
+    };
+  },
+  // The coupon's credits "land" two seconds after redeeming.
+  async getBillingCheckout(checkoutSessionId: string) {
+    const granted =
+      previewCouponRedeemedAt !== null && Date.now() - previewCouponRedeemedAt > 2_000;
+    return {
+      checkoutSessionId,
+      status: granted ? "complete" : "open",
+      credit: {
+        state: granted ? "granted" : "pending",
+        amountMicros: 100_000_000,
+        currency: "usd",
+        free: true,
+        ...(scopedCreditPreview() ? { promotionalScope: previewCreditScope } : {}),
+      },
+      balance: granted
+        ? {
+            accountId: "preview-organization",
+            balanceMicros: 110_000_000,
+            currency: "usd",
+            updatedAt: new Date().toISOString(),
+          }
+        : null,
+    };
   },
   async codexConnectStart() {
     const state = crypto.randomUUID();
@@ -46,11 +108,52 @@ const previewMethods = {
   async supergrokConnectPoll(workspaceId: string, state: string) {
     return previewMethods.codexConnectPoll(workspaceId, state);
   },
-  async createConnection() {
-    return {};
+  // Onboarding connects subscriptions for the organization.
+  async organizationSupergrokConnectStart() {
+    return previewMethods.supergrokConnectStart();
+  },
+  async organizationSupergrokConnectPoll(_organizationId: string, state: string) {
+    return previewMethods.codexConnectPoll("", state);
+  },
+  async requestJson(_method: string, path: string, body?: { state?: string }) {
+    if (path.endsWith("/codex/connect/start")) return previewMethods.codexConnectStart();
+    if (path.endsWith("/codex/connect/poll"))
+      return previewMethods.codexConnectPoll("", body?.state ?? "");
+    throw new Error(`Not in the preview: ${path}`);
+  },
+  async createConnection(_workspaceId: string, request: CreateConnectionRequest) {
+    const connection = {
+      id: crypto.randomUUID(),
+      version: 1,
+      status: "active",
+      subjectId: request.subjectId ?? null,
+      kind: request.kind,
+      providerDomain: request.providerDomain,
+      metadata: request.metadata,
+    };
+    const spec = directModelConnectionSpec(connection);
+    if (spec)
+      previewModel = {
+        id: spec.modelId,
+        label: spec.model,
+        provider: spec.providerId,
+        providerLabel: spec.provider === "openai" ? "Your OpenAI" : "Your Azure OpenAI",
+        api: "responses",
+        cost: "workspace",
+        policyAllowed: true,
+        billing: { upstreamPayer: "workspace", metering: "external" },
+        availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+        credentialReadiness: {
+          status: "ready",
+          reason: null,
+          basis: "connection",
+          checkedAt: null,
+        },
+      };
+    return connection;
   },
   async getWorkspaceModelCatalog() {
-    return { models: [] };
+    return { models: previewModel ? [previewModel] : [] };
   },
   async getNewSessionDraft() {
     return {
@@ -69,6 +172,24 @@ const previewMethods = {
   },
   async saveNewSessionDraft() {
     return previewMethods.getNewSessionDraft();
+  },
+  // Developer setup ("Add AI agents to my product"). Nothing real is created.
+  async createOrganizationApiKey() {
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    return {
+      apiKey: { id: crypto.randomUUID(), prefix: "ogk_preview12" },
+      token: "ogk_preview12_NOT-A-REAL-KEY-local-preview-only",
+    };
+  },
+  async createWorkspace() {
+    return { id: "preview-setup-workspace" };
+  },
+  async createVariableSet() {
+    return { id: "preview-variable-set" };
+  },
+  async createSession() {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    return { id: "preview-setup-session" };
   },
 };
 const previewClient = previewMethods as unknown as OpenGeniBrowserClient;
@@ -126,21 +247,152 @@ function previewIncludedModel() {
   return null;
 }
 
-/** `?credits=trial` previews the step when the organization already holds OpenGeni credits. */
+/** `?credits=trial` previews the step when the organization already holds Opengeni credits. */
 function previewStartingCredits() {
   if (new URLSearchParams(window.location.search).get("credits") !== "trial") return null;
   return {
-    balance: { balanceMicros: 10_000_000, currency: "usd" },
+    balance: {
+      balanceMicros: 10_000_000,
+      currency: "usd",
+      ...(scopedCreditPreview()
+        ? {
+            generalBalanceMicros: 0,
+            promotionalCredits: [
+              {
+                ...previewCreditScope,
+                label: "Signup credits",
+                grantId: "00000000-0000-4000-8000-000000000001",
+                remainingMicros: 10_000_000,
+              },
+            ],
+          }
+        : {}),
+    },
     model: {
-      id: "preview-credits",
-      label: "Preview Credits Model",
+      id: scopedCreditPreview() ? "gpt-6-luna" : "preview-credits",
+      label: scopedCreditPreview() ? "GPT-6 Luna" : "Preview Credits Model",
       reasoningEffort: "xhigh" as const,
     },
   };
 }
 
+function CreditBalancePreview() {
+  const generalCredits =
+    new URLSearchParams(window.location.search).get("general") === "0" ? 0 : 25_000_000;
+  const [model, setModel] = useState("gpt-6-luna");
+  const [effort, setEffort] = useState<ReasoningEffort>("medium");
+  const [latency, setLatency] = useState<LatencyMode>("standard");
+  const rows = projectPickerRows(
+    ["gpt-6-luna", "gpt-6-sol", "gpt-6-astra"].map(
+      (id): WorkspaceModelCatalogModel => ({
+        id,
+        label: id,
+        provider: "openai",
+        providerLabel: "OpenAI",
+        api: "responses",
+        cost: "credits",
+        creditFunding: previewCreditScope.eligibleModelIds.includes(id)
+          ? "promotional"
+          : generalCredits > 0
+            ? "general"
+            : "unavailable",
+        policyAllowed: true,
+        credentialReadiness: {
+          status: "ready",
+          reason: null,
+          basis: "configuration",
+          checkedAt: null,
+        },
+        availability: { status: "available", selectable: true, reason: null, checkedAt: null },
+      }),
+    ),
+  );
+
+  const [granted, setGranted] = useState<BillingCheckoutStatus | null>(null);
+  return (
+    <section className="mx-auto grid w-full max-w-2xl gap-6 p-6">
+      <h1 className="text-xl font-semibold text-fg">Credits</h1>
+      <SectionVariantProvider variant="group">
+        <SectionStack>
+          <Section title="Balance">
+            <div className="py-4">
+              <OrganizationCreditBalance
+                hasAccount
+                canReadBilling
+                loading={false}
+                hasError={false}
+                billing={{
+                  mode: "stripe",
+                  balance: {
+                    accountId: "00000000-0000-4000-8000-000000000002",
+                    currency: "usd",
+                    updatedAt: new Date().toISOString(),
+                    balanceMicros: 100_000_000 + generalCredits,
+                    generalBalanceMicros: generalCredits,
+                    promotionalCredits: [
+                      {
+                        ...previewCreditScope,
+                        grantId: "00000000-0000-4000-8000-000000000001",
+                        remainingMicros: 100_000_000,
+                      },
+                    ],
+                  },
+                }}
+              />
+            </div>
+          </Section>
+          <Section title="Model selection">
+            <SettingRow
+              label="Model"
+              controlWidth="select"
+              control={
+                <ModelPolicyPicker
+                  rows={rows}
+                  model={model}
+                  effort={effort}
+                  latencyMode={latency}
+                  onModelChange={setModel}
+                  onEffortChange={setEffort}
+                  onLatencyModeChange={setLatency}
+                  triggerStyle={
+                    new URLSearchParams(window.location.search).get("picker") === "pill"
+                      ? "pill"
+                      : "field"
+                  }
+                  menuSide="bottom"
+                />
+              }
+            />
+          </Section>
+          <Section title="Redeem credits">
+            <SettingRow
+              label="Promo code"
+              description="Opens Stripe to confirm your code."
+              controlWidth="auto"
+              control={
+                <CouponRedeem
+                  client={previewClient}
+                  accountId="preview-organization"
+                  workspaceId="preview-workspace"
+                  variant="inline"
+                  defaultOpen
+                  onGranted={setGranted}
+                />
+              }
+            />
+          </Section>
+        </SectionStack>
+      </SectionVariantProvider>
+      <p className="text-xs text-fg-muted">Local preview · Try LAUNCH100</p>
+      {granted ? (
+        <CreditsCelebrationDialog status={granted} open onOpenChange={() => setGranted(null)} />
+      ) : null}
+    </section>
+  );
+}
+
 function ModelPreview({ organization = false }: { organization?: boolean }) {
-  const [completed, setCompleted] = useState(false);
+  const [completed, setCompleted] = useState<false | { sessionId?: string }>(false);
   const includedModel = previewIncludedModel();
   const startingCredits = previewStartingCredits();
   if (completed)
@@ -150,8 +402,9 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
           <p className="text-xs text-fg-subtle">LOCAL PREVIEW</p>
           <h1 className="text-xl font-semibold">Onboarding complete</h1>
           <p className="text-sm text-fg-muted">
-            In the app, you now arrive in your Personal workspace. The connected model is selected
-            for your next chat.
+            {completed.sessionId
+              ? "In the app, you now arrive in the setup chat, in the Opengeni setup workspace."
+              : "In the app, you now arrive in your Personal workspace. The connected model is selected for your next chat."}
           </p>
           <Button onClick={() => setCompleted(false)}>Try another option</Button>
           <Button asChild variant="ghost">
@@ -171,19 +424,20 @@ function ModelPreview({ organization = false }: { organization?: boolean }) {
       previewState="required"
       activeEmail="preview@example.test"
       onSignOut={() => window.location.assign("/dev/onboarding")}
-      onComplete={() => setCompleted(true)}
+      onComplete={(destination) => setCompleted(destination ?? {})}
     />
   ) : (
     <ModelAccessOnboardingPanel
       client={previewClient}
       organizationId="preview-organization"
+      organizationName="Acme Robotics"
       workspaceId="preview-workspace"
       billingMode="stripe"
       codexEnabled
       supergrokEnabled
       includedModel={includedModel}
       startingCredits={startingCredits}
-      onComplete={() => setCompleted(true)}
+      onComplete={() => setCompleted({})}
     />
   );
 }
@@ -280,6 +534,7 @@ export function OnboardingPreviewRoute() {
   }
   if (view === "authorize" || view === "checkout") return <PreviewResult view={view} />;
   if (view === "credits") return <CreditPromptPreview />;
+  if (view === "billing") return <CreditBalancePreview />;
   if (view === "organization") return <ModelPreview organization />;
   if (view === "models") return <ModelPreview />;
   if (view === "signin") return <ManagedAuthPanel onSubmit={async () => undefined} />;

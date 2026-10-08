@@ -2,8 +2,12 @@ import { useCreditExposure } from "@/lib/use-analytics-exposure";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { Link } from "@tanstack/react-router";
 import { CreditCardIcon, Loader2Icon, SparklesIcon } from "lucide-react";
+import type { BillingCheckoutStatus, WorkspaceModelCatalogModel } from "@opengeni/sdk";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+
+import { CouponRedeem } from "@/components/credits/coupon-redeem";
+import { CreditsCelebrationDialog } from "@/components/credits/checkout-credits-celebration";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +24,7 @@ import { useAppContext } from "@/context";
 import { userErrorText } from "@/lib/api-error";
 import { validTopupAmount } from "@/lib/format";
 import { analyticsAction } from "@/lib/analytics-actions";
+import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
 
 const DEFAULT_TOPUP = "25.00";
 
@@ -28,6 +33,7 @@ type CreditRequiredPromptProps = {
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
+  purpose?: "required" | "topup";
   onOpenChange: (open: boolean) => void;
 };
 
@@ -41,10 +47,16 @@ export function CreditRequiredPromptView({
   workspaceId,
   accountId,
   canBuyCredits,
+  purpose = "required",
   onOpenChange,
 }: CreditRequiredPromptProps & { client: OpenGeniBrowserClient }) {
   const [topupAmount, setTopupAmount] = useState(DEFAULT_TOPUP);
   const [busy, setBusy] = useState(false);
+  // A redeemed coupon, celebrated in this dialog with its real amount.
+  const [granted, setGranted] = useState<BillingCheckoutStatus | null>(null);
+  useEffect(() => {
+    if (!open) setGranted(null);
+  }, [open]);
   const [stripeEnabled, setStripeEnabled] = useState(false);
 
   useEffect(() => {
@@ -74,8 +86,8 @@ export function CreditRequiredPromptView({
       const session = await client.createBillingCheckout({
         amountUsd: Number(topupAmount),
         accountId,
-        successUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=success`,
-        cancelUrl: `${window.location.origin}/workspaces/${workspaceId}/organization?section=billing&checkout=cancelled`,
+        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       window.location.assign(session.url);
     } catch (error) {
@@ -84,23 +96,29 @@ export function CreditRequiredPromptView({
     }
   }
 
+  if (granted) {
+    return <CreditsCelebrationDialog status={granted} open={open} onOpenChange={onOpenChange} />;
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Add Opengeni credits to continue</DialogTitle>
+          <DialogTitle>
+            {purpose === "topup" ? "Add Opengeni credits" : "Add Opengeni credits to continue"}
+          </DialogTitle>
           <DialogDescription>
-            This chat uses Opengeni credits and none are currently available. Buy credits, or
-            connect a model you already pay for.
+            {purpose === "topup"
+              ? "Choose an amount and pay in Stripe Checkout, or redeem a coupon code."
+              : "Add credits to use this model, or choose another model."}
           </DialogDescription>
         </DialogHeader>
         {canBuyCredits && stripeEnabled ? (
           <div className="grid gap-4">
             <CreditAmountPicker value={topupAmount} onChange={setTopupAmount} disabled={busy} />
-            {/* The footer's Connect a model is this dialog's one primary. */}
             <Button
               type="button"
-              variant="outline"
+              variant={purpose === "topup" ? "default" : "outline"}
               disabled={busy || !validTopupAmount(topupAmount)}
               onClick={() => void buyCredits()}
               {...analyticsAction("buy_credits")}
@@ -110,28 +128,41 @@ export function CreditRequiredPromptView({
               ) : (
                 <CreditCardIcon className="size-4" />
               )}
-              Buy credits
+              {purpose === "topup" ? "Continue to Stripe" : "Buy credits"}
             </Button>
+            {accountId ? (
+              <div className="border-t border-border pt-3">
+                <CouponRedeem
+                  client={client}
+                  accountId={accountId}
+                  workspaceId={workspaceId}
+                  disabled={busy}
+                  onGranted={setGranted}
+                />
+              </div>
+            ) : null}
           </div>
         ) : !canBuyCredits ? (
           <p className="text-sm text-fg-muted">
-            Ask an organization owner to add credits, or connect a model in workspace settings.
+            Ask an organization owner to add credits, or an admin to connect a model.
           </p>
         ) : null}
-        <DialogFooter>
-          <Button asChild type="button">
-            <Link
-              to="/workspaces/$workspaceId/settings"
-              params={{ workspaceId }}
-              search={{ section: "models" }}
-              onClick={() => onOpenChange(false)}
-              {...analyticsAction("connect_model")}
-            >
-              <SparklesIcon className="size-3.5" />
-              Connect a model
-            </Link>
-          </Button>
-        </DialogFooter>
+        {purpose === "required" ? (
+          <DialogFooter>
+            <Button asChild type="button">
+              <Link
+                to="/workspaces/$workspaceId/organization"
+                params={{ workspaceId }}
+                search={{ section: "models", workspace: workspaceId }}
+                onClick={() => onOpenChange(false)}
+                {...analyticsAction("connect_model")}
+              >
+                <SparklesIcon className="size-3.5" />
+                Connect a model
+              </Link>
+            </Button>
+          </DialogFooter>
+        ) : null}
       </DialogContent>
     </Dialog>
   );
@@ -142,14 +173,16 @@ export function EmptyCreditsNotice({
   accountId,
   canBuyCredits,
   canReadBilling,
+  creditFunding,
 }: {
   workspaceId: string;
   accountId: string | null;
   canBuyCredits: boolean;
   canReadBilling: boolean;
+  creditFunding?: WorkspaceModelCatalogModel["creditFunding"];
 }) {
   const client = useAppContext().client;
-  const [empty, setEmpty] = useState(false);
+  const [legacyEmpty, setEmpty] = useState(false);
   const [stripeEnabled, setStripeEnabled] = useState(false);
 
   useEffect(() => {
@@ -174,11 +207,13 @@ export function EmptyCreditsNotice({
     };
   }, [accountId, canReadBilling, client]);
 
+  const empty =
+    stripeEnabled && (creditFunding === undefined ? legacyEmpty : creditFunding === "unavailable");
   useCreditExposure(empty, workspaceId);
   if (!empty) return null;
   return (
     <Notice tone="waiting" title="This model uses Opengeni credits">
-      No credits are available for this model. Buy some or connect a model to continue.
+      No credits are available for this model. Choose another model or add credits.
       <div className="mt-2 flex flex-wrap gap-2">
         {canBuyCredits && stripeEnabled ? (
           <Button asChild type="button" size="sm" variant="outline">
@@ -195,9 +230,9 @@ export function EmptyCreditsNotice({
         ) : null}
         <Button asChild type="button" size="sm">
           <Link
-            to="/workspaces/$workspaceId/settings"
+            to="/workspaces/$workspaceId/organization"
             params={{ workspaceId }}
-            search={{ section: "models" }}
+            search={{ section: "models", workspace: workspaceId }}
             {...analyticsAction("connect_model")}
           >
             Connect a model

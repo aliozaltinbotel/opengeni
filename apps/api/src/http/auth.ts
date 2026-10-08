@@ -1,5 +1,6 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
+import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context, MiddlewareHandler } from "hono";
 import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
@@ -20,7 +21,7 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
     // per-tenant identity gate (that is resolveAccessContext). When
     // `authRequired:false` it is a NO-OP — the embedded (Path 2) case where the
-    // host's own auth is the sole human gate and OpenGeni is mounted behind it.
+    // host's own auth is the sole human gate and Opengeni is mounted behind it.
     // Standalone/separate deployments set `authRequired:true` to keep this ON as
     // the shared-deployment-key perimeter.
     if (!settings.authRequired || isAuthExempt(c, settings)) {
@@ -37,6 +38,11 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
 
 function isAuthExempt(c: Context, settings: Settings): boolean {
   if (c.req.method === "OPTIONS") {
+    return true;
+  }
+  // An organization MCP action dispatched in this process for a verified
+  // person. Only server code can stamp the exact Request object.
+  if (verifiedDelegatedHumanAuthorizationForRequest(c.req.raw)) {
     return true;
   }
   const path = new URL(c.req.url).pathname;

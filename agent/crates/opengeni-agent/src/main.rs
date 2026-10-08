@@ -1,7 +1,7 @@
-//! The OpenGeni self-hosted agent binary.
+//! The Opengeni self-hosted agent binary.
 //!
-//! Run your own machine as a first-class OpenGeni sandbox. After a one-time
-//! device-flow enrollment the agent dials the OpenGeni control plane over NATS,
+//! Run your own machine as a first-class Opengeni sandbox. After a one-time
+//! device-flow enrollment the agent dials the Opengeni control plane over NATS,
 //! claims one process generation and subscribes to its exact authority subject
 //! (`agent.<ws>.<id>.connection.<instance>.rpc`), then answers control RPCs
 //! (exec / filesystem / git today; terminal + desktop
@@ -42,6 +42,7 @@ mod capacity;
 mod cli;
 mod codemode;
 mod config;
+mod credential_renewal;
 mod dispatch;
 mod embedded_runtime;
 mod engine;
@@ -218,10 +219,10 @@ fn string_err(message: String) -> anyhow_lite::BoxError {
 fn list_connections(api_url: &str) -> anyhow_lite::Result {
     let connections = config::load_connections(api_url).map_err(to_boxed)?;
     if connections.is_empty() {
-        println!("No OpenGeni connections configured. Run `opengeni-agent connect`.");
+        println!("No Opengeni connections configured. Run `opengeni-agent connect`.");
         return Ok(());
     }
-    println!("Configured OpenGeni connections ({}):", connections.len());
+    println!("Configured Opengeni connections ({}):", connections.len());
     for connection in connections {
         let origin_note = if connection.legacy_origin {
             " (legacy origin unverified; reconnect once to confirm)"
@@ -341,7 +342,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         let connections = existing_connections;
         info!(
             count = connections.len(),
-            "loaded configured OpenGeni connections"
+            "loaded configured Opengeni connections"
         );
         connections
     };
@@ -378,15 +379,16 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
         platform = platform.with_oom_isolation(cgroups);
     }
     let config_dir = config::config_dir().ok();
+    let update_drain = Arc::new(uploads::update_drain::UpdateDrain::default());
     let (next_platform, browser_sidecars) =
-        attach_browser_controller(platform, config_dir.as_deref());
+        attach_browser_controller(platform, config_dir.as_deref(), update_drain.clone());
     platform = next_platform;
     // Clone connection platforms only after browser control is attached. Existing
     // links and links added by the watcher must expose the identical controller.
     let connection_instance_id = uuid::Uuid::new_v4().to_string();
     let links = supervisor_links(&connections, &platform, &connection_instance_id);
     let (updates_tx, updates_rx) = tokio::sync::watch::channel(links.clone());
-    let browser_bridge = start_browser_bridge(config_dir.as_deref()).await;
+    let browser_bridge = start_browser_bridge(config_dir.as_deref(), update_drain.clone()).await;
 
     // The engine's disk spool lives under the config dir — a real filesystem
     // (a tmpfs temp dir would spool "to disk" in RAM and defeat the budgets).
@@ -395,6 +397,7 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
             .with_spool_root(dir.join("spool")),
         None => Supervisor::new_links(&links, env!("CARGO_PKG_VERSION")),
     };
+    supervisor = supervisor.with_update_drain(update_drain);
     if let Some(bridge) = &browser_bridge {
         supervisor = supervisor.with_browser_bridge(bridge.inventory());
     }
@@ -425,19 +428,21 @@ async fn run(args: RunArgs, api_url: &str) -> anyhow_lite::Result {
                     if updates_tx.send(next_links).is_err() {
                         return;
                     }
-                    info!(count = next.len(), "reconciled local OpenGeni connections");
+                    info!(count = next.len(), "reconciled local Opengeni connections");
                     current = next;
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    error!(%error, "could not reload OpenGeni connections; keeping active links");
+                    error!(%error, "could not reload Opengeni connections; keeping active links");
                 }
             }
         }
     });
 
     info!("agent online — press Ctrl-C to stop (the machine goes offline cleanly)");
+    let renewal = tokio::spawn(credential_renewal::run(api_url.to_string()));
     let supervisor_result = supervisor.run_with_updates(updates_rx).await;
+    renewal.abort();
     watcher.abort();
     if let Some(bridge) = browser_bridge {
         if let Err(error) = bridge.shutdown().await {
@@ -485,13 +490,14 @@ fn restart_after_verified_update() -> anyhow_lite::Result {
 fn attach_browser_controller(
     platform: NativePlatform,
     config_dir: Option<&Path>,
+    update_drain: Arc<uploads::update_drain::UpdateDrain>,
 ) -> (NativePlatform, Option<Arc<BrowserSidecarManager>>) {
     let Some(directory) = config_dir else {
         return (platform, None);
     };
     match BrowserSidecarManager::discover(directory) {
         Ok(manager) => {
-            let manager = Arc::new(manager);
+            let manager = Arc::new(manager.with_update_drain(update_drain));
             (
                 platform.with_browser_control(manager.clone()),
                 Some(manager),
@@ -504,9 +510,12 @@ fn attach_browser_controller(
     }
 }
 
-async fn start_browser_bridge(config_dir: Option<&Path>) -> Option<BrowserBridgeServer> {
+async fn start_browser_bridge(
+    config_dir: Option<&Path>,
+    update_drain: Arc<uploads::update_drain::UpdateDrain>,
+) -> Option<BrowserBridgeServer> {
     let directory = config_dir?;
-    match BrowserBridgeServer::start(directory).await {
+    match BrowserBridgeServer::start_with_update_drain(directory, update_drain).await {
         Ok(bridge) => Some(bridge),
         Err(error) => {
             warn!(%error, "attached browser bridge unavailable; continuing without it");
@@ -629,7 +638,7 @@ fn ensure_macos_desktop_grants() {
             screen_recording = grants.screen_recording,
             accessibility = grants.accessibility,
             input_monitoring = grants.input_monitoring,
-            "this Mac needs OS permission to expose its display to OpenGeni — requesting \
+            "this Mac needs OS permission to expose its display to Opengeni — requesting \
              Screen Recording + Accessibility + Input Monitoring. Approve the system prompt(s), \
              or open System Settings > Privacy & Security and enable all three for \
              opengeni-agent, then let it reconnect. Capture and input capabilities appear as \
@@ -765,7 +774,7 @@ async fn enroll_command(
         "connection complete; credentials persisted"
     );
     println!(
-        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        "Connected to {} (connection {}). Existing Opengeni connections were kept.",
         stored.api_url, stored.connection_id
     );
     println!("A running agent notices this connection automatically within a few seconds.");
@@ -832,7 +841,7 @@ async fn enroll_with_token(
         "connection complete; credentials persisted"
     );
     println!(
-        "Connected to {} (connection {}). Existing OpenGeni connections were kept.",
+        "Connected to {} (connection {}). Existing Opengeni connections were kept.",
         stored.api_url, stored.connection_id
     );
     println!("A running agent notices this connection automatically within a few seconds.");

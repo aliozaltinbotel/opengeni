@@ -20,6 +20,11 @@ export type OrganizationSettingsAccess = {
   organizationAdministratorSession: boolean;
   /** An owner or admin in an administrator session. */
   administrator: boolean;
+  /**
+   * Shared workspaces in this organization the person administers. A workspace
+   * admin who isn't an organization admin manages those workspaces' models.
+   */
+  administeredWorkspaceIds: readonly string[];
   canReadBilling: boolean;
   canManageBilling: boolean;
   canManageOrganizationKnowledge: boolean;
@@ -64,17 +69,37 @@ export function organizationSettingsAccess(input: {
   const organizationAdministratorSession = managedHumanSession || singleUser;
   // The one rule the rail's picker also uses to tell administrators from a key that creates by name.
   const administrator = administersOrganization(input);
+  const administeredWorkspaceIds = accessContext.workspaceGrants
+    .filter(
+      (grant) =>
+        grant.accountId === accountId &&
+        grant.subjectId === accessContext.subjectId &&
+        grant.permissions.includes("workspace:admin"),
+    )
+    .map((grant) => grant.workspaceId);
 
   const visible = new Set<OrganizationAdminSection>();
   if (administrator) {
     visible.add("general");
     if (managedHumanSession && !singleUser) visible.add("people");
     visible.add("workspaces");
-    visible.add("models");
     visible.add("integrations");
   }
+  // Every model setting lives on Organization > Models: owners and admins manage
+  // all of it, workspace admins the workspaces they administer, and every
+  // signed-in member their own Personal workspace (each membership has one).
+  if (
+    administrator ||
+    (organizationAdministratorSession && administeredWorkspaceIds.length > 0) ||
+    (managedHumanSession && !singleUser && actorRole !== null)
+  ) {
+    visible.add("models");
+  }
   visible.add("identity");
-  if (canReadBilling) visible.add("billing");
+  if (canReadBilling) {
+    visible.add("insights");
+    visible.add("billing");
+  }
   if (canManageOrganizationApiKeys) visible.add("developer");
   // Recovery contacts are members, not only owners and admins: they accept
   // and approve recovery on this page, so every managed person can reach it.
@@ -86,6 +111,7 @@ export function organizationSettingsAccess(input: {
     managedHumanSession,
     organizationAdministratorSession,
     administrator,
+    administeredWorkspaceIds,
     canReadBilling,
     canManageBilling,
     canManageOrganizationKnowledge,

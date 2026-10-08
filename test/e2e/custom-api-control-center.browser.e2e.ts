@@ -6,7 +6,10 @@ import { chromium, type Browser, type Page } from "playwright";
 
 import { INTEGRATION_DEFINITION_PRESENTATIONS } from "@opengeni/capabilities";
 import { freePort, startProcess, type StartedProcess } from "@opengeni/testing";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import {
+  OPENGENI_API_CONTRACT_REVISION,
+  type ConnectorToolPermissionsResponse,
+} from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir = new URL("../../.agent/evidence/capabilities-custom-api/", import.meta.url)
@@ -55,6 +58,9 @@ describe("custom API control center diagnostics", () => {
     for (const query of [
       "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active",
       "archiveStatus=active&sortBy=updatedAt&parentSessionId=null&limit=50&view=page",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false",
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true",
+      "view=page&limit=1&projection=summary&pinsOnly=true",
     ]) {
       expect(
         isExpectedSessionPageCancellation("GET", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"),
@@ -85,7 +91,16 @@ describe("custom API control center diagnostics", () => {
 
   test("retains other request failures as diagnostics", () => {
     const query = "view=page&limit=50&parentSessionId=null&sortBy=updatedAt&archiveStatus=active";
+    const totalsQuery =
+      "view=page&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&archiveStatus=active&includePinned=false&includeTotals=true";
     for (const [method, url, error] of [
+      ["GET", `${sessionsUrl}?${totalsQuery}&unexpected=true`, "net::ERR_ABORTED"],
+      ["GET", `${sessionsUrl}?${totalsQuery}&includeTotals=true`, "net::ERR_ABORTED"],
+      [
+        "GET",
+        `${sessionsUrl}?${totalsQuery.replace("includeTotals=true", "includeTotals=false")}`,
+        "net::ERR_ABORTED",
+      ],
       ["POST", `${sessionsUrl}?${query}`, "net::ERR_ABORTED"],
       ["GET", `${sessionsUrl}?${query}`, "net::ERR_CONNECTION_RESET"],
       ["GET", `${sessionsUrl}?${query}&unexpected=true`, "net::ERR_ABORTED"],
@@ -331,6 +346,11 @@ describe("custom API control center browser acceptance", () => {
   test("pass 6: per-account facets configure and pause without exposing provider state", async () => {
     const context = await browser.newContext({ viewport: { width: 1180, height: 960 } });
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
     try {
       const state = readyState();
       await installApi(page, state);
@@ -360,6 +380,7 @@ describe("custom API control center browser acceptance", () => {
       await expectText(inbox, "Paused");
       await assertAccessibleAndBounded(page, "[data-capability-page]");
       await page.screenshot({ path: `${evidenceDir}pass-6-account-facets.png`, fullPage: true });
+      expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
     }
@@ -457,6 +478,11 @@ describe("custom API control center browser acceptance", () => {
       reducedMotion: "reduce",
     });
     const page = await context.newPage();
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") pageErrors.push(message.text());
+    });
     try {
       await installApi(page, { ...readyState(), canManage: false });
       await openCapabilities(page);
@@ -494,6 +520,7 @@ describe("custom API control center browser acceptance", () => {
       await page.getByRole("button", { name: "Capabilities", exact: true }).click();
       await sheet.waitFor({ state: "hidden" });
       await expectVisible(row);
+      expect(pageErrors).toEqual([]);
     } finally {
       await context.close();
     }
@@ -553,9 +580,12 @@ function isExpectedSessionPageCancellation(
   return new Set([
     // Default root page on this fixture's capabilities route; keep exact keys and values.
     "archiveStatus=active&limit=50&parentSessionId=null&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
+    "archiveStatus=active&includePinned=false&includeTotals=true&limit=4&parentSessionId=null&projection=summary&sortBy=updatedAt&view=page",
     "limit=50&parentSessionId=null&view=page",
     "archivedOnly=true&limit=50&parentSessionId=null&view=page",
     "limit=1&pinsOnly=true&view=page",
+    "limit=1&pinsOnly=true&projection=summary&view=page",
   ]).has(actual);
 }
 
@@ -632,6 +662,36 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       });
     }
     if (url.pathname === "/v1/access/me") return json(access(state.canManage));
+    if (
+      url.pathname ===
+      `/v1/workspaces/${workspaceId}/capabilities/api%3Amicrosoft-outlook-mail/tool-permissions`
+    ) {
+      expect(request.method()).toBe("GET");
+      const selectedConnection = url.searchParams.get("connectionId");
+      if (selectedConnection !== null) expect(selectedConnection).toBe(outlookConnectionId);
+      const selectedInstance = url.searchParams.get("instanceKey");
+      if (selectedInstance !== null) expect(selectedInstance).toBe("account-finance");
+      return json({
+        connectionId: outlookConnectionId,
+        serverId: "api:microsoft-outlook-mail",
+        instanceKey: "account-finance",
+        accountLabel: "Outlook Mail — Finance",
+        defaultPermission: null,
+        tools: [],
+        discoveryError: null,
+        canManage: state.canManage,
+        appliesTo: "next_attempt",
+        revision: "fixture-permissions-1",
+        accounts: [
+          {
+            connectionId: outlookConnectionId,
+            instanceKey: "account-finance",
+            label: "Outlook Mail — Finance",
+            scope: "workspace",
+          },
+        ],
+      } satisfies ConnectorToolPermissionsResponse);
+    }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts`) {
       if (request.method() === "GET") return json([]);
       const input = request.postDataJSON();
@@ -658,6 +718,17 @@ async function installApi(page: Page, state: UiState): Promise<void> {
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/connect/attempts/fixture-connect`)
       return json(connectAttempt);
+    if (url.pathname === `/v1/workspaces/${workspaceId}/connect/catalog`)
+      return json([
+        {
+          id: "microsoft-outlook-mail",
+          label: "Outlook Mail",
+          family: "microsoft",
+          readiness: "available",
+          ownership: ["workspace", "personal"],
+          setup: ["oauth"],
+        },
+      ]);
     if (url.pathname === "/v1/workspaces") return json([workspace()]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/channels`) return json([]);
     if (url.pathname === `/v1/workspaces/${workspaceId}/capabilities`) {
@@ -686,7 +757,19 @@ async function installApi(page: Page, state: UiState): Promise<void> {
       return json({ configured: false, missing: [], installUrl: null });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/sessions`) {
-      return json({ sessions: [], pinned: [], pinnedTruncated: false, nextCursor: null });
+      return json({
+        sessions: [],
+        pinned: [],
+        pinnedTruncated: false,
+        nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
+      });
     }
     if (url.pathname === `/v1/workspaces/${workspaceId}/integrations/definitions`) {
       if (state.loading) await new Promise((resolve) => setTimeout(resolve, 8_000));

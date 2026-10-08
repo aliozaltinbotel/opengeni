@@ -13,7 +13,32 @@ export type ModelContextInstructionLayerId =
   | "sdk_capability_instructions"
   | "sandbox_preamble"
   | "sandbox_filesystem"
-  | "sent_system_instructions";
+  | "sent_system_instructions"
+  | "identity";
+
+/** Sections of a modular operational contract, in composition order. */
+export type AgentPromptModuleId =
+  | "base_behavior"
+  | "runtime_mechanics"
+  | "renderer_markdown"
+  | "sandbox"
+  | "connected_machine"
+  | "repositories"
+  | "workspace_environment"
+  | "rig"
+  | "artifacts"
+  | "media"
+  | "goals"
+  | "subagents"
+  | "knowledge"
+  | "skills"
+  | "admin"
+  | "attachments";
+
+export type ModelContextInstructionModule = {
+  id: AgentPromptModuleId;
+  chars: number;
+};
 
 export type ModelContextInstructionLayer = {
   id: ModelContextInstructionLayerId;
@@ -21,6 +46,8 @@ export type ModelContextInstructionLayer = {
   content: string;
   utf8Bytes: number;
   estimatedTokens: number;
+  /** Present on the operational contract of sessions with an agent configuration. */
+  modules?: ModelContextInstructionModule[] | undefined;
 };
 
 export type ModelContextToolVisibility = "eager" | "searchable";

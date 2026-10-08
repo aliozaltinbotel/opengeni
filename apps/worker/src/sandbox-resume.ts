@@ -20,6 +20,8 @@
 //
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
+import type { EventBus } from "@opengeni/events";
+import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   effectiveSandboxLifecycle,
   sandboxArchiveCaptureTimeoutMs,
@@ -164,6 +166,9 @@ export type SandboxResumeServices = {
    * replacement. Production uses {@link freshSandboxReadinessReplacementDelayMs}.
    * It may be async so a test can observe the rolled-back lease in between. */
   freshSandboxReadinessReplacementDelayMs?: () => number | Promise<number>;
+  /** Test seam: runs immediately after the elected spawner published its box
+   * warm, before the final cancellation check. */
+  onSpawnedSandboxPublished?: () => void | Promise<void>;
   /**
    * The turn attempt's fresh-box readiness replacement budget. The lazy
    * provisioner may call resumeBoxForTurn again after a typed lease
@@ -171,6 +176,8 @@ export type SandboxResumeServices = {
    * call. Absent, the call gets its own single replacement.
    */
   freshSandboxReadinessReplacementBudget?: FreshSandboxReadinessReplacementBudget;
+  /** Live fanout for background commands a provider loss settled. */
+  bus?: EventBus | null;
   /** Called only by the observer that wins the exact warm->cold loss CAS. */
   onSandboxLost?: (input: {
     sandboxGroupId: string;
@@ -210,6 +217,9 @@ export type ResumeBoxIds = {
    * never conflicts).
    */
   image?: string;
+  /** Deployment/workspace image pins apply only to new creates; an existing
+   * group keeps its image. Omission preserves explicit image matching (B3). */
+  imagePolicy?: "require_match" | "new_creates_only";
   /**
    * RIG IS SHARED STATE (M3): the frozen rig version this run rides. Threaded to
    * acquireLease, which stamps it on the cold-create and conflicts on a live box
@@ -431,10 +441,6 @@ export class SandboxLeaseInstanceLostError extends SandboxLeaseSupersededError {
 // user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
 
-async function sleep(ms: number): Promise<void> {
-  await new Promise<void>((resolve) => setTimeout(resolve, ms));
-}
-
 /**
  * A remote provider may return a sandbox handle before its command router
  * accepts the first exec. The upstream session's yieldTimeMs starts only after
@@ -445,9 +451,10 @@ export async function waitForSandboxExecReadiness(
   established: EstablishedSandboxSession,
   timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
   identity: { sandboxGroupId?: string | null } = {},
+  signal?: AbortSignal,
 ): Promise<void> {
   try {
-    await verifySandboxExecReadiness(established, timeoutMs);
+    await verifySandboxExecReadiness(established, timeoutMs, signal);
   } catch (error) {
     if (error instanceof SandboxExecReadinessError && error.code === "exec_probe_timeout") {
       throw new SandboxExecReadinessTimeoutError(established.backendId, timeoutMs, {
@@ -875,7 +882,7 @@ async function persistWarmWorkspaceSnapshot(
   // Filesystem and directory snapshots create retained Images without
   // terminating the source Sandbox. (Modal's termination warning applies to
   // memory snapshots.) They are therefore the preferred warm-checkpoint path:
-  // the durable capture gate pauses OpenGeni commands while the provider reads
+  // the durable capture gate pauses Opengeni commands while the provider reads
   // the filesystem, then the same live instance continues serving the turn.
   const workspacePersistence =
     persistable.state?.workspacePersistence ??
@@ -1347,11 +1354,12 @@ async function resumeBoxForTurnOnce(
     },
     os,
     // IMAGE IS SHARED STATE (B3): thread the resolved image so the lease stamps it +
-    // conflicts on a live box already running a different image. A
+    // conflicts on a live box already running a different required image. A
     // SandboxImageConflictError propagates while another holder is active; a
     // solo change requests a capture-and-drain rotation and this attempt retries
     // after the cold successor can safely stamp the new image.
     ...(ids.image ? { image: ids.image } : {}),
+    ...(ids.imagePolicy ? { imagePolicy: ids.imagePolicy } : {}),
     // RIG IS SHARED STATE (M3): thread the frozen rig version so the lease stamps it
     // + conflicts on a live box under a different rig. A SandboxRigConflictError
     // propagates while another holder is active; a solo change uses the same
@@ -1567,6 +1575,12 @@ async function resumeBoxForTurnOnce(
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
+    // Set once commitWarmingToWarm publishes this box. From then on the box is
+    // the group's shared, attachable workspace: a later cancellation (Pause,
+    // Steer, worker shutdown) only drops this attempt's holder. Terminating it
+    // here would hand the next attempt a warm lease naming a dead box, whose
+    // exact-id resume then records a lost workspace that never lost anything.
+    let published = false;
     let providerCreateOperationId: string | undefined;
     let providerCreateBindingKey: string | undefined;
     let rematerialization: {
@@ -1917,9 +1931,14 @@ async function resumeBoxForTurnOnce(
           sandboxGroupId: ids.sandboxGroupId,
         });
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       await maybeRenewProviderExpiration(true);
       throwIfReleasedOrCancelled();
@@ -2007,13 +2026,21 @@ async function resumeBoxForTurnOnce(
         await release();
         throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
       }
+      published = true;
       holderLeaseHeartbeat = {
         expectedEpoch: committed.lease.leaseEpoch,
         leaseTtlMs,
       };
+      await services.onSpawnedSandboxPublished?.();
       throwIfReleasedOrCancelled();
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
+      if (published) {
+        // The published warm box stays for the replacement attempt to resume
+        // by exact provider id; ordinary idle drain owns its capture/teardown.
+        await release();
+        throw error;
+      }
       if (error instanceof SandboxLeaseSupersededError) {
         await terminateEstablishedSandbox(createdEstablished);
         await release();
@@ -2110,16 +2137,21 @@ async function resumeBoxForTurnOnce(
       });
       throwIfReleasedOrCancelled();
       // A durable `warm` row is an ownership assertion, not provider liveness.
-      // A provider may have ended the exact box while OpenGeni was idle. Prove
+      // A provider may have ended the exact box while Opengeni was idle. Prove
       // the command router before handing the session to the
       // agent so terminal evidence enters the atomic warm->cold recovery path
       // below instead of surfacing inside a model-visible tool call.
       if (services.verifyAttachedSandboxReadiness) {
         await services.verifyAttachedSandboxReadiness(established);
       } else {
-        await waitForSandboxExecReadiness(established, MODAL_EXEC_READINESS_TIMEOUT_MS, {
-          sandboxGroupId: ids.sandboxGroupId,
-        });
+        await waitForSandboxExecReadiness(
+          established,
+          MODAL_EXEC_READINESS_TIMEOUT_MS,
+          {
+            sandboxGroupId: ids.sandboxGroupId,
+          },
+          cancellationSignal,
+        );
       }
       providerRenewalTarget = {
         backend: ids.backend,
@@ -2140,6 +2172,11 @@ async function resumeBoxForTurnOnce(
         expectedBackend: ids.backend,
       });
       if (marked.status === "marked") {
+        await publishDurableSessionEvents(
+          services.bus,
+          ids.workspaceId,
+          marked.backgroundCommandEvents,
+        );
         await services.onSandboxLost?.({
           sandboxGroupId: ids.sandboxGroupId,
           instanceId: live.instanceId,
@@ -2179,7 +2216,13 @@ async function waitForWarm(
   const deadline = Date.now() + settings.sandboxWarmingTimeoutMs;
   let instanceId: string | null = null;
   while (Date.now() < deadline) {
-    await sleep(WARMING_POLL_INTERVAL_MS);
+    // A cancelled waiter owns no box and must not keep polling for up to the
+    // warming budget: its activity finalizer joins this exact promise.
+    if (!(await sleepUnlessCancelled(WARMING_POLL_INTERVAL_MS, services.cancellationSignal))) {
+      throw services.cancellationSignal?.reason instanceof Error
+        ? services.cancellationSignal.reason
+        : new Error("Sandbox warming wait was cancelled with its owning turn attempt");
+    }
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     if (!lease) {
       // Lease vanished (cold-reaped). Re-dispatch from scratch.

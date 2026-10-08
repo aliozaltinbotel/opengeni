@@ -1,0 +1,90 @@
+---
+title: "Embed manually"
+description: "Add the Opengeni conversation to your product in three steps."
+icon: "code"
+---
+
+You add one backend route and one component. The browser talks to your backend; your backend holds the API key and tells Opengeni who the user is.
+
+Everything on this page works on [app.opengeni.ai](https://app.opengeni.ai) today, including attachments, tool output, and approvals.
+
+```bash
+bun add @opengeni/sdk @opengeni/react
+```
+
+Keep all `@opengeni` packages on the same version.
+
+<Steps>
+  <Step title="Get an API key">
+    Sign up at [app.opengeni.ai](https://app.opengeni.ai). In **Organization settings → Developer → API keys**, create a **full-access** key and put it in your server environment:
+
+    ```bash
+    OPENGENI_API_KEY=ogk_...   # server only
+    ```
+
+    Self-hosting? Also pass `baseUrl` to `new Opengeni(...)` below.
+
+  </Step>
+  <Step title="Add the backend route">
+    ```ts
+    // lib/opengeni.ts (server only)
+    import { Opengeni } from "@opengeni/sdk/chat";
+
+    export const og = new Opengeni({ apiKey: process.env.OPENGENI_API_KEY! });
+    ```
+
+    ```ts
+    // app/api/opengeni/[...path]/route.ts
+    import { createSessionProxyRoute } from "@opengeni/sdk/next";
+    import { og } from "@/lib/opengeni";
+
+    export const dynamic = "force-dynamic";
+    export const { GET, POST, PUT, PATCH, DELETE } = createSessionProxyRoute(og, {
+      resolve: async (request) => {
+        const me = await authenticate(request); // your existing session check
+        if (!me) return new Response("Unauthorized", { status: 401 });
+        return { user: me.id, tenant: me.orgId }; // or { user: me.id } | { user: me.id, workspaceId }
+      },
+      // A lighter reasoning effort replies faster; omit it for the deployment
+      // default (often higher: deeper answers, slower replies).
+      createSession: (input) => ({ reasoningEffort: "medium", ...input }),
+    });
+    ```
+
+    `resolve` maps your signed-in user to Opengeni. Workspaces and memberships are created on first use, so there is no onboarding step. See [Users & tenants](/integrate/users-and-tenants) for the three shapes.
+
+    `createSession` lets the browser start chats. Return a fuller request to choose the agent, tools, and model; see [Configure the agent](/integrate/configure-the-agent).
+
+    Not on Next.js? Use the Express or Hono adapter, or `createSessionProxyHandler` from `@opengeni/sdk/session-proxy` (see [Proxy from any backend](/integrate/proxy-from-any-backend)).
+
+  </Step>
+  <Step title="Render the conversation">
+    ```tsx
+    "use client";
+    import { OpenGeniChat } from "@opengeni/react";
+    import "@opengeni/react/compiled.css";
+
+    export function Assistant() {
+      return <OpenGeniChat baseUrl="/api/opengeni" />;
+    }
+    ```
+
+    `OpenGeniChat` shows the user's chats and the open conversation. For one chat tied to a record, render `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />`. The stylesheet is scoped and needs no Tailwind. See [Conversation UI & theming](/integrate/conversation-ui).
+
+  </Step>
+</Steps>
+
+Chats are private to each user by default. That needs private chats enabled for your organization; if they are off, the proxy returns an error that says who can turn them on.
+
+## Next
+
+<CardGroup cols={2}>
+  <Card title="Give the agent your data" icon="database" href="/integrate/your-data">
+    Connect your API through MCP or OpenAPI, as the signed-in user.
+  </Card>
+  <Card title="Going to production" icon="rocket" href="/integrate/production">
+    Key storage, costs, versions, and cleanup.
+  </Card>
+</CardGroup>
+
+The [Northstar support example](/examples/northstar-support) runs this whole path with a product MCP server.

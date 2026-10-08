@@ -1,11 +1,15 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 
 import type {
+  McpConnectionAccountBinding,
+  McpPersonalConnectionDelegation,
   SessionEventType,
   SessionRealtimeEndReason,
   SessionRealtimeMode,
   SessionRealtimeModel,
 } from "@opengeni/contracts";
+import { McpPersonalConnectionDelegations } from "@opengeni/contracts";
+import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import { and, asc, eq, gt, inArray, isNull, or } from "drizzle-orm";
 
 import type { Database, SessionActivityDatabase } from "./database";
@@ -68,6 +72,8 @@ export type BeginSessionRealtimeInput = {
   browserInstanceId: string;
   ownerKey: string;
   model: SessionRealtimeModel;
+  personalConnectionDelegations?: McpPersonalConnectionDelegation[];
+  mcpAccountBindings?: McpConnectionAccountBinding[] | null;
   now?: Date;
   leaseMs?: number;
 };
@@ -82,13 +88,22 @@ export type RenewSessionRealtimeInput = {
   expectedVersion: number;
   now?: Date;
   leaseMs?: number;
+  /**
+   * False keeps the current lease unchanged (owner still proven). Used when a
+   * deployment-funded call ran out of credits: the client drains and ends
+   * inside the remaining lease, and an ignoring client lapses on its own.
+   */
+  extendLease?: boolean;
 };
 
-export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs"> & {
+export type EndSessionRealtimeInput = Omit<RenewSessionRealtimeInput, "leaseMs" | "extendLease"> & {
   reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
 };
 
-export type AssertSessionRealtimeOwnerInput = Omit<RenewSessionRealtimeInput, "leaseMs">;
+export type AssertSessionRealtimeOwnerInput = Omit<
+  RenewSessionRealtimeInput,
+  "leaseMs" | "extendLease"
+>;
 
 export type SessionRealtimeMutationResult = {
   mode: SessionRealtimeMode;
@@ -422,6 +437,10 @@ export async function beginSessionRealtimeInTransaction(
       ownerSubjectId: input.ownerSubjectId,
       browserInstanceId: input.browserInstanceId,
       ownerKeyHash: hashOwnerKey(input.ownerKey),
+      personalConnectionDelegations: McpPersonalConnectionDelegations.parse(
+        input.personalConnectionDelegations ?? [],
+      ),
+      mcpAccountBindings: parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
       model: input.model,
       state: "active",
       version: 1,
@@ -582,6 +601,15 @@ export async function renewSessionRealtimeInTransaction(
       eventIds: [expired.eventId],
       workflowWakeRevision: expired.workflowWakeRevision,
       expired: true,
+    };
+  }
+  if (input.extendLease === false) {
+    return {
+      mode: mapRealtimeMode(row),
+      replay: false,
+      eventIds: [],
+      workflowWakeRevision: null,
+      expired: false,
     };
   }
   const [renewed] = await db

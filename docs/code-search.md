@@ -13,8 +13,8 @@ tokens. It never writes text, so the agent still writes the answer.
 
 ## Measured effect
 
-- **Investigation questions, in OpenGeni.** 26 real code questions from
-  staging, answered twice per arm by the OpenGeni agent (gpt-6-astra) on a
+- **Investigation questions, in Opengeni.** 26 real code questions from
+  staging, answered twice per arm by the Opengeni agent (gpt-6-astra) on a
   Connected Machine, with the tool on and off in parallel, graded blind by two
   graders. With the current wording: cost -6.6% (95% CI 2-12%), wall time -9.1%
   (5-13%), 1.4 fewer model requests per question, answer quality at parity.
@@ -50,9 +50,9 @@ switched on per deployment or workspace to measure it.
    small files are cut into declaration-sized tiles, so every function and handler in them is judged.
    Other files get windows around their keyword and symbol hits. In the same round, Jev answers a
    "must change together" question for up to 60 functions of the three most relevant files, each shown by
-   its signature and the calls it makes. A chosen function is packed right after each sub-question's best
-   passage: it catches sibling code that a literal relevance check scores low, such as another handler
-   that mutates the same state.
+   its signature and the calls it makes. A chosen function catches sibling code that a literal relevance
+   check scores low, such as another handler that mutates the same state. It is packed after the passages
+   that passed the relevance bar, so it never pushes a verified passage out of the budget.
 5. **Leads.** The tool follows up to six definitions named in the best passages,
    one level deep, and checks up to three call sites of each.
 6. **Pack.** Passages that pass are packed within a token budget:
@@ -133,7 +133,7 @@ The rule is path exclusion at the source, never content redaction:
 - ripgrep searches an explicitly named path even when a glob excludes it, so an
   explicit `paths` entry into one of them is ignored like a missing path. The
   engine checks the normalized path case-insensitively (`./.opengeni`,
-  `.OpenGeni`, `a/../x` and backslashes included), and `codeSearchRipgrep`
+  `.Opengeni`, `a/../x` and backslashes included), and `codeSearchRipgrep`
   refuses such a path again.
 - ripgrep follows a symlink named as a search root, so `codeSearchPathKinds`
   resolves each path physically and reports one that lands in a credential
@@ -220,7 +220,7 @@ The tool reports problems to the agent instead of degrading silently:
 ## Cost
 
 Jev runs on the deployment's TypeSafe key, so the tool works whatever the
-workspace uses for its chat model: OpenGeni credits, its own subscription or
+workspace uses for its chat model: Opengeni credits, its own subscription or
 its own API keys. It costs about $0.006 per call. Every completed call records
 two usage events against its workspace, session, turn and attempt:
 `code_search.jev_input_tokens` (tokens) and `code_search.jev_cost`

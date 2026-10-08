@@ -1,3 +1,4 @@
+import { normalizeSlackScopes, OFFICIAL_SLACK_MCP_URL } from "@opengeni/contracts/slack-rest-mcp";
 import { beginMcpPhase, measureMcpPhase } from "@opengeni/observability";
 import {
   environmentsEncryptionKeyBytes,
@@ -116,6 +117,8 @@ export type ResolveConnectionCredentialResult =
       connectionId: string;
       /** Exact durable version when the credential came from the local connection store. */
       connectionVersion?: number;
+      /** Actual provider grants; never inferred from requested connection scopes. */
+      grantedScopes?: string[];
       /** Metadata-only owner attribution from the immediate pre-use fence. */
       connectionUseAttribution?: ConnectionUseAttribution;
       /** Metadata-only equality key from current live authority; never credentials or authorization. */
@@ -258,6 +261,57 @@ export function normalizedCredentialHeaders(
     normalized[name] = value;
   }
   return normalized;
+}
+
+export const BROKERED_CREDENTIAL_SHAPE_HINT =
+  'store { headers: { "<Header-Name>": "<value>" } } or { placements: [{ carrier: "header" | "query" | "cookie", name, value, prefix? }] }';
+
+/**
+ * Why a non-OAuth credential bundle cannot be placed on a brokered request,
+ * or null when the runtime broker can use it. Mirrors
+ * `credentialMaterialForConnection` exactly so create-time validation and
+ * execution never disagree.
+ */
+export function brokeredCredentialBundleProblem(
+  credential: Record<string, unknown>,
+): string | null {
+  if (credential.placements !== undefined) {
+    try {
+      normalizedCredentialPlacements(credential.placements);
+      return null;
+    } catch (error) {
+      return `invalid credential placements (${credentialProblemDetail(error)}); ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+    }
+  }
+  if (credential.headers !== undefined) {
+    const headers = stringRecord(credential.headers);
+    if (!headers) {
+      return `credential.headers must map header names to string values; ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+    }
+    try {
+      normalizedCredentialHeaders(headers);
+      return null;
+    } catch (error) {
+      return `invalid credential headers (${credentialProblemDetail(error)}); ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+    }
+  }
+  const unplaced = Object.keys(credential).filter(
+    (key) => key !== "headers" && key !== "placements",
+  );
+  return `an api_key credential must say where the secret goes on each request${
+    unplaced.length > 0
+      ? ` (fields such as ${unplaced
+          .slice(0, 3)
+          .map((key) => JSON.stringify(key.slice(0, 64)))
+          .join(", ")} are never sent)`
+      : ""
+  }; ${BROKERED_CREDENTIAL_SHAPE_HINT}`;
+}
+
+function credentialProblemDetail(error: unknown): string {
+  return error instanceof Error
+    ? error.message.replace(/^connection credential returned /, "")
+    : "invalid value";
 }
 
 function normalizedCredentialPlacements(value: unknown): ConnectionCredentialPlacement[] {
@@ -510,6 +564,9 @@ export function buildConnectionTokenResolver(
       ...(material.placements ? { placements: material.placements } : {}),
       connectionId: cred.id,
       connectionVersion: cred.version,
+      ...(cred.providerDomain.toLowerCase() === "slack.com"
+        ? { grantedScopes: normalizeSlackScopes(cred.grantedScopes) }
+        : {}),
       ...(connectionUseAttribution ? { connectionUseAttribution } : {}),
       expiresAt: cred.expiresAt,
     };
@@ -802,6 +859,10 @@ function connectionBindingMatches(
         !(
           binding === canonicalHttpUrl(OFFICIAL_GMAIL_MCP_RESOURCE) &&
           isOfficialGmailRestDestination(destination, ref)
+        ) &&
+        !(
+          binding === canonicalHttpUrl(OFFICIAL_SLACK_MCP_URL) &&
+          isOfficialSlackRestDestination(destination, ref)
         ))
     ) {
       return false;
@@ -832,6 +893,39 @@ export function connectionMetadataMatchesBinding(
     connectionBindingMatches({ ...connection, credential: {} }, ref, destinationUrl) &&
     missingRequestedScopes(ref.scopes, connection.grantedScopes, connection.providerDomain)
       .length === 0
+  );
+}
+
+/** Only the reviewed Slack bridge methods may reuse the hosted resource grant. */
+function isOfficialSlackRestDestination(
+  destinationUrl: string,
+  ref: McpServerConnectionRef,
+): boolean {
+  if (
+    ref.providerDomain.toLowerCase() !== "slack.com" ||
+    ref.kind !== "oauth2" ||
+    (ref.subjectScope !== undefined &&
+      ref.subjectScope !== "subject" &&
+      ref.subjectScope !== "workspace")
+  )
+    return false;
+  const url = new URL(destinationUrl);
+  return (
+    url.origin === "https://slack.com" &&
+    !url.username &&
+    !url.password &&
+    [
+      "auth.test",
+      "conversations.list",
+      "conversations.info",
+      "conversations.members",
+      "users.list",
+      "users.info",
+      "conversations.history",
+      "conversations.replies",
+      "conversations.open",
+      "chat.postMessage",
+    ].some((method) => url.pathname === `/api/${method}`)
   );
 }
 
@@ -948,7 +1042,9 @@ function missingRequestedScopes(
   if (!requested?.length) {
     return [];
   }
-  const grantedSet = new Set(granted.map((scope) => connectionScopeKey(providerDomain, scope)));
+  const actual =
+    providerDomain.toLowerCase() === "slack.com" ? normalizeSlackScopes(granted) : granted;
+  const grantedSet = new Set(actual.map((scope) => connectionScopeKey(providerDomain, scope)));
   return requested.filter((scope) => !grantedSet.has(connectionScopeKey(providerDomain, scope)));
 }
 

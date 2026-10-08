@@ -1,4 +1,5 @@
 import { migrate } from "@opengeni/db/migrate";
+import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
@@ -21,13 +22,16 @@ import {
   resolveSessionToolPolicy,
   settingsWithEnabledCapabilityMcpServers,
   syncUpdatedScheduledTask,
+  syncCreatedScheduledTask,
   createValidatedScheduledTask,
   validatedScheduledTaskUpdate,
+  type SessionWorkflowClient,
 } from "@opengeni/core";
 import {
   appendSessionEvents,
   enqueueSessionTurn,
   claimSessionWorkForAttempt,
+  createClaudeSubscriptionAccount,
   bindScheduledTaskRunSessionInTransaction,
   createDb,
   createRig,
@@ -50,6 +54,8 @@ import {
   requestSessionTurnRecovery,
   requireSession,
   setVariableSetVariable,
+  setInitialActiveClaudeCredential,
+  setInitialActiveXaiCredential,
   updateScheduledTask,
   type DbClient,
 } from "@opengeni/db";
@@ -171,7 +177,7 @@ async function slackBotConnectionFixture(workspace: Awaited<ReturnType<typeof wo
       slackTeamName: "Scheduled claim test",
       botUserId: `U-${suffix}`,
       botId: `B-${suffix}`,
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: "2026-08-16T20:00:00.000Z",
     },
   });
@@ -316,6 +322,138 @@ async function claimedCommonVariableSetRun(
 }
 
 describe("scheduled task personal MCP authority", () => {
+  test.each(["organization", "personal"] as const)(
+    "SUB-ACCESS-01: a scheduled run carries its task's accepted Claude and SuperGrok %s pool snapshots into the generated turn",
+    async (scope) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      let claudeSnapshot:
+        | {
+            version: 1;
+            scope: "organization";
+          }
+        | {
+            version: 1;
+            scope: "user";
+            authorityGeneration: number;
+          };
+      let xaiSnapshot: typeof claudeSnapshot;
+      if (scope === "personal") {
+        await admin`insert into workspace_memberships (
+        account_id, workspace_id, subject_id, role, permissions
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, ${workspace.subjectId},
+        'owner', '[]'::jsonb
+      ) on conflict (workspace_id, subject_id) do update set role = 'owner', permissions = '[]'::jsonb`;
+        const claudeIdentity = crypto.randomUUID();
+        const claude = await createClaudeSubscriptionAccount(client.db, {
+          ...workspace,
+          scope: "user",
+          encryptionKey: new Uint8Array(32).fill(23),
+          secret: {
+            version: 1,
+            token: "sk-ant-oat01-scheduled-personal",
+            identity: { accountUuid: claudeIdentity, deviceId: "c".repeat(64) },
+          },
+          providerAccountId: claudeIdentity,
+          label: null,
+          accountEmail: null,
+          planType: "claude_max",
+          expiresAt: null,
+        });
+        await setInitialActiveClaudeCredential(client.db, {
+          ...workspace,
+          authoritySnapshot: claude.authoritySnapshot,
+          credentialId: claude.account.id,
+        });
+        const xai = await createXaiSubscriptionCredential(client.db, {
+          ...workspace,
+          scope: "user",
+          encryptionKey: new Uint8Array(32).fill(23),
+          secret: { version: 1, accessToken: "scheduled-personal-access" },
+          providerAccountId: `scheduled-personal-${crypto.randomUUID()}`,
+        });
+        await setInitialActiveXaiCredential(client.db, {
+          ...workspace,
+          authoritySnapshot: xai.authoritySnapshot,
+          credentialId: xai.account.id,
+        });
+        claudeSnapshot = claude.authoritySnapshot;
+        xaiSnapshot = xai.authoritySnapshot;
+        expect(xaiSnapshot).toEqual(claudeSnapshot);
+      } else {
+        claudeSnapshot = { version: 1, scope: "organization" };
+        xaiSnapshot = claudeSnapshot;
+      }
+      const task = await createScheduledTask(client.db, {
+        ...workspace,
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        name: `subscription-authority-${crypto.randomUUID()}`,
+        status: "active",
+        schedule: { type: "manual" },
+        temporalScheduleId: `subscription-authority-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "Use the accepted subscription pool",
+          model: "scripted-model",
+          resources: [],
+          tools: [],
+          metadata: {},
+        },
+        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
+        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
+        metadata: {},
+      });
+
+      const dispatched = await activities().dispatchScheduledTaskRun({
+        workspaceId: workspace.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+        producerKey: `subscription-authority:${crypto.randomUUID()}`,
+      });
+      expect(dispatched.action).toBe("start");
+      if (dispatched.action !== "start")
+        throw new Error(`Unexpected schedule result: ${dispatched.action}`);
+
+      const [run] = await admin<{ accepted_execution_snapshot: Record<string, unknown> }[]>`
+      select accepted_execution_snapshot from scheduled_task_runs
+      where workspace_id = ${workspace.workspaceId} and session_id = ${dispatched.sessionId}`;
+      expect(run?.accepted_execution_snapshot).toMatchObject({
+        xaiProviderAccountAuthoritySnapshot: xaiSnapshot,
+        claudeProviderAccountAuthoritySnapshot: claudeSnapshot,
+      });
+      const [session] = await admin<
+        {
+          xai: unknown;
+          claude: unknown;
+        }[]
+      >`
+      select initial_xai_provider_account_authority_snapshot as xai,
+        initial_claude_provider_account_authority_snapshot as claude
+      from sessions where id = ${dispatched.sessionId}`;
+      expect(session).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
+
+      const claimed = await claimSessionWorkForAttempt(client.db, workspace.workspaceId, {
+        sessionId: dispatched.sessionId,
+        workflowId: dispatched.workflowId,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(claimed.action).toBe("claimed");
+      if (claimed.action !== "claimed")
+        throw new Error(`Scheduled turn was not claimed: ${claimed.reason}`);
+      const [turn] = await admin<{ xai: unknown; claude: unknown }[]>`
+      select xai_provider_account_authority_snapshot as xai,
+        claude_provider_account_authority_snapshot as claude
+      from session_turns where id = ${claimed.turn.id}`;
+      expect(turn).toEqual({ xai: xaiSnapshot, claude: claudeSnapshot });
+    },
+    180_000,
+  );
+
   test("validated create and material update freeze an empty set; explicit replacement stays exact through dispatch", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -1505,8 +1643,13 @@ describe("scheduled task personal MCP authority", () => {
       // tasks. 0414 replay is a pre-cutover contract, never a downgrade path.
       await historicalAdmin`CREATE TABLE schema_migrations(name text PRIMARY KEY,applied_at timestamptz NOT NULL DEFAULT now())`;
       // These later migrations require the post-0461 Knowledge/file policies.
+      // 0561 and 0582 also extend the producer fence beyond this replay boundary.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql')`;
+        ('0461_unified_knowledge.sql'),('0468_knowledge_relationship_projection.sql'),('0469_knowledge_source_discovery.sql'),('0640_knowledge_entry_created_since.sql'),('0488_permanent_skill_removal.sql'),('0499_session_attachment_access.sql'),('0501_session_sharing_execution.sql'),('0510_knowledge_index_funding_wait.sql'),('0511_knowledge_visible_index_status.sql'),('0515_autonomous_learning_defaults.sql'),('0561_scheduled_session_agent_identity.sql'),('0582_scheduled_setup_policy_identity.sql')`;
+      // Allowance policy/attribution compiles against the same withheld
+      // Knowledge tables. Keep this 0414 proof on the actual pre-cutover side.
+      for (const name of allowanceMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       await migrate(historical.databaseUrl);
       const migration = await readFile(
         new URL(
@@ -2102,6 +2245,90 @@ describe("scheduled task personal MCP authority", () => {
     ).toEqual([{ serverId: "scheduled-common", connectionId: laterAccount }]);
   });
 
+  test.each(["prompt", "name", "status"] as const)(
+    "late Temporal sync failure preserves a newer %s edit",
+    async (field) => {
+      if (!available) return;
+      const workspace = await workspaceFixture();
+      const original = await createScheduledTask(client.db, {
+        ...workspace,
+        name: "Original schedule",
+        status: "paused",
+        schedule: { type: "manual" },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "skip",
+        agentConfig: { prompt: "Original message", resources: [], tools: [], metadata: {} },
+        createdBy: { kind: "subject", subjectId: workspace.subjectId },
+        metadata: {},
+      });
+      const changed = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+        status: "active",
+        agentConfig: { ...original.agentConfig, prompt: "First edit" },
+      });
+      let newer = changed;
+      await expect(
+        syncUpdatedScheduledTask({
+          db: client.db,
+          previous: await captureScheduledTaskRestoreState(client.db, original),
+          task: changed,
+          workflowClient: {
+            syncScheduledTask: async ({
+              onFailure,
+            }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+              newer = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
+                ...(field === "prompt"
+                  ? { agentConfig: { ...changed.agentConfig, prompt: "Newer edit" } }
+                  : field === "name"
+                    ? { name: "Newer name" }
+                    : { status: "paused" }),
+              });
+              const error = new Error("Synthetic synchronization failure");
+              throw await client.db.transaction((tx) => onFailure!(tx, error));
+            },
+          } as never,
+        }),
+      ).rejects.toMatchObject({ persistenceRestored: false });
+      expect(await getScheduledTask(client.db, workspace.workspaceId, original.id)).toEqual(newer);
+    },
+  );
+
+  test("late creation sync failure never deletes a schedule edited meanwhile", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const created = await createScheduledTask(client.db, {
+      ...workspace,
+      name: "New schedule",
+      status: "paused",
+      schedule: { type: "manual" },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "skip",
+      agentConfig: { prompt: "Review activity", resources: [], tools: [], metadata: {} },
+      createdBy: { kind: "subject", subjectId: workspace.subjectId },
+      metadata: {},
+    });
+    let newer = created;
+    await expect(
+      syncCreatedScheduledTask({
+        db: client.db,
+        task: created,
+        workflowClient: {
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            newer = await updateScheduledTask(client.db, workspace.workspaceId, created.id, {
+              name: "Reviewed schedule",
+            });
+            const error = new Error("Synthetic synchronization failure");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
+          },
+        } as never,
+      }),
+    ).rejects.toMatchObject({ persistenceRestored: false });
+    expect(await getScheduledTask(client.db, workspace.workspaceId, created.id)).toEqual(newer);
+  });
+
   test("Temporal sync failure restores every execution-affecting task field", async () => {
     if (!available) return;
     const workspace = await workspaceFixture();
@@ -2182,8 +2409,11 @@ describe("scheduled task personal MCP authority", () => {
         previous: restoreState,
         task: changed,
         workflowClient: {
-          syncScheduledTask: async () => {
-            throw new Error("expected Temporal synchronization failure");
+          syncScheduledTask: async ({
+            onFailure,
+          }: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0]) => {
+            const error = new Error("expected Temporal synchronization failure");
+            throw await client.db.transaction((tx) => onFailure!(tx, error));
           },
         } as never,
       }),

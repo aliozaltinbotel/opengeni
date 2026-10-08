@@ -1,5 +1,646 @@
 # @opengeni/api-router
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [db21f93]
+- Updated dependencies [62e718d]
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/db@1.4.4
+  - @opengeni/runtime@1.4.4
+  - @opengeni/contracts@1.4.4
+  - @opengeni/interaction@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/core@1.4.4
+  - @opengeni/documents@1.4.4
+  - @opengeni/events@1.4.4
+  - @opengeni/artifact-tool@1.4.4
+  - @opengeni/capabilities@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/github@1.4.4
+  - @opengeni/storage@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+  - @opengeni/agent-proto@1.4.4
+  - @opengeni/network@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [19a16ef]
+- Updated dependencies [63c7473]
+- Updated dependencies [1a05862]
+  - @opengeni/runtime@1.4.3
+  - @opengeni/config@1.4.3
+  - @opengeni/core@1.4.3
+  - @opengeni/db@1.4.3
+  - @opengeni/documents@1.4.3
+  - @opengeni/github@1.4.3
+  - @opengeni/storage@1.4.3
+  - @opengeni/codemode@1.4.3
+  - @opengeni/events@1.4.3
+  - @opengeni/agent-proto@1.4.3
+  - @opengeni/artifact-tool@1.4.3
+  - @opengeni/capabilities@1.4.3
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/interaction@1.4.3
+  - @opengeni/network@1.4.3
+  - @opengeni/observability@1.4.3
+  - @opengeni/tool-gateway@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/agent-proto@1.4.2
+- @opengeni/artifact-tool@1.4.2
+- @opengeni/capabilities@1.4.2
+- @opengeni/codemode@1.4.2
+- @opengeni/codex@1.4.2
+- @opengeni/config@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/core@1.4.2
+- @opengeni/db@1.4.2
+- @opengeni/documents@1.4.2
+- @opengeni/events@1.4.2
+- @opengeni/github@1.4.2
+- @opengeni/interaction@1.4.2
+- @opengeni/network@1.4.2
+- @opengeni/observability@1.4.2
+- @opengeni/runtime@1.4.2
+- @opengeni/storage@1.4.2
+- @opengeni/tool-gateway@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- f290348: Signup credits now pay for dictation and live voice like general credits. Admission counts their remainder, each voice charge is allocated to them first, and balances report `coversVoice` on those grants. Other model-scoped promotional credits still do not cover voice.
+- Updated dependencies [eeb73ee]
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [82cd591]
+- Updated dependencies [e6d35b9]
+- Updated dependencies [0674635]
+- Updated dependencies [0674635]
+- Updated dependencies [d14de0c]
+- Updated dependencies [55bddfe]
+- Updated dependencies [c06d45a]
+- Updated dependencies [f290348]
+- Updated dependencies [aedc3b9]
+  - @opengeni/core@1.4.1
+  - @opengeni/db@1.4.1
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/runtime@1.4.1
+  - @opengeni/documents@1.4.1
+  - @opengeni/events@1.4.1
+  - @opengeni/artifact-tool@1.4.1
+  - @opengeni/capabilities@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/github@1.4.1
+  - @opengeni/interaction@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/storage@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+  - @opengeni/agent-proto@1.4.1
+  - @opengeni/network@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- 5451b38: Distinguish an exact committed sandbox mutation receipt from rejection of its output after authority changes. Preserve the non-retryable typed failure through SDK tools and stop later dispatches in the same invocation without hiding uncertain batch items. Missing, mismatched, rolled-back, and caller-owned transaction receipts remain unknown; existing history and recovery authority are unchanged.
+- Updated dependencies [bd9521c]
+- Updated dependencies [664eabf]
+- Updated dependencies [48c5eec]
+- Updated dependencies [08ce841]
+- Updated dependencies [ee1c07e]
+- Updated dependencies [92a5024]
+- Updated dependencies [ee1c07e]
+- Updated dependencies [673bb53]
+- Updated dependencies [5451b38]
+- Updated dependencies [36ff885]
+- Updated dependencies [2a65d6e]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/db@1.4.0
+  - @opengeni/config@1.4.0
+  - @opengeni/core@1.4.0
+  - @opengeni/runtime@1.4.0
+  - @opengeni/artifact-tool@1.4.0
+  - @opengeni/capabilities@1.4.0
+  - @opengeni/codemode@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/documents@1.4.0
+  - @opengeni/events@1.4.0
+  - @opengeni/github@1.4.0
+  - @opengeni/interaction@1.4.0
+  - @opengeni/observability@1.4.0
+  - @opengeni/storage@1.4.0
+  - @opengeni/tool-gateway@1.4.0
+  - @opengeni/agent-proto@1.4.0
+  - @opengeni/network@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 1670f64: Keep the API process alive and answer a retryable 503 (`upstream_unavailable`, `details.code: DATABASE_UNAVAILABLE`) when the database terminates its connections during a deploy drain, failover, or restart, instead of crashing on an unhandled Slack interaction claim rejection or answering an opaque 500.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- Updated dependencies [1670f64]
+- Updated dependencies [62006f1]
+- Updated dependencies [fd4346c]
+- Updated dependencies [178b5ae]
+- Updated dependencies [757a7e4]
+- Updated dependencies [414d416]
+  - @opengeni/core@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/contracts@1.3.0
+  - @opengeni/capabilities@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+  - @opengeni/documents@1.3.0
+  - @opengeni/events@1.3.0
+  - @opengeni/artifact-tool@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/github@1.3.0
+  - @opengeni/interaction@1.3.0
+  - @opengeni/storage@1.3.0
+  - @opengeni/agent-proto@1.3.0
+  - @opengeni/network@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- e70ddfe: Restore disputed credits correctly when Stripe delivers the resolution before
+  the hold. Record the matching hold and release atomically and idempotently so
+  late or repeated webhooks cannot withhold restored credits.
+- Updated dependencies [7424e7c]
+- Updated dependencies [1033595]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/db@1.2.0
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/runtime@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/documents@1.2.0
+  - @opengeni/events@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/github@1.2.0
+  - @opengeni/storage@1.2.0
+  - @opengeni/artifact-tool@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/interaction@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+  - @opengeni/agent-proto@1.2.0
+  - @opengeni/capabilities@1.2.0
+  - @opengeni/network@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [f895d19]
+- Updated dependencies [411b3b5]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/core@1.1.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/db@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/artifact-tool@1.1.0
+  - @opengeni/codemode@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/documents@1.1.0
+  - @opengeni/events@1.1.0
+  - @opengeni/github@1.1.0
+  - @opengeni/interaction@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/storage@1.1.0
+  - @opengeni/tool-gateway@1.1.0
+  - @opengeni/agent-proto@1.1.0
+  - @opengeni/capabilities@1.1.0
+  - @opengeni/network@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- e64a5a9: Allow signed machine credential renewal without a browser API contract header.
+- 4476ca7: Share connected-account identity labels across the web UI and agent MCP bindings. Save Slack username and workspace name from the existing verified authentication response without requesting additional scopes.
+
+  Allow settings to include inactive accounts in the owning user's organization-wide account inventory, while keeping execution account lists active-only by default.
+
+- Updated dependencies [ee6b145]
+- Updated dependencies [6fccfa0]
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+- Updated dependencies [9925fe2]
+  - @opengeni/db@1.0.1
+  - @opengeni/runtime@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/core@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/documents@1.0.1
+  - @opengeni/events@1.0.1
+  - @opengeni/artifact-tool@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/github@1.0.1
+  - @opengeni/interaction@1.0.1
+  - @opengeni/storage@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+  - @opengeni/agent-proto@1.0.1
+  - @opengeni/capabilities@1.0.1
+  - @opengeni/network@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 5.6.2
+
+### Patch Changes
+
+- Updated dependencies [6fee02a]
+  - @opengeni/db@6.7.2
+  - @opengeni/core@5.3.2
+  - @opengeni/documents@0.8.44
+  - @opengeni/events@0.4.42
+
+## 5.6.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/core@5.3.1
+  - @opengeni/codemode@0.7.2
+  - @opengeni/runtime@4.8.1
+  - @opengeni/db@6.7.1
+  - @opengeni/documents@0.8.43
+  - @opengeni/events@0.4.41
+
+## 5.6.0
+
+### Minor Changes
+
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+
+### Patch Changes
+
+- e6036b3: Publish native structured first-party tool input contracts without changing omission-sensitive arguments. Reject opaque input definitions during registration, and report applicable union validation requirements across tool adapters.
+- f779d43: Load Gmail tool definitions through the pure REST MCP module during OAuth setup.
+- b710f5e: Recover an active managed Chromium working directory through the existing authorized controller lifecycle after restart. Preserve profile data and accepted operation receipts; retain uncertain launch and cleanup state instead of repeating input or removing unsettled state.
+
+  Attest headless managed Chromium through its exact profile, CDP PID and direct pinned-daemon lineage. Retire both proven processes after recovery and retain cleanup state when predecessor identity is uncertain.
+
+- 1b482bf: Cut per-request CPU of the first-party MCP route. Within one request, the agent-attempt context, the route's session check, and a tool's entry check share identical caller-session and attempt reads (keyed by database handle and session RLS actor; re-checks after a handler's first await read fresh). Static tool inputs are built once per process, and each tool's described-input check runs once per process instead of converting every schema to JSON Schema on every request.
+- a651f55: Complete the reviewed Gmail tool surface under the existing OAuth scopes: exact attachment and original message downloads, individual message search, draft updates/deletion, label lifecycle, atomic and batch organization, trash/restore, imports, history, optional operator-configured watches and settings reads. Bind draft sends and workspace-file attachment inputs to reviewed hashes, preserve MIME metadata and report bounded body projections explicitly.
+- aa41b15: Connect personal Gmail accounts through Google's regular OAuth and Gmail API without depending on the hosted MCP preview. Require the configured Google Web client, the reviewed Gmail scopes, a fresh offline grant and successful mailbox verification before saving a connection. Failed reconnects preserve the previous account, and historical workspace-owned Gmail grants remain available for cleanup.
+- 3cc26b5: Identify the default pinned HTTP client with a User-Agent, preserve caller overrides, and show retryable MCP sign-in discovery failures in connection setup.
+- 81a5d9d: Retain bounded, redacted diagnostic evidence for unexpected first-party session creation, messaging and steering failures. Correlate the failed-tool receipt and optional protected export using one diagnostic ID and the signed caller attempt; preserve original error classifications and mutation uncertainty even when diagnostics are disabled or unavailable.
+- 0b6636f: Verify Linux/macOS installer signatures when the system crypto tool lacks Ed25519, using an authenticated temporary minisign verifier while preserving the pinned release key and checksum gate.
+- 2a5ab6f: Defer SSE frame encoding until queue capacity is available, avoiding an extra byte buffer for blocked or stopped writes.
+- Updated dependencies [a0f5728]
+- Updated dependencies [aa41b15]
+- Updated dependencies [981ba72]
+- Updated dependencies [3be5798]
+- Updated dependencies [af57cf9]
+- Updated dependencies [6ca71f6]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [fe2aa8c]
+- Updated dependencies [e6036b3]
+- Updated dependencies [b710f5e]
+- Updated dependencies [1b482bf]
+- Updated dependencies [a651f55]
+- Updated dependencies [e103581]
+- Updated dependencies [aa41b15]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3cc26b5]
+- Updated dependencies [3395acc]
+- Updated dependencies [f38dac6]
+- Updated dependencies [18216d2]
+- Updated dependencies [18216d2]
+- Updated dependencies [5b809eb]
+- Updated dependencies [81a5d9d]
+- Updated dependencies [aa41b15]
+- Updated dependencies [7705d65]
+- Updated dependencies [746464c]
+- Updated dependencies [2a47520]
+- Updated dependencies [ac20181]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [53b2c83]
+- Updated dependencies [6fc73e3]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [b32b5f6]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+- Updated dependencies [8f8629d]
+- Updated dependencies [f23caa9]
+- Updated dependencies [44d5ee5]
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@5.8.0
+  - @opengeni/core@5.3.0
+  - @opengeni/config@3.4.0
+  - @opengeni/runtime@4.8.0
+  - @opengeni/tool-gateway@0.1.20
+  - @opengeni/network@0.3.2
+  - @opengeni/observability@0.8.39
+  - @opengeni/capabilities@0.3.7
+  - @opengeni/documents@0.8.42
+  - @opengeni/events@0.4.40
+  - @opengeni/artifact-tool@0.3.39
+  - @opengeni/codemode@0.7.1
+  - @opengeni/codex@0.2.33
+  - @opengeni/github@0.8.4
+  - @opengeni/interaction@0.4.47
+  - @opengeni/storage@0.2.140
+  - @opengeni/xai-subscription@0.1.6
+
+## 5.5.0
+
+### Minor Changes
+
+- 697263e: The web client beacon (`POST /v1/client-errors`) now also admits closed, content-free operational signals discriminated by `signal`: key requests that failed before any HTTP response (`opengeni_client_request_failures_total{action,reason}`), live-stream health (`opengeni_client_stream_events_total{stream,event}`), and web vitals (`opengeni_client_web_vital{metric,page}` histogram). Error reports are unchanged.
+
+### Patch Changes
+
+- c13389d: Return an actionable 409 rather than an internal error when retained or linked
+  records prevent workspace deletion. Preserve the failed transaction's rollback,
+  audit history, existing authorization and quiescence fences, and do not dispatch
+  external schedule cleanup. Document that no workspace retirement endpoint exists.
+- 521ae01: Bound session stream replay pages by bytes before transferring event payloads. Stop interactive page sizing at the byte target and preserve complete oversized events, durable cursors, reconnect replay and tenant isolation.
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+- c60d38a: Include normalized effective OpenAPI operation destinations and the primary manifest URL in immutable revision identity. URL rotation no longer reuses a document-only revision, while equivalent destinations still deduplicate and existing immutable versions and installation fences remain intact.
+
+  Classify known credential Connection rejection at install-time revalidation separately from internal failures. Missing or inaccessible references return 404, and inactive or incompatible references return 422 without weakening ownership, scope, or optimistic-concurrency checks.
+
+- d1bb05c: Default omitted latency mode to standard for fresh agent-created sessions while preserving model and reasoning inheritance. Explicit faster modes retain model validation, and creation replay and later messages preserve accepted settings.
+- 351cd79: Batch workspace model catalog provider reads within each request. Reuse authorized connection metadata and combine custom-model queries while preserving tenant isolation, provider limits, credential readiness and model selection.
+- cbb3e36: A send that names a model no longer in the live catalog now returns its 422 with `details: { code: "model_unavailable", modelId }` (the status, code and message are unchanged). `@opengeni/react` maps it to plain composer copy, offers Edit message instead of a Retry that cannot succeed, and exports `COMPOSER_MODEL_UNAVAILABLE_MESSAGE` and `isModelUnavailableSubmissionError`.
+- fcaf518: Settle browser and computer creation failures that occur before controller dispatch, while preserving dispatched operations and accepted controller bindings for reconciliation.
+- Updated dependencies [12ef019]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [09289aa]
+- Updated dependencies [521ae01]
+- Updated dependencies [1ac93e3]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [b052ad3]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [c60d38a]
+- Updated dependencies [d1bb05c]
+- Updated dependencies [4a63d4f]
+- Updated dependencies [946f6c3]
+- Updated dependencies [7f70820]
+- Updated dependencies [fb55322]
+- Updated dependencies [7dc8eaf]
+- Updated dependencies [82b6358]
+- Updated dependencies [9b70b4a]
+- Updated dependencies [f146f78]
+- Updated dependencies [1f3e11a]
+- Updated dependencies [91cc03e]
+- Updated dependencies [3b7496e]
+- Updated dependencies [c755ff4]
+- Updated dependencies [e9b9730]
+- Updated dependencies [1133a8e]
+- Updated dependencies [351cd79]
+- Updated dependencies [131eda2]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [328eaaa]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [351cd79]
+- Updated dependencies [fcaf518]
+- Updated dependencies [404854d]
+- Updated dependencies [70af8bb]
+- Updated dependencies [103faae]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/db@6.6.0
+  - @opengeni/runtime@4.7.0
+  - @opengeni/codemode@0.7.0
+  - @opengeni/core@5.2.0
+  - @opengeni/config@3.3.0
+  - @opengeni/capabilities@0.3.6
+  - @opengeni/observability@0.8.38
+  - @opengeni/artifact-tool@0.3.38
+  - @opengeni/codex@0.2.32
+  - @opengeni/documents@0.8.41
+  - @opengeni/events@0.4.39
+  - @opengeni/github@0.8.3
+  - @opengeni/interaction@0.4.46
+  - @opengeni/storage@0.2.139
+  - @opengeni/tool-gateway@0.1.19
+
+## 5.4.1
+
+### Patch Changes
+
+- Updated dependencies [3a688de]
+- Updated dependencies [5e1175d]
+  - @opengeni/runtime@4.6.0
+  - @opengeni/db@6.5.0
+  - @opengeni/codemode@0.6.8
+  - @opengeni/core@5.1.1
+  - @opengeni/documents@0.8.40
+  - @opengeni/events@0.4.38
+
+## 5.4.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- 4762e1a: Collect product usage analytics server-side, independent of browser analytics consent.
+
+  Record throttled, batched presence for managed browser sessions and publish `opengeni_active_users{window}` from control workers. Add the `user.active`, `credits.granted` (grant class) and `connection.revoked` (provider class) lifecycle facts, live `opengeni_sessions_created_total{surface,created_by_kind,root}` and `opengeni_user_messages_total{surface}` counters, and database-derived `opengeni_credit_grants_total{grant_class}` / `opengeni_credit_granted_micros_total{grant_class}` that include trigger-written trial grants.
+
+  Add an idempotent operator backfill (`bun run db:backfill-lifecycle-facts`) for lifecycle facts captured before the first lifecycle consumer registered.
+
+  Give the logical workspace capture its own `opengeni_workspace_capture_revision_duration_seconds` histogram so it no longer collides with the physical capture histogram's label set in one worker registry.
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/core@5.1.0
+  - @opengeni/db@6.4.0
+  - @opengeni/runtime@4.5.0
+  - @opengeni/artifact-tool@0.3.37
+  - @opengeni/codemode@0.6.7
+  - @opengeni/codex@0.2.31
+  - @opengeni/config@3.2.1
+  - @opengeni/documents@0.8.39
+  - @opengeni/events@0.4.37
+  - @opengeni/github@0.8.2
+  - @opengeni/interaction@0.4.45
+  - @opengeni/observability@0.8.37
+  - @opengeni/storage@0.2.138
+  - @opengeni/tool-gateway@0.1.18
+
+## 5.3.0
+
+### Minor Changes
+
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+- b45621d: Fix embedded artifact viewing for external users by resolving fresh effective workspace grants, checking exact session associations on every request, and binding live editor tickets to their source session. Keep editor authority and reconnect reads current when clients or sessions change, and allow retrying temporary viewer configuration failures.
+
+  Source-bound editor sockets renew a 15-second lease through the host proxy, rechecking product authorization; existing unbound console sockets are unchanged. Compact authenticated source tickets remain within the existing wire limit.
+
+  Add server-only `@opengeni/sdk/session-proxy` helpers. Stream embedded Site HTML with backpressure and cancellation and enforce a 25 MiB actual-byte ceiling; oversized streams fail with `site_html_too_large`. Preserve the console's existing shared artifact components and list behavior.
+
+  Allow PostgreSQL test fixtures to use an explicitly configured native server while preserving restricted-role and FORCE-RLS verification.
+
+### Patch Changes
+
+- 0bbe2e7: `installApiIntegration` accepts `autoApprovedTools`: selected write or destructive tools of a custom or curated API Integration (a curated definition may forbid specific operations) that run without per-call human approval, so scheduled and other unattended runs no longer wait forever on an approval. It needs `capabilities:manage`, passes organization integration policy again, and is declarative (omit it and every write tool asks again). Connector tool-permission and session approval-policy errors for API Integration ids now point to this setting.
+- 55f1cdd: Checkpoint managed browsers before provider expiry through existing encrypted
+  suspension receipts. Exact lease and controller claims fence capture, publication
+  and cleanup; retries retain one operation and never recapture a committed artifact.
+  Share browser authority derivation through leaf exports used by API and worker.
+- 45d1301: Share the complete default model and reasoning-effort fallback between client config and omitted-model session creation when the deployment default is stably blocked.
+
+  Preserve older nonempty allowedModels parsers when no model is admitted by returning one explicit unavailable legacyModelFallback hint, while keeping models as the exact admitted set and leaving creation gates unchanged.
+
+  Keep cookie-only managed browser bootstrap unscoped so account reconciliation can load before actor-fenced workspace reads.
+
+- 45d1301: Resolve caller-scoped client model lists and fresh session creation through the same workspace selection rules, including credential readiness, policy, and connection model permissions. Hide unavailable subscription models from public bootstrap, support an explicit workspace selector in client config, and allow an empty selectable model list.
+- 04640d1: Use live Codex account catalogs for browser and agent model choices and automatic new-session defaults. Require exact model support on every permitted serving account, refresh expired credentials, and preserve provider unsupported-model explanations through the OpenAI SDK error envelope.
+- b45621d: Revalidate live editor source-session authority in the mutation commit transaction, and enforce source-bound socket lease expiry independently of stalled authorization. Publish the session-proxy JavaScript entry and negotiate artifact support without breaking conversation bootstrap against older APIs.
+- c7bb6f1: Stop deterministic goal retries for terminal or unavailable-model sessions,
+  preserve frozen connector authority through voice delegation and handoff, and
+  request advertised OAuth offline access for generic native MCP connections.
+  Distinguish MCP teardown warnings from connection failures in safe telemetry.
+
+  Freeze initial-turn connector accounts against executable workspace defaults,
+  matching follow-up admission while preserving explicit selections and exclusions.
+
+  Validate scheduled generated sessions against the full accepted agent
+  configuration and instruction alias during queued recovery.
+
+- 0bbe2e7: `previewApiIntegration` and `installApiIntegration` accept an inline OpenAPI document: `source: { kind: "openapi_document", sourceKey, document, baseUrl? }` (JSON or YAML, at most 8 MiB). `sourceKey` is the stable installation identity, server URLs must be absolute (or `baseUrl` given), and the preview echoes only the document's SHA-256. Calls still follow the deployment network policy, so a product on a private or loopback address still needs a public tunnel unless the operator enables private targets.
+- 4566d7a: Filter browser and desktop inventories by the original chat's read permissions for every caller. Related-chat associations no longer make otherwise inaccessible resources discoverable.
+- dd6795c: Explain known session-creation refusals for unavailable accepted workspace connections as non-retryable errors. Preserve authorization checks and original driver evidence without returning query text, credentials, or account details.
+- 45d1301: Use the same stable model admission predicate for client config and direct session creation. Preserve creation during transient provider health or deployment credential-resolver uncertainty, while exposing optional per-model availability hints for degraded UI display.
+- 0bbe2e7: `api_key` Connections now must store `{ headers: {...} }` or `{ placements: [...] }`; create and update reject any other shape (such as a bare `{ apiKey }`) with 422 instead of accepting it and failing every tool call later. The SDK types this as `ApiKeyConnectionCredential`. `previewApiIntegration` warns when the selected Connection does not place its credential where the API description declares.
+- Updated dependencies [e01fc8e]
+- Updated dependencies [a6ff780]
+- Updated dependencies [6a97313]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [55f1cdd]
+- Updated dependencies [6a97313]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [c8830e0]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [c7bb6f1]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [79f4635]
+- Updated dependencies [46e3a8e]
+- Updated dependencies [f26c4f5]
+- Updated dependencies [3545ca3]
+- Updated dependencies [665e849]
+- Updated dependencies [665e849]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [dd6795c]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [6a97313]
+  - @opengeni/db@6.3.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/agent-proto@0.6.1
+  - @opengeni/core@5.0.1
+  - @opengeni/interaction@0.4.44
+  - @opengeni/capabilities@0.3.5
+  - @opengeni/runtime@4.4.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/config@3.2.0
+  - @opengeni/xai-subscription@0.1.5
+  - @opengeni/documents@0.8.38
+  - @opengeni/events@0.4.36
+  - @opengeni/codemode@0.6.6
+  - @opengeni/artifact-tool@0.3.36
+  - @opengeni/github@0.8.1
+  - @opengeni/observability@0.8.36
+  - @opengeni/storage@0.2.137
+  - @opengeni/tool-gateway@0.1.17
+
 ## 5.2.0
 
 ### Minor Changes

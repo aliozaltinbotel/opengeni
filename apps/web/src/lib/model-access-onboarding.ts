@@ -36,10 +36,17 @@ export type ConnectedModelFamily =
   | "supergrok"
   | "vercel_gateway"
   | "openrouter"
-  | "credits";
+  | "opper"
+  | "credits"
+  | "openai"
+  | "azure_openai";
 
 function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): boolean {
   switch (family) {
+    case "openai":
+      return row.provider.startsWith("workspace-openai-");
+    case "azure_openai":
+      return row.provider.startsWith("workspace-azure-openai-");
     case "codex":
       return row.billingClass === "codex_subscription";
     case "supergrok":
@@ -56,8 +63,13 @@ function rowMatchesFamily(row: PickerModelRow, family: ConnectedModelFamily): bo
         (row.billingClass === "byok" || row.billingClass === "organization_byok") &&
         (row.provider === "workspace-openrouter" || row.provider === "organization-openrouter")
       );
+    case "opper":
+      return (
+        (row.billingClass === "byok" || row.billingClass === "organization_byok") &&
+        (row.provider === "workspace-opper" || row.provider === "organization-opper")
+      );
     case "credits":
-      return row.catalog.cost === "credits";
+      return row.catalog.cost === "credits" && row.catalog.creditFunding !== "unavailable";
   }
 }
 
@@ -117,9 +129,31 @@ export async function applyConnectedModelToNewSessionDraft(
   client: OpenGeniBrowserClient,
   workspaceId: string,
   family?: ConnectedModelFamily,
+  preferredModelId?: string,
 ): Promise<{ id: string; label: string } | null> {
   const catalog = await client.getWorkspaceModelCatalog(workspaceId);
-  const modelId = preferredConnectedModelId(catalog.models, family);
+  const creditDefault =
+    family === "credits"
+      ? [catalog.defaultSelection, catalog.creditsSelection].find(
+          (selection) =>
+            selection &&
+            projectPickerRows(catalog.models).some(
+              (row) =>
+                row.id === selection.model && row.selectable && rowMatchesFamily(row, "credits"),
+            ),
+        )
+      : undefined;
+  const modelId = preferredModelId
+    ? (projectPickerRows(catalog.models).find(
+        (row) =>
+          row.id === preferredModelId &&
+          row.selectable &&
+          (family !== "credits" || rowMatchesFamily(row, "credits")),
+      )?.id ??
+      (family === "credits"
+        ? (creditDefault?.model ?? preferredConnectedModelId(catalog.models, family))
+        : null))
+    : (creditDefault?.model ?? preferredConnectedModelId(catalog.models, family));
   if (!modelId) return null;
   const model = catalog.models.find((candidate) => candidate.id === modelId);
   const draft = await client.getNewSessionDraft(workspaceId);
@@ -129,7 +163,12 @@ export async function applyConnectedModelToNewSessionDraft(
     tools: draft.tools,
     toolsProvided: draft.toolsProvided,
     model: modelId,
-    reasoningEffort: model ? defaultEffortForModel(model) : "low",
+    reasoningEffort:
+      creditDefault?.model === modelId
+        ? creditDefault.reasoningEffort
+        : model
+          ? defaultEffortForModel(model)
+          : "low",
     latencyMode: draft.latencyMode,
     // Connecting a service is a deliberate choice of that service's model.
     modelProvided: true,

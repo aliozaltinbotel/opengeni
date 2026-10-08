@@ -5,16 +5,15 @@
 // the Enter-save / Esc-cancel / blur-save / empty-or-unchanged-no-op behaviour
 // lives in exactly one place.
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  deriveAutomaticSessionTitlePreview,
-  deriveSessionDisplayTitle,
-  sessionTitleIsPending,
-} from "@opengeni/sdk";
 
 import type { Session } from "@/types";
-
-/** The maximum length a session title may be renamed to. */
-export const SESSION_TITLE_MAX_LENGTH = 200;
+import type { RailSession } from "./session-list-entry";
+import {
+  resolveRenameSubmission,
+  SESSION_TITLE_MAX_LENGTH,
+  sessionDisplayTitle,
+  sessionRenameSeed,
+} from "@opengeni/react/session-list-model";
 
 /**
  * The title shown for a session: durable agent/user metadata once available,
@@ -22,40 +21,17 @@ export const SESSION_TITLE_MAX_LENGTH = 200;
  * pending. Mirrors the rail list and the header so every surface reads
  * identically.
  */
-export function sessionDisplayTitle(session: Session): string {
-  return deriveSessionDisplayTitle(session);
-}
+export { sessionDisplayTitle };
 
 /**
- * The value the editor seeds from when entering edit mode. A safe provisional
- * prompt preview is editable because it is also what the user sees; the
- * UUID-derived reference remains an empty draft rather than becoming an
- * accidental rename.
+ * The value the editor seeds from when entering edit mode; see the shared
+ * sessionRenameSeed. Rail entries carry a precomputed seed.
  */
-export function renameSeedValue(session: Session): string {
-  if (!sessionTitleIsPending(session)) {
-    return session.title?.trim() || "";
-  }
-  return deriveAutomaticSessionTitlePreview(session.initialMessage) ?? "";
+export function renameSeedValue(session: RailSession): string {
+  return sessionRenameSeed(session);
 }
 
-/**
- * Resolve a submitted draft against the current display title. Returns the
- * trimmed title to persist, or `null` when the edit is a no-op (empty,
- * unchanged from what is already shown, or still equal to the value that
- * seeded this edit) and should simply cancel.
- */
-export function resolveRenameSubmission(
-  draft: string,
-  display: string,
-  editSeed?: string,
-): string | null {
-  const next = draft.trim();
-  if (!next || next === display || (editSeed !== undefined && next === editSeed.trim())) {
-    return null;
-  }
-  return next;
-}
+export { resolveRenameSubmission, SESSION_TITLE_MAX_LENGTH };
 
 type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promise<Session | null>;
 
@@ -69,7 +45,7 @@ type RenameFn = (workspaceId: string, sessionId: string, title: string) => Promi
  * and tests can assert — the persist semantics without a DOM.
  */
 export async function performRename(
-  session: Session,
+  session: RailSession,
   draft: string,
   onRename: RenameFn,
 ): Promise<Session | null> {
@@ -104,7 +80,7 @@ export interface InlineRename {
  * the commit/cancel logic; the host renders the input (and whatever trigger
  * opens it) and wires the handlers. Used by the header editor and the rail row.
  */
-export function useInlineRename(session: Session, onRename: RenameFn): InlineRename {
+export function useInlineRename(session: RailSession, onRename: RenameFn): InlineRename {
   const display = sessionDisplayTitle(session);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(display);

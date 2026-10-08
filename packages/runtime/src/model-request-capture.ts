@@ -219,6 +219,27 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
   }
 }
 
+/** Awaited producer-side authority, separate from observational request capture. */
+export type ModelCallLifecycle = {
+  beforeModelRequest?: () => Promise<void>;
+  /** Register before yielding so the next model entry waits for consumer settlement. */
+  onModelResponse?: (event: StreamEvent) => Promise<void>;
+};
+const modelCallLifecycle = new AsyncLocalStorage<ModelCallLifecycle>();
+
+export function withModelCallLifecycle<T>(lifecycle: ModelCallLifecycle, fn: () => T): T {
+  return modelCallLifecycle.run(lifecycle, fn);
+}
+
+export async function beforeModelRequest(): Promise<void> {
+  await modelCallLifecycle.getStore()?.beforeModelRequest?.();
+}
+
+export function modelResponseSettlement(event: StreamEvent): Promise<void> | undefined {
+  if (event.type !== "response_done") return undefined;
+  return modelCallLifecycle.getStore()?.onModelResponse?.(event);
+}
+
 /** The same agent can re-enter runAgentStream after in-activity compaction. */
 export function nextModelContextCaptureIndex(agent: object): number {
   const index = (captureIndices.get(agent) ?? 0) + 1;
@@ -342,6 +363,7 @@ export class ModelRequestCaptureModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest) {
+    await beforeModelRequest();
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     request = this.prepareRequest?.(request) ?? request;
@@ -358,6 +380,7 @@ export class ModelRequestCaptureModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
+    await beforeModelRequest();
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     request = this.prepareRequest?.(request) ?? request;
@@ -380,6 +403,9 @@ export class ModelRequestCaptureModel implements Model {
           bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[],this.projectOutput);
           await capture?.callCompleted?.(sourceKey,typeof response.id==="string"?response.id:null,response,sourceState(capture!).restoreHistorySources);
         }
+        // Upstream model-call admission: the next model entry waits for this response's settlement.
+        const settlement = modelResponseSettlement(event);
+        void settlement?.catch(() => undefined);
         yield event;
       }
     } finally {
@@ -394,7 +420,7 @@ export class ModelRequestCaptureModel implements Model {
 
 /**
  * Wrap every name-resolved model so Debug capture sees the ModelRequest the
- * provider client actually receives. OpenGeni agents almost always set
+ * provider client actually receives. Opengeni agents almost always set
  * `agent.model` to a string; wrapping only `agent.model` is a no-op there.
  */
 export class ModelRequestCaptureProvider implements ModelProvider {

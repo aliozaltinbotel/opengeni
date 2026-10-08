@@ -37,7 +37,7 @@ function automaticDefaultNote(source: DefaultModelSelectionSource | undefined): 
 /**
  * Picker rows for the default-model row. The shared picker only lists models
  * whose credentials are ready, but the current default may be one that can't
- * run yet (e.g. OpenGeni credits without a balance). Keep that real catalog
+ * run yet (e.g. Opengeni credits without a balance). Keep that real catalog
  * entry visible as an unselectable row so the trigger shows its label and
  * payment source instead of a raw id.
  */
@@ -90,6 +90,11 @@ export function defaultModelSummary(
 export function DefaultSessionModelPreferenceRow(props: {
   workspaceId: string;
   canManage: boolean;
+  /**
+   * Who pays for the default, in words: "paid with Acme's Opengeni credits".
+   * The trigger already names the model and its payment source; this says whose.
+   */
+  describePayer?: ((model: WorkspaceModelCatalogModel) => string) | undefined;
 }) {
   const context = useAppContext();
   const catalog = useWorkspaceModelCatalog(props.workspaceId);
@@ -153,6 +158,11 @@ export function DefaultSessionModelPreferenceRow(props: {
   }
 
   const selected = pickerRows.find((row) => row.id === draft.model) ?? null;
+  const selectedModel = catalog.models.find((model) => model.id === draft.model) ?? null;
+  const payer = selectedModel && props.describePayer ? props.describePayer(selectedModel) : null;
+  const starts = payer
+    ? `New chats and schedules start with this model, ${payer}.`
+    : "New chats and schedules start with this model.";
   const cantRun =
     catalog.loading || catalog.error
       ? null
@@ -170,16 +180,15 @@ export function DefaultSessionModelPreferenceRow(props: {
     <SettingRow
       label="Default model"
       controlWidth="auto"
-      description={
-        configured
-          ? "New chats and schedules start with this model."
-          : `New chats and schedules start with this model. ${automaticDefaultNote(automatic?.source)}`
-      }
+      description={configured ? starts : `${starts} ${automaticDefaultNote(automatic?.source)}`}
       error={cantRun}
       hint={saving ? "Saving…" : undefined}
       control={
         <ModelPicker
           rows={pickerRows}
+          onOpenChange={(open) => {
+            if (open) void catalog.refresh();
+          }}
           model={draft.model}
           effort={draft.reasoningEffort}
           latencyMode="standard"
@@ -188,6 +197,8 @@ export function DefaultSessionModelPreferenceRow(props: {
           loading={catalog.loading}
           error={catalog.error}
           messages={{ label: "Default model and reasoning" }}
+          // Models settings keeps its scope-aware presentation.
+          collapseScopes={false}
           triggerStyle="field"
           triggerMeta={selected ? payerShortLabel(selected) : null}
           // The secondary button's exact look, so every control on the row matches.

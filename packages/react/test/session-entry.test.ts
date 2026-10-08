@@ -53,7 +53,13 @@ describe("session-only entry", () => {
     expect(visited.has(join(packageRoot, "src/session-context.ts"))).toBe(true);
     expect([...visited].some((file) => file.includes("/src/components/"))).toBe(false);
     expect([...visited].some((file) => file.includes("/src/commands/"))).toBe(false);
-    expect([...thirdParty].sort()).toEqual(["@opengeni/sdk", "react"]);
+    // The synchronous refusal presenter is an explicit schema-runtime-free
+    // SDK leaf, not permission to import contracts/server/workbench barrels.
+    expect([...thirdParty].sort()).toEqual([
+      "@opengeni/sdk",
+      "@opengeni/sdk/allowance-refusal",
+      "react",
+    ]);
     expect(visited.size).toBeGreaterThan(5);
   });
 
@@ -77,7 +83,12 @@ describe("session-only entry", () => {
         minify: true,
         rollupOptions: {
           input: join(import.meta.dir, "fixtures/session-consumer.ts"),
-          external: ["react", "react/jsx-runtime", "@opengeni/sdk"],
+          external: [
+            "react",
+            "react/jsx-runtime",
+            "@opengeni/sdk",
+            "@opengeni/sdk/allowance-refusal",
+          ],
         },
       },
     });
@@ -102,7 +113,10 @@ describe("session-only entry", () => {
     // Vite transforms the optional resolver even when this fixture tree-shakes
     // its invocation; production browser tests verify its on-click chunk load.
     expect(reactSources.some((id) => id.endsWith("/src/hooks/latest-question.ts"))).toBe(true);
-    expect(reactSources.length).toBe(23);
+    expect(reactSources.some((id) => id.endsWith("/src/lib/error-message.ts"))).toBe(true);
+    // Pure provider-recovery copy used by failure presentation; no React graph.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/provider-recovery.ts"))).toBe(true);
+    expect(reactSources.length).toBe(25);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

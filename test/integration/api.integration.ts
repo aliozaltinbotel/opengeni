@@ -1,3 +1,4 @@
+import { loadDirectModelProviderConnection } from "@opengeni/db";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { generateKeyPairSync } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -27,6 +28,7 @@ import {
   getBillingBalance,
   getSession,
   getScheduledTask,
+  getScheduledTaskIncludingDeleted,
   getSessionGoal,
   getVariableSetValuesForRun,
   listGitHubInstallationAccessForWorkspace,
@@ -62,9 +64,12 @@ import {
   type Permission,
   type SessionEvent,
   type SessionStatus,
+  type ScheduledTask,
 } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
+import { createTemporalScheduleSynchronizer } from "../../apps/api/src/temporal-schedule-sync";
+import { drainTemporalScheduleCleanupOutbox } from "../../apps/api/src/temporal-schedule-cleanup";
 import {
   checkoutSessionEvent,
   foreignPaymentCheckoutSession,
@@ -166,6 +171,164 @@ describe("API component integration", () => {
     expect(response.headers.get("access-control-allow-headers")?.toLowerCase()).toContain(
       "x-opengeni-subject",
     );
+  });
+
+  test("customer OpenAI and Azure keys are encrypted, externally billed, isolated, and revoked without fallback", async () => {
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      environmentsEncryptionKey: environmentsTestKey,
+    });
+    let probeStatus = 200;
+    const app = createApp({
+      settings,
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      directModelFetch: (async () =>
+        Response.json(
+          probeStatus === 200
+            ? { status: "completed" }
+            : { error: { message: "customer-test-secret" } },
+          { status: probeStatus },
+        )) as typeof fetch,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    for (const provider of ["openai", "azure_openai"] as const) {
+      const payload = {
+        providerDomain: provider === "openai" ? "api.openai.com" : "customer.openai.azure.com",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "customer-test-secret" },
+        grantedScopes: [],
+        operationId: crypto.randomUUID(),
+        verifyModelAccess: true,
+        metadata: {
+          credentialRole: `direct_${provider}`,
+          directModelProvider: {
+            provider,
+            model: "customer-model",
+            ...(provider === "azure_openai"
+              ? { endpoint: "https://customer.openai.azure.com" }
+              : {}),
+          },
+        },
+      };
+      probeStatus = 401;
+      const rejected = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(rejected.status).toBe(422);
+      expect(await rejected.text()).not.toContain("customer-test-secret");
+      const absent = await app.request(
+        workspacePath(workspaceId, `/connections/operations/${payload.operationId}`),
+      );
+      expect(absent.status).toBe(404);
+      probeStatus = 200;
+      const create = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (create.status !== 201)
+        throw new Error(`Customer connection failed: ${create.status} ${await create.text()}`);
+      expect(create.status).toBe(201);
+      const connection = ((await create.json()) as { connection: { id: string } }).connection;
+      const replay = await app.request(workspacePath(workspaceId, "/connections"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      expect(replay.status).toBe(201);
+      expect(((await replay.json()) as { connection: { id: string } }).connection.id).toBe(
+        connection.id,
+      );
+      const catalog = await app.request(workspacePath(workspaceId, "/model-catalog"));
+      const catalogBody = (await catalog.json()) as {
+        models: Array<{
+          id: string;
+          cost: string;
+          billing: unknown;
+          availability: { selectable: boolean };
+        }>;
+      };
+      const model = catalogBody.models.find((row) => row.id.includes(connection.id))!;
+      expect(model).toBeDefined();
+      expect(model.cost).toBe("workspace");
+      expect(model.billing).toEqual({ upstreamPayer: "workspace", metering: "external" });
+      expect(model.availability.selectable).toBe(true);
+      expect(JSON.stringify(catalogBody)).not.toContain("customer-test-secret");
+      const loaded = await loadDirectModelProviderConnection(
+        dbClient.db,
+        settings,
+        workspaceId,
+        model.id,
+      );
+      expect(loaded?.apiKey).toBe("customer-test-secret");
+      const otherWorkspace = await bootstrapWorkspace(dbClient.db, {
+        accountExternalSource: "test:customer-key-isolation",
+        accountExternalId: crypto.randomUUID(),
+        accountName: "Customer key isolation",
+        workspaceExternalSource: "test:customer-key-isolation",
+        workspaceExternalId: crypto.randomUUID(),
+        workspaceName: "Other workspace",
+        subjectId: "test:customer-key-isolation",
+      });
+      const otherWorkspaceId = otherWorkspace.defaultWorkspaceId!;
+      await expect(
+        loadDirectModelProviderConnection(dbClient.db, settings, otherWorkspaceId, model.id),
+      ).rejects.toThrow("no longer available");
+      const update = await app.request(
+        workspacePath(workspaceId, `/connections/${connection.id}`),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            metadata: {
+              credentialRole: "direct_openai",
+              directModelProvider: { provider: "openai", model: "other-model" },
+            },
+          }),
+        },
+      );
+      expect(update.status).toBe(422);
+      const start = await app.request(workspacePath(workspaceId, "/sessions"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ initialMessage: "customer model test", model: model.id }),
+      });
+      expect(start.status).toBe(202);
+      const remove = await app.request(
+        workspacePath(workspaceId, `/connections/${connection.id}`),
+        { method: "DELETE" },
+      );
+      expect(remove.status).toBe(200);
+      await expect(
+        loadDirectModelProviderConnection(dbClient.db, settings, workspaceId, model.id),
+      ).rejects.toThrow("no longer available");
+    }
+    const invalid = await app.request(workspacePath(workspaceId, "/connections"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        providerDomain: "evil.test",
+        kind: "api_key",
+        subjectId: null,
+        credential: { apiKey: "private-key" },
+        grantedScopes: [],
+        operationId: crypto.randomUUID(),
+        metadata: {
+          credentialRole: "direct_azure_openai",
+          directModelProvider: {
+            provider: "azure_openai",
+            model: "model",
+            endpoint: "https://evil.test",
+          },
+        },
+      }),
+    });
+    expect(invalid.status).toBe(422);
   });
 
   test("creates sessions, persists initial events, and starts workflow", async () => {
@@ -666,7 +829,7 @@ describe("API component integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: "http://127.0.0.1:65530/v1/workspaces/{workspaceId}/mcp",
             cacheToolsList: true,
           },
@@ -728,6 +891,48 @@ describe("API component integration", () => {
     expect(((await paused.json()) as { status: string }).status).toBe("paused");
 
     const wakeupsBeforeResume = workflow.wakeups.length;
+    const pausedGoal = await getSessionGoal(dbClient.db, workspaceId, session.id);
+    const pausedEvents = await listSessionEvents(dbClient.db, workspaceId, session.id);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'removed/fixture-model' where id = ${session.id}`),
+    );
+    const blockedResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedResume.status).toBe(422);
+    expect(await blockedResume.text()).toContain("Choose an available model");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'scripted-model' where id = ${session.id}`),
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'fast' where id = ${session.id}`),
+    );
+    const blockedLatencyResume = await app.request(
+      workspacePath(workspaceId, `/sessions/${session.id}/goal`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({ status: "active" }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(blockedLatencyResume.status).toBe(422);
+    expect(await blockedLatencyResume.text()).toContain("latency mode");
+    expect(await getSessionGoal(dbClient.db, workspaceId, session.id)).toEqual(pausedGoal);
+    expect(await listSessionEvents(dbClient.db, workspaceId, session.id)).toEqual(pausedEvents);
+    expect(workflow.wakeups.length).toBe(wakeupsBeforeResume);
+    await withWorkspaceSessionActivityRls(dbClient.db, workspaceId, (tx) =>
+      tx.execute(sql`update sessions set latency_mode = 'standard' where id = ${session.id}`),
+    );
     const resumed = await app.request(workspacePath(workspaceId, `/sessions/${session.id}/goal`), {
       method: "PATCH",
       body: JSON.stringify({ status: "active" }),
@@ -1100,6 +1305,27 @@ describe("API component integration", () => {
       outcome: "applied",
     });
 
+    const pausedBeforeResume = await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id);
+    const eventsBeforeResume = await listSessionEvents(
+      dbClient.db,
+      baseGrant.workspaceId,
+      session.id,
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, baseGrant.workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'removed/fixture-model' where id = ${session.id}`),
+    );
+    await expect(callMcpTool(mcp, "goal_resume", {})).rejects.toThrow("Choose an available model");
+    expect(await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id)).toEqual(
+      pausedBeforeResume,
+    );
+    expect(await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id)).toEqual(
+      eventsBeforeResume,
+    );
+    await withWorkspaceSessionActivityRls(dbClient.db, baseGrant.workspaceId, (tx) =>
+      tx.execute(sql`
+      update sessions set model = 'scripted-model' where id = ${session.id}`),
+    );
     const resumedGoal = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
     expect(resumedGoal).toMatchObject({ changed: true, resource: { state: "active" } });
     const alreadyActive = await callMcpTool<McpMutationReceiptType>(mcp, "goal_resume", {});
@@ -1524,7 +1750,7 @@ describe("API component integration", () => {
           mcpServers: [
             {
               id: "opengeni",
-              name: "OpenGeni",
+              name: "Opengeni",
               url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
               timeoutMs: undefined,
               cacheToolsList: false,
@@ -1812,7 +2038,9 @@ describe("API component integration", () => {
       }),
     });
     expect(rejectedTurn.status).toBe(402);
-    expect(await rejectedTurn.text()).toContain("insufficient OpenGeni credits");
+    expect(await rejectedTurn.json()).toMatchObject({
+      error: { status: 402, code: "payment_required", retryable: false },
+    });
     const preserved = await app.request(
       workspacePath(ownerWorkspaceId, `/files/${upload.fileId}`),
       {
@@ -1992,7 +2220,9 @@ describe("API component integration", () => {
       },
     );
     expect(triggered.status).toBe(402);
-    expect(await triggered.text()).toContain("insufficient OpenGeni credits");
+    expect(await triggered.json()).toMatchObject({
+      error: { status: 402, code: "payment_required", retryable: false },
+    });
   });
 
   test("static usage limits enforce operator caps without Better Auth or Stripe", async () => {
@@ -2331,6 +2561,168 @@ describe("API component integration", () => {
     expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(20_000_000);
   });
 
+  test("Stripe promotion codes credit the full package and reverse discounted purchases", async () => {
+    const webhookSecret = "whsec_test_coupon_secret";
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        billingMode: "stripe",
+        betterAuthSecret: "test-better-auth-secret-32-bytes",
+        publicBaseUrl: "http://127.0.0.1:3000",
+        stripeSecretKey: "sk_test_fake",
+        stripeWebhookSecret: webhookSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const context = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:stripe-coupon",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Stripe coupon test",
+      workspaceExternalSource: "test:stripe-coupon",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Stripe coupon workspace",
+      subjectId: "test:stripe-coupon",
+    });
+    const accountId = context.defaultAccountId!;
+    const discountedMetadata = {
+      opengeni_account_id: accountId,
+      opengeni_credit_micros: "25000000",
+      opengeni_credit_idempotency_key: `checkout:coupon:${crypto.randomUUID()}`,
+      opengeni_credit_coupon_v1: "1",
+    };
+    const discountedCheckout = await postStripeEvent(app, webhookSecret, {
+      id: `evt_coupon_checkout_${crypto.randomUUID()}`,
+      object: "event",
+      type: "checkout.session.completed",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `cs_coupon_${crypto.randomUUID()}`,
+          object: "checkout.session",
+          mode: "payment",
+          status: "complete",
+          payment_status: "paid",
+          currency: "usd",
+          amount_subtotal: 2500,
+          amount_total: 1500,
+          total_details: { amount_discount: 1000 },
+          payment_intent: "pi_coupon_test",
+          metadata: discountedMetadata,
+        },
+      },
+    });
+    expect(discountedCheckout.status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+
+    const disputeId = `dp_coupon_${crypto.randomUUID()}`;
+    const dispute = {
+      id: disputeId,
+      object: "dispute",
+      amount: 1500,
+      currency: "usd",
+      status: "needs_response",
+      payment_intent: "pi_coupon_test",
+      metadata: discountedMetadata,
+    };
+    expect(
+      (
+        await postStripeEvent(app, webhookSecret, {
+          id: `evt_coupon_dispute_${crypto.randomUUID()}`,
+          object: "event",
+          type: "charge.dispute.created",
+          livemode: false,
+          created: Math.floor(Date.now() / 1000),
+          data: { object: dispute },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(0);
+    expect(
+      (
+        await postStripeEvent(app, webhookSecret, {
+          id: `evt_coupon_dispute_release_${crypto.randomUUID()}`,
+          object: "event",
+          type: "charge.dispute.closed",
+          livemode: false,
+          created: Math.floor(Date.now() / 1000),
+          data: { object: { ...dispute, status: "won" } },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(25_000_000);
+
+    const refund = await postStripeEvent(app, webhookSecret, {
+      id: `evt_coupon_refund_${crypto.randomUUID()}`,
+      object: "event",
+      type: "refund.created",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `re_coupon_${crypto.randomUUID()}`,
+          object: "refund",
+          amount: 1500,
+          currency: "usd",
+          status: "succeeded",
+          payment_intent: "pi_coupon_test",
+          metadata: discountedMetadata,
+        },
+      },
+    });
+    expect(refund.status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(0);
+
+    const freeMetadata = {
+      opengeni_account_id: accountId,
+      opengeni_credit_micros: "10000000",
+      opengeni_credit_idempotency_key: `checkout:free-coupon:${crypto.randomUUID()}`,
+      opengeni_credit_coupon_v1: "1",
+    };
+    const freeEvent = {
+      id: `evt_free_coupon_${crypto.randomUUID()}`,
+      object: "event",
+      type: "checkout.session.completed",
+      livemode: false,
+      created: Math.floor(Date.now() / 1000),
+      data: {
+        object: {
+          id: `cs_free_coupon_${crypto.randomUUID()}`,
+          object: "checkout.session",
+          mode: "payment",
+          status: "complete",
+          payment_status: "no_payment_required",
+          currency: "usd",
+          amount_subtotal: 1000,
+          amount_total: 0,
+          total_details: { amount_discount: 1000 },
+          payment_intent: null,
+          metadata: freeMetadata,
+        },
+      },
+    };
+    const zeroWithoutCoupon = await postStripeEvent(app, webhookSecret, {
+      ...freeEvent,
+      id: `evt_no_coupon_${crypto.randomUUID()}`,
+      data: {
+        object: {
+          ...freeEvent.data.object,
+          id: `cs_no_coupon_${crypto.randomUUID()}`,
+          total_details: { amount_discount: 0 },
+        },
+      },
+    });
+    expect(zeroWithoutCoupon.status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(0);
+    expect((await postStripeEvent(app, webhookSecret, freeEvent)).status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(10_000_000);
+    expect((await postStripeEvent(app, webhookSecret, freeEvent)).status).toBe(200);
+    expect((await getBillingBalance(dbClient.db, accountId)).balanceMicros).toBe(10_000_000);
+  });
+
   test("Stripe webhook retry processes stored events that were not marked processed", async () => {
     const webhookSecret = "whsec_test_webhook_retry_secret";
     const app = createApp({
@@ -2462,8 +2854,8 @@ describe("API component integration", () => {
     ).toEqual({ received: true });
     expect(await balance()).toBe(0);
 
-    // A paid OpenGeni checkout for an account this deployment does not hold,
-    // such as another OpenGeni deployment sharing the Stripe account: retrying
+    // A paid Opengeni checkout for an account this deployment does not hold,
+    // such as another Opengeni deployment sharing the Stripe account: retrying
     // cannot succeed, so it is acknowledged rather than failed for days.
     const absentAccountId = crypto.randomUUID();
     expect(
@@ -3923,7 +4315,7 @@ describe("API component integration", () => {
   });
 
   test("keeps scheduled task persistence consistent when schedule sync fails", async () => {
-    workflow = new FakeWorkflowClient();
+    workflow = new FakeWorkflowClient(dbClient.db);
     const app = createApp({
       settings: testSettings({ databaseUrl: services.databaseUrl }),
       db: dbClient.db,
@@ -3948,6 +4340,8 @@ describe("API component integration", () => {
         (task) => task.name === failedCreateName,
       ),
     ).toBe(false);
+    expect(workflow.temporalSchedules.size).toBe(0);
+    expect(workflow.triggers).toHaveLength(0);
 
     workflow.syncError = null;
     const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
@@ -3959,19 +4353,61 @@ describe("API component integration", () => {
       }),
       headers: { "content-type": "application/json" },
     });
+    expect(created.status).toBe(201);
     const task = (await created.json()) as { id: string };
+    const original = (await getScheduledTask(dbClient.db, workspaceId, task.id))!;
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
 
     workflow.syncError = new Error("temporal unavailable");
+    const failedUpdate = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: "must not persist",
+          schedule: { type: "interval", everySeconds: 7200 },
+          agentConfigPatch: { prompt: "must not persist" },
+        }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(failedUpdate.status).toBe(500);
+    expect(await getScheduledTask(dbClient.db, workspaceId, task.id)).toMatchObject({
+      name: original.name,
+      schedule: original.schedule,
+      agentConfig: original.agentConfig,
+      status: "active",
+    });
     const failedPause = await app.request(
       workspacePath(workspaceId, `/scheduled-tasks/${task.id}/pause`),
       { method: "POST" },
     );
     expect(failedPause.status).toBe(500);
     expect((await getScheduledTask(dbClient.db, workspaceId, task.id))?.status).toBe("active");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
+
+    workflow.syncError = null;
+    expect(
+      (
+        await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}/pause`), {
+          method: "POST",
+        })
+      ).status,
+    ).toBe(200);
+    const paused = workflow.temporalSchedules.get(original.temporalScheduleId)!;
+    workflow.syncError = new Error("temporal unavailable");
+    const failedResume = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/resume`),
+      { method: "POST" },
+    );
+    expect(failedResume.status).toBe(500);
+    expect((await getScheduledTask(dbClient.db, workspaceId, task.id))?.status).toBe("paused");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(paused);
+    expect(workflow.triggers).toHaveLength(0);
   });
 
   test("keeps MCP scheduled task persistence consistent when schedule sync fails", async () => {
-    workflow = new FakeWorkflowClient();
+    workflow = new FakeWorkflowClient(dbClient.db);
     const settings = testSettings({ databaseUrl: services.databaseUrl });
     const grant = await bootstrapMcpGrant(dbClient.db);
     const mcp = buildOpenGeniMcpServer(
@@ -3993,10 +4429,21 @@ describe("API component integration", () => {
 
     workflow.syncError = new Error("temporal unavailable");
     const failedCreateName = `mcp-sync-fail-${crypto.randomUUID()}`;
+    const beforeMissingIntent = await listScheduledTasks(dbClient.db, grant.workspaceId);
+    await expect(
+      callMcpTool(mcp, "scheduled_tasks_create", {
+        name: `mcp-missing-intent-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        agentConfig: { prompt: "inspect" },
+      }),
+    ).rejects.toThrow("Choose an existing chat");
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeMissingIntent);
+    expect(workflow.synced).toHaveLength(0);
     await expect(
       callMcpTool(mcp, "scheduled_tasks_create", {
         name: failedCreateName,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
       }),
     ).rejects.toThrow("temporal unavailable");
@@ -4005,14 +4452,18 @@ describe("API component integration", () => {
         (task) => task.name === failedCreateName,
       ),
     ).toBe(false);
+    expect(workflow.temporalSchedules.size).toBe(0);
+    expect(workflow.triggers).toHaveLength(0);
 
     workflow.syncError = null;
     const taskReceipt = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
       name: `mcp-rollback-${crypto.randomUUID()}`,
       schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
       agentConfig: { prompt: "inspect" },
     });
     const taskId = taskReceipt.resource.id;
+    const original = (await getScheduledTask(dbClient.db, grant.workspaceId, taskId))!;
     expect(taskReceipt).toMatchObject({
       operation: "scheduled_tasks_create",
       outcome: "created",
@@ -4021,14 +4472,127 @@ describe("API component integration", () => {
     });
 
     workflow.syncError = new Error("temporal unavailable");
+    await expect(
+      callMcpTool(mcp, "scheduled_tasks_update", {
+        id: taskId,
+        name: "must not persist",
+        schedule: { type: "interval", everySeconds: 7200 },
+        agentConfigPatch: { prompt: "must not persist" },
+      }),
+    ).rejects.toThrow("temporal unavailable");
+    expect(await getScheduledTask(dbClient.db, grant.workspaceId, taskId)).toMatchObject({
+      name: original.name,
+      schedule: original.schedule,
+      agentConfig: original.agentConfig,
+      status: "active",
+    });
     await expect(callMcpTool(mcp, "scheduled_tasks_pause", { id: taskId })).rejects.toThrow(
       "temporal unavailable",
     );
     expect((await getScheduledTask(dbClient.db, grant.workspaceId, taskId))?.status).toBe("active");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
+    workflow.syncError = null;
+    await callMcpTool(mcp, "scheduled_tasks_pause", { id: taskId });
+    const paused = workflow.temporalSchedules.get(original.temporalScheduleId)!;
+    workflow.syncError = new Error("temporal unavailable");
+    await expect(callMcpTool(mcp, "scheduled_tasks_resume", { id: taskId })).rejects.toThrow(
+      "temporal unavailable",
+    );
+    expect((await getScheduledTask(dbClient.db, grant.workspaceId, taskId))?.status).toBe("paused");
+    expect(workflow.temporalSchedules.get(original.temporalScheduleId)).toEqual(paused);
+    expect(workflow.triggers).toHaveLength(0);
     await expect(
       callMcpTool(mcp, "scheduled_tasks_resume", { id: crypto.randomUUID() }),
     ).rejects.toThrow("Scheduled task not found");
   });
+
+  test.each(["REST", "MCP"] as const)(
+    "%s scheduled task deletion retains durable cleanup when Temporal removal fails",
+    async (surface) => {
+      const workflowClient = new FakeWorkflowClient(dbClient.db);
+      const settings = testSettings({ databaseUrl: services.databaseUrl });
+      const app = createApp({
+        settings,
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient,
+      });
+      const grant = await bootstrapMcpGrant(dbClient.db);
+      const mcp = buildOpenGeniMcpServer(
+        {
+          settings,
+          db: dbClient.db,
+          bus: new MemoryEventBus(),
+          workflowClient,
+          objectStorage: null,
+          githubStateSecret: "test-state-secret",
+          documentIndexer: { indexDocument: async () => undefined },
+          getDocumentServices: () => {
+            throw new Error("document services are not used by scheduled task deletion tests");
+          },
+          resumeBoxById: fakeResumeBoxById,
+        },
+        grant,
+      );
+      const workspaceId = surface === "REST" ? await defaultWorkspaceId(app) : grant.workspaceId;
+      const payload = {
+        name: `delete-sync-fail-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "inspect" },
+      };
+      let taskId: string;
+      if (surface === "REST") {
+        const response = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+          method: "POST",
+          body: JSON.stringify(payload),
+          headers: { "content-type": "application/json" },
+        });
+        expect(response.status).toBe(201);
+        taskId = ((await response.json()) as { id: string }).id;
+      } else {
+        taskId = (await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", payload))
+          .resource.id;
+      }
+      const original = (await getScheduledTask(dbClient.db, workspaceId, taskId))!;
+      workflowClient.deleteError = new Error("temporal removal unavailable");
+      if (surface === "REST") {
+        const response = await app.request(
+          workspacePath(workspaceId, `/scheduled-tasks/${taskId}`),
+          { method: "DELETE" },
+        );
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({ ok: true });
+      } else {
+        expect(await callMcpTool(mcp, "scheduled_tasks_delete", { id: taskId })).toMatchObject({
+          outcome: "deleted",
+          resource: { state: "deleted" },
+        });
+      }
+      expect(await getScheduledTask(dbClient.db, workspaceId, taskId)).toBeNull();
+      expect(
+        await getScheduledTaskIncludingDeleted(dbClient.db, workspaceId, taskId),
+      ).toMatchObject({
+        id: taskId,
+        deletedAt: expect.any(String),
+      });
+      expect(workflowClient.temporalSchedules.get(original.temporalScheduleId)).toEqual(original);
+      expect(workflowClient.deletedSchedules).toContainEqual({
+        temporalScheduleId: original.temporalScheduleId,
+      });
+      workflowClient.deleteError = null;
+      await waitFor(async () => {
+        await drainTemporalScheduleCleanupOutbox({
+          db: dbClient.db,
+          deleteSchedule: async (temporalScheduleId) =>
+            await workflowClient.deleteScheduledTaskSchedule({ temporalScheduleId }),
+        });
+        return !workflowClient.temporalSchedules.has(original.temporalScheduleId);
+      });
+      expect(workflowClient.deletedSchedules.length).toBeGreaterThanOrEqual(2);
+      expect(workflowClient.triggers).toHaveLength(0);
+    },
+  );
 
   test("returns compact receipts across the MCP scheduled task lifecycle", async () => {
     const workflowClient = new FakeWorkflowClient();
@@ -4054,6 +4618,7 @@ describe("API component integration", () => {
     const created = await callMcpTool<McpMutationReceiptType>(mcp, "scheduled_tasks_create", {
       name: originalName,
       schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
       agentConfig: { prompt },
     });
     expect(created).toMatchObject({
@@ -4165,6 +4730,7 @@ describe("API component integration", () => {
     const task = await callMcpTool<McpMutationReceiptType>(allowedMcp, "scheduled_tasks_create", {
       name: `mcp-limit-trigger-${crypto.randomUUID()}`,
       schedule: { type: "interval", everySeconds: 3600 },
+      runMode: "new_session_per_run",
       agentConfig: { prompt: "inspect" },
     });
     workflow.synced = [];
@@ -4192,13 +4758,16 @@ describe("API component integration", () => {
       grant,
     );
 
+    const beforeLimitedCreate = await listScheduledTasks(dbClient.db, grant.workspaceId);
     await expect(
       callMcpTool(blockedCreateMcp, "scheduled_tasks_create", {
         name: `mcp-limit-create-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
       }),
     ).rejects.toThrow("scheduled task limit reached");
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeLimitedCreate);
     expect(workflow.synced).toHaveLength(0);
     await recordUsageEvent(dbClient.db, {
       accountId: grant.accountId,
@@ -4234,12 +4803,24 @@ describe("API component integration", () => {
       },
       grant,
     );
+    const beforeLimitedTrigger = await sumUsageQuantity(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      eventType: "agent_run.created",
+      since: startOfUtcMonth(),
+    });
     await expect(
       callMcpTool(blockedTriggerMcp, "scheduled_tasks_trigger", {
         id: task.resource.id,
       }),
     ).rejects.toThrow("monthly agent run limit reached");
     expect(workflow.triggers).toHaveLength(0);
+    expect(
+      await sumUsageQuantity(dbClient.db, {
+        workspaceId: grant.workspaceId,
+        eventType: "agent_run.created",
+        since: startOfUtcMonth(),
+      }),
+    ).toBe(beforeLimitedTrigger);
   });
 
   test("returns 404 for missing scheduled task actions", async () => {
@@ -4318,7 +4899,7 @@ describe("API component integration", () => {
         schedule: { type: "interval", everySeconds: 3600 },
         runMode: "existing_session",
         targetSessionId: target.id,
-        agentConfig: { prompt: "continue exactly here" },
+        prompt: "continue exactly here",
       }),
     });
     expect(createResponse.status).toBe(201);
@@ -4393,7 +4974,7 @@ describe("API component integration", () => {
       schedule: { type: "interval", everySeconds: 3600 },
       runMode: "existing_session",
       targetSessionId: mcpTarget.id,
-      agentConfig: { prompt: "continue MCP target" },
+      prompt: "continue MCP target",
     });
     const summary = await callMcpTool<{ targetSessionId: string | null }>(
       mcp,
@@ -5329,7 +5910,7 @@ describe("API component integration", () => {
 
     const authorityCheckedAt = new Date();
     const authorityExpiresAt = new Date(authorityCheckedAt.getTime() + 10 * 60_000);
-    // One GitHub installation can be deliberately delegated into two OpenGeni
+    // One GitHub installation can be deliberately delegated into two Opengeni
     // workspaces, but each workspace owns an independent exact allowlist and
     // an independent consumed owner-authority proof.
     await Promise.all([
@@ -5514,7 +6095,7 @@ describe("API component integration", () => {
     );
   });
 
-  test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
+  test("configured-token browser handoff preserves Opengeni grant but still requires GitHub owner proof", async () => {
     const stateSecret = "github-owner-authority-state";
     const delegationSecret = "test-delegation-secret";
     const installationId = 438826628;
@@ -6344,10 +6925,12 @@ describe("API component integration", () => {
       ] as Permission[],
     };
     const noAttachMcp = buildOpenGeniMcpServer(mcpDeps, noAttachGrant);
+    const beforeDeniedCreate = await listScheduledTasks(dbClient.db, grant.workspaceId);
     await expect(
       callMcpTool(noAttachMcp, "scheduled_tasks_create", {
         name: `mcp-self-attach-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
       }),
@@ -6362,10 +6945,26 @@ describe("API component integration", () => {
       callMcpTool(attachOnlyMcp, "scheduled_tasks_create", {
         name: `mcp-without-use-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
+    const useOnlyMcp = buildOpenGeniMcpServer(mcpDeps, {
+      ...noAttachGrant,
+      permissions: [...noAttachGrant.permissions, "variable-sets:use"] as Permission[],
+    });
+    await expect(
+      callMcpTool(useOnlyMcp, "scheduled_tasks_create", {
+        name: `mcp-use-without-attach-${crypto.randomUUID()}`,
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        agentConfig: { prompt: "inspect" },
+        environmentId: environment.id,
+      }),
+    ).rejects.toThrow("missing permission: variable-sets:attach");
+    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toEqual(beforeDeniedCreate);
+    expect(workflow.synced).toHaveLength(0);
 
     const createdReceipt = await callMcpTool<McpMutationReceiptType>(
       adminMcp,
@@ -6373,6 +6972,7 @@ describe("API component integration", () => {
       {
         name: `mcp-attach-${crypto.randomUUID()}`,
         schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
         agentConfig: { prompt: "inspect" },
         environmentId: environment.id,
       },
@@ -6408,6 +7008,9 @@ describe("API component integration", () => {
         agentConfig: { prompt: "exfiltrate the injected secrets" },
       }),
     ).rejects.toThrow("missing permission: variable-sets:use");
+    expect(
+      await getScheduledTask(dbClient.db, grant.workspaceId, createdReceipt.resource.id),
+    ).toEqual(created);
   });
 
   test("registers manager orchestration MCP tools gated by session permissions", async () => {
@@ -7049,7 +7652,7 @@ describe("API component integration", () => {
 
     // A worker-signed parent claim makes this a child create. Omitting the
     // override must inherit the manager's effective grant instead of widening
-    // the child to OpenGeni's full standalone worker defaults.
+    // the child to Opengeni's full standalone worker defaults.
     const childMcp = buildOpenGeniMcpServer(mcpDeps, {
       ...managerGrant,
       // Delegated permission arrays are semantically sets. Inheritance stores
@@ -7100,7 +7703,7 @@ describe("API component integration", () => {
         mcpServers: [
           {
             id: "opengeni",
-            name: "OpenGeni",
+            name: "Opengeni",
             url: `http://127.0.0.1:${server.port}/v1/workspaces/{workspaceId}/mcp`,
             timeoutMs: undefined,
             cacheToolsList: false,
@@ -9115,6 +9718,28 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   syncError: Error | null = null;
   wakeError: Error | null = null;
   triggerError: Error | null = null;
+  deleteError: Error | null = null;
+  temporalSchedules = new Map<string, ScheduledTask>();
+  private readonly scheduleSync?: ReturnType<typeof createTemporalScheduleSynchronizer>;
+
+  constructor(db?: Database) {
+    if (db) {
+      // Inject errors at the external operation, not above the synchronizer:
+      // compensation must run and commit under the production writer lock.
+      this.scheduleSync = createTemporalScheduleSynchronizer({
+        db,
+        withDeadline: async (_deadline, work) => await work(),
+        upsert: async (task) => {
+          if (this.syncError) throw this.syncError;
+          this.temporalSchedules.set(task.temporalScheduleId, task);
+        },
+        remove: async (id) => {
+          if (this.deleteError) throw this.deleteError;
+          this.temporalSchedules.delete(id);
+        },
+      });
+    }
+  }
 
   async signalUserMessage(input: unknown): Promise<void> {
     this.userMessages.push(input);
@@ -9139,15 +9764,30 @@ class FakeWorkflowClient implements SessionWorkflowClient {
     this.interrupts.push(input);
   }
 
-  async syncScheduledTask(input: unknown): Promise<void> {
+  async syncScheduledTask(
+    input: Parameters<SessionWorkflowClient["syncScheduledTask"]>[0],
+  ): Promise<void> {
     this.synced.push(input);
+    if (this.scheduleSync) {
+      await this.scheduleSync.sync(input.task, input.onFailure);
+      return;
+    }
     if (this.syncError) {
-      throw this.syncError;
+      throw new Error("Schedule sync failure injection requires a database-backed fake");
     }
   }
 
-  async deleteScheduledTaskSchedule(input: unknown): Promise<void> {
+  async deleteScheduledTaskSchedule(
+    input: Parameters<SessionWorkflowClient["deleteScheduledTaskSchedule"]>[0],
+  ): Promise<void> {
     this.deletedSchedules.push(input);
+    if (this.scheduleSync) {
+      await this.scheduleSync.remove(input.temporalScheduleId);
+      return;
+    }
+    if (this.deleteError) {
+      throw new Error("Schedule deletion failure injection requires a database-backed fake");
+    }
   }
 
   async triggerScheduledTask(input: unknown): Promise<void> {

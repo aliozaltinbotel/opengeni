@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  canManageWorkspaceMembers,
   canManageWorkspaceSettings,
   hasWorkspacePermission,
   buildApiKeyPermissionGroups,
@@ -9,6 +10,7 @@ import {
   fixedOrganizationApiKeyPermissions,
   workspaceAccessLevels,
   isWorkspacePermissionDenied,
+  lacksWorkspacePermission,
 } from "./permissions";
 import { workspaceMemberAccessRole } from "./workspace-access-levels";
 
@@ -18,6 +20,57 @@ describe("workspace member permission groups", () => {
     expect(member.permissions).toContain("connections:read");
     expect(member.permissions).not.toContain("connections:write");
     expect(member.permissions).not.toContain("capabilities:manage");
+  });
+
+  test("member contains artifacts:read", () => {
+    const member = workspaceAccessLevels.find((level) => level.role === "member")!;
+    expect(member.permissions).toContain("artifacts:read");
+    // Everyone in the workspace may create and publish artifacts.
+    expect(member.permissions).toContain("artifacts:publish");
+  });
+
+  test("member is a superset of viewer without administrative powers", () => {
+    const level = (role: string) => workspaceAccessLevels.find((item) => item.role === role)!;
+    const member = new Set(level("member").permissions);
+    expect(level("viewer").permissions.filter((permission) => !member.has(permission))).toEqual([]);
+    expect(level("member").permissions.every((p) => level("admin").permissions.includes(p))).toBe(
+      true,
+    );
+    for (const administrative of [
+      "workspace:admin",
+      "members:manage",
+      "api_keys:manage",
+      "connections:write",
+      "github:manage",
+      "rigs:manage",
+      // Connected Machines stay admin-managed in shared workspaces.
+      "enrollments:read",
+      "enrollments:manage",
+      "variable-sets:manage",
+      "secrets:read",
+    ]) {
+      expect(member.has(administrative)).toBe(false);
+    }
+  });
+
+  test("only a loaded grant proves a missing workspace permission", () => {
+    const context = (permissions: string[]) =>
+      ({
+        workspaceGrants: [{ workspaceId: "workspace", permissions }],
+      }) as unknown as Parameters<typeof lacksWorkspacePermission>[0];
+    expect(lacksWorkspacePermission(context(["files:read"]), "workspace", "artifacts:read")).toBe(
+      true,
+    );
+    expect(
+      lacksWorkspacePermission(context(["artifacts:read"]), "workspace", "artifacts:read"),
+    ).toBe(false);
+    expect(
+      lacksWorkspacePermission(context(["workspace:admin"]), "workspace", "artifacts:read"),
+    ).toBe(false);
+    expect(lacksWorkspacePermission(context(["files:read"]), "other", "artifacts:read")).toBe(
+      false,
+    );
+    expect(lacksWorkspacePermission(null, "workspace", "artifacts:read")).toBe(false);
   });
 
   test("distinguishes access denial from transient connection failures", () => {
@@ -167,5 +220,56 @@ describe("workspace member access roles", () => {
         workspaceAccessLevels,
       ),
     ).toBe("custom");
+  });
+});
+
+describe("workspace Members surface", () => {
+  const organizationId = "11111111-1111-4111-8111-111111111111";
+  const shared = {
+    id: "22222222-2222-4222-8222-222222222222",
+    accountId: organizationId,
+    kind: "shared" as const,
+  };
+  const personal = {
+    ...shared,
+    id: "33333333-3333-4333-8333-333333333333",
+    kind: "personal" as const,
+  };
+  const context = (
+    role: "owner" | "admin" | "member",
+    permissions: string[] = ["workspace:read"],
+  ) =>
+    ({
+      mode: "managed",
+      subjectId: "user:me",
+      accountGrants: [{ accountId: organizationId, subjectId: "user:me", role, permissions: [] }],
+      workspaceGrants: [
+        {
+          workspaceId: shared.id,
+          accountId: organizationId,
+          subjectId: "user:me",
+          permissions,
+        },
+      ],
+    }) as unknown as Parameters<typeof canManageWorkspaceMembers>[0];
+
+  test("organization owners and admins manage any shared workspace's members", () => {
+    expect(canManageWorkspaceMembers(context("owner"), shared, true)).toBe(true);
+    expect(canManageWorkspaceMembers(context("admin"), shared, true)).toBe(true);
+    expect(canManageWorkspaceMembers(context("owner"), { ...shared, id: "other" }, true)).toBe(
+      true,
+    );
+  });
+
+  test("members need their own grant; Personal workspaces and non-managed sessions never qualify", () => {
+    expect(canManageWorkspaceMembers(context("member"), shared, true)).toBe(false);
+    expect(canManageWorkspaceMembers(context("member", ["members:manage"]), shared, true)).toBe(
+      true,
+    );
+    expect(canManageWorkspaceMembers(context("owner"), personal, true)).toBe(false);
+    expect(canManageWorkspaceMembers(context("owner"), shared, false)).toBe(false);
+    expect(
+      canManageWorkspaceMembers(context("owner"), { ...shared, accountId: "other-org" }, true),
+    ).toBe(false);
   });
 });

@@ -50,6 +50,15 @@ descriptor. Compiler-wide OpenAPI destination governance remains separate work.
 - **Gmail** is the static reviewed example. Its catalog identity remains the
   official Gmail MCP resource, while every call executes through
   `GmailRestMcpServer` and the existing personal Connection resolver.
+- **Slack** keeps `https://mcp.slack.com/mcp` as its catalog/OAuth identity,
+  while `SlackRestMcpServer` executes nine reviewed Web API tools. It uses the
+  exact accepted native user-token Connection, including an explicitly shared
+  connection when selected; it never substitutes a bot or coworker's personal
+  grant. Actual granted scopes determine discovery and each request. Safe reads
+  can refresh once; submitted mutations with an unknown outcome are not replayed.
+  `packages/db/src/slack-api-rate-limits.ts` coordinates history/replies and
+  provider cooldowns across replicas, bot/personal tokens, and Opengeni tenants
+  sharing one Slack app/workspace. Search is absent. See [Slack](../slack-bot.md).
 - **Google Drive** already uses the immutable Integration Definition compiler
   and local OpenAPI MCP adapter. It remains functional as one Integration row
   with its provider-specific facet/source authority unchanged, but does not
@@ -61,7 +70,7 @@ descriptor. Compiler-wide OpenAPI destination governance remains separate work.
   surface and product identity; the old SSE premise is not current.
 - **GitHub** uses one static-reviewed `GitHubRestMcpServer` protocol bridge with
   two non-substitutable worker authority adapters: the workspace GitHub App
-  acts as the OpenGeni bot, while personal OAuth acts as the exact connected
+  acts as the Opengeni bot, while personal OAuth acts as the exact connected
   user. The default-off `OPENGENI_GITHUB_REST_MCP_ENABLED` flag adds the
   resource-backed namespaces only when an accepted turn carries matching
   repositories. Arguments can select only `owner/name` from that private

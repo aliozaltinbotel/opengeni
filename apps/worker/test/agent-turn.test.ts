@@ -47,6 +47,7 @@ import {
   SessionEventPersistenceError,
 } from "@opengeni/db";
 import {
+  AnthropicProviderRejection,
   CompactionNeededError,
   CompactionProviderResponseError,
   compactionProviderFailureDiagnostics,
@@ -294,6 +295,19 @@ describe("periodic workspace snapshot admission", () => {
 });
 
 describe("Connected Machine durable stream finalization", () => {
+  test("forwards exact durable tool owners without converting an empty scope to turn-end release", async () => {
+    const calls: Array<readonly string[] | undefined> = [];
+    const machine = {
+      finalizeOpStreamOps: async (callIds?: readonly string[]) => {
+        calls.push(callIds);
+      },
+    };
+    await finalizeDurableTurnOpStreams([machine, machine], null, ["call_first"]);
+    await finalizeDurableTurnOpStreams([], machine, []);
+    await finalizeDurableTurnOpStreams([machine], null);
+    expect(calls).toEqual([["call_first"], [], undefined]);
+  });
+
   test("finalizes every routed proxy once and does not bypass them for the raw fallback", async () => {
     const calls: string[] = [];
     const eagerProxy = {
@@ -385,7 +399,7 @@ function citedAssistantMessage() {
     content: [
       {
         type: "output_text",
-        text: "OpenGeni is documented here [1].",
+        text: "Opengeni is documented here [1].",
         providerData: {
           annotations: [
             {
@@ -393,7 +407,7 @@ function citedAssistantMessage() {
               start_index: 28,
               end_index: 31,
               url: "https://docs.opengeni.example/search",
-              title: "OpenGeni search documentation",
+              title: "Opengeni search documentation",
             },
           ],
         },
@@ -567,7 +581,7 @@ describe("turn exact-content boundaries", () => {
     ).toMatchObject({
       type: "url_citation",
       url: "https://docs.opengeni.example/search",
-      title: "OpenGeni search documentation",
+      title: "Opengeni search documentation",
     });
   });
 
@@ -582,7 +596,7 @@ describe("turn exact-content boundaries", () => {
         type: "web_search_call",
         id: "ws_123",
         status: "completed",
-        action: { type: "search", query: "OpenGeni" },
+        action: { type: "search", query: "Opengeni" },
       },
     };
 
@@ -982,6 +996,10 @@ describe("turn exact-content boundaries", () => {
       "await eventing.preparedTools?.inputWaitYield?.sealForSettlement(runtimeCancellationSignal);",
       streamCompletionAuthority,
     );
+    const drainedWaitReceipts = source.indexOf(
+      "await eventing.preparedTools?.inputWaitYield?.drainForHandoff(runtimeCancellationSignal);",
+      streamCompletionAuthority,
+    );
     const postCompactionRecovery = source.indexOf(
       "throw new PostCompactionContinuationEmptyError();",
       streamCompletionAuthority,
@@ -991,7 +1009,7 @@ describe("turn exact-content boundaries", () => {
       postCompactionRecovery,
     );
     const interruptionPath = source.indexOf(
-      "if (eventing.stream.interruptions.length > 0)",
+      "if (eventing.stream.interruptions.length > 0 || programmaticPending.length > 0)",
       cancelledStreamGuard,
     );
     const completionPath = source.indexOf(
@@ -1005,14 +1023,19 @@ describe("turn exact-content boundaries", () => {
     const successCompletion = source.indexOf('type: "turn.completed"', mandatoryBarrier);
     expect(streamCompletionAuthority).toBeGreaterThan(-1);
     expect(sealedWaitAdmission).toBeGreaterThan(streamCompletionAuthority);
-    expect(postCompactionRecovery).toBeGreaterThan(sealedWaitAdmission);
+    expect(drainedWaitReceipts).toBeGreaterThan(streamCompletionAuthority);
+    expect(postCompactionRecovery).toBeGreaterThan(drainedWaitReceipts);
     expect(source).toContain("eventing.preparedTools?.inputWaitYield?.yielded === true");
     expect(source).toContain(
       "options.requireTerminalModelResponse &&\n      !eventing.preparedTools?.inputWaitYield?.yielded &&",
     );
-    expect(source).not.toContain("eventing.preparedTools?.inputWaitYield?.requested === true");
+    // Receipt acceptance exempts a handoff but never asserts a yielded final.
+    expect(source).toContain(
+      "requireAgentStreamFinalOutput(eventing.stream.finalOutput, inputWaitYielded)",
+    );
     expect(cancelledStreamGuard).toBeGreaterThan(postCompactionRecovery);
     expect(interruptionPath).toBeGreaterThan(cancelledStreamGuard);
+    expect(sealedWaitAdmission).toBeGreaterThan(interruptionPath);
     expect(completionPath).toBeGreaterThan(interruptionPath);
     expect(mandatoryBarrier).toBeGreaterThan(completionPath);
     expect(successCompletion).toBeGreaterThan(mandatoryBarrier);
@@ -2038,7 +2061,7 @@ describe("production model-response usage callback authority", () => {
     );
     const debitSpy = spyOn(opengeniDb, "applyCreditDebitUpToBalance").mockImplementation(
       async () => {
-        throw new Error("workspace Gateway usage must not debit OpenGeni credits");
+        throw new Error("workspace Gateway usage must not debit Opengeni credits");
       },
     );
     try {
@@ -2177,6 +2200,13 @@ describe("production model-response usage callback authority", () => {
         type: "response_done",
         response: { id: "resp-1", output: [] },
       } as any);
+      const emptyRawMirror = new RunRawModelStreamEvent({
+        type: "model",
+        providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+        event: { type: "response.completed", response: { id: "resp-2" } },
+      } as any);
+      expect(await process(emptyRawMirror)).toEqual({ status: "not_response" });
+      expect(state.responseCount).toBe(0);
       expect(await process(missingUsage)).toMatchObject({
         status: "processed",
         authoritative: true,
@@ -3551,9 +3581,7 @@ describe("lazy sandbox provisioner single-flight", () => {
     const onDemandEstablishBody = establishSource.slice(onDemandAt, lazyBinderDefinitionAt);
     expect(onDemandEstablishBody).not.toContain("await sandboxState.resumeManagedGroupBox()");
     expect(onDemandEstablishBody).not.toContain("await resumeBoxForTurn(");
-    expect(establishSource).toContain(
-      "onSandboxLost: publishSandboxLost,\n                objectStorage,",
-    );
+    expect(establishSource).toMatch(/onSandboxLost: publishSandboxLost,\n\s+objectStorage,/);
   });
 
   test("personal-connection membership uses named live-authority, not a bare grant join", async () => {
@@ -5321,6 +5349,7 @@ describe("transient provider error classifier", () => {
       error: "SECRET worker server provider detail",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "unavailable",
     });
     expect(JSON.stringify({ error: observed.error, payload })).toContain(
       "SECRET worker server provider detail",
@@ -5373,6 +5402,7 @@ describe("transient provider error classifier", () => {
       code: "provider_rate_limited",
       retryable: true,
       detail: "SECRET worker rate provider detail",
+      providerCondition: "rate_limited",
     });
 
     const usage = await actualCodexStreamingFailure({
@@ -5707,6 +5737,42 @@ describe("transient provider error classifier", () => {
     });
   });
 
+  test("Claude model suspension retains authored guidance and never retries or rotates credentials", () => {
+    const error = new AnthropicProviderRejection(
+      "anthropic_model_access_suspended",
+      403,
+      "req_synthetic_suspended",
+      "2031-04-05T06:07:08.000Z",
+    );
+    expect(agentRunFailurePayload(error)).toEqual({
+      error: error.message,
+      code: "anthropic_model_access_suspended",
+      retryable: false,
+      requestId: "req_synthetic_suspended",
+    });
+    expect(isTransientProviderError(error)).toBe(false);
+    expect(classifyCodexCredentialFailure(error)).toBeNull();
+    expect(classifyXaiCredentialFailure(error)).toBeNull();
+    expect(error.message).toContain("2031-04-05 06:07:08 UTC");
+  });
+
+  test("Claude HTTP-200 refusal uses the shared policy-refusal UI without automatic replay", () => {
+    const error = new AnthropicProviderRejection(
+      "content_policy_violation",
+      200,
+      "req_synthetic_refusal",
+    );
+    expect(agentRunFailurePayload(error)).toEqual({
+      error: error.message,
+      code: "provider_safety_refusal",
+      retryable: false,
+      requestId: "req_synthetic_refusal",
+    });
+    expect(isTransientProviderError(error)).toBe(false);
+    expect(classifyCodexCredentialFailure(error)).toBeNull();
+    expect(classifyXaiCredentialFailure(error)).toBeNull();
+  });
+
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
     for (const status of [500, 502, 503, 504, 529]) {
       const err = Object.assign(new Error("Service failure"), { status });
@@ -5797,7 +5863,7 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
       error:
-        "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+        "Opengeni could not reach an upstream service. The same turn will retry after a short delay.",
       code: "upstream_connectivity_unavailable",
       retryable: true,
     });
@@ -5986,6 +6052,7 @@ describe("transient provider error classifier", () => {
       error: "Our servers are currently overloaded. Please try again later.",
       code: "provider_unavailable",
       retryable: true,
+      providerCondition: "overloaded",
     });
 
     const generic500 = Object.assign(
@@ -6798,8 +6865,12 @@ describe("modelAttachmentInputPolicyForTurn", () => {
     ).toEqual({ supportsImageInput: false, inputFileMediaTypes: [] });
   });
 
-  test("keeps chat-completions typed attachments on the sandbox-path fallback", () => {
+  test("delivers images to image-capable chat models while documents use file paths", () => {
     expect(modelAttachmentInputPolicyForTurn(resolved("chat", true, ["application/pdf"]))).toEqual({
+      supportsImageInput: true,
+      inputFileMediaTypes: [],
+    });
+    expect(modelAttachmentInputPolicyForTurn(resolved("chat", false))).toEqual({
       supportsImageInput: false,
       inputFileMediaTypes: [],
     });

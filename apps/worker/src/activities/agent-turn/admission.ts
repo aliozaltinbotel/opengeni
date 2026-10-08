@@ -1,4 +1,4 @@
-import { getBillingBalance, sumUsageQuantity } from "@opengeni/db";
+import { checkWorkspaceAllowance, getSpendableCreditBalance, sumUsageQuantity } from "@opengeni/db";
 import {
   configuredStaticUsageLimits,
   resolveTurnExecutionPolicyV1,
@@ -8,6 +8,7 @@ import { selectCodexCredentialId } from "@opengeni/codex";
 import { directPersonalConnectionSubjectId } from "@opengeni/core";
 import type { TurnActivityServices as ActivityServices } from "../types";
 import {
+  type AllowanceExhaustedRefusal,
   type SessionEvent,
   type SessionTurn,
   type ToolAuthNeededPayload,
@@ -243,9 +244,64 @@ export class BudgetExhaustedError extends Error {
   constructor(
     message: string,
     readonly serializedRunState: string | null,
+    readonly allowance: AllowanceRefusal | null = null,
   ) {
     super(message);
     this.name = "BudgetExhaustedError";
+  }
+}
+
+export type AllowanceRefusal = AllowanceExhaustedRefusal;
+
+/** Account allowance exhaustion is recoverable state, never a provider failure. */
+export class AllowanceExhaustedError extends Error {
+  readonly code = "allowance_exhausted";
+
+  constructor(readonly refusal: AllowanceRefusal) {
+    super(refusal.message);
+    this.name = "AllowanceExhaustedError";
+  }
+}
+
+/** Revalidate between paid calls without replaying provider work or reserving credits. */
+export async function ensureRunAllowedBetweenModelCalls(input: {
+  settings: Settings;
+  db: ActivityServices["db"];
+  accountId: string;
+  workspaceId: string;
+  isExternallyBilledTurn: boolean;
+  entitlements?: ActivityServices["entitlements"];
+  chargesOpenGeniCredits: boolean;
+  countsTowardTokenCap: boolean;
+  initiatingHumanSubjectId: string | null;
+  modelId?: string;
+  serializedRunState?: () => string | null;
+}): Promise<number | undefined> {
+  try {
+    return await ensureRunAllowed(
+      input.settings,
+      input.db,
+      input.accountId,
+      input.workspaceId,
+      input.isExternallyBilledTurn,
+      input.entitlements,
+      input.chargesOpenGeniCredits,
+      input.countsTowardTokenCap,
+      input.initiatingHumanSubjectId,
+      input.modelId,
+    );
+  } catch (limitError) {
+    let serializedRunState: string | null = null;
+    try {
+      serializedRunState = input.serializedRunState?.() ?? null;
+    } catch {
+      // Durable history remains authoritative when the SDK state cannot serialize.
+    }
+    throw new BudgetExhaustedError(
+      limitError instanceof Error ? limitError.message : String(limitError),
+      serializedRunState,
+      limitError instanceof AllowanceExhaustedError ? limitError.refusal : null,
+    );
   }
 }
 
@@ -262,10 +318,13 @@ export async function ensureRunAllowed(
   entitlements?: ActivityServices["entitlements"],
   chargesOpenGeniCredits = !isExternallyBilledTurn,
   countsTowardTokenCap = !isExternallyBilledTurn,
-): Promise<void> {
+  initiatingHumanSubjectId: string | null = null,
+  modelId?: string,
+): Promise<number | undefined> {
+  let creditPolicyRevision: number | undefined;
   // Upstream settlement and workspace-facing cost are independent. External
   // metering skips the token cap; free/subscription/workspace cost skips the
-  // OpenGeni credit gate. The agent-run COUNT cap below is a volume/fairness
+  // Opengeni credit gate. The agent-run COUNT cap below is a volume/fairness
   // quota and is intentionally kept for every funding path.
   //
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
@@ -291,17 +350,25 @@ export async function ensureRunAllowed(
       quantity: 1,
     });
     if (!decision.allowed) {
-      throw new Error(decision.reason || "insufficient OpenGeni credits");
+      throw new Error(decision.reason || "insufficient Opengeni credits");
     }
   } else if (
     chargesOpenGeniCredits &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
-    const balance = await getBillingBalance(db, accountId);
+    const balance = await getSpendableCreditBalance(db, accountId, modelId);
+    creditPolicyRevision = balance.creditPolicyRevision;
     if (balance.balanceMicros <= 0) {
-      throw new Error("insufficient OpenGeni credits");
+      throw new Error("insufficient Opengeni credits");
     }
   }
+  const refusal = await checkWorkspaceAllowance(db, {
+    accountId,
+    workspaceId,
+    subjectId: initiatingHumanSubjectId,
+    ...(chargesOpenGeniCredits ? {} : { fundedWithoutCredits: true }),
+  });
+  if (refusal) throw new AllowanceExhaustedError(refusal);
   if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
     const limits = configuredStaticUsageLimits(settings);
     if (limits.maxMonthlyAgentRunsPerWorkspace) {
@@ -330,4 +397,5 @@ export async function ensureRunAllowed(
       }
     }
   }
+  return creditPolicyRevision;
 }

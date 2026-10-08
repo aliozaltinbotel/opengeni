@@ -1,15 +1,18 @@
+import { useNavigate } from "@tanstack/react-router";
 import { ArrowUpRightIcon } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { RowButton } from "@/components/ui/page-actions";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
-import { OrganizationUsageDashboard } from "@/components/organization-usage-dashboard";
 import { ErrorMessage } from "@/components/ui/error-message";
 import { TextInput } from "@/components/ui/field";
 import { Section, SectionStack } from "@/components/ui/section";
 import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
+import { CouponRedeem } from "@/components/credits/coupon-redeem";
 import { useAppContext } from "@/context";
+import { billingCheckoutReturnUrl } from "@/lib/credit-checkout";
+import { CREDIT_BALANCE_CHANGED } from "@/lib/credit-balance-events";
 import { analyticsAction } from "@/lib/analytics-actions";
 import {
   apiErrorAdvice,
@@ -29,22 +32,79 @@ import {
   type OrganizationAdminOperationSlot,
 } from "@/lib/organization-admin";
 import type { BillingEntitlementsResponse, BillingSummary } from "@/types";
+import type { BillingCheckoutStatus } from "@opengeni/sdk";
+
+// Budgets load only on this page: they never join the session or rail graphs.
+const CreditsCelebrationDialog = lazy(() =>
+  import("@/components/credits/checkout-credits-celebration").then((module) => ({
+    default: module.CreditsCelebrationDialog,
+  })),
+);
+const WorkspaceBudgetsSection = lazy(() =>
+  import("@/components/usage/workspace-budgets-section").then((module) => ({
+    default: module.WorkspaceBudgetsSection,
+  })),
+);
+const WorkspaceBudgetPage = lazy(() =>
+  import("@/components/usage/workspace-budget-page").then((module) => ({
+    default: module.WorkspaceBudgetPage,
+  })),
+);
 
 /* ----------------------------------------------------------------------------
-   Organization settings > Billing & usage: the credit balance and top-ups,
-   plan limits, and usage by workspace.
+   Organization settings > Billing: the credit balance and top-ups,
+   plan limits, workspace budgets, and usage by workspace. A workspace's budget
+   page (`?section=billing&workspace=<id>`) opens from the budgets list.
    -------------------------------------------------------------------------- */
 
 export function OrganizationBillingPage({
-  identity,
-  canReadBilling,
-  canManageBilling,
+  budgetWorkspaceId,
+  ...props
 }: {
   identity: OrganizationAdminIdentity;
   canReadBilling: boolean;
   canManageBilling: boolean;
+  /** The workspace whose budget page is open. */
+  budgetWorkspaceId?: string | undefined;
+}) {
+  const navigate = useNavigate();
+  const anchorWorkspaceId = props.identity.workspaceId;
+  const openBudget = useCallback(
+    (workspace: string | undefined) =>
+      void navigate({
+        to: "/workspaces/$workspaceId/organization",
+        params: { workspaceId: anchorWorkspaceId },
+        search: workspace ? { section: "billing", workspace } : { section: "billing" },
+      }),
+    [anchorWorkspaceId, navigate],
+  );
+  if (budgetWorkspaceId) {
+    return (
+      <Suspense fallback={null}>
+        <WorkspaceBudgetPage
+          key={budgetWorkspaceId}
+          workspaceId={budgetWorkspaceId}
+          onBack={() => openBudget(undefined)}
+        />
+      </Suspense>
+    );
+  }
+  return <BillingOverview {...props} onOpenBudget={openBudget} />;
+}
+
+function BillingOverview({
+  identity,
+  canReadBilling,
+  canManageBilling,
+  onOpenBudget,
+}: {
+  identity: OrganizationAdminIdentity;
+  canReadBilling: boolean;
+  canManageBilling: boolean;
+  onOpenBudget: (workspaceId: string) => void;
 }) {
   const client = useAppContext().client;
+  const navigate = useNavigate();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
   const identityKey = organizationAdminIdentityKey(identity);
@@ -57,6 +117,8 @@ export function OrganizationBillingPage({
   const [entitlementsError, setEntitlementsError] = useState<Error | null>(null);
   const [topupAmount, setTopupAmount] = useState("25.00");
   const [busy, setBusy] = useState(false);
+  // A coupon just redeemed here, celebrated with its real amount.
+  const [redeemed, setRedeemed] = useState<BillingCheckoutStatus | null>(null);
   const [busyOwnerKey, setBusyOwnerKey] = useState("");
   const identityRef = useRef<OrganizationAdminIdentity | null>(identity);
   identityRef.current = identity;
@@ -157,6 +219,15 @@ export function OrganizationBillingPage({
     void refresh();
   }, [workspaceId, refresh]);
 
+  useEffect(() => {
+    const changed = (event: Event) => {
+      if ((event as CustomEvent<{ accountId: string }>).detail.accountId === accountId)
+        void refreshBilling();
+    };
+    window.addEventListener(CREDIT_BALANCE_CHANGED, changed);
+    return () => window.removeEventListener(CREDIT_BALANCE_CHANGED, changed);
+  }, [accountId, refreshBilling]);
+
   async function startCheckout(amountUsd: number) {
     const operation = claimBillingOperation("billing", "mutation");
     setBusyOwnerKey(identityKey);
@@ -165,6 +236,8 @@ export function OrganizationBillingPage({
       const session = await client.createBillingCheckout({
         amountUsd,
         ...(accountId ? { accountId } : {}),
+        successUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "success"),
+        cancelUrl: billingCheckoutReturnUrl(window.location.origin, workspaceId, "cancelled"),
       });
       if (!ownsBillingOperation(operation)) return;
       window.location.assign(session.url);
@@ -205,6 +278,17 @@ export function OrganizationBillingPage({
   const stripe = visibleBilling?.mode === "stripe";
   return (
     <SectionStack>
+      {redeemed ? (
+        <Suspense fallback={null}>
+          <CreditsCelebrationDialog
+            status={redeemed}
+            open
+            onOpenChange={(open) => {
+              if (!open) setRedeemed(null);
+            }}
+          />
+        </Suspense>
+      ) : null}
       <section aria-label="Credits and payments" className="min-w-0">
         <Section title="Credits">
           <div className="mt-1 flex min-w-0 flex-col gap-4">
@@ -227,7 +311,7 @@ export function OrganizationBillingPage({
               <SettingRowGroup>
                 <SettingRow
                   label="Add credits"
-                  description="Minimum $5.00. You pay in Stripe."
+                  description="For models and platform usage. Minimum $5."
                   controlWidth="auto"
                   control={
                     <div className="flex items-center gap-2">
@@ -263,6 +347,25 @@ export function OrganizationBillingPage({
                     </div>
                   }
                 />
+                {accountId ? (
+                  <SettingRow
+                    label="Promo code"
+                    description="Opens Stripe to confirm your code."
+                    controlWidth="auto"
+                    control={
+                      <CouponRedeem
+                        variant="inline"
+                        client={client}
+                        accountId={accountId}
+                        workspaceId={workspaceId}
+                        disabled={visibleBusy}
+                        onGranted={(status) => {
+                          setRedeemed(status);
+                        }}
+                      />
+                    }
+                  />
+                ) : null}
                 <SettingRow
                   label="Invoices and payment details"
                   controlWidth="auto"
@@ -294,11 +397,34 @@ export function OrganizationBillingPage({
         onRetry={() => void refreshEntitlements()}
       />
 
-      <OrganizationUsageDashboard
-        key={identityKey}
-        accountId={accountId}
-        enabled={canReadBilling && Boolean(accountId)}
-      />
+      <Suspense fallback={null}>
+        <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
+      </Suspense>
+
+      {canReadBilling && accountId ? (
+        <Section title="Usage">
+          <SettingRowGroup>
+            <SettingRow
+              label="Insights"
+              description="Spend, tokens and model calls across every workspace, by model, workspace, person and more."
+              controlWidth="auto"
+              control={
+                <RowButton
+                  onClick={() =>
+                    void navigate({
+                      to: "/workspaces/$workspaceId/organization",
+                      params: { workspaceId },
+                      search: { section: "insights" },
+                    })
+                  }
+                >
+                  Open Insights
+                </RowButton>
+              }
+            />
+          </SettingRowGroup>
+        </Section>
+      ) : null}
     </SectionStack>
   );
 }
@@ -331,8 +457,21 @@ function BillingLoadFailure(props: {
 
 /** "max_concurrent_sessions" as "Max concurrent sessions". */
 function entitlementLabel(name: string): string {
-  const words = name.replace(/[_.-]+/g, " ").trim();
+  const words = name
+    .replace(/^limits?\./, "")
+    .replace(/[_.-]+/g, " ")
+    .trim();
   return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/**
+ * Only limits a customer can run into: numbers. Feature switches
+ * ("managed.api_keys": true) are how the deployment is built, not a limit.
+ */
+function customerLimits(entitlements: BillingEntitlementsResponse["entitlements"]) {
+  return entitlementEntries(entitlements).filter(
+    (row) => !row.name.startsWith("managed.") && /^[\d,.]+$/.test(row.value),
+  );
 }
 
 /**
@@ -345,19 +484,11 @@ function EntitlementsSection(props: {
   error: Error | null;
   onRetry: () => void;
 }) {
-  const rows = props.entitlements ? entitlementEntries(props.entitlements.entitlements) : [];
+  const rows = props.entitlements ? customerLimits(props.entitlements.entitlements) : [];
   if (!props.enabled) return null;
   if (props.error) {
-    return (
-      <Section title="Plan limits">
-        <BillingLoadFailure
-          title="Couldn't load the plan's limits"
-          denied="You can't see the plan's limits. Ask an organization owner for access."
-          error={props.error}
-          onRetry={props.onRetry}
-        />
-      </Section>
-    );
+    // Limits are rare; a failed read of them is not worth a red box on Billing.
+    return null;
   }
   if (rows.length === 0) return null;
   return (

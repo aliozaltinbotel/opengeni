@@ -1,5 +1,649 @@
 # @opengeni/worker-bundle
 
+## 1.4.4
+
+### Patch Changes
+
+- Updated dependencies [db21f93]
+- Updated dependencies [62e718d]
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/db@1.4.4
+  - @opengeni/runtime@1.4.4
+  - @opengeni/contracts@1.4.4
+  - @opengeni/sdk@1.4.4
+  - @opengeni/interaction@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/core@1.4.4
+  - @opengeni/documents@1.4.4
+  - @opengeni/events@1.4.4
+  - @opengeni/capabilities@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/github@1.4.4
+  - @opengeni/storage@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+  - @opengeni/agent-proto@1.4.4
+  - @opengeni/jev@1.4.4
+  - @opengeni/network@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [19a16ef]
+- Updated dependencies [63c7473]
+- Updated dependencies [1a05862]
+- Updated dependencies [c0c0f74]
+  - @opengeni/runtime@1.4.3
+  - @opengeni/config@1.4.3
+  - @opengeni/sdk@1.4.3
+  - @opengeni/core@1.4.3
+  - @opengeni/db@1.4.3
+  - @opengeni/documents@1.4.3
+  - @opengeni/github@1.4.3
+  - @opengeni/storage@1.4.3
+  - @opengeni/codemode@1.4.3
+  - @opengeni/events@1.4.3
+  - @opengeni/agent-proto@1.4.3
+  - @opengeni/capabilities@1.4.3
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/interaction@1.4.3
+  - @opengeni/jev@1.4.3
+  - @opengeni/network@1.4.3
+  - @opengeni/observability@1.4.3
+  - @opengeni/tool-gateway@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/agent-proto@1.4.2
+- @opengeni/capabilities@1.4.2
+- @opengeni/codemode@1.4.2
+- @opengeni/codex@1.4.2
+- @opengeni/config@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/core@1.4.2
+- @opengeni/db@1.4.2
+- @opengeni/documents@1.4.2
+- @opengeni/events@1.4.2
+- @opengeni/github@1.4.2
+- @opengeni/interaction@1.4.2
+- @opengeni/jev@1.4.2
+- @opengeni/network@1.4.2
+- @opengeni/observability@1.4.2
+- @opengeni/runtime@1.4.2
+- @opengeni/sdk@1.4.2
+- @opengeni/storage@1.4.2
+- @opengeni/tool-gateway@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 9ac9a14: Time-to-first-token is now honest and alerted where it is actionable. TTFT buckets run to 300 seconds instead of saturating at 10. New `opengeni_model_request_pre_dispatch_seconds` measures OpenGeni's own per-request work before the provider sees bytes, and `opengeni_model_provider_ttft_seconds{content="any"|"text"}` measures provider latency from literal dispatch. The absolute first-token alert is replaced by tight alerts on OpenGeni-owned dispatch latency and a per-provider regression alert against each provider's own 24-hour baseline.
+- a937996: Count provider web search and fetch calls. The worker now exports `opengeni_web_search_calls_total{operation,provider,outcome}` and `opengeni_web_search_call_duration_seconds`, and logs `web search provider call failed` with the provider status, so operators can alert on a failing search provider.
+- Updated dependencies [eeb73ee]
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [be95071]
+- Updated dependencies [1f112d5]
+- Updated dependencies [82cd591]
+- Updated dependencies [e6d35b9]
+- Updated dependencies [0674635]
+- Updated dependencies [0674635]
+- Updated dependencies [d14de0c]
+- Updated dependencies [55bddfe]
+- Updated dependencies [784e862]
+- Updated dependencies [c06d45a]
+- Updated dependencies [f290348]
+- Updated dependencies [e852eb7]
+- Updated dependencies [aedc3b9]
+  - @opengeni/core@1.4.1
+  - @opengeni/db@1.4.1
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/sdk@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/runtime@1.4.1
+  - @opengeni/documents@1.4.1
+  - @opengeni/events@1.4.1
+  - @opengeni/capabilities@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/github@1.4.1
+  - @opengeni/interaction@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/storage@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+  - @opengeni/agent-proto@1.4.1
+  - @opengeni/jev@1.4.1
+  - @opengeni/network@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 673bb53: Add provider-agnostic web search. When a deployment names a search provider (TinyFish, Exa, Tavily, Firecrawl, Brave, Jina, or self-hosted SearXNG), models without hosted search receive `web_search` and `web_fetch` tools; hosted search stays the default where it exists, and `replace` mode can swap it. Priced calls are credit-billed at provider cost plus 5%. Off until configured.
+
+### Patch Changes
+
+- 3fa351f: Recover pending managed-home resolver transitions through the existing durable same-turn checkpoint.
+- 5451b38: Distinguish an exact committed sandbox mutation receipt from rejection of its output after authority changes. Preserve the non-retryable typed failure through SDK tools and stop later dispatches in the same invocation without hiding uncertain batch items. Missing, mismatched, rolled-back, and caller-owned transaction receipts remain unknown; existing history and recovery authority are unchanged.
+- d3a8cf2: Reuse fresh subscription lease confirmations between runtime and usage checkpoints to avoid redundant database heartbeats. Preserve the independent timer, expiry checks, exact ownership fences, and immediate retry after failed renewal.
+- Updated dependencies [bd9521c]
+- Updated dependencies [5a0c6f3]
+- Updated dependencies [e0ccba8]
+- Updated dependencies [8e11301]
+- Updated dependencies [664eabf]
+- Updated dependencies [48c5eec]
+- Updated dependencies [ef0f1c8]
+- Updated dependencies [08ce841]
+- Updated dependencies [ee1c07e]
+- Updated dependencies [92a5024]
+- Updated dependencies [ee1c07e]
+- Updated dependencies [673bb53]
+- Updated dependencies [e01662a]
+- Updated dependencies [5451b38]
+- Updated dependencies [36ff885]
+- Updated dependencies [2a65d6e]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/db@1.4.0
+  - @opengeni/sdk@1.4.0
+  - @opengeni/config@1.4.0
+  - @opengeni/core@1.4.0
+  - @opengeni/runtime@1.4.0
+  - @opengeni/capabilities@1.4.0
+  - @opengeni/codemode@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/documents@1.4.0
+  - @opengeni/events@1.4.0
+  - @opengeni/github@1.4.0
+  - @opengeni/interaction@1.4.0
+  - @opengeni/observability@1.4.0
+  - @opengeni/storage@1.4.0
+  - @opengeni/tool-gateway@1.4.0
+  - @opengeni/agent-proto@1.4.0
+  - @opengeni/jev@1.4.0
+  - @opengeni/network@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 9294e9c: Keep opaque model-tool approval IDs out of UUID-only programmatic operation lookups so approved and rejected calls resume correctly.
+- Updated dependencies [1670f64]
+- Updated dependencies [62006f1]
+- Updated dependencies [fd4346c]
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [757a7e4]
+- Updated dependencies [414d416]
+  - @opengeni/core@1.3.0
+  - @opengeni/db@1.3.0
+  - @opengeni/runtime@1.3.0
+  - @opengeni/contracts@1.3.0
+  - @opengeni/capabilities@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/sdk@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+  - @opengeni/documents@1.3.0
+  - @opengeni/events@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/github@1.3.0
+  - @opengeni/interaction@1.3.0
+  - @opengeni/storage@1.3.0
+  - @opengeni/agent-proto@1.3.0
+  - @opengeni/jev@1.3.0
+  - @opengeni/network@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- Updated dependencies [7424e7c]
+- Updated dependencies [1033595]
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/db@1.2.0
+  - @opengeni/sdk@1.2.0
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/runtime@1.2.0
+  - @opengeni/core@1.2.0
+  - @opengeni/documents@1.2.0
+  - @opengeni/events@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/github@1.2.0
+  - @opengeni/storage@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/interaction@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+  - @opengeni/agent-proto@1.2.0
+  - @opengeni/capabilities@1.2.0
+  - @opengeni/jev@1.2.0
+  - @opengeni/network@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- f895d19: Give durable worker recovery sole ownership of provider retries, add bounded backoff jitter, preserve nested HTTP error classification, and observe recovery outcomes across response and compaction attempts.
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [f895d19]
+- Updated dependencies [411b3b5]
+- Updated dependencies [4d5053f]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/core@1.1.0
+  - @opengeni/runtime@1.1.0
+  - @opengeni/db@1.1.0
+  - @opengeni/sdk@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codemode@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/documents@1.1.0
+  - @opengeni/events@1.1.0
+  - @opengeni/github@1.1.0
+  - @opengeni/interaction@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/storage@1.1.0
+  - @opengeni/tool-gateway@1.1.0
+  - @opengeni/agent-proto@1.1.0
+  - @opengeni/capabilities@1.1.0
+  - @opengeni/jev@1.1.0
+  - @opengeni/network@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- 6fccfa0: Release completed Connected Machine command output once its exact tool result is
+  durable, instead of retaining it until a long turn ends. Preserve parallel and
+  background output ownership, and allow failed final acknowledgements to retry.
+  Persist independent background output custody after verified PostgreSQL capture,
+  then reconcile release on its original connection even after worker loss.
+- Updated dependencies [43da85e]
+- Updated dependencies [ee6b145]
+- Updated dependencies [6fccfa0]
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+- Updated dependencies [9925fe2]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/db@1.0.1
+  - @opengeni/runtime@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/core@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/documents@1.0.1
+  - @opengeni/events@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/github@1.0.1
+  - @opengeni/interaction@1.0.1
+  - @opengeni/storage@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+  - @opengeni/agent-proto@1.0.1
+  - @opengeni/capabilities@1.0.1
+  - @opengeni/jev@1.0.1
+  - @opengeni/network@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 2.3.5
+
+### Patch Changes
+
+- Updated dependencies [6fee02a]
+  - @opengeni/db@6.7.2
+  - @opengeni/core@5.3.2
+  - @opengeni/documents@0.8.44
+  - @opengeni/events@0.4.42
+
+## 2.3.4
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/core@5.3.1
+  - @opengeni/sdk@7.8.1
+  - @opengeni/codemode@0.7.2
+  - @opengeni/runtime@4.8.1
+  - @opengeni/db@6.7.1
+  - @opengeni/documents@0.8.43
+  - @opengeni/events@0.4.41
+
+## 2.3.3
+
+### Patch Changes
+
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+- c82f66a: Clarify the default result for an explicitly rejected tool approval: that proposed call was not executed. Preserve custom rejection reasons, intervention results and approved-call outcomes.
+- 746464c: Add a launch-load safety switch that pauses new managed account sign-ups without affecting existing users. Rolling migration 0585 adds an append-only, operator-only runtime switch (`set_managed_auth_new_signups_enabled`, read by the API on every sign-up decision, so a flip applies to the next request with no restart), and `OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED=false` remains the deployment ceiling. While paused, email sign-up returns `403` with code `NEW_SIGNUPS_PAUSED` and Google/GitHub refuse unknown provider accounts with `error=signup_disabled`; sign-in, sessions, password reset, email verification, and invitation-bound account setup keep working. The managed-session client config gains an additive `newSignupsEnabled` field (absent means `true`), `@opengeni/contracts` exports `MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE`, `@opengeni/db` exports `readManagedAuthNewSignupsSwitch`, and the control worker publishes `opengeni_managed_auth_new_signups_runtime_enabled`.
+- 978981a: Present expected sandbox lifecycle waits during model preparation as waiting rather than failed. Retain technical failure receipts and keep actual model and provider failures visible.
+- ac20181: Recognize documented OpenAI and Claude spend limits, ramp/overload and safety failures. Keep payment refusals distinct from exhausted credits and unknown Claude stream errors conservative, preserve authoritative HTTP refusals, and honor Azure millisecond retry hints without changing side-effect recovery boundaries.
+- Updated dependencies [a0f5728]
+- Updated dependencies [aa41b15]
+- Updated dependencies [981ba72]
+- Updated dependencies [3be5798]
+- Updated dependencies [af57cf9]
+- Updated dependencies [6ca71f6]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [fe2aa8c]
+- Updated dependencies [e6036b3]
+- Updated dependencies [b710f5e]
+- Updated dependencies [395becb]
+- Updated dependencies [1b482bf]
+- Updated dependencies [a651f55]
+- Updated dependencies [e103581]
+- Updated dependencies [aa41b15]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3cc26b5]
+- Updated dependencies [3395acc]
+- Updated dependencies [f38dac6]
+- Updated dependencies [18216d2]
+- Updated dependencies [18216d2]
+- Updated dependencies [5b809eb]
+- Updated dependencies [81a5d9d]
+- Updated dependencies [00000d7]
+- Updated dependencies [aa41b15]
+- Updated dependencies [7705d65]
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [2a47520]
+- Updated dependencies [ac20181]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [53b2c83]
+- Updated dependencies [6fc73e3]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [b32b5f6]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [1826595]
+- Updated dependencies [b4d1c5b]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+- Updated dependencies [8f8629d]
+- Updated dependencies [f23caa9]
+- Updated dependencies [44d5ee5]
+  - @opengeni/db@6.7.0
+  - @opengeni/contracts@5.8.0
+  - @opengeni/core@5.3.0
+  - @opengeni/config@3.4.0
+  - @opengeni/runtime@4.8.0
+  - @opengeni/sdk@7.8.0
+  - @opengeni/tool-gateway@0.1.20
+  - @opengeni/network@0.3.2
+  - @opengeni/observability@0.8.39
+  - @opengeni/capabilities@0.3.7
+  - @opengeni/documents@0.8.42
+  - @opengeni/events@0.4.40
+  - @opengeni/codemode@0.7.1
+  - @opengeni/codex@0.2.33
+  - @opengeni/github@0.8.4
+  - @opengeni/interaction@0.4.47
+  - @opengeni/storage@0.2.140
+  - @opengeni/xai-subscription@0.1.6
+
+## 2.3.2
+
+### Patch Changes
+
+- 4a63d4f: A Modal box kept warm only by legacy background commands (a dev server, a command whose large output is still draining, a stopped command the provider no longer answers for) is no longer held until the provider deadline kills it uncaptured, which left the session unable to restore. Once every session of the sandbox group has been unused for `OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS` (default 30 minutes; above the idle grace, below the rotation lead, and before an explicit Modal idle timeout), the reaper checkpoints the current workspace excluding exactly those commands, stops the box, and settles the commands `lost` with reason `idle_containment`. The next turn restores the saved workspace. "Unused" comes from durable facts only: no open turn or pending approval or human-input request, no pending quiescence, no `wait_for_input` or unclaimed turn-starting input within the window (counted from the wait deadline and the input creation), no other holder or writer, and the newest turn, holder change and write older than the window. A command the agent is waiting on keeps running until the provider-deadline backstop. That backstop now also captures behind a cancelled, failed or superseded owner without a quiescence receipt, instead of letting the box die uncaptured. Rolling migration 0547 stamps holder changes on the lease and adds a health-independent containment inventory, replacing the separate unobservable-command and stopping-with-provider-errors predicates; pre-0547 workers keep their unchanged inventory. Commands settled by containment, by provider-deadline rotation (`provider_deadline_containment`), by provider loss during that drain, by provider loss seen while routing, or by the operator cold-loss reconciliation now get `session.command.finished` and the agent notice in the same transaction, for example "`bun run dev` was stopped because nobody used this session for 30 minutes and nothing was waiting on it; the workspace was saved. Restart it if you still need it." Previously those settlements were silent. Supervised commands keep their own proof gate. The reaper exports `opengeni_sandbox_command_containment_total{outcome}`.
+- 7dc8eaf: Park genuine pre-dispatch Modal setup exhaustion without failing or replaying the accepted turn or replenishing its finite recovery budget.
+- 82b6358: Continue fixed Modal capability and file-visibility probes through transient transport failures by observing their original invocation. Report uncertain retained stdin acknowledgements without encouraging another input write.
+- 404854d: Let turn cleanup consume exact retained-command terminal proof committed by another worker, including when the original control transport hangs. Drain the worker gracefully when finalization stalls so concurrent turns checkpoint and resume without spending their unexpected-worker-death recovery allowance. Keep standalone host exit as a final backstop; bare activity hosts supply the worker drain edge and embedded services own their termination policy.
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+- Updated dependencies [12ef019]
+- Updated dependencies [7798558]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [09289aa]
+- Updated dependencies [521ae01]
+- Updated dependencies [1ac93e3]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [b052ad3]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [c60d38a]
+- Updated dependencies [d1bb05c]
+- Updated dependencies [4a63d4f]
+- Updated dependencies [946f6c3]
+- Updated dependencies [7f70820]
+- Updated dependencies [fb55322]
+- Updated dependencies [7dc8eaf]
+- Updated dependencies [82b6358]
+- Updated dependencies [9b70b4a]
+- Updated dependencies [f146f78]
+- Updated dependencies [1f3e11a]
+- Updated dependencies [91cc03e]
+- Updated dependencies [3b7496e]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [c755ff4]
+- Updated dependencies [e9b9730]
+- Updated dependencies [1133a8e]
+- Updated dependencies [351cd79]
+- Updated dependencies [131eda2]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [328eaaa]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [351cd79]
+- Updated dependencies [fcaf518]
+- Updated dependencies [404854d]
+- Updated dependencies [70af8bb]
+- Updated dependencies [103faae]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/db@6.6.0
+  - @opengeni/sdk@7.7.0
+  - @opengeni/runtime@4.7.0
+  - @opengeni/codemode@0.7.0
+  - @opengeni/core@5.2.0
+  - @opengeni/config@3.3.0
+  - @opengeni/capabilities@0.3.6
+  - @opengeni/observability@0.8.38
+  - @opengeni/codex@0.2.32
+  - @opengeni/documents@0.8.41
+  - @opengeni/events@0.4.39
+  - @opengeni/github@0.8.3
+  - @opengeni/interaction@0.4.46
+  - @opengeni/storage@0.2.139
+  - @opengeni/tool-gateway@0.1.19
+
+## 2.3.1
+
+### Patch Changes
+
+- Updated dependencies [3f7ff5b]
+- Updated dependencies [3a688de]
+- Updated dependencies [5e1175d]
+  - @opengeni/sdk@7.6.1
+  - @opengeni/runtime@4.6.0
+  - @opengeni/db@6.5.0
+  - @opengeni/codemode@0.6.8
+  - @opengeni/core@5.1.1
+  - @opengeni/documents@0.8.40
+  - @opengeni/events@0.4.38
+
+## 2.3.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- 4762e1a: Collect product usage analytics server-side, independent of browser analytics consent.
+
+  Record throttled, batched presence for managed browser sessions and publish `opengeni_active_users{window}` from control workers. Add the `user.active`, `credits.granted` (grant class) and `connection.revoked` (provider class) lifecycle facts, live `opengeni_sessions_created_total{surface,created_by_kind,root}` and `opengeni_user_messages_total{surface}` counters, and database-derived `opengeni_credit_grants_total{grant_class}` / `opengeni_credit_granted_micros_total{grant_class}` that include trigger-written trial grants.
+
+  Add an idempotent operator backfill (`bun run db:backfill-lifecycle-facts`) for lifecycle facts captured before the first lifecycle consumer registered.
+
+  Give the logical workspace capture its own `opengeni_workspace_capture_revision_duration_seconds` histogram so it no longer collides with the physical capture histogram's label set in one worker registry.
+
+- Updated dependencies [e5b0123]
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/core@5.1.0
+  - @opengeni/db@6.4.0
+  - @opengeni/runtime@4.5.0
+  - @opengeni/sdk@7.6.0
+  - @opengeni/codemode@0.6.7
+  - @opengeni/codex@0.2.31
+  - @opengeni/config@3.2.1
+  - @opengeni/documents@0.8.39
+  - @opengeni/events@0.4.37
+  - @opengeni/github@0.8.2
+  - @opengeni/interaction@0.4.45
+  - @opengeni/observability@0.8.37
+  - @opengeni/storage@0.2.138
+  - @opengeni/tool-gateway@0.1.18
+
+## 2.2.1
+
+### Patch Changes
+
+- 55f1cdd: Checkpoint managed browsers before provider expiry through existing encrypted
+  suspension receipts. Exact lease and controller claims fence capture, publication
+  and cleanup; retries retain one operation and never recapture a committed artifact.
+  Share browser authority derivation through leaf exports used by API and worker.
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+- c7bb6f1: Stop deterministic goal retries for terminal or unavailable-model sessions,
+  preserve frozen connector authority through voice delegation and handoff, and
+  request advertised OAuth offline access for generic native MCP connections.
+  Distinguish MCP teardown warnings from connection failures in safe telemetry.
+
+  Freeze initial-turn connector accounts against executable workspace defaults,
+  matching follow-up admission while preserving explicit selections and exclusions.
+
+  Validate scheduled generated sessions against the full accepted agent
+  configuration and instruction alias during queued recovery.
+
+- f26c4f5: Recover transient Modal sandbox readiness failures before command dispatch and observe uncertain probe starts without replay.
+- 3545ca3: Include exact accepted-turn initiator context in signed credential-provider
+  requests, with human/service/agent attribution and bounded causal lineage for
+  children, continuations, and coalesced updates. Preserve initiating-human fields
+  and authorization; expose the additive context through the SDK verifier.
+- 665e849: Share execution's effective turn-tool selection with credential-provider MCP
+  targeting and preparation so follow-up turns retain their per-turn headers,
+  without widening tool selection or connection authority.
+- 45d1301: Preserve bounded exact OpenAI/Azure streamed failure diagnostics separately from safe error messages, and classify provider terminal codes for existing bounded same-turn recovery. Invalid requests, safety refusals, and unknown terminal codes remain non-retryable; Codex and SuperGrok keep their transport-owned behavior.
+- 45d1301: Keep streamed safety diagnostics terminal even under server-error codes, recognize bounded diagnostic-only context overflows for compaction, and retain HTTP Retry-After evidence on yielded Responses failures so long quota waits do not enter automatic recovery.
+- 0bbe2e7: Every `session.requiresAction` approval entry now carries the same top-level `id`, `name`, and `arguments`, whether it is the first pause of a turn or a later one after a decision. `id` is the `approvalId` that `sendApprovalDecision` accepts (the pending tool call id). Historical fields (`rawItem`, `raw`) remain for compatibility. The SDK exports this as `SessionApprovalRequest`.
+- Updated dependencies [e01fc8e]
+- Updated dependencies [a6ff780]
+- Updated dependencies [6a97313]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [55f1cdd]
+- Updated dependencies [6a97313]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [48f5d39]
+- Updated dependencies [c8830e0]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [c7bb6f1]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [79f4635]
+- Updated dependencies [46e3a8e]
+- Updated dependencies [f26c4f5]
+- Updated dependencies [3545ca3]
+- Updated dependencies [665e849]
+- Updated dependencies [665e849]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [dd6795c]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [6a97313]
+  - @opengeni/db@6.3.0
+  - @opengeni/sdk@7.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/agent-proto@0.6.1
+  - @opengeni/core@5.0.1
+  - @opengeni/interaction@0.4.44
+  - @opengeni/capabilities@0.3.5
+  - @opengeni/jev@0.2.1
+  - @opengeni/runtime@4.4.0
+  - @opengeni/codex@0.2.30
+  - @opengeni/config@3.2.0
+  - @opengeni/xai-subscription@0.1.5
+  - @opengeni/documents@0.8.38
+  - @opengeni/events@0.4.36
+  - @opengeni/codemode@0.6.6
+  - @opengeni/github@0.8.1
+  - @opengeni/observability@0.8.36
+  - @opengeni/storage@0.2.137
+  - @opengeni/tool-gateway@0.1.17
+
 ## 2.2.0
 
 ### Minor Changes

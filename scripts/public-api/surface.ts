@@ -1,7 +1,7 @@
 /**
  * Public API surface inventory and compatibility diff.
  *
- * `docs/design/api-compatibility-policy.md` defines OpenGeni's public surface:
+ * `docs/design/api-compatibility-policy.md` defines Opengeni's public surface:
  * the `/v1` routes reachable through public `@opengeni/sdk` methods, the
  * documented session event envelope and event types, the exported names of
  * `@opengeni/sdk` and `@opengeni/react`, and the automation webhook ingress.
@@ -34,7 +34,7 @@ const HTTP_VERBS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 /**
  * Public ingress formats that no SDK method calls (third parties post to them).
  * Provider callbacks whose format the provider owns (Stripe, GitHub, Slack) are
- * not OpenGeni's surface and stay out.
+ * not Opengeni's surface and stay out.
  */
 export const PUBLIC_INGRESS_ROUTES: readonly string[] = [
   "POST /v1/webhooks/automations/:endpointId",
@@ -76,6 +76,8 @@ export type Snapshot = {
   schemas: Record<string, { io: SchemaIo[]; shape: Record<string, string> }>;
   exports: Record<string, Record<string, ExportKind>>;
   sdkMembers: Record<string, string[]>;
+  /** Entry point + exported class, not a source class-name union. Optional for older baselines. */
+  sdkSignatures?: Record<string, Record<string, string[]>>;
 };
 
 // ---------------------------------------------------------------------------
@@ -126,6 +128,9 @@ function parse(path: string): { program: Node; comments: { value: string; end: n
 }
 
 function literalString(node: Node, bindings?: ReadonlyMap<string, string>): string | null {
+  if (bindings && node.type === "CallExpression" && (node.callee as Node).type === "Identifier") {
+    return bindings.get(String((node.callee as Node).name)) ?? null;
+  }
   if (node.type === "Literal" && typeof node.value === "string") return node.value;
   if (node.type === "StringLiteral" && typeof node.value === "string") return node.value;
   if (node.type === "TemplateLiteral") {
@@ -229,7 +234,11 @@ function jsdocBefore(
     : "";
 }
 
-function collectFunctionInfo(fn: Node, method: SdkMethod): void {
+function collectFunctionInfo(
+  fn: Node,
+  method: SdkMethod,
+  fileBindings: ReadonlyMap<string, string>,
+): void {
   for (const param of (fn.params as Node[] | undefined) ?? []) {
     const annotation =
       (param.typeAnnotation as Node | undefined) ??
@@ -241,7 +250,10 @@ function collectFunctionInfo(fn: Node, method: SdkMethod): void {
   for (const name of returnNames) if (name !== "Promise") method.responseTypes.add(name);
   const body = fn.body as Node | undefined;
   if (!body) return;
-  const bindings = new Map<string, string>();
+  const bindings = new Map(fileBindings);
+  for (const param of (fn.params as Node[] | undefined) ?? []) {
+    if (param.type === "Identifier") bindings.delete(String(param.name));
+  }
   walk(body, (child) => {
     if (child.type !== "VariableDeclarator" || (child.id as Node).type !== "Identifier") return;
     let init = child.init as Node | null;
@@ -249,7 +261,9 @@ function collectFunctionInfo(fn: Node, method: SdkMethod): void {
       init = init.body as Node;
     }
     const text = init ? literalString(init) : null;
-    if (text?.startsWith("/v1/")) bindings.set(String((child.id as Node).name), text);
+    const name = String((child.id as Node).name);
+    if (text?.startsWith("/v1/")) bindings.set(name, text);
+    else bindings.delete(name);
   });
   walk(body, (child) => {
     const text = literalString(child, bindings);
@@ -275,6 +289,17 @@ export function extractSdkMethods(files: readonly string[]): SdkMethod[] {
   for (const file of files) {
     const source = readFileSync(file, "utf8");
     const { program, comments } = parse(file);
+    // Only a single literal return qualifies as a file-level path helper.
+    // Unknown or computed helpers must not invent an SDK-reachable route.
+    const fileBindings = new Map<string, string>();
+    for (const node of program.body as Node[]) {
+      if (node.type !== "FunctionDeclaration" || !node.id) continue;
+      const statements = (node.body as Node).body as Node[];
+      if (statements.length !== 1 || statements[0]!.type !== "ReturnStatement") continue;
+      const argument = statements[0]!.argument as Node | null;
+      const text = argument ? literalString(argument) : null;
+      if (text?.startsWith("/v1/")) fileBindings.set(String((node.id as Node).name), text);
+    }
     const add = (name: string, fn: Node, docStart: number) => {
       const method: SdkMethod = {
         name,
@@ -284,7 +309,7 @@ export function extractSdkMethods(files: readonly string[]): SdkMethod[] {
         requestTypes: new Set(),
         responseTypes: new Set(),
       };
-      collectFunctionInfo(fn, method);
+      collectFunctionInfo(fn, method, fileBindings);
       if (method.paths.size > 0) methods.push(method);
     };
     walk(program, (node) => {
@@ -735,15 +760,11 @@ function declaredNames(declaration: Node): [string, ExportKind][] {
   }
 }
 
-function packageEntryExports(
-  packageDir: string,
-  packageName: string,
-): Record<string, Record<string, ExportKind>> {
+function packageEntryFiles(packageDir: string, packageName: string): Record<string, string> {
   const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")) as {
     exports: Record<string, string | { types?: string; default?: string; import?: string }>;
   };
-  const cache = new Map<string, ModuleExports>();
-  const out: Record<string, Record<string, ExportKind>> = {};
+  const out: Record<string, string> = {};
   for (const [subpath, target] of Object.entries(manifest.exports).sort(([a], [b]) =>
     a.localeCompare(b),
   )) {
@@ -751,12 +772,24 @@ function packageEntryExports(
       typeof target === "string" ? target : (target.types ?? target.default ?? target.import);
     const entryName =
       subpath === "." ? packageName : `${packageName}/${subpath.replace(/^\.\//, "")}`;
-    if (!file || !/\.(ts|tsx)$/.test(file)) {
+    if (file) out[entryName] = resolve(packageDir, file);
+  }
+  return out;
+}
+
+function packageEntryExports(
+  packageDir: string,
+  packageName: string,
+): Record<string, Record<string, ExportKind>> {
+  const cache = new Map<string, ModuleExports>();
+  const out: Record<string, Record<string, ExportKind>> = {};
+  for (const [entryName, file] of Object.entries(packageEntryFiles(packageDir, packageName))) {
+    if (!/\.(ts|tsx)$/.test(file)) {
       // CSS and other asset entry points: the entry itself is the surface.
       out[entryName] = {};
       continue;
     }
-    const exports = moduleExports(resolve(packageDir, file), cache);
+    const exports = moduleExports(file, cache);
     out[entryName] = Object.fromEntries(
       [...exports.entries()].sort(([a], [b]) => a.localeCompare(b)),
     );
@@ -764,34 +797,317 @@ function packageEntryExports(
   return out;
 }
 
-function sdkClassMembers(files: readonly string[]): Record<string, string[]> {
-  const out: Record<string, Set<string>> = {};
+/** Strip parser locations and source spelling, retaining only the declared type structure. */
+function signatureType(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(signatureType);
+  if (!value || typeof value !== "object") return value;
+  const node = value as Record<string, unknown>;
+  if (node.type === "TSTypeAnnotation") return signatureType(node.typeAnnotation);
+  const out = Object.fromEntries(
+    Object.entries(node)
+      .filter(
+        ([key, field]) =>
+          !["start", "end", "raw", "decorators"].includes(key) &&
+          (field !== null || key === "value"),
+      )
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, field]) => [key, signatureType(field)]),
+  );
+  // Union/intersection spelling order is not a type change.
+  if (["TSUnionType", "TSIntersectionType"].includes(String(node.type))) {
+    out.types = (out.types as unknown[]).sort((a, b) =>
+      JSON.stringify(a).localeCompare(JSON.stringify(b)),
+    );
+  }
+  return out;
+}
+
+type MemberSignature = {
+  kind: string;
+  static: boolean;
+  optional: boolean;
+  readonly: boolean;
+  generics: unknown;
+  parameters: { type: unknown; optional: boolean; rest: boolean }[];
+  result: unknown;
+};
+
+function memberSignature(member: Node): string {
+  const fn = member.value as Node | undefined;
+  const parameters = ((fn?.params as Node[] | undefined) ?? []).map((parameter) => {
+    const binding = (parameter.left ?? parameter.argument ?? parameter) as Node;
+    return {
+      type: signatureType(binding.typeAnnotation ?? parameter.typeAnnotation ?? null),
+      optional: parameter.type === "AssignmentPattern" || binding.optional === true,
+      rest: parameter.type === "RestElement",
+    };
+  });
+  return JSON.stringify({
+    kind: String(member.kind ?? "property"),
+    static: member.static === true,
+    optional: member.optional === true,
+    readonly: member.readonly === true,
+    generics: signatureType(fn?.typeParameters ?? null),
+    parameters,
+    result: signatureType(fn?.returnType ?? member.typeAnnotation ?? null),
+  } satisfies MemberSignature);
+}
+
+type ClassDefinition = { file: string; name: string; declaration: Node };
+type SymbolReference = { file: string; name: string };
+
+/** Resolve by module + local symbol; different modules can both declare OpenGeniClient. */
+export function sdkClassSurface(
+  files: readonly string[],
+  entries: Readonly<Record<string, string>>,
+): Pick<Snapshot, "sdkMembers" | "sdkSignatures"> {
+  const modules = new Map<string, ReturnType<typeof parse>>();
+  const definitions: ClassDefinition[] = [];
+  const module = (file: string) => {
+    const cached = modules.get(file);
+    if (cached) return cached;
+    const parsed = parse(file);
+    modules.set(file, parsed);
+    return parsed;
+  };
   for (const file of files) {
-    const source = readFileSync(file, "utf8");
-    const { program, comments } = parse(file);
-    for (const statement of program.body as Node[]) {
-      const declaration =
-        statement.type === "ExportNamedDeclaration" ? (statement.declaration as Node | null) : null;
-      if (!declaration || declaration.type !== "ClassDeclaration" || !declaration.id) continue;
-      const className = String((declaration.id as Node).name);
-      const members = (out[className] ??= new Set());
-      for (const member of ((declaration.body as Node).body as Node[]) ?? []) {
-        const key = member.key as Node | undefined;
-        if (!key || key.type !== "Identifier") continue;
-        if (member.accessibility === "private" || member.accessibility === "protected") continue;
-        if (member.type !== "MethodDefinition" && member.type !== "PropertyDefinition") continue;
-        if (member.kind === "constructor") continue;
-        if (/@internal\b/.test(jsdocBefore(comments, member.start, source))) continue;
-        members.add(String(key.name));
+    for (const statement of module(file).program.body as Node[]) {
+      const declaration = (statement.declaration ?? statement) as Node;
+      if (
+        statement.type === "ExportNamedDeclaration" &&
+        declaration.type === "ClassDeclaration" &&
+        declaration.id
+      ) {
+        definitions.push({ file, name: String((declaration.id as Node).name), declaration });
       }
     }
   }
-  return Object.fromEntries(
-    Object.entries(out)
-      .filter(([, members]) => members.size > 0)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([name, members]) => [name, [...members].sort()]),
+  const resolveClass = (
+    reference: SymbolReference,
+    exported = false,
+    seen = new Set<string>(),
+  ): ClassDefinition | null => {
+    const key = `${reference.file}:${exported}:${reference.name}`;
+    if (seen.has(key)) return null;
+    const nextSeen = new Set(seen).add(key);
+    for (const statement of module(reference.file).program.body as Node[]) {
+      const declaration = (statement.declaration ?? statement) as Node;
+      if (
+        declaration.type === "ClassDeclaration" &&
+        declaration.id &&
+        String((declaration.id as Node).name) === reference.name &&
+        (!exported || statement.type === "ExportNamedDeclaration")
+      )
+        return { file: reference.file, name: reference.name, declaration };
+      if (statement.type === "ImportDeclaration" && !exported && statement.importKind !== "type") {
+        const source = resolveModule(reference.file, String((statement.source as Node).value));
+        if (!source) continue;
+        for (const specifier of (statement.specifiers as Node[]) ?? []) {
+          if (
+            String((specifier.local as Node).name) !== reference.name ||
+            specifier.importKind === "type"
+          )
+            continue;
+          const imported =
+            specifier.type === "ImportDefaultSpecifier"
+              ? "default"
+              : String((specifier.imported as Node | undefined)?.name);
+          return resolveClass({ file: source, name: imported }, true, nextSeen);
+        }
+      }
+      if (
+        statement.type === "ExportNamedDeclaration" &&
+        exported &&
+        statement.exportKind !== "type"
+      ) {
+        for (const specifier of (statement.specifiers as Node[]) ?? []) {
+          const target = specifier.exported as Node;
+          if (
+            String(target.name ?? target.value) !== reference.name ||
+            specifier.exportKind === "type"
+          )
+            continue;
+          const local = specifier.local as Node;
+          const source = statement.source as Node | null;
+          const file = source
+            ? resolveModule(reference.file, String(source.value))
+            : reference.file;
+          if (file)
+            return resolveClass(
+              { file, name: String(local.name ?? local.value) },
+              !!source,
+              nextSeen,
+            );
+        }
+      }
+      if (
+        statement.type === "ExportAllDeclaration" &&
+        exported &&
+        statement.exportKind !== "type"
+      ) {
+        const file = resolveModule(reference.file, String((statement.source as Node).value));
+        const found = file ? resolveClass({ file, name: reference.name }, true, nextSeen) : null;
+        if (found) return found;
+      }
+      if (
+        statement.type === "ExportDefaultDeclaration" &&
+        exported &&
+        reference.name === "default"
+      ) {
+        if (declaration.type === "ClassDeclaration")
+          return { file: reference.file, name: "default", declaration };
+        if (declaration.type === "Identifier")
+          return resolveClass(
+            { file: reference.file, name: String(declaration.name) },
+            false,
+            nextSeen,
+          );
+      }
+    }
+    return null;
+  };
+  const effectiveMembers = (
+    definition: ClassDefinition,
+    seen = new Set<Node>(),
+  ): Map<string, string[]> => {
+    if (seen.has(definition.declaration))
+      throw new Error(`cyclic SDK class inheritance: ${definition.name}`);
+    const nextSeen = new Set(seen).add(definition.declaration);
+    const base = definition.declaration.superClass as Node | null;
+    const ancestor =
+      base?.type === "Identifier"
+        ? resolveClass({ file: definition.file, name: String(base.name) })
+        : null;
+    const members = ancestor ? effectiveMembers(ancestor, nextSeen) : new Map<string, string[]>();
+    const { comments } = module(definition.file);
+    const source = readFileSync(definition.file, "utf8");
+    const own = new Map<string, { signature: string; overload: boolean }[]>();
+    for (const member of (definition.declaration.body as Node).body as Node[]) {
+      const key = member.key as Node | undefined;
+      if (!key || key.type !== "Identifier" || member.kind === "constructor") continue;
+      if (member.type !== "MethodDefinition" && member.type !== "PropertyDefinition") continue;
+      const name = String(key.name);
+      if (
+        member.accessibility === "private" ||
+        member.accessibility === "protected" ||
+        /@internal\b/.test(jsdocBefore(comments, member.start, source))
+      ) {
+        members.delete(name);
+        continue;
+      }
+      const list = own.get(name) ?? own.set(name, []).get(name)!;
+      list.push({
+        signature: memberSignature(member),
+        overload: member.type === "MethodDefinition" && !(member.value as Node).body,
+      });
+    }
+    for (const [name, signatures] of own) {
+      const overloads = signatures.filter((signature) => signature.overload);
+      members.set(
+        name,
+        [
+          ...new Set(
+            (overloads.length ? overloads : signatures).map((signature) => signature.signature),
+          ),
+        ].sort(),
+      );
+    }
+    return members;
+  };
+  // Keep the existing class-name inventory for historical baselines, but include inheritance.
+  const legacy = new Map<string, Set<string>>();
+  for (const definition of definitions) {
+    const names =
+      legacy.get(definition.name) ?? legacy.set(definition.name, new Set()).get(definition.name)!;
+    for (const name of effectiveMembers(definition).keys()) names.add(name);
+  }
+  const sdkSignatures: NonNullable<Snapshot["sdkSignatures"]> = {};
+  for (const [entry, file] of Object.entries(entries)) {
+    if (!/\.(ts|tsx)$/.test(file)) continue;
+    for (const [name, kind] of moduleExports(file)) {
+      if (kind !== "value") continue;
+      const definition = resolveClass({ file, name }, true);
+      if (definition)
+        sdkSignatures[`${entry}:${name}`] = Object.fromEntries(
+          [...effectiveMembers(definition)].sort(([a], [b]) => a.localeCompare(b)),
+        );
+    }
+  }
+  return {
+    sdkMembers: Object.fromEntries(
+      [...legacy]
+        .filter(([, members]) => members.size)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, members]) => [name, [...members].sort()]),
+    ),
+    sdkSignatures: Object.fromEntries(
+      Object.entries(sdkSignatures).sort(([a], [b]) => a.localeCompare(b)),
+    ),
+  };
+}
+
+function signatureCompatible(previous: string, candidate: string): boolean {
+  const before = JSON.parse(previous) as MemberSignature;
+  const after = JSON.parse(candidate) as MemberSignature;
+  const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+  const contains = (container: unknown, contained: unknown): boolean => {
+    const node = container as { type?: string; types?: unknown[] } | null;
+    if (node?.type === "TSAnyKeyword" || node?.type === "TSUnknownKeyword") return true;
+    const variants = node?.type === "TSUnionType" ? node.types! : [container];
+    const subset = contained as { type?: string; types?: unknown[] } | null;
+    return (subset?.type === "TSUnionType" ? subset.types! : [contained]).every((type) =>
+      variants.some((variant) => same(variant, type)),
+    );
+  };
+  if (
+    before.kind !== after.kind ||
+    before.static !== after.static ||
+    (!before.optional && after.optional) ||
+    (!before.readonly && after.readonly) ||
+    !same(before.generics, after.generics)
+  )
+    return false;
+  if (!contains(before.result, after.result) || after.parameters.length < before.parameters.length)
+    return false;
+  return (
+    before.parameters.every((parameter, index) => {
+      const next = after.parameters[index]!;
+      return (
+        parameter.rest === next.rest &&
+        (!parameter.optional || next.optional) &&
+        contains(next.type, parameter.type)
+      );
+    }) &&
+    after.parameters
+      .slice(before.parameters.length)
+      .every((parameter) => parameter.optional || parameter.rest)
   );
+}
+
+/*
+ * The alias-specific signatures supplement (never replace) legacy member removals.
+ * Contract-schema diffs still own the shapes behind named request/response types.
+ */
+function signatureFindings(before: Snapshot, after: Snapshot): Finding[] {
+  const findings: Finding[] = [];
+  for (const [client, members] of Object.entries(before.sdkSignatures ?? {})) {
+    for (const [name, signatures] of Object.entries(members)) {
+      const next = after.sdkSignatures?.[client]?.[name];
+      if (
+        !next ||
+        signatures.some(
+          (signature) => !next.some((candidate) => signatureCompatible(signature, candidate)),
+        )
+      ) {
+        findings.push({
+          id: `signature:${client}.${name}`,
+          breaking: true,
+          message: `${client}.${name} ${next ? "has an incompatible signature" : "removed"}`,
+        });
+      }
+    }
+  }
+  return findings;
 }
 
 // ---------------------------------------------------------------------------
@@ -974,7 +1290,7 @@ export function generateSnapshot(sources: SurfaceSources): Snapshot {
       ...packageEntryExports(sdkDir, "@opengeni/sdk"),
       ...packageEntryExports(join(root, "packages/react"), "@opengeni/react"),
     },
-    sdkMembers: sdkClassMembers(files),
+    ...sdkClassSurface(files, packageEntryFiles(sdkDir, "@opengeni/sdk")),
   };
 }
 
@@ -989,11 +1305,22 @@ export type Finding = {
   message: string;
 };
 
+/** Decides whether a field's move from one named schema to another keeps callers working. */
+type RefCompatibility = (
+  oldRef: string,
+  newRef: string,
+  ios: readonly SchemaIo[],
+  seen?: Set<string>,
+) => boolean;
+
+const REF_TYPE = /^ref\((.+)\)$/;
+
 function shapeFindings(
   name: string,
   ios: readonly SchemaIo[],
   before: Shape,
   after: Shape,
+  refCompatible: RefCompatibility = () => false,
 ): Finding[] {
   const findings: Finding[] = [];
   const input = ios.includes("input");
@@ -1015,10 +1342,35 @@ function shapeFindings(
       push(path, true, "field removed");
       continue;
     }
-    if (old.t !== next.t) {
+    // A one-value enum is emitted as a const by JSON Schema. Expanding it
+    // into same-scalar enum values follows the ordinary enum policy below.
+    const literalPair = [old, next].every(
+      (field) => (field.t === "const" || field.t === "enum") && field.enum?.length,
+    );
+    const literalTypes = new Set(
+      literalPair
+        ? [...(old.enum ?? []), ...(next.enum ?? [])].map((value) => typeof JSON.parse(value))
+        : [],
+    );
+    const sameScalarEnum =
+      literalPair &&
+      literalTypes.size === 1 &&
+      [...literalTypes].every(
+        (type) => type === "string" || type === "number" || type === "boolean",
+      );
+    if (old.t !== next.t && !sameScalarEnum) {
       const widenedInput = input && !output && next.t === "unknown";
       const narrowedOutput = output && !input && old.t === "unknown";
-      if (!widenedInput && !narrowedOutput) push(path, true, `type changed ${old.t} -> ${next.t}`);
+      const oldRef = REF_TYPE.exec(old.t)?.[1];
+      const newRef = REF_TYPE.exec(next.t)?.[1];
+      // A field that now points at a differently named schema is only a break
+      // when that schema's shape breaks callers (e.g. a request union widened
+      // into a new named superset is additive).
+      if (oldRef && newRef && refCompatible(oldRef, newRef, ios)) {
+        push(path, false, `type changed ${old.t} -> ${next.t} (compatible shape)`);
+      } else if (!widenedInput && !narrowedOutput) {
+        push(path, true, `type changed ${old.t} -> ${next.t}`);
+      }
       continue;
     }
     if (old.req !== undefined && next.req !== undefined && old.req !== next.req) {
@@ -1119,6 +1471,20 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
         });
     }
   }
+  const refCompatible: RefCompatibility = (oldRef, newRef, ios, seen = new Set<string>()) => {
+    const key = `${oldRef}->${newRef}`;
+    const oldSchema = before.schemas[oldRef];
+    const newSchema = after.schemas[newRef];
+    if (!oldSchema || !newSchema || seen.has(key)) return false;
+    seen.add(key);
+    return !shapeFindings(
+      newRef,
+      ios,
+      decodeShape(oldSchema.shape),
+      decodeShape(newSchema.shape),
+      (a, b, nested) => refCompatible(a, b, nested, seen),
+    ).some((finding) => finding.breaking);
+  };
   for (const [name, schema] of Object.entries(before.schemas)) {
     const next = after.schemas[name];
     if (!next) {
@@ -1134,7 +1500,15 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
       continue;
     }
     const ios = [...new Set([...schema.io, ...next.io])] as SchemaIo[];
-    findings.push(...shapeFindings(name, ios, decodeShape(schema.shape), decodeShape(next.shape)));
+    findings.push(
+      ...shapeFindings(
+        name,
+        ios,
+        decodeShape(schema.shape),
+        decodeShape(next.shape),
+        refCompatible,
+      ),
+    );
   }
   for (const [entry, names] of Object.entries(before.exports)) {
     const next = after.exports[entry];
@@ -1189,7 +1563,7 @@ export function diffSnapshots(before: Snapshot, after: Snapshot): Finding[] {
         });
     }
   }
-  return findings;
+  return [...findings, ...signatureFindings(before, after)];
 }
 
 // ---------------------------------------------------------------------------

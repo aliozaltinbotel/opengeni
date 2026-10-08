@@ -42,6 +42,10 @@ const ALWAYS_VISIBLE_BASE_TOOL_NAMES: ReadonlySet<string> = new Set([
   // enable it; hiding it behind search would spend a model round trip to find
   // the tool that exists to save round trips.
   "code_search",
+  // Provider web search, offered where the model has no hosted search. Hosted
+  // search is never deferred, so neither is its replacement.
+  "web_search",
+  "web_fetch",
 ]);
 const DISPATCH_MARKER_KEY = "opengeni.lazy_dispatch.v1";
 const SEARCH_MARKER_KEY = "opengeni.lazy_search.v1";
@@ -186,6 +190,7 @@ export class LazyToolRuntime {
   private activeAgent: object | null = null;
   private activeRunContext: unknown;
   readonly controlTools: Tool[];
+  private routerWasExposed: boolean;
 
   constructor(
     readonly transport: LazyToolTransport,
@@ -194,7 +199,10 @@ export class LazyToolRuntime {
     private readonly deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
     private readonly preparationIndependentToolNames: ReadonlySet<string> = new Set(),
     private readonly modelMcpServerIds: () => ReadonlyMap<string, string> = () => new Map(),
+    private readonly conditionalRouter = false,
+    routerInHistory = false,
   ) {
+    this.routerWasExposed = routerInHistory;
     this.controlTools =
       transport !== "generic_dispatch"
         ? [this.buildNativeSearchTool(), this.buildListTool()]
@@ -215,6 +223,23 @@ export class LazyToolRuntime {
 
   hasPendingPreparation(): boolean {
     return !this.preparationSettled;
+  }
+
+  async prepareConditionalRouter(): Promise<void> {
+    // Router visibility already accounts for authorized pending server IDs.
+    // Joining their catalog here would put background MCP setup back on the
+    // first-request path for configured agents. Tool demand still joins the
+    // exact preparation fence; settled empty catalogs keep the router hidden.
+    if (this.conditionalRouter && !this.hasPendingPreparation()) await this.ensurePrepared();
+  }
+
+  visibleControlTools(): Tool[] {
+    // Pending servers are genuinely deferred, even before tools/list completes.
+    this.routerWasExposed ||=
+      !this.conditionalRouter ||
+      this.searchableToolNames.size > 0 ||
+      (this.hasPendingPreparation() && this.deferredMcpServerIds.size > 0);
+    return this.routerWasExposed ? this.controlTools : [];
   }
 
   async ensurePrepared(): Promise<void> {
@@ -465,10 +490,10 @@ export class LazyToolRuntime {
           typeof args.limit === "number" && Number.isFinite(args.limit)
             ? Math.max(1, Math.min(40, Math.floor(args.limit)))
             : 20;
-        const tools = [...new Set(this.searchableTools(this.currentTools))]
+        const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
           .filter(isFunctionTool)
-          .filter((tool) => tool.name.startsWith(prefix))
           .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        const tools = authorizedTools.filter((tool) => tool.name.startsWith(prefix));
         const cursorIndex =
           cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
         if (cursor !== undefined && cursorIndex === -1) {
@@ -501,17 +526,33 @@ export class LazyToolRuntime {
           }
           descriptors.push(descriptor);
         }
-        return JSON.stringify({
+        const result = {
           tools: descriptors,
           total: tools.length,
           nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
-          ...(prefix && tools.length === 0
-            ? {
-                message:
-                  "No tool names match this literal prefix. Retry tool_list without namePrefix to browse the authorized catalog; tool names can include a server namespace.",
-              }
-            : {}),
-        });
+        };
+        if (!prefix || tools.length > 0) return JSON.stringify(result);
+
+        // Preserve literal-prefix pagination. Recovery hints are descriptors
+        // from the same authorized deferred pool, never schemas or new grants.
+        const recovery = {
+          ...result,
+          message:
+            "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
+          suggestions: [] as { name: string; description: string }[],
+        };
+        for (const candidate of authorizedTools) {
+          if (!candidate.name.includes(prefix)) continue;
+          const suggestion = {
+            name: candidate.name,
+            description: Array.from(candidate.description).slice(0, 160).join(""),
+          };
+          const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
+          if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
+          recovery.suggestions.push(suggestion);
+          if (recovery.suggestions.length >= Math.min(limit, 8)) break;
+        }
+        return JSON.stringify(recovery);
       },
     }) as unknown as Tool;
   }
@@ -618,6 +659,8 @@ export function installLazyToolRuntime(
   deferredMcpServerIds: ReadonlySet<string> = mcpServerIds,
   preparationIndependentToolNames: ReadonlySet<string> = new Set(),
   modelMcpServerIds?: () => ReadonlyMap<string, string>,
+  conditionalRouter = false,
+  routerInHistory = false,
 ): LazyToolRuntime {
   const runtime = new LazyToolRuntime(
     transport,
@@ -626,6 +669,8 @@ export function installLazyToolRuntime(
     deferredMcpServerIds,
     preparationIndependentToolNames,
     modelMcpServerIds,
+    conditionalRouter,
+    routerInHistory,
   );
   installLazyToolRuntimeOnAgent(agent, runtime);
   return runtime;
@@ -649,17 +694,18 @@ function installLazyToolRuntimeOnAgent(agent: CloneCapableAgent, runtime: LazyTo
   runtime.registerOriginalToolLoader(agent, originalGetAllTools);
   agent.getAllTools = (async (runContext: unknown) => {
     runtime.noteToolResolution(agent, runContext);
+    await runtime.prepareConditionalRouter();
     if (runtime.hasPendingPreparation()) {
       // Deferred MCP projections return an empty list until their shared
       // preparation fence settles, while required/eager MCP and ordinary agent
       // tools resolve normally through the policy-wrapped SDK path.
       const tools = await originalGetAllTools(runContext);
       runtime.refresh(tools);
-      return [...tools, ...runtime.controlTools];
+      return [...tools, ...runtime.visibleControlTools()];
     }
     const tools = await originalGetAllTools(runContext);
     runtime.refresh(tools);
-    return [...runtime.configuredExecutionTools(tools), ...runtime.controlTools];
+    return [...runtime.configuredExecutionTools(tools), ...runtime.visibleControlTools()];
   }) as typeof agent.getAllTools;
 
   const originalClone = agent.clone?.bind(agent);
@@ -777,7 +823,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   if (candidate.name === TOOL_SEARCH_NAME && typeof candidate.arguments === "string") {
     const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
     if (SEARCH_MARKER_KEY in providerData) {
-      throw new Error("Provider function call collided with OpenGeni lazy-search metadata");
+      throw new Error("Provider function call collided with Opengeni lazy-search metadata");
     }
     return [
       {
@@ -804,7 +850,7 @@ function transformGenericDispatchCall(candidate: unknown, runtime: LazyToolRunti
   }
   const providerData = isRecord(candidate.providerData) ? candidate.providerData : {};
   if (DISPATCH_MARKER_KEY in providerData) {
-    throw new Error("Provider function call collided with OpenGeni lazy-dispatch metadata");
+    throw new Error("Provider function call collided with Opengeni lazy-dispatch metadata");
   }
   return [
     {
@@ -868,19 +914,20 @@ class LazyToolModel implements Model {
           await this.runtime.ensurePrepared();
         }
       }
-      if (this.runtime.transport === "generic_dispatch" && event.type === "response_done") {
-        yield {
-          ...event,
-          response: {
-            ...event.response,
-            output: event.response.output.flatMap((item) =>
-              transformGenericDispatchCall(item, this.runtime),
-            ) as typeof event.response.output,
-          },
-        } as StreamEvent;
-      } else {
-        yield event;
-      }
+      const delivered =
+        this.runtime.transport === "generic_dispatch" && event.type === "response_done"
+          ? ({
+              ...event,
+              response: {
+                ...event.response,
+                output: event.response.output.flatMap((item) =>
+                  transformGenericDispatchCall(item, this.runtime),
+                ) as typeof event.response.output,
+              },
+            } as StreamEvent)
+          : event;
+      // The outer ModelRequestCaptureModel (wrapModel) registers this event's settlement.
+      yield delivered;
     }
   }
 

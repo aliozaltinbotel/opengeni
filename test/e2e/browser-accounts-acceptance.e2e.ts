@@ -13,6 +13,10 @@ import {
   type ManagedAuthSessionSetProjection,
 } from "@opengeni/contracts/managed-auth-session-sets";
 import { createDb, provisionRoles, type DbClient } from "@opengeni/db";
+import {
+  acquireManagedAuthActorMutationLease,
+  releaseManagedAuthActorMutationLease,
+} from "@opengeni/db/managed-auth-session-sets";
 import { migrate } from "@opengeni/db/migrate";
 import { OpenGeniClient } from "@opengeni/sdk";
 import {
@@ -37,6 +41,10 @@ import {
 import { createApp } from "../../apps/api/src/app";
 import { withAccountMenuAxeDiagnostics } from "./browser-account-axe-diagnostics";
 import { createAccountReadDiagnostics } from "./browser-account-read-diagnostics";
+import {
+  createFiniteReviewReadDiagnostics,
+  type FiniteReviewDiagnosticsWindow,
+} from "./browser-account-finite-review-diagnostics";
 import { observeReloadCapabilities } from "./browser-account-reload-barrier";
 import { observeChromiumNeutralSessionSetRequestAuthority } from "./browser-account-request-observation";
 import {
@@ -56,11 +64,13 @@ import {
 } from "./browser-account-race-diagnostics";
 import { exactLogoutAllSessionListSearch } from "./logout-all-session-list-search";
 
+// Signup first asks how to use Opengeni; these flows take the cloud path.
+const USE_CASE_HEADING = "How do you want to use Opengeni?";
 // The model-access step leads with credits the organization already holds, or
 // the included default model when the deployment provides one, otherwise it
 // asks how to power chats.
 const MODEL_ACCESS_HEADING =
-  /^(Choose how to power your chats|Start chatting for free|Start chatting with Opengeni credits|You’re ready to chat)$/;
+  /^(Choose how to power your chats|Start chatting for free|You got \S+ in free credits|You got free Opengeni credits|You’re ready to chat)$/;
 const MODEL_ACCESS_CONTINUE = /^(Skip for now|Start chatting( for free)?)$/;
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
@@ -103,8 +113,11 @@ type PendingFiniteRead = {
 type BrowserProblems = {
   capabilityDiagnostics: ReturnType<typeof createCapabilityDiagnostics>;
   crossTabReloadStartedAt?: number;
+  /** Receipt times of top-level document commits (Playwright `framenavigated`). */
+  mainFrameCommits: number[];
   acceptedRequestTerminals: Array<{
     observedAt: number;
+    origin?: string | undefined;
     pathnameAndSearch: string;
     responsePhase: string;
     terminal: "failed" | "finished";
@@ -443,6 +456,7 @@ function requestFailureProblem(input: BrowserRequestFailureInput): string | null
       (pathname === "/v1/auth/get-session" ||
         pathname === "/v1/auth/session-set" ||
         pathname === "/v1/workspaces" ||
+        pathname === "/v1/organization-invitations" ||
         (pathname === "/v1/billing" &&
           /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(
             requestUrl.searchParams.get("accountId") ?? "",
@@ -869,6 +883,7 @@ async function authSessionCount(email: string): Promise<number> {
 function observeBrowser(page: Page): BrowserProblems {
   const problems: BrowserProblems = {
     capabilityDiagnostics: createCapabilityDiagnostics(),
+    mainFrameCommits: [],
     acceptedRequestTerminals: [],
     activeStreams: new Map(),
     boundedHttp1StreamDispatches: 0,
@@ -1043,6 +1058,7 @@ function observeBrowser(page: Page): BrowserProblems {
       if (finishedBoundedStream) problems.boundedHttp1NativeSeams += 1;
       problems.acceptedRequestTerminals.push({
         observedAt: finishedAt,
+        origin: finishedUrl.origin,
         pathnameAndSearch: `${finishedUrl.pathname}${finishedUrl.search}`,
         responsePhase: problems.phase,
         terminal: "finished",
@@ -1069,6 +1085,9 @@ function observeBrowser(page: Page): BrowserProblems {
         problems.capabilityDiagnostics.console(problems.phase, source, message.text());
       }
     }
+  });
+  page.on("framenavigated", (frame) => {
+    if (frame === page.mainFrame()) problems.mainFrameCommits.push(performance.now());
   });
   page.on("pageerror", (error) => {
     const message = `[${problems.phase}] ${error.message}`;
@@ -1108,6 +1127,7 @@ function observeBrowser(page: Page): BrowserProblems {
       // actor-transition cancellations instead of broadly allowing CORS text.
       problems.acceptedRequestTerminals.push({
         observedAt: failedAt,
+        origin: failedUrl.origin,
         pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
         responsePhase,
         terminal: "failed",
@@ -1150,6 +1170,7 @@ function observeBrowser(page: Page): BrowserProblems {
         }
         problems.acceptedRequestTerminals.push({
           observedAt: failedAt,
+          origin: failedUrl.origin,
           pathnameAndSearch: `${failedUrl.pathname}${failedUrl.search}`,
           responsePhase,
           terminal: "failed",
@@ -1795,7 +1816,19 @@ async function expectAndConsumeActorTransitionResponse(
     [...exactConsoleErrors, ...(input.allowedConsoleErrors ?? [])],
     requestedEngine === "firefox" ? [] : exactConsoleErrors,
   );
-  consumeAllowedPageErrors(problems, input.allowedPageErrors);
+  if (requestedEngine === "webkit" && input.allowedPageErrors !== undefined) {
+    await expectAndConsumePageErrors(
+      page,
+      problems,
+      () =>
+        typeof input.allowedPageErrors === "function"
+          ? input.allowedPageErrors()
+          : [...(input.allowedPageErrors ?? [])],
+      [],
+    );
+  } else {
+    consumeAllowedPageErrors(problems, input.allowedPageErrors);
+  }
   problems.actorTransitionResponses.splice(0);
 }
 
@@ -1881,6 +1914,221 @@ function firefoxLiveEventsAbortPageErrorsForValidatedRace(
     )
     .slice(0, expectedCount)
     .map((evidence) => evidence.message);
+}
+
+function minimumCostTerminalAssignment(
+  costs: readonly ReadonlyMap<number, number>[],
+  terminalCount: number,
+  excluded?: { errorIndex: number; terminalIndex: number },
+): { cost: number; terminalIndexes: number[] } | null {
+  if (costs.length > terminalCount) return null;
+  // Rectangular Hungarian assignment. Missing edges have infinite cost;
+  // an unreachable augmenting path means the full ledger cannot correlate.
+  const rowPotential = Array.from({ length: costs.length + 1 }, () => 0);
+  const columnPotential = Array.from({ length: terminalCount + 1 }, () => 0);
+  const rowByColumn = Array.from({ length: terminalCount + 1 }, () => 0);
+  const previousColumn = Array.from({ length: terminalCount + 1 }, () => 0);
+  for (let row = 1; row <= costs.length; row += 1) {
+    rowByColumn[0] = row;
+    let column = 0;
+    const distances = Array.from({ length: terminalCount + 1 }, () => Number.POSITIVE_INFINITY);
+    const visited = Array.from({ length: terminalCount + 1 }, () => false);
+    do {
+      visited[column] = true;
+      const currentRow = rowByColumn[column] ?? 0;
+      let delta = Number.POSITIVE_INFINITY;
+      let nextColumn = 0;
+      for (let candidateColumn = 1; candidateColumn <= terminalCount; candidateColumn += 1) {
+        if (visited[candidateColumn]) continue;
+        const forbidden =
+          excluded?.errorIndex === currentRow - 1 && excluded.terminalIndex === candidateColumn - 1;
+        const edgeCost = forbidden
+          ? Number.POSITIVE_INFINITY
+          : (costs[currentRow - 1]?.get(candidateColumn - 1) ?? Number.POSITIVE_INFINITY);
+        const distance =
+          edgeCost - (rowPotential[currentRow] ?? 0) - (columnPotential[candidateColumn] ?? 0);
+        if (distance < (distances[candidateColumn] ?? Number.POSITIVE_INFINITY)) {
+          distances[candidateColumn] = distance;
+          previousColumn[candidateColumn] = column;
+        }
+        if ((distances[candidateColumn] ?? Number.POSITIVE_INFINITY) < delta) {
+          delta = distances[candidateColumn] ?? Number.POSITIVE_INFINITY;
+          nextColumn = candidateColumn;
+        }
+      }
+      if (!Number.isFinite(delta)) return null;
+      for (let candidateColumn = 0; candidateColumn <= terminalCount; candidateColumn += 1) {
+        if (visited[candidateColumn]) {
+          const assignedRow = rowByColumn[candidateColumn] ?? 0;
+          rowPotential[assignedRow] = (rowPotential[assignedRow] ?? 0) + delta;
+          columnPotential[candidateColumn] = (columnPotential[candidateColumn] ?? 0) - delta;
+        } else {
+          distances[candidateColumn] =
+            (distances[candidateColumn] ?? Number.POSITIVE_INFINITY) - delta;
+        }
+      }
+      column = nextColumn;
+    } while (rowByColumn[column] !== 0);
+    do {
+      const predecessor = previousColumn[column] ?? 0;
+      rowByColumn[column] = rowByColumn[predecessor] ?? 0;
+      column = predecessor;
+    } while (column !== 0);
+  }
+  const terminalIndexes = Array.from({ length: costs.length }, () => -1);
+  for (let column = 1; column <= terminalCount; column += 1) {
+    const row = rowByColumn[column] ?? 0;
+    if (row > 0) terminalIndexes[row - 1] = column - 1;
+  }
+  let cost = 0;
+  for (const [errorIndex, terminalIndex] of terminalIndexes.entries()) {
+    const distance = costs[errorIndex]?.get(terminalIndex);
+    if (distance === undefined || !Number.isFinite(distance)) return null;
+    cost += distance;
+  }
+  return { cost, terminalIndexes };
+}
+
+// The SDK live stream never reopens sooner than its minimum jittered reconnect
+// delay (500 ms base, 20% jitter). Two outgoing-document refusals closer than
+// that cannot both be the single stream's sequential reconnect attempts.
+const WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS = 400;
+
+function webKitLiveEventsPageErrorsForValidatedRace(
+  problems: Pick<BrowserProblems, "acceptedRequestTerminals" | "pageErrorEvidence"> &
+    Partial<Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">>,
+  engine: EngineName,
+  input: { acceptedAt: number; origin: string; pathname: string; settledAt: number },
+): string[] {
+  if (
+    engine !== "webkit" ||
+    !Number.isFinite(input.acceptedAt) ||
+    !Number.isFinite(input.settledAt) ||
+    input.settledAt < input.acceptedAt
+  ) {
+    return [];
+  }
+  // The explicit reload starts a navigation, and WebKit cancels the outgoing
+  // alpha document's in-flight loads at that point but keeps the document
+  // running until the replacement commits. The SDK live stream treats that
+  // cancellation (or its ordinary finite-batch close) as a reason to reopen
+  // after its backoff. When the reopen lands before the commit, WebKit refuses
+  // the load locally: the request never reaches the network, Playwright emits
+  // no request or terminal for it, and the console reports it as an
+  // access-control error, which Playwright surfaces as a pageerror. Accept only
+  // that exact shape: the old workspace's exact bounded live-events URL,
+  // observed after this page's reload started and no later than this page's
+  // first subsequent top-level commit, which itself precedes settlement, with
+  // sequential-reconnect spacing. Such errors consume no request terminal.
+  const reloadStartedAt = problems.crossTabReloadStartedAt;
+  const outgoingDocumentCommitAt =
+    reloadStartedAt === undefined
+      ? undefined
+      : problems.mainFrameCommits?.find((commitAt) => commitAt >= reloadStartedAt);
+  const outgoingDocumentWindow =
+    reloadStartedAt !== undefined &&
+    outgoingDocumentCommitAt !== undefined &&
+    Number.isFinite(reloadStartedAt) &&
+    Number.isFinite(outgoingDocumentCommitAt) &&
+    reloadStartedAt >= input.acceptedAt &&
+    outgoingDocumentCommitAt <= input.settledAt
+      ? { startedAt: reloadStartedAt, committedAt: outgoingDocumentCommitAt }
+      : null;
+  const outgoingDocumentRefusals: string[] = [];
+  let previousOutgoingDocumentRefusalAt = Number.NEGATIVE_INFINITY;
+  // WebKit may additionally report an accepted old-document cancellation as
+  // an access-control pageerror. Never infer cancellation from that text: the direct-race
+  // gate has already validated the actor transition, and every remaining
+  // callback must consume a distinct, exact-URL failed terminal accepted by
+  // the strict request-failure ledger within that race's acceptance/settlement
+  // window.
+  const candidates: Array<{
+    pageError: BrowserProblems["pageErrorEvidence"][number];
+    matches: Array<{ distance: number; index: number }>;
+  }> = [];
+  for (const pageError of problems.pageErrorEvidence) {
+    const match =
+      /^\[cross-tab-select-race\] \/(?<authority>127\.0\.0\.1:\d+)(?<pathnameAndSearch>\/v1\/workspaces\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/live-events\/stream\?controlAfter=\d+&interactionAfter=\d+&transport=http1-bounded) due to access control checks\.$/u.exec(
+        pageError.message,
+      );
+    const pathnameAndSearch = match?.groups?.pathnameAndSearch;
+    const url =
+      pathnameAndSearch === undefined ? undefined : new URL(pathnameAndSearch, input.origin);
+    if (
+      url === undefined ||
+      `http://${match?.groups?.authority}` !== input.origin ||
+      url.pathname !== input.pathname ||
+      !exactBoundedWorkspaceLiveStreamSearch(url.search) ||
+      !Number.isFinite(pageError.observedAt) ||
+      pageError.observedAt < input.acceptedAt
+    ) {
+      return [];
+    }
+    if (
+      outgoingDocumentWindow !== null &&
+      pageError.observedAt >= outgoingDocumentWindow.startedAt &&
+      pageError.observedAt <= outgoingDocumentWindow.committedAt
+    ) {
+      if (
+        pageError.observedAt - previousOutgoingDocumentRefusalAt <
+        WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS
+      ) {
+        return [];
+      }
+      previousOutgoingDocumentRefusalAt = pageError.observedAt;
+      outgoingDocumentRefusals.push(pageError.message);
+      continue;
+    }
+    const matches = problems.acceptedRequestTerminals
+      .flatMap((terminal, index) => {
+        const distance = Math.abs(pageError.observedAt - terminal.observedAt);
+        return terminal.terminal === "failed" &&
+          terminal.origin === input.origin &&
+          terminal.responsePhase === "cross-tab-select-race" &&
+          terminal.pathnameAndSearch === pathnameAndSearch &&
+          terminal.observedAt >= input.acceptedAt &&
+          terminal.observedAt <= input.settledAt + 1_000 &&
+          distance <= WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS
+          ? [{ distance, index }]
+          : [];
+      })
+      .sort((left, right) => left.distance - right.distance || left.index - right.index);
+    const nearest = matches[0];
+    if (!nearest || matches[1]?.distance === nearest.distance) return [];
+    // Do not use an ambiguous fallback edge if an augmenting path later
+    // needs to move the nearest match. Equal-distance evidence stays red.
+    candidates.push({
+      pageError,
+      matches: matches.filter(
+        (candidateMatch, index) =>
+          matches[index - 1]?.distance !== candidateMatch.distance &&
+          matches[index + 1]?.distance !== candidateMatch.distance,
+      ),
+    });
+  }
+  // Require a uniquely minimum-lag complete assignment, not a nearest-first
+  // traversal that can steal a later callback's only eligible terminal.
+  // Every different assignment excludes at least one selected edge, so
+  // re-solving without each such edge detects all equal-cost alternatives.
+  const costs = candidates.map(
+    ({ matches }) => new Map(matches.map(({ index, distance }) => [index, distance])),
+  );
+  const best = minimumCostTerminalAssignment(costs, problems.acceptedRequestTerminals.length);
+  if (best === null) return [];
+  for (const [errorIndex, terminalIndex] of best.terminalIndexes.entries()) {
+    const alternative = minimumCostTerminalAssignment(
+      costs,
+      problems.acceptedRequestTerminals.length,
+      { errorIndex, terminalIndex },
+    );
+    // One nanosecond absorbs summation roundoff conservatively: nearly tied
+    // evidence remains red, rather than manufacturing a unique correlation.
+    if (alternative !== null && alternative.cost <= best.cost + 0.000_001) return [];
+  }
+  for (const index of [...best.terminalIndexes].sort((a, b) => b - a)) {
+    problems.acceptedRequestTerminals.splice(index, 1);
+  }
+  return [...outgoingDocumentRefusals, ...candidates.map(({ pageError }) => pageError.message)];
 }
 
 async function expectNoAxeViolations(page: Page, include?: string): Promise<void> {
@@ -2032,7 +2280,7 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         }),
       ]);
       await continueAsAccount.click();
-      await page.getByRole("heading", { name: "Create your organization" }).waitFor({
+      await page.getByRole("heading", { name: USE_CASE_HEADING }).waitFor({
         timeout: 30_000,
       });
     } catch (error) {
@@ -2052,6 +2300,7 @@ async function signIn(page: Page, account: AccountFixture): Promise<void> {
         { cause: error },
       );
     }
+    await page.getByRole("button", { name: /^Run agents in the cloud/ }).click();
     await page.getByLabel("Organization name").fill(account.organizationName);
     await page.getByRole("button", { name: "Create organization" }).click();
     await page.getByRole("heading", { name: MODEL_ACCESS_HEADING }).waitFor();
@@ -2208,12 +2457,42 @@ async function closeResponsiveAccountMenu(page: Page, width: number): Promise<vo
 }
 
 async function expectActiveAccountAnnouncement(page: Page, account: AccountFixture): Promise<void> {
-  await page
-    .locator('span[aria-live="polite"][aria-atomic="true"]')
-    .filter({
-      hasText: `Active account: ${account.displayName}, ${account.email}`,
-    })
-    .waitFor();
+  const liveRegions = page.locator('span[aria-live="polite"][aria-atomic="true"]');
+  try {
+    await liveRegions
+      .filter({
+        hasText: `Active account: ${account.displayName}, ${account.email}`,
+      })
+      .waitFor();
+  } catch (error) {
+    // The announcement is driven by the account provider's `ready` phase, while
+    // the trigger label can fall back to the host auth session. Record which
+    // account surface is actually rendered so a timeout distinguishes a
+    // provider stuck in loading/error from a stale or missing selection.
+    const evidence = await page
+      .evaluate(() => ({
+        url: location.pathname,
+        liveRegions: [
+          ...document.querySelectorAll('span[aria-live="polite"][aria-atomic="true"]'),
+        ].map((element) => element.textContent ?? ""),
+        accountTriggers: [...document.querySelectorAll('button[aria-label^="Account menu"]')].map(
+          (element) => ({
+            label: element.getAttribute("aria-label"),
+            // The trigger renders a spinner while the provider is loading or committing.
+            busy: element.querySelector(".animate-spin") !== null,
+          }),
+        ),
+        headings: [...document.querySelectorAll("h1, h2, [role=alert]")]
+          .map((element) => element.textContent?.trim() ?? "")
+          .filter(Boolean)
+          .slice(0, 8),
+      }))
+      .catch((evidenceError: unknown) => ({ unavailable: String(evidenceError) }));
+    throw new Error(
+      `active account announcement for ${account.displayName} did not appear: ${JSON.stringify(evidence)}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expectAccountMenuEvidenceVisible(page: Page, displayName: string): Promise<void> {
@@ -2497,6 +2776,62 @@ const selectAdmissionDiagnostics: Array<{
   }>;
 }> = [];
 
+type SelectionRaceSearchScope = {
+  authorityHash: string;
+  actorEpoch: string;
+  pathname: string;
+};
+type SelectionRaceSearchBoundary = SelectionRaceSearchScope & {
+  released: Promise<void>;
+  release: () => void;
+  deferred: Set<Promise<void>>;
+};
+let selectionRaceSearchBoundary: SelectionRaceSearchBoundary | null = null;
+
+function isSelectionRaceSearch(request: Request, scope: SelectionRaceSearchScope): boolean {
+  return (
+    request.method === "POST" &&
+    new URL(request.url).pathname === scope.pathname &&
+    /^\/v1\/workspaces\/[^/]+\/knowledge\/entries\/search$/.test(scope.pathname) &&
+    request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER) === scope.actorEpoch &&
+    sessionSetAuthorityHash(request.headers.get("cookie")) === scope.authorityHash
+  );
+}
+
+async function withSelectionRaceSearchBoundary<T>(
+  scope: SelectionRaceSearchScope,
+  race: () => Promise<T>,
+): Promise<T> {
+  if (selectionRaceSearchBoundary) throw new Error("selection race boundary already active");
+  const { promise: released, resolve: release } = Promise.withResolvers<void>();
+  const boundary: SelectionRaceSearchBoundary = {
+    ...scope,
+    released,
+    release,
+    deferred: new Set(),
+  };
+  selectionRaceSearchBoundary = boundary;
+  try {
+    // Browser request terminals do not prove the outer API handler released its
+    // actor lease. Include already-admitted searches from responsive contexts,
+    // and defer new exact-scope searches before they acquire a production lease.
+    const deadline = Date.now() + 30_000;
+    while (
+      [...pendingAccountApiRequests.keys()].some((request) => isSelectionRaceSearch(request, scope))
+    ) {
+      if (Date.now() >= deadline) throw new Error("selection race companion search did not settle");
+      await Bun.sleep(25);
+    }
+    return await race();
+  } finally {
+    selectionRaceSearchBoundary = null;
+    boundary.release();
+    // Forward every deferred request unchanged, including its original actor.
+    // Its real stale-actor response remains subject to the strict browser ledger.
+    await Promise.all(boundary.deferred);
+  }
+}
+
 async function observeAccountApiRequest(
   request: Request,
   dispatch: () => Response | Promise<Response>,
@@ -2509,6 +2844,13 @@ async function observeAccountApiRequest(
     actorEpoch: request.headers.get(MANAGED_AUTH_ACTOR_EPOCH_HEADER),
     authorityHash: sessionSetAuthorityHash(request.headers.get("cookie")),
   });
+  const boundary = selectionRaceSearchBoundary;
+  const deferred =
+    boundary && isSelectionRaceSearch(request, boundary) ? Promise.withResolvers<void>() : null;
+  if (deferred) {
+    boundary!.deferred.add(deferred.promise);
+    await boundary!.released;
+  }
   if (metadata.pathname === "/v1/auth/session-set/select") {
     selectAdmissionDiagnostics.push({
       authorityHash: metadata.authorityHash,
@@ -2526,6 +2868,7 @@ async function observeAccountApiRequest(
     throw failure;
   } finally {
     pendingAccountApiRequests.delete(request);
+    deferred?.resolve();
   }
 }
 
@@ -3029,6 +3372,75 @@ afterAll(async () => {
 }, 180_000);
 
 describe("provider-neutral browser account acceptance", () => {
+  test("selection race admission defers only the exact actor's knowledge search and forwards on failure", async () => {
+    const authority = "a".repeat(43);
+    const scope: SelectionRaceSearchScope = {
+      authorityHash: managedAuthSha256(authority),
+      actorEpoch: "2",
+      pathname: "/v1/workspaces/workspace/knowledge/entries/search",
+    };
+    const request = (
+      method = "POST",
+      pathname = scope.pathname,
+      actorEpoch = scope.actorEpoch,
+      cookie = authority,
+    ) =>
+      new Request(`${publicOrigin}${pathname}`, {
+        method,
+        headers: {
+          cookie: `${MANAGED_AUTH_SESSION_SET_COOKIE}=${cookie}`,
+          [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: actorEpoch,
+        },
+      });
+    expect(isSelectionRaceSearch(request(), scope)).toBe(true);
+    for (const other of [
+      request("GET"),
+      request("POST", "/v1/auth/session-set/select"),
+      request("POST", `${scope.pathname}/other`),
+      request("POST", scope.pathname.replace("workspace/", "other/")),
+      request("POST", scope.pathname, "3"),
+      request("POST", scope.pathname, "2", "b".repeat(43)),
+      request("POST", scope.pathname, "2", ""),
+    ])
+      expect(isSelectionRaceSearch(other, scope)).toBe(false);
+
+    const forwarded: string[] = [];
+    const sentinel = new Error("race failed");
+    let companion: Promise<Response> | undefined;
+    await expect(
+      withSelectionRaceSearchBoundary(scope, async () => {
+        companion = observeAccountApiRequest(request(), () => {
+          forwarded.push("companion");
+          return new Response(null, { status: 409 });
+        });
+        await observeAccountApiRequest(request("POST", "/v1/auth/session-set/select"), () => {
+          forwarded.push("select");
+          return new Response(null, { status: 200 });
+        });
+        expect(forwarded).toEqual(["select"]);
+        throw sentinel;
+      }),
+    ).rejects.toBe(sentinel);
+    expect((await companion!).status).toBe(409);
+    expect(forwarded).toEqual(["select", "companion"]);
+    expect(selectionRaceSearchBoundary).toBeNull();
+    expect(pendingAccountApiRequests.size).toBe(0);
+
+    const admitted = Promise.withResolvers<Response>();
+    const oldSearch = observeAccountApiRequest(request(), () => admitted.promise);
+    let raceStarted = false;
+    const race = withSelectionRaceSearchBoundary(scope, async () => {
+      raceStarted = true;
+      expect(pendingAccountApiRequests.size).toBe(0);
+    });
+    expect(raceStarted).toBe(false);
+    admitted.resolve(new Response(null, { status: 200 }));
+    expect((await oldSearch).status).toBe(200);
+    await race;
+    expect(raceStarted).toBe(true);
+    expect(selectionRaceSearchBoundary).toBeNull();
+  });
+
   test("actor transition reads include only the exact read-only POST search", () => {
     const path = "/v1/workspaces/workspace/knowledge/entries/search";
     expect(isActorTransitionRead("POST", path)).toBe(true);
@@ -3105,6 +3517,21 @@ describe("provider-neutral browser account acceptance", () => {
       url: `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/sessions`,
     } satisfies BrowserRequestFailureInput;
     expect(requestFailureProblem(oldActorRead)).toBeNull();
+    const invitationRead = {
+      ...oldActorRead,
+      url: `${publicOrigin}/v1/organization-invitations?limit=100`,
+    };
+    expect(requestFailureProblem(invitationRead)).toBeNull();
+    for (const changed of [
+      { actorEpoch: null },
+      { dispatchPhase: "initialization", responsePhase: "initialization" },
+      { failure: "net::ERR_CONNECTION_RESET" },
+      { method: "POST" },
+      { url: `${publicOrigin}/v1/organization-invitations/invitation/accept` },
+      { url: `${publicOrigin}/v1/organization-invitations-other` },
+    ]) {
+      expect(requestFailureProblem({ ...invitationRead, ...changed })).not.toBeNull();
+    }
     const billingRead = {
       ...oldActorRead,
       url: `${publicOrigin}/v1/billing?accountId=00000000-0000-0000-0000-000000000001`,
@@ -4163,6 +4590,327 @@ describe("provider-neutral browser account acceptance", () => {
     ]);
   });
 
+  test("the strict browser ledger solves bounded minimum-lag assignments", () => {
+    // Exhaust every two-error/three-terminal graph with missing or 0/1/2 ms
+    // edges against an independent enumeration, including excluded edges.
+    for (let encoding = 0; encoding < 4 ** 6; encoding += 1) {
+      const costs = Array.from({ length: 2 }, (_, errorIndex) => {
+        const row = new Map<number, number>();
+        for (let terminalIndex = 0; terminalIndex < 3; terminalIndex += 1) {
+          const digit = Math.floor(encoding / 4 ** (errorIndex * 3 + terminalIndex)) % 4;
+          if (digit > 0) row.set(terminalIndex, digit - 1);
+        }
+        return row;
+      });
+      const oracle = (excluded?: { errorIndex: number; terminalIndex: number }) => {
+        let best = Number.POSITIVE_INFINITY;
+        for (let first = 0; first < 3; first += 1) {
+          for (let second = 0; second < 3; second += 1) {
+            if (
+              first === second ||
+              (excluded?.errorIndex === 0 && excluded.terminalIndex === first) ||
+              (excluded?.errorIndex === 1 && excluded.terminalIndex === second)
+            ) {
+              continue;
+            }
+            best = Math.min(
+              best,
+              (costs[0]?.get(first) ?? Number.POSITIVE_INFINITY) +
+                (costs[1]?.get(second) ?? Number.POSITIVE_INFINITY),
+            );
+          }
+        }
+        return Number.isFinite(best) ? best : null;
+      };
+      const best = minimumCostTerminalAssignment(costs, 3);
+      expect(best?.cost ?? null).toBe(oracle());
+      if (best !== null) {
+        expect(new Set(best.terminalIndexes).size).toBe(2);
+        for (const [errorIndex, terminalIndex] of best.terminalIndexes.entries()) {
+          const excluded = { errorIndex, terminalIndex };
+          expect(minimumCostTerminalAssignment(costs, 3, excluded)?.cost ?? null).toBe(
+            oracle(excluded),
+          );
+        }
+      }
+    }
+    expect(
+      minimumCostTerminalAssignment(
+        [
+          new Map([
+            [0, 1],
+            [1, 2],
+          ]),
+          new Map([
+            [1, 1],
+            [2, 2],
+          ]),
+          new Map([[0, 2]]),
+        ],
+        3,
+      ),
+    ).toEqual({ cost: 6, terminalIndexes: [1, 2, 0] });
+    expect(minimumCostTerminalAssignment([new Map(), new Map()], 1)).toBeNull();
+  });
+
+  test("the strict browser ledger correlates WebKit race pageerrors without broad CORS exemptions", () => {
+    const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 200 };
+    const terminal = {
+      observedAt: 150,
+      origin: input.origin,
+      pathnameAndSearch,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const pageError = { message, observedAt: 175 };
+    const match = (
+      terminals: BrowserProblems["acceptedRequestTerminals"],
+      errors = [pageError],
+      engine: EngineName = "webkit",
+      scope = input,
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        { acceptedRequestTerminals: terminals, pageErrorEvidence: errors },
+        engine,
+        scope,
+      );
+    const accepted = [terminal];
+    expect(match(accepted)).toEqual([message]);
+    expect(accepted).toEqual([]);
+    for (const cursor of ["12", String(Number.MAX_SAFE_INTEGER)]) {
+      const validSearch = pathnameAndSearch.replace("controlAfter=0", `controlAfter=${cursor}`);
+      const validTerminal = { ...terminal, pathnameAndSearch: validSearch };
+      const validError = { ...pageError, message: message.replace(pathnameAndSearch, validSearch) };
+      const validTerminals = [validTerminal];
+      expect(match(validTerminals, [validError])).toEqual([validError.message]);
+      expect(validTerminals).toEqual([]);
+    }
+    for (const cursor of ["00", "01", "9007199254740992"]) {
+      for (const name of ["controlAfter", "interactionAfter"]) {
+        const invalidSearch = pathnameAndSearch.replace(`${name}=0`, `${name}=${cursor}`);
+        const invalidTerminal = { ...terminal, pathnameAndSearch: invalidSearch };
+        const invalidError = {
+          ...pageError,
+          message: message.replace(pathnameAndSearch, invalidSearch),
+        };
+        const rejected = [invalidTerminal];
+        expect(match(rejected, [invalidError])).toEqual([]);
+        expect(rejected).toEqual([invalidTerminal]);
+      }
+    }
+    expect(match([], [pageError])).toEqual([]);
+    expect(match([terminal], [pageError], "firefox")).toEqual([]);
+    expect(match([terminal], [pageError], "chromium")).toEqual([]);
+    for (const changed of [
+      { responsePhase: "slot-revocation-reauthentication" },
+      { origin: "http://127.0.0.1:23213" },
+      { origin: undefined },
+      {
+        pathnameAndSearch: `${pathname}?controlAfter=1&interactionAfter=0&transport=http1-bounded`,
+      },
+      { terminal: "finished" as const },
+      { observedAt: input.acceptedAt - 1 },
+      { observedAt: input.settledAt + 1_001 },
+      { observedAt: Number.NaN },
+    ]) {
+      const rejected = [{ ...terminal, ...changed }];
+      expect(match(rejected)).toEqual([]);
+      expect(rejected).toHaveLength(1);
+    }
+    for (const changed of [
+      { message: message.replace("cross-tab-select-race", "logout-one") },
+      { message: message.replace(":23212", ":23213") },
+      { message: message.replace("000000000001", "000000000002") },
+      { message: message.replace("http1-bounded", "http1") },
+      { message: message.replace("live-events/stream", "sessions") },
+      { message: message.replace("access control checks.", "access control checks. unexpected") },
+      { observedAt: input.acceptedAt - 1 },
+      { observedAt: terminal.observedAt + WEBKIT_PAGE_ERROR_TERMINAL_MATCH_WINDOW_MS + 1 },
+      { observedAt: Number.NaN },
+    ]) {
+      expect(match([terminal], [{ ...pageError, ...changed }])).toEqual([]);
+    }
+    expect(match([terminal], [pageError], "webkit", { ...input, acceptedAt: Number.NaN })).toEqual(
+      [],
+    );
+    expect(match([terminal], [pageError], "webkit", { ...input, settledAt: 99 })).toEqual([]);
+    const duplicate = [terminal];
+    expect(match(duplicate, [pageError, pageError])).toEqual([]);
+    expect(duplicate).toEqual([terminal]);
+    expect(match([terminal, terminal])).toEqual([]);
+    const nearer = [terminal, { ...terminal, observedAt: 170 }];
+    expect(match(nearer)).toEqual([message]);
+    expect(nearer).toEqual([terminal]);
+    expect(
+      match([
+        { ...terminal, observedAt: 150 },
+        { ...terminal, observedAt: 200 },
+      ]),
+    ).toEqual([]);
+    // A delayed callback uniquely needs the later terminal. The earlier
+    // callback must not consume that terminal just because it is closer.
+    const overlappingTerminals = [
+      { ...terminal, observedAt: 1_000 },
+      { ...terminal, observedAt: 1_900 },
+    ];
+    const overlappingErrors = [
+      { ...pageError, observedAt: 2_000 },
+      { ...pageError, observedAt: 31_500 },
+    ];
+    const overlappingScope = { ...input, acceptedAt: 1_000, settledAt: 2_000 };
+    for (const errors of [overlappingErrors, [...overlappingErrors].reverse()]) {
+      for (const terminals of [overlappingTerminals, [...overlappingTerminals].reverse()]) {
+        const reorderedTerminals = [...terminals];
+        expect(match(reorderedTerminals, errors, "webkit", overlappingScope)).toEqual([
+          message,
+          message,
+        ]);
+        expect(reorderedTerminals).toEqual([]);
+      }
+    }
+    const incomplete = [...overlappingTerminals];
+    expect(
+      match(
+        incomplete,
+        [...overlappingErrors, { ...pageError, observedAt: 31_501 }],
+        "webkit",
+        overlappingScope,
+      ),
+    ).toEqual([]);
+    expect(incomplete).toEqual(overlappingTerminals);
+    // Both complete assignments have the same total lag (2,100 ms), even
+    // though neither pageerror has a local nearest-distance tie.
+    const equalLagErrors = [
+      { ...pageError, observedAt: 2_000 },
+      { ...pageError, observedAt: 3_000 },
+    ];
+    for (const errors of [equalLagErrors, [...equalLagErrors].reverse()]) {
+      for (const terminals of [overlappingTerminals, [...overlappingTerminals].reverse()]) {
+        const ambiguousTerminals = [...terminals];
+        expect(match(ambiguousTerminals, errors, "webkit", overlappingScope)).toEqual([]);
+        expect(ambiguousTerminals).toEqual(terminals);
+      }
+    }
+    const ambiguousFallback = [...overlappingTerminals, { ...terminal, observedAt: 2_000 }];
+    const ambiguousOriginal = [...ambiguousFallback];
+    expect(
+      match(
+        ambiguousFallback,
+        [
+          { ...pageError, observedAt: 1_500 },
+          { ...pageError, observedAt: 31_500 },
+          { ...pageError, observedAt: 31_950 },
+        ],
+        "webkit",
+        overlappingScope,
+      ),
+    ).toEqual([]);
+    expect(ambiguousFallback).toEqual(ambiguousOriginal);
+  });
+
+  test("the strict browser ledger accepts WebKit's local refusal of an outgoing document's live-events reopen only before its commit", () => {
+    const pathname = "/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream";
+    const pathnameAndSearch = `${pathname}?controlAfter=0&interactionAfter=0&transport=http1-bounded`;
+    const message = `[cross-tab-select-race] /127.0.0.1:23212${pathnameAndSearch} due to access control checks.`;
+    const input = { acceptedAt: 100, origin: "http://127.0.0.1:23212", pathname, settledAt: 3_000 };
+    const navigation = { crossTabReloadStartedAt: 110, mainFrameCommits: [50, 900] };
+    const match = (
+      errors: BrowserProblems["pageErrorEvidence"],
+      overrides: Partial<
+        Pick<BrowserProblems, "crossTabReloadStartedAt" | "mainFrameCommits">
+      > = {},
+      terminals: BrowserProblems["acceptedRequestTerminals"] = [],
+      engine: EngineName = "webkit",
+      scope = input,
+    ) =>
+      webKitLiveEventsPageErrorsForValidatedRace(
+        {
+          acceptedRequestTerminals: terminals,
+          pageErrorEvidence: errors,
+          ...navigation,
+          ...overrides,
+        },
+        engine,
+        scope,
+      );
+    // The never-dispatched reopen has no request terminal of its own and must
+    // not consume an unrelated one.
+    const unrelatedTerminal = {
+      observedAt: 120,
+      origin: input.origin,
+      pathnameAndSearch,
+      responsePhase: "cross-tab-select-race",
+      terminal: "failed" as const,
+    };
+    const preserved = [unrelatedTerminal];
+    expect(match([{ message, observedAt: 600 }], {}, preserved)).toEqual([message]);
+    expect(preserved).toEqual([unrelatedTerminal]);
+    expect(match([{ message, observedAt: 110 }])).toEqual([message]);
+    expect(match([{ message, observedAt: 900 }])).toEqual([message]);
+    // Sequential reconnect attempts are spaced by the SDK's minimum backoff.
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS },
+      ]),
+    ).toEqual([message, message]);
+    expect(
+      match([
+        { message, observedAt: 300 },
+        { message, observedAt: 300 + WEBKIT_OUTGOING_DOCUMENT_RECONNECT_MIN_SPACING_MS - 1 },
+      ]),
+    ).toEqual([]);
+    // Before the reload, after the commit, without an observed commit, with a
+    // commit after settlement, or with a reload preceding acceptance, the
+    // error is not this outgoing-document shape and still needs a terminal.
+    expect(match([{ message, observedAt: 109 }])).toEqual([]);
+    expect(match([{ message, observedAt: 901 }])).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { mainFrameCommits: [50] })).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: undefined })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: Number.NaN })).toEqual(
+      [],
+    );
+    expect(match([{ message, observedAt: 600 }], { crossTabReloadStartedAt: 99 })).toEqual([]);
+    expect(
+      match([{ message, observedAt: 600 }], {}, [], "webkit", { ...input, settledAt: 899 }),
+    ).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "chromium")).toEqual([]);
+    expect(match([{ message, observedAt: 600 }], {}, [], "firefox")).toEqual([]);
+    // URL, phase, origin, and cursor exactness are unchanged.
+    for (const changed of [
+      message.replace("cross-tab-select-race", "logout-one"),
+      message.replace(":23212", ":23213"),
+      message.replace("000000000001", "000000000002"),
+      message.replace("http1-bounded", "http1"),
+      message.replace("controlAfter=0", "controlAfter=00"),
+      message.replace("live-events/stream", "sessions"),
+      message.replace("access control checks.", "access control checks. unexpected"),
+    ]) {
+      expect(match([{ message: changed, observedAt: 600 }])).toEqual([]);
+    }
+    // An error outside the window still requires its own exact terminal, and
+    // both shapes may settle together without sharing evidence.
+    const lateTerminal = { ...unrelatedTerminal, observedAt: 950 };
+    const mixed = [lateTerminal];
+    expect(
+      match(
+        [
+          { message, observedAt: 600 },
+          { message, observedAt: 960 },
+        ],
+        {},
+        mixed,
+      ),
+    ).toEqual([message, message]);
+    expect(mixed).toEqual([]);
+  });
+
   test("the strict browser ledger bounds native HTTP/1 stream seams by URL, cause, and time", () => {
     const boundedLiveUrl = `${publicOrigin}/v1/workspaces/00000000-0000-0000-0000-000000000001/live-events/stream?transport=http1-bounded`;
     expect(isBoundedHttp1StreamRequest("GET", boundedLiveUrl)).toBe(true);
@@ -4328,9 +5076,13 @@ describe("provider-neutral browser account acceptance", () => {
       organizationName: "Review Reader Organization",
     });
     const browser = await launchAccountBrowser(requestedEngine as EngineName);
+    let diagnostics: ReturnType<typeof createFiniteReviewReadDiagnostics> | undefined;
     try {
       const page = await browser.newPage();
       const problems = observeBrowser(page);
+      diagnostics = createFiniteReviewReadDiagnostics(page);
+      await diagnostics.install();
+      diagnostics.mark(null, "sign-in");
       setBrowserPhase(problems, "primary-set-sign-in");
       await signIn(page, reviewAccount);
       await waitForFiniteReadQuiescence(problems);
@@ -4339,17 +5091,27 @@ describe("provider-neutral browser account acceptance", () => {
       // must reach a native terminal before another poll; no routing, fetch
       // replacement, navigation, or cancellation exemption is involved.
       for (let i = 0; i < 100; i++) {
+        diagnostics.mark(i, "response-wait");
         const pending = page.waitForResponse((response) =>
           response.url().endsWith("/knowledge/entries/search"),
         );
-        await page.evaluate(() =>
-          window.dispatchEvent(new Event("opengeni:knowledge-review-updated")),
-        );
+        await page.evaluate((iteration) => {
+          (
+            window as FiniteReviewDiagnosticsWindow
+          ).__opengeniFiniteReviewReadDiagnostics?.markIteration(iteration);
+          return window.dispatchEvent(new Event("opengeni:knowledge-review-updated"));
+        }, i);
         const response = await pending;
+        diagnostics.mark(i, "response-assertion");
         expect(response.status()).toBe(200);
+        diagnostics.mark(i, "quiescence");
         await waitForFiniteReadQuiescence(problems);
       }
+      diagnostics.mark(null, "browser-assertion");
       await expectNoBrowserProblems(problems);
+    } catch (error) {
+      if (diagnostics) await diagnostics.rethrowFailure(error);
+      throw error;
     } finally {
       await browser.close();
     }
@@ -4489,15 +5251,61 @@ describe("provider-neutral browser account acceptance", () => {
       projection = await sessionSet(page);
       const betaSlot = projection.slots.find((slot) => slot.displayName === beta.displayName);
       if (!betaSlot) throw new Error("Beta slot missing after add");
-      const [pageProjection, tabProjection] = await Promise.all([
-        sessionSet(page),
-        sessionSet(secondTab),
-      ]);
-      selectAdmissionDiagnostics.length = 0;
-      const raced = await Promise.all([
-        raceSelect(page, pageProjection, betaSlot.id),
-        raceSelect(secondTab, tabProjection, betaSlot.id),
-      ]);
+      const authority = (await context.cookies(publicOrigin)).find(
+        (cookie) => cookie.name === MANAGED_AUTH_SESSION_SET_COOKIE,
+      )?.value;
+      if (!authority || !client) throw new Error("selection race authority unavailable");
+      const scope: SelectionRaceSearchScope = {
+        authorityHash: managedAuthSha256(authority),
+        actorEpoch: projection.actorEpoch,
+        pathname: `/v1/workspaces/${alpha.workspaceId}/knowledge/entries/search`,
+      };
+      // The CI double-409 was truthful: a search held this exact actor's lease.
+      // Reproduce that denial through canonical restricted-role lease routines;
+      // failed selects must neither advance the actor nor change the selection.
+      const companionRequestId = crypto.randomUUID();
+      await acquireManagedAuthActorMutationLease(client.db, {
+        authorityHash: scope.authorityHash,
+        actorEpoch: scope.actorEpoch,
+        requestId: companionRequestId,
+        leaseSeconds: 30,
+      });
+      try {
+        const blocked = await Promise.all([
+          raceSelect(page, projection, betaSlot.id),
+          raceSelect(secondTab, projection, betaSlot.id),
+        ]);
+        expect(blocked.map(({ status, managedAuthCode }) => ({ status, managedAuthCode }))).toEqual(
+          [
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+            { status: 409, managedAuthCode: "actor_mutation_in_flight" },
+          ],
+        );
+        expect(sanitizeRaceProjection(await sessionSet(page))).toEqual(
+          sanitizeRaceProjection(projection),
+        );
+      } finally {
+        expect(
+          await releaseManagedAuthActorMutationLease(client.db, {
+            authorityHash: scope.authorityHash,
+            requestId: companionRequestId,
+          }),
+        ).toBe(true);
+      }
+      const { raced, pageProjection } = await withSelectionRaceSearchBoundary(scope, async () => {
+        const [primaryProjection, companionProjection] = await Promise.all([
+          sessionSet(page),
+          sessionSet(secondTab),
+        ]);
+        expect(primaryProjection.actorEpoch).toBe(scope.actorEpoch);
+        expect(companionProjection.actorEpoch).toBe(scope.actorEpoch);
+        selectAdmissionDiagnostics.length = 0;
+        const results = await Promise.all([
+          raceSelect(page, primaryProjection, betaSlot.id),
+          raceSelect(secondTab, companionProjection, betaSlot.id),
+        ]);
+        return { raced: results, pageProjection: primaryProjection };
+      });
       const racedStatuses = raced.map(({ status }) => status).sort();
       if (racedStatuses[0] !== 200 || racedStatuses[1] !== 409) {
         const currentProjections = await Promise.all(
@@ -4570,7 +5378,15 @@ describe("provider-neutral browser account acceptance", () => {
                     phase: "cross-tab-select-race",
                     settledAt: racedSelectionSettledAt,
                   })
-              : undefined,
+              : engine === "webkit"
+                ? () =>
+                    webKitLiveEventsPageErrorsForValidatedRace(observedProblems, engine, {
+                      acceptedAt: racedSelectAcceptedAt,
+                      origin: publicOrigin,
+                      pathname: `/v1/workspaces/${alpha.workspaceId}/live-events/stream`,
+                      settledAt: racedSelectionSettledAt,
+                    })
+                : undefined,
         });
       }
       const racedSelectionAcceptance = actorMutationAcceptances
@@ -5094,6 +5910,9 @@ describe("provider-neutral browser account acceptance", () => {
       ]);
       setBrowserPhase(pageProblems, "signed-out-settled");
       setBrowserPhase(secondTabProblems, "signed-out-settled");
+      // The independent set still polls while the other set signs out. Settle
+      // its finite reads before reload can tear down their owning document.
+      await waitForFiniteReadQuiescence(otherProblems);
       setBrowserPhase(otherProblems, "independent-set-after-other-logout-all");
       await otherPage.reload({ waitUntil: "domcontentloaded" });
       await accountMenuTrigger(otherPage, beta.displayName).waitFor();

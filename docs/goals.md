@@ -170,8 +170,18 @@ A goal is `active`, `paused`, or `completed`.
   and mutation commit atomically. A recovered attempt can therefore reconcile
   a lost response without applying the update twice; replaying an older key
   returns its stored result and never overwrites a newer goal revision.
-- `goal_complete { evidence }` is terminal. Only a new `goal_set` can replace a
-  completed goal.
+- `goal_complete { evidence }` is terminal for the goal, not the current turn.
+  Only a new `goal_set` can replace a completed goal. Its agent-facing evidence
+  has an explicit 8192-character limit and is a short ledger proof, not the
+  deliverable. The agent must still send the requested final answer (or summary
+  and retained artifact link) in the same turn. The tool receipt reminds it to
+  do so. Late child results remain context to integrate and deliver, not a
+  command to stay silent or restart completed work.
+  If one same-turn reply reminder still produces an empty final, the turn
+  completes with a typed `emptyFinalReply: true` notice, not `turn.failed`.
+  The goal is untouched: active goals can continue, and later child results
+  remain deliverable. The marker records missing answer delivery, not success
+  of the requested output.
 - `goal_pause { rationale }` stops the loop until the goal is resumed or
   replaced.
 - `goal_resume {}` reactivates any paused goal regardless of pause actor or
@@ -197,7 +207,13 @@ the session. An active goal remains active while the session waits; use
 [`durable-agent-inputs.md`](durable-agent-inputs.md).
 
 New goal text and success criteria are each limited to 8 KiB of UTF-8, rewrite
-and pause rationales to 2 KiB, and progress notes to 4 KiB. Root constraints
+and pause rationales to 2 KiB, and progress notes to 8 KiB. Agent schemas expose
+the character upper bound plus the exact UTF-8 byte limit and purpose.
+Progress is a short human-readable status, rationale is a short explanation,
+and objective/criteria describe the intended outcome—not the deliverable.
+Use normal spacing; summarize unnecessary detail instead of squeezing words.
+Evidence remains short ledger proof with an explicit 8192-character cap; the
+requested answer must still appear in the final user-facing reply. Root constraints
 are limited to 16 items, 512 UTF-8 bytes per item, and 4 KiB in aggregate.
 Pre-0257 goals remain exact and lifecycle-mutable even when larger. Their immutable
 accepted-turn prompt snapshot uses a deterministic UTF-8 prefix with an
@@ -288,7 +304,7 @@ The locked decision applies these rules:
    next evaluation as ordinary input. The API projects the pacing delay as
    `scheduled` / `backoff_pending` with `nextAttemptAt` at the deadline.
 5. Budget/admission policy can pause the goal visibly with reason `limits`.
-   OpenGeni does not infer progress or blockage from tool/event shape; the
+   Opengeni does not infer progress or blockage from tool/event shape; the
    model explicitly completes or pauses the goal under the continuation
    instructions, and a user can control it directly.
 6. Goals are NOT capped by continuation count by default - runs legitimately
@@ -384,13 +400,16 @@ The resulting internal-update inference is an ordinary billed run: it meters
 `agent_run.created` with source `session_system_update` and streams like a
 user-triggered inference without appearing in the prompt queue. If billing or
 usage limits would block another run, the goal pauses visibly
-(`goal.paused`, `reason: "limits"`) instead of failing the session; the limits
+(`goal.paused`, with `credits`, `allowance`, `budget` for model spending, or
+`usage_limit` for agent run quotas) instead of failing the session; the limits
 gate is applied inside the same locked decision, before the counter bump, so a
 budget pause never consumes continuation budget. Re-arming a goal (resume or
 replace) starts a fresh continuation epoch: counters and the
 previous-continuation pointers are cleared together. A worker can re-dispatch a
 recovering logical goal turn under a new fenced attempt after death; that is
 recovery of the same turn, not creation or charging of another continuation.
+An embedding host's funding refusal uses `usage_policy`: its private meter can
+deny for reasons other than credits, so Opengeni does not invent a balance diagnosis.
 
 ## Pauses and failures
 
@@ -404,6 +423,17 @@ recovery of the same turn, not creation or charging of another continuation.
   a goal that the user paused. Only a goal paused by the continuation ceiling
   (`max_auto_continuations`) is resumed by new input, because that pause is
   pacing rather than intent.
+- Terminal sessions skip catalog/model validation entirely. An eligible goal
+  whose inherited model is missing, retired, disallowed, or no longer supports
+  the selected latency mode pauses visibly with
+  `model_unavailable` or `model_policy` and an actionable rationale. Goal admission
+  uses the same scoped catalog as ordinary turns, including organization and
+  workspace connections. Catalog membership never grants credential authority:
+  the exact causal turn's accepted snapshots and credential ceiling remain in force.
+  The existing goal tooltip and panel show the stored rationale; legacy `limits`
+  pauses remain neutral rather than being mislabeled as spending limits.
+  It never silently chooses another
+  model or retries a deterministic selection error through Temporal.
 - Provider backpressure persists a capacity waiter. It blocks goal
   materialization until authoritative allocator re-evaluation records recovery;
   no model polling or synthetic human message is used.
@@ -426,7 +456,10 @@ recovery of the same turn, not creation or charging of another continuation.
   `session.created`.
 - `GET /v1/workspaces/:id/sessions/:sessionId/goal` returns the goal plus a
   `continuation` projection from one repeatable-read Postgres snapshot
-  (`sessions:read`; 404 when the session has no goal). The projection reports
+  (`sessions:read`; 404 when the session has no goal, or 200 `null` when the
+  client opts in with `?absent=null` - the SDK's `findGoal`, which
+  `useGoal` prefers so a goal-less chat logs no failed browser request; a
+  missing session is always 404). The projection reports
   `inactive`, `scheduled`, `running`, `blocked`, or `invariant_broken`, with a
   typed reason, wake/observed revisions, optional next-attempt time, the
   latest workflow-wake error, and (for `held_for_input`) the agent's stated
@@ -442,7 +475,13 @@ recovery of the same turn, not creation or charging of another continuation.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
   `{ status: "paused" | "active", rationale? }` is the operator override
   (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
-  is only valid from `paused`: it resets the counters, emits `goal.resumed`
+  is only valid from `paused`: model and funding admission are checked under
+  the control/session/goal locks first, using the effective model and exact
+  active causal human, or the latest-finished causal human when idle. A rejected
+  Resume returns an actionable 422
+  and preserves the paused goal, counters, event sequence and wake revisions.
+  The agent Resume tool uses the same validation. An admitted Resume resets
+  the counters, emits `goal.resumed`
   (`actor: "api"`, `reason: "api"`), and wakes the session workflow - resume
   works even on a fully idle session because `signalWithStart` restarts a
   completed workflow. Invalid transitions (e.g. resuming a completed goal)

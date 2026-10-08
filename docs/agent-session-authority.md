@@ -16,6 +16,20 @@ This policy applies only to authenticated `agent_attempt` callers. Human and
 service callers continue through their existing workspace, private-session, and
 optional embedding-host authorization rules.
 
+A private parent can create a same-owner private child from a live internal-update
+attempt as well as a human-message attempt. Internal updates keep their service
+audit attribution; they do not become human requests. The private-child database
+capability separately verifies the accepted turn's causal human against the
+parent's active owner and checks the exact parent, turn, attempt, generation and
+interruption state. A service label alone grants no private-child authority.
+
+Browser and desktop inventories apply `session.read` authorization to the chat
+that created each resource, for humans, services, API keys and agent attempts.
+This matches direct resource reads. A later observing/using association does not
+grant visibility through a different chat; missing or ambiguous creation
+associations are omitted. Authorization outages fail the list request rather
+than returning an apparently complete partial inventory.
+
 `session_get({})` resolves only the session in the authenticated exact agent
 attempt claims, then performs the same live-attempt and target authorization as
 an explicit ID. A child reads itself, never its parent or root. Sessionless,
@@ -68,7 +82,7 @@ selection; access and canonical identity are inherited from trusted authority.
 The server reconstructs the exact live caller attempt. Caller-supplied lineage
 is never accepted. After that, the agent access scope, Slack-private, and
 `user_private` owner checks still run. An optional embedding-host `SessionAuthorizationPort` may narrow the
-result; it cannot grant a private session OpenGeni already denied, and it cannot
+result; it cannot grant a private session Opengeni already denied, and it cannot
 widen a cross-session projection from exact-target to whole-root.
 
 | Target relative to caller | Read | Message (`session.append`) | Mutate/control |
@@ -84,7 +98,7 @@ widen a cross-session projection from exact-target to whole-root.
 Goal tools remain self-only. Compact `sessions_list` discovery still requires a
 live attempt.
 
-Related-work matching does not widen this table. OpenGeni resolves the exact
+Related-work matching does not widen this table. Opengeni resolves the exact
 caller and optional host list scope before applying lifecycle/root/parent/
 recency filters, matching titles, active goals, or typed work claims, counting
 results, or expanding authorized ancestors. A claim is non-exclusive advisory
@@ -168,7 +182,9 @@ rather than hijacking an unrelated existing session. The prompt does not widen
 authority; the relationship policy above remains the enforcement boundary. A
 leaf turn without those tools continues the work itself.
 
-Canonical implementation: `packages/runtime/src/operational-instructions.ts`,
+Canonical implementation: `packages/runtime/src/operational-instructions.ts`
+(legacy sessions), `packages/runtime/src/agent-instructions/modules/subagents.ts`
+(sessions with an agent configuration and the subagents capability),
 `packages/core/src/session-authorization.ts`,
 `packages/db/src/session-control.ts`, `packages/db/src/index.ts`,
 `apps/api/src/routes/sessions.ts`, and `apps/api/src/mcp/server.ts`.

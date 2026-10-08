@@ -1,21 +1,32 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { DEFAULT_OPENROUTER_MODEL_ID, type Settings } from "@opengeni/config";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
+import {
+  applyModelCatalogDocument,
+  configuredModels,
+  DEFAULT_OPENROUTER_MODEL_ID,
+  withCodexCatalogProvider,
+  type Settings,
+} from "@opengeni/config";
 import type { AccessGrant, WorkspaceModelPolicyContract } from "@opengeni/contracts";
 import {
   applyCreditDebitAfterUse,
   applyCreditLedgerEntry,
+  createClaudeSubscriptionAccount,
   createDb,
   createXaiSubscriptionCredential,
+  disconnectClaudeSubscriptionAccount,
   disconnectXaiSubscriptionCredential,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
   ensureXaiRotationSettings,
+  setInitialActiveClaudeCredential,
   setInitialActiveXaiCredential,
   saveNewSessionDraftInTransaction,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
+  upsertOrganizationClaudeSubscription,
   withWorkspaceSubjectRls,
   type Database,
   type DbClient,
@@ -35,14 +46,51 @@ import {
 import {
   clampReasoningEffortForConfiguredModel,
   creditsDefaultSessionModel,
+  loadWorkspaceClaudeSubscriptionReadiness,
   resolveDefaultSessionModel,
   selectDefaultSessionModel,
 } from "../src/default-session-model";
 import { createSessionForRequest } from "../src/domain/sessions";
 import { resolveWorkspaceModelSelection } from "../src/model-catalog";
 
+test("scoped grants choose a funded credit model without overriding saved choices", () => {
+  const settings = hostedSettings();
+  const creditBalance = {
+    accountId: crypto.randomUUID(),
+    balanceMicros: 10_000_000,
+    generalBalanceMicros: 0,
+    currency: "usd" as const,
+    updatedAt: new Date().toISOString(),
+    promotionalCredits: [
+      {
+        grantId: crypto.randomUUID(),
+        label: "Welcome credits",
+        remainingMicros: 10_000_000,
+        eligibleModelIds: ["gpt-6-sol"],
+      },
+    ],
+  };
+  const input = {
+    settings,
+    selections: selections(settings),
+    workspaceDefaults: null,
+    creditsAvailable: true,
+    creditBalance,
+  };
+  expect(selectDefaultSessionModel(input).model).toBe("gpt-6-sol");
+  expect(
+    selectDefaultSessionModel({
+      ...input,
+      workspaceDefaults: {
+        model: "gpt-6-astra",
+        reasoningEffort: "high",
+      },
+    }).model,
+  ).toBe("gpt-6-astra");
+});
+
 // A deployment shaped like the hosted one: a free OpenRouter default, the
-// OpenGeni credits catalog, and both connected-subscription rails enabled.
+// Opengeni credits catalog, and both connected-subscription rails enabled.
 function hostedSettings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({
     openrouterApiKey: "openrouter-test-key",
@@ -97,6 +145,52 @@ describe("default model precedence", () => {
     });
   });
 
+  test("a stably blocked deployment default falls back with the model's own effort", () => {
+    const settings = hostedSettings({
+      openaiModel: "codex/gpt-6-sol",
+      openaiAllowedModels: "gpt-6-luna",
+      openaiReasoningEffort: "low",
+    });
+    const catalog = selections(settings).map((selection) => ({
+      ...selection,
+      model: {
+        ...selection.model,
+        capabilities: {
+          ...selection.model.capabilities,
+          reasoning: { ...selection.model.capabilities.reasoning, defaultEffort: "high" as const },
+        },
+      },
+    }));
+    const result = selectDefaultSessionModel({
+      settings,
+      selections: catalog,
+      workspaceDefaults: null,
+      creditsAvailable: false,
+    });
+    expect(result).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "high",
+      source: "deployment",
+    });
+    expect(result.reasoningEffort).not.toBe(settings.openaiReasoningEffort);
+  });
+
+  test("provider health and resolver uncertainty preserve the stably admissible default", () => {
+    const settings = hostedSettings({
+      openaiProvider: "azure",
+      openaiModel: "gpt-6-luna",
+      azureOpenaiBaseUrl: "https://fixture.openai.azure.com/openai/v1",
+      azureOpenaiApiKey: undefined,
+      azureOpenaiAdToken: undefined,
+      openaiReasoningEffort: "low",
+    });
+    expect(decide(settings)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "low",
+      source: "deployment",
+    });
+  });
+
   test("a connected ChatGPT/Codex subscription makes its default model the default", () => {
     expect(decide(hostedSettings(), { codex: true })).toEqual({
       model: "codex/gpt-6-astra",
@@ -113,11 +207,11 @@ describe("default model precedence", () => {
     });
   });
 
-  test("a subscription wins over an OpenGeni credit balance", () => {
+  test("a subscription wins over an Opengeni credit balance", () => {
     expect(decide(hostedSettings(), { codex: true, credits: true }).source).toBe("subscription");
   });
 
-  test("an OpenGeni credit balance selects GPT-6 Luna at extra high reasoning", () => {
+  test("an Opengeni credit balance selects GPT-6 Luna at extra high reasoning", () => {
     expect(decide(hostedSettings(), { credits: true })).toEqual({
       model: "gpt-6-luna",
       reasoningEffort: "xhigh",
@@ -165,6 +259,32 @@ describe("default model precedence", () => {
       reasoningEffort: settings.openaiReasoningEffort,
       source: "deployment",
     });
+  });
+
+  test("a credits-billed deployment default that is the credits default model takes the credits effort", () => {
+    const settings = hostedSettings({ openaiModel: "gpt-6-luna", openaiReasoningEffort: "low" });
+    // Credit holders (for example the verified-signup trial) get the credits
+    // default effort on the unchanged deployment default model.
+    expect(decide(settings, { credits: true })).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "xhigh",
+      source: "credits",
+    });
+    // Without credits the deployment default keeps the deployment effort.
+    expect(decide(settings)).toEqual({
+      model: "gpt-6-luna",
+      reasoningEffort: "low",
+      source: "deployment",
+    });
+    expect(
+      creditsDefaultSessionModel({
+        settings,
+        selections: selections(settings),
+        workspaceSettings: {},
+      }),
+    ).toEqual({ model: "gpt-6-luna", reasoningEffort: "xhigh", source: "credits" });
+    // A subscription still wins.
+    expect(decide(settings, { codex: true, credits: true }).source).toBe("subscription");
   });
 
   test("a saved workspace default is an explicit choice that beats subscriptions and credits", () => {
@@ -239,9 +359,19 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient | null = null;
 let db: Database;
 
+let restoreModelsProbe = () => {};
 beforeAll(async () => {
+  const modelsProbe = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+    ok: true,
+    status: 200,
+    slugs: ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"],
+  });
+  restoreModelsProbe = () => modelsProbe.mockRestore();
   shared = await acquireSharedTestDatabase("core-default-session-model");
   if (!shared) {
+    if (process.env.OPENGENI_REQUIRE_REAL_DB === "1") {
+      throw new Error("Default model integration tests require real PostgreSQL");
+    }
     available = false;
     return;
   }
@@ -250,6 +380,7 @@ beforeAll(async () => {
 }, 180_000);
 
 afterAll(async () => {
+  restoreModelsProbe();
   await client?.close();
   await shared?.release();
 }, 180_000);
@@ -301,7 +432,7 @@ async function connectCodex(settings: Settings, grant: AccessGrant & { workspace
     scopes: null,
     planType: "pro",
     isFedramp: false,
-    expiresAt: new Date(Date.now() + 60_000),
+    expiresAt: new Date(Date.now() + 3_600_000),
     lastRefreshAt: new Date(),
   });
   await ensureCodexRotationSettings(db, grant.accountId, grant.workspaceId);
@@ -371,6 +502,48 @@ async function connectPersonalSupergrok(
   return created;
 }
 
+async function connectClaudePool(
+  settings: Settings,
+  grant: AccessGrant & { workspaceId: string },
+  scope: "workspace" | "user" | "organization",
+) {
+  const secret = {
+    version: 1 as const,
+    token: "sk-ant-oat01-readiness-fixture",
+    identity: { accountUuid: crypto.randomUUID(), deviceId: "a".repeat(64) },
+  };
+  const encryptionKey = Buffer.from(settings.environmentsEncryptionKey!, "base64");
+  if (scope === "organization") {
+    await shared!.admin`
+      update organization_memberships set role = 'owner'
+      where account_id = ${grant.accountId} and subject_id = ${grant.subjectId}`;
+    await upsertOrganizationClaudeSubscription(db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      encryptionKey,
+      secret,
+      providerAccountId: secret.identity.accountUuid,
+      label: null,
+      accountEmail: null,
+      expiresAt: null,
+    });
+    return { authoritySnapshot: { version: 1, scope: "organization" } as const };
+  }
+  const created = await createClaudeSubscriptionAccount(db, {
+    ...grant,
+    scope,
+    encryptionKey,
+    secret,
+    providerAccountId: secret.identity.accountUuid,
+  });
+  await setInitialActiveClaudeCredential(db, {
+    ...grant,
+    credentialId: created.account.id,
+    authoritySnapshot: created.authoritySnapshot,
+  });
+  return created;
+}
+
 function routeDeps(settings: Settings): ApiRouteDeps {
   const noop = async () => undefined;
   return {
@@ -394,7 +567,151 @@ function routeDeps(settings: Settings): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
+describe("canonical Claude pool readiness", () => {
+  test.each(["workspace", "user", "organization"] as const)(
+    "current and frozen %s authority use metadata-only canonical readiness",
+    async (scope) => {
+      if (!available) return;
+      const settings = hostedSettings({ claudeSubscriptionEnabled: true });
+      const grant = await workspaceFixture();
+      await organizationMember(grant.accountId, grant.subjectId);
+      expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, grant)).toEqual({
+        workspace: false,
+        organization: false,
+      });
+      const connected = await connectClaudePool(settings, grant, scope);
+      // Readiness cannot depend on decrypting credential material with this key.
+      const metadataSettings = {
+        ...settings,
+        environmentsEncryptionKey: Buffer.alloc(32, 8).toString("base64"),
+      };
+      const expected = {
+        workspace: scope !== "organization",
+        organization: scope === "organization",
+      };
+      expect(await loadWorkspaceClaudeSubscriptionReadiness(db, metadataSettings, grant)).toEqual(
+        expected,
+      );
+      expect(
+        await loadWorkspaceClaudeSubscriptionReadiness(db, metadataSettings, {
+          ...grant,
+          claudeAuthoritySnapshot: connected.authoritySnapshot,
+        }),
+      ).toEqual(expected);
+    },
+    180_000,
+  );
+
+  test("private authority never borrows another member's pool or replaces a stale frozen pool", async () => {
+    if (!available) return;
+    const settings = hostedSettings({ claudeSubscriptionEnabled: true });
+    const owner = await workspaceFixture();
+    const other = { ...owner, subjectId: `user:default-model-${crypto.randomUUID()}` };
+    const service = { ...owner, subjectId: `service:claude-readiness-${crypto.randomUUID()}` };
+    await shared!.admin`
+      insert into workspace_memberships (workspace_id, account_id, subject_id, role)
+      values (${owner.workspaceId}, ${owner.accountId}, ${other.subjectId}, 'member'),
+             (${owner.workspaceId}, ${owner.accountId}, ${service.subjectId}, 'member')`;
+    await organizationMember(owner.accountId, owner.subjectId);
+    await organizationMember(other.accountId, other.subjectId);
+    const personal = await connectClaudePool(settings, owner, "user");
+    const frozen = { ...owner, claudeAuthoritySnapshot: personal.authoritySnapshot };
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, frozen)).toEqual({
+      workspace: true,
+      organization: false,
+    });
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, other)).toEqual({
+      workspace: false,
+      organization: false,
+    });
+    expect(
+      await loadWorkspaceClaudeSubscriptionReadiness(db, settings, {
+        ...other,
+        claudeAuthoritySnapshot: personal.authoritySnapshot,
+      }),
+    ).toEqual({ workspace: false, organization: false });
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, service)).toEqual({
+      workspace: false,
+      organization: false,
+    });
+    expect(
+      await loadWorkspaceClaudeSubscriptionReadiness(db, settings, {
+        ...service,
+        claudeAuthoritySnapshot: personal.authoritySnapshot,
+      }),
+    ).toEqual({ workspace: false, organization: false });
+    if (!("account" in personal)) throw new Error("Expected a private Claude account");
+    await disconnectClaudeSubscriptionAccount(db, {
+      ...owner,
+      credentialId: personal.account.id,
+      authoritySnapshot: personal.authoritySnapshot,
+    });
+    await connectClaudePool(settings, owner, "workspace");
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, owner)).toEqual({
+      workspace: true,
+      organization: false,
+    });
+    expect(await loadWorkspaceClaudeSubscriptionReadiness(db, settings, frozen)).toEqual({
+      workspace: false,
+      organization: false,
+    });
+  }, 180_000);
+
+  test("disabled Claude subscriptions short-circuit before any authority or metadata read", async () => {
+    const unreadableDb = new Proxy({} as Database, {
+      get() {
+        throw new Error("Disabled Claude readiness must not access the database");
+      },
+    });
+    const context = {
+      accountId: crypto.randomUUID(),
+      workspaceId: crypto.randomUUID(),
+      subjectId: "user:disabled-claude",
+    };
+    for (const frozen of [undefined, { version: 1, scope: "workspace" } as const]) {
+      expect(
+        await loadWorkspaceClaudeSubscriptionReadiness(
+          unreadableDb,
+          hostedSettings({ claudeSubscriptionEnabled: false }),
+          { ...context, claudeAuthoritySnapshot: frozen },
+        ),
+      ).toEqual({ workspace: false, organization: false });
+    }
+  });
+});
+
 describe("server-side default model resolution", () => {
+  test("automatic defaults skip a configured Codex model absent from the live account catalog", async () => {
+    if (!available) return;
+    const base = hostedSettings();
+    const capabilities = configuredModels(withCodexCatalogProvider(base))[0]!.capabilities;
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-sol"],
+      codexModels: [
+        {
+          id: "codex/gpt-6.1-sol",
+          upstreamModelId: "gpt-6.1-sol",
+          label: "GPT-6.1 Sol",
+          capabilities,
+        },
+        { id: "codex/gpt-6-sol", upstreamModelId: "gpt-6-sol", label: "GPT-6 Sol", capabilities },
+      ],
+    });
+    const grant = await workspaceFixture();
+    await connectCodex(settings, grant);
+    expect(
+      await resolveDefaultSessionModel(db, settings, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        workspaceSettings: {
+          sessionDefaults: { model: "codex/gpt-6.1-sol", reasoningEffort: "high" },
+        },
+      }),
+    ).toMatchObject({ model: "codex/gpt-6-sol", source: "subscription" });
+  }, 180_000);
+
   test("resolves deployment, credits, and subscription defaults from workspace state", async () => {
     if (!available) return;
     const settings = hostedSettings();
@@ -608,6 +925,31 @@ describe("server-side default model resolution", () => {
       model: "codex/gpt-6-astra",
       source: "subscription",
     });
+  }, 180_000);
+
+  test("a scoped signup grant replaces an unfunded paid deployment default", async () => {
+    if (!available) return;
+    const settings = { ...hostedSettings(), openaiModel: "gpt-6-astra" };
+    const grant = await workspaceFixture();
+    await applyCreditLedgerEntry(db, {
+      accountId: grant.accountId,
+      amountMicros: 10_000_000,
+      type: "grant",
+      eligibleModelIds: ["gpt-6-sol"],
+      idempotencyKey: crypto.randomUUID(),
+    });
+    const context = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: grant.subjectId,
+    };
+    expect(await resolveDefaultSessionModel(db, settings, context)).toMatchObject({
+      model: "gpt-6-sol",
+      source: "credits",
+    });
+    expect(await getActorNewSessionDraft({ db, settings }, grant, grant.workspaceId)).toMatchObject(
+      { model: "gpt-6-sol", modelProvided: false },
+    );
   }, 180_000);
 
   test("a zero or negative balance falls back to the free default", async () => {

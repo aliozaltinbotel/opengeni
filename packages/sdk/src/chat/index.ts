@@ -1,6 +1,8 @@
 // @opengeni/sdk/chat: the one-option-object chat facade, a server handler for
 // a product's own chat endpoint, and protocol adapters (native SSE, Vercel AI
 // SDK UI message stream, OpenAI Chat Completions and Responses).
+export type { Chats } from "../chats";
+export { OpenGeniSetupError } from "../errors";
 
 export {
   Chat,
@@ -8,6 +10,7 @@ export {
   DEFAULT_OPENGENI_BASE_URL,
   IMPORTED_HISTORY_MAX_CHARS,
   OpenGeni,
+  Opengeni,
   formatImportedHistory,
 } from "./opengeni";
 export {
@@ -26,6 +29,7 @@ export {
   type ChatSessionListOptions,
   type ChatSnapshot,
   type ChatTarget,
+  type WorkspaceTarget,
   type ChatToolStatus,
   type OpenGeniOptions,
 } from "./types";

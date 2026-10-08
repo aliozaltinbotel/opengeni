@@ -3,9 +3,9 @@
  *
  * The checkpoint model sees the current active history plus one fixed
  * checkpoint prompt, then the active history is rebuilt from the newest real
- * user messages within one cumulative 20k-token budget plus one summary.
- * Assistant messages, tool calls/results, reasoning, and images are removed
- * from the active model-facing history; the database audit rows remain.
+ * user/system input messages within one cumulative 20k-token budget plus one summary.
+ * Assistant messages, tool calls/results, and reasoning are removed from the
+ * active model-facing history; retained input images and database audit rows remain.
  */
 
 import {
@@ -85,7 +85,7 @@ export const USER_MESSAGE_TRUNCATION_MARKER =
   "\n[... middle truncated for context compaction ...]\n";
 
 export const REMOTE_COMPACTION_TOOL_RESULT_OMISSION =
-  "[OpenGeni omitted tool result body for context compaction retry]";
+  "[Opengeni omitted tool result body for context compaction retry]";
 
 const RESULT_TYPE_BY_CALL_TYPE = TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE;
 const RESULT_TYPES = new Set(Object.values(RESULT_TYPE_BY_CALL_TYPE));
@@ -119,9 +119,14 @@ function itemRole(item: unknown): string | undefined {
   return typeof role === "string" ? role : undefined;
 }
 
-/** A user-authored `message` item is the only legal turn boundary. */
+/** A real user-role `message` item. */
 export function isUserMessage(item: unknown): boolean {
   return itemType(item) === "message" && itemRole(item) === "user";
+}
+
+/** Accepted machine-input batches are canonical system messages, not user intent. */
+function isPortableInputMessage(item: unknown): boolean {
+  return isUserMessage(item) || (itemType(item) === "message" && itemRole(item) === "system");
 }
 
 /** True for our synthetic compaction summary item. */
@@ -1501,7 +1506,7 @@ function remoteCompactionShellOutputIsMinimal(output: unknown): boolean {
  * Fit the explicit checkpoint request without mutating canonical history.
  *
  * Codex first replaces oversized tool outputs in its temporary remote-
- * compaction input. OpenGeni does the same oldest-first, preserving the most
+ * compaction input. Opengeni does the same oldest-first, preserving the most
  * recent tool detail for the plaintext summary. If that is still insufficient,
  * whole oldest user-delimited work units are removed and the remaining suffix
  * is protocol-sanitized so no call/result/reasoning fragment is orphaned.
@@ -1628,7 +1633,7 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 
 /**
  * Build the active history after compaction:
- * the newest real user messages that fit one cumulative, model-bounded budget
+ * the newest user/system input messages that fit one cumulative, model-bounded budget
  * (prior summaries excluded, retained images preserved) plus one marked summary item.
  */
 export function buildCompactionReplacementHistory(
@@ -1644,7 +1649,7 @@ export function buildCompactionReplacementHistory(
   );
   for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
     const item = items[index]!;
-    if (!isUserMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {
+    if (!isPortableInputMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {
       continue;
     }
     const textTokens = estimateTextTokens(messageText(item));
@@ -1678,18 +1683,20 @@ export function isRemoteCompactionItem(item: unknown): item is CompactionItem {
   );
 }
 
-/** Messages retained beside a remote v2 compaction blob (user + developer). */
+/** Messages retained beside a remote v2 compaction blob (user + system + developer). */
 export function isRetainedRemoteV2Message(item: unknown): boolean {
   if (isCompactionSummary(item) || isAttachmentCatalog(item) || itemType(item) === "compaction") {
     return false;
   }
   const role = itemRole(item);
-  return itemType(item) === "message" && (role === "user" || role === "developer");
+  return (
+    itemType(item) === "message" && (role === "user" || role === "system" || role === "developer")
+  );
 }
 
 /**
  * Build the active history after Codex remote compaction v2:
- * newest retained user/developer messages within the CLI 64k budget plus the
+ * newest retained user/system/developer messages within the CLI 64k budget plus the
  * opaque `{ type: "compaction", encrypted_content }` item.
  *
  * Both modes preserve retained image parts. Charge their projected image
@@ -1772,7 +1779,7 @@ function buildAttachmentCatalogItem(
   return {
     type: "message",
     role: "user",
-    content: "[OpenGeni retained attachment references]",
+    content: "[Opengeni retained attachment references]",
     [MODEL_ATTACHMENT_REFS_FIELD]: omittedRefs,
     [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
   };

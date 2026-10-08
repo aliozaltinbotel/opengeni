@@ -16,6 +16,9 @@ export {
 export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
+  prepareSessionCapabilityAccess,
+  applySessionCapabilityAccess,
+  type SessionCapabilityAccessPlan,
 } from "./session-capability-policy";
 export { retainedImageId } from "./components/markdown";
 // oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
@@ -43,7 +46,7 @@ export type {
   SessionClientLike,
 } from "./client";
 export { OpenGeniProvider } from "./provider";
-export type { OpenGeniProviderProps } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export { useVideoArtifactPlaybackLoader } from "./hooks/use-video-artifact-playback";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
@@ -130,7 +133,12 @@ export type {
   VoiceRecordingTranscriptionState,
   VoiceRecordingUploadState,
 } from "./voice-recording-store";
-export { COMPOSER_PAYMENT_REQUIRED_MESSAGE, composerSubmissionErrorMessage } from "./lib/format";
+export {
+  COMPOSER_MODEL_UNAVAILABLE_MESSAGE,
+  COMPOSER_PAYMENT_REQUIRED_MESSAGE,
+  composerSubmissionErrorMessage,
+  isModelUnavailableSubmissionError,
+} from "./lib/format";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,
@@ -323,6 +331,8 @@ export type {
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
 export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export { ToolActionReviewCard, ToolActionReviewDetails } from "./components/tool-action-review";
+export type { ToolReviewDetailsLoader } from "./components/tool-action-review";
 export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
@@ -381,14 +391,21 @@ export type {
 // Tool-renderer registry + the per-tool renderers (the timeline's extension API)
 export {
   createDefaultToolRegistry,
+  createSessionRetainedScreenshotLoader,
   createToolRegistry,
+  createWorkspaceRetainedArtifactLoader,
+  createWorkspaceRetainedVideoLoader,
   defaultToolRegistry,
   rawTypeOf,
 } from "./timeline";
 export type {
   CreateToolRegistryOptions,
   RetainedArtifactLoader,
+  RetainedArtifactLoadOptions,
+  RetainedArtifactLoaderClient,
   RetainedScreenshotLoader,
+  RetainedScreenshotLoaderClient,
+  RetainedVideoLoaderClient,
   VideoArtifactPlaybackLoader,
   ToolRegistry,
   ToolRegistryEntry,
@@ -486,8 +503,15 @@ export { SessionConversation } from "./components/session-conversation";
 export { SessionList } from "./components/session-list";
 export type { SessionListLabels, SessionListProps } from "./components/session-list";
 export { OpenGeniChat } from "./components/open-geni-chat";
-export type { OpenGeniChatLabels, OpenGeniChatProps } from "./components/open-geni-chat";
-export type { SessionConversationProps } from "./components/session-conversation";
+export type {
+  OpenGeniChatCreateOptions,
+  OpenGeniChatLabels,
+  OpenGeniChatProps,
+} from "./components/open-geni-chat";
+export type {
+  SessionConversationLabels,
+  SessionConversationProps,
+} from "./components/session-conversation";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
 export type {
@@ -531,11 +555,27 @@ export {
   runnableLatencyModesForModel,
   sortPickerRows,
 } from "./model-policy";
-export type { LatencyModeId, PickerBillingClass, PickerModelRow } from "./model-policy";
+export type {
+  GroupPickerRowsOptions,
+  LatencyModeId,
+  PickerBillingClass,
+  PickerModelRow,
+} from "./model-policy";
+export { ChatGptMark, ModelMark, ModelName, modelHasMark } from "./components/model-mark";
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "@opengeni/sdk/model-display";
+export type { ModelDisplayInput, ModelVendor } from "@opengeni/sdk/model-display";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";
 export { GeneratedVideoPlayer } from "./components/generated-video-player";
 export type { GeneratedVideoPlayerProps } from "./components/generated-video-player";
 export type { MessageTimelineProps } from "./components/message-timeline";
+export type { RenderAllowanceExhausted } from "./timeline/allowance-exhausted-row";
+export type { AllowanceLabels, AllowanceScope } from "./usage/allowance-copy";
 export type { TimelineSearchTarget } from "./components/timeline-search";
 export { UserMessageBody, userMessageLikelyNeedsDisclosure } from "./components/user-message-body";
 export type {
@@ -557,13 +597,20 @@ export {
   chainLinkResolvers,
   sessionLinkResolver,
   useOpenGeniLinkResolver,
+  viewerLinkResolver,
 } from "./components/open-geni-links";
 export type {
   OpenGeniLinkResolution,
   OpenGeniLinkResolver,
   OpenGeniLinkTarget,
+  OpenGeniViewerTarget,
 } from "./components/open-geni-links";
 export { parseOpenGeniLink } from "@opengeni/sdk";
+export {
+  ArtifactLabelsProvider,
+  DEFAULT_ARTIFACT_LABELS,
+  type ArtifactLabels,
+} from "./components/artifacts/artifact-chrome";
 export { CopyButton, CopyHoverFrame } from "./components/copy-button";
 export { copyTextToClipboard, tableElementToTsv } from "./lib/clipboard";
 export { SessionStatus, StatusDot, SESSION_STATUS_META } from "./components/session-status";
@@ -588,6 +635,19 @@ export { PierreDiff } from "./components/pierre-diff";
 // Opt in to the optional `@pierre/diffs` peer with `enablePierreDiffs()` from
 // `@opengeni/react/diffs`; the root entry never names the peer.
 export { registerPierreDiffs, type PierreDiffsLoader } from "./lib/pierre-diffs-loader";
+// Bundler-visible optional workbench imports live only on opt-in subpaths.
+export {
+  registerSandboxTerminal,
+  registerCodeEditor,
+  registerDesktopViewer,
+} from "./lib/workbench-peers";
+export type {
+  WorkbenchPeerLoader,
+  SandboxTerminalPeers,
+  CodeEditorPeers,
+  CodeEditorLanguage,
+  CodeEditorLanguages,
+} from "./lib/workbench-peers";
 export type { PierreDiffProps } from "./components/pierre-diff";
 export { PierreFile } from "./components/pierre-file";
 export type { PierreFileProps } from "./components/pierre-file";
@@ -657,6 +717,20 @@ export {
   truncate,
   tryParseJson,
 } from "./lib/format";
+export {
+  currentProviderRecovery,
+  parseProviderRecovery,
+  providerRecoveryExhaustedText,
+  providerRecoveryRetryingText,
+  providerRecoverySubject,
+  type ProviderRecoveryCondition,
+  type ProviderRecoveryFacts,
+} from "./lib/provider-recovery";
+export {
+  ProviderRecoveryNotice,
+  PROVIDER_RECOVERY_NOTICE_DETAIL,
+  type ProviderRecoveryNoticeProps,
+} from "./components/provider-recovery-notice";
 export { SessionCommandsPanel } from "./components/session-commands-panel";
 export { SessionCommands } from "./components/session-commands";
 
@@ -669,4 +743,7 @@ export { setStartupDetails, useStartupDetails } from "./timeline/startup-prefere
 export { ClaudeMark } from "./components/claude-mark";
 export { AnthropicMark } from "./components/anthropic-mark";
 export { OpenRouterMark } from "./components/openrouter-mark";
+export { OpperMark } from "./components/opper-mark";
 export { GrokMark } from "./components/grok-mark";
+
+export { ToolReviewHistoryProvider } from "./components/tool-review-history";

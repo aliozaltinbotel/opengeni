@@ -27,9 +27,13 @@ mock.module("@tanstack/react-router", () => ({
     children: ReactNode;
     to: string;
     params: { workspaceId: string };
-    search: { section: string };
+    search: { section: string; workspace?: string };
   }) => (
-    <a href={`${to.replace("$workspaceId", params.workspaceId)}?section=${search.section}`}>
+    <a
+      href={`${to.replace("$workspaceId", params.workspaceId)}?section=${search.section}${
+        search.workspace ? `&workspace=${search.workspace}` : ""
+      }`}
+    >
       {children}
     </a>
   ),
@@ -76,6 +80,49 @@ afterEach(async () => {
 });
 
 describe("credit required prompt", () => {
+  test("the notice follows selected-model funding rather than the total credit balance", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: 100_000_000 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    const render = async (creditFunding: "unavailable" | "promotional" | "general") =>
+      act(async () =>
+        root!.render(
+          <EmptyCreditsNotice
+            workspaceId="workspace-a"
+            accountId="account-a"
+            canBuyCredits
+            canReadBilling
+            creditFunding={creditFunding}
+          />,
+        ),
+      );
+    await render("unavailable");
+    expect(container.textContent).toContain("No credits are available for this model");
+    await render("promotional");
+    expect(container.textContent).toBe("");
+    await render("general");
+    expect(container.textContent).toBe("");
+  });
+
+  test("usable free credits do not show a warning when general charges made the total negative", async () => {
+    getBilling.mockResolvedValue({ mode: "stripe", balance: { balanceMicros: -1_000_000 } });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <EmptyCreditsNotice
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          canReadBilling
+          creditFunding="promotional"
+        />,
+      ),
+    );
+    expect(container.textContent).toBe("");
+  });
   test("create-session dialog names buy credits and connect a model", async () => {
     const container = document.createElement("div");
     document.body.append(container);
@@ -95,8 +142,50 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
     expect(
-      container.querySelector('a[href="/workspaces/workspace-a/settings?section=models"]'),
+      container.querySelector(
+        'a[href="/workspaces/workspace-a/organization?section=models&workspace=workspace-a"]',
+      ),
     ).not.toBeNull();
+  });
+
+  test("workspace top-up accepts a $10 gift package without requiring a model", async () => {
+    createBillingCheckout.mockImplementationOnce(async () => {
+      throw new Error("checkout test");
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () =>
+      root!.render(
+        <CreditRequiredPromptView
+          client={client as never}
+          purpose="topup"
+          open
+          workspaceId="workspace-a"
+          accountId="account-a"
+          canBuyCredits
+          onOpenChange={() => undefined}
+        />,
+      ),
+    );
+    expect(container.textContent).toContain("Add Opengeni credits");
+    expect(container.textContent).toContain("Have a code?");
+    expect(container.textContent).not.toContain("Connect a model");
+    const preset = container.querySelector<HTMLSelectElement>("#credit-preset")!;
+    await act(async () => {
+      preset.value = "10.00";
+      preset.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const checkout = [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim() === "Continue to Stripe",
+    )!;
+    await act(async () => checkout.click());
+    expect(createBillingCheckout).toHaveBeenCalledWith({
+      amountUsd: 10,
+      accountId: "account-a",
+      successUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=success&checkoutSession={CHECKOUT_SESSION_ID}`,
+      cancelUrl: `${window.location.origin}/workspaces/workspace-a/organization?section=billing&checkout=cancelled`,
+    });
   });
 
   test("empty-credits notice appears only when the organization balance is empty", async () => {
@@ -118,7 +207,9 @@ describe("credit required prompt", () => {
     expect(container.textContent).toContain("Buy credits");
     expect(container.textContent).toContain("Connect a model");
     expect(
-      container.querySelector('a[href="/workspaces/workspace-a/settings?section=models"]'),
+      container.querySelector(
+        'a[href="/workspaces/workspace-a/organization?section=models&workspace=workspace-a"]',
+      ),
     ).not.toBeNull();
     const connect = [...container.querySelectorAll("a")].find((node) =>
       node.textContent?.includes("Connect a model"),

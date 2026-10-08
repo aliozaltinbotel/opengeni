@@ -213,7 +213,10 @@ function codexUsageJson(payload: CodexUsagePayload): {
   return { status: payload.status, usage: payload };
 }
 
-export function codexModelsForPicker(settings: Settings = getSettings()): Array<{
+export function codexModelsForPicker(
+  settings: Settings = getSettings(),
+  supportedSlugs?: readonly string[],
+): Array<{
   id: string;
   label: string;
   provider: string;
@@ -221,7 +224,11 @@ export function codexModelsForPicker(settings: Settings = getSettings()): Array<
   api: "responses";
 }> {
   return configuredModels(withCodexCatalogProvider(settings))
-    .filter((model) => model.providerId === CODEX_PROVIDER_ID)
+    .filter(
+      (model) =>
+        model.providerId === CODEX_PROVIDER_ID &&
+        (supportedSlugs === undefined || supportedSlugs.includes(model.upstreamModelId)),
+    )
     .map((model) => ({
       id: model.id,
       label: model.label,
@@ -241,6 +248,13 @@ import {
 } from "@opengeni/core";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import {
+  agentActingAsPerson,
+  agentActingAsPersonBeforeGrantCheck,
+  isAgentActingAsPerson,
+  organizationSettingsPermission,
+  requireNotAgent,
+} from "../http/acting-person";
 import * as z from "zod/v4";
 import {
   hashCodexBrowserSession,
@@ -266,7 +280,7 @@ type ManagedCookieHuman = {
   browserSessionHash: string;
 };
 
-async function managedCookieHuman(
+export async function managedCookieHuman(
   c: Context,
   deps: ApiRouteDeps,
 ): Promise<ManagedCookieHuman | null> {
@@ -290,14 +304,50 @@ async function managedCookieHuman(
   };
 }
 
+/**
+ * The person in this browser, or an agent acting as them. Only for routes that
+ * then require the same person's workspace grant; provider sign-in steps keep
+ * managedCookieHuman. An agent has no browser session, so its hash never
+ * matches a sign-in started in one.
+ */
+export async function managedHumanOrAgent(
+  c: Context,
+  deps: ApiRouteDeps,
+): Promise<ManagedCookieHuman | null> {
+  const human = await managedCookieHuman(c, deps);
+  if (human) return human;
+  const agent = agentActingAsPersonBeforeGrantCheck(c);
+  return agent
+    ? {
+        subjectId: agent.subjectId,
+        browserSessionHash: await hashCodexBrowserSession(`agent:${crypto.randomUUID()}`),
+      }
+    : null;
+}
+
 export async function requireOrganizationCodexHuman(
   c: Context,
   deps: ApiRouteDeps,
   organizationId: string,
+  options: {
+    /** A provider sign-in step: the person does it in the browser, never an agent. */
+    providerConsent?: boolean;
+  } = {},
 ): Promise<ManagedCookieHuman> {
+  if (options.providerConsent) requireNotAgent(c, "Signing in to a provider");
   const parsed = z.string().uuid().safeParse(organizationId);
   if (!parsed.success) throw new HTTPException(422, { message: "invalid organization id" });
   let human = await managedCookieHuman(c, deps);
+  if (!human) {
+    const agent = agentActingAsPerson(c, parsed.data, organizationSettingsPermission(c));
+    // An agent has no browser session, so it never matches a sign-in started in one.
+    if (agent) {
+      human = {
+        subjectId: agent.subjectId,
+        browserSessionHash: await hashCodexBrowserSession(`agent:${crypto.randomUUID()}`),
+      };
+    }
+  }
   if (!human && deps.settings.productAccessMode === "local") {
     const local = await requireCanonicalLocalAccountAdministrator(c, deps, organizationId);
     human = {
@@ -348,6 +398,9 @@ async function requireWorkspaceCodexManagementSource(
 }
 
 export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps): void {
+  // Built in process for an agent acting as a person: no browser credentials
+  // ride along, so there is no cross-site request to guard against.
+  if (isAgentActingAsPerson(c)) return;
   const contentType = c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
   if (contentType !== "application/json") {
     throw new HTTPException(403, {
@@ -457,17 +510,29 @@ async function requireRedemptionHuman(
       message: "reset redemption requires managed product mode",
     });
   }
-  // Normal managed auth prefers a bearer over a cookie. This irreversible route
-  // rejects the header before grant resolution so an API key/delegated/agent
-  // token can never borrow a browser cookie that happens to ride along. Exact
-  // JSON content type plus Origin and Fetch Metadata fail closed before auth.
-  if (c.req.header("authorization")) {
-    throw new HTTPException(403, {
-      message: "authorization bearer is not allowed for redemption",
-    });
+  // An agent the person signed in (organization MCP) acts as that person and
+  // may redeem, within the same exact-person grant check below. Its
+  // confirmation binds to a stable per-person agent hash, which can never equal
+  // a browser session hash.
+  const agent = isAgentActingAsPerson(c) ? agentActingAsPersonBeforeGrantCheck(c) : null;
+  if (!agent) {
+    // Normal managed auth prefers a bearer over a cookie. This irreversible
+    // route rejects the header before grant resolution so an API key or
+    // delegated token can never borrow a browser cookie that happens to ride
+    // along. Exact JSON content type plus Origin and Fetch Metadata fail closed.
+    if (c.req.header("authorization")) {
+      throw new HTTPException(403, {
+        message: "authorization bearer is not allowed for redemption",
+      });
+    }
+    requireSameOriginBrowserMutation(c, deps);
   }
-  requireSameOriginBrowserMutation(c, deps);
-  const human = await managedCookieHuman(c, deps);
+  const human: ManagedCookieHuman | null = agent
+    ? {
+        subjectId: agent.subjectId,
+        browserSessionHash: await hashCodexBrowserSession(`agent:${agent.subjectId}`),
+      }
+    : await managedCookieHuman(c, deps);
   if (!human) {
     throw new HTTPException(401, {
       message: "managed browser session required",
@@ -493,7 +558,7 @@ async function requireCodexAppsHuman(
     });
   }
   requireSameOriginBrowserMutation(c, deps);
-  const human = await managedCookieHuman(c, deps);
+  const human = await managedHumanOrAgent(c, deps);
   if (!human) {
     throw new HTTPException(401, {
       message: "managed browser session required",
@@ -885,7 +950,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations/:organizationId/codex/connect/start", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
+      providerConsent: true,
+    });
     let start: Awaited<ReturnType<typeof startDeviceCode>>;
     try {
       start = await startDeviceCode();
@@ -911,7 +978,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/organizations/:organizationId/codex/connect/poll", async (c) => {
     const organizationId = c.req.param("organizationId");
     requireSameOriginBrowserMutation(c, deps);
-    const human = await requireOrganizationCodexHuman(c, deps, organizationId);
+    const human = await requireOrganizationCodexHuman(c, deps, organizationId, {
+      providerConsent: true,
+    });
     const { state } = (await c.req.json().catch(() => null)) as {
       state?: string;
     };
@@ -1307,21 +1376,24 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       now: new Date(),
     });
     let valid = false;
-    const models = codexModelsForPicker((await resolveCatalogSettings(db, settings)).settings);
+    const catalogSettings = (await resolveCatalogSettings(db, settings)).settings;
+    let models: ReturnType<typeof codexModelsForPicker> = [];
     let catalogError: string | null = null;
     try {
       const cred = status?.credentialId
         ? await loadCodexCredentialForRun(db, settings, workspaceId, status.credentialId)
         : null;
       if (cred) {
+        const token = await buildCodexTokenResolver(db, settings, workspaceId, cred.id).getToken();
         const live = await fetchCodexModels({
-          accessToken: cred.tokens.accessToken,
-          chatgptAccountId: cred.chatgptAccountId,
-          isFedramp: cred.isFedramp,
+          accessToken: token.accessToken,
+          chatgptAccountId: token.chatgptAccountId,
+          isFedramp: token.isFedramp,
           clientVersion: CODEX_CLIENT_VERSION,
         });
         if (live.ok) {
           valid = true;
+          models = codexModelsForPicker(catalogSettings, live.slugs);
         } else {
           catalogError = `Codex models request failed with status ${live.status}`;
         }
@@ -1355,7 +1427,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       listCodexAccountStatuses(db, workspaceId),
       getCodexRotationSettings(db, workspaceId),
       getCodexAppsSettings(db, workspaceId),
-      managedCookieHuman(c, deps),
+      managedHumanOrAgent(c, deps),
       getWorkspaceCodexSubscriptionSource(db, workspaceId),
     ]);
     const activeAccountId = rotation?.activeCredentialId ?? null;
@@ -1377,6 +1449,8 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
         credentialId: apps.credentialId,
         version: apps.version,
         designatedAt: apps.designatedAt,
+        // Clearing is independent of inference routing (see DELETE below), so
+        // this is true in workspace, organization and disabled modes alike.
         canDisable: canManageApps && apps.credentialId !== null,
       },
       settings: {
@@ -1445,7 +1519,10 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/codex/apps", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireWorkspaceCodexManagementSource(deps, workspaceId);
+    // The Apps designation is its own setting, not part of inference-account
+    // routing: a workspace that switched routing to organization accounts (or
+    // disabled subscriptions) must still be able to turn Apps off. Clearing
+    // only removes authority; the owner/permission checks below still apply.
     const { human, accountId } = await requireCodexAppsHuman(c, deps, workspaceId);
     const parsed = z
       .object({ expectedVersion: z.number().int().nonnegative() })
@@ -1747,7 +1824,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/codex/overview", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const human = await managedCookieHuman(c, deps);
+    const human = await managedHumanOrAgent(c, deps);
     const accounts = await listCodexAccountStatuses(db, workspaceId);
     const ownerRecoveries =
       human &&
@@ -1990,8 +2067,9 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     },
   );
 
-  // The only OpenGeni reset-credit mutation route. There is intentionally no
-  // SDK/MCP/worker/scheduled/background equivalent.
+  // The only Opengeni reset-credit mutation route: the person in the web app,
+  // or an agent they signed in acting as them. Nothing redeems automatically
+  // (no worker, scheduled, allocator or rotation path).
   app.post(
     "/v1/workspaces/:workspaceId/codex/accounts/:accountId/reset-credits/redeem",
     async (c) => {

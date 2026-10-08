@@ -4,7 +4,7 @@ import { createContext, useContext, useMemo, type ReactNode } from "react";
 export type { OpenGeniLinkTarget };
 
 /**
- * How the host opens one OpenGeni object an agent linked in chat Markdown.
+ * How the host opens one Opengeni object an agent linked in chat Markdown.
  *
  * - `{ href }` renders a real link (new tab) — use it for a host page URL.
  * - `{ open }` renders a button that runs the action (download, open a panel,
@@ -42,7 +42,7 @@ export function chainLinkResolvers(
 }
 
 /**
- * Resolve OpenGeni object links (`artifact:`, `sandbox:`, editable artifacts,
+ * Resolve Opengeni object links (`artifact:`, `sandbox:`, editable artifacts,
  * Sites) for every {@link Markdown} body below. An inner provider is asked
  * before an outer one, so a host can override a single kind and keep defaults.
  */
@@ -100,7 +100,7 @@ function base64Bytes(content: string): Uint8Array<ArrayBuffer> {
 }
 
 /**
- * Default resolver for a session conversation that talks to OpenGeni through
+ * Default resolver for a session conversation that talks to Opengeni through
  * the normal SDK client (for example behind `createSessionProxyHandler`):
  *
  * - `artifact:<file>` downloads the retained file through a short-lived URL.
@@ -151,5 +151,29 @@ export function sessionLinkResolver(input: {
       };
     }
     return null;
+  };
+}
+
+/** An editable artifact or Site to open in a host-mounted viewer. */
+export type OpenGeniViewerTarget = Readonly<{
+  kind: "editable-artifact" | "site";
+  artifactId: string;
+  /** The link text the agent wrote, until the viewer loads the real title. */
+  title?: string | undefined;
+}>;
+
+/**
+ * "Open in host viewer": resolve agent links to editable artifacts and Sites
+ * in this workspace to `open(target)`, for example to mount
+ * `SessionArtifactViewer` beside the conversation. Other targets fall through.
+ */
+export function viewerLinkResolver(input: {
+  workspaceId: string;
+  open: (target: OpenGeniViewerTarget) => void;
+}): OpenGeniLinkResolver {
+  return (target) => {
+    if (target.kind !== "editable-artifact" && target.kind !== "site") return null;
+    if (target.workspaceId !== input.workspaceId) return null;
+    return { open: () => input.open({ kind: target.kind, artifactId: target.artifactId }) };
   };
 }

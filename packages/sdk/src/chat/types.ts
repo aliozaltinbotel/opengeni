@@ -1,6 +1,9 @@
 import type { FetchLike } from "../client";
+import type { Chats } from "../chats";
+import type { WorkspaceIdResolverOptions } from "../tenant-workspaces";
 import type {
   CreateSessionRequest,
+  AgentConfigRequest,
   HumanInputAnswer,
   LatencyMode,
   ReasoningEffort,
@@ -16,7 +19,7 @@ export type ChatAgentAccess = "session" | "user" | "workspace";
 /**
  * Compatibility option for personal or workspace Knowledge. `false` initializes
  * Knowledge authoring to Off; authorized retrieval remains available. Omitted
- * follows user/workspace agent reach; session-only reach defaults to false.
+ * follows `chats`: private with a user, or legacy reach-based defaults without one.
  * Task notes cover temporary session-tree data.
  */
 export type ChatMemory = "user" | "workspace" | false;
@@ -24,8 +27,11 @@ export type ChatMemory = "user" | "workspace" | false;
 export type OpenGeniOptions = {
   /** Organization API key. Keep it on the server. */
   apiKey: string;
-  /** The organization (account) id that owns every tenant workspace. */
-  organizationId: string;
+  /**
+   * The organization (account) id that owns every workspace. Optional: when
+   * omitted it is read once from the API key.
+   */
+  organizationId?: string | undefined;
   /** Defaults to `https://app.opengeni.ai`. */
   baseUrl?: string | undefined;
   /**
@@ -36,21 +42,58 @@ export type OpenGeniOptions = {
   fetch?: FetchLike | undefined;
   /** Display name for a tenant workspace created on first use. Defaults to the tenant id. */
   workspaceName?: ((tenant: string) => string) | undefined;
+  /**
+   * Per-user workspaces only (`{ user }` alone, or `chats: "isolated"`):
+   * permissions for the one owner the SDK adds explicitly. Tenant workspaces
+   * rely on Opengeni, which adds a user on their first request. Both default
+   * to workspace read, session create/read/control (including sending
+   * messages), file upload/read, and per-session MCP attachment; no admin
+   * permissions. Never updates an existing membership: use
+   * `client.updateExternalWorkspaceMember` for that.
+   */
+  memberPermissions?: WorkspaceIdResolverOptions["memberPermissions"];
 };
 
+/**
+ * Which workspace, in your own ids: `tenant` (one workspace per tenant),
+ * neither (the `user`'s own workspace), or an explicit `workspaceId`.
+ */
 export type ChatTarget =
   | { tenant: string; workspaceId?: undefined }
-  | { workspaceId: string; tenant?: undefined };
+  | { workspaceId: string; tenant?: undefined }
+  | { user: string; tenant?: undefined; workspaceId?: undefined };
+
+/**
+ * A workspace in your own ids, for `og.workspaceId(...)`: `{ tenant }` (one
+ * workspace per tenant), `{ user }` (one workspace per user), or
+ * `{ workspaceId }`. Precedence: workspaceId, then tenant, then user.
+ */
+export type WorkspaceTarget = {
+  tenant?: string | undefined;
+  user?: string | undefined;
+  workspaceId?: string | undefined;
+};
 
 export type ChatOptions = ChatTarget & {
-  /** Host-authenticated external user; resolved through server-side asUser(). */
+  /**
+   * Host-authenticated external user; resolved through server-side asUser().
+   * Without a tenant or workspaceId, the user gets one workspace of their own.
+   */
   user?: string | undefined;
   /** Stable conversation id; the session id is derived from it deterministically. */
   conversation: string;
-  /** Prefer the actual OpenGeni session ID for shared or existing conversations.
+  /** Prefer the actual Opengeni session ID for shared or existing conversations.
    * The acting user is independent of the conversation's identity. */
   sessionId?: string | undefined;
-  /** Defaults to `"session"`: the agent sees only this conversation. */
+  /**
+   * Private (default with a user) uses personal Knowledge and session-only reach;
+   * shared uses workspace Knowledge/reach, isolated adds a workspace per tenant/user.
+   * Without a user, omission keeps workspace visibility, session reach and Knowledge off.
+   */
+  chats?: Chats | undefined;
+  /** Agent identity, capabilities and instructions; implicit markdown falls back on older servers. */
+  agent?: AgentConfigRequest | undefined;
+  /** Explicit agent reach overrides the `chats` default. */
   agentAccess?: ChatAgentAccess | undefined;
   memory?: ChatMemory | undefined;
   model?: string | undefined;
@@ -87,6 +130,10 @@ export type ChatReply = {
   status: ChatReplyStatus;
   /** Set when the turn is waiting on `chat.respond` instead of finished. */
   pending: ChatPending | null;
+  /** A non-destructive completion without a model-authored final answer. */
+  emptyFinalReply?: true;
+  /** Display this informational notice when emptyFinalReply is present. */
+  notice?: string;
   /** Every event consumed while folding this turn. */
   events: SessionEvent[];
   toString(): string;
@@ -136,7 +183,7 @@ export type ChatSendOptions = {
    * this send creates the session: they become the first message's
    * `modelContext` (skipped when `create.modelContext` was supplied), trimmed
    * from the oldest end to 30,000 characters. Never resent on later turns:
-   * after the first message OpenGeni owns the history.
+   * after the first message Opengeni owns the history.
    */
   importedHistory?: ChatImportedMessage[] | undefined;
   /** Model for this message's turn; omitted keeps the session's current policy. */
@@ -153,6 +200,8 @@ export type ChatSendOptions = {
 
 export type ChatSessionListOptions = ChatTarget & {
   user?: string | undefined;
+  /** Match the chat's mode; isolated lists that user's separate workspace. */
+  chats?: Chats | undefined;
   limit?: number | undefined;
 };
 

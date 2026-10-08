@@ -6,6 +6,8 @@ import {
   DEFAULT_OPENROUTER_MODEL_ID,
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   configuredModels,
+  applyModelCatalogDocument,
+  withCodexCatalogProvider,
   withClaudeConnectionCatalog,
   withClaudeConnectionCredential,
 } from "@opengeni/config";
@@ -18,6 +20,12 @@ import {
 } from "../src/model-catalog";
 import { modelPickerBillingClassFor } from "@opengeni/contracts/model-picker-order";
 import { resolveWorkspaceModelSelection } from "@opengeni/core";
+
+test("client catalog retains configured model logos", () => {
+  const model = configuredModels(testSettings())[0]!;
+  const logoUrl = "https://cdn.example.test/model.svg";
+  expect(projectClientModel({ ...model, logoUrl }).logoUrl).toBe(logoUrl);
+});
 
 test("public Claude catalog preserves provider and payment identity without leaking credentials", () => {
   let settings = withClaudeConnectionCatalog(testSettings({ claudeSubscriptionEnabled: true }), {
@@ -54,6 +62,10 @@ test("public Claude catalog preserves provider and payment identity without leak
     const client = projectClientModel(model);
     expect(client.provider).toBe(providerId);
     expect(client.providerLabel).toBe(label);
+    expect(client.capabilities?.reasoning).toMatchObject({
+      efforts: ["low", "medium", "high", "xhigh", "max"],
+      defaultEffort: "medium",
+    });
     expect(client.source).toBeUndefined();
     expect(modelPickerBillingClassFor(client)).toBe(billingClass);
     expect(JSON.stringify(client)).not.toContain("secret");
@@ -92,6 +104,45 @@ const previousClientModelSchema = z
   .passthrough();
 
 describe("workspace model catalog availability", () => {
+  test("live database catalog projects fast/vision for GPT-6 point releases and Luna", () => {
+    const base = testSettings({ codexSubscriptionEnabled: true });
+    const capabilities = {
+      ...configuredModels(base)[0]!.capabilities,
+      inputModalities: ["text"],
+      latencyModes: [{ id: "standard", upstream: "unknown", runnable: true }],
+    };
+    const settings = applyModelCatalogDocument(base, {
+      schemaVersion: 1,
+      builtInModels: ["gpt-6-luna"],
+      codexModels: ["gpt-6.1-sol", "gpt-6-luna"].map((slug) => ({
+        id: `codex/${slug}`,
+        upstreamModelId: slug,
+        label: slug,
+        capabilities,
+      })),
+    });
+    const catalog = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: true,
+    });
+    for (const id of ["codex/gpt-6.1-sol", "codex/gpt-6-luna"]) {
+      const model = catalog.models.find((candidate) => candidate.id === id)!;
+      expect(model.capabilities.inputModalities).toEqual(["text", "image"]);
+      expect(model.capabilities.latencyModes).toContainEqual(
+        expect.objectContaining({ id: "fast", upstream: "supported", runnable: true }),
+      );
+      expect(model.billing).toEqual({
+        upstreamPayer: "connected_subscription",
+        metering: "external",
+      });
+      expect(model.definitionVersion).toBe(
+        configuredModels(withCodexCatalogProvider(settings)).find(
+          (candidate) => candidate.id === id,
+        )!.definitionVersion,
+      );
+    }
+  });
   test("projects anonymous providers as ready external routes", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
@@ -165,7 +216,7 @@ describe("workspace model catalog availability", () => {
     });
   });
 
-  test("projects OpenGeni topology safely and gates the workspace Gateway rail", () => {
+  test("projects Opengeni topology safely and gates the workspace Gateway rail", () => {
     const settings = testSettings({
       codexSubscriptionEnabled: false,
       modelProvidersJson: "[]",
@@ -180,7 +231,7 @@ describe("workspace model catalog availability", () => {
     const managed = disconnected.models.find((model) => model.id === "deepseek-v4-flash-0731")!;
     expect(managed).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
@@ -566,7 +617,7 @@ describe("workspace model catalog availability", () => {
     }).models.find((candidate) => candidate.id === settings.openaiModel)!;
     expect(unresolved).toMatchObject({
       provider: "opengeni",
-      providerLabel: "OpenGeni",
+      providerLabel: "Opengeni",
       source: "opengeni",
       credentialReadiness: {
         status: "not_ready",

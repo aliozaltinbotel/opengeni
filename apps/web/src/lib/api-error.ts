@@ -1,7 +1,8 @@
+import { modelDisplayName } from "@opengeni/sdk/model-display";
 import type { ErrorDetail } from "@/components/ui/error-message";
 
 /*
- * Errors from the Opengeni API arrive as "OpenGeni API 403: missing permission:
+ * Errors from the Opengeni API arrive as "Opengeni API 403: missing permission:
  * workspace:admin Reference: <uuid>." That string is for logs and support, not
  * for people (DESIGN.md section 6): the UI says what happened, then what to
  * do, and keeps the status, server message and reference behind "Technical
@@ -70,8 +71,15 @@ function isNetworkFailure(error: unknown): boolean {
   return error instanceof TypeError && NETWORK_FAILURE.test(error.message);
 }
 
+/** "model is not selectable: codex/gpt-6.1-sol" names the model, never its routing id. */
+const MODEL_REFUSAL = /^model is not (?:selectable|available): (\S+)$/iu;
+
 /** A server sentence that is safe to show: short, and not a JSON or schema dump. */
 function readableServerSentence(message: string | undefined): string | undefined {
+  const refusedModel = message ? MODEL_REFUSAL.exec(message.trim())?.[1] : undefined;
+  if (refusedModel) {
+    return `${modelDisplayName(refusedModel)} isn't available here. Choose another model.`;
+  }
   if (!message || message.length > 160 || /^[[{]/u.test(message)) return undefined;
   // A bare code ("invalid_transaction") is not a sentence.
   if (!/\s/u.test(message.trim())) return undefined;

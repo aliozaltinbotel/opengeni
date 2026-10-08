@@ -17,7 +17,7 @@ const messages = {
 };
 const options = { phrases: ["Préparation…"], messages };
 test("native messages localize normal, slow, and expanded states without replacing rendering", async () => {
-  for (const age of [0, 16_000, 31_000]) {
+  for (const age of [0, 29_000, 31_000, 59_000, 61_000]) {
     for (const detailsOpen of [false, true]) {
       let clicks = 0;
       const r = await renderComponent(
@@ -30,13 +30,13 @@ test("native messages localize normal, slow, and expanded states without replaci
         </GenieLoadingOptionsContext.Provider>,
       );
       expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
-        age >= 30_000 ? messages.slowStatus : messages.status,
+        age >= 60_000 ? messages.slowStatus : messages.status,
       );
       expect(r.container.querySelector(".og-genie-phrase")?.textContent).toBe(
-        age >= 30_000 ? messages.slowText : "Préparation…",
+        age >= 60_000 ? messages.slowText : "Préparation…",
       );
       const button = r.container.querySelector("button");
-      if (age >= 15_000 || detailsOpen) {
+      if (age >= 30_000 || detailsOpen) {
         expect(button?.textContent).toContain(
           detailsOpen ? messages.hideDetails : messages.showDetails,
         );
@@ -73,9 +73,9 @@ test("normal preparation has one accessible status and hides all timing rows", a
   expect(r.container.querySelector("button")).toBeNull();
   await r.unmount();
 });
-test("details appear after 15 seconds without replacing playful copy", async () => {
+test("details appear after 30 seconds without replacing playful copy", async () => {
   const r = await renderComponent(
-    <ActivityRail items={[phase({ startedAt: new Date(Date.now() - 15_001).toISOString() })]} />,
+    <ActivityRail items={[phase({ startedAt: new Date(Date.now() - 30_001).toISOString() })]} />,
   );
   expect(r.container.textContent).toContain("Behind the magic");
   expect(r.container.textContent).not.toContain("A little longer than usual");
@@ -103,11 +103,38 @@ test("historical startup is quiet but recorded timings remain inspectable", asyn
 });
 test("long waits replace playful text with an honest status", async () => {
   const r = await renderComponent(
-    <ActivityRail items={[phase({ startedAt: new Date(Date.now() - 31_000).toISOString() })]} />,
+    <ActivityRail items={[phase({ startedAt: new Date(Date.now() - 61_000).toISOString() })]} />,
   );
   expect(r.container.textContent).toContain("A little longer than usual");
   expect(r.container.textContent).toContain("Behind the magic");
   await r.unmount();
+});
+test("a dispatched model request waits for its response instead of preparing the task", async () => {
+  const start = new Date(Date.now() - 61_000).toISOString();
+  const setup = phase({ startedAt: start, status: "complete" });
+  for (const status of ["running", "complete"] as const) {
+    const r = await renderComponent(
+      <ActivityRail
+        startupActive
+        items={[
+          setup,
+          phase({ id: "request", phase: "provider_first_byte", status, startedAt: start }),
+        ]}
+      />,
+    );
+    try {
+      expect(r.container.querySelector('[role="status"]')?.textContent).toBe(
+        "Waiting for a response. Taking longer than usual.",
+      );
+      expect(r.container.querySelector(".og-genie-phrase")?.textContent).toBe(
+        "Still waiting for a response…",
+      );
+      expect(r.container.textContent).not.toContain("Preparing your task");
+      expect(r.container.querySelector("button")?.textContent).toContain("Show details");
+    } finally {
+      await r.unmount();
+    }
+  }
 });
 test("failures and cancellation stop the wisp and stay visible", async () => {
   for (const status of ["failed", "cancelled"] as const) {
@@ -321,16 +348,19 @@ test("work mixed with startup receipts uses the normal Steps disclosure", async 
 });
 
 test("hosts can replace loading with an arbitrary component", async () => {
-  const r = await renderComponent(
-    <MessageTimeline
-      items={[phase()]}
-      genieLoading={{
-        render: ({ startedAt }) => <div data-start={startedAt}>Custom preparation</div>,
-      }}
-    />,
+  const render = ({ startedAt, phase: loadingPhase }: { startedAt: string; phase: string }) => (
+    <div data-start={startedAt} data-phase={loadingPhase}>
+      Custom preparation
+    </div>
   );
+  const r = await renderComponent(<MessageTimeline items={[phase()]} genieLoading={{ render }} />);
   expect(r.container.textContent).toContain("Custom preparation");
   expect(r.container.querySelector("canvas")).toBeNull();
+  expect(r.container.querySelector("[data-phase]")?.getAttribute("data-phase")).toBe("preparing");
+  await r.rerender(
+    <MessageTimeline items={[phase({ phase: "provider_first_byte" })]} genieLoading={{ render }} />,
+  );
+  expect(r.container.querySelector("[data-phase]")?.getAttribute("data-phase")).toBe("waiting");
   await r.unmount();
 });
 

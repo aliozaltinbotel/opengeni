@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/contracts",
-  "version": "5.4.0",
-  "description": "Shared zod schemas and wire-contract types for the OpenGeni API.",
+  "version": "1.4.4",
+  "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -18,6 +18,26 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./prepared-mcp-setup": {
+      "types": "./src/prepared-mcp-setup.ts",
+      "default": "./src/prepared-mcp-setup.ts"
+    },
+    "./connection-account-label": {
+      "types": "./src/connection-account-label.ts",
+      "default": "./src/connection-account-label.ts"
+    },
+    "./modal-native-proof-v2": {
+      "types": "./src/modal-native-proof-v2.ts",
+      "default": "./src/modal-native-proof-v2.ts"
+    },
+    "./allowance-refusal": {
+      "types": "./src/allowance-refusal.ts",
+      "default": "./src/allowance-refusal.ts"
+    },
+    "./usage-allowances": {
+      "types": "./src/usage-allowances.ts",
+      "default": "./src/usage-allowances.ts"
+    },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
       "default": "./src/browser-storage.ts"
@@ -50,6 +70,10 @@
       "types": "./src/external-identities.ts",
       "default": "./src/external-identities.ts"
     },
+    "./organization-access": {
+      "types": "./src/organization-access.ts",
+      "default": "./src/organization-access.ts"
+    },
     "./connect": {
       "types": "./src/connect.ts",
       "default": "./src/connect.ts"
@@ -58,6 +82,14 @@
       "types": "./src/site-session-http.ts",
       "default": "./src/site-session-http.ts"
     },
+    "./organization-model-usage": {
+      "types": "./src/organization-model-usage.ts",
+      "default": "./src/organization-model-usage.ts"
+    },
+    "./insights-usage": {
+      "types": "./src/insights-usage.ts",
+      "default": "./src/insights-usage.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
@@ -65,6 +97,10 @@
     "./slack-bot-scopes": {
       "types": "./src/slack-bot-scopes.ts",
       "default": "./src/slack-bot-scopes.ts"
+    },
+    "./slack-rest-mcp": {
+      "types": "./src/slack-rest-mcp.ts",
+      "default": "./src/slack-rest-mcp.ts"
     },
     "./google-drive": {
       "types": "./src/google-drive.ts",
@@ -85,6 +121,10 @@
     "./atlassian": {
       "types": "./src/atlassian.ts",
       "default": "./src/atlassian.ts"
+    },
+    "./atlassian-native-retirement": {
+      "types": "./src/atlassian-native-retirement.ts",
+      "default": "./src/atlassian-native-retirement.ts"
     },
     "./connector-destinations": {
       "types": "./src/connector-destinations.ts",
@@ -110,6 +150,10 @@
       "types": "./src/session-titles.ts",
       "default": "./src/session-titles.ts"
     },
+    "./session-final-reply": {
+      "types": "./src/session-final-reply.ts",
+      "default": "./src/session-final-reply.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -126,9 +170,21 @@
       "types": "./src/xai-provider-account-authority.ts",
       "default": "./src/xai-provider-account-authority.ts"
     },
+    "./subscription-personal-authority-v2": {
+      "types": "./src/subscription-personal-authority-v2.ts",
+      "default": "./src/subscription-personal-authority-v2.ts"
+    },
     "./model-picker-order": {
       "types": "./src/model-picker-order.ts",
       "default": "./src/model-picker-order.ts"
+    },
+    "./model-display": {
+      "types": "./src/model-display.ts",
+      "default": "./src/model-display.ts"
+    },
+    "./tool-review-presentation": {
+      "types": "./src/tool-review-presentation.ts",
+      "default": "./src/tool-review-presentation.ts"
     },
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
@@ -189,6 +245,10 @@
     "./presentation-artifact-query": {
       "types": "./src/presentation-artifact-query.ts",
       "default": "./src/presentation-artifact-query.ts"
+    },
+    "./session-list-entries": {
+      "types": "./src/session-list-entries.ts",
+      "default": "./src/session-list-entries.ts"
     }
   },
   "publishConfig": {

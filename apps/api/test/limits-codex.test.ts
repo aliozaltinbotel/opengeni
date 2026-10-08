@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import type { Settings } from "@opengeni/config";
@@ -9,7 +9,7 @@ const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
 
 // Live config that reproduces the bug: billingMode=stripe + usageLimitsMode=managed,
-// codex feature enabled, account has 0 OpenGeni credits.
+// codex feature enabled, account has 0 Opengeni credits.
 function billedSettings(overrides: Partial<Settings> = {}): Settings {
   return testSettings({
     billingMode: "stripe",
@@ -44,6 +44,11 @@ function mockCodexBilled(active: boolean): () => void {
 }
 
 describe("API edge credit gate — codex bypass", () => {
+  let allowance: ReturnType<typeof spyOn<typeof opengeniDb, "checkWorkspaceAllowance">>;
+  beforeEach(() => {
+    allowance = spyOn(opengeniDb, "checkWorkspaceAllowance").mockResolvedValue(null);
+  });
+  afterEach(() => allowance.mockRestore());
   test("(a) codex model + ACTIVE credential bypasses the 0-credit gate", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(true);
@@ -98,7 +103,7 @@ describe("API edge credit gate — codex bypass", () => {
     }
   });
 
-  test("a SuperGrok subscription model bypasses OpenGeni credits through its synthetic catalog", async () => {
+  test("a SuperGrok subscription model bypasses Opengeni credits through its synthetic catalog", async () => {
     const restoreBal = mockZeroBalance();
     const restoreCred = mockCodexBilled(false);
     try {

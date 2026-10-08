@@ -66,6 +66,7 @@ import {
   classifySandboxLogicalProvisionFailure,
   isLazySandboxProvisionRetryable,
   createTurnSandboxProvisioner,
+  trackPhysicalSandboxResume,
 } from "./sandbox-provision";
 import {
   resolveActiveSandboxBackend,
@@ -102,6 +103,7 @@ export type SandboxRouteOk = {
   machinePrimary: boolean;
   groupBoxBackend: Settings["sandboxBackend"];
   groupBoxImage: ReturnType<typeof rigProviderImageSourceImage>;
+  groupBoxImagePolicy: "new_creates_only";
   sandboxCreationBackend: Settings["sandboxBackend"];
   effectiveRunCredentialBackend: Settings["sandboxBackend"];
 };
@@ -299,6 +301,7 @@ export async function resolveSandboxRoute(deps: SandboxRouteDeps): Promise<Sandb
     machinePrimary,
     groupBoxBackend,
     groupBoxImage,
+    groupBoxImagePolicy: "new_creates_only",
     sandboxCreationBackend,
     effectiveRunCredentialBackend,
   };
@@ -341,6 +344,7 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
     machinePrimary,
     groupBoxBackend,
     groupBoxImage,
+    groupBoxImagePolicy,
     rigVersion,
     turnResources,
   } = deps;
@@ -642,38 +646,43 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
           const lazyHolderId = sandboxState.sandboxHolderId;
           const lazyGroupId = sandboxState.sandboxGroupId;
           sandboxState.resumeManagedGroupBox = () =>
-            resumeBoxForTurn(
-              {
-                db,
-                settings: runSettings,
-                logicalFallbackSettings: logicalSandboxSettings,
-                cancellationSignal: sandboxResumeSignal,
-                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                observability,
-                freshSandboxReadinessReplacementBudget,
-                onSandboxLost: publishSandboxLost,
-                objectStorage,
-              },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: lazyGroupId,
-                sessionId: input.sessionId,
-                backend: groupBoxBackend,
-                os: groupBoxOs,
-                environment: sandboxEnvironment,
-                ...(groupBoxImage
-                  ? {
-                      image: groupBoxImage,
-                    }
-                  : {}),
-                // The lazy acquire must enforce the same frozen rig authority
-                // as the eager acquire; otherwise a warm box for another rig
-                // can bypass the shared-state conflict/rotation fence.
-                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-              },
-              "turn",
-              lazyHolderId,
+            trackPhysicalSandboxResume(
+              sandboxState.inFlightSandboxResumes,
+              resumeBoxForTurn(
+                {
+                  db,
+                  settings: runSettings,
+                  logicalFallbackSettings: logicalSandboxSettings,
+                  cancellationSignal: sandboxResumeSignal,
+                  sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                  observability,
+                  freshSandboxReadinessReplacementBudget,
+                  onSandboxLost: publishSandboxLost,
+                  objectStorage,
+                  bus,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId: lazyGroupId,
+                  sessionId: input.sessionId,
+                  backend: groupBoxBackend,
+                  os: groupBoxOs,
+                  environment: sandboxEnvironment,
+                  ...(groupBoxImage
+                    ? {
+                        image: groupBoxImage,
+                        imagePolicy: groupBoxImagePolicy,
+                      }
+                    : {}),
+                  // The lazy acquire must enforce the same frozen rig authority
+                  // as the eager acquire; otherwise a warm box for another rig
+                  // can bypass the shared-state conflict/rotation fence.
+                  ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                },
+                "turn",
+                lazyHolderId,
+              ),
             );
           if (
             shouldPrefetchManagedSandbox({
@@ -720,51 +729,55 @@ export async function establishTurnSandbox(deps: EstablishTurnSandboxDeps): Prom
         );
         try {
           sandboxState.resolvedSandbox = await waitForTurnOperation(
-            resumeBoxForTurn(
-              {
-                db,
-                settings: runSettings,
-                logicalFallbackSettings: logicalSandboxSettings,
-                cancellationSignal: sandboxResumeSignal,
-                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
-                observability,
-                freshSandboxReadinessReplacementBudget,
-                onSandboxLost: publishSandboxLost,
-                objectStorage,
-              },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                sessionId: input.sessionId,
-                // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-                // is not machine-primary resumes a real cloud group box (the
-                // deployment default), never a "selfhosted" box (which would throw
-                // for lack of a bound agentId).
-                backend: groupBoxBackend,
-                os: groupBoxOs,
-                environment: sandboxEnvironment,
-                // IMAGE IS SHARED STATE (B3): the container image
-                // this run resolves. The lease stamps it + conflicts on a live shared box
-                // running a DIFFERENT image (solo → durable rotation; N-holders →
-                // SandboxImageConflictError surfaced as an actionable turn error). Select
-                // the image for the actual group-box backend; a configured Modal image must
-                // never override a Docker run. The selfhosted branch
-                // (establishSelfhostedTurnSession) NEVER passes
-                // an image — B3 lives only on this managed-box branch.
-                ...(groupBoxImage
-                  ? {
-                      image: groupBoxImage,
-                    }
-                  : {}),
-                // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-                // conflicts on a live shared box set up under a different rig (solo
-                // durable rotation / N-holders SandboxRigConflictError). Omitted for a
-                // rig-less turn -> never stamped or enforced (shares exactly as today).
-                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-              },
-              "turn",
-              managedOwnership!.holderId,
+            trackPhysicalSandboxResume(
+              sandboxState.inFlightSandboxResumes,
+              resumeBoxForTurn(
+                {
+                  db,
+                  settings: runSettings,
+                  logicalFallbackSettings: logicalSandboxSettings,
+                  cancellationSignal: sandboxResumeSignal,
+                  sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                  observability,
+                  freshSandboxReadinessReplacementBudget,
+                  onSandboxLost: publishSandboxLost,
+                  objectStorage,
+                  bus,
+                },
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  sessionId: input.sessionId,
+                  // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                  // is not machine-primary resumes a real cloud group box (the
+                  // deployment default), never a "selfhosted" box (which would throw
+                  // for lack of a bound agentId).
+                  backend: groupBoxBackend,
+                  os: groupBoxOs,
+                  environment: sandboxEnvironment,
+                  // Deployment/workspace pins select NEW creates only. The lease
+                  // retains a live group's image through between-turn repins, even
+                  // with other holders; only rotation/reaping elects a new image.
+                  // Select the image for the actual group-box backend; a configured Modal image must
+                  // never override a Docker run. The selfhosted branch
+                  // (establishSelfhostedTurnSession) NEVER passes
+                  // an image — B3 lives only on this managed-box branch.
+                  ...(groupBoxImage
+                    ? {
+                        image: groupBoxImage,
+                        imagePolicy: groupBoxImagePolicy,
+                      }
+                    : {}),
+                  // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                  // conflicts on a live shared box set up under a different rig (solo
+                  // durable rotation / N-holders SandboxRigConflictError). Omitted for a
+                  // rig-less turn -> never stamped or enforced (shares exactly as today).
+                  ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+                },
+                "turn",
+                managedOwnership!.holderId,
+              ),
             ),
             sandboxResumeSignal,
             releaseLateSandbox,

@@ -1,4 +1,4 @@
-import { useNavigate } from "@tanstack/react-router";
+import { defaultStringifySearch, useNavigate } from "@tanstack/react-router";
 import type { ArtifactCatalogItem } from "@opengeni/sdk";
 import {
   ImageIcon,
@@ -8,6 +8,8 @@ import {
   MessageSquareIcon,
   MoreHorizontalIcon,
   PanelsTopLeftIcon,
+  PinIcon,
+  PinOffIcon,
 } from "lucide-react";
 import {
   lazy,
@@ -47,12 +49,14 @@ import {
 } from "@/components/ui/toolbar";
 import { useAppContext } from "@/context";
 import { apiErrorAdvice, isPermissionDenied, userErrorText } from "@/lib/api-error";
+import { ARTIFACT_ACCESS_REQUIRED } from "@/lib/artifact-access";
 import {
   artifactKey,
   artifactKindLabel,
   artifactKinds,
   artifactPath,
   artifactRoute,
+  isEditableArtifactKind,
   type ArtifactCatalogFilters,
   type ArtifactKind,
 } from "@/lib/artifact-catalog";
@@ -63,6 +67,7 @@ import {
   type ArtifactView,
 } from "@/lib/artifact-library-view";
 import { cn } from "@/lib/utils";
+import type { ArtifactReturnSearch } from "@/lib/routes";
 import { ArtifactKindTile, ArtifactTypeIcon } from "./artifact-page-chrome";
 
 const InlineChatImage = lazy(() =>
@@ -70,6 +75,17 @@ const InlineChatImage = lazy(() =>
 );
 
 const IMAGE_GLYPH = <ImageIcon className="size-4 text-fg-subtle" aria-hidden />;
+
+export type ArtifactPinAction = (item: ArtifactCatalogItem, pinned: boolean) => Promise<void>;
+
+function PinnedMarker() {
+  return (
+    <span title="Pinned" className="inline-flex shrink-0 items-center text-fg-muted">
+      <PinIcon aria-hidden className="size-3.5 fill-current" />
+      <span className="sr-only">Pinned</span>
+    </span>
+  );
+}
 
 /** Mount retained-image loaders only near the viewport, not merely their img elements. */
 export function ArtifactThumbnail({
@@ -176,15 +192,37 @@ function useArtifactOpen(
   item: ArtifactCatalogItem,
   sessionId?: string,
   onSelect?: (item: ArtifactCatalogItem) => void,
+  onPin?: ArtifactPinAction,
+  loading = false,
+  browseSearch?: ArtifactReturnSearch,
 ) {
   const navigate = useNavigate();
+  const [pinning, setPinning] = useState(false);
+  const pinInFlight = useRef(false);
+  const togglePin = async () => {
+    if (!onPin || pinInFlight.current || loading) return;
+    pinInFlight.current = true;
+    setPinning(true);
+    const pinned = !item.pinned;
+    try {
+      await onPin(item, pinned);
+      toast(pinned ? "Artifact pinned" : "Artifact unpinned");
+    } catch (error) {
+      toast.error(pinned ? "Couldn't pin artifact" : "Couldn't unpin artifact", {
+        description: userErrorText(error),
+      });
+    } finally {
+      pinInFlight.current = false;
+      setPinning(false);
+    }
+  };
   const open = () =>
     onSelect
       ? onSelect(item)
       : void navigate({
           to: artifactRoute(item.kind),
           params: { workspaceId, artifactId: item.id },
-          search: sessionId ? { fromSession: sessionId } : {},
+          search: browseSearch ?? (sessionId ? { fromSession: sessionId } : {}),
         });
   const menu = (
     <>
@@ -192,6 +230,12 @@ function useArtifactOpen(
         <PanelsTopLeftIcon />
         Open
       </DropdownMenuItem>
+      {onPin ? (
+        <DropdownMenuItem disabled={pinning || loading} onSelect={() => void togglePin()}>
+          {item.pinned ? <PinOffIcon /> : <PinIcon />}
+          {pinning ? "Saving…" : item.pinned ? "Unpin" : "Pin"}
+        </DropdownMenuItem>
+      ) : null}
       {item.sourceSessionId && item.sourceSessionId !== sessionId ? (
         <DropdownMenuItem
           onSelect={() =>
@@ -226,7 +270,9 @@ function useArtifactOpen(
     link: onSelect
       ? null
       : {
-          href: artifactPath(workspaceId, item, sessionId),
+          href: browseSearch
+            ? `${artifactPath(workspaceId, item)}${defaultStringifySearch(browseSearch)}`
+            : artifactPath(workspaceId, item, sessionId),
           onClick: (event: MouseEvent<HTMLElement>) => {
             if (!isPlainClick(event)) return;
             event.preventDefault();
@@ -255,13 +301,27 @@ export function ArtifactRow({
   item,
   sessionId,
   onSelect,
+  onPin,
+  loading,
+  browseSearch,
 }: {
   workspaceId: string;
   item: ArtifactCatalogItem;
   sessionId?: string;
   onSelect?: (item: ArtifactCatalogItem) => void;
+  onPin?: ArtifactPinAction;
+  loading?: boolean;
+  browseSearch?: ArtifactReturnSearch;
 }) {
-  const { open, menu, link } = useArtifactOpen(workspaceId, item, sessionId, onSelect);
+  const { open, menu, link } = useArtifactOpen(
+    workspaceId,
+    item,
+    sessionId,
+    onSelect,
+    onPin,
+    loading,
+    browseSearch,
+  );
   const archived = item.status === "archived";
   return (
     <ListRow
@@ -274,6 +334,7 @@ export function ArtifactRow({
         )
       }
       title={item.title}
+      titleAddon={item.pinned ? <PinnedMarker /> : undefined}
       meta={[
         artifactKindLabel[item.kind],
         item.kind === "file" && item.filename && item.filename !== item.title
@@ -428,13 +489,27 @@ export function ArtifactCard({
   item,
   sessionId,
   onSelect,
+  onPin,
+  loading,
+  browseSearch,
 }: {
   workspaceId: string;
   item: ArtifactCatalogItem;
   sessionId?: string;
   onSelect?: (item: ArtifactCatalogItem) => void;
+  onPin?: ArtifactPinAction;
+  loading?: boolean;
+  browseSearch?: ArtifactReturnSearch;
 }) {
-  const { open, menu, link } = useArtifactOpen(workspaceId, item, sessionId, onSelect);
+  const { open, menu, link } = useArtifactOpen(
+    workspaceId,
+    item,
+    sessionId,
+    onSelect,
+    onPin,
+    loading,
+    browseSearch,
+  );
   const titleId = useId();
   const archived = item.status === "archived";
   // The title is the card's action, stretched over the whole card; the menu sits above it.
@@ -460,12 +535,15 @@ export function ArtifactCard({
       >
         <ArtifactPreview workspaceId={workspaceId} item={item} />
       </div>
-      {archived ? (
+      {archived || item.pinned ? (
         // On the preview, so the meta line keeps its one fact whole.
-        <span className="absolute top-2.5 left-2.5 rounded-full bg-surface">
-          <StatusBadge tone="neutral" icon="auto">
-            Archived
-          </StatusBadge>
+        <span className="absolute top-2.5 left-2.5 flex items-center gap-2 rounded-full bg-surface px-2 py-1">
+          {item.pinned ? <PinnedMarker /> : null}
+          {archived ? (
+            <StatusBadge tone="neutral" icon="auto">
+              Archived
+            </StatusBadge>
+          ) : null}
         </span>
       ) : null}
       <div className="flex min-w-0 items-start gap-2 px-3.5 pt-3 pb-3.5">
@@ -548,9 +626,12 @@ export function ArtifactLibrary({
   nextCursor,
   onLoadMore,
   onSelect,
+  onPin,
   compact = false,
   emptyAction,
   onEmptyChange,
+  artifactKindsHidden = false,
+  browseSearch,
 }: {
   workspaceId: string;
   sessionId?: string;
@@ -563,6 +644,8 @@ export function ArtifactLibrary({
   nextCursor?: string | null;
   onLoadMore?: () => void;
   onSelect?: (item: ArtifactCatalogItem) => void;
+  /** Omitted for viewers without permission to change workspace pins. */
+  onPin?: ArtifactPinAction;
   /**
    * The session's artifact panel: no page tabs, so the type filter joins the
    * Filter menu.
@@ -572,6 +655,13 @@ export function ArtifactLibrary({
   emptyAction?: ReactNode;
   /** Nothing at all yet: the page hides its header action, the empty state has it. */
   onEmptyChange?: (empty: boolean) => void;
+  /**
+   * The viewer can't read Sites and editable artifacts here (no
+   * `artifacts:read`), so the catalog omits them: say so instead of "none yet".
+   */
+  artifactKindsHidden?: boolean;
+  /** Workspace library query carried into the full-page viewer, not embedded panels. */
+  browseSearch?: ArtifactReturnSearch;
 }) {
   const [view, setView] = useState<ArtifactView>(readArtifactView);
   const changeView = (next: ArtifactView) => {
@@ -604,8 +694,26 @@ export function ArtifactLibrary({
       ? "artifacts"
       : (artifactKinds.find(([kind]) => kind === filters.kind)?.[1] ?? "").toLocaleLowerCase();
 
+  // The flag comes from the viewer's loaded grant, which can be stale: once
+  // the catalog returns a Site or editable artifact, the server has decided.
+  const readsArtifactKinds = (kind: ArtifactKind) =>
+    kind === "site" || isEditableArtifactKind(kind);
+  const hiddenKindSelected =
+    artifactKindsHidden &&
+    filters.kind !== "all" &&
+    readsArtifactKinds(filters.kind) &&
+    !loading &&
+    items.length === 0;
+  const hiddenKindsNotice =
+    artifactKindsHidden &&
+    filters.kind === "all" &&
+    !(error && isPermissionDenied(error)) &&
+    !items.some((item) => readsArtifactKinds(item.kind));
+
   let body: ReactNode;
-  if (error && items.length === 0 && isPermissionDenied(error)) {
+  if (hiddenKindSelected) {
+    body = <Notice title={`You can't see ${kindLabel} here.`}>{ARTIFACT_ACCESS_REQUIRED}</Notice>;
+  } else if (error && items.length === 0 && isPermissionDenied(error)) {
     body = <Notice title="You can't see artifacts here.">Ask a workspace admin for access.</Notice>;
   } else if (error && items.length === 0) {
     body = (
@@ -693,6 +801,9 @@ export function ArtifactLibrary({
                 item={item}
                 sessionId={sessionId}
                 onSelect={onSelect}
+                onPin={onPin}
+                loading={loading}
+                browseSearch={browseSearch}
               />
             ))}
           </ul>
@@ -710,6 +821,9 @@ export function ArtifactLibrary({
                 item={item}
                 sessionId={sessionId}
                 onSelect={onSelect}
+                onPin={onPin}
+                loading={loading}
+                browseSearch={browseSearch}
               />
             ))}
           </RowList>
@@ -768,6 +882,9 @@ export function ArtifactLibrary({
           </div>
         ) : null}
       </div>
+      {hiddenKindsNotice ? (
+        <Notice title="Sites and documents are hidden">{ARTIFACT_ACCESS_REQUIRED}</Notice>
+      ) : null}
       <div className="min-w-0">{body}</div>
     </section>
   );

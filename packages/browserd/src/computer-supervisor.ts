@@ -14,7 +14,7 @@ import {
   type ComputerInteractionAuthority,
   type ComputerInteractionDriver,
 } from "@opengeni/interaction";
-import { NativeComputerDriver } from "./computer-driver";
+import { ComputerDriver } from "./computer-driver";
 import {
   ExistingComputerEnvironmentAllocator,
   type ComputerEnvironmentAllocator,
@@ -27,6 +27,7 @@ import type {
   ComputerImageFrame,
 } from "./computer-media";
 import { ComputerNativeClient } from "./computer-native-client";
+import { UnsettledCleanupError } from "./cleanup-error";
 
 const DEFAULT_MAX_SESSIONS = 64;
 
@@ -106,8 +107,10 @@ export class ComputerSupervisor {
   private readonly sessions = new Map<string, Runtime>();
   private readonly creating = new Map<string, Promise<Runtime>>();
   private readonly ending = new Map<string, Promise<void>>();
-  private displaceGate: Promise<void> = Promise.resolve();
+  private displaceGate: Promise<void> | null = null;
   private closed = false;
+  private closePromise: Promise<void> | null = null;
+  private cleanupUncertain = false;
 
   private constructor(options: ComputerSupervisorOptions) {
     this.rootDirectory = resolve(options.rootDirectory);
@@ -132,7 +135,7 @@ export class ComputerSupervisor {
             cwd: context.sessionDirectory,
           });
         const client = await clientFactory();
-        return new NativeComputerDriver({
+        return new ComputerDriver({
           computerSessionId: context.computerSessionId,
           controllerGeneration: context.controllerGeneration,
           client,
@@ -168,7 +171,7 @@ export class ComputerSupervisor {
       return await this.describe(runtime);
     }
     if (this.displaceExistingSessions) {
-      const displaced = this.displaceGate.then(async () => {
+      const displaced = (this.displaceGate ?? Promise.resolve()).then(async () => {
         const current = this.sessions.get(options.computerSessionId);
         if (current) {
           this.assertSameBinding(current, options);
@@ -183,10 +186,26 @@ export class ComputerSupervisor {
         await this.displaceOtherSessions(options.computerSessionId);
         return await this.installSession(options);
       });
-      this.displaceGate = displaced.then(() => undefined).catch(() => undefined);
-      return await displaced;
+      const gate = displaced.then(() => undefined).catch(() => undefined);
+      this.displaceGate = gate;
+      try {
+        return await displaced;
+      } finally {
+        if (this.displaceGate === gate) this.displaceGate = null;
+      }
     }
     return await this.installSession(options);
+  }
+
+  /** A queued shared-seat create owns work before its runtime exists. */
+  isIdle(): boolean {
+    return (
+      !this.cleanupUncertain &&
+      this.displaceGate === null &&
+      this.sessions.size === 0 &&
+      this.creating.size === 0 &&
+      this.ending.size === 0
+    );
   }
 
   listSessions(): Array<
@@ -261,7 +280,11 @@ export class ComputerSupervisor {
   /** Resolve the private loopback RFB endpoint for one exact isolated screen.
    * The endpoint is consumed only by BrowserControlServer's authenticated
    * WebSocket proxy and is never returned across the placement boundary. */
-  async rfbPort(reference: ComputerSessionReference, targetId: string): Promise<number> {
+  async rfbPort(
+    reference: ComputerSessionReference,
+    targetId: string,
+    scope?: { targetGeneration: string; inputAllowed: boolean },
+  ): Promise<number> {
     const runtime = this.requireActive(reference);
     if (runtime.environmentLease.rfbPort === null) {
       throw new InteractionControllerError(
@@ -275,6 +298,15 @@ export class ComputerSupervisor {
         "invalid_action",
         "RFB is available only for a complete screen target",
       );
+    }
+    if (scope && target.targetGeneration !== scope.targetGeneration) {
+      throw new InteractionControllerError("target_stale", "RFB screen generation is stale");
+    }
+    if (
+      scope?.inputAllowed &&
+      (!runtime.driver.capabilities.pointerInput || !runtime.driver.capabilities.keyboardInput)
+    ) {
+      throw new InteractionControllerError("permission_denied", "RFB native input is unavailable");
     }
     return runtime.environmentLease.rfbPort;
   }
@@ -306,8 +338,14 @@ export class ComputerSupervisor {
   }
 
   async close(): Promise<void> {
-    if (this.closed) return;
+    if (this.closePromise) return await this.closePromise;
     this.closed = true;
+    this.closePromise = this.performClose();
+    return await this.closePromise;
+  }
+
+  private async performClose(): Promise<void> {
+    await this.displaceGate?.catch(() => undefined);
     await Promise.allSettled([...this.creating.values()]);
     const results = await Promise.allSettled(
       [...this.sessions.values()].map(async (runtime) => await this.endSession(binding(runtime))),
@@ -315,7 +353,10 @@ export class ComputerSupervisor {
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
     );
+    if (this.cleanupUncertain)
+      failures.push(new Error("previous computer cleanup remains unsettled"));
     if (failures.length > 0) {
+      this.cleanupUncertain = true;
       throw new AggregateError(failures, "computer supervisor shutdown failed");
     }
   }
@@ -335,7 +376,12 @@ export class ComputerSupervisor {
     try {
       const runtime = await creation;
       if (this.closed) {
-        await this.disposeRuntime(runtime, false);
+        try {
+          await this.disposeRuntime(runtime, false);
+        } catch (error) {
+          this.cleanupUncertain = true;
+          throw error;
+        }
         throw new InteractionControllerError(
           "resource_unavailable",
           "computer supervisor is closed",
@@ -437,6 +483,7 @@ export class ComputerSupervisor {
       };
       return runtime;
     } catch (error) {
+      if (error instanceof UnsettledCleanupError) this.cleanupUncertain = true;
       const failures: unknown[] = [error];
       try {
         await driver?.close();
@@ -459,6 +506,7 @@ export class ComputerSupervisor {
         failures.push(cleanupError);
       }
       if (failures.length > 1) {
+        this.cleanupUncertain = true;
         const cleanupFailure = new Error("computer runtime creation cleanup failed", {
           cause: error,
         });

@@ -6,8 +6,17 @@ and reports success.
 
 ## The mechanism
 
+The rolling `0604_insights_raw_usage_api.sql` endpoint checkpoint performs no
+data backfill and does not relax FORCE RLS. Its scoped readers reuse the
+existing owner-only Insights read capability and session inventory windows;
+the raw intermediate helper additionally attests the schema owner, so direct
+application EXECUTE cannot expose unmasked rows. The owner/app fixture verifies
+historical rows remain readable, policies unchanged, and capabilities cleaned
+up. Daily rollup backfill remains a separate migration with its own owner
+posture/convergence gate.
+
 `FORCE ROW LEVEL SECURITY` binds the **table owner**, not merely ordinary roles.
-Only a genuine `SUPERUSER` (or a role with `BYPASSRLS`) is exempt. OpenGeni's
+Only a genuine `SUPERUSER` (or a role with `BYPASSRLS`) is exempt. Opengeni's
 documented deployment posture ([`deployment.md`](deployment.md)) runs migrations
 as `OPENGENI_MIGRATIONS_DATABASE_URL`'s identity - the schema **owner**, which on
 every managed Postgres (Azure Flexible Server, AWS RDS, Cloud SQL) is a
@@ -144,7 +153,8 @@ authority. Migration bytes are frozen, so this needs its own reviewed repair
 migration - it is listed here rather than fixed in passing.
 
 **Known unrepaired global aggregate.** `opengeni_private.count_session_recovery_backlog()`
-(0375, restated by 0519) reads `sessions`, `session_turns`,
+(0375, restated by 0519; 0633 moved its body into
+`opengeni_private.summarize_session_recovery_backlog()` unchanged in shape) reads `sessions`, `session_turns`,
 `session_turn_attempts`, `session_attempt_interruptions`, `session_events`, and
 `workspace_inference_controls` with no tenant GUC and no capability window.
 Every permissive policy those tables offer its owner needs one, so on the

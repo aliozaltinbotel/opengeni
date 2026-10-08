@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Permission } from "./permissions";
 
 export const ATTEMPT_TOOL_CATALOG_VERSION = 1 as const;
 export const TOOL_GATEWAY_CATALOG_VERSION = 1 as const;
@@ -182,6 +183,9 @@ export const AttemptToolCatalog = z
     generation: z.number().int().positive(),
     digest: sha256,
     createdAt: z.string().datetime({ offset: true }),
+    /** Native permission ceiling frozen by the worker with this catalog.
+     * Absence is legacy/unknown, not permission to derive a larger live set. */
+    firstPartyMcpPermissions: z.array(Permission).max(128).optional(),
     entries: z.array(AttemptToolCatalogEntry).max(ATTEMPT_TOOL_CATALOG_MAX_ENTRIES),
   })
   .strict()
@@ -408,6 +412,7 @@ function requireCompleteSiteToolContext(
 
 export const CodemodeOperationState = z.enum([
   "queued",
+  "waiting_for_approval",
   "running",
   "completed",
   "failed",
@@ -439,6 +444,9 @@ export const CodemodeOperation = z
       message: "Codemode operation caller must be codemode",
     }),
     state: CodemodeOperationState,
+    /** Present only for clients that acknowledged durable approval continuation. */
+    durableApproval: z.literal(true).optional(),
+    approvalRequestId: z.string().uuid().optional(),
     result: AttemptToolResult.nullable(),
     errorCode: z.string().min(1).max(128).nullable(),
     errorMessage: z.string().min(1).max(4_096).nullable(),
@@ -453,6 +461,8 @@ export type CodemodeOperation = z.infer<typeof CodemodeOperation>;
 
 export const CodemodeCallRequest = z
   .object({
+    /** Opt-in transport capability, never permission to execute. */
+    durableApproval: z.literal(true).optional(),
     operationId: z.string().uuid(),
     catalogDigest: sha256,
     identity: AttemptToolIdentity,

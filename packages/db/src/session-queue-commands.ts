@@ -1,8 +1,15 @@
+import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
+import { resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction } from "./claude-subscription-accounts";
+import {
+  receiverSubscriptionAuthorityInTransaction,
+  sharedPoolSubscriptionAuthoritySnapshotsInTransaction,
+} from "./accepted-subscription-authority";
 import { acceptSessionFileAttachments } from "./session-file-attachments";
+import { ArchivedSessionImportError } from "./archived-session-imports";
+import { SessionArchivedError } from "./session-archive-errors";
 import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { parseAcceptedMcpAccountBindings } from "./mcp-account-bindings";
 import {
-  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
   XaiProviderAccountAuthoritySnapshotV1,
   DraftTimelineAnnotations,
   ModelSourceRef,
@@ -411,17 +418,19 @@ async function personalConnectionDelegationsForAgentActor(
   return { delegations, mcpAccountBindings, connectionAuthoritySubjectId };
 }
 
-async function xaiAuthorityForAgentActor(
+/**
+ * The sender's exact causal human. Agent-originated work keeps this human for
+ * permissions and provenance, but never the sender's subscription pool: the
+ * receiving session's own accepted work owns that (see
+ * `receiverSubscriptionAuthorityInTransaction`).
+ */
+async function subscriptionCausalHumanForAgentActor(
   db: Database,
   workspaceId: string,
   actor: Extract<SessionCommandActor, { type: "agent_attempt" }>,
-): Promise<{
-  snapshot: ReturnType<typeof XaiProviderAccountAuthoritySnapshotV1.parse>;
-  subjectId: string | null;
-}> {
+): Promise<string | null> {
   const [row] = await db
     .select({
-      snapshot: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
       initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
       initiatorKind: schema.sessionTurns.initiatorKind,
       initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
@@ -437,15 +446,13 @@ async function xaiAuthorityForAgentActor(
     .limit(1);
   if (!row) {
     throw new SessionControlInvariantError(
-      `Agent xAI authority turn not found: ${actor.sessionId}/${actor.turnId}`,
+      `Agent subscription authority turn not found: ${actor.sessionId}/${actor.turnId}`,
     );
   }
-  return {
-    snapshot: XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot),
-    subjectId:
-      row.initiatingHumanSubjectId ??
-      (row.initiatorKind === "subject" ? row.initiatorSubjectId : null),
-  };
+  return (
+    row.initiatingHumanSubjectId ??
+    (row.initiatorKind === "subject" ? row.initiatorSubjectId : null)
+  );
 }
 
 async function lockSession(
@@ -747,17 +754,19 @@ export async function supersedeSessionCurrentDirectionInTransaction(
           eq(schema.codexCapacityWaiters.status, "waiting"),
         ),
       );
-    await db
-      .update(schema.xaiCapacityWaiters)
-      .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
-      .where(
-        and(
-          eq(schema.xaiCapacityWaiters.workspaceId, input.workspaceId),
-          eq(schema.xaiCapacityWaiters.sessionId, input.sessionId),
-          eq(schema.xaiCapacityWaiters.blockedTurnId, current.id),
-          eq(schema.xaiCapacityWaiters.status, "waiting"),
-        ),
-      );
+    for (const waiters of [schema.xaiCapacityWaiters, schema.claudeCapacityWaiters]) {
+      await db
+        .update(waiters)
+        .set({ status: "superseded", lastWakeReason: "steer", updatedAt: now })
+        .where(
+          and(
+            eq(waiters.workspaceId, input.workspaceId),
+            eq(waiters.sessionId, input.sessionId),
+            eq(waiters.blockedTurnId, current.id),
+            eq(waiters.status, "waiting"),
+          ),
+        );
+    }
   }
   return {
     interruptionCount: 0,
@@ -1771,7 +1780,12 @@ export async function submitHumanPromptInTransaction(
     }>;
     /** Trusted database-only admission seam. It runs only after a completed
      * operation replay has been ruled out; throwing rolls the prompt back. */
-    beforeFreshPromptCommit?: (tx: Database) => Promise<void>;
+    beforeFreshPromptCommit?: (
+      tx: Database,
+      authority: {
+        claudeProviderAccountAuthoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+      },
+    ) => Promise<void>;
     /** Backend-only authority capture, atomic with the newly accepted turn. */
     captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
 
@@ -1798,7 +1812,7 @@ export async function submitHumanPromptInTransaction(
       subjectId: input.actor.subjectId,
     });
   }
-  await lockSessionEventWriteRows(db, {
+  const promptLocks = await lockSessionEventWriteRows(db, {
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
     sessionIds:
@@ -1808,6 +1822,11 @@ export async function submitHumanPromptInTransaction(
     turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  const promptTarget = promptLocks.sessions.find((session) => session.id === input.sessionId);
+  if (promptTarget?.importedArchiveImportId) {
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  }
+  if (promptTarget?.contentArchiveState) throw new SessionArchivedError();
   const messageModelSourceRefs = ModelSourceRef.array().max(16384).parse(input.messageModelSourceRefs ?? []);
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
@@ -1879,8 +1898,6 @@ export async function submitHumanPromptInTransaction(
       receipt: reserved.receipt,
     });
   }
-  await input.beforeFreshPromptCommit?.(db);
-
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
   });
@@ -2099,15 +2116,41 @@ export async function submitHumanPromptInTransaction(
       )`,
     );
   }
+  // Edits copy their source turn. A human resolves their own current pool.
+  // Agent-submitted work takes the receiving session's pool (never the
+  // sender's). Service/operator actors, organization API keys and bridges have
+  // no exact accepting human, so they resolve the organization or workspace
+  // pool and can never select a personal pool.
+  const nonHumanAuthority =
+    editedSourceTurn || input.actor.type === "human"
+      ? null
+      : input.actor.type === "agent_attempt"
+        ? await receiverSubscriptionAuthorityInTransaction(db, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            causalHumanSubjectId: acceptedInitiatingHumanSubjectId,
+          }).then((authority) => ({
+            xai: authority.xai.snapshot,
+            claude: authority.claude.snapshot,
+          }))
+        : await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(db, input.workspaceId);
   const xaiProviderAccountAuthoritySnapshot = editedSourceTurn
     ? XaiProviderAccountAuthoritySnapshotV1.parse(
         editedSourceTurn.xaiProviderAccountAuthoritySnapshot,
       )
-    : input.actor.type === "human"
-      ? await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
-          workspaceId: input.workspaceId,
-        })
-      : WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1;
+    : (nonHumanAuthority?.xai ??
+      (await resolveXaiProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
+        workspaceId: input.workspaceId,
+      })));
+  const claudeProviderAccountAuthoritySnapshot = editedSourceTurn
+    ? ClaudeProviderAccountAuthoritySnapshotV1.parse(
+        editedSourceTurn.claudeProviderAccountAuthoritySnapshot,
+      )
+    : (nonHumanAuthority?.claude ??
+      (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptanceInTransaction(db, {
+        workspaceId: input.workspaceId,
+      })));
+  await input.beforeFreshPromptCommit?.(db, { claudeProviderAccountAuthoritySnapshot });
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -2209,6 +2252,7 @@ export async function submitHumanPromptInTransaction(
             ? editedSourceTurn.mcpAccountBindings
             : parseAcceptedMcpAccountBindings(input.mcpAccountBindings),
           xaiProviderAccountAuthoritySnapshot,
+          claudeProviderAccountAuthoritySnapshot,
           createdAt: now,
           updatedAt: now,
         },
@@ -2466,7 +2510,7 @@ export async function submitHumanPromptInTransaction(
         delivery: effectiveDelivery,
         routing,
         acceptedEventId,
-        instruction: "OpenGeni accepted and routed this user input; do not delegate it again.",
+        instruction: "Opengeni accepted and routed this user input; do not delegate it again.",
       },
       now,
     });
@@ -2618,6 +2662,8 @@ export async function sendAgentMessageInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     text: string;
+    /** Fresh admission only, after receipt replay and exact caller authority. */
+    assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /**
      * Bound the workspace control prefix wait (request-scoped API callers pass
      * `workspaceControlRequestLockTimeoutMs()`); omit for lifecycle callers.
@@ -2678,14 +2724,27 @@ export async function sendAgentMessageInTransaction(
     targetSessionId: input.targetSessionId,
     action: "message",
   });
+  await input.assertFreshAdmission?.(db);
   const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
     input.actor,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
-  const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const subscriptionCausalHuman = await subscriptionCausalHumanForAgentActor(
+    db,
+    input.workspaceId,
+    input.actor,
+  );
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
+  if (session.importedArchiveImportId)
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  if (session.contentArchiveState) throw new SessionArchivedError();
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2693,6 +2752,12 @@ export async function sendAgentMessageInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  // The pool belongs to the receiving session's accepted work, not the sender.
+  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const effective = await evaluateSessionControl(db, input.workspaceId, input.targetSessionId, {
     workspaceControl,
   });
@@ -2726,17 +2791,26 @@ export async function sendAgentMessageInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:
                       inheritedConnectionAuthority.connectionAuthoritySubjectId,
                   }
                 : {}),
-              ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+              ...(subscriptionCausalHuman
+                ? {
+                    xaiAuthoritySubjectId: subscriptionCausalHuman,
+                    claudeAuthoritySubjectId: subscriptionCausalHuman,
+                  }
+                : {}),
             },
             personalConnectionDelegations,
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
-            xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+            xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
+            claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
             state: "pending",
           },
           "summary",
@@ -2869,6 +2943,8 @@ export async function steerAgentSessionInTransaction(
     actor: Extract<SessionCommandActor, { type: "agent_attempt" }>;
     operationKey: string;
     instruction: string;
+    /** Runs before resume, supersession or interruption; never on receipt replay. */
+    assertFreshAdmission?: (tx: SessionActivityDatabase) => Promise<void>;
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
   },
@@ -2932,13 +3008,23 @@ export async function steerAgentSessionInTransaction(
     targetSessionId: input.targetSessionId,
     action: "steer",
   });
+  await input.assertFreshAdmission?.(db);
   const inheritedConnectionAuthority = await personalConnectionDelegationsForAgentActor(
     db,
     input.workspaceId,
     input.actor,
   );
   const personalConnectionDelegations = inheritedConnectionAuthority.delegations;
-  const xaiAuthority = await xaiAuthorityForAgentActor(db, input.workspaceId, input.actor);
+  const subscriptionCausalHuman = await subscriptionCausalHumanForAgentActor(
+    db,
+    input.workspaceId,
+    input.actor,
+  );
+  const sourceInitiator = await frozenInitiatorForCommandActor(
+    db as Database,
+    input.workspaceId,
+    input.actor,
+  );
   const resumed = await autoResumeSessionBranchInTransaction(db, {
     workspaceId: input.workspaceId,
     sessionId: input.targetSessionId,
@@ -2947,6 +3033,9 @@ export async function steerAgentSessionInTransaction(
     admission,
   });
   const session = await lockSession(db, input.workspaceId, input.targetSessionId);
+  if (session.importedArchiveImportId)
+    throw new ArchivedSessionImportError("SESSION_IMPORTED_READ_ONLY");
+  if (session.contentArchiveState) throw new SessionArchivedError();
   if (session.status === "cancelled") {
     throw new QueueCommandConflictError(
       "QUEUE_PROMPT_STARTED",
@@ -2954,6 +3043,12 @@ export async function steerAgentSessionInTransaction(
       { queueVersion: session.queueVersion },
     );
   }
+  // The pool belongs to the receiving session's accepted work, not the sender.
+  const receiverAuthority = await receiverSubscriptionAuthorityInTransaction(db, {
+    workspaceId: input.workspaceId,
+    sessionId: input.targetSessionId,
+    causalHumanSubjectId: subscriptionCausalHuman,
+  });
   const now = new Date();
   const updateId = crypto.randomUUID();
   // An Agent Steer is external input for the target's goal. A goal paused only
@@ -3015,17 +3110,26 @@ export async function steerAgentSessionInTransaction(
               callerTurnId: input.actor.turnId,
               callerAttemptId: input.actor.attemptId,
               callerExecutionGeneration: input.actor.executionGeneration,
+              ...(sourceInitiator.context.credentialRestriction === "developer_setup"
+                ? { credentialRestriction: "developer_setup" }
+                : {}),
               ...(inheritedConnectionAuthority.connectionAuthoritySubjectId
                 ? {
                     connectionAuthoritySubjectId:
                       inheritedConnectionAuthority.connectionAuthoritySubjectId,
                   }
                 : {}),
-              ...(xaiAuthority.subjectId ? { xaiAuthoritySubjectId: xaiAuthority.subjectId } : {}),
+              ...(subscriptionCausalHuman
+                ? {
+                    xaiAuthoritySubjectId: subscriptionCausalHuman,
+                    claudeAuthoritySubjectId: subscriptionCausalHuman,
+                  }
+                : {}),
             },
             personalConnectionDelegations,
             mcpAccountBindings: inheritedConnectionAuthority.mcpAccountBindings,
-            xaiProviderAccountAuthoritySnapshot: xaiAuthority.snapshot,
+            xaiProviderAccountAuthoritySnapshot: receiverAuthority.xai.snapshot,
+            claudeProviderAccountAuthoritySnapshot: receiverAuthority.claude.snapshot,
             state: "pending",
           },
           "summary",

@@ -1,5 +1,35 @@
 # @opengeni/jev
 
+## 1.4.4
+
+## 1.4.3
+
+## 1.4.2
+
+## 1.4.1
+
+## 1.4.0
+
+## 1.3.0
+
+## 1.2.0
+
+## 1.1.0
+
+## 1.0.2
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.2.1
+
+### Patch Changes
+
+- 48f5d39: `code_search` packs "must change together" declarations after the passages that passed the relevance bar instead of before them, so they no longer push verified passages out of the token budget.
+
 ## 0.2.0
 
 ### Minor Changes

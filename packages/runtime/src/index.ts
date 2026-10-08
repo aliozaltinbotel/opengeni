@@ -1,4 +1,7 @@
+import { KNOWLEDGE_GUIDANCE } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
+import { interactionToolErrorOutput, type InteractionToolErrorResult } from "./interaction-tools";
+import { createMcpTransportLogger } from "./mcp-transport-logger";
 import {
   withPreparedCompactionRequest,
   deferCompactionToModelBoundary,
@@ -6,11 +9,17 @@ import {
 export { bindModelSourceInput, omitModelSourceInputBinding, modelSourceInputBinding, modelSourceBindings } from "./model-request-capture";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+export { AnthropicProviderRejection } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
-import { normalizeCredentialProviderMcpUrl } from "@opengeni/contracts";
+import {
+  normalizeCredentialProviderMcpUrl,
+  toolPolicyActionName,
+  toolReviewContextFromSchema,
+} from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
+export { AnthropicRequestError } from "./anthropic-request-error";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
@@ -72,6 +81,7 @@ import {
   digestCanonicalJson,
   type ToolGateway,
   type ToolGatewayAuthorization,
+  type ToolGatewayApprovalResolver,
   type ToolGatewayCallLifecycle,
   type ToolGatewayDefinition,
 } from "@opengeni/tool-gateway";
@@ -102,6 +112,9 @@ import {
   GenerateVideoToolInput,
   GetVideoGenerationCapabilitiesToolInput,
   RequestHumanInputToolInput,
+  resolveAgentToolFamilies,
+  resolveAgentMediaToolSurface,
+  type ResolvedAgentConfig,
   AttemptToolResult,
   type AttemptToolCatalog,
   type AttemptToolResult as AttemptToolResultValue,
@@ -131,6 +144,7 @@ import {
 export { renderSessionGoalContext } from "@opengeni/contracts";
 import {
   MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_RESPONSE_BYTES,
   MCP_MAX_TOOL_RESULT_BYTES,
   McpAggregateToolListBudget,
   assertMcpPayloadWithinBytes,
@@ -154,9 +168,16 @@ import {
 } from "./lazy-tool-transport";
 import {
   GMAIL_REST_MCP_BRIDGE_ADAPTER,
+  gmailRestResultOutcome,
+  isOfficialGmailMcpConfig,
   type GmailRestMcpBridgeConfig,
   type GmailRestMcpBridgeContext,
 } from "./gmail-rest-mcp";
+import {
+  SLACK_REST_MCP_BRIDGE_ADAPTER,
+  type SlackApiRateLimiter,
+  type SlackRestMcpBridgeContext,
+} from "./slack-rest-mcp";
 
 import { McpResultCustomDataBridge, unwrapSdkMcpResultProjection } from "./mcp-result-custom-data";
 import {
@@ -194,9 +215,21 @@ export {
   GmailRestMcpServer,
   OFFICIAL_GMAIL_MCP_URL,
   gmailRestToolIsMutation,
+  gmailToolAvailableOnDeployment,
+  gmailToolSupportsScopes,
   isOfficialGmailMcpConfig,
   type GmailRestMcpServerOptions,
 } from "./gmail-rest-mcp";
+export {
+  SLACK_REST_API_BASE,
+  SLACK_REST_MCP_TOOLS,
+  SlackRestMcpServer,
+  OFFICIAL_SLACK_MCP_URL,
+  slackRestToolIsMutation,
+  isOfficialSlackMcpConfig,
+  type SlackRestMcpServerOptions,
+  type SlackApiRateLimiter,
+} from "./slack-rest-mcp";
 import {
   Agent,
   AgentsError,
@@ -263,15 +296,48 @@ import {
   CODEX_ORIGINATOR,
   classifyCodexEncryptedArtifactRejection,
   codexAppsSanitizingFetch,
+  isCodexAppsCredentialUnavailable,
 } from "@opengeni/codex";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath } from "node:path";
+import { gzipSync } from "node:zlib";
 
 import { z } from "zod";
 
 import { sanitizeHistoryItemsForModel } from "./history-sanitizer";
 import { OPENGENI_OPERATIONAL_INSTRUCTIONS } from "./operational-instructions";
+import {
+  composeModularAgentInstructions,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptResources,
+  type AgentPromptToolAvailability,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
+export {
+  AGENT_PROMPT_MODULES,
+  DEFAULT_AGENT_IDENTITY,
+  INSTRUCTION_PRECEDENCE,
+  SESSION_INSTRUCTIONS_PREAMBLE,
+  composeModularAgentInstructions,
+  composeOperationalContract,
+  deriveAgentPromptToolAvailability,
+  identityFromLegacyTemplate,
+  resolveAgentIdentity,
+  rigInstructions,
+  workspaceEnvironmentInstructions,
+  type AgentPromptContext,
+  type AgentPromptResources,
+  type AgentPromptToolAvailability,
+  type AgentPromptToolAvailabilityInput,
+  type ComposeModularAgentInstructionsInput,
+  type ModularInstructionLayer,
+  type RigInstructionsContext,
+  type WorkspaceEnvironmentContext,
+} from "./agent-instructions";
 import {
   CompactionProviderResponseError,
   EmptyCompactionSummaryError,
@@ -285,7 +351,12 @@ import {
 import {
   createSandboxClient,
   isModalTaskExecStartPreDispatchUnavailableError,
+  isModalCommandStartOutcomeUnknownError,
+  isProviderCommandObservationUnavailableError,
   isRoutingMutationOutcomeUnknownError,
+  isRoutingMutationOutputRejectedError,
+  withRoutingMutationOutputRejectionFence,
+  renderRoutingMutationOutcomeUnknownToolResult,
   repairSerializedRunStateExposedPorts,
   restoredSandboxSessionStateFromEntry,
   setOpenSandboxApplyDiff,
@@ -325,7 +396,9 @@ import {
   type RetainableSessionImageOutputHook,
 } from "./retained-session-image";
 import type { ComputerToolMode } from "./legacy-computer-compat";
+import { withCodexAddFileApplyPatchInput, withCodexAddFileEditor } from "./apply-patch-add-file";
 import type { McpToolCallOutcome, RuntimeMetricsHooks } from "./metrics";
+import { mcpToolMetricLabel } from "./metrics";
 import {
   MultiProviderModelProvider,
   OpenGeniResponsesModel,
@@ -381,11 +454,21 @@ import {
   bindModelSourceInput,
   modelSourceBindings,
   modelSourceInputBinding,
+  withModelCallLifecycle,
+  type ModelCallLifecycle,
   type ModelRequestCapture,
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
 export type { BeforeModelCallSourceReceipt } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
+export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
+export {
+  classifyModelStreamIdleTimeoutError,
+  MODEL_STREAM_IDLE_TIMEOUT_ERROR_CODE,
+  ModelStreamIdleTimeoutError,
+  streamIdleTimeoutModelFetch,
+  type ModelStreamIdleTimeoutInfo,
+} from "./model-stream-idle-timeout";
 import {
   baseModelInputFilterForSettings,
   boundModelToolOutputsFilterForSettings,
@@ -403,6 +486,7 @@ import {
   withModelTransportStartedObserver,
   type ModelPreparationMeasurement,
   type ModelPreparationPhase,
+  type ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 import {
   HUMAN_INPUT_TOOL_NAME,
@@ -448,7 +532,10 @@ export {
   MCP_LIFECYCLE_PHASES,
   MCP_LIFECYCLE_POLICIES,
   MCP_TOOL_CALL_OUTCOMES,
+  MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SANDBOX_READINESS_REPLACEMENT_OUTCOMES,
+  isMcpToolMetricLabel,
+  mcpToolMetricLabel,
   type McpLifecycleOutcome,
   type McpLifecyclePhase,
   type McpLifecyclePolicy,
@@ -459,6 +546,7 @@ export {
 export type {
   ModelPreparationMeasurement,
   ModelPreparationPhase,
+  ModelTransportDispatchClock,
 } from "./model-preparation-diagnostics";
 export {
   markModelPreparationFirstSandboxOperation,
@@ -468,13 +556,16 @@ export {
   CodexSubscriptionUnavailableError,
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
+  OrganizationOpperUnavailableError,
   MultiProviderModelProvider,
   OpenGeniChatCompletionsModel,
   OpenGeniResponsesModel,
+  ResponsesStreamingTerminalError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
+  WorkspaceOpperUnavailableError,
   WorkspaceModelPolicyBlockedError,
   XaiSubscriptionUnavailableError,
   azureOpenAIDefaultQuery,
@@ -726,10 +817,11 @@ export type {
 
 ensureReadableStreamFrom();
 
+type BuiltInMcpBridgeContext = GmailRestMcpBridgeContext & SlackRestMcpBridgeContext;
 const BUILT_IN_MCP_BRIDGE_ADAPTERS: readonly LocalMcpBridgeAdapter<
   GmailRestMcpBridgeConfig,
-  GmailRestMcpBridgeContext
->[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER]);
+  BuiltInMcpBridgeContext
+>[] = Object.freeze([GMAIL_REST_MCP_BRIDGE_ADAPTER, SLACK_REST_MCP_BRIDGE_ADAPTER]);
 const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
 
 /**
@@ -1951,12 +2043,21 @@ export type ConnectorActionToolCall = {
   serverId: string;
   toolName: string;
   arguments: unknown;
+  reviewContext?: import("@opengeni/contracts").ToolReviewContext;
   approvalMode?: "session_mcp" | "connector_write";
+  defaultDecision?: "allow" | "ask";
+  actionName?: string;
 };
 
 export type ConnectorActionPolicyPreparation =
   | { managed: false; decision: "unmanaged" }
-  | { managed: true; decision: "allow" | "ask" | "block" };
+  | {
+      managed: true;
+      decision: "allow" | "ask" | "block";
+      requestId?: string;
+      actionFingerprint?: string;
+      approvalStatus?: string;
+    };
 
 export type ConnectorActionExecutionAdmission =
   | { allowed: true; managed: false }
@@ -1991,7 +2092,7 @@ export class ConnectorActionBindingRejectedError extends Error {
   override readonly name = "ConnectorActionBindingRejectedError";
 }
 
-/** Typed failure proving the connector provider boundary was not crossed. */
+/** Typed connector settlement distinguishing proven nonexecution from an uncertain effect. */
 export class ConnectorActionExecutionError extends Error {
   override readonly name = "ConnectorActionExecutionError";
   readonly connectorActionOutcome: "not_executed" | "uncertain";
@@ -2026,6 +2127,8 @@ const modelMcpCallIdentity = new AsyncLocalStorage<{
 const agentInputWaitYields = new WeakMap<object, InputWaitYield>();
 
 export type BuildAgentOptions = {
+  /** Durable router use survives capability and tool-policy changes. */
+  toolRouterInHistory?: boolean;
   /** Live authority fence for intrinsic sandbox tools outside the MCP gateway. */
   authorizeAttemptExecution?: () => Promise<void> | void;
   /** Trusted attempt-local wait receipt shared with prepared tools. */
@@ -2040,6 +2143,8 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
+  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
+  reasoningSummary?: "auto" | "detailed";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -2073,7 +2178,7 @@ export type BuildAgentOptions = {
   //   hosted-capable — but route it to the ChatGPT/Codex backend, which REJECTS
   //   the hosted `apply_patch` type ("Unsupported tool type: apply_patch",
   //   verified live). Gateway routes also use ordinary function tools. When
-  //   false, OpenGeni keeps function `apply_patch` and converts successful
+  //   false, Opengeni keeps function `apply_patch` and converts successful
   //   `view_image` data URLs back into typed input_image content when the
   //   selected model has a proven image-input wire.
   hostedWebSearch?: boolean;
@@ -2128,7 +2233,7 @@ export type BuildAgentOptions = {
   // Whether this turn's resolved model accepts image input. This is derived
   // from ConfiguredModel.capabilities.inputModalities at the worker boundary.
   // False removes image-only sandbox tools and projects images out of each
-  // provider request without mutating OpenGeni's durable history. Omitted keeps
+  // provider request without mutating Opengeni's durable history. Omitted keeps
   // the legacy built-in path image-capable.
   supportsImageInput?: boolean;
   /** Exact typed `input_file` MIME allow-list; omitted preserves legacy behavior. */
@@ -2225,7 +2330,7 @@ export type BuildAgentOptions = {
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
   codemodeTokenSeed?: string;
-  // Durable OpenGeni session identity used only to derive the off-manifest,
+  // Durable Opengeni session identity used only to derive the off-manifest,
   // per-session token file. Required together with codemodeTokenSeed so two
   // sessions sharing one box never overwrite the same pointer.
   codemodeTokenSessionId?: string;
@@ -2256,6 +2361,31 @@ export type BuildAgentOptions = {
    * metadata no longer enters the prompt-cache-critical system instructions.
    */
   persistentSessionSettings?: PersistentSessionSettings;
+  /**
+   * The session's frozen agent configuration. Absent or null keeps the legacy
+   * instructions byte-for-byte and the historical tool/provider request surface;
+   * a configuration selects the modular composer (identity, base behavior,
+   * runtime mechanics, capability modules) and gates tool families.
+   */
+  agentConfig?: ResolvedAgentConfig | null;
+  /**
+   * Modular composer only: the workspace identity tier (explicit workspace
+   * default identity, else the legacy `agentInstructions` persona). Unlike
+   * `instructionsTemplate`, workspace governance never drops it.
+   */
+  workspaceAgentIdentity?: string;
+  /**
+   * Modular composer only: resource facts for module selection. Derived from
+   * the build resources and options when omitted.
+   */
+  agentPromptResources?: AgentPromptResources;
+  /**
+   * Modular composer only: frozen per-attempt tool availability (see
+   * `deriveAgentPromptToolAvailability`). It suppresses instruction clauses
+   * for tools proven absent and never changes the executable catalog. Omitted
+   * means unknown and keeps every clause; the legacy composition ignores it.
+   */
+  agentPromptToolAvailability?: AgentPromptToolAvailability;
   // Per-call agent persona override (the white-label surface). Resolved by the
   // caller as session > workspace > deployment default; when omitted the
   // runtime falls back to settings.agentInstructionsTemplate. The runtime
@@ -2292,62 +2422,10 @@ export type BuildAgentOptions = {
   onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
-/**
- * Operator-facing metadata for the workspace environment attached to a run.
- * Surfaced verbatim in the agent instructions: the description is where
- * operators document how the exported credentials are meant to be used
- * (e.g. which variable holds a deploy key and how to clone with it), so an
- * agent must not have to rediscover that by enumerating `env` and guessing.
- * Only metadata belongs here — never variable values.
- */
-export type WorkspaceEnvironmentContext = {
-  name: string;
-  description?: string | null;
-  variableNames?: string[];
-};
-
 /** @deprecated Persistent display metadata is no longer model-visible. */
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
 };
-
-/**
- * The rig a session rides (M3): its name + the active version pinned onto the
- * session. Surfaced verbatim in the non-bypassable CORE instructions so the
- * agent understands its sandbox is a disposable fork of a shared, versioned
- * machine definition and how to promote a durable change. Absent for rig-less
- * sessions (the block never renders).
- */
-export type RigInstructionsContext = {
-  name: string;
-  version: number;
-};
-
-export function rigInstructions(rig: RigInstructionsContext): string[] {
-  return [
-    `This session uses sandbox environment "${rig.name}" (active version v${rig.version}) — a versioned definition of custom sandbox setup and health checks.`,
-    "Your sandbox is an EPHEMERAL FORK of this environment. You may install tools here, but local changes do not update the environment definition or other sessions.",
-    "To make a verified setup change available to future sessions using this environment, call rig_propose_change with the exact command that already worked here. Never assume an unverified change propagates.",
-    "If tooling you expect is missing, consult rig_get to see the sandbox environment's current setup and checks before reinstalling.",
-  ];
-}
-
-export function workspaceEnvironmentInstructions(
-  environment: WorkspaceEnvironmentContext,
-): string[] {
-  const lines = [
-    `A workspace environment named "${environment.name}" is attached to this session; its variables are exported in the sandbox shell environment.`,
-  ];
-  const variableNames = (environment.variableNames ?? []).filter((name) => name.length > 0);
-  if (variableNames.length > 0) {
-    lines.push(`Exported environment variables: ${[...variableNames].sort().join(", ")}.`);
-  }
-  const description = environment.description?.trim();
-  if (description) {
-    lines.push(`Environment notes from the operator: ${description}`);
-  }
-  return lines;
-}
 
 /**
  * The non-bypassable CORE of the agent instructions: the goal-loop ownership
@@ -2366,9 +2444,8 @@ export function coreInstructions(
 ): string[] {
   return [
     "If the session has a goal, you own it: keep working until you call opengeni__goal_complete with concrete evidence or opengeni__goal_pause with a rationale; revise it with opengeni__goal_update; create one with opengeni__goal_set when given a long-running objective. Resume a paused goal with opengeni__goal_resume when the user asks you to continue, regardless of who paused it, or when the blocker you paused for has cleared. A question alone is not such a request: answer it and leave the goal paused.",
-    'Choose durable storage by purpose, including requests to "remember this" or keep something "for future sessions". Knowledge is retrieval-only information, not standing behavior. Use instruction_policy_get then instruction_policy_save for short always-on workspace rules, such as "Keep replies concise; expand when asked." Use Skills for reusable procedures and context-specific or personal behavioral preferences; make the Skill description state when it applies so the prompt index can guide skill_read. Do not save behavioral preferences as Knowledge by rephrasing them as facts like "the user prefers concise replies". Preserve the intended scope: do not turn a personal preference into a workspace-wide rule; use an authorized personal Skill when appropriate, or explain the unavailable scope. Split mixed requests into a short rule and detailed Skill steps without duplicating them in Knowledge.',
-    "Before changing workspace instructions, read the current instruction and exact baseline, preserve unrelated rules, append new rules, and use only a localized exact anchored edit for updates or removals. Agents cannot replace the complete instruction; whole-policy rewrites belong in the manual workspace editor. Do not bypass a destination's Agent learning setting, review, scope, limits, or unavailable tools by saving to another destination. Report the actual destination and receipt: active, pending review, or not saved. Do not promise future behavior from a Knowledge save.",
-    "Use knowledge_search and knowledge_get when retained information is relevant. For questions about what the workspace knows, ground the answer in authorized Knowledge and attached sources. Missing internal facts remain unknown; do not infer a person's role or cite unrelated public search results as evidence. Keep any relevant external research clearly separate from workspace records. Default retrieval returns published information. Before retaining or correcting anything, also search view=needs_review for existing pending entries and collections; read those with knowledge_get view=needs_review. Pending means unapproved: you may inspect and improve it, but do not present it as accepted knowledge or activate behavioral guidance from it. Reuse the existing entryId and current version instead of creating another proposal each run. Save durable facts, decisions, requirements, incidents, fixes and outcomes autonomously with knowledge_save only when they help a plausible future task. Do not retain routine approvals, acknowledgments, temporary task instructions, status chatter or raw screenshots merely because they occurred. Before saving, use knowledge_prepare_save when available to fetch the authorized collection map with descriptions and parent IDs plus related published and pending entries; otherwise search both views and browse collections. Skip unchanged duplicates, improve the existing entry when appropriate, and create a new entry only for distinct useful information. Read the current entry before correcting it and preserve uncertainty, conflicting evidence and existing relationships. When a user supplies or confirms a durable fact, use knowledge_retain_message to retain the actual message and cite its returned entryId/revisionId in the finding evidence. Preserve existing source evidence and relationships when correcting an entry; do not replace them with empty arrays merely because the user confirmed a new value. Explicit confirmation can supersede a conflicting pending proposal, but explain that outcome to the user. Preserve uncertainty and exact supporting evidence; the fact label is not a verification claim. Chat attachments retain their original files for the conversation without automatically publishing OCR or source text into Knowledge. Inspect an image visually in the current task; save only a useful supported observation, requirement or incident when warranted. Use knowledge_retain_file purpose=evidence only when a selected finding needs the original as supporting evidence, or purpose=reference when deliberately retaining a reusable source document. Supporting sources remain accessible through evidence links and explicit includeEvidence searches, but do not fill ordinary Knowledge discovery. An upload alone is not a reason to save Knowledge. A source entry contains retained original text; a finding states a useful conclusion and cites the exact source revision. Do not create both when they would simply repeat the same text. Reuse collections for customers, products, systems or subjects across sources, and link one entry to multiple collections instead of copying it. Technical incidents belong with the affected system and should include cause, fix and outcome when known. Reorganize references when useful; do not erase source evidence or revision history. Private tasks author personal Knowledge; shared tasks author workspace Knowledge. Automatic publishes immediately, Review first keeps a pending proposal without pausing your task, and Off prevents authoring while permitting retrieval. Never bypass review by making a new entry, switching tools, or asking for another approval. Reuse the same operationId and exact request after an uncertain save, including recovery. Use task_note_save for temporary coordination in this task tree. Conversation history is separate. Workspace instructions are concise standing rules; Skills are reusable procedures with their own Agent learning settings. Do not save the same content in multiple authorities.",
+    "Goal completion records short ledger proof, not the user-facing deliverable. After goal_complete succeeds, finish the same turn with the requested answer, or a concise summary and retained artifact link. Never use evidence as the final reply. A later child result after completion is context to integrate, not a reason to stay silent or restart the completed goal.",
+    ...KNOWLEDGE_GUIDANCE,
     ...(workspaceEnvironment ? workspaceEnvironmentInstructions(workspaceEnvironment) : []),
     // Rig doctrine (M3): data-conditional, inside the non-bypassable CORE so a
     // white-label persona template can never drop it. Absent for rig-less sessions.
@@ -2446,10 +2523,87 @@ function gitBindingDiscoveryApplies(
   return [...bindingsByProvider.values()].some((ids) => ids.size > 1);
 }
 
+/**
+ * Resource facts for modular module selection. Every input is a session- or
+ * turn-level fact, so the composed prefix changes only when they change.
+ */
+export function agentPromptResourcesFor(
+  settings: Settings,
+  resources: readonly ResourceRef[],
+  options: Pick<
+    BuildAgentOptions,
+    | "activeSandboxBackend"
+    | "fileResourceDownloads"
+    | "gitCredentialBindings"
+    | "gitTokenSeed"
+    | "gitTokenSeeds"
+    | "workspaceEnvironment"
+    | "rig"
+  >,
+): AgentPromptResources {
+  const backend = options.activeSandboxBackend ?? settings.sandboxBackend;
+  const connectedMachine = backend === "selfhosted";
+  const managedSandbox = backend !== "none" && !connectedMachine;
+  const gitTokenSeeds = Object.values(options.gitTokenSeeds ?? {}).filter(Boolean);
+  return {
+    managedSandbox,
+    connectedMachine,
+    // A Connected Machine never receives platform clones.
+    repositories: managedSandbox && resources.some((resource) => resource.kind === "repository"),
+    gitCredentials:
+      managedSandbox &&
+      (Boolean(options.gitTokenSeed) ||
+        gitTokenSeeds.length > 0 ||
+        (options.gitCredentialBindings?.length ?? 0) > 0),
+    attachments:
+      (managedSandbox || connectedMachine) &&
+      (resources.some((resource) => resource.kind === "file") ||
+        (options.fileResourceDownloads?.length ?? 0) > 0),
+    ...(options.workspaceEnvironment ? { workspaceEnvironment: options.workspaceEnvironment } : {}),
+    ...(options.rig ? { rig: options.rig } : {}),
+  };
+}
+
+function inspectModularAgentInstructions(
+  settings: Settings,
+  config: ResolvedAgentConfig,
+  options: BuildAgentOptions,
+): PersistentAgentInstructionInspection {
+  const identity = resolveAgentIdentity({
+    sessionIdentity: config.identity,
+    workspaceIdentity: options.workspaceAgentIdentity ?? options.instructionsTemplate,
+    deploymentTemplate: settings.agentInstructionsTemplate,
+  });
+  const composed = composeModularAgentInstructions({
+    capabilities: config.capabilities,
+    renderer: config.renderer,
+    identity,
+    resources: options.agentPromptResources ?? agentPromptResourcesFor(settings, [], options),
+    ...(options.agentPromptToolAvailability
+      ? { toolAvailability: options.agentPromptToolAvailability }
+      : {}),
+    ...(codemodeIsAvailable(options) ? { codemode: CODEMODE_PROGRAMMATIC_DIRECTIVE } : {}),
+    ...(options.codeSearchAvailable ? { codeSearch: CODE_SEARCH_DIRECTIVE } : {}),
+    ...(gitBindingDiscoveryApplies(options.gitCredentialBindings, options.activeSandboxBackend)
+      ? { gitBindings: GIT_BINDING_DISCOVERY_DIRECTIVE }
+      : {}),
+    ...(options.skillCatalog && !options.skillCatalogInHistory
+      ? { skillCatalog: formatSkillCatalog(options.skillCatalog) }
+      : {}),
+    workspaceGovernance: options.workspaceGovernance,
+    workspaceMemory: options.workspaceMemory,
+    sessionInstructions: options.sessionInstructions,
+  });
+  return { layers: composed.layers, composed: composed.composed };
+}
+
 export function inspectPersistentAgentInstructions(
   settings: Settings,
   options: BuildAgentOptions,
 ): PersistentAgentInstructionInspection {
+  if (options.agentConfig) {
+    return inspectModularAgentInstructions(settings, options.agentConfig, options);
+  }
   const personaAndCore = composeAgentInstructions(
     options.instructionsTemplate ?? settings.agentInstructionsTemplate,
     options.workspaceEnvironment,
@@ -2638,11 +2792,19 @@ const agentRigCredentialHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
+  structuredContent?: InteractionToolErrorResult["structuredContent"];
 } {
+  if (isRoutingMutationOutputRejectedError(error)) throw error;
+  const interactionFailure = interactionToolErrorOutput(error);
+  if (interactionFailure) return interactionFailure;
   const details = exactErrorMessage(error);
+  // E-14 (Cendra agent-ops): a refusal the host marked final never invites a retry.
   const text = toolErrorIsFinal(error)
     ? `An error occurred while running the tool. Error: ${details}`
     : (invalidToolArgumentsText(error) ??
+      (isIntegrationInvocationOutcomeUnknownError(error)
+        ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${details}`
+        : null) ??
       `An error occurred while running the tool. Please try again. Error: ${details}`);
   return { isError: true, content: [{ type: "text", text }] };
 }
@@ -2745,6 +2907,10 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (resolveAgentToolFamilies(options.agentConfig).skills === false) {
+    const { skillActivations: _disabledActivations, ...withoutSkills } = options;
+    options = { ...withoutSkills, skillCatalog: [] };
+  }
   if (Boolean(options.codemodeTokenSeed) !== Boolean(options.codemodeTokenSessionId)) {
     throw new Error("codemodeTokenSeed and codemodeTokenSessionId must be supplied together");
   }
@@ -2778,12 +2944,24 @@ export function buildOpenGeniAgent(
   const instructionOptions: BuildAgentOptions = {
     ...options,
     ...(skillCatalog !== undefined ? { skillCatalog } : {}),
+    ...(options.agentConfig && !options.agentPromptResources
+      ? { agentPromptResources: agentPromptResourcesFor(settings, resources, options) }
+      : {}),
   };
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
   // resolved provider's api/window/web-search instead.
-  const hostedWebSearch = options.hostedWebSearch ?? settings.webSearchEnabled;
+  const toolFamilies = resolveAgentToolFamilies(options.agentConfig, {
+    hasSkills: (skillCatalog?.length ?? 0) > 0,
+    webSearch: options.hostedWebSearch ?? settings.webSearchEnabled,
+    humanInput: options.humanInputEnabled !== false,
+  });
+  const hostedWebSearch = toolFamilies.webSearch;
+  const mediaTools = resolveAgentMediaToolSurface(options.agentConfig, {
+    image: options.imageGeneration?.kind ?? null,
+    video: Boolean(options.videoGeneration),
+  });
   const encryptedReasoning = options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent;
   // Wire value must be provider-mapped by the caller (OpenAI `fast`, Azure/Codex
   // `priority`). Do not fall back to latencyMode itself — that would send
@@ -2805,28 +2983,29 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools: Tool[] = hostedWebSearch ? [webSearchTool()] : [];
-  if (options.imageGeneration?.kind === "native_hosted") {
+  if (mediaTools.hosted.includes("image_generation")) {
     hostedTools.push(imageGenerationTool({ model: "gpt-image-2" }));
   }
-  const providerImageGenerationTool =
-    options.imageGeneration?.kind === "provider_adapter"
-      ? agentTool({
-          name: "generate_image",
-          description:
-            "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
-          parameters: GenerateImageToolInput,
-          errorFunction: null,
-          execute: async (input, _context, details) => {
-            const toolCallId = details?.toolCall?.callId;
-            if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
-            if (options.imageGeneration?.kind !== "provider_adapter") {
-              throw new Error("Image-generation adapter changed during execution");
-            }
-            return await options.imageGeneration.execute(input, { toolCallId });
-          },
-        })
-      : null;
-  const videoGenerationCapabilityTool = options.videoGeneration
+  const providerImageGenerationTool = mediaTools.runtime.includes("generate_image")
+    ? agentTool({
+        name: "generate_image",
+        description:
+          "Generate or edit exactly one image. Optionally provide up to four ordered references using exact /workspace paths, workspace File IDs, or generated-image artifact IDs; every reference must be a PNG, JPEG, or WebP image, so convert SVG or other formats first. Describe each reference's role by position in the prompt. The result is a permanent image artifact and its exact sandbox path. Do not call repeatedly unless the user requested multiple distinct images.",
+        parameters: GenerateImageToolInput,
+        errorFunction: null,
+        execute: async (input, _context, details) => {
+          const toolCallId = details?.toolCall?.callId;
+          if (!toolCallId) throw new Error("Image-generation tool call has no durable identity");
+          if (options.imageGeneration?.kind !== "provider_adapter") {
+            throw new Error("Image-generation adapter changed during execution");
+          }
+          return await options.imageGeneration.execute(input, { toolCallId });
+        },
+      })
+    : null;
+  const videoGenerationCapabilityTool = mediaTools.runtime.includes(
+    "get_video_generation_capabilities",
+  )
     ? agentTool({
         name: "get_video_generation_capabilities",
         description:
@@ -2840,7 +3019,7 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
-  const videoGenerationTool = options.videoGeneration
+  const videoGenerationTool = mediaTools.runtime.includes("generate_video")
     ? agentTool({
         name: "generate_video",
         description:
@@ -2856,54 +3035,53 @@ export function buildOpenGeniAgent(
         },
       })
     : null;
-  const humanInputTool =
-    options.humanInputEnabled === false
-      ? null
-      : agentTool({
-          name: HUMAN_INPUT_TOOL_NAME,
-          description:
-            "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
-          parameters: RequestHumanInputToolInput,
-          needsApproval: true,
-          inputGuardrails: [
-            {
-              name: "validate_human_input_request",
-              run: async ({ toolCall }) => {
-                let input: unknown;
-                try {
-                  input = JSON.parse(toolCall.arguments);
-                } catch {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
-                  );
-                }
-                if (!RequestHumanInputToolInput.safeParse(input).success) {
-                  return ToolGuardrailFunctionOutputFactory.rejectContent(
-                    "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
-                  );
-                }
-                return ToolGuardrailFunctionOutputFactory.allow();
-              },
+  const humanInputTool = !toolFamilies.humanInput
+    ? null
+    : agentTool({
+        name: HUMAN_INPUT_TOOL_NAME,
+        description:
+          "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, multiple questions, explicit skip policy, and an optional expiry. Every single-select or multi-select question also gives the person an Other field for an exact free-text answer; interpret that answer normally and make a new request only if genuine clarification is still needed.",
+        parameters: RequestHumanInputToolInput,
+        needsApproval: true,
+        inputGuardrails: [
+          {
+            name: "validate_human_input_request",
+            run: async ({ toolCall }) => {
+              let input: unknown;
+              try {
+                input = JSON.parse(toolCall.arguments);
+              } catch {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with valid JSON matching its schema.",
+                );
+              }
+              if (!RequestHumanInputToolInput.safeParse(input).success) {
+                return ToolGuardrailFunctionOutputFactory.rejectContent(
+                  "Invalid request_human_input arguments. Call the tool again with an object matching its schema; questions must be an array, not JSON text.",
+                );
+              }
+              return ToolGuardrailFunctionOutputFactory.allow();
             },
-          ],
-          // A missing/mismatched durable response is a protocol integrity failure,
-          // not model-visible tool output the agent may reason past.
-          errorFunction: null,
-          execute: (_input, _context, details) => {
-            const settled = options.humanInputResponse;
-            if (!settled) {
-              throw new Error("Human-input tool resumed without a durable response");
-            }
-            const resumedCallId = details?.toolCall?.callId;
-            if (resumedCallId && resumedCallId !== settled.toolCallId) {
-              throw new Error("Human-input response does not belong to the resumed tool call");
-            }
-            return JSON.stringify({
-              requestId: settled.requestId,
-              ...settled.response,
-            });
           },
-        });
+        ],
+        // A missing/mismatched durable response is a protocol integrity failure,
+        // not model-visible tool output the agent may reason past.
+        errorFunction: null,
+        execute: (_input, _context, details) => {
+          const settled = options.humanInputResponse;
+          if (!settled) {
+            throw new Error("Human-input tool resumed without a durable response");
+          }
+          const resumedCallId = details?.toolCall?.callId;
+          if (resumedCallId && resumedCallId !== settled.toolCallId) {
+            throw new Error("Human-input response does not belong to the resumed tool call");
+          }
+          return JSON.stringify({
+            requestId: settled.requestId,
+            ...settled.response,
+          });
+        },
+      });
   const agentTools = [
     ...hostedTools,
     ...(providerImageGenerationTool ? [providerImageGenerationTool] : []),
@@ -2912,7 +3090,9 @@ export function buildOpenGeniAgent(
     ...(humanInputTool ? [humanInputTool] : []),
   ];
   const embeddedSkillReadTool =
-    !hostSuppliedSkillCatalog && skillComposition.artifacts.length > 0
+    toolFamilies.allowsFunctionTool("skill_read") &&
+    !hostSuppliedSkillCatalog &&
+    skillComposition.artifacts.length > 0
       ? agentTool({
           name: "skill_read",
           description:
@@ -2932,7 +3112,7 @@ export function buildOpenGeniAgent(
   if (embeddedSkillReadTool) agentTools.push(embeddedSkillReadTool);
   const instructionInspection = inspectPersistentAgentInstructions(settings, instructionOptions);
   const baseConfig = {
-    name: "OpenGeni Agent",
+    name: "Opengeni Agent",
     model: options.model ?? settings.openaiModel,
     // White-label persona composition. The effective template is the per-call
     // override (options.instructionsTemplate, resolved by the caller as
@@ -2961,14 +3141,14 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: "detailed",
+        summary: options.reasoningSummary ?? "detailed",
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains
       // of thought survive without provider-side response storage (which is
       // what stripped provider item ids opt us out of — see
       // stripProviderItemIds). providerData.include replaces any
-      // tool-derived include entries; OpenGeni's tools are MCP/sandbox
+      // tool-derived include entries; Opengeni's tools are MCP/sandbox
       // function tools, which contribute none. Gated on the resolved
       // encryptedReasoning flag: the chat wire API has no encrypted_content
       // field, so registry "chat" providers turn it off.
@@ -3173,11 +3353,13 @@ function maybeInstallLazyToolTransport(
   settings: Settings,
   options: BuildAgentOptions,
 ): void {
-  const transport = options.lazyToolTransport;
+  const transport =
+    options.lazyToolTransport ??
+    (options.agentConfig && options.toolRouterInHistory ? "generic_dispatch" : undefined);
   if (!transport) return;
   const enabled =
     transport === "codex_native" ? settings.codexToolSearchEnabled : settings.lazyToolSearchEnabled;
-  if (!enabled) return;
+  if (!enabled && !(options.agentConfig && options.toolRouterInHistory)) return;
 
   const mcpServers = options.mcpServers ?? [];
   // Prepared servers use exact model-name mappings, not SDK lifecycle names
@@ -3220,6 +3402,8 @@ function maybeInstallLazyToolTransport(
       }
       return identities;
     },
+    options.agentConfig != null,
+    options.toolRouterInHistory === true,
   );
 }
 
@@ -3290,6 +3474,7 @@ type McpApprovalPolicy = {
   serverId: string;
   requireApproval: boolean | ReadonlySet<string>;
   connectorBacked: boolean;
+  reviewKind: "generic" | "gmail";
   connectionId: () => string | null;
 };
 
@@ -3357,9 +3542,9 @@ function modelMcpSourceCallId(modelName: string): string | undefined {
 }
 
 /**
- * Install the approval wrap on a single agent instance: replace `getMcpTools`
- * with one that stamps `needsApproval: () => true` on every MCP tool whose
- * server policy demands it. Prepared tools resolve through their frozen model
+ * Install the canonical connector decision on each agent instance's MCP tools.
+ * The SDK approval hook reflects that decision, while standalone adapters keep
+ * their safe compatibility behavior. Prepared tools use their frozen model
  * name -> original server/tool map; legacy unwrapped servers retain longest-
  * prefix matching. Never infer account authority from a sanitized SDK name.
  *
@@ -3384,7 +3569,17 @@ function installMcpApprovalPolicy(
   const listMcpTools = agent.getMcpTools.bind(agent);
   agent.getMcpTools = async (resolutionContext: unknown) => {
     const tools = await listMcpTools(resolutionContext);
-    const identities = new Map<string, { serverId: string; toolName: string }>();
+    const identities = new Map<
+      string,
+      {
+        serverId: string;
+        toolName: string;
+        inputSchema: unknown;
+        title?: string;
+        accountLabel?: string | undefined;
+        readReview: ToolReviewReader;
+      }
+    >();
     for (const server of agent.mcpServers ?? []) {
       if (!(server instanceof PrefixedMcpServer || server instanceof DeferredPreparedMcpServer))
         continue;
@@ -3393,6 +3588,12 @@ function installMcpApprovalPolicy(
         identities.set(descriptor.name, {
           serverId: server.registryId,
           toolName: await server.unprefixedToolName(descriptor.name),
+          inputSchema: descriptor.inputSchema,
+          readReview: (name, args) => server.reviewContext(name, args),
+          ...(descriptor.title ? { title: descriptor.title } : {}),
+          ...(server.toolDisplayMetadata(descriptor.name)?.accountLabel
+            ? { accountLabel: server.toolDisplayMetadata(descriptor.name)!.accountLabel }
+            : {}),
         });
       }
     }
@@ -3432,7 +3633,16 @@ function installMcpApprovalPolicy(
           serverId: policy.serverId,
           toolName: unprefixed,
           arguments: args,
+          reviewContext: toolReviewContextFromSchema(identity?.inputSchema, {
+            kind: policy.reviewKind,
+            ...(identity?.title ? { title: identity.title } : {}),
+            ...(identity?.accountLabel ? { accountLabel: identity.accountLabel } : {}),
+          }),
+          actionName: toolPolicyActionName(unprefixed, identity?.inputSchema, args),
           ...(legacyApproval ? { approvalMode: "session_mcp" as const } : {}),
+          defaultDecision: mcpToolRequiresApproval(policy.requireApproval, unprefixed)
+            ? "ask"
+            : "allow",
         };
       };
       return {
@@ -3451,19 +3661,20 @@ function installMcpApprovalPolicy(
           if (!callId) {
             throw new Error("Connector action is missing its durable approval identity");
           }
-          const preparation = await connectorActionPolicy.prepare(
+          const preparation = await prepareConnectorReview(
             connectorCall(callId, parsedInput),
+            connectorActionPolicy,
+            identity?.readReview,
           );
           preparations.set(callId, preparation);
           if (preparation.managed && preparation.decision === "block") {
             approvalRequiredCallIds.delete(callId);
             return false;
           }
-          const approvalRequired =
-            mcpToolRequiresApproval(policy.requireApproval, unprefixed) ||
-            (await originalNeedsApproval(runContext, parsedInput, callId));
-          const requiresApproval =
-            (preparation.managed && preparation.decision === "ask") || approvalRequired;
+          // An explicit Allow is a decision, not an exemption from one of several floors.
+          const requiresApproval = preparation.managed
+            ? preparation.decision === "ask"
+            : mcpToolRequiresApproval(policy.requireApproval, unprefixed);
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3589,9 +3800,7 @@ function installAttemptConnectorActionPolicy(
             approvalRequiredCallIds.delete(callId);
             return false;
           }
-          const requiresApproval =
-            preparation.decision === "ask" ||
-            (await originalNeedsApproval(runContext, parsedInput, callId));
+          const requiresApproval = preparation.decision === "ask";
           if (requiresApproval) approvalRequiredCallIds.add(callId);
           else approvalRequiredCallIds.delete(callId);
           return requiresApproval;
@@ -3721,30 +3930,12 @@ function installInteractionInterventionPolicy(
 }
 
 /**
- * Enforce per-MCP-server human approval. `settings.mcpServers[].requireApproval`
- * is `true` (every tool of that server requires approval) or a string[] of
- * UNPREFIXED tool names (only those do); absent = auto-run. The SDK converts MCP
- * tools to function tools with `needsApproval` unset (defaults false) and exposes
- * no per-server/agent approval knob, so we wrap the agent's `getMcpTools` to
- * attach a `needsApproval: () => true` predicate to the matching tools — matched
- * by exact prepared server/tool identity (legacy unwrapped servers use their
- * `<id>__` prefix). A tool that
- * needs approval raises a run INTERRUPTION, which the worker turns into
- * `session.requiresAction` and resolves via `user.approvalDecision`
- * (resumeApproval) — the same generic path other tool approvals use, so
- * no extra plumbing. No-op when no server requests approval, so the default
- * (auto-run everything) is byte-for-byte unchanged.
- *
- * Two robustness properties the wrap must hold:
- *  - LONGEST-PREFIX-FIRST. Server ids can be prefixes of one another (`my` vs
- *    `my_`), so their tool prefixes collide (`my__` vs `my___`): a tool like
- *    `my___run` (from server `my_`) also `startsWith` `my__` (server `my`). A
- *    first-match `find` over unsorted policies could bind it to the WRONG
- *    server's policy and bypass gating. Sorting policies by DESCENDING prefix
- *    length makes the most-specific (longest) prefix win, so each tool resolves
- *    to its own server.
- *  - CLONE SURVIVAL. The wrap is re-installed onto every clone; see
- *    {@link installMcpApprovalPolicy}.
+ * Translate the canonical decision into the model SDK interruption protocol.
+ * Legacy requireApproval is a recommendation only when no explicit choice exists.
+ * Standalone runtimes without policy hooks retain their configured behavior;
+ * they cannot execute an approval-gated call without the durable authority.
+ * Prepared server/tool identities take precedence over longest-prefix legacy
+ * matching, and clones keep the same attempt-frozen resolver.
  */
 function applyMcpApprovalPolicy(
   agent: Agent<any, any>,
@@ -3784,6 +3975,9 @@ function applyMcpApprovalPolicy(
             ? true
             : new Set(Array.isArray(server.requireApproval) ? server.requireApproval : []),
         connectorBacked: Boolean(server.connectionRef),
+        reviewKind: isOfficialGmailMcpConfig(server.url ?? "", server.connectionRef)
+          ? ("gmail" as const)
+          : ("generic" as const),
         connectionId,
       };
     })
@@ -3844,7 +4038,7 @@ function neutralizeStructuredToolTransport(capability: ReturnType<typeof filesys
 
 /**
  * Build the SandboxAgent capability set explicitly. The SDK default includes
- * its inline provider compaction capability; OpenGeni deliberately omits it
+ * its inline provider compaction capability; Opengeni deliberately omits it
  * because durable portable compaction owns the full history transition.
  */
 /**
@@ -3927,6 +4121,129 @@ function withoutImageInputTools(tools: Tool<unknown>[]): Tool<unknown>[] {
   );
 }
 
+/**
+ * The SDK filesystem fallback's never-approve policy is a plain closure the SDK
+ * does not register as a static policy, so its runner treats `apply_patch` as
+ * a DYNAMIC approval tool. For a dynamic tool whose arguments are not valid
+ * JSON, the SDK fails safe by forcing a human approval interruption instead of
+ * returning the parse error to the model: a malformed patch from a weak model
+ * became a confusing approval card and stalled the session in
+ * `requires_action`. `apply_patch` never needs approval, so give it the SDK's
+ * own registered static `false` policy (minted by `tool({ needsApproval: false })`);
+ * malformed arguments then take the SDK's ordinary model-visible parse error.
+ * Genuine approval tools keep their own policies untouched.
+ */
+const STATIC_NEVER_APPROVAL: Extract<Tool<unknown>, { type: "function" }>["needsApproval"] =
+  agentTool({
+    name: "opengeni_static_never_approval",
+    description: "Policy source only; never exposed to a model.",
+    parameters: { type: "object", properties: {}, required: [], additionalProperties: false },
+    strict: true,
+    needsApproval: false,
+    execute: () => "",
+  }).needsApproval;
+
+const APPLY_PATCH_EXAMPLE =
+  "*** Begin Patch\n*** Add File: notes/example.txt\n+first line\n+second line\n*** End Patch";
+
+const APPLY_PATCH_DESCRIPTION = [
+  "Create, update, move, or delete files in the sandbox workspace.",
+  'Pass exactly one argument, `patch`: a single string in apply_patch format that starts with "*** Begin Patch" and ends with "*** End Patch".',
+  'File sections: "*** Add File: <path>" followed by lines each prefixed with "+"; "*** Delete File: <path>"; "*** Update File: <path>" (optionally followed by "*** Move to: <path>") with "@@" hunks whose lines start with " " (context), "-" (remove), or "+" (add).',
+  `Example arguments: ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })}`,
+].join(" ");
+
+const APPLY_PATCH_PARAMETERS = {
+  type: "object",
+  properties: {
+    patch: {
+      type: "string",
+      description: `The whole patch as one string, from "*** Begin Patch" to "*** End Patch". Example: ${JSON.stringify(APPLY_PATCH_EXAMPLE)}`,
+    },
+  },
+  required: ["patch"],
+  // The SDK parser still accepts its legacy structured/tuple forms at runtime.
+  additionalProperties: true,
+} as const;
+
+/** Reject a JSON object the SDK parser cannot recognize with a corrective error. */
+function unrecognizedApplyPatchArgumentsError(input: string): string | null {
+  if (input.trimStart().startsWith("*** Begin Patch")) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(input);
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const record = payload as Record<string, unknown>;
+  if (
+    typeof record.patch === "string" ||
+    Array.isArray(record.command) ||
+    Array.isArray(record.operations) ||
+    record.operation !== undefined ||
+    typeof record.type === "string"
+  ) {
+    return null;
+  }
+  const keys = Object.keys(record);
+  return `Invalid apply_patch arguments: expected ${JSON.stringify({ patch: APPLY_PATCH_EXAMPLE })} (one string field named "patch"); got ${keys.length ? `keys ${keys.join(", ")}` : "no keys"}. Retry apply_patch with the whole patch in "patch".`;
+}
+
+/**
+ * Present the SDK's function `apply_patch` fallback (Chat Completions and
+ * Codex function transports) as one unambiguous string field, give it a static
+ * never-approval policy, and answer unrecognized argument objects with a
+ * corrective tool error the model can retry from.
+ */
+function withModelFacingApplyPatchFunction(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type !== "function" || capabilityTool.name !== "apply_patch") {
+      return capabilityTool;
+    }
+    const invoke = capabilityTool.invoke;
+    return {
+      ...capabilityTool,
+      description: APPLY_PATCH_DESCRIPTION,
+      parameters: APPLY_PATCH_PARAMETERS as unknown as typeof capabilityTool.parameters,
+      strict: false,
+      needsApproval: STATIC_NEVER_APPROVAL,
+      invoke: async (runContext, input, details) => {
+        const error =
+          typeof input === "string" ? unrecognizedApplyPatchArgumentsError(input) : null;
+        return error ?? invoke(runContext, input, details);
+      },
+    };
+  });
+}
+
+/**
+ * Give the model-facing `apply_patch` tool (function fallback and hosted) Codex
+ * Add File semantics: created files end with a newline. See
+ * `apply-patch-add-file.ts`; the sandbox editors keep their exact-content
+ * `create_file` behavior for internal writers.
+ */
+function withCodexAddFileApplyPatch(tools: Tool<unknown>[]): Tool<unknown>[] {
+  return tools.map((capabilityTool) => {
+    if (capabilityTool.type === "function" && capabilityTool.name === "apply_patch") {
+      const invoke = capabilityTool.invoke;
+      return {
+        ...capabilityTool,
+        invoke: (runContext, input, details) =>
+          invoke(
+            runContext,
+            typeof input === "string" ? withCodexAddFileApplyPatchInput(input) : input,
+            details,
+          ),
+      };
+    }
+    if (capabilityTool.type === "apply_patch") {
+      return { ...capabilityTool, editor: withCodexAddFileEditor(capabilityTool.editor) };
+    }
+    return capabilityTool;
+  });
+}
+
 export function buildAgentCapabilities(
   settings: Settings,
   skillActivations: readonly RuntimeSkillActivation[] = [],
@@ -3987,10 +4304,11 @@ function buildAgentCapabilitiesFromComposition(
   // results below; text-only/unproven wires remove the image tool entirely.
   // Scoped to filesystem: shell() is always a function-tool transport.
   const configureFilesystemTools = (tools: Tool<unknown>[]): Tool<unknown>[] => {
+    const typedTools = withModelFacingApplyPatchFunction(withCodexAddFileApplyPatch(tools));
     const transportTools =
       options.structuredToolTransport === false
-        ? withStructuredViewImageFunctionResults(tools)
-        : tools;
+        ? withStructuredViewImageFunctionResults(typedTools)
+        : typedTools;
     const imageCapableTools =
       options.supportsImageInput === false
         ? withoutImageInputTools(transportTools)
@@ -4001,11 +4319,7 @@ function buildAgentCapabilitiesFromComposition(
     );
   };
   const filesystemCapability = filesystem({
-    ...(options.structuredToolTransport === false ||
-    options.supportsImageInput === false ||
-    options.onRetainableSessionImageOutput
-      ? { configureTools: configureFilesystemTools }
-      : {}),
+    configureTools: configureFilesystemTools,
   });
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
@@ -4017,7 +4331,20 @@ function buildAgentCapabilitiesFromComposition(
       // Preserve that behavior except for client-side, pre-dispatch Modal
       // readiness proof, which reaches bounded same-turn recovery.
       execCommandErrorFunction: (_context, error) => {
+        if (isProviderCommandObservationUnavailableError(error)) {
+          return "Managed sandbox command observation unavailable. Outcome unknown. Do not replay the command or resend stdin; observe the existing invocation.";
+        }
         if (isModalTaskExecStartPreDispatchUnavailableError(error)) throw error;
+        if (isRoutingMutationOutputRejectedError(error)) throw error;
+        if (isRoutingMutationOutcomeUnknownError(error)) {
+          // The outer physical fence must retain the exact process before
+          // rendering uncertainty. Platform/setup calls still throw normally.
+          if (toolCancellation) throw error;
+          return renderRoutingMutationOutcomeUnknownToolResult(error);
+        }
+        if (isModalCommandStartOutcomeUnknownError(error)) {
+          return "Managed sandbox command start outcome unknown. The command may have executed. Do not blindly retry it; inspect the existing sandbox state before taking further action.";
+        }
         const details = error instanceof Error ? error.toString() : String(error);
         return `An error occurred while running the tool. Please try again. Error: ${details}`;
       },
@@ -4059,6 +4386,24 @@ function buildAgentCapabilitiesFromComposition(
         });
       };
     }
+  }
+  // The SDK write_stdin and apply_patch fallbacks catch provider errors
+  // internally. Preserve exact typed settlement rejection outside that catch,
+  // with an invocation-local routing fence against later batch dispatch.
+  for (const capability of caps) {
+    const target = capability as unknown as { tools(): Tool<unknown>[] };
+    const original = target.tools;
+    target.tools = function () {
+      return original.call(this).map((tool) => {
+        if (tool.type !== "function") return tool;
+        const invoke = tool.invoke;
+        return {
+          ...tool,
+          invoke: (context, input, details) =>
+            withRoutingMutationOutputRejectionFence(() => invoke(context, input, details)),
+        };
+      });
+    };
   }
   return caps;
 }
@@ -4124,6 +4469,8 @@ export type LocalMcpServerRegistration = {
   resolvedConnectionId?: string;
   /** Metadata-only authority revision bound into current-human approvals. */
   approvalAuthority?: unknown;
+  /** Stable operation semantics for cross-attempt continuation, evaluated per tool. */
+  effectAuthority?: (toolName: string) => unknown;
   /** Provider-free argument/credential preflight for the current-human gateway. */
   preflightCall?: (
     toolName: string,
@@ -4168,6 +4515,8 @@ export type PrepareToolsOptions = {
   executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
+  /** Trusted immutable setup ceiling from the accepted execution policy. */
+  credentialRestriction?: "developer_setup";
   // Immutable human authority used only for subject-owned connection lookup.
   // This is intentionally separate from the worker's first-party MCP identity.
   credentialSubjectId?: string;
@@ -4192,6 +4541,8 @@ export type PrepareToolsOptions = {
   resolveCredential?: (
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
+  /** Shared Slack workspace/app method quota and provider Retry-After coordination. */
+  slackRateLimit?: SlackApiRateLimiter;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
   /** Exact workspace-designated ChatGPT credential; unrelated to inference. */
   codexAppsAuth?: {
@@ -4233,6 +4584,8 @@ export type PrepareToolsOptions = {
     generation?: number;
     createdAt?: Date;
     authorize?: ToolGatewayAuthorization;
+    resolveApproval?: ToolGatewayApprovalResolver;
+    mapDefinition?: (definition: ToolGatewayDefinition) => ToolGatewayDefinition;
     requireApproval?: (
       entry: ToolGatewayCatalogEntry,
       caller: ToolGatewayCaller,
@@ -4250,6 +4603,8 @@ export type PrepareToolsOptions = {
    * through this host callback and never included in the returned MCP result.
    */
   materializeConnectorAttachments?: ConnectorAttachmentMaterializer;
+  materializeGmailFile?: GmailRestMcpBridgeContext["materializeGmailFile"];
+  readGmailFile?: GmailRestMcpBridgeContext["readGmailFile"];
   /** Overlap every non-eager MCP connection/catalog with the first model request. */
   deferNonEagerUntilToolDemand?: boolean;
   /** @internal Shared live cells used by deferred preparation handles. */
@@ -4329,7 +4684,7 @@ export async function connectMcpServersInBatches(
             ...(options.connectTimeoutMs === undefined
               ? {}
               : { connectTimeoutMs: options.connectTimeoutMs }),
-            // OpenGeni already bounds lifecycle work in batches. The Agents SDK
+            // Opengeni already bounds lifecycle work in batches. The Agents SDK
             // parallel path additionally starts a detached `void drain()` task;
             // a best-effort server rejection can escape that task as a process-
             // level unhandled rejection even though the session records and
@@ -4457,6 +4812,10 @@ class DeferredPreparedMcpServer implements MCPServer {
     return this.preparedTarget?.toolDisplayMetadata(name);
   }
 
+  async reviewContext(toolName: string, args: Record<string, unknown>) {
+    return (await this.preparedTarget?.reviewContext(toolName, args)) ?? {};
+  }
+
   async unprefixedToolName(name: string): Promise<string> {
     const target = await this.requiredTarget();
     if (!(target instanceof PrefixedMcpServer)) throw new Error("Unknown prepared MCP identity");
@@ -4528,17 +4887,49 @@ export async function prepareAgentTools(
   );
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const localRegistry = localMcpServerRegistry(options.localMcpServers ?? [], registry);
+  // An explicit empty permission ceiling is valid zero authority, not a
+  // request for the default grant. There is no delegated bearer to mint and
+  // no Opengeni MCP capability to prepare. Host/local adapters and independent
+  // connection credentials do not use that bearer and keep their own authority.
+  const unavailableFirstPartyServers = new Map<string, Settings["mcpServers"][number]>();
+  const refs = tools.filter((tool) => {
+    const config = registry.get(tool.id);
+    if (
+      options.firstPartyPermissions?.length !== 0 ||
+      !config ||
+      config.connectionRef ||
+      localRegistry.has(config.id) ||
+      !isFirstPartyMcpServer(settings, config)
+    ) {
+      return true;
+    }
+    unavailableFirstPartyServers.set(config.id, config);
+    return false;
+  });
+  for (const config of unavailableFirstPartyServers.values()) {
+    if (
+      config.id === "opengeni" &&
+      (options.firstPartyTools ?? DEFAULT_FIRST_PARTY_MCP_TOOLS).length === 0
+    ) {
+      continue;
+    }
+    await publishAuthNeeded(options, {
+      serverId: config.id,
+      providerDomain: "opengeni",
+      reason: "insufficient_scope",
+    });
+  }
   const identityTargets = selectedSessionRemoteMcpTargets(
     settings,
     options.sessionAttachedRemoteMcpTargets ?? [],
-    tools,
+    refs,
     options.localMcpServers,
   );
   options = { ...options, sessionAttachedRemoteMcpTargets: identityTargets };
   options.runMcpCredentials?.assertRemoteTargets(
     settings.mcpServers.filter(
       (config) =>
-        tools.some((tool) => tool.id === config.id) &&
+        refs.some((tool) => tool.id === config.id) &&
         !config.connectionRef &&
         !localRegistry.has(config.id) &&
         !isFirstPartyMcpServer(settings, config) &&
@@ -4556,7 +4947,7 @@ export async function prepareAgentTools(
     options,
     "server_construction",
     async () =>
-      await boundedParallelMap(tools, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
+      await boundedParallelMap(refs, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (tool, index) => {
         const config = registry.get(tool.id);
         if (!config) {
           throw new Error(`Unknown MCP server id: ${tool.id}`);
@@ -4597,6 +4988,8 @@ export async function prepareAgentTools(
                 undefined,
                 undefined,
                 options.mcpAccountLabels?.get(config.id),
+                undefined,
+                local.effectAuthority,
               ),
               config,
               options,
@@ -4688,15 +5081,15 @@ export async function prepareAgentTools(
         // credential surfacing as a StreamableHTTP "authentication required" 401)
         // degrades to zero tools rather than throwing out of the SDK's run-time
         // getAllMcpTools and failing an unrelated turn. Codex Apps setup-time
-        // auth misses are still published as actionable state because the
-        // workspace catalog explicitly told the user that the surface existed.
+        // auth misses are logged, not published: Apps is discovered on every
+        // turn, so a setup card would repeat on each one (see codexAppsAuthFetch).
         const bestEffort = isCodexAppsMcpServer(config) || optional || !!config.connectionRef;
         // First-party bridges are ordinary in-process MCP servers selected by
         // adapter-owned matchers. Adding another provider extends this registry;
         // generic transport/catalog code never branches on provider identity.
         const bridge = createLocalMcpBridgeFromAdapters<
           GmailRestMcpBridgeConfig,
-          GmailRestMcpBridgeContext
+          BuiltInMcpBridgeContext
         >(
           BUILT_IN_MCP_BRIDGE_ADAPTERS,
           {
@@ -4716,10 +5109,20 @@ export async function prepareAgentTools(
                 request.toolName,
                 request.forceRefresh === true,
               ),
-            onAuthNeeded: async (payload) => await publishAuthNeeded(options, payload),
+            onAuthNeeded: async (payload) => {
+              await publishAuthNeeded(options, payload);
+            },
             onResolvedConnectionId: (connectionId) =>
               recordResolvedMcpConnectionId(resolvedMcpConnectionIds, config, connectionId),
             fetchImpl: mcpFetchImpl,
+            ...(options.slackRateLimit ? { slackRateLimit: options.slackRateLimit } : {}),
+            ...(options.materializeGmailFile
+              ? { materializeGmailFile: options.materializeGmailFile }
+              : {}),
+            ...(options.readGmailFile ? { readGmailFile: options.readGmailFile } : {}),
+            ...(settings.gmailWatchTopicName
+              ? { watchTopicName: settings.gmailWatchTopicName }
+              : {}),
           },
         );
         const innerServer =
@@ -4769,6 +5172,8 @@ export async function prepareAgentTools(
               : undefined,
             options.mcpAccountLabels?.get(config.id),
             options.runMcpCredentials,
+            undefined,
+            firstParty,
           ),
           config,
           options,
@@ -5236,6 +5641,13 @@ async function prepareAttemptToolEnvironment(
     resolvedMcpConnectionIds,
     options.attemptConnectorActionBindings ?? [],
     options.connectorActionPolicy,
+    options.mcpAccountLabels,
+    new Map(
+      prepared.servers.map(({ server }) => [
+        server.registryId,
+        (name: string, args: Record<string, unknown>) => server.reviewContext(name, args),
+      ]),
+    ),
   );
   const subjectId = options.subjectId ?? "worker:mcp-model";
   const guardedDefinitions = options.authorizeAttemptExecution
@@ -5251,6 +5663,9 @@ async function prepareAttemptToolEnvironment(
                 await options.authorizeAttemptExecution!({ call: input.call as Parameters<AttemptToolAuthorization>[0]["call"], entry: input.entry });
                 await prior?.begin?.();
               },
+              ...(prior?.waitingForApproval
+                ? { waitingForApproval: prior.waitingForApproval }
+                : {}),
               ...(prior?.complete ? { complete: prior.complete } : {}),
             };
           },
@@ -5259,6 +5674,9 @@ async function prepareAttemptToolEnvironment(
     : definitions;
   const environment = createAttemptToolEnvironment({
     scope,
+    firstPartyMcpPermissions: options.firstPartyPermissions ?? [
+      ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+    ],
     generation: options.attemptToolCatalogGeneration ?? 1,
     definitions: guardedDefinitions,
     confirmModelApproval: ({ modelName, subjectId: callerSubjectId }) =>
@@ -5278,6 +5696,8 @@ function installAttemptConnectorActionGatewayLifecycle(
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
   bindings: readonly AttemptConnectorActionBinding[],
   connectorActionPolicy?: ConnectorActionPolicyHooks,
+  accountLabels?: ReadonlyMap<string, string>,
+  reviewReaders?: ReadonlyMap<string, ToolReviewReader>,
 ): AttemptToolDefinition[] {
   const byModelName = new Map<string, AttemptConnectorActionBinding>();
   for (const binding of bindings) {
@@ -5316,6 +5736,15 @@ function installAttemptConnectorActionGatewayLifecycle(
               serverId: definition.identity.serverId,
               toolName: definition.identity.toolName,
               arguments: arguments_,
+              actionName: toolPolicyActionName(
+                definition.identity.toolName,
+                definition.inputSchema,
+                arguments_,
+              ),
+              defaultDecision:
+                attemptToolApproval(config!, definition.identity.toolName) === "human"
+                  ? "ask"
+                  : "allow",
             };
           }
         : (approvalId: string, arguments_: unknown): ConnectorActionToolCall => ({
@@ -5327,28 +5756,83 @@ function installAttemptConnectorActionGatewayLifecycle(
             serverId: definition.identity.serverId,
             toolName: definition.identity.toolName,
             arguments: arguments_,
+            actionName: toolPolicyActionName(
+              definition.identity.toolName,
+              definition.inputSchema,
+              arguments_,
+            ),
             ...(legacyMcpApproval ? { approvalMode: "session_mcp" as const } : {}),
+            defaultDecision: legacyMcpApproval ? "ask" : "allow",
           });
     return {
       ...definition,
+      // Argument-sensitive preparation decides approval for every attempt transport.
+      approval: connectorActionPolicy ? "policy" : definition.approval,
       lifecycle: connectorActionGatewayLifecycle({
         modelName: definition.modelName,
-        call,
-        ...(binding?.resultOutcome ? { resultOutcome: binding.resultOutcome } : {}),
+        ...(reviewReaders?.get(definition.identity.serverId)
+          ? { readReview: reviewReaders.get(definition.identity.serverId)! }
+          : {}),
+        call: (approvalId, arguments_) => ({
+          ...call(approvalId, arguments_),
+          reviewContext: toolReviewContextFromSchema(definition.inputSchema, {
+            kind:
+              config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
+                ? "gmail"
+                : "generic",
+            ...(definition.title ? { title: definition.title } : {}),
+            ...(accountLabels?.get(definition.identity.serverId)
+              ? { accountLabel: accountLabels.get(definition.identity.serverId)! }
+              : {}),
+          }),
+        }),
+        ...(binding?.resultOutcome
+          ? { resultOutcome: binding.resultOutcome }
+          : config && isOfficialGmailMcpConfig(config.url ?? "", config.connectionRef)
+            ? { resultOutcome: gmailRestResultOutcome }
+            : {}),
         ...(connectorActionPolicy ? { connectorActionPolicy } : {}),
       }),
     };
   });
 }
 
+type ToolReviewReader = (
+  toolName: string,
+  args: Record<string, unknown>,
+) => Promise<Partial<import("@opengeni/contracts").ToolReviewContext>>;
+
+async function prepareConnectorReview(
+  call: ConnectorActionToolCall,
+  policy: ConnectorActionPolicyHooks,
+  readReview?: ToolReviewReader,
+) {
+  if (readReview && policy.preview) {
+    const preview = await policy.preview(call);
+    if (
+      preview.managed &&
+      preview.decision === "ask" &&
+      !preview.requestId &&
+      call.arguments &&
+      typeof call.arguments === "object" &&
+      !Array.isArray(call.arguments)
+    ) {
+      const extra = await readReview(call.toolName, call.arguments as Record<string, unknown>);
+      call = { ...call, reviewContext: { kind: "generic", ...call.reviewContext, ...extra } };
+    }
+  }
+  return await policy.prepare(call);
+}
+
 function connectorActionGatewayLifecycle(input: {
   modelName: string;
+  readReview?: ToolReviewReader;
   call: AttemptConnectorActionBinding["call"];
   resultOutcome?: AttemptConnectorActionBinding["resultOutcome"];
   connectorActionPolicy?: ConnectorActionPolicyHooks;
 }): ToolGatewayCallLifecycle {
   return {
-    prepare: async ({ call }) => {
+    prepare: async ({ call, context }) => {
       if (!input.connectorActionPolicy) {
         throw new ConnectorActionExecutionError(
           "Connector action was not executed: durable execution policy is unavailable",
@@ -5373,9 +5857,15 @@ function connectorActionGatewayLifecycle(input: {
       }
       const preparation =
         modelInvocation?.preparation ??
-        (call.caller.kind === "codemode" && input.connectorActionPolicy.preview
+        (call.caller.kind === "codemode" &&
+        context.transportMeta?.durableApproval !== true &&
+        input.connectorActionPolicy.preview
           ? await input.connectorActionPolicy.preview(connectorCall)
-          : await input.connectorActionPolicy.prepare(connectorCall));
+          : await prepareConnectorReview(
+              connectorCall,
+              input.connectorActionPolicy,
+              input.readReview,
+            ));
       if (preparation.managed && preparation.decision === "block") {
         throw new ConnectorActionExecutionError(
           "Connector action was not executed: blocked",
@@ -5385,8 +5875,23 @@ function connectorActionGatewayLifecycle(input: {
       if (
         preparation.managed &&
         preparation.decision === "ask" &&
-        modelInvocation?.approvalConfirmed !== true
+        modelInvocation?.approvalConfirmed !== true &&
+        preparation.approvalStatus !== "approved"
       ) {
+        if (
+          call.caller.kind === "codemode" &&
+          context.transportMeta?.durableApproval === true &&
+          preparation.requestId &&
+          preparation.actionFingerprint &&
+          (!preparation.approvalStatus || preparation.approvalStatus === "pending")
+        ) {
+          return {
+            waitingForApproval: {
+              requestId: preparation.requestId,
+              actionFingerprint: preparation.actionFingerprint,
+            },
+          };
+        }
         throw new AttemptToolApprovalRequiredError();
       }
       let requestId: string | null = null;
@@ -5410,19 +5915,22 @@ function connectorActionGatewayLifecycle(input: {
             });
             return;
           }
-          const returnedOutcome = input.resultOutcome?.(settlement.result) ?? null;
+          // A provider-declared error is not evidence that no side effect occurred.
+          // Only a trusted in-process adapter can prove nonexecution. The ledger
+          // records that judgement; the caller always receives the provider's
+          // own result, so its error text is never replaced or discarded.
+          const returnedOutcome =
+            input.resultOutcome?.(settlement.result) ??
+            (settlement.result !== null &&
+            typeof settlement.result === "object" &&
+            "isError" in settlement.result &&
+            settlement.result.isError === true
+              ? "uncertain"
+              : null);
           await input.connectorActionPolicy!.complete({
             requestId,
             outcome: returnedOutcome ?? "completed",
           });
-          if (returnedOutcome) {
-            throw new ConnectorActionExecutionError(
-              returnedOutcome === "not_executed"
-                ? "Connector action was not executed"
-                : "Connector action outcome is uncertain; inspect provider state before retrying",
-              returnedOutcome,
-            );
-          }
         },
       };
     },
@@ -5438,9 +5946,12 @@ async function prepareWorkspaceToolGatewayEnvironment(
     throw new Error("workspace tool gateway requires account and workspace scope");
   }
   const prepared = await prepareToolGatewayDefinitionsFromServers(servers, registry);
-  const definitions = options.workspaceToolGateway.filterDefinition
+  const admittedDefinitions = options.workspaceToolGateway.filterDefinition
     ? prepared.definitions.filter(options.workspaceToolGateway.filterDefinition)
     : prepared.definitions;
+  const definitions = options.workspaceToolGateway.mapDefinition
+    ? admittedDefinitions.map(options.workspaceToolGateway.mapDefinition)
+    : admittedDefinitions;
   return createWorkspaceToolGateway({
     accountId: options.accountId,
     workspaceId: options.workspaceId,
@@ -5452,6 +5963,9 @@ async function prepareWorkspaceToolGatewayEnvironment(
     ...(options.workspaceToolGateway.authorize
       ? { authorize: options.workspaceToolGateway.authorize }
       : {}),
+    ...(options.workspaceToolGateway.resolveApproval
+      ? { resolveApproval: options.workspaceToolGateway.resolveApproval }
+      : {}),
     ...(options.workspaceToolGateway.requireApproval
       ? { requireApproval: options.workspaceToolGateway.requireApproval }
       : {}),
@@ -5459,7 +5973,7 @@ async function prepareWorkspaceToolGatewayEnvironment(
 }
 
 /**
- * Identity OpenGeni advertises to MCP servers as `_meta.opengeni` on every
+ * Identity Opengeni advertises to MCP servers as `_meta.opengeni` on every
  * tools/call, so a server can correlate the call with a workspace, session,
  * turn, and causal human. It is trusted worker scope, set after caller
  * transport metadata so a caller cannot replace it, and it is informational:
@@ -5538,6 +6052,14 @@ async function prepareToolGatewayDefinitionsFromServers(
           ...(tool.icons ? { icons: tool.icons } : {}),
           source: attemptToolSource(server.registryId),
           approval: attemptToolApproval(config, toolName),
+          effectAuthorityDigest: digestCanonicalJson({
+            version: 1,
+            serverId: server.registryId,
+            toolName,
+            endpoint: config.url,
+            connectionRef: config.connectionRef ?? null,
+            authority: server.catalogEffectAuthority(toolName) ?? null,
+          }),
           ...(modelSourceRefs ? { modelSourceRefs: (result, context) => modelSourceRefs(toolName, result, context) } : {}),
           ...(config.connectionRef ? { requiresProviderPreflight: true } : {}),
           ...(config.connectionRef || server.catalogApprovalAuthority() !== undefined
@@ -5576,6 +6098,7 @@ async function prepareToolGatewayDefinitionsFromServers(
                 attemptToolCallMeta(server.registryId, context, serverIdentity),
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
+                  maxResultBytes: MCP_MAX_RESPONSE_BYTES,
                 },
               );
             const recovery = configuredMcpOperationRecovery(server, toolName);
@@ -6220,12 +6743,14 @@ async function publishAuthNeededForRequest(
 async function publishAuthNeeded(
   options: PrepareToolsOptions,
   payload: ToolAuthNeededPayload,
-): Promise<void> {
+): Promise<boolean> {
   try {
     await options.onAuthNeeded?.(payload);
+    return true;
   } catch {
     // Auth-needed events are advisory UI/audit signals; a publisher failure must
     // not turn an auth-recoverable tool condition into a failed agent turn.
+    return false;
   }
 }
 
@@ -6285,7 +6810,7 @@ function parseWwwAuthenticate(header: string | null): {
 // before a provider tool result exists. PrefixedMcpServer converts the thrown
 // McpError into an MCP-shaped `{ isError: true }` output for the model.
 const MCP_AUTH_NEEDED_ERROR = {
-  // OpenGeni application-defined JSON-RPC code. Keep this positive so it cannot
+  // Opengeni application-defined JSON-RPC code. Keep this positive so it cannot
   // collide with MCP SDK transport errors such as RequestTimeout (-32001).
   code: 40_101,
   message: "Authentication required - a connection link was posted to the session.",
@@ -6294,7 +6819,7 @@ const MCP_AUTH_NEEDED_ERROR = {
 const MCP_TOOL_OUTCOME_UNCERTAIN_ERROR = {
   code: 40_102,
   message:
-    "Tool outcome uncertain: the provider returned 401 after receiving the request. OpenGeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
+    "Tool outcome uncertain after provider submission. Opengeni did not replay this call. Do not retry automatically; verify provider state before any new attempt.",
 } as const;
 
 function mcpToolAuthNeededResponse(request: McpRequestReplayInfo): Response {
@@ -6404,7 +6929,7 @@ function mcpToolOutcomeUncertainContent(error: unknown): Array<{ type: "text"; t
 // Preserve the exact source diagnostic as one independent content item when it
 // is safely readable. Hostile getters/proxies receive a fixed content-free
 // fallback so best-effort isolation cannot be turned into a new thrown error.
-// The second item is OpenGeni guidance and never mutates the source failure.
+// The second item is Opengeni guidance and never mutates the source failure.
 function mcpToolUnavailableContent(error: unknown): Array<{ type: "text"; text: string }> {
   return [
     { type: "text", text: exactErrorMessage(error) },
@@ -6482,6 +7007,7 @@ type McpPublicErrorFields = {
 };
 
 type McpPublicFailureCode =
+  | "mcp_cleanup_failed"
   | "mcp_connect_failed"
   | "mcp_close_failed"
   | "mcp_transport_failed"
@@ -6842,27 +7368,7 @@ function exactMcpLifecycleError(error: unknown, options: McpTransportErrorOption
 }
 
 function mcpTransportLogger(serverId: string) {
-  const logFailure = (_message: string, ...args: unknown[]) => {
-    let error: unknown;
-    for (let index = args.length - 1; index >= 0; index -= 1) {
-      if (args[index] instanceof Error) {
-        error = args[index];
-        break;
-      }
-    }
-    console.warn(
-      "[mcp] transport operation failed",
-      mcpErrorFields(error, "mcp_transport_failed", serverId),
-    );
-  };
-  return {
-    namespace: "opengeni:mcp-transport",
-    debug: () => undefined,
-    error: logFailure,
-    warn: logFailure,
-    dontLogModelData: true,
-    dontLogToolData: true,
-  };
+  return createMcpTransportLogger(serverId, mcpErrorFields);
 }
 
 async function mcpServerRequestInit(
@@ -6879,7 +7385,7 @@ async function mcpServerRequestInit(
   }
   // Third-party MCP servers get their configured credential headers (for
   // example workspace-enabled capability MCP credentials) and nothing else —
-  // never OpenGeni's own access key or delegated tokens.
+  // never Opengeni's own access key or delegated tokens.
   if (config.headers && Object.keys(config.headers).length > 0) {
     return { requestInit: { headers: { ...config.headers } } };
   }
@@ -6950,6 +7456,9 @@ async function signFirstPartyDelegatedBearer(
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
+    ...(options.credentialRestriction
+      ? { credentialRestriction: options.credentialRestriction }
+      : {}),
     permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     principalKind: hasExactAttemptClaims ? "agent_attempt" : "service",
     firstPartyMcpTools: options.firstPartyTools ?? [...DEFAULT_FIRST_PARTY_MCP_TOOLS],
@@ -6996,24 +7505,51 @@ function firstPartyAuthFetch(
   };
 }
 
-/** Resolve explicit Apps authentication for each MCP request; no inference fallback. */
+/**
+ * Resolve explicit Apps authentication for each MCP request; no inference fallback.
+ *
+ * Apps is discovered on every turn (`cacheToolsList: false`), so setup traffic
+ * (initialize, tools/list) never publishes an authorization card: a broken
+ * designation would otherwise post a new card on every turn that selects Apps.
+ * Only a tool call that needs Apps publishes, at most once per prepared tool
+ * environment (one turn attempt).
+ */
 function codexAppsAuthFetch(
   baseFetch: FetchLike,
   settings: Settings,
   options: PrepareToolsOptions,
 ): FetchLike {
+  let authNeededPublished = false;
+  let authNeededPublishing: Promise<boolean> | null = null;
+  const publishForToolCall = async (
+    request: McpRequestReplayInfo,
+    reason: ToolAuthNeededPayload["reason"],
+  ): Promise<void> => {
+    if (!request.toolName || authNeededPublished) return;
+    if (authNeededPublishing) {
+      await authNeededPublishing;
+      return;
+    }
+    // Only a delivered card counts; a failed publish lets a later call retry.
+    authNeededPublishing = publishCodexAppsAuthNeeded(options, request, reason);
+    try {
+      authNeededPublished = await authNeededPublishing;
+    } finally {
+      authNeededPublishing = null;
+    }
+  };
   return async (input, init) => {
     const request = await mcpRequestReplayInfo(input, init);
     const auth = options.codexAppsAuth;
     if (!auth) {
-      await publishCodexAppsAuthNeeded(options, request, "missing_connection");
+      await publishForToolCall(request, "missing_connection");
       throw new Error("Codex Apps has no explicit workspace designation");
     }
     let token: { accessToken: string; chatgptAccountId: string | null };
     try {
       token = await auth.withAuthorization(async (snapshot) => snapshot);
     } catch (error) {
-      await publishCodexAppsAuthNeeded(options, request, "refresh_failed");
+      await publishForToolCall(request, codexAppsAuthFailureReason(error));
       throw error;
     }
     const headers: Record<string, string> = {
@@ -7029,22 +7565,25 @@ function codexAppsAuthFetch(
       withConnectionHeaders(input, init, headers),
     );
     if (response.status === 401 || response.status === 403) {
-      await publishCodexAppsAuthNeeded(
-        options,
-        request,
-        response.status === 403 ? "insufficient_scope" : "expired",
-      );
+      await publishForToolCall(request, response.status === 403 ? "insufficient_scope" : "expired");
     }
     return response;
   };
+}
+
+/** The designation being unusable is not a refresh failure. */
+function codexAppsAuthFailureReason(error: unknown): ToolAuthNeededPayload["reason"] {
+  return isCodexAppsCredentialUnavailable(error)
+    ? "designated_credential_unavailable"
+    : "refresh_failed";
 }
 
 async function publishCodexAppsAuthNeeded(
   options: PrepareToolsOptions,
   request: McpRequestReplayInfo,
   reason: ToolAuthNeededPayload["reason"],
-): Promise<void> {
-  await publishAuthNeeded(options, {
+): Promise<boolean> {
+  return await publishAuthNeeded(options, {
     serverId: CODEX_APPS_MCP_SERVER_ID,
     toolName: request.toolName ?? null,
     providerDomain: new URL(CODEX_APPS_MCP_URL).hostname,
@@ -7066,7 +7605,7 @@ async function publishCodexAppsAuthNeeded(
 // capabilities. (A finer-grained capability model comes later.)
 // codex_apps is third-party-by-trust (the external ChatGPT connectors backend)
 // but needs DYNAMIC auth, so it is its own category — deliberately NOT folded
-// into the first-party allowlist, which would wrongly sign an OpenGeni delegated
+// into the first-party allowlist, which would wrongly sign an Opengeni delegated
 // token to chatgpt.com.
 function isCodexAppsMcpServer(config: Settings["mcpServers"][number]): boolean {
   if (config.id !== CODEX_APPS_MCP_SERVER_ID) return false;
@@ -7549,6 +8088,12 @@ export class PrefixedMcpServer implements MCPServer {
     private readonly refreshOwnedCommand?: (commandId: string) => Promise<boolean>,
     private readonly accountLabel?: string,
     private readonly runMcpCredentials?: RunMcpCredentials,
+    private readonly effectAuthority?: LocalMcpServerRegistration["effectAuthority"],
+    /**
+     * Verified first-party Opengeni server (deployment URL + reserved id). Only
+     * then may a catalog tool name become a metric label.
+     */
+    private readonly firstPartyCatalog = false,
   ) {
     this.registryId = registryId;
     // The SDK uses `name` for cache keys, traces, and lifecycle diagnostics.
@@ -7709,6 +8254,17 @@ export class PrefixedMcpServer implements MCPServer {
     return this.approvalAuthority;
   }
 
+  async reviewContext(toolName: string, args: Record<string, unknown>) {
+    const bridge = this.inner as MCPServer & { reviewContext?: ToolReviewReader };
+    return typeof bridge.reviewContext === "function"
+      ? await bridge.reviewContext(toolName, args)
+      : {};
+  }
+
+  catalogEffectAuthority(toolName: string): unknown {
+    return this.effectAuthority ? this.effectAuthority(toolName) : this.approvalAuthority;
+  }
+
   async preflightCatalogTool(
     unprefixed: string,
     args: Record<string, unknown>,
@@ -7852,7 +8408,17 @@ export class PrefixedMcpServer implements MCPServer {
     unprefixed: string,
     args: Record<string, unknown>,
     meta?: Record<string, unknown> | null,
-    options?: { signal?: AbortSignal },
+    options?: {
+      signal?: AbortSignal;
+      /**
+       * Exact-result bound for a successful provider result. A direct SDK call
+       * hands the result straight to the model, so it keeps the 1 MiB model cap.
+       * The attempt gateway passes the transport cap instead: its per-caller seam
+       * spills an oversized model result to a file, and Codemode receives the
+       * exact result, so a large read must never fail before that seam.
+       */
+      maxResultBytes?: number;
+    },
   ): Promise<AttemptToolResultValue> {
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
@@ -7868,7 +8434,11 @@ export class PrefixedMcpServer implements MCPServer {
     const recordOutcome = (outcome: McpToolCallOutcome): void => {
       if (!recordsPhysicalCall || metricRecorded) return;
       metricRecorded = true;
-      recordRuntimeMcpToolCallMetric(outcome, startedAt);
+      recordRuntimeMcpToolCallMetric(
+        outcome,
+        mcpToolMetricLabel({ firstParty: this.firstPartyCatalog, toolName: unprefixed }),
+        startedAt,
+      );
     };
     const operationId =
       meta && typeof meta.opengeniOperationId === "string" ? meta.opengeniOperationId : undefined;
@@ -7923,7 +8493,11 @@ export class PrefixedMcpServer implements MCPServer {
         },
       });
       const result = AttemptToolResult.parse(output);
-      boundedMcpToolResult(result);
+      assertMcpPayloadWithinBytes(
+        result,
+        options?.maxResultBytes ?? MCP_MAX_TOOL_RESULT_BYTES,
+        "MCP tool result",
+      );
       recordOutcome(result.isError === true ? "provider_declared_error" : "success");
       if (unprefixed === "wait_for_input" && result.isError !== true) {
         completeWait?.(true);
@@ -7985,6 +8559,10 @@ export class PrefixedMcpServer implements MCPServer {
       // durably settles the operation as outcome_unknown.
       if (isRoutingMutationOutcomeUnknownError(error)) {
         recordOutcome("outcome_uncertain");
+        throw error;
+      }
+      if (isRoutingMutationOutputRejectedError(error)) {
+        recordOutcome("thrown_protocol_error");
         throw error;
       }
       // Generated OpenAPI/GraphQL adapters explicitly distinguish a provider
@@ -8225,6 +8803,10 @@ export async function prepareRunInput(
 }
 
 export type RunAgentStreamOptions = {
+  /** Producer-side gate before calling any resolved model/provider. */
+  beforeModelRequest?: ModelCallLifecycle["beforeModelRequest"];
+  /** Register terminal response settlement before the next producer model request. */
+  onModelResponse?: ModelCallLifecycle["onModelResponse"];
   /** Abort the provider/tool loop when the owning activity is cancelled. */
   signal?: AbortSignal;
   /** Nonblocking phase measurements for request preparation before provider I/O. */
@@ -8235,6 +8817,8 @@ export type RunAgentStreamOptions = {
   beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
   onModelToolSource?:(source:import("@opengeni/contracts").NativeModelToolSource)=>Promise<void>;
   onModelCallSourceCompleted?: ModelRequestCapture["callCompleted"];
+  /** Synchronous diagnostic after admission/audit, immediately before fetch. */
+  onModelTransportDispatched?: (clock: ModelTransportDispatchClock) => void;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -8366,9 +8950,10 @@ export const CODE_SEARCH_DIRECTIVE =
 
 export const CODEMODE_PROGRAMMATIC_DIRECTIVE =
   "Default `ogtool list` enumerates every authorized tool with a compact summary, without schemas or an output-size cutoff. " +
-  "Codemode calls and result reads require the same live execution attempt. While a Codemode command is pending, keep this attempt alive with `command_wait`/`command_read`; do not end the turn or call `wait_for_input` to await it. After an attempt ends, its CLI credentials expire and a new attempt cannot read its operation ID. Inspect retained command output and session tool receipts before deciding whether another call is needed; an observation error does not prove execution failed. Never automatically replay a mutation. " +
+  "Codemode uses current-attempt credentials. Keep ordinary running commands alive with `command_wait`/`command_read`. When a call returns `codemode_approval_pending`, retain its operation ID and let the review pause work. The worker resumes that exact stored operation after human approval; JavaScript locals do not resume. A later authorized attempt of the same turn can use `ogtool read <operation-id>` or `environmentCodemodeClient().status(operationId)` / `.resume(operationId)` to observe its result. Never copy the payload into another call to request approval. Observation failure or outcome_unknown does not prove execution failed; inspect actual state before any separately authorized retry. " +
   "Managed sandboxes select the worker-release client on PATH for every command, including warm boxes. When OPENGENI_CODEMODE_CLIENT_MODULE is set, persistent Bun programs must use `const { tools, openGeni } = await import(process.env.OPENGENI_CODEMODE_CLIENT_MODULE!)`; do not import the older image-baked package or invoke /usr/local/bin/ogtool directly. The stock-package import below is only for environments without that deployment-selected module. " +
-  'Every tool available to you is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools requiring human approval return a typed error in Codemode and must be invoked normally.';
+  "Every tool in the Codemode catalog (what `ogtool list` shows) is also callable programmatically from the sandbox through the same frozen catalog, authority, credentials, policy, and execution path. Built-in sandbox tools for the shell, file patching, image viewing and terminal input are not in that catalog; inside the sandbox, use the shell and filesystem directly. " +
+  'In stock sandboxes, write persistent Bun code with `import { tools, openGeni } from "@opengeni/codemode"`; run `ogtool declarations <file.d.ts>` when project-local catalog types are useful. For shell calls, discover tools with `ogtool list`, inspect an unfamiliar tool with `ogtool show <tool-path>`, then use `ogtool call <tool-path> \'<json-args>\'`. Listing is compact by default; `list --json` gives compact structured discovery and `list --full` explicitly includes all schemas. When $OPENGENI_CODEMODE_NATIVE_CLIENT is available, prefer the connection-bound native client even if an older `ogtool` is installed: use `"$OPENGENI_CODEMODE_NATIVE_CLIENT" codemode` with the same list, show, and call commands; this uses the same public Codemode operation journal, not another tool path. If no compatible installed client is available and Bun plus $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `bun x -p "$OPENGENI_OGTOOL_PACKAGE_SPEC" ogtool ...`; never guess a version or install `latest`. Prefer Codemode for loops, polling, bulk filtering, and intermediate data that should remain in the sandbox instead of consuming your context window. Tools needing review return a compact durable pending handle in Codemode. New calls use the current permission snapshot; an existing review keeps its original action.';
 
 function modelModalityProjectionFilterForAgent(
   agent: object,
@@ -8446,6 +9031,8 @@ function bindModelVisibleContextCapture(
         body,
         ...(unavailableReason ? { unavailableReason } : {}),
         requestIndex: index ?? nextModelContextCaptureIndex(agent),
+        persistentLayers: persistentAgentInstructionInspectionFor(agent).layers,
+        genesisTitleDirective: GENESIS_TITLE_DIRECTIVE,
       }),
     );
   };
@@ -8478,8 +9065,17 @@ export async function runAgentStream(
   const scope = gate?.beginStream(overrides.signal);
   try {
     if (scope) agent.toolUseBehavior = scope.toolUseBehavior;
-    const stream = await withPreparedCompactionRequest(agent, () =>
-      runAgentStreamInternal(agent, input, settings, overrides, scope),
+    const stream = await withModelCallLifecycle(
+      {
+        ...(overrides.beforeModelRequest
+          ? { beforeModelRequest: overrides.beforeModelRequest }
+          : {}),
+        ...(overrides.onModelResponse ? { onModelResponse: overrides.onModelResponse } : {}),
+      },
+      () =>
+        withPreparedCompactionRequest(agent, () =>
+          runAgentStreamInternal(agent, input, settings, overrides, scope),
+        ),
     );
     // Observe the SDK's own settlement promise before exposing the stream. Do
     // not wrap/replace SDK history, errors, cancellation, or stream iteration.
@@ -8726,21 +9322,25 @@ async function runAgentStreamInternal(
     } as SandboxRunConfig;
     return await withModelRequestCapture(modelRequestCapture, () =>
       withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-        withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-          recordModelPreparationManifestInventory(
-            "sandbox_agent_manifest_inventory",
-            (agent as { defaultManifest?: Manifest }).defaultManifest,
-          );
-          recordModelPreparationManifestInventory(
-            "sandbox_session_manifest_inventory",
-            (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
-          );
-          return runScopedRunner(settings, agent, inputWaitYield).run(
-            agent,
-            prepared.input,
-            ownedRunOptions,
-          );
-        }),
+        withModelTransportStartedObserver(
+          overrides.onModelTransportStarted,
+          () => {
+            recordModelPreparationManifestInventory(
+              "sandbox_agent_manifest_inventory",
+              (agent as { defaultManifest?: Manifest }).defaultManifest,
+            );
+            recordModelPreparationManifestInventory(
+              "sandbox_session_manifest_inventory",
+              (agentSession as { state?: { manifest?: Manifest } }).state?.manifest,
+            );
+            return runScopedRunner(settings, agent, inputWaitYield).run(
+              agent,
+              prepared.input,
+              ownedRunOptions,
+            );
+          },
+          overrides.onModelTransportDispatched,
+        ),
       ),
     );
   }
@@ -8828,7 +9428,7 @@ async function runAgentStreamInternal(
   // provider-id stripping, output bounds), then any per-turn filter, the model's
   // modality projection, and finally context accounting over the exact payload
   // that can reach the provider. External ownership gives the SDK a borrowed,
-  // immutable history view; every filter below is copy-on-write. OpenGeni does not
+  // immutable history view; every filter below is copy-on-write. Opengeni does not
   // pass an SDK session and reconciles durable truth from the untouched input.
   const callModelInputFilter = composeCallModelInputFilters(
     [
@@ -8888,17 +9488,21 @@ async function runAgentStreamInternal(
   }
   return await withModelRequestCapture(modelRequestCapture, () =>
     withModelPreparationObserver(overrides.onModelPreparationPhase, () =>
-      withModelTransportStartedObserver(overrides.onModelTransportStarted, () => {
-        recordModelPreparationManifestInventory(
-          "sandbox_agent_manifest_inventory",
-          (agent as { defaultManifest?: Manifest }).defaultManifest,
-        );
-        return runScopedRunner(settings, agent, inputWaitYield).run(
-          agent,
-          prepared.input,
-          runOptions,
-        );
-      }),
+      withModelTransportStartedObserver(
+        overrides.onModelTransportStarted,
+        () => {
+          recordModelPreparationManifestInventory(
+            "sandbox_agent_manifest_inventory",
+            (agent as { defaultManifest?: Manifest }).defaultManifest,
+          );
+          return runScopedRunner(settings, agent, inputWaitYield).run(
+            agent,
+            prepared.input,
+            runOptions,
+          );
+        },
+        overrides.onModelTransportDispatched,
+      ),
     ),
   );
 }
@@ -10925,7 +11529,7 @@ const SANDBOX_GIT_PROVISIONING_TARGET_ASSIGNMENT = "OPENGENI_GIT_PROVISIONING_TA
 function sandboxGitProvisioningGuardLines(): string[] {
   return [
     'if [ "${OPENGENI_GIT_PROVISIONING_TARGET:-}" != sandbox ]; then',
-    '  echo "Refusing to provision OpenGeni Git credentials into HOME=${HOME:-unset} and its global Git config: this script only runs as an OpenGeni sandbox lifecycle command (OPENGENI_GIT_PROVISIONING_TARGET=sandbox)." >&2',
+    '  echo "Refusing to provision Opengeni Git credentials into HOME=${HOME:-unset} and its global Git config: this script only runs as an Opengeni sandbox lifecycle command (OPENGENI_GIT_PROVISIONING_TARGET=sandbox)." >&2',
     "  exit 78",
     "fi",
   ];
@@ -11662,7 +12266,7 @@ export function repositoryCloneCommand(
     '  clone_repository "$@" &',
     '  clone_pids="$clone_pids $!"',
     "}",
-    // A repository OpenGeni attached on the person's behalf is best effort: its
+    // A repository Opengeni attached on the person's behalf is best effort: its
     // clone runs in its own errexit subshell exactly like a required one, and a
     // failure is reported as a warning while the job itself succeeds, so one
     // empty, deleted or unreachable repository never fails the whole setup.
@@ -11840,11 +12444,11 @@ const RIG_SETUP_PROVIDER_IMAGE_MARKER_ROOT = "/var/opengeni";
 // Modal's command transport caps aggregate argv at 64 KiB. Cancellation and
 // run-as wrappers duplicate/expand this command, so stage moderate scripts too.
 const RIG_SETUP_INLINE_COMMAND_MAX_BYTES = 4 * 1024;
-// The cancellation fence embeds a lifecycle command twice, then the current
-// runAs wrapper repeats it across several execution branches. Keep each base64
-// chunk below Modal's 64-KiB aggregate argument ceiling after both wrappers.
-const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 7 * 1024;
+// Both cancellation and the SDK run-as wrapper repeat the payload three times.
+// Leave room for their fixed shell programs under Modal's 64-KiB argv ceiling.
+const RIG_SETUP_PAYLOAD_CHUNK_CHARS = 2 * 1024;
 const RIG_SETUP_PAYLOAD_ROOT = "/tmp/opengeni/rig-setup-payloads";
+const RIG_SETUP_GZIP_SENTINEL = "__OPENGENI_SETUP_GZIP__";
 
 export type RigSetupScriptCommandOptions = {
   timeoutMs?: number;
@@ -11981,22 +12585,55 @@ async function stageRigSetupScript(
   session: SandboxSessionLike,
   script: string,
   context: SandboxLifecycleHookContext,
+  options: { payloadRoot?: string; label?: string } = {},
 ): Promise<string> {
-  const payloadPath = `${RIG_SETUP_PAYLOAD_ROOT}/${randomUUID()}.sh`;
+  const payloadRoot = options.payloadRoot ?? RIG_SETUP_PAYLOAD_ROOT;
+  const payloadPath = `${payloadRoot}/${randomUUID()}.sh`;
   const encodedPath = `${payloadPath}.b64`;
-  const encoded = Buffer.from(script, "utf8").toString("base64");
-  const commands = [
-    `set -eu\numask 077\nmkdir -p ${shellQuote(RIG_SETUP_PAYLOAD_ROOT)}\n: > ${shellQuote(encodedPath)}`,
-  ];
-  for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
-    commands.push(
-      `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
-    );
-  }
-  commands.push(
-    `set -eu\nbase64 -d ${shellQuote(encodedPath)} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
-  );
+  const bytes = Buffer.from(script, "utf8");
+  const compressed = gzipSync(bytes);
+  const compressionUseful = compressed.length < bytes.length;
   try {
+    // Repeated shell programs compress well. Probe in the existing bootstrap
+    // call, retaining the same bounded transfer on machines without gzip.
+    const bootstrap = await runSandboxLifecycleCommand(
+      session,
+      {
+        cmd: [
+          "set -eu",
+          "umask 077",
+          `mkdir -p ${shellQuote(payloadRoot)}`,
+          `: > ${shellQuote(encodedPath)}`,
+          ...(compressionUseful
+            ? [
+                `if command -v gzip >/dev/null 2>&1; then printf '%s\\n' ${shellQuote(RIG_SETUP_GZIP_SENTINEL)}; fi`,
+              ]
+            : []),
+        ].join("\n"),
+        workdir: "/workspace",
+        ...(context.runAs ? { runAs: context.runAs } : {}),
+        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+        maxOutputTokens: 4_000,
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(
+      bootstrap,
+      options.label ?? "Sandbox Environment setup payload staging",
+    );
+    const useCompression =
+      compressionUseful &&
+      sandboxCommandOutput(bootstrap).split(/\r?\n/u).includes(RIG_SETUP_GZIP_SENTINEL);
+    const encoded = (useCompression ? compressed : bytes).toString("base64");
+    const commands: string[] = [];
+    for (let offset = 0; offset < encoded.length; offset += RIG_SETUP_PAYLOAD_CHUNK_CHARS) {
+      commands.push(
+        `printf '%s' ${shellQuote(encoded.slice(offset, offset + RIG_SETUP_PAYLOAD_CHUNK_CHARS))} >> ${shellQuote(encodedPath)}`,
+      );
+    }
+    commands.push(
+      `set -eu\nbase64 -d < ${shellQuote(encodedPath)}${useCompression ? " | gzip -dc" : ""} > ${shellQuote(payloadPath)}\nchmod 0700 ${shellQuote(payloadPath)}\nrm -f ${shellQuote(encodedPath)}`,
+    );
     for (const command of commands) {
       const result = await runSandboxLifecycleCommand(
         session,
@@ -12009,7 +12646,10 @@ async function stageRigSetupScript(
         },
         context.commandRunner,
       );
-      assertSandboxCommandSucceeded(result, "Sandbox Environment setup payload staging");
+      assertSandboxCommandSucceeded(
+        result,
+        options.label ?? "Sandbox Environment setup payload staging",
+      );
     }
     return payloadPath;
   } catch (error) {
@@ -12242,6 +12882,7 @@ export async function runRepositoryCloneHook(
     editor: null,
     staged: [],
   };
+  let stagedCloneScript: string | null = null;
   try {
     // Direct provider tokens retain the established off-manifest per-exec seed.
     // Smart-Git broker bearers take a stricter path: stage opaque bytes through
@@ -12269,9 +12910,19 @@ export async function runRepositoryCloneHook(
       stagedBrokerSeeds.staged,
       options,
     );
-    const command = sandboxGitProvisioningCommand(
+    let command = sandboxGitProvisioningCommand(
       seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand,
     );
+    // SDK setup also wraps run-as commands and cancellation can expand them.
+    // Reuse the bounded script transport instead of sending the whole clone
+    // program through those nested shell arguments.
+    if (Buffer.byteLength(command, "utf8") > RIG_SETUP_INLINE_COMMAND_MAX_BYTES) {
+      stagedCloneScript = await stageRigSetupScript(session, command, context, {
+        payloadRoot: "/tmp/opengeni/repository-setup-payloads",
+        label: "Repository setup payload staging",
+      });
+      command = `exec /bin/sh ${shellQuote(stagedCloneScript)}`;
+    }
     const result = await runSandboxLifecycleCommand(
       session,
       {
@@ -12311,6 +12962,19 @@ export async function runRepositoryCloneHook(
     });
     throw error;
   } finally {
+    if (stagedCloneScript) {
+      await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: `rm -f ${shellQuote(stagedCloneScript)} ${shellQuote(`${stagedCloneScript}.b64`)}`,
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 1_000,
+        },
+        context.commandRunner,
+      ).catch(() => undefined);
+    }
     if (stagedBrokerSeeds.editor) {
       await cleanupStagedGitCredentialSeeds(stagedBrokerSeeds.editor, stagedBrokerSeeds.staged);
     }

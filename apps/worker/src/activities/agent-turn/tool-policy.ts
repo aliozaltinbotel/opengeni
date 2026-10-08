@@ -2,8 +2,11 @@ import {
   desktopCapableBackend,
   type ComputerToolMode,
   type LazyToolTransport,
+  type OpenGeniRuntime,
 } from "@opengeni/runtime";
+import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import {
+  configuredModelForAcceptedTurnExecutionPolicy,
   isDirectOpenAiApiBaseUrl,
   type ModelProviderApi,
   type ResolvedModelProvider,
@@ -126,10 +129,44 @@ function modelAcceptsTextVerbosity(upstreamModelId: string): boolean {
 }
 
 /**
- * Progressive tool disclosure is universal for supported OpenGeni turns; only
+ * Ask supported reasoning Responses routes for their provider-selected summary
+ * format. This is public summary text, never private or encrypted reasoning.
+ * Codex and unverified compatible wires retain the existing detailed setting.
+ */
+export function reasoningSummaryForTurn(
+  resolvedModel: {
+    provider: {
+      id: string;
+      api: ModelProviderApi;
+      wireProfile: "openai" | "azure-openai";
+      builtin: boolean;
+      baseUrl?: string | undefined;
+    };
+    configured: {
+      upstreamModelId: string;
+      capabilities: { reasoning: { runnable: boolean } };
+    };
+  } | null,
+): "auto" | undefined {
+  if (
+    resolvedModel?.provider.api !== "responses" ||
+    !resolvedModel.configured.capabilities.reasoning.runnable ||
+    !modelAcceptsTextVerbosity(resolvedModel.configured.upstreamModelId)
+  ) {
+    return undefined;
+  }
+  const provider = resolvedModel.provider;
+  return provider.wireProfile === "azure-openai" ||
+    (provider.builtin && provider.id === "openai" && isDirectOpenAiApiBaseUrl(provider.baseUrl))
+    ? "auto"
+    : undefined;
+}
+
+/**
+ * Progressive tool disclosure is universal for supported Opengeni turns; only
  * its contained transport differs. Codex keeps its native path, built-in direct
  * OpenAI/Azure Responses use native client tool search, and every other ordinary
- * function-calling provider uses OpenGeni's stable search/invoke dispatcher.
+ * function-calling provider uses Opengeni's stable search/invoke dispatcher.
  */
 export function lazyToolTransportForTurn(
   resolvedModel: {
@@ -172,6 +209,28 @@ export function shouldDeferNonEagerToolPreparation(args: {
     args.triggerKind === "next" &&
     (args.triggerType === "user.message" || args.triggerType === "system.update.delivered"),
   );
+}
+
+/**
+ * Resolve the provider routing/gating shape for an accepted turn. The current
+ * definition is projected back onto the verified frozen policy: a turn
+ * accepted before hosted web search was enabled keeps its frozen tool set on
+ * every recovery attempt (stable tool prefix, exact accepted definition); the
+ * next accepted logical turn resolves the newly enabled tool.
+ */
+export function resolveAcceptedTurnModel(
+  runtime: Pick<OpenGeniRuntime, "resolveTurnModel">,
+  settings: Settings,
+  policy: TurnExecutionPolicyV1,
+): ReturnType<OpenGeniRuntime["resolveTurnModel"]> {
+  const current = runtime.resolveTurnModel(settings, policy.productModelId);
+  if (!current) return null;
+  const configured = configuredModelForAcceptedTurnExecutionPolicy(
+    current.configured,
+    current.provider,
+    policy,
+  );
+  return configured === current.configured ? current : { ...current, configured };
 }
 
 /**
@@ -260,12 +319,8 @@ export function modelAttachmentInputPolicyForTurn(
     };
   } | null,
 ): ModelAttachmentInputPolicy {
-  const typedTransport =
-    resolvedModel === null ||
-    resolvedModel.provider.api === "responses" ||
-    resolvedModel.provider.api === "anthropic-messages";
   return {
-    supportsImageInput: typedTransport && modelSupportsImageInputForTurn(resolvedModel),
+    supportsImageInput: modelSupportsImageInputForTurn(resolvedModel),
     inputFileMediaTypes: [],
   };
 }

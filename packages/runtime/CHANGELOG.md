@@ -1,5 +1,492 @@
 # @opengeni/runtime
 
+## 1.4.4
+
+### Patch Changes
+
+- 62e718d: A yielded shell command whose last step is a bare interactive shell (for example `bash --noprofile --norc`) now stays turn-scoped and is stopped when the turn ends. It is no longer adopted as a session background command that keeps the sandbox busy indefinitely.
+- Updated dependencies [6384dbd]
+- Updated dependencies [2edfa4c]
+  - @opengeni/contracts@1.4.4
+  - @opengeni/sdk@1.4.4
+  - @opengeni/observability@1.4.4
+  - @opengeni/capabilities@1.4.4
+  - @opengeni/codemode@1.4.4
+  - @opengeni/codex@1.4.4
+  - @opengeni/config@1.4.4
+  - @opengeni/tool-gateway@1.4.4
+  - @opengeni/agent-proto@1.4.4
+  - @opengeni/network@1.4.4
+  - @opengeni/xai-subscription@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- 19a16ef: Malformed `apply_patch` arguments no longer stall a session on a human approval. The function `apply_patch` used on Chat Completions and Codex function transports now carries a static never-approval policy, so unparseable arguments return the ordinary model-visible parse error and the model can retry. An argument object without a recognized patch field returns a corrective error naming the expected shape. The tool now presents one required string field, `patch`, with a format description and example; the legacy structured and tuple forms are still accepted.
+- 63c7473: A tool call whose model-emitted arguments are not a JSON object (truncated output, a leaked provider control token) no longer poisons the session. Model requests now replay such a call with its arguments wrapped request-locally as `{"_invalid_arguments": "<raw text, bounded to 4,000 characters>"}` on the Chat Completions, Responses, and Claude wires. Before, Chat Completions providers rejected every later request with "function.arguments must be valid JSON". Canonical history keeps the exact text, and the wrapper is deterministic, so prompt caching stays stable.
+- 1a05862: A model stream that stalls mid-response no longer leaves a turn `running` indefinitely. Generic OpenAI-compatible streams (built-in OpenAI/Azure and registry chat/responses providers) now fail after 5 minutes without a response byte, or 10 minutes of keepalive-only traffic without model progress, measured only while the consumer is waiting. Both reset on activity and are configurable (`OPENGENI_MODEL_STREAM_IDLE_TIMEOUT_MS`, `OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS`, or per registry provider `streamIdleTimeoutMs` / `streamProgressTimeoutMs`). The stall, and a fetch-layer "The operation timed out." error, now classify as retryable provider failures, so the same turn recovers within the existing finite five-attempt budget instead of failing terminally.
+- Updated dependencies [1a05862]
+- Updated dependencies [c0c0f74]
+  - @opengeni/config@1.4.3
+  - @opengeni/sdk@1.4.3
+  - @opengeni/codemode@1.4.3
+  - @opengeni/agent-proto@1.4.3
+  - @opengeni/capabilities@1.4.3
+  - @opengeni/codex@1.4.3
+  - @opengeni/contracts@1.4.3
+  - @opengeni/network@1.4.3
+  - @opengeni/observability@1.4.3
+  - @opengeni/tool-gateway@1.4.3
+  - @opengeni/xai-subscription@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/agent-proto@1.4.2
+- @opengeni/capabilities@1.4.2
+- @opengeni/codemode@1.4.2
+- @opengeni/codex@1.4.2
+- @opengeni/config@1.4.2
+- @opengeni/contracts@1.4.2
+- @opengeni/network@1.4.2
+- @opengeni/observability@1.4.2
+- @opengeni/sdk@1.4.2
+- @opengeni/tool-gateway@1.4.2
+- @opengeni/xai-subscription@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 82cd591: Gemini upstream models (any OpenAI-compatible route, e.g. Vercel AI Gateway to Vertex) no longer fail a turn with `400 The referenced name ... in function_response.response does not match to a display_name` when a JSON tool result contains a `$ref` key, such as the parameter schemas returned by `tool_search`. The request-local provider view renames those object keys to `_$ref`; durable history is unchanged.
+- d14de0c: The Modal orphan sweep now reports what it reconciled: running Modal boxes, boxes running without a live lease, and live leases whose box is gone. The worker publishes these as `opengeni_modal_sandbox_inventory{state}`, and Modal deployments alert when unleased boxes or lease-less instances persist for 15 minutes, or when the sweep stops completing a full listing.
+- 55bddfe: A `write_stdin` poll that races the reaper's settlement of an exited background command now returns the durable exit result instead of failing the turn with `sandbox_mutation_output_rejected`. The provider call is still made once and never replayed, and its output stays rejected.
+- Updated dependencies [fe1f64d]
+- Updated dependencies [9145bad]
+- Updated dependencies [be95071]
+- Updated dependencies [1f112d5]
+- Updated dependencies [784e862]
+- Updated dependencies [f290348]
+- Updated dependencies [e852eb7]
+  - @opengeni/codemode@1.4.1
+  - @opengeni/contracts@1.4.1
+  - @opengeni/sdk@1.4.1
+  - @opengeni/config@1.4.1
+  - @opengeni/capabilities@1.4.1
+  - @opengeni/codex@1.4.1
+  - @opengeni/observability@1.4.1
+  - @opengeni/tool-gateway@1.4.1
+  - @opengeni/agent-proto@1.4.1
+  - @opengeni/network@1.4.1
+  - @opengeni/xai-subscription@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 673bb53: Add provider-agnostic web search. When a deployment names a search provider (TinyFish, Exa, Tavily, Firecrawl, Brave, Jina, or self-hosted SearXNG), models without hosted search receive `web_search` and `web_fetch` tools; hosted search stays the default where it exists, and `replace` mode can swap it. Priced calls are credit-billed at provider cost plus 5%. Off until configured.
+
+### Patch Changes
+
+- 664eabf: Stop offering features whose backend this deployment does not run. The new `OPENGENI_ARTIFACT_MATERIALIZER_DEPLOYED` setting (default `false`; Helm sets it from `artifactMaterializer.enabled`) removes `editable_artifact_export` and `editable_artifact_export_status` from the first-party tool ceiling when no materializer drains export jobs, and an explicit session request for them is dropped rather than rejected. The Gmail bridge offers `watch_mailbox` only when `OPENGENI_GMAIL_WATCH_TOPIC_NAME` is set.
+- 48c5eec: Send an MCP tool result's payload to the model once. A plain text block that only repeats `structuredContent` as JSON is omitted from the model-facing result; prose, differing text, and non-text blocks are kept, and the durable tool-output event keeps the exact result.
+- 08ce841: `ogtool call` prints a tool result's payload once: a text block that only repeats `structuredContent` as JSON is omitted, and `--full` prints the exact result. The rule is exported from `@opengeni/contracts` as `omitStructuredContentTextDuplicates` and is shared with the runtime's model-facing MCP projection and the native Connected Machine client.
+- 92a5024: Preserve readable reasoning when switching model API families without sending foreign signatures or ciphertext, and retain structured Chat reasoning details through streaming, persistence and tool continuation.
+- ee1c07e: Checkpoint programmatic approvals with no pending SDK calls without serializing the full conversation history.
+- 5451b38: Distinguish an exact committed sandbox mutation receipt from rejection of its output after authority changes. Preserve the non-retryable typed failure through SDK tools and stop later dispatches in the same invocation without hiding uncertain batch items. Missing, mismatched, rolled-back, and caller-owned transaction receipts remain unknown; existing history and recovery authority are unchanged.
+- Updated dependencies [bd9521c]
+- Updated dependencies [5a0c6f3]
+- Updated dependencies [e0ccba8]
+- Updated dependencies [8e11301]
+- Updated dependencies [664eabf]
+- Updated dependencies [ef0f1c8]
+- Updated dependencies [08ce841]
+- Updated dependencies [673bb53]
+- Updated dependencies [e01662a]
+- Updated dependencies [2a65d6e]
+  - @opengeni/contracts@1.4.0
+  - @opengeni/sdk@1.4.0
+  - @opengeni/config@1.4.0
+  - @opengeni/capabilities@1.4.0
+  - @opengeni/codemode@1.4.0
+  - @opengeni/codex@1.4.0
+  - @opengeni/observability@1.4.0
+  - @opengeni/tool-gateway@1.4.0
+  - @opengeni/agent-proto@1.4.0
+  - @opengeni/network@1.4.0
+  - @opengeni/xai-subscription@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- 62006f1: Preserve image attachments and tool image results on image-capable Chat Completions models, omit response-only metadata from replayed assistant content, and explicitly request Claude thinking summaries.
+- fd4346c: Preserve Chat Completions reasoning across streamed and non-streamed replies, tool continuations, and saved history. Surface streamed reasoning in the thinking timeline and keep response-only metadata out of follow-up text blocks.
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+- 757a7e4: Preserve Chat reasoning as historical assistant context when switching to Responses or native Claude, and prevent Chat reply metadata from leaking into Responses text blocks and tool calls.
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [414d416]
+  - @opengeni/contracts@1.3.0
+  - @opengeni/capabilities@1.3.0
+  - @opengeni/codemode@1.3.0
+  - @opengeni/observability@1.3.0
+  - @opengeni/sdk@1.3.0
+  - @opengeni/tool-gateway@1.3.0
+  - @opengeni/codex@1.3.0
+  - @opengeni/config@1.3.0
+  - @opengeni/agent-proto@1.3.0
+  - @opengeni/network@1.3.0
+  - @opengeni/xai-subscription@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/sdk@1.2.0
+  - @opengeni/config@1.2.0
+  - @opengeni/contracts@1.2.0
+  - @opengeni/codemode@1.2.0
+  - @opengeni/codex@1.2.0
+  - @opengeni/observability@1.2.0
+  - @opengeni/tool-gateway@1.2.0
+  - @opengeni/agent-proto@1.2.0
+  - @opengeni/capabilities@1.2.0
+  - @opengeni/network@1.2.0
+  - @opengeni/xai-subscription@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- 5fd6c55: A session whose agent starts from `capabilities: "none"` no longer receives the
+  bundled Opengeni guides (`opengeni-help`, `opengeni-client`, ...) when
+  `bundledSkillIds` is omitted; an explicit list still opts in exactly, and
+  `"all"` or legacy configurations keep the bundled defaults. Session create
+  freezes the empty selection so the record, replay, and children agree.
+
+  `command_read` and `command_wait` are now owned by attached compute
+  (`FIRST_PARTY_MCP_TOOL_CAPABILITIES` reports `"sandbox"`) and are attached, and
+  listed in `effectiveTools`, only when a managed sandbox or Connected Machine is
+  attached to the turn. `wait_for_input` and `set_session_title` are unchanged.
+  New exports: `AgentFirstPartyToolOwner`, `isDerivedAgentToolOwner`,
+  `AGENT_SANDBOX_MECHANIC_TOOL_NAMES`, `bundledSkillSelectionForAgentConfig`, and
+  the `sandboxAttached` tool-environment flag.
+
+- Updated dependencies [5fd6c55]
+- Updated dependencies [c600e3a]
+- Updated dependencies [411b3b5]
+- Updated dependencies [4d5053f]
+- Updated dependencies [208dec1]
+- Updated dependencies [4cd01cd]
+  - @opengeni/contracts@1.1.0
+  - @opengeni/sdk@1.1.0
+  - @opengeni/config@1.1.0
+  - @opengeni/codemode@1.1.0
+  - @opengeni/codex@1.1.0
+  - @opengeni/observability@1.1.0
+  - @opengeni/tool-gateway@1.1.0
+  - @opengeni/agent-proto@1.1.0
+  - @opengeni/capabilities@1.1.0
+  - @opengeni/network@1.1.0
+  - @opengeni/xai-subscription@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- 6fccfa0: Release completed Connected Machine command output once its exact tool result is
+  durable, instead of retaining it until a long turn ends. Preserve parallel and
+  background output ownership, and allow failed final acknowledgements to retry.
+  Persist independent background output custody after verified PostgreSQL capture,
+  then reconcile release on its original connection even after worker loss.
+- Updated dependencies [43da85e]
+- Updated dependencies [4476ca7]
+- Updated dependencies [f9e33b5]
+- Updated dependencies [e16aa17]
+- Updated dependencies [cbe4357]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/contracts@1.0.1
+  - @opengeni/observability@1.0.1
+  - @opengeni/codemode@1.0.1
+  - @opengeni/codex@1.0.1
+  - @opengeni/config@1.0.1
+  - @opengeni/tool-gateway@1.0.1
+  - @opengeni/agent-proto@1.0.1
+  - @opengeni/capabilities@1.0.1
+  - @opengeni/network@1.0.1
+  - @opengeni/xai-subscription@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 4.8.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+  - @opengeni/codemode@0.7.2
+
+## 4.8.0
+
+### Minor Changes
+
+- a651f55: Complete the reviewed Gmail tool surface under the existing OAuth scopes: exact attachment and original message downloads, individual message search, draft updates/deletion, label lifecycle, atomic and batch organization, trash/restore, imports, history, optional operator-configured watches and settings reads. Bind draft sends and workspace-file attachment inputs to reviewed hashes, preserve MIME metadata and report bounded body projections explicitly.
+
+### Patch Changes
+
+- aa41b15: Use hosted Atlassian MCP for Jira and Confluence agent access. Retire native API tools and Knowledge sync admission while preserving historical wire types, encrypted grants, imported Documents and cleanup paths. Existing native schedules no longer fetch provider content; pending authorization attempts settle without exchanging a native grant. Google Drive integration is unchanged.
+- 981ba72: Allow automation and session startup with an empty first-party permission ceiling without minting a delegated token or connecting to OpenGeni MCP. Preserve host-owned adapters, independent connection credentials, and existing nonempty permission behavior; requested first-party capabilities without authority remain unavailable.
+- fe2aa8c: Batch ordinary agent messages with compatible pending results when their originating turns have the same human and frozen access settings. Preserve each update's lineage and separate different access, unresolved origins, and Steer commands. Clarify that a child session's final answer is automatically delivered to its parent.
+- b710f5e: Recover an active managed Chromium working directory through the existing authorized controller lifecycle after restart. Preserve profile data and accepted operation receipts; retain uncertain launch and cleanup state instead of repeating input or removing unsettled state.
+
+  Attest headless managed Chromium through its exact profile, CDP PID and direct pinned-daemon lineage. Retire both proven processes after recovery and retain cleanup state when predecessor identity is uncertain.
+
+- e103581: Accept long opaque Gmail attachment IDs and retrieve them directly without requiring a match against a newer metadata snapshot. Preserve stable MIME-part selection, bounded inputs and message-scoped provider requests.
+- 2f09c54: Add unified workspace/organization usage and visible-call readers over recorded
+  facts without changing debit or access semantics.
+  Distinguish deleted retained usage from private amounts and expose the prior
+  cache denominator and historical telemetry coverage.
+  Bound successful responses to a 60-second, authorization/visibility-fenced server
+  cache and return an actionable friendly error for statement timeouts.
+- 3395acc: Automatically reuse the existing send credential hook for approval/human-input responses, with atomic write-only MCP header updates and no integration changes.
+- f38dac6: Add a nonactivating, synchronous compiler for the explicit known-ID native fresh-create recipe. Retain the full pre-election origin, stable operation IDs, declared sleep entrypoint and create workdir, pinned SDK defaults, and exact normalized create-JSON correlation.
+
+  Compilation performs no provider, database or configuration I/O and supplies no credential, reservation, dispatch permission, physical receipt or helper-continuation authority. Export the compiler, descriptor and their types passively from `@opengeni/runtime/sandbox`; existing Modal helpers remain unchanged and no production caller is activated.
+
+- 5b809eb: Add a dormant private Modal read-only TLS transport with an explicit credential snapshot, no ambient profile or retries, and callback-joined cancellation and closure. It supplies no host custody, capture or effect authority and has no production caller.
+- 7705d65: Add a passive, issuer-bound preflight descriptor for the exact native Modal readiness Start profile without consuming the prepared handle or changing dispatch behavior.
+- ac20181: Recognize documented OpenAI and Claude spend limits, ramp/overload and safety failures. Keep payment refusals distinct from exhausted credits and unknown Claude stream errors conservative, preserve authoritative HTTP refusals, and honor Azure millisecond retry hints without changing side-effect recovery boundaries.
+- 53b2c83: Use Gmail's message collection endpoint for insertion and verify supported REST routes against the published API discovery contract.
+- 6cdc0aa: Agent configuration is always on. The `OPENGENI_AGENT_CONFIG_ADMISSION_ENABLED` and `OPENGENI_AGENT_CONFIG_DEFAULT_FOR_NEW_SESSIONS` settings are removed: `agent` is admitted on every surface, and a top-level session that omits it resolves to the workspace default or `{ capabilities: "all" }`. The client config still reports `agentConfig.enabled` and `defaultForNewSessions` (deprecated, always `true`).
+- 0fba21e: Schedule messages in existing chats without duplicating execution settings. Default conversational scheduling to the calling chat, add lossless message edits and guarded retargeting, and preserve captured account authority. Improve destination controls, exact prompt retrieval and filtered history paging; remove obsolete deployment guidance.
+- 97d4f07: Require an explicit server-enforced screen grant for managed ComputerSession RFB input. Preserve viewing with pixel-only grants, recheck controller and target authority before forwarding packets, and use canonical frames and actions with older controllers. Desktop viewers default old attachments to view only.
+- 8323e90: Run Slack account MCP tools through a reviewed Web API bridge while preserving OAuth, exact account authority, and tool approvals. Add scope-aware discovery and shared app/workspace request quotas for unlisted pilots. Preserve bot reaction and message tasks under throttled optional context, and remove unavailable generic Real-time Search.
+
+  Migration 0597 requires stopped application processes and matching role provisioning before starting this release.
+
+- f23caa9: Keep inline Claude images within dimension and encoded-byte limits using stable request projections. Preserve original image storage and cached prefixes as conversations gain images.
+- 44d5ee5: Clarify the bundled client Skill's stock-versus-custom appearance guidance: use theme tokens for custom-branded embeds, and keep stock UI free of cosmetic host CSS or token overrides.
+- Updated dependencies [aa41b15]
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [e6036b3]
+- Updated dependencies [395becb]
+- Updated dependencies [a651f55]
+- Updated dependencies [e0d4bd4]
+- Updated dependencies [c7c09fd]
+- Updated dependencies [2f09c54]
+- Updated dependencies [303ed6c]
+- Updated dependencies [9ca494c]
+- Updated dependencies [3cc26b5]
+- Updated dependencies [3395acc]
+- Updated dependencies [18216d2]
+- Updated dependencies [81a5d9d]
+- Updated dependencies [00000d7]
+- Updated dependencies [aa41b15]
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [fa0a9ef]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [b32b5f6]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [1826595]
+- Updated dependencies [b4d1c5b]
+- Updated dependencies [14e95e9]
+- Updated dependencies [8323e90]
+  - @opengeni/contracts@5.8.0
+  - @opengeni/config@3.4.0
+  - @opengeni/sdk@7.8.0
+  - @opengeni/tool-gateway@0.1.20
+  - @opengeni/network@0.3.2
+  - @opengeni/observability@0.8.39
+  - @opengeni/capabilities@0.3.7
+  - @opengeni/codemode@0.7.1
+  - @opengeni/codex@0.2.33
+  - @opengeni/xai-subscription@0.1.6
+
+## 4.7.0
+
+### Minor Changes
+
+- 479ec20: Add the selectable opengeni-schedules bundled Skill for schedule creation. The
+  Schedules chat shortcut keeps setup guidance in the Skill and sends only the
+  user's scheduling request and time zone.
+
+### Patch Changes
+
+- 09289aa: Bound credential-file transfer chunks, quote-heavy path encoding and repeated activation identifiers so cancellation and run-as shell wrappers remain within Modal command argument limits without truncating material, restricting accepted paths or changing generation pruning.
+- 1ac93e3: Admit richer nested MCP tool schemas within a 512 KiB per-definition bound, and allow one such definition plus its disclosure envelope through tool search. Server, aggregate catalog, HTTP response, and tool-result limits remain unchanged.
+- da4ba6f: Expose exact managed browser download discovery and workspace save through attempt-scoped tools and the typed Code Mode facade, retaining existing authority, integrity checks and operation identity.
+- b052ad3: Retain recent system-role conversation inputs during portable and Codex remote compaction, preserving accepted agent-message batches and their frozen goal context within the existing retention budgets.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- d2fe11d: Add capability-gated media instructions and bounded discovery hints so agents can find deferred image tools after an unmatched literal-prefix lookup. Preserve tool-family authorization, approval checks, and deferred schema visibility.
+- 7f70820: Stage large repository setup scripts in bounded chunks and pass run-as command payloads once in provider arguments to stay within Modal's command size limit. Preserve partial Modal output at quiet-stream deadlines without extending retry admission, accept identity-only first-observation receipts without advancing cursors, and reuse captured complete terminal observations after provider handles expire. Commands are never replayed.
+- fb55322: Retain original Modal command observation and cancellation ownership across transport failures without replaying Start or reporting false quiescence.
+- 82b6358: Continue fixed Modal capability and file-visibility probes through transient transport failures by observing their original invocation. Report uncertain retained stdin acknowledgements without encouraging another input write.
+- 9b70b4a: Expose bounded native Modal output bytes and deterministic UTF-8 cursor reduction while preserving the existing decoded read interface.
+- f146f78: Preserve genuine Modal command observation errors through the SDK adapter and prevent incomplete stdout or stderr from being reported as successful output.
+- 1f3e11a: Separate read-only native Modal Start preparation from single-use transport dispatch while preserving existing command-start compatibility and outcome-unknown handling.
+- 91cc03e: Correct native Claude model effort levels and defaults, apply per-model context
+  and output limits, and preserve terminal provider rejections and prompt stream
+  cancellation.
+- 328eaaa: Retain narrow private file staging and cleanup on the exact resolved provider during routed workspace imports, including providers that transfer bytes through stdin instead of a file-writing API.
+- 404854d: Let turn cleanup consume exact retained-command terminal proof committed by another worker, including when the original control transport hangs. Drain the worker gracefully when finalization stalls so concurrent turns checkpoint and resume without spending their unexpected-worker-death recovery allowance. Keep standalone host exit as a final backstop; bare activity hosts supply the worker drain edge and embedded services own their termination policy.
+- 70af8bb: Fence subscription lease renewal against expired ownership under lock contention. Share account selection and worker lease deadlines between subscription providers. Preserve Claude model-specific quota evidence and exact dispatched-token identity through concurrent responses, refreshes and delayed finalization.
+- 103faae: Reuse subscription account lifecycle and table definitions while retaining existing SuperGrok behavior. Bind Claude response observations to the immutable credential receipt prepared with each physical request.
+- Updated dependencies [12ef019]
+- Updated dependencies [7798558]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [697263e]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [c60d38a]
+- Updated dependencies [4a63d4f]
+- Updated dependencies [91cc03e]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [131eda2]
+- Updated dependencies [cbb3e36]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [70af8bb]
+- Updated dependencies [3a921bf]
+  - @opengeni/contracts@5.7.0
+  - @opengeni/sdk@7.7.0
+  - @opengeni/codemode@0.7.0
+  - @opengeni/config@3.3.0
+  - @opengeni/capabilities@0.3.6
+  - @opengeni/observability@0.8.38
+  - @opengeni/codex@0.2.32
+  - @opengeni/tool-gateway@0.1.19
+
+## 4.6.0
+
+### Minor Changes
+
+- 3a688de: Expose `getModalCommandStartInvocation`, `withModalCommandStartSignal`, and the `ModalCommandStartInvocation` type through `@opengeni/runtime/sandbox`, alongside the runtime-owned `ProviderCommandStartOutcomeUnknownError`.
+
+  Add the exported `SandboxSetupOutcomeUnknown` database type, an optional recovery-input flag, and optional details on the existing `admission-blocked` work result to park incomplete sandbox setup without replay.
+
+  In repository builds that apply the pinned Modal SDK patch, recover lost command-start acknowledgements through bounded, cancellable observation of the original invocation. Preserve uncertain setup commands as durable locators without replay or fabricated supervision, and keep failed-create cleanup fenced.
+
+  SDK adoption and cancellation depend on that repository patch. Vanilla npm `modal@0.9.0` does not acquire this behavior merely by installing `@opengeni/runtime`; the runtime's optional own-symbol integration does not require patch-only SDK error exports.
+
+### Patch Changes
+
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+  - @opengeni/codemode@0.6.8
+
+## 4.5.0
+
+### Minor Changes
+
+- e5b0123: Release the developer-setup API-key preset and SDK mirror with its credential ceiling preserved across sessions, delegated tools, automations and scheduled runs. Include the scheduled setup-policy identity migration and the bundled skills-only developer setup guide.
+
+### Patch Changes
+
+- e5b0123: Preserve genuine non-dispatch proof when Modal readiness task or router-access preparation fails, without granting replay authority to cancelled or late readiness replies.
+- Updated dependencies [e5b0123]
+- Updated dependencies [4762e1a]
+  - @opengeni/contracts@5.6.0
+  - @opengeni/sdk@7.6.0
+  - @opengeni/codemode@0.6.7
+  - @opengeni/codex@0.2.31
+  - @opengeni/config@3.2.1
+  - @opengeni/observability@0.8.37
+  - @opengeni/tool-gateway@0.1.18
+
+## 4.4.0
+
+### Minor Changes
+
+- f874217: Make browser sign-in the default Claude subscription connection flow, with profile access for current usage/reset times and encrypted automatic token renewal. Reuse native workspace/organization connection ownership and access policy, bind one-use PKCE attempts to the human/browser/current generation, and preserve original model-request bindings across token renewal. Keep inference-only setup tokens as a clearly labelled fallback, and send JSON for browser usage-refresh mutations.
+
+### Patch Changes
+
+- c8830e0: Keep verified managed Codemode client installations usable when non-secret staging cleanup fails, and preserve original delivery failures without wrapping or replaying them.
+- 0bbe2e7: Point the bundled `opengeni-help` and `opengeni-client` guides at the new public "Embed manually" page (`https://docs.opengeni.ai/embed-manually.md`) instead of the retired "Integrate your product" page.
+- c7bb6f1: Stop deterministic goal retries for terminal or unavailable-model sessions,
+  preserve frozen connector authority through voice delegation and handoff, and
+  request advertised OAuth offline access for generic native MCP connections.
+  Distinguish MCP teardown warnings from connection failures in safe telemetry.
+
+  Freeze initial-turn connector accounts against executable workspace defaults,
+  matching follow-up admission while preserving explicit selections and exclusions.
+
+  Validate scheduled generated sessions against the full accepted agent
+  configuration and instruction alias during queued recovery.
+
+- 79f4635: Fix Mac browser text replacement by sending Chromium's select-all editing command, including explicit Command+A. Attached Chrome retains its connected machine's keyboard platform. Empty fills and Unicode replacements use normal browser input events and existing outcome verification.
+- f26c4f5: Recover transient Modal sandbox readiness failures before command dispatch and observe uncertain probe starts without replay.
+- 665e849: Exclude connection-backed MCP servers from credential-provider targeting and
+  header application, including historical turns without account-binding snapshots.
+  Native connection authentication and attribution cannot be replaced by provider
+  credentials, and native-denied targets are not disclosed to the provider.
+- 45d1301: Preserve bounded exact OpenAI/Azure streamed failure diagnostics separately from safe error messages, and classify provider terminal codes for existing bounded same-turn recovery. Invalid requests, safety refusals, and unknown terminal codes remain non-retryable; Codex and SuperGrok keep their transport-owned behavior.
+- 45d1301: Keep streamed safety diagnostics terminal even under server-error codes, recognize bounded diagnostic-only context overflows for compaction, and retain HTTP Retry-After evidence on yielded Responses failures so long quota waits do not enter automatic recovery.
+- 45d1301: Clarify that goal completion records ledger proof, not the user-facing answer, including when late child results arrive after completion.
+- 45d1301: Project structured developer/system text into Chat-native history without mutating canonical messages, recognize completed hosted tools for final-reply handoffs across recovery, and keep DB helper imports within the foundation boundary.
+- Updated dependencies [a6ff780]
+- Updated dependencies [6a97313]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [6a97313]
+- Updated dependencies [45d1301]
+- Updated dependencies [45d1301]
+- Updated dependencies [04640d1]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [45d1301]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [45d1301]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [6a97313]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/contracts@5.5.0
+  - @opengeni/agent-proto@0.6.1
+  - @opengeni/capabilities@0.3.5
+  - @opengeni/codex@0.2.30
+  - @opengeni/config@3.2.0
+  - @opengeni/xai-subscription@0.1.5
+  - @opengeni/codemode@0.6.6
+  - @opengeni/observability@0.8.36
+  - @opengeni/tool-gateway@0.1.17
+
 ## 4.3.0
 
 ### Minor Changes

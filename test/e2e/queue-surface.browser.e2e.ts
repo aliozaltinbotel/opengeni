@@ -1172,6 +1172,8 @@ describe("queue surface browser acceptance", () => {
           .analyze();
         expect(menuReport.violations).toEqual([]);
         await page.keyboard.press("Escape");
+        // Radix restores focus after the menu's unmount, on a deferred timer.
+        await trigger.and(page.locator(":focus")).waitFor();
         expect(await trigger.evaluate((element) => document.activeElement === element)).toBe(true);
         expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
         const report = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa"]).analyze();
@@ -1183,7 +1185,34 @@ describe("queue surface browser acceptance", () => {
     }
   }, 60_000);
 
-  test("hostile queue errors stay lossless and bounded at 320px and 200% text", async () => {
+  test("default queue errors use neutral copy and preserve retry behavior", async () => {
+    for (const source of ["queue", "mutation"] as const) {
+      const context = await newBrowserContext({ viewport: { width: 320, height: 800 } });
+      try {
+        const page = await context.newPage();
+        await page.goto(`${baseUrl}/queue.html?count=1&error=${source}&errorShape=multiline`);
+        const message = page.getByRole("region", { name: "Queue error details", exact: true });
+        await message.waitFor();
+        expect(await message.textContent()).toBe("The request could not be completed.");
+        expect(await message.textContent()).not.toContain(queueHarnessError("multiline"));
+        await page
+          .getByRole("button", { name: "Dismiss queue error and retry", exact: true })
+          .click();
+        await page.getByRole("alert").waitFor({ state: "detached" });
+        expect(
+          await page.locator("[data-queue-harness]").evaluate((element) => ({
+            refresh: Number((element as HTMLElement).dataset.refreshCount),
+            clearMutationError: Number((element as HTMLElement).dataset.clearMutationErrorCount),
+          })),
+        ).toEqual({ refresh: 1, clearMutationError: 1 });
+        expect((await pageMetrics(page)).documentOverflow).toBeLessThanOrEqual(1);
+      } finally {
+        await context.close();
+      }
+    }
+  }, 30_000);
+
+  test("host-owned hostile queue errors stay lossless and bounded at 320px and 200% text", async () => {
     const viewport = { width: 320, height: 800 } as const;
     const sources = ["queue", "mutation"] as const satisfies readonly QueueErrorSource[];
     const shapes = ["unbroken", "multiline"] as const satisfies readonly QueueHarnessErrorShape[];
@@ -1205,6 +1234,7 @@ describe("queue surface browser acceptance", () => {
               count: "1",
               error: source,
               errorShape: shape,
+              customError: "1",
               theme,
             });
             await page.goto(`${baseUrl}/queue.html?${search}`, { waitUntil: "networkidle" });

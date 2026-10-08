@@ -4,6 +4,7 @@ import {
   FORCE_RLS_TABLES,
   NON_RLS_RUNTIME_TABLES,
   PROTECTED_NO_DIRECT_DML_TABLES,
+  RUNTIME_ALLOWANCE_PRIVATE_TABLES,
   RUNTIME_DML_TABLES,
   RUNTIME_FULL_DML_TABLES,
   RUNTIME_READ_INSERT_TABLES,
@@ -16,10 +17,13 @@ import {
   RUNTIME_TARGET_SCHEMA_INVOKER_ROUTINES,
   RUNTIME_TARGET_SCHEMA_PUBLIC_POLICY_PREDICATE_ROUTINES,
   SANDBOX_FILE_PUBLICATION_RUNTIME_ROUTINES,
+  ARTIFACT_PIN_RUNTIME_ROUTINES,
   SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES,
+  ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES,
   SLACK_FILE_UPLOAD_OPERATIONS_TABLE,
   type RuntimeDatabasePosture,
   type RuntimeDatabasePostureOptions,
+  type RuntimePrivateTablePosture,
   type RuntimeTablePosture,
 } from "../src/runtime-posture";
 
@@ -271,6 +275,8 @@ function companyProfileAgentAdminAuthorityTables(): RuntimeTablePosture[] {
 function organizationMembershipLifecycleAuthorityTables(): RuntimeTablePosture[] {
   return [
     "api_keys",
+    "organization_api_key_workspaces",
+    "organization_service_accounts",
     "additional_organization_creation_receipts",
     "organization_invitation_binding_events",
     "organization_membership_invitations",
@@ -393,8 +399,8 @@ function safePosture(): RuntimeDatabasePosture {
     ],
     ownedSchemas: [],
     ownedRelations: [],
-    sessionTenancyProductActivationPresent: false,
     sessionVariableSetAttachmentsCutoverPresent: true,
+    claudeSubscriptionPoolActivationPresent: true,
     tables: [
       {
         name: "tenant_rows",
@@ -424,8 +430,56 @@ function safePosture(): RuntimeDatabasePosture {
       ...organizationMembershipLifecycleAuthorityTables(),
       ...organizationPrivateSessionAuthorityTables(),
       ...xaiAuthorityTables(),
+      ...[
+        "usage_allowance_attribution_receipts",
+        "workspace_usage_allowances",
+        "workspace_member_allowances",
+        "workspace_allowance_grants",
+        "workspace_allowance_counters",
+        "workspace_allowance_notifications",
+        "workspace_allowance_periods",
+        "workspace_video_allowance_allocations",
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        rlsEnabled: false,
+        rlsForced: false,
+        rlsActive: false,
+        policyCount: 0,
+        artifactOutboxDispatcherPolicy: false,
+        artifactMaterializerPolicy: false,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      })),
     ],
     privateTables: [
+      {
+        name: "modal_native_origin_read_capabilities",
+        owner: "opengeni_migrator",
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        select: false,
+        insert: false,
+        update: false,
+        delete: false,
+        truncate: false,
+        references: false,
+        trigger: false,
+      },
+      {
+        name: "credit_promotion_policy_revisions",
+        owner: "opengeni_migrator",
+        select: true,
+        insert: false,
+        update: false,
+        delete: false,
+      },
       {
         name: "personal_resource_delegation_capabilities",
         owner: "opengeni_migrator",
@@ -553,6 +607,286 @@ function safePosture(): RuntimeDatabasePosture {
 }
 
 describe("runtime database posture evaluator", () => {
+  test("requires the individual Claude account activation before starting a runtime", () => {
+    const posture = safePosture();
+    posture.claudeSubscriptionPoolActivationPresent = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "database is missing the Claude subscription account activation receipt",
+    );
+  });
+
+  const modelFactCapabilities = [
+    {
+      name: "insights_scoped_usage_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, text, uuid[], boolean)",
+      violation: "Insights unified usage projection is missing or unsafe",
+    },
+    {
+      name: "insights_scoped_calls_rows(uuid, uuid, timestamp with time zone, timestamp with time zone, jsonb, timestamp with time zone, uuid, integer, uuid[], boolean)",
+      violation: "Insights unified visible calls projection is missing or unsafe",
+    },
+    {
+      name: "complete_workspace_insights_usage_projection(uuid, timestamp with time zone, timestamp with time zone, text[])",
+      violation: "Insights complete usage amount projection is missing or unsafe",
+    },
+    {
+      name: "workspace_insights_amount_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+      violation: "Insights amount fact projection is missing or unsafe",
+    },
+    {
+      name: "organization_model_usage_summary(uuid, timestamp with time zone, timestamp with time zone, uuid)",
+      violation: "organization model usage aggregate is missing or unsafe",
+    },
+    {
+      name: "visible_workspace_insights_model_fact_rows(uuid, timestamp with time zone, timestamp with time zone, text, text, uuid, uuid)",
+      violation: "Insights scoped fact projection is missing or unsafe",
+    },
+  ];
+
+  function modelFactPosture(): RuntimeDatabasePosture {
+    const posture = safePosture();
+    posture.tables.push({ ...knowledgeAuthorityTables()[0]!, name: "model_call_facts" });
+    posture.privateRoutines.push(
+      ...modelFactCapabilities.map(({ name }) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+      })),
+    );
+    return posture;
+  }
+
+  test("requires all current model-fact capabilities without changing the frozen old contract", () => {
+    const posture = modelFactPosture();
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    for (const { name, violation } of modelFactCapabilities) {
+      const missing = {
+        ...posture,
+        privateRoutines: posture.privateRoutines.filter((routine) => routine.name !== name),
+      };
+      expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(violation);
+      expect(
+        evaluateRuntimeDatabasePosture(missing, {
+          ...options,
+          modelFactCapabilityRoutines: modelFactCapabilities
+            .filter((capability) => capability.name !== name)
+            .map((capability) => capability.name),
+        }),
+      ).toEqual([]);
+    }
+    posture.privateRoutines = posture.privateRoutines.filter(
+      (routine) => !modelFactCapabilities.some(({ name }) => name === routine.name),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      modelFactCapabilities.map(({ violation }) => violation),
+    );
+    expect(
+      evaluateRuntimeDatabasePosture(posture, { ...options, modelFactCapabilityRoutines: [] }),
+    ).toEqual([]);
+  });
+
+  for (const { name, violation } of modelFactCapabilities) {
+    test(`rejects unsafe or ambiguous ${name} even for an old binary`, () => {
+      for (const unsafe of [
+        { securityDefiner: false },
+        { execute: false },
+        { publicExecute: true },
+        { owner: "another_owner" },
+      ]) {
+        const posture = modelFactPosture();
+        Object.assign(posture.privateRoutines.find((routine) => routine.name === name)!, unsafe);
+        for (const contract of [options, { ...options, modelFactCapabilityRoutines: [] }]) {
+          expect(evaluateRuntimeDatabasePosture(posture, contract)).toContain(violation);
+        }
+      }
+      const ambiguous = modelFactPosture();
+      ambiguous.privateRoutines.push({
+        ...ambiguous.privateRoutines.find((routine) => routine.name === name)!,
+      });
+      expect(evaluateRuntimeDatabasePosture(ambiguous, options)).toContain(violation);
+      expect(
+        evaluateRuntimeDatabasePosture(ambiguous, { ...options, modelFactCapabilityRoutines: [] }),
+      ).toContain(violation);
+    });
+  }
+
+  test("native LIVE-origin helper requires its private exact-read capability with safe owner and no ACLs", () => {
+    const violation = "Native LIVE-origin read capability has unsafe owner, RLS or privileges";
+    for (const unsafe of [
+      { owner: "opengeni_app" },
+      { owner: "other_owner" },
+      { rlsEnabled: false },
+      { rlsForced: false },
+      { rlsActive: false },
+      { select: true },
+      { insert: true },
+      { update: true },
+      { delete: true },
+      { truncate: true },
+      { references: true },
+      { trigger: true },
+    ]) {
+      const posture = safePosture();
+      Object.assign(
+        posture.privateTables.find((t) => t.name === "modal_native_origin_read_capabilities")!,
+        unsafe,
+      );
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(violation);
+    }
+    const missing = safePosture();
+    missing.privateTables = missing.privateTables.filter(
+      (t) => t.name !== "modal_native_origin_read_capabilities",
+    );
+    expect(evaluateRuntimeDatabasePosture(missing, options)).toContain(violation);
+  });
+
+  test("archived import receipts require private FORCE RLS and scoped non-public capabilities", () => {
+    const posture = safePosture();
+    const ledger = {
+      name: "session_import_batches",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 3,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(ledger);
+    for (const name of [
+      "read_archived_session_import_batch(uuid, uuid, uuid, text, text, text)",
+      "record_archived_session_import_batch(uuid, uuid, uuid, text, text, text, text, integer, integer)",
+    ])
+      posture.privateRoutines.push({
+        name,
+        owner: ledger.owner,
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      });
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    ledger.select = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "archived import ledger lacks private same-owner FORCE-RLS isolation",
+    );
+    ledger.select = false;
+    ledger.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "archived import ledger lacks private same-owner FORCE-RLS isolation",
+    );
+    ledger.rlsForced = true;
+    const reader = posture.privateRoutines.at(-2)!;
+    reader.configuration = ["search_path=public, pg_catalog"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      `archived import capability ${reader.name} is missing or unsafe`,
+    );
+    reader.configuration = ["search_path=pg_catalog, public, pg_temp"];
+    reader.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      `archived import capability ${reader.name} is missing or unsafe`,
+    );
+  });
+
+  test("attribution receipts require same-owner FORCE RLS and no public lifecycle execution", () => {
+    const posture = safePosture();
+    const receipt = posture.tables.find(
+      (table) => table.name === "usage_allowance_attribution_receipts",
+    )!;
+    posture.tables = posture.tables.filter((table) => table !== receipt);
+    posture.privateTables.push({
+      ...receipt,
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 2,
+    });
+    const privateReceipt = posture.privateTables.at(-1)!;
+    posture.privateTables.push({ ...privateReceipt, name: "workspace_usage_allowances" });
+    const lifecycle = posture.targetRoutines.find(
+      (routine) => routine.name === "capture_usage_allowance_attribution()",
+    )!;
+    const receiptOptions = {
+      ...options,
+      protectedTables: ["tenant_rows"],
+    };
+    receipt.rlsEnabled = true;
+    receipt.rlsForced = true;
+    receipt.rlsActive = true;
+    receipt.policyCount = 2;
+    expect(evaluateRuntimeDatabasePosture(posture, receiptOptions)).toEqual([]);
+    privateReceipt.rlsForced = false;
+    lifecycle.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, receiptOptions)).toEqual(
+      expect.arrayContaining([
+        "usage allowance attribution receipts lack same-owner FORCE-RLS isolation",
+        "PUBLIC has forbidden owner-internal helper capture_usage_allowance_attribution()",
+      ]),
+    );
+  });
+  test("video refund reversal remains a same-owner non-public internal helper", () => {
+    const posture = safePosture();
+    const routine = posture.targetRoutines.find(
+      (r) => r.name === "reverse_video_allowance_refund()",
+    );
+    expect(routine).toBeDefined();
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    routine!.execute = true;
+    routine!.publicExecute = true;
+    routine!.owner = "wrong_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "runtime role has forbidden owner-internal helper reverse_video_allowance_refund()",
+        ),
+        expect.stringContaining(
+          "PUBLIC has forbidden owner-internal helper reverse_video_allowance_refund()",
+        ),
+        expect.stringContaining("helper reverse_video_allowance_refund() owner wrong_owner"),
+      ]),
+    );
+  });
+
+  test("usage allowance capability rejects direct runtime access and split lifecycle ownership", () => {
+    const posture = safePosture();
+    posture.privateTables.push({
+      name: "usage_allowance_capabilities",
+      owner: "opengeni_migrator",
+      rlsEnabled: false,
+      rlsForced: false,
+      rlsActive: false,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    });
+    const capability = posture.privateTables.at(-1)!;
+    for (const name of RUNTIME_ALLOWANCE_PRIVATE_TABLES) {
+      posture.privateTables.push({
+        ...capability,
+        name,
+        rlsEnabled: true,
+        rlsForced: true,
+        rlsActive: true,
+        policyCount: 1,
+      });
+    }
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    capability.insert = true;
+    posture.targetRoutines.find((r) => r.name === "usage_allowance_command(jsonb)")!.owner =
+      "wrong_owner";
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining(
+          "usage allowance capability has unsafe owner or direct runtime privileges",
+        ),
+        expect.stringContaining("allowance authority owners do not match"),
+      ]),
+    );
+  });
   test("organization usage read capability forbids direct runtime DML and PUBLIC execution", () => {
     const posture = safePosture();
     posture.tables.push({
@@ -589,6 +923,65 @@ describe("runtime database posture evaluator", () => {
     routine.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
       "organization usage aggregate capability is missing or unsafe",
+    );
+  });
+
+  test("private pin capabilities preserve rolling inventory and require safe EXECUTE-only authority", () => {
+    const posture = safePosture();
+    const table: RuntimePrivateTablePosture = {
+      name: "artifact_catalog_pins",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...ARTIFACT_PIN_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("artifact_catalog_pins");
+    expect(RUNTIME_TABLE_PRIVILEGES.artifact_catalog_pins).toBeUndefined();
+    for (const privilege of [
+      "select",
+      "insert",
+      "update",
+      "delete",
+      "truncate",
+      "references",
+      "trigger",
+    ] as const) {
+      table[privilege] = true;
+      expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+        "runtime role has forbidden direct artifact pin authority",
+      );
+      table[privilege] = false;
+    }
+    table.extraPrivileges = ["MAINTAIN"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct artifact pin authority",
+    );
+    table.extraPrivileges = [];
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "artifact pin relation lacks active FORCE-RLS workspace isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.configuration = ["search_path=public"];
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "artifact pin capability list_sandbox_file_publications_pinned(uuid, uuid, jsonb) is missing or unsafe",
     );
   });
 
@@ -705,6 +1098,7 @@ describe("runtime database posture evaluator", () => {
       delete: false,
     };
     posture.privateTables.push(table);
+    posture.privateTables.push({ ...table, name: "organization_slack_bot_access" });
     posture.privateRoutines.push(
       ...SCHEDULED_SLACK_BOT_MESSAGE_RUNTIME_ROUTINES.map((name) => ({
         name,
@@ -729,7 +1123,50 @@ describe("runtime database posture evaluator", () => {
     table.rlsForced = true;
     posture.privateRoutines.at(-1)!.publicExecute = true;
     expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "scheduled Slack bot message capability read_scheduled_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
+      "scheduled Slack bot message capability read_organization_slack_bot_message(uuid, uuid, uuid, uuid) is missing or unsafe",
+    );
+  });
+
+  test("organization signup use cases stay behind their record capability", () => {
+    const posture = safePosture();
+    const table = {
+      name: "organization_signup_use_cases",
+      owner: "opengeni_migrator",
+      rlsEnabled: true,
+      rlsForced: true,
+      rlsActive: true,
+      policyCount: 1,
+      select: false,
+      insert: false,
+      update: false,
+      delete: false,
+    };
+    posture.privateTables.push(table);
+    posture.privateRoutines.push(
+      ...ORGANIZATION_SIGNUP_USE_CASE_RUNTIME_ROUTINES.map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: true,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, pg_temp"],
+      })),
+    );
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
+    expect(FORCE_RLS_TABLES as readonly string[]).not.toContain("organization_signup_use_cases");
+    table.select = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "runtime role has forbidden direct organization signup use case authority",
+    );
+    table.select = false;
+    table.rlsForced = false;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization signup use case relation lacks active FORCE-RLS isolation",
+    );
+    table.rlsForced = true;
+    posture.privateRoutines.at(-1)!.publicExecute = true;
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
+      "organization signup use case capability record_organization_signup_use_case(uuid, text, text) is missing or unsafe",
     );
   });
 
@@ -795,26 +1232,26 @@ describe("runtime database posture evaluator", () => {
         ).length;
       const contracts = hasCurrentMainActivityLedger
         ? ([
-            [FORCE_RLS_TABLES, 322],
+            [FORCE_RLS_TABLES, 339],
             [NON_RLS_RUNTIME_TABLES, 19],
-            [RUNTIME_FULL_DML_TABLES, 163],
+            [RUNTIME_FULL_DML_TABLES, 179],
             [RUNTIME_READ_ONLY_TABLES, 26],
             [readUpdateTables, 1],
-            [RUNTIME_READ_INSERT_TABLES, 46],
+            [RUNTIME_READ_INSERT_TABLES, 47],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 33],
             [PROTECTED_NO_DIRECT_DML_TABLES, 72],
-            [RUNTIME_DML_TABLES, 269],
+            [RUNTIME_DML_TABLES, 286],
           ] as const)
         : ([
-            [FORCE_RLS_TABLES, 206],
+            [FORCE_RLS_TABLES, 223],
             [NON_RLS_RUNTIME_TABLES, 12],
-            [RUNTIME_FULL_DML_TABLES, 120],
+            [RUNTIME_FULL_DML_TABLES, 136],
             [RUNTIME_READ_ONLY_TABLES, 18],
             [readUpdateTables, 0],
-            [RUNTIME_READ_INSERT_TABLES, 38],
+            [RUNTIME_READ_INSERT_TABLES, 39],
             [RUNTIME_READ_INSERT_UPDATE_TABLES, 12],
             [PROTECTED_NO_DIRECT_DML_TABLES, 30],
-            [RUNTIME_DML_TABLES, 188],
+            [RUNTIME_DML_TABLES, 205],
           ] as const);
       for (const [tables, length] of contracts) {
         // Nine additive embedding tables: three full-DML, four append-only,
@@ -834,7 +1271,15 @@ describe("runtime database posture evaluator", () => {
                       ? 8
                       : 0;
         const expectedLength =
-          // 0542 adds three organization integration tables.
+          // Individual Claude accounts share the six subscription runtime tables;
+          // the organization key scope join and service accounts add two more.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 8
+            : 0) +
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 8 : 0) +
+          // 0546 adds three organization integration tables.
           (tables === FORCE_RLS_TABLES ||
           tables === RUNTIME_FULL_DML_TABLES ||
           tables === RUNTIME_DML_TABLES
@@ -874,7 +1319,19 @@ describe("runtime database posture evaluator", () => {
             : tables === RUNTIME_READ_INSERT_TABLES || tables === RUNTIME_READ_INSERT_UPDATE_TABLES
               ? 1
               : 0) +
-          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 12 : 0) +
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 4 : 0) +
+          // Content-free Slack provider quotas are global and full-DML only.
+          (tables === NON_RLS_RUNTIME_TABLES ||
+          tables === RUNTIME_FULL_DML_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
+          // 0611 adds account-isolated, append-only promotional debit allocations.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           embeddingTableCount +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
@@ -890,7 +1347,23 @@ describe("runtime database posture evaluator", () => {
 
       expect(Object.keys(RUNTIME_TABLE_PRIVILEGES).sort()).toEqual([...RUNTIME_DML_TABLES]);
       const tableCount =
-        (hasCurrentMainActivityLedger ? 341 : 218) + 9 + 12 + 2 + 2 + 2 - 3 + 1 + 1 + 3;
+        (hasCurrentMainActivityLedger ? 341 : 218) +
+        9 +
+        12 +
+        2 +
+        2 +
+        2 -
+        3 +
+        1 +
+        1 +
+        3 +
+        8 +
+        1 +
+        6 +
+        1 +
+        16 + // M2 and M3 runtime-store migrations add sixteen FORCE-RLS tables with explicit runtime DML contracts.
+        1; // Session content blobs: append-only, session-owned.
+      expect(RUNTIME_TABLE_PRIVILEGES.credit_debit_allocations).toEqual(["SELECT", "INSERT"]);
       for (const removed of [
         "workspace_packs",
         "pack_installations",
@@ -940,17 +1413,21 @@ describe("runtime database posture evaluator", () => {
       ]);
       expect(new Set([...RUNTIME_DML_TABLES, ...PROTECTED_NO_DIRECT_DML_TABLES]).size).toBe(
         tableCount +
+          2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
-          organizationRecoveryProtectedTableCount,
+          organizationRecoveryProtectedTableCount -
+          8,
       );
       expect(new Set([...FORCE_RLS_TABLES, ...NON_RLS_RUNTIME_TABLES]).size).toBe(
         tableCount +
+          2 + // 0600 organization key workspace scope join and 0603 service accounts.
           3 +
           personalResourceProtectedTableCount +
           managedAuthSessionSetProtectedTableCount +
-          organizationRecoveryProtectedTableCount,
+          organizationRecoveryProtectedTableCount -
+          8,
       );
       expect(RUNTIME_TABLE_PRIVILEGES.feedback_submissions).toEqual(["SELECT", "INSERT"]);
       expect(RUNTIME_TABLE_PRIVILEGES.memory_slack_publication_configurations).toEqual([
@@ -1343,7 +1820,9 @@ describe("runtime database posture evaluator", () => {
 
   test("enforces the exact personal-resource private capability boundary", () => {
     const posture = safePosture();
-    const capabilityTable = posture.privateTables[0]!;
+    const capabilityTable = posture.privateTables.find(
+      (table) => table.name === "personal_resource_delegation_capabilities",
+    )!;
     const capabilityRoutine = posture.privateRoutines.find(
       (routine) => routine.name === "personal_resource_delegation_capability_active(text)",
     )!;
@@ -2291,18 +2770,17 @@ describe("runtime database posture evaluator", () => {
     ).toEqual([]);
   });
 
-  test("fails closed when durable session-tenancy activation outlives the deployment switch", () => {
+  test("session-tenancy activation is universal and no longer has a startup interlock", () => {
+    // Migration 0611 retired OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED:
+    // neither the posture shape nor its options carry an activation switch.
     const posture = safePosture();
-    posture.sessionTenancyProductActivationPresent = true;
-    expect(evaluateRuntimeDatabasePosture(posture, options)).toContain(
-      "session-tenancy product activation is durable but OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is not true",
-    );
+    expect(posture).not.toHaveProperty("sessionTenancyProductActivationPresent");
+    expect(evaluateRuntimeDatabasePosture(posture, options)).toEqual([]);
     expect(
-      evaluateRuntimeDatabasePosture(posture, {
-        ...options,
-        organizationTenancyCanonicalActivationEnabled: true,
-      }),
-    ).toEqual([]);
+      evaluateRuntimeDatabasePosture(posture, options).some((violation) =>
+        violation.includes("ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED"),
+      ),
+    ).toBe(false);
   });
 
   test("rejects runtime or PUBLIC execution of the owner-internal quiescence helper", () => {

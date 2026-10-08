@@ -7,12 +7,19 @@ import {
   type ConnectInstallationTarget,
   type ConnectAttempt,
 } from "@opengeni/connect";
-import { ConnectSetup, ConnectionLogo } from "@opengeni/react/connect";
+import { ConnectSetup, ConnectionLogo, isOwnerApprovalPending } from "@opengeni/react/connect";
 import "@opengeni/react/connect.css";
 import { Dialog, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { CapabilityDialogContent } from "./detail-dialog";
 import { Button } from "@/components/ui/button";
 import { selectGitHubConnectAccount } from "@/lib/github-connect-account";
+import { recordGitHubInstallRequest } from "@/lib/github-install-request";
+import {
+  beginIntegrationConnect,
+  connectAttemptOutcome,
+  integrationClassFromConnectProvider,
+  type IntegrationConnectTracker,
+} from "@/lib/integration-connect-analytics";
 
 export type NativeConnectRequest = {
   scope: { workspaceId: string; transport: ConnectTransport };
@@ -68,6 +75,20 @@ export function NativeConnectSetup({
   );
   const navigation = useRef<AbortController | null>(null);
   const completedAttempt = useRef<string | null>(null);
+  // Consent-gated connect journey: started when the dialog begins setup,
+  // finished by the attempt's settled state, `abandoned` when closed first.
+  const journey = useRef<IntegrationConnectTracker | null>(null);
+  useEffect(() => {
+    const tracker = beginIntegrationConnect(
+      integrationClassFromConnectProvider(request.providerId),
+      "oauth",
+    );
+    journey.current = tracker;
+    return () => {
+      tracker.finish("abandoned");
+      if (journey.current === tracker) journey.current = null;
+    };
+  }, [request.providerId]);
   useEffect(() => {
     if (request.scope.workspaceId !== workspaceId || request.scope.transport !== transport) {
       setController(null);
@@ -118,6 +139,12 @@ export function NativeConnectSetup({
     if (!controller) return;
     const notify = () => {
       const attempt = controller.getSnapshot().attempt;
+      const outcome = attempt ? connectAttemptOutcome(attempt) : null;
+      if (outcome) journey.current?.finish(outcome);
+      // A non-owner's request: remember it so the GitHub card can say it's
+      // waiting for an owner rather than offering the same dead end again.
+      if (attempt?.providerId === "github-app" && isOwnerApprovalPending(attempt))
+        recordGitHubInstallRequest(attempt.workspaceId);
       if (attempt?.state === "complete" && completedAttempt.current !== attempt.id) {
         completedAttempt.current = attempt.id;
         onComplete(attempt);

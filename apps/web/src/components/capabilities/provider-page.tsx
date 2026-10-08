@@ -5,8 +5,8 @@ import { DetailSection } from "@/components/ui/detail-sheet";
 import { ListRow, RowList } from "@/components/ui/list-row";
 
 /* ----------------------------------------------------------------------------
-   One provider, several ways to use it (Slack: the OpenGeni bot or your own
-   account; Jira & Confluence: knowledge sync or agent tools). The catalog
+   One provider, several ways to use it (Slack: the Opengeni bot or your own
+   account; Jira & Confluence: historical sync accounts or agent tools). The catalog
    shows the provider once; this page asks for the outcome, and each row opens
    that mode's own page (DESIGN.md section 7: the connect page is a list of
    rows, each opening its own step).
@@ -14,7 +14,7 @@ import { ListRow, RowList } from "@/components/ui/list-row";
 
 export type ProviderMode = {
   id: string;
-  /** The outcome, verb first: "Add OpenGeni to Slack". */
+  /** The outcome, verb first: "Add Opengeni to Slack". */
   title: string;
   /** Who it is for and what happens: "Everyone can chat with it in Slack." */
   description: string;
@@ -48,7 +48,11 @@ export function ProviderPage({
     >
       <DetailSection
         title={`How do you want to use ${name}?`}
-        description="You can set up both. Each one is connected separately."
+        description={
+          modes.some((mode) => mode.status === "Retired")
+            ? "Connect agent tools for live access. Previous sync connections can be removed."
+            : "You can set up both. Each one is connected separately."
+        }
       >
         <RowList label={`Ways to use ${name}`} flush>
           {modes.map((mode) => (

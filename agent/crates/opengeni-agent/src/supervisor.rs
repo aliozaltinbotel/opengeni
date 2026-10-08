@@ -508,6 +508,13 @@ impl<P: Platform + 'static> Supervisor<P> {
         self
     }
 
+    /// All ingress transports share one process-wide accepted-work boundary.
+    #[must_use]
+    pub fn with_update_drain(mut self, update_drain: Arc<UpdateDrain>) -> Self {
+        self.update_drain = update_drain;
+        self
+    }
+
     /// A handle that, when [`request`](ShutdownSignal::request)ed, drives a clean
     /// shutdown of the run loop. Wired to SIGINT/SIGTERM by [`crate::run`].
     #[must_use]
@@ -737,10 +744,9 @@ impl<P: Platform + 'static> Supervisor<P> {
         } = match connect {
             Ok(connection) => connection,
             Err(e @ SupervisorError::Authentication(_)) => {
-                // A CLEAR auth denial (not a panic): log it loudly so the operator
-                // knows a re-enroll may be needed, then treat it as a (slow) retry —
-                // a re-enroll can rotate the bearer in place and the next attempt
-                // re-presents it.
+                // Renewal runs independently and the file watcher adopts fresh
+                // credentials. Explicit reconnect is recovery only when the
+                // existing grant/key cannot authorize automatic renewal.
                 let reconnect_command = rejected_bearer_reconnect_command(
                     link.api_url.as_deref(),
                     &link.creds.workspace_id,
@@ -748,7 +754,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 error!(
                     connection_id = %link.connection_id,
                     error = %e,
-                    "control plane rejected the enrollment bearer; run `{reconnect_command}` to replace the rejected credential (the agent will keep retrying in the meantime)"
+                    "control plane rejected the enrollment bearer; automatic renewal and reconnect will retry. If renewal cannot authorize the existing grant, reconnect explicitly with `{reconnect_command}`"
                 );
                 return ConnectionOutcome::Disconnected(e.to_string());
             }
@@ -876,8 +882,8 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
             tokio::select! {
                 biased;
-                // Stop accepting work immediately. Accepted work is cancelled below
-                // before we announce going-offline and return.
+                // Stop accepting work immediately. Generation waiters retire below;
+                // the actual accepted work retains its reservation independently.
                 () = self.link_stop_notified(link) => {
                     break ConnectionOutcome::CleanShutdown;
                 }
@@ -936,10 +942,9 @@ impl<P: Platform + 'static> Supervisor<P> {
             }
         };
 
-        // Reply and op-start handshake tasks belong to this connection
-        // generation. Once it ends, they cannot publish a useful reply. This
-        // count deliberately excludes already-established op-stream jobs: those
-        // detach below, keep running, and replay after the next connection.
+        // This count covers generation waiters, not the accepted workers. Those
+        // workers keep executing and settle on their original client. Established
+        // op-stream jobs also detach and replay after the next connection.
         let generation_bound_tasks = rpc_tasks.len();
         if generation_bound_tasks > 0 {
             let reason = match &outcome {
@@ -1015,15 +1020,16 @@ impl<P: Platform + 'static> Supervisor<P> {
         // The reservation is synchronous with the update fence, before any task
         // can be spawned but not yet visible in the engine's admission counters.
         let upload = crate::uploads::handles(&request);
-        let reservation = if upload
-            || !matches!(
-                &route,
-                Route::Liveness | Route::OpControl | Route::AgentUpdate(_)
-            ) {
+        let reservation = if upload || !matches!(&route, Route::Liveness | Route::AgentUpdate(_)) {
             let identity = upload
                 .then(|| crate::uploads::identity(&request, &link.connection_id))
                 .flatten();
-            let Some(reservation) = self.update_drain.reserve_work(identity) else {
+            let admitted = if matches!(route, Route::OpControl) {
+                self.update_drain.reserve_control()
+            } else {
+                self.update_drain.reserve_work(identity)
+            };
+            let Some(reservation) = admitted else {
                 publish_response(
                     client,
                     reply,
@@ -1044,10 +1050,11 @@ impl<P: Platform + 'static> Supervisor<P> {
             let shutdown = link.shutdown.clone();
             let global_shutdown = self.shutdown.clone();
             let client = client.clone();
-            rpc_tasks.spawn(async move {
+            let reply_reservation = reservation.expect("upload reservation");
+            let worker_reservation = reply_reservation.clone();
+            spawn_admitted_rpc(rpc_tasks, reply_reservation, async move {
                 // A blocking filesystem call outlives cancellation of its reply task.
-                let response = tokio::task::spawn_blocking(move || {
-                    let reservation = reservation.expect("upload reservation");
+                let response = opengeni_agent_platform::spawn_blocking_reserved(move || {
                     uploads.lock().expect("upload registry").serve_reserved(
                         platform.as_ref(),
                         &request,
@@ -1055,7 +1062,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                         // subject. Session route epochs are pinned per upload;
                         // they are not a machine-wide generation.
                         &|| !shutdown.is_requested() && !global_shutdown.is_requested(),
-                        &reservation,
+                        &worker_reservation,
                     )
                 })
                 .await;
@@ -1106,9 +1113,18 @@ impl<P: Platform + 'static> Supervisor<P> {
                 );
             }
             Route::OpControl => {
-                let response =
-                    serve_op_control(&self.engine, &link.connection_id, request_id, &request);
-                publish_response(client, reply, response, label, max_payload).await;
+                let engine = self.engine.clone();
+                let connection_id = link.connection_id.clone();
+                let client = client.clone();
+                spawn_admitted_rpc(
+                    rpc_tasks,
+                    reservation.expect("control reservation"),
+                    async move {
+                        let response =
+                            serve_op_control(&engine, &connection_id, request_id, &request);
+                        publish_response(&client, reply, response, label, max_payload).await;
+                    },
+                );
             }
             Route::AgentUpdate(update) => {
                 self.spawn_agent_update(link, client, &request, update, reply)
@@ -1134,21 +1150,27 @@ impl<P: Platform + 'static> Supervisor<P> {
                 let engine = self.engine.clone();
                 let ctx = self.ctx(link, max_payload);
                 let scope = link.connection_id.clone();
-                rpc_tasks.spawn(async move {
-                    let _reservation = reservation;
-                    let op = crate::engine::scoped_op_id(&scope, &request_id);
-                    let origin = crate::engine::scoped_origin(&scope, crate::engine::LEGACY_ORIGIN);
-                    let ticket = match engine.admit(&op, class, &origin).await {
-                        Ok(ticket) => ticket,
-                        Err(reason) => {
-                            let response = dispatch::breaker_reply_error(request_id, label, reason);
-                            publish_response(&client, reply, response, label, max_payload).await;
-                            return;
-                        }
-                    };
-                    serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
-                    drop(ticket);
-                });
+                spawn_admitted_rpc(
+                    rpc_tasks,
+                    reservation.expect("work reservation"),
+                    async move {
+                        let op = crate::engine::scoped_op_id(&scope, &request_id);
+                        let origin =
+                            crate::engine::scoped_origin(&scope, crate::engine::LEGACY_ORIGIN);
+                        let ticket = match engine.admit(&op, class, &origin).await {
+                            Ok(ticket) => ticket,
+                            Err(reason) => {
+                                let response =
+                                    dispatch::breaker_reply_error(request_id, label, reason);
+                                publish_response(&client, reply, response, label, max_payload)
+                                    .await;
+                                return;
+                            }
+                        };
+                        serve_request(&client, reply, request, &platform, &ctx, max_payload).await;
+                        drop(ticket);
+                    },
+                );
             }
         }
     }
@@ -1247,6 +1269,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let agent_id = link.creds.agent_id.clone();
         let engine = self.engine.clone();
         let update_drain = self.update_drain.clone();
+        let browser_control = link.platform.browser_control_backend();
         let shutdown = self.shutdown.clone();
         // Process-global ownership is intentional. Credential rotation or one
         // transport generation ending must not cancel a verified binary swap.
@@ -1280,25 +1303,32 @@ impl<P: Platform + 'static> Supervisor<P> {
             // Never fence the whole host waiting for their lifetime to end. The
             // fence already excludes new routed work; defer this update if any
             // accepted work remains, preserving its independent lifetime.
-            let pending = update_drain.snapshot();
-            let admission = engine.admission_snapshot();
-            let busy_code = match pending {
-                None => Some("update_state_unavailable"),
-                Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
-                Some(pending)
-                    if pending.routed > 0
-                        || admission.light_running > 0
-                        || admission.light_queued > 0
-                        || admission.heavy_running > 0
-                        || admission.heavy_queued > 0 =>
-                {
-                    Some("update_busy_work")
+            let mut busy_code = update_busy_code(&update_drain, &engine);
+            if busy_code.is_none() {
+                if let Some(backend) = browser_control.as_ref() {
+                    busy_code = match backend.begin_update(&update.operation_id).await {
+                        Ok(true) => None,
+                        Ok(false) => Some("update_busy_work"),
+                        Err(_) => Some("update_state_unavailable"),
+                    };
                 }
-                Some(_) => None,
-            };
+            }
+            // Controller fencing awaits external IO. Recheck the shared fence:
+            // an admitted control on any link may have arrived during that proof.
+            if busy_code.is_none() {
+                busy_code = update_busy_code(&update_drain, &engine);
+                if busy_code.is_none() && !update_drain.seal_update(&update.operation_id) {
+                    busy_code = Some("update_busy_work");
+                }
+            }
             if let Some(code) = busy_code {
-                // Reopen admission before publishing the terminal receipt so a
-                // caller observing failure can immediately continue ordinary work.
+                if let Some(backend) = browser_control.as_ref() {
+                    if backend.release_update(&update.operation_id).await.is_err() {
+                        warn!("browser controller update fence could not be released");
+                    }
+                }
+                // Reopen host admission. Any lost controller-release receipt
+                // retains its exact owner for ordinary scoped recovery.
                 update_drain.release_update(&update.operation_id);
                 publish_agent_update_progress(
                     &client,
@@ -1361,6 +1391,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                     shutdown.request_update();
                 }
                 Ok(Err(code)) => {
+                    if let Some(backend) = browser_control.as_ref() {
+                        if backend.release_update(&update.operation_id).await.is_err() {
+                            warn!("browser controller update fence could not be released");
+                        }
+                    }
                     let rolled_back = matches!(
                         code.as_str(),
                         "startup_preflight_failed_rolled_back"
@@ -1382,6 +1417,11 @@ impl<P: Platform + 'static> Supervisor<P> {
                     update_drain.release_update(&update.operation_id);
                 }
                 Err(error) => {
+                    if let Some(backend) = browser_control.as_ref() {
+                        if backend.release_update(&update.operation_id).await.is_err() {
+                            warn!("browser controller update fence could not be released");
+                        }
+                    }
                     warn!(%error, "self-update worker failed");
                     publish_agent_update_progress(
                         &client,
@@ -1431,8 +1471,7 @@ impl<P: Platform + 'static> Supervisor<P> {
         let scope = link.connection_id.clone();
         let (request_epoch, held_epoch) = (request.epoch, self.ctx(link, max_payload).epoch);
         let request_id = request.request_id.clone();
-        rpc_tasks.spawn(async move {
-            let _reservation = reservation;
+        spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
@@ -1490,8 +1529,7 @@ impl<P: Platform + 'static> Supervisor<P> {
                 debug!("bulk lane full/closed; op frame dropped (replay heals)");
             }
         });
-        rpc_tasks.spawn(async move {
-            let _reservation = reservation;
+        spawn_admitted_rpc(rpc_tasks, reservation, async move {
             let response = if request_epoch != 0 && request_epoch < held_epoch {
                 dispatch::fenced_reply(request_id, request_epoch, held_epoch)
             } else {
@@ -1952,8 +1990,8 @@ async fn housekeeping_loop(engine: Arc<Engine>) {
 }
 
 /// Dispatch one already-decoded request and publish its typed response. This
-/// function owns no connection-generation state, so the generation's `JoinSet`
-/// can cancel it deterministically on disconnect or shutdown. (No duration
+/// function owns no connection-generation state. The generation waits on its
+/// independently retained execution; disconnect does not cancel accepted work. (No duration
 /// policing here: an op producing output is healthy at any age — the
 /// LIMITS-DOCTRINE health rule; liveness is the op-stream progress cadence.)
 async fn serve_request<P: Platform>(
@@ -1977,6 +2015,24 @@ async fn serve_request<P: Platform>(
     publish_response(client, reply, response, label, max_payload).await;
 }
 
+/// Generation tasks wait on, but do not own, accepted physical work. Dropping
+/// their JoinHandle detaches the actual worker; its guard covers execution and
+/// transport settlement on the original client, even after another link updates.
+fn spawn_admitted_rpc<F>(tasks: &mut JoinSet<()>, reservation: WorkReservation, work: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
+        Some(reservation),
+        work,
+    ));
+    tasks.spawn(async move {
+        if let Err(error) = actual.await {
+            warn!(%error, "accepted control worker ended without a complete receipt");
+        }
+    });
+}
+
 /// Encode and publish a response with the generic negotiated-payload guard. A
 /// payload failure remains an operation-level typed outcome and never changes
 /// heartbeat or machine-liveness state.
@@ -1987,6 +2043,7 @@ async fn publish_response(
     label: &'static str,
     max_payload: usize,
 ) {
+    let reservation = opengeni_agent_platform::current_work_reservation();
     let request_id = response.request_id.clone();
     let encoded = response.encode_to_vec();
     let payload = if max_payload > 0 && encoded.len() > max_payload {
@@ -2004,12 +2061,16 @@ async fn publish_response(
         encoded
     };
 
-    if let Err(publish_error) = client.publish(reply, payload.into()).await {
-        warn!(
-            error = %publish_error,
-            op = label,
-            "failed to publish control rpc reply"
-        );
+    if let Some(reservation) = reservation {
+        // Attach the reply's receipt to its actual publication command. A
+        // reconnect must fail that receipt rather than redeem it on a socket
+        // that never wrote the old reply. This is not a consumer storage ACK.
+        if let Err(flush_error) = client.publish_with_flush(reply, payload.into()).await {
+            reservation.mark_unsettled();
+            warn!(error = %flush_error, op = label, "control rpc reply transport did not settle");
+        }
+    } else if let Err(publish_error) = client.publish(reply, payload.into()).await {
+        warn!(error = %publish_error, op = label, "failed to publish control rpc reply");
     }
 }
 
@@ -2107,8 +2168,677 @@ fn running_binary_sha256() -> String {
     format!("{:x}", hasher.finalize())
 }
 
+fn update_busy_code(update_drain: &UpdateDrain, engine: &Engine) -> Option<&'static str> {
+    let pending = update_drain.snapshot();
+    let admission = engine.admission_snapshot();
+    match pending {
+        None => Some("update_state_unavailable"),
+        Some(pending) if pending.uploads > 0 => Some("update_busy_uploads"),
+        Some(pending)
+            if pending.routed > 0
+                // A completed child may still own an unconsumed terminal result.
+                || engine.live_ops() > 0
+                || admission.light_running > 0
+                || admission.light_queued > 0
+                || admission.heavy_running > 0
+                || admission.heavy_queued > 0 =>
+        {
+            Some("update_busy_work")
+        }
+        Some(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// A real async-nats client over TCP with its actual writer backpressured.
+    /// `Client::flush` settles socket writes, not a server or consumer ACK.
+    async fn paused_reply_transport() -> (
+        async_nats::Client,
+        tokio::sync::oneshot::Receiver<v1::ControlResponse>,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        // Bound the advertised receive window before accept. The host's
+        // default buffering can otherwise settle every queued write while
+        // this fixture's reader is paused, which is a legal flush completion.
+        socket.set_recv_buffer_size(64 * 1024).unwrap();
+        let receive_buffer = socket.recv_buffer_size().unwrap();
+        assert!(
+            receive_buffer <= 1024 * 1024,
+            "fixture receive buffer: {receive_buffer}"
+        );
+        socket.bind(([127, 0, 0, 1], 0).into()).unwrap();
+        let listener = socket.listen(1).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (published, received) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (paused, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let (read, mut write) = socket.into_split();
+            let mut read = BufReader::new(read);
+            write.write_all(format!(
+                "INFO {{\"server_id\":\"fixture\",\"version\":\"2.10.0\",\"proto\":1,\"host\":\"127.0.0.1\",\"port\":{port},\"max_payload\":67108864}}\r\n"
+            ).as_bytes()).await.unwrap();
+            let mut published = Some(published);
+            let mut released = Some(released);
+            let mut paused = Some(paused);
+            loop {
+                let mut line = String::new();
+                if read.read_line(&mut line).await.unwrap() == 0 {
+                    break;
+                }
+                if line.starts_with("PUB ") {
+                    let length: usize = line.split_whitespace().last().unwrap().parse().unwrap();
+                    assert!(length <= 32 * 1024 * 1024);
+                    let mut body = vec![0; length + 2];
+                    read.read_exact(&mut body).await.unwrap();
+                    assert_eq!(&body[length..], b"\r\n");
+                    if line.split_whitespace().nth(1) == Some("fixture.backpressure") {
+                        continue;
+                    }
+                    let response = v1::ControlResponse::decode(&body[..length]).unwrap();
+                    published.take().unwrap().send(response).unwrap();
+                } else if line == "PING\r\n" {
+                    write.write_all(b"PONG\r\n").await.unwrap();
+                    if let Some(gate) = released.take() {
+                        paused.take().unwrap().send(()).unwrap();
+                        gate.await.unwrap();
+                    }
+                }
+            }
+        });
+        let client = async_nats::connect(format!("nats://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        // Prove the actual writer is backpressured before testing ownership;
+        // entry into the admitted task is not transport-pending evidence. Host
+        // send buffering varies, so fill it within an explicit 256 MiB bound.
+        let mut backpressured = false;
+        for _ in 0..8 {
+            match tokio::time::timeout(
+                Duration::from_millis(100),
+                client.publish_with_flush("fixture.backpressure", vec![0; 32 * 1024 * 1024].into()),
+            )
+            .await
+            {
+                Err(_) => {
+                    backpressured = true;
+                    break;
+                }
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => panic!("fixture publication did not settle: {error}"),
+            }
+        }
+        assert!(
+            backpressured,
+            "fixture writer never blocked before its reader was released"
+        );
+        (client, received, release, server)
+    }
+
+    #[tokio::test]
+    async fn reply_settlement_retains_work_after_its_generation_waiter_is_cancelled() {
+        let (client, received, release, server) = paused_reply_transport().await;
+        let drain = Arc::new(UpdateDrain::default());
+        let mut waiters = JoinSet::new();
+        let publisher = client.clone();
+        let (started, executing) = tokio::sync::oneshot::channel();
+        spawn_admitted_rpc(
+            &mut waiters,
+            drain.reserve_work(None).unwrap(),
+            async move {
+                started.send(()).unwrap();
+                publish_response(
+                    &publisher,
+                    "fixture.reply".into(),
+                    v1::ControlResponse {
+                        request_id: "synthetic-reply".into(),
+                        ..Default::default()
+                    },
+                    "fs_read",
+                    1_048_576,
+                )
+                .await;
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(2), executing)
+            .await
+            .unwrap()
+            .unwrap();
+        waiters.shutdown().await;
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        assert_eq!(
+            drain.reserve_update("other-link"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update("other-link"));
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.request_id, "synthetic-reply");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain.seal_update("other-link"));
+        drop(client);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn committed_upload_retains_its_final_reply_until_the_original_transport_settles() {
+        use opengeni_agent_platform::NativePlatform;
+        let directory = tempfile::tempdir().unwrap();
+        let platform = Arc::new(NativePlatform::with_root(directory.path()));
+        let drain = Arc::new(UpdateDrain::default());
+        let bytes = b"synthetic upload";
+        let start = v1::ControlRequest {
+            request_id: "fsw-reply".into(),
+            epoch: 7,
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::FsWrite(v1::FsWriteBegin {
+                    path: "document".into(),
+                    expected_absent: true,
+                    content_size: Some(bytes.len() as u64),
+                    content_digest: blake3::hash(bytes).to_hex().to_string(),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let mut uploads = crate::uploads::Uploads::default();
+        let begin = drain
+            .reserve_work(crate::uploads::identity(&start, "fixture-link"))
+            .unwrap();
+        assert!(uploads
+            .serve_reserved(platform.as_ref(), &start, &|| true, &begin)
+            .error
+            .is_none());
+        drop(begin);
+        assert_eq!(drain.snapshot().unwrap().uploads, 1);
+        let chunk = v1::ControlRequest {
+            request_id: "final-chunk".into(),
+            epoch: 7,
+            op: Some(v1::control_request::Op::WriteChunk(v1::WriteChunk {
+                op_id: "fsw-reply".into(),
+                bytes: bytes.to_vec().into(),
+                last: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let reservation = drain
+            .reserve_work(crate::uploads::identity(&chunk, "fixture-link"))
+            .unwrap();
+        let worker = reservation.clone();
+        let (client, received, release, server) = paused_reply_transport().await;
+        let mut waiters = JoinSet::new();
+        let publisher = client.clone();
+        let (committed, commit_done) = tokio::sync::oneshot::channel();
+        spawn_admitted_rpc(&mut waiters, reservation, async move {
+            let response = opengeni_agent_platform::spawn_blocking_reserved(move || {
+                uploads.serve_reserved(platform.as_ref(), &chunk, &|| true, &worker)
+            })
+            .await
+            .unwrap();
+            committed.send(response.error.is_none()).unwrap();
+            publish_response(
+                &publisher,
+                "fixture.reply".into(),
+                response,
+                "fs_write",
+                1_048_576,
+            )
+            .await;
+        });
+        let successful = tokio::time::timeout(Duration::from_secs(2), commit_done)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(successful);
+        assert_eq!(
+            std::fs::read(directory.path().join("document")).unwrap(),
+            bytes
+        );
+        waiters.shutdown().await;
+        assert_eq!(drain.snapshot().unwrap().uploads, 0);
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        assert_eq!(
+            drain.reserve_update("other-link"),
+            UpdateReservation::Started
+        );
+        assert!(!drain.seal_update("other-link"));
+        release.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.error.is_none(), "{response:?}");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(drain.seal_update("other-link"));
+        drop(client);
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(unix)]
+    async fn retained_update_result(
+        engine: &Arc<Engine>,
+        drain: &Arc<UpdateDrain>,
+        scope: &str,
+    ) -> (opengeni_agent_engine::OpId, crate::engine::StartedJob, u64) {
+        use crate::engine::{scoped_op_id, StartOutcome};
+        use crate::job::{JobExit, JobOutcome};
+
+        let reservation = drain.reserve_work(None).expect("routed work admitted");
+        let operation = scoped_op_id(scope, "synthetic-command");
+        let ticket = engine
+            .admit(&operation, JobClass::Heavy, scope)
+            .await
+            .expect("child admitted");
+        let (exit_tx, exit_rx) = tokio::sync::oneshot::channel();
+        let outcome = engine.start_job(
+            &operation,
+            ticket,
+            Vec::new(),
+            None,
+            || {
+                let mut command = tokio::process::Command::new("/bin/sh");
+                command.arg("-c").arg("printf synthetic-result");
+                opengeni_agent_platform::spawn_contained(command, None)
+            },
+            |_| {},
+            |exit| format!("{exit:?}").into_bytes(),
+            move |sequence, exit: &JobExit| {
+                drop(reservation);
+                let _ = exit_tx.send((sequence, exit.clone()));
+            },
+        );
+        let StartOutcome::Started(started) = outcome else {
+            panic!("fresh child must start");
+        };
+        let (sequence, exit) = tokio::time::timeout(Duration::from_secs(5), exit_rx)
+            .await
+            .expect("child completed")
+            .expect("terminal receipt");
+        assert_eq!(exit.outcome, JobOutcome::Exited { exit_code: 0 });
+        assert_eq!(exit.stdout.total_bytes, 16);
+        assert_eq!(exit.stdout.digest, blake3::hash(b"synthetic-result"));
+        assert_eq!(started.handles.exit.get(), Some(&exit));
+        (
+            operation,
+            started,
+            sequence.expect("retained terminal frame"),
+        )
+    }
+
+    #[cfg(unix)]
+    async fn update_result_barrier(started: &crate::engine::StartedJob) {
+        let completed = Arc::new(tokio::sync::Notify::new());
+        started
+            .mailbox
+            .send(crate::job::JobCommand::Barrier {
+                completed: completed.clone(),
+            })
+            .await
+            .expect("retained result still routable");
+        tokio::time::timeout(Duration::from_secs(5), completed.notified())
+            .await
+            .expect("prior mailbox commands applied");
+    }
+
+    #[cfg(unix)]
+    async fn acknowledge_update_result(
+        engine: &Engine,
+        operation: &opengeni_agent_engine::OpId,
+        started: &crate::engine::StartedJob,
+        sequence: u64,
+    ) {
+        use crate::job::JobCommand;
+        use opengeni_agent_engine::registry::QueryAnswer;
+
+        started
+            .mailbox
+            .send(JobCommand::Attach {
+                generation: 2,
+                from_seq: 0,
+                window_bytes: 1 << 20,
+            })
+            .await
+            .unwrap();
+        started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 2,
+                acked_seq: sequence,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                engine.query(operation),
+                QueryAnswer::Complete {
+                    final_acked: true,
+                    ..
+                }
+            ) || engine.route_command(operation, JobCommand::Detach { completed: None })
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted final ack releases its route");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_retained_result_requires_current_terminal_ack() {
+        use crate::job::JobCommand;
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let (operation, started, sequence) =
+            retained_update_result(&engine, &drain, "scope-a").await;
+        assert_eq!(
+            engine.admission_snapshot(),
+            opengeni_agent_engine::admission::AdmissionSnapshot {
+                light_running: 0,
+                light_queued: 0,
+                heavy_running: 0,
+                heavy_queued: 0,
+            }
+        );
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+        assert_eq!(engine.live_ops(), 1);
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert!(drain.reserve_work(None).is_none());
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        for generation in [1, 2] {
+            started
+                .mailbox
+                .send(JobCommand::Attach {
+                    generation,
+                    from_seq: 0,
+                    window_bytes: 1 << 20,
+                })
+                .await
+                .unwrap();
+        }
+        started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 1,
+                acked_seq: sequence,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        started
+            .mailbox
+            .send(JobCommand::Ack {
+                generation: 2,
+                acked_seq: sequence - 1,
+                credit_bytes: 0,
+                final_ack: true,
+            })
+            .await
+            .unwrap();
+        update_result_barrier(&started).await;
+        assert_eq!(engine.live_ops(), 1);
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        acknowledge_update_result(&engine, &operation, &started, sequence).await;
+        assert_eq!(engine.live_ops(), 0);
+        assert_eq!(update_busy_code(&drain, &engine), None);
+        drain.release_update("synthetic-update");
+        assert!(drain.reserve_work(None).is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn update_retained_results_wait_for_each_connection_scope() {
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let (first, first_job, first_sequence) =
+            retained_update_result(&engine, &drain, "scope-a").await;
+        let (second, second_job, second_sequence) =
+            retained_update_result(&engine, &drain, "scope-b").await;
+        assert_ne!(first, second);
+        assert_eq!(
+            engine.admission_snapshot(),
+            opengeni_agent_engine::admission::AdmissionSnapshot {
+                light_running: 0,
+                light_queued: 0,
+                heavy_running: 0,
+                heavy_queued: 0,
+            }
+        );
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert_eq!(engine.live_ops(), 2);
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        acknowledge_update_result(&engine, &first, &first_job, first_sequence).await;
+        assert_eq!(engine.live_ops(), 1);
+        assert_eq!(update_busy_code(&drain, &engine), Some("update_busy_work"));
+        assert!(drain.reserve_work(None).is_none());
+        acknowledge_update_result(&engine, &second, &second_job, second_sequence).await;
+        assert_eq!(engine.live_ops(), 0);
+        assert_eq!(update_busy_code(&drain, &engine), None);
+        drain.release_update("synthetic-update");
+        assert!(drain.reserve_work(None).is_some());
+    }
+
+    #[tokio::test]
+    async fn update_retained_result_spawn_failure_does_not_block_update() {
+        use crate::engine::StartOutcome;
+        use opengeni_agent_engine::{registry::QueryAnswer, OpId};
+
+        let directory = tempfile::tempdir().unwrap();
+        let engine = Engine::new(
+            directory.path().join("spool"),
+            opengeni_agent_engine::HostCapacity::default(),
+        );
+        let drain = Arc::new(UpdateDrain::default());
+        let operation = OpId::from("synthetic-spawn-failure");
+        let ticket = engine
+            .admit(&operation, JobClass::Heavy, "scope-a")
+            .await
+            .unwrap();
+        let outcome = engine.start_job(
+            &operation,
+            ticket,
+            Vec::new(),
+            None,
+            || Err(std::io::Error::other("synthetic spawn failure")),
+            |_| {},
+            |_| Vec::new(),
+            |_, _| {},
+        );
+        assert!(matches!(outcome, StartOutcome::SpawnFailed { .. }));
+        assert!(matches!(
+            engine.query(&operation),
+            QueryAnswer::Complete {
+                final_acked: true,
+                ..
+            }
+        ));
+        assert_eq!(engine.live_ops(), 0);
+        assert_eq!(
+            engine.admission_snapshot(),
+            opengeni_agent_engine::admission::AdmissionSnapshot {
+                light_running: 0,
+                light_queued: 0,
+                heavy_running: 0,
+                heavy_queued: 0,
+            }
+        );
+        assert_eq!(
+            drain.reserve_update("synthetic-update"),
+            UpdateReservation::Started
+        );
+        assert_eq!(update_busy_code(&drain, &engine), None);
+        drain.release_update("synthetic-update");
+        assert!(drain.reserve_work(None).is_some());
+    }
+    #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::too_many_lines)] // real update router, progress receipts, and admission recovery
+    async fn update_defers_live_or_unreadable_interaction_controllers() {
+        use opengeni_agent_platform::{
+            BrowserControlBackend, BrowserControlEndpoint, NativePlatform, PlatformError,
+            PlatformResult,
+        };
+        use std::sync::atomic::AtomicU8;
+
+        struct InteractionProof(AtomicU8);
+        #[async_trait::async_trait]
+        impl BrowserControlBackend for InteractionProof {
+            async fn begin_update(&self, _: &str) -> PlatformResult<bool> {
+                self.is_idle().await
+            }
+            async fn release_update(&self, _: &str) -> PlatformResult<()> {
+                Ok(())
+            }
+            async fn is_idle(&self) -> PlatformResult<bool> {
+                match self.0.load(Ordering::Acquire) {
+                    0 => Ok(false),
+                    _ => Err(PlatformError::os("fixture controller unavailable")),
+                }
+            }
+            async fn ensure(
+                &self,
+                _: &v1::BrowserControlEnsureRequest,
+            ) -> PlatformResult<BrowserControlEndpoint> {
+                Err(PlatformError::os("unused fixture ensure"))
+            }
+            async fn resolve(&self, _: &str, _: &str) -> PlatformResult<BrowserControlEndpoint> {
+                Err(PlatformError::os("unused fixture resolve"))
+            }
+        }
+        let Some(bin) = it::find_nats_server() else {
+            eprintln!("SKIP interaction update regression: no nats-server");
+            return;
+        };
+        let port = it::free_local_port();
+        let _server = it::NatsServerGuard::spawn(&bin, port);
+        let client =
+            it::connect_with_retry(&format!("nats://127.0.0.1:{port}"), Duration::from_secs(5))
+                .await;
+        let directory = tempfile::tempdir().unwrap();
+        let backend = Arc::new(InteractionProof(AtomicU8::new(0)));
+        let definition = SupervisorLink::new(
+            "interaction-update",
+            Arc::new(
+                NativePlatform::with_root(directory.path()).with_browser_control(backend.clone()),
+            ),
+            it::test_credentials(&format!("nats://127.0.0.1:{port}")),
+        );
+        let link = WorkspaceLink::from_definition(definition.clone());
+        let supervisor = Supervisor::new_links(&[definition], "0.0.0");
+        let mut inbound = client.subscribe("audit.interaction.in").await.unwrap();
+        let mut replies = client.subscribe("audit.interaction.out").await.unwrap();
+        let mut events = client.subscribe(link.events_subject()).await.unwrap();
+        client.flush().await.unwrap();
+        for (state, code) in [(0, "update_busy_work"), (1, "update_state_unavailable")] {
+            backend.0.store(state, Ordering::Release);
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let request = ControlRequest {
+                request_id: "interaction-update".into(),
+                epoch: 0,
+                resource_policy: None,
+                op: Some(v1::control_request::Op::AgentUpdateApply(
+                    v1::AgentUpdateApplyRequest {
+                        operation_id: operation_id.clone(),
+                        target_version: "0.1.0".into(),
+                        channel: "stable".into(),
+                        expected_current_version: "0.0.0".into(),
+                        expected_current_sha256: String::new(),
+                        release_base_url: "http://127.0.0.1:1".into(),
+                    },
+                )),
+            };
+            assert_eq!(supervisor.update_drain.snapshot().unwrap().routed, 0);
+            assert_eq!(supervisor.update_drain.snapshot().unwrap().uploads, 0);
+            let before = supervisor.engine.admission_snapshot();
+            client
+                .publish_with_reply(
+                    "audit.interaction.in",
+                    "audit.interaction.out",
+                    request.encode_to_vec().into(),
+                )
+                .await
+                .unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(5), inbound.next())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut tasks = JoinSet::new();
+            supervisor
+                .route_message(&link, &client, message, &mut tasks)
+                .await;
+            let reply = tokio::time::timeout(Duration::from_secs(5), replies.next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(ControlResponse::decode(reply.payload.as_ref())
+                .unwrap()
+                .error
+                .is_none());
+            assert!(
+                it::wait_for_event(&mut events, Duration::from_secs(5), |event| {
+                    matches!(&event.event, Some(Event::AgentUpdateProgress(progress))
+                    if progress.operation_id == operation_id
+                        && progress.stage == v1::AgentUpdateStage::Failed as i32
+                        && progress.error_code == code && progress.retryable)
+                })
+                .await
+            );
+            assert_eq!(supervisor.engine.admission_snapshot(), before);
+            assert!(!supervisor.shutdown.is_requested());
+            let continuation = supervisor
+                .update_drain
+                .reserve_work(None)
+                .expect("deferred update reopens admission");
+            drop(continuation);
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test(flavor = "current_thread")]
     async fn update_drain_reserves_unpolled_routed_work() {
@@ -2596,14 +3326,15 @@ mod tests {
             })
             .await
             .unwrap();
-            assert!(link
-                .desktop_status
-                .read()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .unavailable_reason
-                .is_empty());
+            assert_eq!(
+                link.desktop_status
+                    .read()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .unavailable_reason,
+                ""
+            );
             assert_eq!(link.epoch.load(), 42);
         };
         tokio::select! {

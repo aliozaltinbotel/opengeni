@@ -75,7 +75,7 @@ use crate::{
 
 pub(crate) use ax::MacAxControllerImpl;
 use input_monitor::{input_activity_monitor, InputActivityMonitor};
-pub(crate) use stream::CaptureStream;
+pub(crate) use stream::{capture_cleanup_is_settled, CaptureStream};
 
 const MAX_CAPTURE_PIXELS: usize = 64 * 1024 * 1024;
 
@@ -720,7 +720,9 @@ fn cgimage_to_rgba(image: &CGImage) -> Result<RgbaFrame, String> {
 
 const MAX_INPUT_BATCH: usize = 16;
 const MAX_TEXT_UTF16_UNITS: usize = 16 * 1024;
-const MAX_PREPARED_EVENTS: usize = 128;
+// A text insertion posts a down/up pair per Unicode scalar. Keep the existing
+// text limit usable while bounding the entire prepared operation.
+const MAX_PREPARED_EVENTS: usize = 2 * MAX_TEXT_UTF16_UNITS;
 const INPUT_CONFIRM_POLL: Duration = Duration::from_millis(1);
 
 static INPUT_SEAT: Mutex<()> = Mutex::new(());
@@ -1048,6 +1050,10 @@ fn prepare_pointer(
             prepared.push(prepare_mouse(src, down_type, point, cg_button, 1)?);
             prepared.push(prepare_mouse(src, up_type, point, cg_button, 1)?);
         }
+        PointerAction::ClickContinuation => {
+            prepared.push(prepare_mouse(src, down_type, point, cg_button, 2)?);
+            prepared.push(prepare_mouse(src, up_type, point, cg_button, 2)?);
+        }
         PointerAction::DoubleClick => {
             prepared.push(prepare_mouse(src, down_type, point, cg_button, 1)?);
             prepared.push(prepare_mouse(src, up_type, point, cg_button, 1)?);
@@ -1130,8 +1136,20 @@ fn prepare_text(
         KeyAction::Down => prepared.push(prepare_unicode_event(src, &utf16, true)?),
         KeyAction::Up => prepared.push(prepare_unicode_event(src, &utf16, false)?),
         KeyAction::Press => {
-            prepared.push(prepare_unicode_event(src, &utf16, true)?);
-            prepared.push(prepare_unicode_event(src, &utf16, false)?);
+            if prepared.len() + 2 * text.chars().count() > MAX_PREPARED_EVENTS {
+                return Err(MacFfiError::Invalid(format!(
+                    "input operation expands beyond {MAX_PREPARED_EVENTS} native events"
+                )));
+            }
+            // Key-driven apps consume one character from each key-down, rather
+            // than treating its Unicode payload as a whole text insertion.
+            // Keep surrogate pairs intact and preserve the original order.
+            for character in text.chars() {
+                let mut units = [0_u16; 2];
+                let character = character.encode_utf16(&mut units);
+                prepared.push(prepare_unicode_event(src, character, true)?);
+                prepared.push(prepare_unicode_event(src, character, false)?);
+            }
         }
     }
     Ok(())
@@ -1416,6 +1434,105 @@ fn post_prepared(prepared: &PreparedInput) -> Result<(), MacFfiError> {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+
+    #[test]
+    fn click_continuation_prepares_exactly_one_second_pair_without_posting() {
+        let point = CGPoint::new(40.0, 60.0);
+        let mut prepared = Vec::new();
+        for action in [PointerAction::Click, PointerAction::ClickContinuation] {
+            prepare_pointer(None, point, PointerButton::Left, action, &mut prepared).unwrap();
+        }
+        let pairs: Vec<_> = prepared
+            .iter()
+            .filter_map(|event| {
+                let kind = CGEvent::r#type(Some(event));
+                (kind != CGEventType::MouseMoved).then(|| {
+                    (
+                        kind,
+                        CGEvent::integer_value_field(
+                            Some(event),
+                            CGEventField::MouseEventClickState,
+                        ),
+                    )
+                })
+            })
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (CGEventType::LeftMouseDown, 1),
+                (CGEventType::LeftMouseUp, 1),
+                (CGEventType::LeftMouseDown, 2),
+                (CGEventType::LeftMouseUp, 2),
+            ]
+        );
+        let mut explicit_double = Vec::new();
+        prepare_pointer(
+            None,
+            point,
+            PointerButton::Left,
+            PointerAction::DoubleClick,
+            &mut explicit_double,
+        )
+        .unwrap();
+        assert_eq!(
+            explicit_double
+                .iter()
+                .filter(|event| CGEvent::r#type(Some(event)) != CGEventType::MouseMoved)
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn typed_text_posts_each_character_in_order_for_key_driven_apps() {
+        let mut prepared = Vec::new();
+        let text = "8*9=😀";
+        prepare_text(None, text, KeyAction::Press, &mut prepared).expect("prepare text");
+        assert_eq!(prepared.len(), 2 * text.chars().count());
+        for (character, pair) in text.chars().zip(prepared.chunks_exact(2)) {
+            for (event, event_type) in pair.iter().zip([CGEventType::KeyDown, CGEventType::KeyUp]) {
+                assert_eq!(CGEvent::r#type(Some(event)), event_type);
+                let mut buffer = [0_u16; 2];
+                let mut length: c_ulong = 0;
+                // SAFETY: CoreGraphics writes at most the two units provided.
+                unsafe {
+                    CGEvent::keyboard_get_unicode_string(
+                        Some(event),
+                        2,
+                        &raw mut length,
+                        buffer.as_mut_ptr(),
+                    );
+                }
+                assert_eq!(
+                    String::from_utf16(&buffer[..length as usize]).unwrap(),
+                    character.to_string()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn text_operation_retains_its_limit_and_refuses_overflow_before_posting() {
+        let mut prepared = Vec::new();
+        prepare_text(
+            None,
+            &"a".repeat(MAX_TEXT_UTF16_UNITS),
+            KeyAction::Press,
+            &mut prepared,
+        )
+        .expect("maximum text remains supported");
+        assert_eq!(prepared.len(), MAX_PREPARED_EVENTS);
+        assert!(prepare_text(None, "b", KeyAction::Press, &mut prepared).is_err());
+        assert_eq!(prepared.len(), MAX_PREPARED_EVENTS);
+        assert!(prepare_text(
+            None,
+            &"a".repeat(MAX_TEXT_UTF16_UNITS + 1),
+            KeyAction::Press,
+            &mut Vec::new()
+        )
+        .is_err());
+    }
 
     #[test]
     fn parses_command_chord_with_accumulated_flags() {

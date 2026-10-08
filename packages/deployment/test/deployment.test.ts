@@ -6,6 +6,7 @@ import {
   deploymentProfiles,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
+  WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV,
   generateRuntimeArtifacts,
   MCP_OAUTH_AND_TOOL_GATEWAY_MAINTENANCE_CUTOVER,
   MODEL_CATALOG_MAINTENANCE_CUTOVER,
@@ -951,6 +952,7 @@ describe("deployment contract", () => {
           '{"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
         OPENGENI_OPENAI_API_KEY: "openai",
         OPENGENI_OPENROUTER_API_KEY: "openrouter",
+        OPENGENI_OPPER_API_KEY: "opper",
         OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
         OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
@@ -979,6 +981,7 @@ describe("deployment contract", () => {
       'OPENGENI_MODEL_NOTES_JSON={"openrouter/nvidia/nemotron-3-super-120b-a12b:free":"Starter model."}',
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OPENROUTER_API_KEY=openrouter");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_OPPER_API_KEY=opper");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
     expect(artifacts.runtimeEnv).toContain(
@@ -1082,7 +1085,7 @@ describe("deployment contract", () => {
         OPENGENI_SLACK_CLIENT_ID: "slack-staging-client",
         OPENGENI_SLACK_CLIENT_SECRET: "slack-staging-secret",
         OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
-        OPENGENI_SLACK_BOT_DISPLAY_NAME: "OpenGeni Staging",
+        OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
         OPENGENI_SLACK_COMMAND: "/opengeni-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
@@ -1143,7 +1146,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
     );
-    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=OpenGeni Staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(
@@ -1232,6 +1235,9 @@ describe("deployment contract", () => {
         OPENGENI_ANALYTICS_ENABLED: "true",
         OPENGENI_ANALYTICS_CONSENT_REQUIRED: "true",
         OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1",
+        OPENGENI_LEGAL_PRIVACY_POLICY_URL: "https://opengeni.ai/privacy",
+        OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms",
+        OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai",
         OPENGENI_IMAGE_TAG: "release-prod",
         ...maintenanceImageDigests,
         OPENGENI_MODAL_APP_NAME: "opengeni-prod",
@@ -1248,7 +1254,7 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS=https://app.opengeni.ai",
     );
-    expect(artifacts.runtimeEnv).toContain("OPENGENI_EMAIL_FROM=OpenGeni <auth@mail.opengeni.ai>");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_EMAIL_FROM=Opengeni <auth@mail.opengeni.ai>");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_APP_SLUG=opengeni-ai");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_BILLING_MODE=stripe");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_ANALYTICS_ENABLED=true");
@@ -1258,6 +1264,13 @@ describe("deployment contract", () => {
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_WEB_ALLOWED_HOSTS: "app.opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_ENABLED: "true"');
     expect(artifacts.helmValuesYaml).toContain('OPENGENI_ANALYTICS_REO_CLIENT_ID: "reo_client-1"');
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_LEGAL_PRIVACY_POLICY_URL=https://opengeni.ai/privacy",
+    );
+    expect(artifacts.helmValuesYaml).toContain(
+      'OPENGENI_LEGAL_TERMS_OF_SERVICE_URL: "https://opengeni.ai/terms"',
+    );
+    expect(artifacts.helmValuesYaml).toContain('OPENGENI_SUPPORT_EMAIL: "support@opengeni.ai"');
     expect(artifacts.helmValuesYaml).toContain('tag: "release-prod"');
     expect(artifacts.helmValuesYaml).toContain(
       `digest: "${maintenanceImageDigests.OPENGENI_API_IMAGE_DIGEST}"`,
@@ -1565,6 +1578,7 @@ describe("deployment contract", () => {
     expect(SANDBOX_LIFECYCLE_PASSTHROUGH_ENV).toEqual(
       expect.arrayContaining([
         "OPENGENI_SANDBOX_IDLE_GRACE_MS",
+        "OPENGENI_SANDBOX_IDLE_COMMAND_CONTAINMENT_MS",
         "OPENGENI_SANDBOX_LEASE_REAPER_PERIOD_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_INTERVAL_MS",
         "OPENGENI_SANDBOX_SNAPSHOT_TIMEOUT_MS",
@@ -1747,7 +1761,6 @@ describe("deployment contract", () => {
     };
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
       OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED: "true",
-      OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED: "true",
       OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED: "true",
       OPENGENI_WORK_DISCOVERY_ENABLED: "false",
       OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED: "false",
@@ -1755,9 +1768,6 @@ describe("deployment contract", () => {
       OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED: "true",
     });
     expect(configured.runtimeEnv).toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=true");
-    expect(configured.runtimeEnv).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=true",
-    );
     expect(configured.runtimeEnv).toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=true");
     expect(configured.runtimeEnv).toContain("OPENGENI_WORK_DISCOVERY_ENABLED=false");
     expect(configured.runtimeEnv).toContain("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED=false");
@@ -1768,23 +1778,14 @@ describe("deployment contract", () => {
       "OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=true",
     );
     expect(configured.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
-    expect(configured.missingEnvVars).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
-    );
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED=");
-    expect(absent.runtimeEnv).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED=",
-    );
     expect(absent.runtimeEnv).not.toContain("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_CLAIM_MUTATIONS_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_HUMAN_ADVISORIES_ENABLED=");
     expect(absent.runtimeEnv).not.toContain("OPENGENI_WORK_DISCOVERY_AUTOMATIC_NUDGES_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
-    expect(absent.missingEnvVars).not.toContain(
-      "OPENGENI_HOST_MCP_AUTHORITY_SOURCE_ADMISSION_ENABLED",
-    );
   });
 
   test("renders configured external browser providers without making them mandatory", () => {
@@ -1857,6 +1858,26 @@ describe("deployment contract", () => {
       {},
     );
     for (const key of JEV_CODE_SEARCH_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes provider web search settings through only when configured", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish",
+      OPENGENI_WEB_SEARCH_API_KEY: "search-key",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_API_KEY=search-key");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }

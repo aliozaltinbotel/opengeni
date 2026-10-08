@@ -48,6 +48,7 @@ import {
   UpdateGitHubActionPolicyRequest as ContractUpdateGitHubActionPolicyRequest,
   ListManagedOrganizationMembershipsResponse as ContractListManagedOrganizationMembershipsResponse,
   Permission as ContractPermission,
+  OrganizationApiKeyAccess as ContractOrganizationApiKeyAccess,
   ProductAccessMode as ContractProductAccessMode,
   ScheduledTaskRun as ContractScheduledTaskRun,
   ScheduledTaskRunStatus as ContractScheduledTaskRunStatus,
@@ -150,6 +151,16 @@ describe("SDK / contracts parity (full coverage)", () => {
   test("permission and usage-event literals match the contracts enums", () => {
     expect([...KNOWN_PERMISSIONS].sort()).toEqual([...ContractPermission.options].sort());
     expect([...KNOWN_USAGE_EVENT_TYPES].sort()).toEqual([...ContractUsageEventType.options].sort());
+  });
+
+  test("organization key tiers include the distinct Developer setup authority", () => {
+    const tiers: NonNullable<ApiKey["access"]>[] = ContractOrganizationApiKeyAccess.options;
+    expect(tiers).toEqual(["full", "read", "developer_setup"]);
+    const setup = {
+      name: "Setup",
+      access: "developer_setup",
+    } satisfies CreateOrganizationApiKeyRequest;
+    expect(ContractCreateOrganizationApiKeyRequest.parse(setup)).toEqual(setup);
   });
 
   test("GitHub installation binding literals and response shapes match", () => {
@@ -340,7 +351,9 @@ describe("SDK / contracts parity (full coverage)", () => {
       value: Omit<CreateApiKeyRequest, "permissions">,
     ): z.input<typeof ContractCreateApiKeyBody> => value;
     const acceptCreateOrganizationApiKey = (
-      value: CreateOrganizationApiKeyRequest,
+      // Explicit-policy permissions are also an open string union in the SDK.
+      // The organization-access parity suite checks that nested wire shape.
+      value: Omit<CreateOrganizationApiKeyRequest, "policy">,
     ): z.input<typeof ContractCreateOrganizationApiKeyRequest> => value;
     const acceptUpdateGoal = (
       value: UpdateSessionGoalRequest,

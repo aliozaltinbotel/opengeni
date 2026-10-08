@@ -1,5 +1,7 @@
 import {
   canonicalizeConfiguredModelId,
+  CLAUDE_CONNECTION_KINDS,
+  type ClaudeConnectionCatalog,
   type ConfiguredModel,
   type Settings,
 } from "@opengeni/config";
@@ -10,32 +12,41 @@ import {
   type ScheduledTask,
   type WorkspaceSessionDefaults,
   type XaiProviderAccountAuthoritySnapshotV1,
+  type ClaudeProviderAccountAuthoritySnapshotV1,
+  type BillingBalance,
 } from "@opengeni/contracts";
 import {
   getScheduledTaskXaiProviderAccountAuthoritySnapshot,
+  getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
   getSession,
   getWorkspace,
   getWorkspaceConnectionModelRestrictions,
   getWorkspaceModelPolicy,
-  listOrganizationModelProviderCustomModelsForWorkspace,
-  listWorkspaceGatewayCustomModels,
-  listWorkspaceOpenRouterCustomModels,
-  organizationModelProviderConnectionActiveForWorkspace,
+  getOrganizationModelProviderCatalogForWorkspace,
+  listConnectionsMetadata,
+  listWorkspaceProviderCustomModelsByKind,
   workspaceCodexSubscriptionActive,
-  workspaceOpenRouterConnectionActive,
-  workspaceVercelAiGatewayConnectionActive,
-  organizationHoldsCredits,
+  workspaceProviderApiKeyConnectionMetadataFromConnections,
+  getBillingBalance,
+  spendableCreditMicros,
   workspaceXaiSubscriptionActive,
   workspaceXaiSubscriptionActiveForAuthority,
   XaiAuthorityPoolInactiveError,
+  ClaudeAuthorityPoolInactiveError,
+  resolveClaudeProviderAccountAuthoritySnapshotForAcceptance,
+  workspaceClaudeSubscriptionActiveForAuthority,
   type ConnectionModelRestrictions,
   type Database,
+  type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import {
+  isWorkspaceModelAdmissible,
   resolveWorkspaceModelSelection,
   type WorkspaceModelSelection,
   type WorkspaceModelSelectionInput,
 } from "./model-catalog";
+
+import { loadWorkspaceCodexModelAvailability } from "./codex-model-availability";
 
 const REASONING_EFFORT_ORDER: readonly ReasoningEffort[] = [
   "none",
@@ -95,20 +106,40 @@ export type DefaultSessionModelInput = {
   selections: readonly WorkspaceModelSelection[];
   workspaceDefaults: WorkspaceSessionDefaults | null;
   /**
-   * True while the organization holds a positive OpenGeni credit balance from
+   * True while the organization holds a positive Opengeni credit balance from
    * any source, the verified-signup trial grant included (see
    * `organizationHoldsCredits`).
    */
   creditsAvailable: boolean;
+  creditBalance?: BillingBalance;
 };
 
 function creditsCandidate(
-  input: Pick<DefaultSessionModelInput, "settings" | "selections">,
+  input: Pick<DefaultSessionModelInput, "settings" | "selections" | "creditBalance">,
 ): DefaultModelSelection | null {
+  const selections = input.creditBalance
+    ? input.selections.filter(
+        (selection) => spendableCreditMicros(input.creditBalance!, selection.model.id) > 0,
+      )
+    : input.selections;
   const fallbackEffort = input.settings.openaiReasoningEffort;
-  const deployment = findSelection(input.selections, input.settings.openaiModel);
-  if (deployment?.availability.selectable && deployment.model.cost === "credits") return null;
-  const configured = findSelection(input.selections, input.settings.creditsDefaultModel);
+  const deployment = findSelection(selections, input.settings.openaiModel);
+  const configured = findSelection(selections, input.settings.creditsDefaultModel);
+  if (deployment?.availability.selectable && deployment.model.cost === "credits") {
+    // A funded paid deployment default is preserved. When it is the
+    // credits default model itself, credit holders get the credits default
+    // effort rather than the deployment-wide fallback effort.
+    if (configured?.model.id !== deployment.model.id) return null;
+    return {
+      model: deployment.model.id,
+      reasoningEffort: clampReasoningEffortForConfiguredModel(
+        deployment.model,
+        input.settings.creditsDefaultReasoningEffort,
+        fallbackEffort,
+      ),
+      source: "credits",
+    };
+  }
   if (configured?.availability.selectable && configured.model.cost === "credits") {
     return {
       model: configured.model.id,
@@ -120,7 +151,7 @@ function creditsCandidate(
       source: "credits",
     };
   }
-  const first = input.selections.find(
+  const first = selections.find(
     (selection) => selection.availability.selectable && selection.model.cost === "credits",
   );
   return first
@@ -144,14 +175,18 @@ function creditsCandidate(
  *    (ChatGPT/Codex, then SuperGrok) in operator catalog order. The
  *    deployment default wins inside this step when it is itself a selectable
  *    subscription model.
- * 3. `credits`: while the organization holds a positive OpenGeni credit
+ * 3. `credits`: while the organization holds a positive Opengeni credit
  *    balance (a purchase, a grant, or the verified-signup trial grant), the
  *    configured credits default (`OPENGENI_CREDITS_DEFAULT_MODEL`, effort
  *    clamped to what the model supports), or the first selectable
- *    credits-billed model when that one is not selectable. Skipped when the
- *    deployment default is already a selectable credits-billed model, so an
- *    operator's paid default is never replaced.
- * 4. `deployment`: the deployment default with the deployment reasoning effort.
+ *    credits-billed model when that one is not selectable. When the
+ *    deployment default is already a funded, selectable credits-billed model it
+ *    keeps the deployment effort, except that it takes the
+ *    credits default effort when it is the credits default model itself.
+ * 4. `deployment`: the deployment default with the deployment reasoning effort
+ *    when stably admissible; otherwise the first stably admissible catalog
+ *    model with its own default effort. With no admitted models, retain the
+ *    deployment hint and let fresh creation refuse it.
  *
  * An explicit model on the request, the scheduled task, or the person's
  * new-chat draft is never passed through this function.
@@ -191,24 +226,33 @@ export function selectDefaultSessionModel(input: DefaultSessionModelInput): Defa
     const credits = creditsCandidate(input);
     if (credits) return credits;
   }
-  return {
-    model:
-      deployment?.model.id ??
-      canonicalizeConfiguredModelId(input.settings, input.settings.openaiModel),
-    reasoningEffort: fallbackEffort,
-    source: "deployment",
-  };
+  if (deployment && isWorkspaceModelAdmissible(deployment)) {
+    return { model: deployment.model.id, reasoningEffort: fallbackEffort, source: "deployment" };
+  }
+  const fallback = input.selections.find(isWorkspaceModelAdmissible);
+  return fallback
+    ? {
+        model: fallback.model.id,
+        reasoningEffort: defaultReasoningEffortForConfiguredModel(fallback.model, fallbackEffort),
+        source: "deployment",
+      }
+    : {
+        model: canonicalizeConfiguredModelId(input.settings, input.settings.openaiModel),
+        reasoningEffort: fallbackEffort,
+        source: "deployment",
+      };
 }
 
 /**
  * The default this workspace would use while its organization holds a
- * positive OpenGeni credit balance. Null when the deployment does not bill
+ * positive Opengeni credit balance. Null when the deployment does not bill
  * credits.
  */
 export function creditsDefaultSessionModel(input: {
   settings: Settings;
   selections: readonly WorkspaceModelSelection[];
   workspaceSettings: unknown;
+  creditBalance?: BillingBalance;
 }): DefaultModelSelection | null {
   if (input.settings.billingMode !== "stripe") return null;
   return selectDefaultSessionModel({
@@ -216,6 +260,7 @@ export function creditsDefaultSessionModel(input: {
     selections: input.selections,
     workspaceDefaults: resolveWorkspaceSessionDefaults(input.workspaceSettings),
     creditsAvailable: true,
+    ...(input.creditBalance ? { creditBalance: input.creditBalance } : {}),
   });
 }
 
@@ -241,13 +286,14 @@ export async function resolveDefaultSessionModelForSelections(
   if (
     withoutCredits.source !== "deployment" ||
     input.settings.billingMode !== "stripe" ||
-    creditsCandidate(decision) === null
+    !input.selections.some(
+      (selection) => selection.availability.selectable && selection.model.cost === "credits",
+    )
   ) {
     return withoutCredits;
   }
-  return (await organizationHoldsCredits(db, input.accountId))
-    ? selectDefaultSessionModel({ ...decision, creditsAvailable: true })
-    : withoutCredits;
+  const creditBalance = await getBillingBalance(db, input.accountId);
+  return selectDefaultSessionModel({ ...decision, creditsAvailable: true, creditBalance });
 }
 
 export type WorkspaceModelSelectionContext = {
@@ -265,6 +311,8 @@ export type WorkspaceModelSelectionContext = {
    * direct Send resolves it.
    */
   xaiAuthoritySnapshot?: XaiProviderAccountAuthoritySnapshotV1 | undefined;
+  /** Already accepted Claude pool; never replace it with current selection. */
+  claudeAuthoritySnapshot?: ClaudeProviderAccountAuthoritySnapshotV1 | undefined;
 };
 
 /**
@@ -285,13 +333,25 @@ async function connectionRestrictionsAndXaiReadiness(
   const { workspaceId, subjectId, xaiAuthoritySnapshot } = context;
   if (!xaiAuthoritySnapshot) {
     const [restrictions, xaiSubscriptionActive] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId),
+      getWorkspaceConnectionModelRestrictions(
+        db,
+        workspaceId,
+        subjectId,
+        undefined,
+        context.claudeAuthoritySnapshot,
+      ),
       workspaceXaiSubscriptionActive(db, settings, workspaceId, subjectId),
     ]);
     return { restrictions, xaiSubscriptionActive };
   }
   const frozen = await Promise.allSettled([
-    getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId, xaiAuthoritySnapshot),
+    getWorkspaceConnectionModelRestrictions(
+      db,
+      workspaceId,
+      subjectId,
+      xaiAuthoritySnapshot,
+      context.claudeAuthoritySnapshot,
+    ),
     workspaceXaiSubscriptionActiveForAuthority(db, settings, {
       workspaceId,
       subjectId,
@@ -307,10 +367,47 @@ async function connectionRestrictionsAndXaiReadiness(
       throw result.reason;
     }
   }
-  const current = await getWorkspaceConnectionModelRestrictions(db, workspaceId, subjectId);
+  const current = await getWorkspaceConnectionModelRestrictions(
+    db,
+    workspaceId,
+    subjectId,
+    undefined,
+    context.claudeAuthoritySnapshot,
+  );
   return {
     restrictions: { ...current, "supergrok/": [] },
     xaiSubscriptionActive: false,
+  };
+}
+
+/**
+ * Readiness for the subject's current or already accepted Claude pool observes
+ * metadata only; quota is handled by the runtime allocator. This is not an
+ * authorization: callers must supply their authenticated or frozen subject.
+ */
+export async function loadWorkspaceClaudeSubscriptionReadiness(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext,
+): Promise<{ workspace: boolean; organization: boolean }> {
+  if (!settings.claudeSubscriptionEnabled) return { workspace: false, organization: false };
+  const authoritySnapshot =
+    context.claudeAuthoritySnapshot ??
+    (await resolveClaudeProviderAccountAuthoritySnapshotForAcceptance(db, context));
+  let active: boolean;
+  try {
+    active = await workspaceClaudeSubscriptionActiveForAuthority(db, settings, {
+      ...context,
+      authoritySnapshot,
+    });
+  } catch (error) {
+    if (!context.claudeAuthoritySnapshot || !(error instanceof ClaudeAuthorityPoolInactiveError))
+      throw error;
+    active = false;
+  }
+  return {
+    workspace: active && authoritySnapshot.scope !== "organization",
+    organization: active && authoritySnapshot.scope === "organization",
   };
 }
 
@@ -319,64 +416,137 @@ export async function loadWorkspaceModelSelectionInput(
   db: Database,
   settings: Settings,
   context: WorkspaceModelSelectionContext,
+  options: { observeAvailability?: boolean } = {},
 ): Promise<WorkspaceModelSelectionInput> {
   const { accountId, workspaceId } = context;
+  // The exact provider set the catalog route reads. A disabled Claude
+  // subscription contributes no catalog entry, so its rows are not read.
+  const providerKinds: WorkspaceCustomModelProviderKind[] = [
+    "vercel_gateway",
+    "openrouter",
+    "opper",
+    ...CLAUDE_CONNECTION_KINDS.filter(
+      (kind) => kind !== "claude_subscription" || settings.claudeSubscriptionEnabled,
+    ),
+  ];
+  const inputRead = (async () =>
+    Promise.all([
+      connectionRestrictionsAndXaiReadiness(db, settings, context),
+      loadWorkspaceClaudeSubscriptionReadiness(db, settings, context),
+      getWorkspaceModelPolicy(db, workspaceId),
+      workspaceCodexSubscriptionActive(db, settings, workspaceId),
+      options.observeAvailability === false
+        ? Promise.resolve({})
+        : loadWorkspaceCodexModelAvailability(db, settings, workspaceId),
+    ]))();
+  // Transaction handles share one backend and LOCAL scope. Preserve the old
+  // batch ordering there rather than introduce concurrent nested savepoints.
+  if (typeof (db as Database & { rollback?: unknown }).rollback === "function") await inputRead;
+  // One scoped read per catalog family (workspace connection metadata,
+  // workspace custom models, organization provider readiness + models) instead
+  // of one scoped transaction per provider kind. The batched readers keep each
+  // provider's filters, bound and overflow error, exactly as the workspace
+  // model catalog route reads them.
+  const catalogRead = (async () =>
+    Promise.all([
+      listConnectionsMetadata(db, workspaceId, null),
+      listWorkspaceProviderCustomModelsByKind(db, { accountId, workspaceId, providerKinds }),
+      getOrganizationModelProviderCatalogForWorkspace(db, {
+        accountId,
+        workspaceId,
+        providerKinds,
+      }),
+    ]))();
+  // Observe both batches before admission resumes or fails. Retain the previous
+  // input-batch error precedence even if the independent catalog fails first.
+  const [inputResult, catalogResult] = await Promise.allSettled([inputRead, catalogRead]);
+  if (inputResult.status === "rejected") throw inputResult.reason;
+  if (catalogResult.status === "rejected") throw catalogResult.reason;
   const [
     { restrictions: connectionModelRestrictions, xaiSubscriptionActive },
+    claudePool,
     policy,
     codexSubscriptionActive,
-    workspaceGatewayConnectionActive,
-    workspaceGatewayCustomModels,
-    openRouterConnectionActive,
-    workspaceOpenRouterCustomModels,
-    organizationGatewayConnectionActive,
-    organizationOpenRouterConnectionActive,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
-  ] = await Promise.all([
-    connectionRestrictionsAndXaiReadiness(db, settings, context),
-    getWorkspaceModelPolicy(db, workspaceId),
-    workspaceCodexSubscriptionActive(db, settings, workspaceId),
-    workspaceVercelAiGatewayConnectionActive(db, workspaceId),
-    listWorkspaceGatewayCustomModels(db, { accountId, workspaceId }),
-    workspaceOpenRouterConnectionActive(db, workspaceId),
-    listWorkspaceOpenRouterCustomModels(db, { accountId, workspaceId }),
-    organizationModelProviderConnectionActiveForWorkspace(db, {
-      accountId,
-      workspaceId,
-      providerKind: "vercel_gateway",
-    }),
-    organizationModelProviderConnectionActiveForWorkspace(db, {
-      accountId,
-      workspaceId,
-      providerKind: "openrouter",
-    }),
-    listOrganizationModelProviderCustomModelsForWorkspace(db, {
-      accountId,
-      workspaceId,
-      providerKind: "vercel_gateway",
-    }),
-    listOrganizationModelProviderCustomModelsForWorkspace(db, {
-      accountId,
-      workspaceId,
-      providerKind: "openrouter",
-    }),
-  ]);
+    observations,
+  ] = inputResult.value;
+  const [workspaceConnections, workspaceCustomModels, organizationProviders] = catalogResult.value;
+  const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
+    workspaceProviderApiKeyConnectionMetadataFromConnections(workspaceConnections, kind) !== null;
+  const claudeConnections: ClaudeConnectionCatalog = {};
+  const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
+  for (const kind of CLAUDE_CONNECTION_KINDS) {
+    if (kind === "claude_subscription" && !settings.claudeSubscriptionEnabled) continue;
+    claudeConnections[kind] = {
+      active:
+        kind === "claude_subscription"
+          ? claudePool.organization
+          : organizationProviders[kind].active,
+      models: organizationProviders[kind].models,
+    };
+    workspaceClaudeConnections[kind] = {
+      active:
+        kind === "claude_subscription" ? claudePool.workspace : workspaceConnectionActive(kind),
+      models: workspaceCustomModels[kind],
+    };
+  }
   return {
+    claudeConnections,
+    workspaceClaudeConnections,
     connectionModelRestrictions,
     settings,
     policy,
     codexSubscriptionActive,
+    observations,
     xaiSubscriptionActive,
-    workspaceGatewayConnectionActive,
-    workspaceGatewayCustomModels,
-    workspaceOpenRouterConnectionActive: openRouterConnectionActive,
-    workspaceOpenRouterCustomModels,
-    organizationGatewayConnectionActive,
-    organizationOpenRouterConnectionActive,
-    organizationGatewayCustomModels,
-    organizationOpenRouterCustomModels,
+    workspaceGatewayConnectionActive: workspaceConnectionActive("vercel_gateway"),
+    workspaceGatewayCustomModels: workspaceCustomModels.vercel_gateway,
+    workspaceOpenRouterConnectionActive: workspaceConnectionActive("openrouter"),
+    workspaceOpenRouterCustomModels: workspaceCustomModels.openrouter,
+    organizationGatewayConnectionActive: organizationProviders.vercel_gateway.active,
+    organizationOpenRouterConnectionActive: organizationProviders.openrouter.active,
+    organizationGatewayCustomModels: organizationProviders.vercel_gateway.models,
+    organizationOpenRouterCustomModels: organizationProviders.openrouter.models,
+    workspaceOpperConnectionActive: workspaceConnectionActive("opper"),
+    workspaceOpperCustomModels: workspaceCustomModels.opper ?? [],
+    organizationOpperConnectionActive: organizationProviders.opper?.active === true,
+    organizationOpperCustomModels: organizationProviders.opper?.models ?? [],
   };
+}
+
+/**
+ * Caller-scoped stable fresh admission; never re-admit already accepted work.
+ * Live discovery is opt-in: its token refresh can mutate connection readiness,
+ * so a health hint must not change the billing rail of an explicit create.
+ */
+export async function resolveCallerWorkspaceModelSelections(
+  db: Database,
+  settings: Settings,
+  context: WorkspaceModelSelectionContext,
+  options: { observeAvailability?: boolean } = {},
+): Promise<WorkspaceModelSelection[]> {
+  return resolveWorkspaceModelSelection(
+    await loadWorkspaceModelSelectionInput(db, settings, context, {
+      observeAvailability: options.observeAvailability === true,
+    }),
+  );
+}
+
+/** Transient selectability for existing consumers; not fresh-create admission. */
+export function selectableWorkspaceModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): WorkspaceModelSelection | undefined {
+  const selection = findSelection(selections, modelId);
+  return selection?.availability.selectable ? selection : undefined;
+}
+
+/** Same stable decision used by client config and direct fresh session creation. */
+export function admissibleWorkspaceModel(
+  selections: readonly WorkspaceModelSelection[],
+  modelId: string,
+): WorkspaceModelSelection | undefined {
+  const selection = findSelection(selections, modelId);
+  return selection && isWorkspaceModelAdmissible(selection) ? selection : undefined;
 }
 
 /**
@@ -422,6 +592,11 @@ export async function resolveScheduledTaskDefaultModel(
     accountId: task.accountId,
     workspaceId: task.workspaceId,
     subjectId: task.ownerSubjectId ?? task.createdBy.subjectId,
+    claudeAuthoritySnapshot: await getScheduledTaskClaudeProviderAccountAuthoritySnapshot(
+      db,
+      task.workspaceId,
+      task.id,
+    ),
     xaiAuthoritySnapshot: await getScheduledTaskXaiProviderAccountAuthoritySnapshot(
       db,
       task.workspaceId,

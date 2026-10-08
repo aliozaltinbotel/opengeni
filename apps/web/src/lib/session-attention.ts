@@ -1,4 +1,7 @@
-import type { Session } from "@/types";
+import type { RailSession as Session } from "./session-list-entry";
+
+// The attention-boundary predicate is shared with native clients.
+export { sessionAttentionReadThroughSequence } from "@opengeni/react/session-attention-model";
 
 export type ActiveSessionReadCandidate = Pick<
   Session,
@@ -126,10 +129,10 @@ export function shouldAcknowledgeActiveSession(input: ActiveSessionReadEligibili
  * `attentionVersion`. The rail calls this only after an id-keyed lookup, so
  * both arguments represent the same session.
  */
-export function applySessionAttentionProjection(
-  current: Session,
+export function applySessionAttentionProjection<T extends Session>(
+  current: T,
   projected: SessionAttentionProjection,
-): Session {
+): T {
   const currentVersion = current.attentionVersion!;
   const projectedVersion = projected.attentionVersion!;
   if (
@@ -154,10 +157,10 @@ export function latestSessionAttentionProjection(
  * foreground child read must adjust each loaded ancestor immediately instead
  * of leaving a stale blue or red parent marker until the next list poll.
  */
-export function applySessionAttentionProjections(
-  sessions: readonly Session[],
+export function applySessionAttentionProjections<T extends Session>(
+  sessions: readonly T[],
   projections: ReadonlyMap<string, SessionAttentionProjection>,
-): Session[] {
+): T[] {
   const sourceById = new Map(sessions.map((session) => [session.id, session]));
   const projectedById = new Map(sourceById);
 

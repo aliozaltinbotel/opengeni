@@ -1,3 +1,4 @@
+import { signupCreditModelIds } from "@opengeni/config";
 import {
   CompleteSelfServiceOrganizationSetupRequest,
   CompleteSelfServiceOrganizationSetupResponse,
@@ -15,6 +16,7 @@ import {
   nestedPostgresSqlState,
   preflightOrganizationUserSetup,
   previewOrganizationUserSetup,
+  recordOrganizationSignupUseCase,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -79,6 +81,7 @@ export function registerManagedOnboardingRoutes(
           organizationName,
           operationId: parsed.data.operationId,
           requestFingerprint,
+          trialCreditModelIds: signupCreditModelIds(deps.settings),
           trialCreditsEnabled:
             deps.settings.productAccessMode === "managed" &&
             deps.settings.verifiedSignupTrialCreditsEnabled,
@@ -87,6 +90,19 @@ export function registerManagedOnboardingRoutes(
       // An idempotent replay of the same operation returns the same committed
       // setup and is counted again; clients retry only on an ambiguous response.
       recordOrganizationSetupOutcome(deps.observability, "created");
+      if (parsed.data.useCase) {
+        // The organization is already committed, so a failure to keep the
+        // signup answer must not fail its setup. The first answer wins.
+        await recordOrganizationSignupUseCase(deps.db, {
+          organizationId: completed.organizationId,
+          subjectId: `user:${session.user.id}`,
+          useCase: parsed.data.useCase,
+        }).catch((error: unknown) => {
+          console.warn("[api] could not record the signup use case", {
+            sqlState: nestedPostgresSqlState(error) ?? null,
+          });
+        });
+      }
       return context.json(completed);
     } catch (error) {
       recordOrganizationSetupOutcome(deps.observability, "failed");

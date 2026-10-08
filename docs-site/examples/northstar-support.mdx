@@ -1,0 +1,50 @@
+---
+title: "Northstar support agent"
+description: "A support app that embeds the Opengeni conversation and lets the agent work tickets through the app's own MCP tools."
+icon: "headset"
+---
+
+Northstar is a fictional customer-support app that shows the full integration. Use it as a working reference.
+
+## What it shows
+
+- **The embed.** `createSessionProxyHandler` at `/api/opengeni/*`, with `OpenGeniProvider` and `SessionConversation` in a panel beside the ticket. Toggle the **Opengeni** switch to compare with and without the agent.
+- **Product tools.** The agent reads and updates tickets through Northstar's MCP server (`get_ticket`, `get_customer`, `update_ticket`, `add_internal_note`). Changes show up in the app immediately.
+- **Custom tool rendering.** Tool calls render as ticket and customer cards through a `toolRegistry`.
+- **Branding.** Compact density and Northstar colors through `--og-*` tokens.
+
+## Run it
+
+You need Bun, a repository checkout, an organization API key, a workspace id, and a public HTTPS tunnel for the MCP server.
+
+```bash
+git clone https://github.com/Cloudgeni-ai/opengeni.git
+cd opengeni && bun install
+cd examples/northstar-support
+cp .env.example .env.local   # set OPENGENI_WORKSPACE_ID, OPENGENI_API_KEY, OPENGENI_DEMO_MCP_TOKEN
+bun run server
+```
+
+In a second terminal, expose the MCP port (or set `OPENGENI_DEMO_MCP_URL` to any public HTTPS URL that reaches port 4101):
+
+```bash
+ngrok http 4101
+```
+
+In a third terminal, start the UI and open http://127.0.0.1:3101:
+
+```bash
+cd examples/northstar-support && bun run dev
+```
+
+## Where to look
+
+| File                             | Contents                                                            |
+| -------------------------------- | ------------------------------------------------------------------- |
+| `src/server.ts`                  | Onboarding, session creation, the session proxy, and the MCP server |
+| `src/support-agent-panel.tsx`    | `OpenGeniProvider` and `SessionConversation`                        |
+| `src/support-tool-renderers.tsx` | Custom renderers for the MCP tool calls                             |
+
+The demo uses one fixed user and pre-approved tools. A real app authenticates users in `resolve` and checks CSRF in `authorizeMutation`.
+
+[View the source on GitHub](https://github.com/Cloudgeni-ai/opengeni/tree/main/examples/northstar-support).

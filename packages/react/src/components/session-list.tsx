@@ -1,9 +1,11 @@
 import { deriveSessionDisplayTitle, type OpenGeniClient, type Session } from "@opengeni/sdk";
 import { ArchiveIcon, PencilIcon, PlusIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useClientConfigFlags } from "../hooks/use-client-config-flags";
 import { useWorkspaceSessions } from "../hooks/use-workspace-sessions";
 import { cn } from "../lib/cn";
 import { formatRelativeTime } from "../lib/format";
+import { useErrorMessage } from "../lib/error-message";
 import { useOpenGeni, type ClientOverride } from "../session-context";
 
 export type SessionListLabels = {
@@ -37,7 +39,10 @@ export type SessionListProps = ClientOverride & {
   onNewChat?: (() => void) | undefined;
   /** Allow inline rename (`updateSession`). Defaults to true. */
   rename?: boolean | undefined;
-  /** Allow archiving (`updateSessionArchive`). Defaults to true. */
+  /**
+   * Allow archiving (`updateSessionArchive`). Defaults to true; hidden when the
+   * session proxy reports archive disabled (`archive: false`).
+   */
   archive?: boolean | undefined;
   /** Called after the selected chat was archived, so the host can move on. */
   onArchived?: ((sessionId: string) => void) | undefined;
@@ -54,7 +59,7 @@ type ArchiveClient = Partial<Pick<OpenGeniClient, "updateSessionArchive">>;
  * The workspace's root chats for the current user, newest activity first.
  * Through `createSessionProxyHandler` the list is limited to the chats the
  * resolved user created (or everything they may read, with `sessionList:
- * "visible"`); OpenGeni enforces visibility either way.
+ * "visible"`); Opengeni enforces visibility either way.
  */
 export function SessionList({
   client,
@@ -90,9 +95,13 @@ export function SessionList({
   }, [refresh, refreshKey]);
   const [editing, setEditing] = useState<{ id: string; title: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ cause: unknown } | null>(null);
+  const formatError = useErrorMessage();
   const archiveClient = context.client as unknown as ArchiveClient;
-  const canArchive = archive && typeof archiveClient.updateSessionArchive === "function";
+  // A session proxy with `archive: false` reports it; hide what would fail.
+  const config = useClientConfigFlags(context.client as never);
+  const canArchive =
+    archive && config.archive && typeof archiveClient.updateSessionArchive === "function";
 
   const run = async (id: string, action: () => Promise<unknown>) => {
     setBusy(id);
@@ -101,7 +110,7 @@ export function SessionList({
       await action();
       await list.refresh();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      setError({ cause });
     } finally {
       setBusy(null);
     }
@@ -148,16 +157,16 @@ export function SessionList({
           </button>
         ) : null}
       </div>
-      {error ? (
+      {error || list.error ? (
         <p role="alert" className="px-2 text-og-xs text-og-status-failed">
-          {error}
+          {formatError(error ? error.cause : list.error)}
         </p>
       ) : null}
       <ul className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto px-1 pb-2">
         {list.loading && sessions.length === 0 ? (
           <li className="px-2 py-2 text-og-xs text-og-fg-subtle">{labels.loading}</li>
         ) : null}
-        {!list.loading && sessions.length === 0 ? (
+        {!list.loading && !list.error && sessions.length === 0 ? (
           <li className="px-2 py-2 text-og-xs text-og-fg-subtle">{labels.empty}</li>
         ) : null}
         {sessions.map((session) => {
@@ -206,7 +215,7 @@ export function SessionList({
                   {formatRelativeTime(session.updatedAt)}
                 </span>
               </button>
-              <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex">
+              <span className="absolute right-1 top-1.5 hidden gap-0.5 group-focus-within:flex group-hover:flex pointer-coarse:flex">
                 {rename ? (
                   <button
                     type="button"

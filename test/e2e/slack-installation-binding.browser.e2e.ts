@@ -263,6 +263,13 @@ async function installApiFixture(page: Page, state: FixtureState): Promise<void>
         pinned: [],
         pinnedTruncated: false,
         nextCursor: null,
+        filtersApplied: true,
+        sortBy: url.searchParams.get("sortBy") ?? "updatedAt",
+        archiveStatus: url.searchParams.get("archiveStatus") ?? "active",
+        ...(url.searchParams.get("needsYouOnly") === "true" ? { needsYouOnly: true } : {}),
+        ...(url.searchParams.get("includeTotals") === "true"
+          ? { totals: { needsYouCount: 0, groups: [] } }
+          : {}),
       });
     }
     return json({});
@@ -317,7 +324,7 @@ function slackConnection(status: ConnectionStatus) {
       slackTeamName: "Slack Binding Team",
       botId: "B_BINDING_BROWSER",
       botUserId: "U_BINDING_BROWSER",
-      botDisplayName: "OpenGeni",
+      botDisplayName: "Opengeni",
       verifiedAt: new Date(0).toISOString(),
     },
     createdBySubjectId: "binding-browser-subject",
@@ -341,7 +348,7 @@ function slackBinding(state: "active" | "quarantined") {
     slackTeamName: "Slack Binding Team",
     botId: "B_BINDING_BROWSER",
     botUserId: "U_BINDING_BROWSER",
-    botDisplayName: "OpenGeni",
+    botDisplayName: "Opengeni",
     state,
     quarantineReason: state === "quarantined" ? "legacy_conflicting_installations" : null,
     version: 3,

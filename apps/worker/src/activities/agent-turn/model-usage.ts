@@ -1,3 +1,4 @@
+import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import {
   applyCreditDebitUpToBalance,
   recordUsageEvent,
@@ -16,12 +17,19 @@ import {
 import {
   calculateGatewayReportedCostBreakdown,
   calculateGatewayReportedProviderCostMicros,
+  calculateModelListUsageCostSnapshot,
   calculateModelUsageCostBreakdown,
+  configuredModelListPricingSchedules,
+  configuredModels,
   configuredModelPricingSchedules,
   resolveModelProvider,
   responseSatisfiesLatencyMode,
   OPENGENI_GATEWAY_PROVIDER_ID,
+  OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
+  WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type ModelUsageInput,
   type ModelProviderApi,
   type Settings,
@@ -32,13 +40,16 @@ import {
   modelCallAccountContext,
   recordCreditMicros,
   recordModelCacheTokens,
+  recordModelCreditsCharged,
   recordModelInputTokens,
+  recordModelResponseUsage,
 } from "../../observability-metrics";
 import {
   type LatencyMode,
   type ModelContextContributionSummary,
   type SessionEvent,
 } from "@opengeni/contracts";
+import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import { safeErrorDiagnostic } from "./errors";
 
 export function modelUsageSourceKey(input: {
@@ -50,6 +61,27 @@ export function modelUsageSourceKey(input: {
     return input.responseId;
   }
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
+}
+
+/** Legacy aggregate usage may only debit a policy shared by its completed calls. */
+export function aggregateCreditPolicyRevision(input: {
+  responseRevisions: ReadonlySet<number | undefined>;
+  lastAdmittedRevision: number | undefined;
+  chargesOpenGeniCredits: boolean;
+  totalTokens: number | null;
+}): number | undefined {
+  if (
+    input.chargesOpenGeniCredits &&
+    input.responseRevisions.size > 1 &&
+    (input.totalTokens ?? 0) > 0
+  ) {
+    throw new Error("Aggregate model usage spans different credit policy revisions");
+  }
+  // Bind the completed response, even if later preparation changed admission.
+  // Older runtimes without response callbacks retain their admitted snapshot.
+  return input.responseRevisions.size === 1
+    ? input.responseRevisions.values().next().value
+    : input.lastAdmittedRevision;
 }
 
 export function providerContextTokens(
@@ -207,6 +239,7 @@ export async function processModelResponseTerminalEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -227,6 +260,15 @@ export async function processModelResponseTerminalEvent(input: {
 > {
   const terminal = modelTerminalResponseFromSdkEvent(input.event);
   if (!terminal) {
+    return { status: "not_response" };
+  }
+  // Some providers mirror a terminal response before normalized usage arrives.
+  // Claiming that empty raw mirror would discard the SDK's billable response.
+  if (
+    !terminal.usage &&
+    input.event.type === "raw_model_stream_event" &&
+    input.event.data.type !== "response_done"
+  ) {
     return { status: "not_response" };
   }
 
@@ -268,6 +310,7 @@ export async function processModelResponseTerminalEvent(input: {
         turnId: input.turnId,
         turnAttemptId: input.turnAttemptId,
         model: input.model,
+        creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -281,6 +324,7 @@ export async function processModelResponseTerminalEvent(input: {
         sourceKey,
         ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
         observability: input.observability,
+        metricProvider: input.provider,
       });
       authoritative = await emitModelCallUsage({
         observability: input.observability,
@@ -296,6 +340,7 @@ export async function processModelResponseTerminalEvent(input: {
         usage: responseUsage,
         normalizedUsage,
         ...(billing ? { billingPath: billing.billingPath } : {}),
+        ...(billing ? { billingSnapshot: billing } : {}),
         ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
@@ -318,6 +363,14 @@ export async function processModelResponseTerminalEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
+        });
+        recordAuthoritativeModelUsageMetrics({
+          observability: input.observability,
+          settings: input.settings,
+          provider: input.provider,
+          model: input.model,
+          externallyBilled: input.externallyBilled,
+          billing,
         });
       }
       const observedInput = normalizedUsage.telemetry.inputTokens;
@@ -374,6 +427,7 @@ export async function processCompactionModelUsageEvent(input: {
   externallyBilled: boolean;
   chargesOpenGeniCredits?: boolean;
   countsTowardTokenCap?: boolean;
+  creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
   emittedSourceKeys: Set<string>;
@@ -416,6 +470,7 @@ export async function processCompactionModelUsageEvent(input: {
         turnId: input.turnId,
         turnAttemptId: input.turnAttemptId,
         model: input.model,
+        creditPolicyRevision: input.creditPolicyRevision,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -428,6 +483,7 @@ export async function processCompactionModelUsageEvent(input: {
         gatewayBilling: input.usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
+        metricProvider: input.provider,
       });
       authoritative = await emitModelCallUsage({
         observability: input.observability,
@@ -443,6 +499,7 @@ export async function processCompactionModelUsageEvent(input: {
         usage: input.usage,
         normalizedUsage,
         ...(billing ? { billingPath: billing.billingPath } : {}),
+        ...(billing ? { billingSnapshot: billing } : {}),
         ...(billing?.upstreamProvider ? { upstreamProvider: billing.upstreamProvider } : {}),
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
@@ -465,6 +522,14 @@ export async function processCompactionModelUsageEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
+        });
+        recordAuthoritativeModelUsageMetrics({
+          observability: input.observability,
+          settings: input.settings,
+          provider: input.provider,
+          model: input.model,
+          externallyBilled: input.externallyBilled,
+          billing,
         });
       }
     },
@@ -496,6 +561,16 @@ export async function emitModelCallUsage(input: {
   normalizedUsage?: ModelCallUsageNormalization;
   /** Accepted billing authority persisted for Insights repair after a soft fact-write failure. */
   billingPath?: ModelUsageBillingRecord["billingPath"];
+  /** Accepted comparisons are frozen with the event, not repriced during fact repair. */
+  billingSnapshot?: Pick<
+    ModelUsageBillingRecord,
+    | "pricedCostMicros"
+    | "estimatedProviderCostMicros"
+    | "equivalentCreditCostMicros"
+    | "pricingSource"
+    | "listByClassMicros"
+    | "listByClassApprox"
+  >;
   /** Validated Gateway endpoint provider persisted for exact Insights repair. */
   upstreamProvider?: string;
   // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
@@ -531,6 +606,16 @@ export async function emitModelCallUsage(input: {
           sourceKey: input.sourceKey,
           ...(input.billingPath ? { billingPath: input.billingPath } : {}),
           ...(input.upstreamProvider ? { upstreamProvider: input.upstreamProvider } : {}),
+          ...(input.billingSnapshot
+            ? {
+                pricedCostMicros: input.billingSnapshot.pricedCostMicros,
+                estimatedProviderCostMicros: input.billingSnapshot.estimatedProviderCostMicros,
+                equivalentCreditCostMicros: input.billingSnapshot.equivalentCreditCostMicros,
+                pricingSource: input.billingSnapshot.pricingSource,
+                listByClassMicros: input.billingSnapshot.listByClassMicros ?? null,
+                listByClassApprox: input.billingSnapshot.listByClassApprox ?? false,
+              }
+            : {}),
           ...telemetry,
         },
       },
@@ -604,11 +689,14 @@ export type ModelUsageBillingRecord = {
   billingPath: "opengeni_credits" | "external";
   /** Same quantity written to usage_events.model.cost when present; else 0. */
   pricedCostMicros: number;
-  /** Hypothetical provider-rate USD micros; never an OpenGeni charge. */
+  /** Hypothetical provider-rate USD micros; never an Opengeni charge. */
   estimatedProviderCostMicros: number | null;
-  /** Hypothetical OpenGeni credit price at the captured rate; never a debit. */
+  /** Hypothetical Opengeni credit price at the captured rate; never a debit. */
   equivalentCreditCostMicros: number | null;
   pricingSource: "configured_list_price" | "gateway_reported" | null;
+  /** Forward-only provider list class snapshot; older facts/events stay unknown. */
+  listByClassMicros?: InsightsUsageClassMicros | null;
+  listByClassApprox?: boolean;
   normalizedUsage: ModelCallUsageNormalization;
   upstreamProvider?: string;
 };
@@ -627,12 +715,15 @@ export async function recordModelUsageAndDebitCredits(
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
+    creditPolicyRevision?: number | undefined;
     gatewayBilling?: ModelResponseUsage["gatewayBilling"];
     usage?: ModelUsageInput | ModelCallUsageInput | null;
     normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
     latencyMode?: LatencyMode;
     observability?: ActivityServices["observability"];
+    /** Configured provider id for metric labels; never billing authority. */
+    metricProvider?: string;
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
@@ -649,15 +740,25 @@ export async function recordModelUsageAndDebitCredits(
     ? resolveModelProvider(settings, input.model)
     : undefined;
   const gatewayProviderId = resolvedGatewayModel?.provider.id;
+  // Opper reports the exact USD cost of every response (`usage.opper.cost`);
+  // the Chat adapter surfaces it with `finalProvider: "opper"`.
+  const opperReported =
+    (gatewayProviderId === OPPER_PROVIDER_ID ||
+      gatewayProviderId === WORKSPACE_OPPER_PROVIDER_ID ||
+      gatewayProviderId === ORGANIZATION_OPPER_PROVIDER_ID) &&
+    input.gatewayBilling?.finalProvider === "opper";
   const gatewayBilling =
     gatewayProviderId === OPENGENI_GATEWAY_PROVIDER_ID ||
-    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID
+    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID ||
+    opperReported
       ? input.gatewayBilling
       : undefined;
   const allowedProviders = resolvedGatewayModel?.model.requestPolicy?.gateway.only;
+  // Scoped Opper rails settle externally; record the exact provider cost only.
   const unpinnedWorkspaceGatewayModel =
-    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined;
-  if (gatewayBilling) {
+    (gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined) ||
+    (opperReported && gatewayProviderId !== OPPER_PROVIDER_ID);
+  if (gatewayBilling && !opperReported) {
     if (
       !unpinnedWorkspaceGatewayModel &&
       (!allowedProviders ||
@@ -669,7 +770,7 @@ export async function recordModelUsageAndDebitCredits(
     }
     if (unpinnedWorkspaceGatewayModel && chargesOpenGeniCredits) {
       throw new Error(
-        `Workspace Gateway custom model ${input.model} cannot charge OpenGeni credits without pinned pricing`,
+        `Workspace Gateway custom model ${input.model} cannot charge Opengeni credits without pinned pricing`,
       );
     }
   }
@@ -701,10 +802,30 @@ export async function recordModelUsageAndDebitCredits(
   const hasCompleteCoreTokenTelemetry =
     normalizedUsage.telemetry.inputTokens !== null &&
     normalizedUsage.telemetry.outputTokens !== null;
+  // Comparison rates are deliberately separate from debit authority. The
+  // current usage frame does not establish geography/service-tier provenance,
+  // so forward class splits stay unknown even when a total estimate is priced.
+  const listPricingSchedules = configuredModelListPricingSchedules(settings);
+  const configuredListPricingModel = listPricingSchedules[input.model]
+    ? input.model
+    : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
+      ? input.model.slice("codex/".length)
+      : null;
+  const listSnapshot =
+    !gatewayBilling && hasCompleteCoreTokenTelemetry && configuredListPricingModel
+      ? calculateModelListUsageCostSnapshot(settings, configuredListPricingModel, sanitizedUsage, {
+          latencyMode: input.latencyMode ?? "standard",
+          priceContextKnown: false,
+        })
+      : null;
+  const listClasses = {
+    listByClassMicros: listSnapshot?.listByClassMicros ?? null,
+    listByClassApprox: listSnapshot?.listByClassApprox ?? false,
+  };
   const estimatedProviderCostMicros = gatewayBilling
     ? (pricingBreakdown?.providerCostMicros ?? null)
     : hasCompleteCoreTokenTelemetry
-      ? (pricingBreakdown?.providerCostMicros ?? null)
+      ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
       : null;
   const equivalentCreditCostMicros =
     pricingBreakdown && !unpinnedWorkspaceGatewayModel
@@ -718,7 +839,7 @@ export async function recordModelUsageAndDebitCredits(
       ? ("configured_list_price" as const)
       : null;
   // Provider settlement and workspace-facing cost are separate. Externally
-  // metered subscription/workspace turns remain exempt from the OpenGeni token
+  // metered subscription/workspace turns remain exempt from the Opengeni token
   // cap, while a deployment-funded free model still records model.tokens. Every
   // non-credit path records a zero-cost marker and never consults pricing for a
   // debit.
@@ -757,6 +878,7 @@ export async function recordModelUsageAndDebitCredits(
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
+      ...listClasses,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
@@ -769,6 +891,7 @@ export async function recordModelUsageAndDebitCredits(
       estimatedProviderCostMicros,
       equivalentCreditCostMicros,
       pricingSource,
+      ...listClasses,
       normalizedUsage,
       ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
     };
@@ -796,6 +919,8 @@ export async function recordModelUsageAndDebitCredits(
       workspaceId: input.workspaceId,
       type: "model_usage_debit",
       requestedAmountMicros: costMicros,
+      modelId: canonicalizeConfiguredModelId(settings, input.model),
+      creditPolicyRevision: input.creditPolicyRevision,
       sourceType: "model_response",
       sourceId: `${input.turnId}:${input.sourceKey}`,
       idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,
@@ -816,6 +941,16 @@ export async function recordModelUsageAndDebitCredits(
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
+    try {
+      recordModelCreditsCharged(input.observability, {
+        provider: input.metricProvider ?? "unknown",
+        model: modelMetricProductId(settings, input.metricProvider, input.model),
+        debitedMicros: result.debitedMicros,
+        grantDebitedMicros: result.grantDebitedMicros,
+      });
+    } catch {
+      // The debit is committed; metrics are best-effort only.
+    }
   }
   return {
     billingPath: "opengeni_credits",
@@ -823,9 +958,74 @@ export async function recordModelUsageAndDebitCredits(
     estimatedProviderCostMicros,
     equivalentCreditCostMicros,
     pricingSource,
+    ...listClasses,
     normalizedUsage,
     ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
   };
+}
+
+const modelMetricProductIds = new WeakMap<Settings, Map<string, string>>();
+
+/**
+ * The bounded `model` metric label: the deployment catalog product id for a
+ * catalog model, or `custom` for a workspace-owned model (workspace gateway or
+ * a customer-key provider) and for anything the deployment catalog does not
+ * list. Metrics only; never billing or routing authority.
+ */
+export function modelMetricProductId(
+  settings: Settings,
+  provider: string | undefined,
+  model: string,
+): string {
+  if (provider?.startsWith("workspace-") || model.startsWith(WORKSPACE_GATEWAY_MODEL_ID_PREFIX)) {
+    return "custom";
+  }
+  let cache = modelMetricProductIds.get(settings);
+  if (!cache) {
+    cache = new Map();
+    modelMetricProductIds.set(settings, cache);
+  }
+  const cached = cache.get(model);
+  if (cached !== undefined) return cached;
+  let label = "custom";
+  try {
+    const canonical = canonicalizeConfiguredModelId(settings, model);
+    if (configuredModels(settings).some((candidate) => candidate.id === canonical)) {
+      label = canonical;
+    }
+  } catch {
+    // An unreadable catalog leaves the call labelled `custom`.
+  }
+  if (cache.size < 256) cache.set(model, label);
+  return label;
+}
+
+/**
+ * Per-model usage and estimated provider cost for one authoritative response.
+ * Call only after the durable usage event was accepted as current (the same
+ * fence as the Insights fact). Best-effort: never throws.
+ */
+export function recordAuthoritativeModelUsageMetrics(input: {
+  observability: ActivityServices["observability"];
+  settings: Settings;
+  provider: string;
+  model: string;
+  externallyBilled: boolean;
+  billing: ModelUsageBillingRecord;
+}): void {
+  try {
+    const telemetry = input.billing.normalizedUsage.telemetry;
+    recordModelResponseUsage(input.observability, {
+      provider: input.provider,
+      model: modelMetricProductId(input.settings, input.provider, input.model),
+      payer: input.externallyBilled ? "external" : "deployment",
+      tokens: telemetry,
+      estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
+      pricingSource: input.billing.pricingSource,
+    });
+  } catch {
+    // Durable event + billing already committed; metrics are best-effort only.
+  }
 }
 
 /** Soft-fail Insights fact write — never throws into the billing/emit path. */
@@ -861,6 +1061,8 @@ export async function recordAuthoritativeModelCallFact(input: {
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
       equivalentCreditCostMicros: input.billing.equivalentCreditCostMicros,
       pricingSource: input.billing.pricingSource,
+      listByClassMicros: input.billing.listByClassMicros ?? null,
+      listByClassApprox: input.billing.listByClassApprox ?? false,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
@@ -887,7 +1089,9 @@ export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization
       ? { outputTokens: normalized.telemetry.outputTokens }
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
-    ...(normalized.telemetry.cachedTokens !== null || normalized.telemetry.cacheWriteTokens !== null
+    ...(normalized.telemetry.cachedTokens !== null ||
+    normalized.telemetry.cacheWriteTokens !== null ||
+    normalized.cacheWriteTokensByTtl !== undefined
       ? {
           inputTokensDetails: {
             ...(normalized.telemetry.cachedTokens === null
@@ -896,6 +1100,12 @@ export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization
             ...(normalized.telemetry.cacheWriteTokens === null
               ? {}
               : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
+            ...(normalized.cacheWriteTokensByTtl?.fiveMinute == null
+              ? {}
+              : { cache_write_tokens_5m: normalized.cacheWriteTokensByTtl.fiveMinute }),
+            ...(normalized.cacheWriteTokensByTtl?.oneHour == null
+              ? {}
+              : { cache_write_tokens_1h: normalized.cacheWriteTokensByTtl.oneHour }),
           },
         }
       : {}),

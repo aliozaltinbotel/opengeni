@@ -1,4 +1,5 @@
 import { Permission } from "@opengeni/contracts";
+import { organizationAdministrationAccountIds } from "@opengeni/react/organization-model";
 
 import type { AccessContext } from "@/types";
 import type { Workspace } from "@/types";
@@ -45,6 +46,7 @@ const permissionGroupAssignments: Record<Permission, string> = {
   "enrollments:manage": "Machines",
   "workspace:admin": "Admin & account",
   "api_keys:manage": "Admin & account",
+  "usage_allowances:manage": "Admin & account",
   "connections:read": "Connections",
   "connections:write": "Connections",
   "capabilities:manage": "Connections",
@@ -154,9 +156,9 @@ export const defaultApiKeyPermissions = new Set<string>([
 ]);
 
 /**
- * Groups offered for a session's first-party MCP (OpenGeni tool) permission
+ * Groups offered for a session's first-party MCP (Opengeni tool) permission
  * scope — the same grouped idiom as the API key dialog. Account-level scopes
- * are excluded: a session's OpenGeni MCP only ever acts inside its workspace.
+ * are excluded: a session's Opengeni MCP only ever acts inside its workspace.
  */
 export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
   const accountOnly = new Set<string>([
@@ -166,6 +168,7 @@ export function buildSessionMcpPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   const notFirstPartyMcp = new Set<string>(["codemode:call"]);
   return buildApiKeyPermissionGroups()
@@ -199,6 +202,7 @@ export function buildWorkspaceMemberPermissionGroups(): PermissionGroup[] {
     "billing:read",
     "billing:manage",
     "workspace:create",
+    "usage_allowances:manage",
   ]);
   // Membership itself is the workspace-access boundary. `workspace:read` is
   // the baseline capability that lets an admitted human discover and open the
@@ -223,15 +227,18 @@ export function workspaceMemberPermissionGroups(): PermissionGroup[] {
 }
 
 /**
- * The default permission set for a newly-added workspace member: full
- * collaborator access minus the admin/management powers (which an admin grants
- * deliberately). Mirrors the API-key default set plus goals management.
+ * The default permission set for a newly-added workspace member: everything a
+ * Viewer holds plus full collaborator access, minus the admin/management powers
+ * (which an admin grants deliberately). Mirrors the server's named `member`
+ * preset (migration 0555) exactly, order included.
  */
 export const defaultWorkspaceMemberPermissions = new Set<string>([
   "workspace:read",
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "stream:view",
+  "stream:acknowledge",
   "files:upload",
   "files:read",
   "documents:manage",
@@ -248,6 +255,9 @@ export const defaultWorkspaceMemberPermissions = new Set<string>([
   "secrets:list",
   "secrets:write",
   "goals:manage",
+  "rigs:use",
+  "artifacts:read",
+  "artifacts:publish",
 ]);
 
 export type WorkspaceAccessLevel = "viewer" | "member" | "admin";
@@ -349,6 +359,22 @@ export function hasWorkspacePermission(
   );
 }
 
+/**
+ * True only when the viewer's loaded grant for this workspace provably lacks
+ * `permission`. A missing grant (still loading, local mode, or no access at
+ * all) is not evidence of a narrower role.
+ */
+export function lacksWorkspacePermission(
+  context: AccessContext | null,
+  workspaceId: string,
+  permission: string,
+): boolean {
+  return (
+    Boolean(context?.workspaceGrants?.some((grant) => grant.workspaceId === workspaceId)) &&
+    !hasWorkspacePermission(context, workspaceId, permission)
+  );
+}
+
 /** An authorization failure needs an access explanation, not a retry prompt. */
 export function isWorkspacePermissionDenied(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "status" in error && error.status === 403);
@@ -384,13 +410,24 @@ export function canManageWorkspaceSettings(
   );
 }
 
-export function organizationAdministrationAccountIds(accessContext: AccessContext): string[] {
-  return accessContext.accountGrants
-    .filter(
-      (grant) =>
-        grant.subjectId === accessContext.subjectId &&
-        (grant.role === "owner" || grant.role === "admin"),
-    )
-    .map((grant) => grant.accountId)
-    .sort();
+/**
+ * A shared workspace's Members surface: the viewer's own members:manage grant,
+ * or (in a managed browser session) an active organization owner or admin of
+ * the workspace's organization, with or without a grant here. The API applies
+ * the same organization authority; Personal workspaces never qualify.
+ */
+export function canManageWorkspaceMembers(
+  context: AccessContext | null,
+  workspace: Pick<Workspace, "id" | "accountId" | "kind"> | null,
+  managedSession: boolean,
+): boolean {
+  if (!context || !workspace) return false;
+  if (hasWorkspacePermission(context, workspace.id, "members:manage")) return true;
+  return (
+    managedSession &&
+    workspace.kind === "shared" &&
+    organizationAdministrationAccountIds(context).includes(workspace.accountId)
+  );
 }
+
+export { organizationAdministrationAccountIds };

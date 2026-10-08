@@ -7,29 +7,24 @@ import { flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
-test("Latest question explains a pending queue destination when the host provides no queue focus", async () => {
-  const reason = new Error("Queued");
-  reason.name = "LatestQuestionQueuedError";
+test("the legacy global resolver cannot create navigation without a mounted prompt", async () => {
+  let calls = 0;
   const view = await renderComponent(
     <MessageTimeline
       events={[]}
       turnSummary={{ rolling: true }}
       hasNewer
       onJumpToLatestQuestion={async () => {
-        throw reason;
+        calls++;
+        return 1;
       }}
     />,
   );
   try {
     await flush(50);
     const button = view.container.querySelector<HTMLButtonElement>("[data-og-jump-to-question]");
-    expect(button).not.toBeNull();
-    await act(async () => button!.click());
-    await flush(30);
-    expect(view.container.querySelector('[role="status"]')?.textContent).toContain(
-      "The latest question is in the prompt queue.",
-    );
-    expect(button?.disabled).toBe(false);
+    expect(button).toBeNull();
+    expect(calls).toBe(0);
   } finally {
     await view.unmount();
   }
@@ -357,6 +352,8 @@ describe("readable per-turn rows", () => {
       await flush();
       const trigger = statusTrigger(r.container);
       expect(trigger.textContent).toMatch(/^Waiting for you/);
+      // One live waiting status: the header, not also a "waiting on you" divider.
+      expect(r.container.textContent).not.toContain("waiting on you");
       await r.rerender(
         <MessageTimeline
           events={[
@@ -374,7 +371,7 @@ describe("readable per-turn rows", () => {
       await flush();
       expect(statusTrigger(r.container)).toBe(trigger);
       expect(trigger.textContent).toMatch(/^Working/);
-      expect(r.container.textContent).toContain("Approval was needed.");
+      expect(r.container.textContent).toContain("You responded to this approval.");
       expect(r.container.textContent).not.toContain("waiting on you");
       expect(r.container.textContent).not.toContain("the turn is paused");
       expect(topLevelMessages(r.container)).toEqual(["Continuing the approved work."]);

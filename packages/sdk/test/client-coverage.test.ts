@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/artifact-client";
 import { OpenGeniEmbeddingClient } from "../src/embedding-client";
 import { OpenGeniApiError, OpenGeniSecureContextRequiredError } from "../src/errors";
+import type { AccessContext, AccessCredential } from "../src/index";
 import {
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -325,6 +326,40 @@ describe("OpenGeniClient goals", () => {
     );
   });
 
+  test("findGoal opts in to a successful null for a goal-less session", async () => {
+    const { client, requests } = makeClient(() => jsonResponse(null));
+    expect(await client.findGoal(WORKSPACE_ID, SESSION_ID)).toBeNull();
+    expect(requests[0]!.method).toBe("GET");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/goal?absent=null`,
+    );
+  });
+
+  test("findGoal returns an existing goal and keeps 404s (older servers) as errors", async () => {
+    const goalClient = makeClient(() => jsonResponse({ id: "goal-1", status: "active" }));
+    expect((await goalClient.client.findGoal(WORKSPACE_ID, SESSION_ID))?.status).toBe("active");
+
+    const legacy = makeClient(() => jsonResponse({ message: "session goal not found" }, 404));
+    const error = await legacy.client.findGoal(WORKSPACE_ID, SESSION_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(404);
+  });
+
+  test("findGoal and getGoal never share one in-flight read", async () => {
+    const { client, requests } = makeClient(() => jsonResponse({ id: "goal-1", status: "active" }));
+    await Promise.all([
+      client.getGoal(WORKSPACE_ID, SESSION_ID),
+      client.findGoal(WORKSPACE_ID, SESSION_ID),
+    ]);
+    expect(requests.map((request) => new URL(request.url).search).sort()).toEqual([
+      "",
+      "?absent=null",
+    ]);
+  });
+
   test("pauseGoal and resumeGoal PATCH the documented status transitions", async () => {
     const { client, requests } = makeClient(() => jsonResponse({ id: "goal-1", status: "paused" }));
     await client.pauseGoal(WORKSPACE_ID, SESSION_ID, {
@@ -523,6 +558,79 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(JSON.parse(requests[7]!.body!)).toEqual(command);
   });
 
+  test.each([
+    {
+      kind: "organization_api_key",
+      access: "full",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: null,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:create", "members:manage"],
+      note: "All shared workspaces in this organization; Personal workspaces are excluded.",
+    },
+    {
+      kind: "workspace_api_key",
+      accountId: ENVIRONMENT_ID,
+      workspaceId: WORKSPACE_ID,
+      effectiveWorkspacePermissions: ["workspace:read", "sessions:read", "secrets:read"],
+      note: "Only this workspace; secrets:read is explicitly granted.",
+    },
+  ] satisfies AccessCredential[])(
+    "getAccessContext preserves $kind credential metadata and existing grants",
+    async (credential) => {
+      const access: AccessContext = {
+        mode: "managed",
+        subjectId: "api_key:test",
+        accountGrants: [
+          {
+            accountId: ENVIRONMENT_ID,
+            subjectId: "api_key:test",
+            permissions: ["account:read"],
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: ENVIRONMENT_ID,
+        defaultWorkspaceId: credential.workspaceId,
+        credential,
+      };
+      const { client, requests } = makeClient(() => jsonResponse(access));
+
+      const result = await client.getAccessContext();
+
+      expect(result).toEqual(access);
+      expect(result.credential).toEqual(credential);
+      expect(result.accountGrants).toEqual(access.accountGrants);
+      expect(result.workspaceGrants).toEqual(access.workspaceGrants);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]!.method).toBe("GET");
+      expect(new URL(requests[0]!.url).pathname).toBe("/v1/access/me");
+    },
+  );
+
+  test("getAccessContext accepts older servers without credential metadata", async () => {
+    const access: AccessContext = {
+      mode: "managed",
+      subjectId: "api_key:legacy",
+      accountGrants: [],
+      workspaceGrants: [
+        {
+          workspaceId: WORKSPACE_ID,
+          accountId: ENVIRONMENT_ID,
+          subjectId: "api_key:legacy",
+          permissions: ["workspace:read", "sessions:read"],
+        },
+      ],
+      defaultAccountId: ENVIRONMENT_ID,
+      defaultWorkspaceId: WORKSPACE_ID,
+    };
+    const { client } = makeClient(() => jsonResponse(access));
+
+    const result = await client.getAccessContext();
+
+    expect(result).toEqual(access);
+    expect(result.credential).toBeUndefined();
+    expect(result).not.toHaveProperty("credential");
+  });
+
   test("getAccessContext and workspace CRUD hit the expected endpoints", async () => {
     const { client, requests } = makeClient((request) => {
       if (request.url.endsWith("/v1/access/me")) {
@@ -609,6 +717,15 @@ describe("OpenGeniClient access + workspaces", () => {
       "openai:gpt-5.6-sol:responses",
       "fireworks:accounts/fireworks/models/glm-5p2:chat",
     ]);
+  });
+
+  test("getClientConfig forwards an explicit workspace without losing request options", async () => {
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ apiContractRevision: OPENGENI_API_CONTRACT_REVISION }),
+    );
+    const controller = new AbortController();
+    await client.getClientConfig({ workspaceId: "workspace/a b", signal: controller.signal });
+    expect(new URL(requests[0]!.url).searchParams.get("workspaceId")).toBe("workspace/a b");
   });
 
   test("getWorkspaceModelCatalog fetches authenticated selectability", async () => {
@@ -1099,7 +1216,7 @@ describe("OpenGeniClient files", () => {
         reason: "insecure_context",
         retryable: false,
       });
-      expect((error as Error).message).toContain("OpenGeni is open over HTTP");
+      expect((error as Error).message).toContain("Opengeni is open over HTTP");
       expect(requests).toHaveLength(0);
     } finally {
       if (windowDescriptor) {
@@ -1478,7 +1595,7 @@ describe("OpenGeniClient files", () => {
       correlationId,
       outcomeUnknown: true,
       body: "",
-      message: `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+      message: `Opengeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
     });
     expect(requests).toHaveLength(2);
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
@@ -1692,50 +1809,70 @@ describe("OpenGeniClient files", () => {
     ).toBe(true);
   });
 
-  test("downloads a retained browser JPEG through the screenshot API", async () => {
-    const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
-    const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer))]
-      .map((byte) => byte.toString(16).padStart(2, "0"))
-      .join("");
-    const metadata = {
-      available: true as const,
-      artifactId: FILE_ID,
-      kind: "browser_screenshot" as const,
-      contentType: "image/jpeg",
-      originalBytes: bytes.byteLength,
-      sha256,
-      retainedAt: "2026-09-24T00:00:00.000Z",
-      dimensions: { width: 1440, height: 900 },
-      retention: {
-        policy: "session_screenshot" as const,
-        expiresAt: "2026-10-24T00:00:00.000Z",
-      },
-      retrieval: {
-        method: "GET" as const,
-        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
-        acceptRanges: "bytes" as const,
-        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
-      },
-    };
-    const { client, requests } = makeClient((request) =>
-      request.url.endsWith(`/artifacts/${FILE_ID}`)
-        ? jsonResponse(metadata)
-        : new Response(bytes, {
-            status: 206,
-            headers: {
-              "Accept-Ranges": "bytes",
-              "Content-Length": String(bytes.byteLength),
-              "Content-Range": `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
-              "Content-Type": "image/jpeg",
-            },
-          }),
-    );
+  test.each([
+    ["computer_screenshot", "image/png", true],
+    ["computer_screenshot", "image/jpeg", true],
+    ["computer_screenshot", "image/webp", true],
+    ["browser_screenshot", "image/png", true],
+    ["browser_screenshot", "image/jpeg", true],
+    ["browser_screenshot", "image/webp", true],
+    ["computer_screenshot", "image/svg+xml", false],
+    ["browser_screenshot", "image/svg+xml", false],
+    ["generated_image", "image/jpeg", false],
+  ] as const)(
+    "validates retained %s %s before screenshot download",
+    async (kind, contentType, supported) => {
+      const bytes = Uint8Array.of(0xff, 0xd8, 0xff, 0xd9);
+      const sha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer))]
+        .map((byte) => byte.toString(16).padStart(2, "0"))
+        .join("");
+      const metadata = {
+        available: true as const,
+        artifactId: FILE_ID,
+        kind,
+        contentType,
+        originalBytes: bytes.byteLength,
+        sha256,
+        retainedAt: "2026-09-24T00:00:00.000Z",
+        dimensions: { width: 1440, height: 900 },
+        retention: {
+          policy: "session_screenshot" as const,
+          expiresAt: "2026-10-24T00:00:00.000Z",
+        },
+        retrieval: {
+          method: "GET" as const,
+          path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/artifacts/${FILE_ID}/content`,
+          acceptRanges: "bytes" as const,
+          maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+        },
+      };
+      const { client, requests } = makeClient((request) =>
+        request.url.endsWith(`/artifacts/${FILE_ID}`)
+          ? jsonResponse(metadata)
+          : new Response(bytes, {
+              status: 206,
+              headers: {
+                "Accept-Ranges": "bytes",
+                "Content-Length": String(bytes.byteLength),
+                "Content-Range": `bytes 0-${bytes.byteLength - 1}/${bytes.byteLength}`,
+                "Content-Type": contentType,
+              },
+            }),
+      );
 
-    const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
-    expect(downloaded.metadata).toEqual(metadata);
-    expect(downloaded.bytes).toEqual(bytes);
-    expect(requests.map((request) => request.headers.range)).toEqual([undefined, "bytes=0-3"]);
-  });
+      if (!supported) {
+        await expect(
+          client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID),
+        ).rejects.toThrow("retained screenshot metadata is invalid");
+        expect(requests).toHaveLength(1);
+        return;
+      }
+      const downloaded = await client.downloadRetainedScreenshot(WORKSPACE_ID, SESSION_ID, FILE_ID);
+      expect(downloaded.metadata).toEqual(metadata);
+      expect(downloaded.bytes).toEqual(bytes);
+      expect(requests.map((request) => request.headers.range)).toEqual([undefined, "bytes=0-3"]);
+    },
+  );
 
   test("validates a generated-image receipt before minting its zero-copy URL", async () => {
     const reference = {
@@ -2357,6 +2494,8 @@ describe("OpenGeniClient billing", () => {
       nextWorkspaceCursor: null,
       personalWorkspaces: [],
       personalWorkspaceCount: 0,
+      privateChats: [],
+      privateChatsTruncated: false,
     };
     const { client, requests } = makeClient(() => jsonResponse(response));
     expect(
@@ -2379,6 +2518,15 @@ describe("OpenGeniClient billing", () => {
     expect(new URL(requests[1]!.url).pathname).toBe("/v1/billing/usage-workspaces");
     expect(new URL(requests[1]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
     expect(new URL(requests[1]!.url).searchParams.get("until")).toBe(response.until);
+    await client.getOrganizationModelUsage({
+      accountId: "acc-1",
+      period: "week",
+      afterWorkspaceId: WORKSPACE_ID,
+    });
+    expect(requests).toHaveLength(3);
+    expect(new URL(requests[2]!.url).pathname).toBe("/v1/billing/usage-models");
+    expect(new URL(requests[2]!.url).searchParams.get("period")).toBe("week");
+    expect(new URL(requests[2]!.url).searchParams.get("afterWorkspaceId")).toBe(WORKSPACE_ID);
   });
 
   test("billing reads pass account/workspace selectors as query params", async () => {
@@ -2401,6 +2549,7 @@ describe("OpenGeniClient billing", () => {
       accountId: "acc-1",
       returnUrl: "https://app.opengeni.ai/billing",
     });
+    await client.getBillingCheckout("cs_test_1", { accountId: "acc-1" });
     expect(
       requests.map(
         (request) =>
@@ -2412,6 +2561,7 @@ describe("OpenGeniClient billing", () => {
       "GET /v1/billing/entitlements",
       "POST /v1/billing/checkout",
       "POST /v1/billing/portal",
+      "GET /v1/billing/checkout/cs_test_1?accountId=acc-1",
     ]);
     expect(JSON.parse(requests[3]!.body!)).toEqual({ amountUsd: 25 });
     expect(JSON.parse(requests[4]!.body!)).toEqual({
@@ -2667,7 +2817,7 @@ describe("OpenGeniClient connections", () => {
       slackTeamName: "Example Slack",
       botId: "B_EXAMPLE",
       botUserId: "U_EXAMPLE",
-      botDisplayName: "OpenGeni" as const,
+      botDisplayName: "Opengeni" as const,
       state: "active" as const,
       quarantineReason: null,
       version: 2,

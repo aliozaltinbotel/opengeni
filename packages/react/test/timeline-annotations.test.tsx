@@ -245,6 +245,36 @@ describe("timeline annotations", () => {
     }
   });
 
+  test("offers Add note for a selection made before the selection controls mount", async () => {
+    let captured: DraftTimelineAnnotation | null = null;
+    const item = userItem(SOURCE_EVENT_ID, "alpha beta omega", 3);
+    const rendered = await renderComponent(<MessageTimeline items={[item]} />);
+    try {
+      const source = rendered.container.querySelector<HTMLElement>(
+        `[data-og-annotation-source-key="${SOURCE_EVENT_ID}"]`,
+      );
+      expect(source).not.toBeNull();
+      selectText(firstTextNode(source!), 6, 10);
+      source!.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
+      expect(addNoteButton()).toBeUndefined();
+
+      // The transcript can be selected while the lazy selection module loads.
+      // Its eventual mount must observe that selection without another gesture.
+      await rendered.rerender(
+        <MessageTimeline items={[item]} onAnnotate={(next) => (captured = next)} />,
+      );
+      await waitFor(() => Boolean(addNoteButton()), "early selection was missed");
+      expect(addNoteButton()?.textContent).toContain("beta");
+      await act(async () => addNoteButton()?.click());
+      expect(captured).toMatchObject({
+        quote: "beta",
+        source: { eventId: SOURCE_EVENT_ID, startOffset: 6, endOffset: 10 },
+      });
+    } finally {
+      await rendered.unmount();
+    }
+  });
+
   test("rejects a selection spanning two timeline messages", async () => {
     const first = userItem("00000000-0000-4000-8000-000000000511", "first", 1);
     const second = userItem("00000000-0000-4000-8000-000000000512", "second", 2);
@@ -328,6 +358,47 @@ describe("timeline annotations", () => {
     await flush();
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     expect(consumed).toBeGreaterThan(0);
+    await rendered.unmount();
+  });
+
+  test("consumes each focus request once across parent renders and permits a new request", async () => {
+    await import("../src/components/timeline-annotations-dialog");
+    const first = annotation("");
+    const second = { ...annotation(""), id: "00000000-0000-4000-8000-000000000504" };
+    let consumed = 0;
+    const view = (target: string | null) => (
+      <TimelineAnnotationsChip
+        annotations={[first, second]}
+        editable
+        focusAnnotationId={target}
+        onFocusConsumed={() => {
+          consumed += 1;
+        }}
+        onUpdate={() => undefined}
+      />
+    );
+    const rendered = await renderComponent(view(first.id));
+    const notes = document.body.querySelectorAll("textarea");
+    expect(document.activeElement).toBe(notes.item(0));
+    expect(consumed).toBe(1);
+    await act(async () => notes[1]?.focus());
+    // Both the callback and annotation array have new identities on this render.
+    await rendered.rerender(view(first.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(1);
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(2);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view(null));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(3);
+    await act(async () => notes[0]?.focus());
+    await rendered.rerender(view("00000000-0000-4000-8000-000000000599"));
+    await rendered.rerender(view(second.id));
+    expect(document.activeElement).toBe(notes.item(1));
+    expect(consumed).toBe(4);
     await rendered.unmount();
   });
 
@@ -475,7 +546,7 @@ describe("timeline annotations", () => {
         annotations={[
           {
             ...annotation(""),
-            quote: "OpenGeni stack is working.",
+            quote: "Opengeni stack is working.",
           },
         ]}
         editable
@@ -485,8 +556,8 @@ describe("timeline annotations", () => {
       />,
     );
     expect(rendered.container.textContent).toContain("1 annotation");
-    expect(rendered.container.textContent).not.toContain("OpenGeni stack is working.");
-    expect(document.body.textContent).toContain("OpenGeni stack is working.");
+    expect(rendered.container.textContent).not.toContain("Opengeni stack is working.");
+    expect(document.body.textContent).toContain("Opengeni stack is working.");
     expect(document.body.querySelector("textarea")).not.toBeNull();
     await rendered.unmount();
   });
@@ -549,12 +620,14 @@ describe("timeline annotations", () => {
     source?.dispatchEvent(new MouseEvent("pointerup", { bubbles: true }));
     await flush();
     expect(addNoteButton()).toBeUndefined();
+    await rendered.rerender(<MessageTimeline items={[{ ...item }]} onAnnotate={() => undefined} />);
+    expect(addNoteButton()).toBeUndefined();
     await rendered.unmount();
   });
 
   test("clips a chrome-inclusive highlight back to the assistant sentence", async () => {
     const captured: DraftTimelineAnnotation[] = [];
-    const text = "OpenGeni stack is working.";
+    const text = "Opengeni stack is working.";
     const item = agentItem(SOURCE_EVENT_ID, text, 4);
     const rendered = await renderComponent(
       <MessageTimeline items={[item]} onAnnotate={(next) => captured.push(next)} />,
@@ -579,7 +652,7 @@ describe("timeline annotations", () => {
       "annotation action did not appear for a long highlight",
     );
     const action = addNoteButton();
-    expect(action?.textContent).toContain("OpenGeni stack is working.");
+    expect(action?.textContent).toContain("Opengeni stack is working.");
     await act(async () => action?.click());
     expect(captured[0]?.quote).toBe(text);
     await rendered.unmount();
@@ -710,7 +783,7 @@ describe("timeline annotations", () => {
       id: `00000000-0000-4000-8000-${String(0x502 + index).padStart(12, "0")}`,
       quote:
         index === 0
-          ? "OpenGeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
+          ? "Opengeni stack is working across a much longer quoted sentence that must stay clamped in the review list."
           : `quote-${index + 1}`,
     }));
     const focusId = items[11]!.id;
@@ -739,7 +812,7 @@ describe("timeline annotations", () => {
     expect(notes[0]?.className).toContain("break-words");
     expect(document.activeElement).toBe(notes.item(11));
     const quoteButton = [...document.body.querySelectorAll("button")].find((button) =>
-      button.getAttribute("aria-label")?.includes("OpenGeni stack is working"),
+      button.getAttribute("aria-label")?.includes("Opengeni stack is working"),
     );
     expect(quoteButton?.querySelector("span")?.className).toContain("line-clamp-2");
     await rendered.unmount();

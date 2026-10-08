@@ -1,6 +1,11 @@
 import { installAnalyticsObserver } from "./analytics-observer";
 import { clearLoginAnalytics, takeSuccessfulLogin } from "./analytics-login";
 import {
+  beginIntegrationConnect,
+  captureIntegrationConnectReturn,
+  modelConnectionClass,
+} from "./integration-connect-analytics";
+import {
   ANALYTICS_COLLECTION_ENABLED_EVENT,
   analyticsHasProviders,
   storedAnalyticsConsent,
@@ -12,6 +17,7 @@ import {
   journeyOperation,
   journeyOutcome,
   journeyPage,
+  type JourneyMilestone,
 } from "./analytics-journey";
 import {
   isSignupAttributionValue,
@@ -44,7 +50,21 @@ export type AnalyticsEventName =
   | "organization_setup_completed"
   | "checkout_started"
   | "checkout_completed"
-  | "first_turn_completed";
+  | "checkout_cancelled"
+  | "first_turn_completed"
+  | "integration_connect_started"
+  | "integration_connect_finished"
+  | "turn_failure_viewed"
+  | "turn_failure_action"
+  | "onboarding_step_viewed"
+  | "onboarding_step_completed"
+  | "onboarding_abandoned"
+  | "playground_step_completed"
+  | "api_key_created"
+  | "voice_call_attempted"
+  | "voice_call_finished"
+  | "dictation_attempted"
+  | "dictation_finished";
 
 type AnalyticsConfig = ClientConfig["analytics"];
 export type AnalyticsProperty = boolean | number | string;
@@ -188,7 +208,7 @@ export function captureAnalyticsEvent(
         ...facts,
         page_location: window.location.origin,
         page_referrer: "",
-        page_title: "OpenGeni",
+        page_title: "Opengeni",
       });
   };
   if (providersReady && analyticsCollectionAllowed()) {
@@ -218,6 +238,7 @@ async function initializeProviders(config: AnalyticsConfig): Promise<void> {
       applyActiveIdentity();
       dispatchPageView(latestPathname);
       captureAuthReturn(takePendingAuthReturn());
+      captureIntegrationConnectReturn();
       window.dispatchEvent?.(new Event(ANALYTICS_COLLECTION_ENABLED_EVENT));
     }
   });
@@ -262,7 +283,7 @@ function dispatchPageView(pathname: string): void {
     window.gtag?.("event", "page_view", {
       page_location: `${window.location.origin}${pathname}`,
       page_referrer: "",
-      page_title: "OpenGeni",
+      page_title: "Opengeni",
       send_to: ga4MeasurementId,
     });
   }
@@ -287,7 +308,7 @@ async function initializeReo(clientId: string): Promise<void> {
   window.Reo.init({
     clientID: clientId,
     // Reo's beacon otherwise observes clipboard/code-copy and supported AI-widget
-    // interactions. OpenGeni deliberately permits page intent only.
+    // interactions. Opengeni deliberately permits page intent only.
     dnt: ["copy", "ai"],
   });
 }
@@ -478,9 +499,10 @@ export function beginAnalyticsRequest(
 }
 
 /** A funnel milestone is reported only when its request was accepted. */
-function milestoneFinisher(
-  name: "checkout_started" | "organization_setup_completed",
-): (status: number | null) => void {
+function milestoneFinisher({
+  name,
+  properties,
+}: JourneyMilestone): (status: number | null) => void {
   if (!analyticsCollectionAllowed()) return () => {};
   const generation = identityGeneration;
   const consentGeneration = initializationGeneration;
@@ -489,20 +511,26 @@ function milestoneFinisher(
     if (finished) return;
     finished = true;
     if (generation !== identityGeneration || consentGeneration !== initializationGeneration) return;
-    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name);
+    if (status !== null && status >= 200 && status < 300) captureAnalyticsEvent(name, properties);
   };
 }
 
 /** Bind asynchronous provider results to the initiating identity and consent. */
 export function trackModelConnection(
-  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter",
+  provider: "codex" | "supergrok" | "ai-gateway" | "openrouter" | "opper",
   workspaceId: string,
 ): (outcome: "connected" | "expired" | "denied" | "outcome_unknown") => void {
   const generation = identityGeneration;
   const consentGeneration = initializationGeneration;
   const allowed = analyticsCollectionAllowed();
+  // The same flow is also one step of the integration connect journey.
+  const journey = beginIntegrationConnect(
+    modelConnectionClass(provider) ?? "other",
+    provider === "codex" || provider === "supergrok" ? "device_code" : "api_key",
+  );
   let finished = false;
   return (outcome) => {
+    journey.finish(outcome === "expired" ? "abandoned" : outcome);
     if (
       !allowed ||
       finished ||
@@ -553,7 +581,7 @@ async function initializeGa4(measurementId: string): Promise<void> {
     allow_google_signals: false,
     page_location: window.location.origin,
     page_referrer: "",
-    page_title: "OpenGeni",
+    page_title: "Opengeni",
     send_page_view: false,
   });
 

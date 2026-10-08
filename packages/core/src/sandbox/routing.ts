@@ -28,6 +28,7 @@ import {
   readActiveSandbox,
   retainWorkspaceMutationProcess,
   SandboxRetainedProcessPromotionFencedError,
+  SandboxWorkspaceMutationOutputRejectedError,
   retainedProcessSettlementIdentity,
   settleRetainedProcess,
   verifyDirectWorkspaceMutationSettlement,
@@ -43,6 +44,7 @@ import {
   NatsControlRpc,
   NatsOpStreamTransport,
   RoutingSandboxSession,
+  RoutingMutationOutputRejectedError,
   resolveModalCheckpointProviderBindingForSession,
   type ControlRpc,
   type EstablishedSandboxSession,
@@ -299,7 +301,7 @@ export function wrapChannelABoxWithRouting(
         op: string;
         backend: ResolvedActiveBackend;
         admission: unknown;
-        outcome: "resolved" | "rejected";
+        outcome: "resolved" | "rejected" | "outcome_unknown";
         result?: unknown;
         retainedProcess?: RoutingRetainedProcess;
       }): Promise<void> => {
@@ -323,7 +325,7 @@ export function wrapChannelABoxWithRouting(
         ) {
           throw new Error("API-direct workspace mutation settlement lacked its bound admission");
         }
-        if (outcome === "resolved" && retainedProcess) {
+        if ((outcome === "resolved" || outcome === "outcome_unknown") && retainedProcess) {
           await retainWorkspaceProviderCommand(db, {
             accountId: ids.accountId,
             workspaceId: ids.workspaceId,
@@ -355,22 +357,42 @@ export function wrapChannelABoxWithRouting(
           });
           return;
         }
-        await verifyDirectWorkspaceMutationSettlement(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: ids.sessionId,
-          requestId: ids.directRequest.requestId,
-          holderId: ids.directRequest.holderId,
-          initiatorSubjectId: ids.resourceSubjectId,
-          sandboxGroupId: homeLease.sandboxGroupId,
-          expectedEpoch: backend.leaseEpoch,
-          expectedInstanceId: backend.providerInstanceId,
-          routeTargetId: exactAdmission.routeTargetId,
-          routeEpoch: exactAdmission.routeEpoch,
-          admission: exactAdmission,
-          operation: op,
-          outcome,
-        });
+        if (outcome === "outcome_unknown")
+          throw new Error(
+            "Outcome-unknown command settlement requires its exact retained invocation",
+          );
+        try {
+          await verifyDirectWorkspaceMutationSettlement(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sessionId: ids.sessionId,
+            requestId: ids.directRequest.requestId,
+            holderId: ids.directRequest.holderId,
+            initiatorSubjectId: ids.resourceSubjectId,
+            sandboxGroupId: homeLease.sandboxGroupId,
+            expectedEpoch: backend.leaseEpoch,
+            expectedInstanceId: backend.providerInstanceId,
+            routeTargetId: exactAdmission.routeTargetId,
+            routeEpoch: exactAdmission.routeEpoch,
+            admission: exactAdmission,
+            operation: op,
+            outcome,
+          });
+        } catch (error) {
+          if (
+            error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+            error.matchesPhysicalSettlement({
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              admission: exactAdmission,
+              operation: op,
+              outcome,
+            })
+          ) {
+            throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+          }
+          throw error;
+        }
       }
     : undefined;
   const beforeProcessMutation = homeLease
@@ -415,15 +437,31 @@ export function wrapChannelABoxWithRouting(
         ) {
           throw new Error("API retained-process mutation settlement lacked its exact admission");
         }
-        await verifyRetainedProcessMutationSettlement(db, {
-          accountId: ids.accountId,
-          workspaceId: ids.workspaceId,
-          sessionId: ids.sessionId,
-          processId: process.id,
-          admission: admission as SandboxWorkspaceMutationAdmission,
-          operation: op,
-          outcome,
-        });
+        try {
+          await verifyRetainedProcessMutationSettlement(db, {
+            accountId: ids.accountId,
+            workspaceId: ids.workspaceId,
+            sessionId: ids.sessionId,
+            processId: process.id,
+            admission: admission as SandboxWorkspaceMutationAdmission,
+            operation: op,
+            outcome,
+          });
+        } catch (error) {
+          if (
+            error instanceof SandboxWorkspaceMutationOutputRejectedError &&
+            error.matchesPhysicalSettlement({
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              admission: admission as SandboxWorkspaceMutationAdmission,
+              operation: op,
+              outcome,
+            })
+          ) {
+            throw new RoutingMutationOutputRejectedError(op, error.code, { cause: error });
+          }
+          throw error;
+        }
       }
     : undefined;
   const settleProcess = homeLease

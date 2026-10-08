@@ -5,154 +5,38 @@
 import { formatWaitingSince } from "@/lib/format";
 import { sessionInputWait } from "./session-rail";
 import { sessionSiteOrigin, type SessionSiteOrigin } from "./session-site-origin";
-import type { Session, SessionStatus } from "@/types";
+import type { SessionListTotals } from "@opengeni/sdk";
+import type { RailSession as Session } from "./session-list-entry";
 
-export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
+// The flat list rules are shared with native renderers through the pure
+// session-list model; the rail-only forest, project and browse logic stays here.
+import {
+  compareSessionActivity,
+  hasActiveEffectiveControl,
+  isEffectivelyRunning,
+  partitionPinnedSessions,
+  recencyGroupFor,
+  SESSION_GROUP_LABELS,
+  SESSION_GROUP_ORDER,
+  sessionActivityTime,
+  type SessionRecencyGroup,
+} from "@opengeni/react/session-list-model";
 
-export const SESSION_GROUP_LABELS: Record<SessionRecencyGroup, string> = {
-  today: "Today",
-  yesterday: "Yesterday",
-  previous7: "Previous 7 days",
-  older: "Older",
-};
-
-/** The render order of recency groups, top → bottom. */
-export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
-  "today",
-  "yesterday",
-  "previous7",
-  "older",
-];
-
-/** Live states that earn the pinned-to-top, breathing-dot treatment. */
-const RUNNING_STATUSES = new Set<SessionStatus>([
-  "running",
-  "queued",
-  "waiting_capacity",
-  "recovering",
-  "requires_action",
-]);
-
-export function isRunningStatus(status: SessionStatus): boolean {
-  return RUNNING_STATUSES.has(status);
-}
-
-function hasActiveEffectiveControl(session: Session): boolean {
-  return (session.effectiveControl?.state ?? "active") === "active";
-}
-
-function isEffectivelyRunning(session: Session): boolean {
-  // Background commands have their own chat indicator, not agent working status.
-  return (
-    hasActiveEffectiveControl(session) &&
-    (isRunningStatus(session.status) || Boolean(sessionInputWait(session)))
-  );
-}
-
-/** Most-recent activity timestamp for a session (updatedAt, then createdAt). */
-export function sessionActivityTime(session: Session): number {
-  const updated = Date.parse(session.updatedAt);
-  if (!Number.isNaN(updated)) {
-    return updated;
-  }
-  const created = Date.parse(session.createdAt);
-  return Number.isNaN(created) ? 0 : created;
-}
-
-/** Deterministic newest-first ordering for every flat or forest session list. */
-export function compareSessionActivity(left: Session, right: Session): number {
-  return sessionActivityTime(right) - sessionActivityTime(left) || right.id.localeCompare(left.id);
-}
-
-/** Deterministic personal-pin order: newest pin first, then descending id. */
-export function compareSessionPins(left: Session, right: Session): number {
-  const leftPinnedAt = Date.parse(left.pinnedAt ?? "");
-  const rightPinnedAt = Date.parse(right.pinnedAt ?? "");
-  const leftTime = Number.isNaN(leftPinnedAt) ? 0 : leftPinnedAt;
-  const rightTime = Number.isNaN(rightPinnedAt) ? 0 : rightPinnedAt;
-  return rightTime - leftTime || right.id.localeCompare(left.id);
-}
-
-/** Split explicit personal pins from ordinary rows without changing the input. */
-export function partitionPinnedSessions(sessions: Session[]): {
-  pinned: Session[];
-  ordinary: Session[];
-} {
-  const pinned: Session[] = [];
-  const ordinary: Session[] = [];
-  for (const session of sessions) {
-    (session.pinned ? pinned : ordinary).push(session);
-  }
-  return { pinned: pinned.sort(compareSessionPins), ordinary };
-}
-
-/**
- * Which recency bucket a timestamp falls into, relative to `now`. "Today" and
- * "Yesterday" are calendar-local; "Previous 7 days" is the rest of the trailing
- * week; everything earlier is "Older".
- */
-export function recencyGroupFor(timestampMs: number, now: Date = new Date()): SessionRecencyGroup {
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfYesterday = startOfToday - 24 * 60 * 60 * 1000;
-  const startOfWeekWindow = startOfToday - 7 * 24 * 60 * 60 * 1000;
-  if (timestampMs >= startOfToday) {
-    return "today";
-  }
-  if (timestampMs >= startOfYesterday) {
-    return "yesterday";
-  }
-  if (timestampMs >= startOfWeekWindow) {
-    return "previous7";
-  }
-  return "older";
-}
-
-export type SessionRecencyBucket = {
-  group: SessionRecencyGroup;
-  label: string;
-  sessions: Session[];
-};
-
-export type GroupedSessions = {
-  /** Running sessions, pinned above every recency group, most-recent first. */
-  running: Session[];
-  /** Non-running sessions bucketed by recency (empty buckets dropped). */
-  grouped: SessionRecencyBucket[];
-};
-
-/**
- * Order + bucket the sessions for the rail. Running sessions are lifted into a
- * synthetic, always-first position regardless of recency (rendered with a
- * "running" marker); the remainder are bucketed by recency, most-recent first
- * within each bucket. Empty groups are dropped.
- */
-export function groupSessionsForRail(sessions: Session[], now: Date = new Date()): GroupedSessions {
-  const running = sessions.filter(isEffectivelyRunning).sort(compareSessionActivity);
-  const rest = sessions
-    .filter((session) => !isEffectivelyRunning(session))
-    .sort(compareSessionActivity);
-
-  const buckets = new Map<SessionRecencyGroup, Session[]>();
-  for (const session of rest) {
-    const group = recencyGroupFor(sessionActivityTime(session), now);
-    const list = buckets.get(group) ?? [];
-    list.push(session);
-    buckets.set(group, list);
-  }
-
-  const grouped: SessionRecencyBucket[] = [];
-  for (const group of SESSION_GROUP_ORDER) {
-    const list = buckets.get(group);
-    if (list && list.length > 0) {
-      grouped.push({
-        group,
-        label: SESSION_GROUP_LABELS[group],
-        sessions: list,
-      });
-    }
-  }
-  return { running, grouped };
-}
+export {
+  compareSessionActivity,
+  compareSessionPins,
+  groupSessionsForRail,
+  isRunningStatus,
+  partitionPinnedSessions,
+  recencyGroupFor,
+  relativeTimeLabel,
+  SESSION_GROUP_LABELS,
+  SESSION_GROUP_ORDER,
+  sessionActivityTime,
+  type GroupedSessions,
+  type SessionRecencyBucket,
+  type SessionRecencyGroup,
+} from "@opengeni/react/session-list-model";
 
 /* ----------------------------------------------------------------------------
    Lineage nesting for the rail
@@ -199,7 +83,7 @@ export type RailAggregateStatus = {
   attentionSince?: string;
 };
 
-type RailStatusCounts = {
+export type RailStatusCounts = {
   total: number;
   sendFailed: number;
   attention: number;
@@ -211,6 +95,34 @@ type RailStatusCounts = {
   unread: number;
   activeWork: number;
 };
+
+/** Complete ordinary project counters; absent groups are authoritative zeroes. */
+export function sessionProjectTotals(
+  totals: SessionListTotals,
+  channelIds: readonly string[],
+): Map<string | null, RailStatusCounts> {
+  const known = new Set(channelIds);
+  const zero = (): RailStatusCounts => ({
+    total: 0,
+    sendFailed: 0,
+    attention: 0,
+    attentionSince: null,
+    failed: 0,
+    active: 0,
+    queued: 0,
+    unread: 0,
+    activeWork: 0,
+  });
+  const result = new Map<string | null, RailStatusCounts>([
+    ...channelIds.map((id) => [id, zero()] as const),
+    [null, zero()],
+  ]);
+  for (const group of totals.groups) {
+    const id = group.channelId && known.has(group.channelId) ? group.channelId : null;
+    addRailStatusCounts(result.get(id)!, { ...group, sendFailed: 0 });
+  }
+  return result;
+}
 
 function earliestIso(a: string | null | undefined, b: string | null | undefined): string | null {
   if (!a) return b ?? null;
@@ -352,6 +264,14 @@ export function summarizeRailNodes(
     addRailStatusCounts(counts, railStatusCounts(node, localDeliveryAttention));
   }
 
+  return summarizeRailStatusCounts(counts, now);
+}
+
+/** Shared presentation for complete server metadata and loaded node summaries. */
+export function summarizeRailStatusCounts(
+  counts: RailStatusCounts,
+  now: Date = new Date(),
+): RailAggregateStatus {
   if (counts.sendFailed > 0) {
     return {
       kind: "send_failed",
@@ -429,7 +349,7 @@ export function summarizeRailNodes(
  * An omitted list-only field must not make the selected row forget its loaded
  * hierarchy summary (and therefore lose its disclosure control).
  */
-export function mergeSessionForRail(current: Session, incoming: Session): Session {
+export function mergeSessionForRail<T extends Session>(current: Session, incoming: T): T {
   if (incoming.treeStats !== undefined || current.treeStats === undefined) {
     return incoming;
   }
@@ -590,8 +510,8 @@ function browseTimestamp(session: Session, field: SessionBrowseDateField): numbe
   return Number.isNaN(created) ? 0 : created;
 }
 
-export function filterSessionsForBrowse(
-  sessions: Session[],
+export function filterSessionsForBrowse<T extends Session>(
+  sessions: T[],
   options: {
     creator: string | null;
     dateField: SessionBrowseDateField;
@@ -600,7 +520,7 @@ export function filterSessionsForBrowse(
     hierarchical?: boolean;
     now?: Date;
   },
-): Session[] {
+): T[] {
   const now = options.now ?? new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
   const threshold =
@@ -611,18 +531,18 @@ export function filterSessionsForBrowse(
         : options.dateRange === "month"
           ? startOfToday - 29 * 24 * 60 * 60 * 1000
           : null;
-  const matches = (session: Session): boolean =>
+  const matches = (session: T): boolean =>
     (!options.creator || sessionCreatorKey(session) === options.creator) &&
     (threshold === null || browseTimestamp(session, options.dateField) >= threshold);
   if (!options.hierarchical) return sessions.filter(matches);
 
   const byId = new Map(sessions.map((session) => [session.id, session]));
-  const rootById = new Map<string, Session>();
-  const hierarchyRoot = (session: Session): Session => {
+  const rootById = new Map<string, T>();
+  const hierarchyRoot = (session: T): T => {
     const cached = rootById.get(session.id);
     if (cached) return cached;
 
-    const path: Session[] = [];
+    const path: T[] = [];
     const seen = new Set<string>();
     let current = session;
     while (current.parentSessionId) {
@@ -769,6 +689,7 @@ export function nodeIsActive(node: SessionTreeNode): boolean {
  * A session a human started never carries the key, so it never groups.
  */
 export function scheduledTaskIdOf(session: Session): string | null {
+  if ("scheduledTaskId" in session) return session.scheduledTaskId;
   const value = (session.metadata as Record<string, unknown> | undefined)?.scheduledTaskId;
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -1122,7 +1043,7 @@ function forestRoots(forest: SessionForest): SessionTreeNode[] {
  * tree, so every result there IS top-level and must say so. A row that renders
  * at the top level while still naming an absent parent is the bug this prevents.
  */
-export function projectRailSessions(sessions: Session[], hierarchyMode: boolean): Session[] {
+export function projectRailSessions<T extends Session>(sessions: T[], hierarchyMode: boolean): T[] {
   return hierarchyMode
     ? sessions
     : sessions.map((session) => ({ ...session, parentSessionId: null }));
@@ -1277,32 +1198,4 @@ export function channelRailSections(
     sections.push({ key: "default", channelId: null, name: "Default", sessions: defaultSessions });
   }
   return sections;
-}
-
-/** Compact relative-time label, e.g. "now", "5m", "3h", "2d", "Mar 4". */
-export function relativeTimeLabel(value: string, now: Date = new Date()): string {
-  const timestamp = Date.parse(value);
-  if (Number.isNaN(timestamp)) {
-    return "";
-  }
-  const diffSeconds = Math.max(0, Math.floor((now.getTime() - timestamp) / 1000));
-  if (diffSeconds < 45) {
-    return "now";
-  }
-  const minutes = Math.floor(diffSeconds / 60);
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    return `${hours}h`;
-  }
-  const days = Math.floor(hours / 24);
-  if (days < 7) {
-    return `${days}d`;
-  }
-  return new Date(timestamp).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
 }

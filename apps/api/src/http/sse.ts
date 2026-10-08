@@ -5,8 +5,9 @@ import {
 } from "@opengeni/contracts";
 import {
   getWorkspaceInteractionRevisionState,
-  listSessionEvents,
+  listSessionEventPage,
   listWorkspaceControlEvents,
+  readSessionEventStorageGapEnd,
   type Database,
 } from "@opengeni/db";
 import {
@@ -21,6 +22,7 @@ import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
+const SESSION_REPLAY_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 const WORKSPACE_CONTROL_REPLAY_PAGE_SIZE = 100;
 export const SSE_QUEUED_FRAME_MAX_COUNT = 1;
 export const SSE_WRITE_STALL_TIMEOUT_MS = 30_000;
@@ -149,12 +151,12 @@ export function createByteBoundedSseStream(
   return {
     stream,
     write: async (frame) => {
-      const chunk = encoder.encode(frame);
       for (;;) {
         if (stopped) return false;
         const desired = controller.desiredSize;
         if (desired === null) return false;
         if (desired >= 1 && queuedFrames === 0) {
+          const chunk = encoder.encode(frame);
           controller.enqueue(chunk);
           queuedFrames = 1;
           queuedBytes = chunk.byteLength;
@@ -267,6 +269,32 @@ export function createLatestWinsDelivery<T extends { sequence: number }>(
   };
 }
 
+/**
+ * Durable coverage for each projected frame. Storage may omit sequences on
+ * purpose (an archived session keeps only its readable timeline), and clients
+ * treat an uncovered jump as a gap to backfill. Within a page the next stored
+ * row bounds the gap; after the last row, `gapEnd` (when given) reads the
+ * race-free bound from storage.
+ */
+export async function coverStorageGaps(
+  projection: { events: SessionEvent[]; coveredThroughBySequence: ReadonlyMap<number, number> },
+  gapEnd: ((through: number) => Promise<number>) | null,
+): Promise<Map<number, number>> {
+  const coverage = new Map<number, number>();
+  const events = projection.events;
+  for (const [index, event] of events.entries()) {
+    const own = projection.coveredThroughBySequence.get(event.sequence) ?? event.sequence;
+    const next = events[index + 1];
+    coverage.set(event.sequence, next ? Math.max(own, next.sequence - 1) : own);
+  }
+  const last = events.at(-1);
+  if (last && gapEnd) {
+    const own = coverage.get(last.sequence)!;
+    coverage.set(last.sequence, Math.max(own, await gapEnd(own)));
+  }
+  return coverage;
+}
+
 export async function sseSessionStream(
   db: Database,
   bus: EventBus,
@@ -277,18 +305,19 @@ export async function sseSessionStream(
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
   if (isHttp1BrowserBatch(options)) {
-    const events = await listSessionEvents(db, workspaceId, sessionId, {
+    const { events } = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       limit: SESSION_REPLAY_PAGE_SIZE,
+      maxBytes: options.finiteResponseMaxBytes ?? HTTP1_BROWSER_SSE_BATCH_MAX_BYTES,
     });
     await options.reauthorize?.();
     const compactProjection = coalesceSessionEventDeltasWithCoverage(events);
+    const coverage = await coverStorageGaps(compactProjection, async (through) =>
+      readSessionEventStorageGapEnd(db, workspaceId, sessionId, through),
+    );
     return finiteSseBatchResponse(
       compactProjection.events.map((event) =>
-        formatSessionEventSse(
-          event,
-          compactProjection.coveredThroughBySequence.get(event.sequence) ?? event.sequence,
-        ),
+        formatSessionEventSse(event, coverage.get(event.sequence) ?? event.sequence),
       ),
       options,
     );
@@ -353,10 +382,12 @@ export async function sseSessionStream(
         targetSequence === undefined
           ? SESSION_REPLAY_PAGE_SIZE
           : Math.min(SESSION_REPLAY_PAGE_SIZE, targetSequence - lastSent);
-      const page = await listSessionEvents(db, workspaceId, sessionId, {
+      const replayPage = await listSessionEventPage(db, workspaceId, sessionId, {
         after: lastSent,
         limit,
+        maxBytes: SESSION_REPLAY_PAGE_MAX_BYTES,
       });
+      const page = replayPage.events;
       const eligible =
         targetSequence === undefined
           ? page
@@ -372,9 +403,16 @@ export async function sseSessionStream(
       // a long answer cannot create thousands of React renders and starve
       // command acknowledgements behind its own token stream.
       const compactProjection = coalesceSessionEventDeltasWithCoverage(eligible);
+      // Live delivery stops exactly at a published sequence; replay pages also
+      // cover what storage intentionally omits after their last event.
+      const coverage = await coverStorageGaps(
+        compactProjection,
+        targetSequence === undefined
+          ? async (through) => readSessionEventStorageGapEnd(db, workspaceId, sessionId, through)
+          : null,
+      );
       for (const projected of compactProjection.events) {
-        const coveredThrough =
-          compactProjection.coveredThroughBySequence.get(projected.sequence) ?? projected.sequence;
+        const coveredThrough = coverage.get(projected.sequence) ?? projected.sequence;
         await writeFrame(formatSessionEventSse(projected, coveredThrough));
         lastSent = coveredThrough;
       }
@@ -382,8 +420,10 @@ export async function sseSessionStream(
         throw new Error(`Session event replay made no progress after sequence ${lastSent}`);
       }
       if (targetSequence !== undefined && lastSent >= targetSequence) return;
+      if (targetSequence === undefined && !replayPage.hasMore) return;
       // A byte-selected page may contain fewer rows than requested, especially
-      // when one large message travels alone. Only an empty read proves EOF.
+      // when one large message travels alone. Use explicit continuation rather
+      // than page length; live publication covers appends after the snapshot.
     }
   };
   let durableDeliveryTail = Promise.resolve();
@@ -698,7 +738,7 @@ export type WorkspaceInteractionSseOptions = SseDeliveryOptions & {
 
 /**
  * One HTTP connection for the two workspace-wide invalidation domains used by
- * every visible OpenGeni surface. Keeping these as separate HTTP/1 streams
+ * every visible Opengeni surface. Keeping these as separate HTTP/1 streams
  * consumes all six per-origin browser connections with only two windows and
  * starves ordinary mutations/terminal grants. The durable cursors remain
  * independent; this function only multiplexes their already-bounded SSE frames.

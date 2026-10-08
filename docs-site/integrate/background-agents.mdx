@@ -1,0 +1,83 @@
+---
+title: "Background agents"
+description: "Run agents on a schedule or from your product's events, and bring their results back into your product."
+icon: "clock"
+---
+
+Start agents on a schedule or from your product's events, let them work to completion, and bring the results back.
+
+## On a schedule
+
+```ts
+await og.createScheduledTask(workspaceId, {
+  name: "Daily ticket triage",
+  schedule: { type: "calendar", hour: 8, minute: 0, timeZone: "Europe/Oslo" },
+  runMode: "new_session_per_run",
+  agentConfig: {
+    prompt: "Triage new support tickets and tag urgent ones.",
+    agent: { capabilities: { from: "none", knowledge: true } }, // frozen with the schedule
+    tools: [{ kind: "mcp", id: acmeServerId }],
+    sandboxBackend: "none",
+  },
+});
+```
+
+`agent` is optional; without it, runs use the workspace defaults ([Configure the agent](/integrate/configure-the-agent)). `runMode` picks a new session per run, one reusable session, or an existing session. Select tools by id from a workspace [OpenAPI Integration or MCP connection](/integrate/your-data#openapi-integration).
+
+Manage tasks with `listScheduledTasks`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, and `deleteScheduledTask`.
+
+To continue an existing conversation, schedule a message for that session:
+
+```ts
+const task = await og.createScheduledTask(workspaceId, {
+  name: "Daily follow-up",
+  schedule: { type: "calendar", hour: 9, minute: 0, timeZone: "Europe/Oslo" },
+  targetSessionId: session.id,
+  prompt: "Review new tickets and report any that need attention.",
+});
+
+await og.updateScheduledTask(workspaceId, task.id, {
+  prompt: "Review urgent tickets and report any that need attention.",
+  expectedExecutionDigest: task.executionDigest,
+});
+```
+
+Each run uses that chat's own model and tools and runs as the schedule owner. Updates keep fields you omit; `expectedExecutionDigest` rejects a conflicting edit. If moving `targetSessionId` would change the run's settings, the API returns a conflict; repeat with `adoptSessionSettings: true` to accept.
+
+## From your product's events
+
+An automation turns a signed HTTP event into an agent session. With `OpenGeniAutomationsClient` from `@opengeni/sdk/automations`, create a **source** (a webhook endpoint and signing secret) and a **trigger** (which events start which session). Then post events:
+
+```bash
+POST /v1/webhooks/automations/<endpoint id>
+x-opengeni-signature-256: sha256=<HMAC-SHA256 of the raw body>
+x-opengeni-delivery-id: <optional, for deduplication>
+
+{ "type": "ticket.created", "id": "evt_123", "data": { "ticketId": "T-42" } }
+```
+
+Redelivered events are deduplicated. The agent treats event data as untrusted input. See the [automations reference](https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/automations.md).
+
+## Work until done
+
+Give a session a **goal** and it keeps working across turns until the goal is met or it pauses with a reason:
+
+```ts
+agentConfig: {
+  prompt: "Reconcile yesterday's refunds.",
+  goal: {
+    text: "Every refund from yesterday is matched to a ledger entry",
+    successCriteria: "A summary lists each refund with its ledger id, or the reason it could not be matched",
+  },
+}
+```
+
+See [Goals](/concepts/goals).
+
+## Bring results back
+
+- **Write back through your tools.** The agent calls your API to update a ticket, post a comment, or store a report. This is the most direct path.
+- **Webhooks.** Get notified when a turn completes or fails, a session's status changes, or the agent waits for approval or an answer. Deliveries are signed, at least once, and unordered; read the session through the API when one arrives. See [Webhooks and credentials](/guides/webhooks-and-credentials#webhooks).
+- **Read the full output.** `listEvents` returns a summary view that can truncate long answers. For the complete result, call `listEventPage` with `mode: "forensic"` and `payloadMode: "full"`, follow `nextAfter` while `hasMore`, and read `payload.output` from the turn's `turn.completed` event.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

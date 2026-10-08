@@ -18,7 +18,10 @@ import { INTERACTION_ATTEMPT_TOOL_NAMES } from "@opengeni/runtime";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { listSessionDiscoverySummaries } from "@opengeni/db";
+import {
+  listSessionDiscoverySummaries,
+  SessionCreateConnectionSelectionUnavailableError,
+} from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 import * as z4 from "zod/v4";
 import { createAttemptToolEnvironment, generateCodemodeDeclarations } from "@opengeni/codemode";
@@ -693,7 +696,7 @@ describe("first-party MCP tool visibility policy", () => {
     ).rejects.toThrow("sessions_list query must be at most 200 characters");
   });
 
-  test("ordinary omission excludes connector tools while explicit authorized selection stays exact", () => {
+  test("an attempt without an accepted tool selection never receives connector tools", () => {
     const ordinary = buildOpenGeniMcpServer(
       deps(),
       grant([...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS]),
@@ -939,11 +942,18 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "OpenGeni could not complete the request.",
+          message: "Opengeni could not complete the request.",
         },
       },
     });
     expect(JSON.stringify(unknown)).not.toContain("private-");
+    expect(unknown.structuredContent?.error?.diagnostic).toMatchObject({
+      schema: "opengeni.failure-diagnostic.v1",
+      code: "mcp_orchestration_failed",
+      stage: "mcp.session_create",
+      causes: [{ kind: "Error", frames: expect.any(Array) }],
+    });
+    expect(unknown.structuredContent?.error?.diagnosticExport).toBe("disabled");
 
     routeDeps.db = new Proxy(
       {},
@@ -965,7 +975,7 @@ describe("first-party MCP tool visibility policy", () => {
       structuredContent: {
         error: {
           code: "session_create_failed",
-          message: "OpenGeni could not complete the request.",
+          message: "Opengeni could not complete the request.",
         },
       },
     });
@@ -1010,6 +1020,40 @@ describe("first-party MCP tool visibility policy", () => {
     });
     expect(unauthorized.structuredContent?.error?.code).toBe("session_create_forbidden");
     expect(JSON.stringify(unauthorized)).not.toContain("private-");
+  });
+
+  test("session_create exposes a known connection refusal without suggesting blind retry or reflecting its cause", async () => {
+    const routeDeps = deps();
+    const failure = new SessionCreateConnectionSelectionUnavailableError(
+      new Error("private-connection-query-and-credential"),
+    );
+    routeDeps.db = new Proxy(
+      {},
+      {
+        get() {
+          throw failure;
+        },
+      },
+    ) as ApiRouteDeps["db"];
+    const server = buildOpenGeniMcpServer(routeDeps, {
+      ...grant(["sessions:create"], ["session_create"]),
+      principalKind: "human_session",
+      metadata: { firstPartyMcpTools: ["session_create"] },
+    });
+    const result = await callRegisteredTool(server, "session_create", {
+      initialMessage: "private-task",
+    });
+    expect(result).toMatchObject({
+      isError: true,
+      structuredContent: {
+        error: {
+          code: "session_create_connection_selection_unavailable",
+          message: failure.message,
+          retryable: false,
+        },
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("private-");
   });
 
   test("model-facing session_create accepts ordered Variable Sets and authorizes attachment before storage", async () => {
@@ -1085,6 +1129,7 @@ describe("first-party MCP tool visibility policy", () => {
     });
     expect(create.isError).toBe(true);
     expect(create.structuredContent?.error?.code).toBe("session_create_rejected");
+    expect(create.structuredContent?.error?.diagnostic).toBeUndefined();
     expect(create.structuredContent?.error?.message).not.toContain("\u0000");
     expect(create.structuredContent?.error?.message).not.toContain("�");
     expect(
@@ -1117,6 +1162,54 @@ describe("first-party MCP tool visibility policy", () => {
         },
       },
     });
+    expect(message.structuredContent?.error?.diagnostic).toBeUndefined();
+  });
+
+  test("all orchestration catches retain evidence bound to the caller, never request target", async () => {
+    const targetSessionId = crypto.randomUUID();
+    for (const tool of ["session_create", "session_send_message", "session_steer"] as const) {
+      let databaseTouches = 0;
+      const routeDeps = deps();
+      routeDeps.db = new Proxy(
+        {},
+        {
+          get() {
+            databaseTouches += 1;
+            throw Object.assign(new Error("private-database-message"), {
+              name: "PostgresError",
+              code: "42501",
+            });
+          },
+        },
+      ) as ApiRouteDeps["db"];
+      const server = buildOpenGeniMcpServer(
+        routeDeps,
+        grant(["sessions:create", "sessions:control"], [tool]),
+      );
+      const args =
+        tool === "session_create"
+          ? { initialMessage: "private-task" }
+          : {
+              sessionId: targetSessionId,
+              ...(tool === "session_steer"
+                ? { instruction: "private-steer" }
+                : { text: "private-message" }),
+              idempotencyKey: crypto.randomUUID(),
+            };
+      const result = await callRegisteredTool(server, tool, args);
+      expect(databaseTouches).toBe(1);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent?.error).toMatchObject({
+        code: `${tool}_failed`,
+        message: "Opengeni could not complete the request.",
+        diagnosticExport: "disabled",
+        diagnostic: { sessionId, turnId, attemptId, executionGeneration: 1, sqlState: "42501" },
+      });
+      expect(JSON.stringify(result)).not.toContain(targetSessionId);
+      expect(JSON.stringify(result)).not.toContain("private-");
+      expect(result.structuredContent?.error).not.toHaveProperty("outcomeUnknown", false);
+      expect(result.structuredContent?.error).not.toHaveProperty("retryable", true);
+    }
   });
 
   test("the broad catalog excludes compatibility-only and local first-party tools", () => {
@@ -1127,7 +1220,20 @@ describe("first-party MCP tool visibility policy", () => {
     );
 
     const broad = registeredToolNames(server);
-    expect(broad).toEqual([...FIRST_PARTY_REMOTE_MCP_TOOL_NAMES].sort());
+    expect(broad).toEqual(
+      FIRST_PARTY_REMOTE_MCP_TOOL_NAMES.filter((name) => name !== "slack_bot_search").sort(),
+    );
+    // Generic agent calls cannot supply Slack's trusted interaction action token,
+    // even after an approved deployment enables full Slack access.
+    for (const slackAccessMode of ["limited", "full"] as const) {
+      const routeDeps = deps();
+      routeDeps.settings = testSettings({ slackAccessMode });
+      const searchSelection = buildOpenGeniMcpServer(
+        routeDeps,
+        grant([...Permission.options], ["slack_bot_search"]),
+      );
+      expect(registeredToolNames(searchSelection)).not.toContain("slack_bot_search");
+    }
     expect(broad).not.toContain("slack_bot_post_message");
     expect(INTERACTION_ATTEMPT_TOOL_NAMES).not.toContain("slack_bot_post_message");
     expect(broad).not.toContain("files_get_download_url");
@@ -1202,9 +1308,9 @@ describe("first-party MCP tool visibility policy", () => {
     }
   });
 
-  test("scheduled Slack posting tools take no destination and stay explicit-only", async () => {
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_prepare_message");
-    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).not.toContain("slack_bot_send_prepared_message");
+  test("bot posting is default-discoverable and accepts an ordinary chat destination", async () => {
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_prepare_message");
+    expect(DEFAULT_FIRST_PARTY_MCP_TOOLS).toContain("slack_bot_send_prepared_message");
     const server = buildOpenGeniMcpServer(
       deps(),
       grant(["connections:read"], ["slack_bot_prepare_message", "slack_bot_send_prepared_message"]),
@@ -1217,8 +1323,10 @@ describe("first-party MCP tool visibility policy", () => {
       const tools = (await client.listTools()).tools;
       const prepare = tools.find((tool) => tool.name === "slack_bot_prepare_message");
       const send = tools.find((tool) => tool.name === "slack_bot_send_prepared_message");
-      // The agent cannot name a channel, user, or bot connection.
+      // Ordinary chats choose a channel; scheduled execution enforces its fixed destination.
       expect(Object.keys(prepare?.inputSchema.properties ?? {}).sort()).toEqual([
+        "channelId",
+        "connectionId",
         "text",
         "threadTimestamp",
       ]);
@@ -1300,7 +1408,11 @@ describe("first-party MCP tool visibility policy", () => {
       expect(request?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["capabilityId", "rationale"]),
       });
-      expect(custom?.description).toContain("cannot add, enable, or contact");
+      // Since #3847 an authorized agent may connect a prepared server through the
+      // native connect lifecycle, but the review card itself still contacts nothing.
+      expect(custom?.description).toContain(
+        "Posting this card does not contact or connect the server.",
+      );
       expect(custom?.inputSchema).toMatchObject({
         required: expect.arrayContaining(["name", "endpointUrl", "rationale"]),
       });

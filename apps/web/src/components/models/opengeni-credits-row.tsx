@@ -1,9 +1,8 @@
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
-import { BrandMark } from "@/components/brand-mark";
 import { ListRow } from "@/components/ui/list-row";
-import { LogoTile } from "@/components/ui/logo-tile";
+import { OpenGeniCreditsTile } from "@/components/models/provider-mark";
 import { useAppContext } from "@/context";
 import { formatMoneyMicros } from "@/lib/format";
 import { modelUsesCredits } from "@/lib/model-policy";
@@ -12,13 +11,13 @@ import { currentPageReturnTo, returnToSearch } from "@/lib/return-to";
 import type { ClientConfig } from "@/types";
 
 /* ----------------------------------------------------------------------------
-   OpenGeni credits in Settings > Models: on a deployment that bills credits,
+   Opengeni credits in Settings > Models: on a deployment that bills credits,
    the organization's credit balance pays for credit models, so it is the
    first row of the Accounts list. Billing admins open organization Billing
    from it; everyone else sees a plain row.
    -------------------------------------------------------------------------- */
 
-/** This deployment bills OpenGeni credits: Stripe billing and at least one credit model. */
+/** This deployment bills Opengeni credits: Stripe billing and at least one credit model. */
 export function deploymentBillsCredits(config: Pick<ClientConfig, "billingMode" | "models">) {
   return config.billingMode === "stripe" && config.models.some((model) => modelUsesCredits(model));
 }
@@ -68,10 +67,13 @@ export function OpenGeniCreditsRow({
   credits,
   workspaceId,
   workspaceName,
+  scope,
 }: {
   credits: OpenGeniCredits;
   workspaceId: string;
   workspaceName: string;
+  /** "Everyone in Acme": credits belong to the whole organization. */
+  scope?: string | undefined;
 }) {
   const navigate = useNavigate();
   if (!credits.visible) return null;
@@ -86,9 +88,9 @@ export function OpenGeniCreditsRow({
     });
   return (
     <ListRow
-      leading={<LogoTile icon={<BrandMark className="text-fg" />} name="Opengeni" />}
+      leading={<OpenGeniCreditsTile />}
       title="Opengeni credits"
-      meta={["Pay as you go", credits.balanceLabel]}
+      meta={[scope, "Pay as you go", credits.balanceLabel]}
       {...(credits.canOpenBilling ? { onOpen: openBilling, indicator: "open" as const } : {})}
     />
   );

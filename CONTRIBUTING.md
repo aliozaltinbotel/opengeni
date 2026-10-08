@@ -1,4 +1,4 @@
-# Contributing To OpenGeni
+# Contributing To Opengeni
 
 Thanks for considering a contribution.
 
@@ -63,6 +63,10 @@ bun run test:e2e
   an unchanged PR starts another run of the same source; it does not incorporate
   fixes from a newer base. Keep current-main integration evidence separate from
   exact-head CI evidence.
+- Workflow-owned registry regressions run from the exact workflow revision, even
+  when a frozen candidate predates them. Candidate builds, impact and admission
+  retain exact candidate authority; incomplete tooling and failed tests never
+  become capability-based skips.
 - Before retrying a failed check, inspect its failing leaf and checkout SHA.
   If the candidate contains a real defect already fixed on `main`, apply the
   necessary scoped correction to the candidate and run review and CI on that new
@@ -87,7 +91,45 @@ Release and publishing guidance starts here; executable truth lives in [`package
 
 **Staging:** dispatch `staging-canary-dispatch.yml` with any `main` SHA whose `canary-sha-*` tags already exist. Pending changesets are allowed. Missing tags fail closed; do not rebuild unsigned `:ci` images.
 
-**Canary npm:** dispatch `publish-canary.yml` to publish `{version}-canary.N` with dist-tag `canary`. This does not consume changeset files or move `latest`.
+**Canary packages:** dispatch `publish-canary.yml` on `main` with `source_sha` equal to that workflow run's exact `main` commit. The workflow, checked-out source, and publisher must all be that commit; an older ancestor is rejected. The workflow uses pinned Bun to build and pack, then the official publishing library under Bun with registry-token authentication and GitHub OIDC provenance. It publishes `{next-patch}-canary.N` with dist-tag `canary` (committed `1.0.0` publishes `1.0.2-canary.N`, skipping a retired patch), so canaries sort after the committed release. It does not consume changeset files or move `latest`; a new package with no `latest` tag remains without one.
+
+All archives are packed and frozen before the first write. Each topological
+publication retains an intent and a positive library HTTP acknowledgement before
+the next write; write retries are disabled. Receipt visibility is checked afterward
+in one bounded read-only phase, preserving latest, archive integrity, canary tag
+and provenance metadata checks. Site pins appear only after the complete cohort
+matches. Acknowledgements are not independent signed-byte acceptance. An uncertain
+write stops without replay. Bounded safe receipts survive ordinary workflow failure;
+a lost runner can still lose its artifact. Existing versions are never repaired in place.
+The final gate rereads the complete cohort within the original shared deadline,
+read quota and custody caps. These reads do not claim an atomic registry snapshot.
+Post-write receipt polling selects the current dist-tags document and the exact
+immutable version manifest rather than unrelated historical versions. Both GETs
+count toward the same 256-request budget and share one per-observation signal;
+the 180-second deadline and existing byte limits are unchanged. Pre-write discovery
+and occupied-version/stable-tag guards still use their existing metadata path.
+
+**Receipt-only recovery:** after a failed canary workflow has acknowledged its
+entire cohort, `reconcile-canary-publication.yml` can observe that exact source,
+run and attempt without publishing again. The protected current controller reads
+historical source only as immutable JSON data. It requires the original provider
+failure, absent Site artifact, bounded receipt artifact, complete linked positive
+acknowledgements and zero unknown writes. It verifies actual archive/manifest
+hashes and official GitHub provenance, then runs the unchanged bounded metadata
+poller and final complete-cohort reread. Unknown writes, expired/ambiguous artifacts,
+unsupported producer protocols, changed latest or superseded canary tags fail
+closed; this command cannot repair tags, rebuild packages or dispatch another run.
+The new `canary-publication-reconciliation-*` receipt and
+`reconciled-site-package-versions-*` artifact retain both controller and failed
+origin identities and set `promotionEligible: false`. They never replace the
+failed publisher conclusion or masquerade as its missing Site artifact.
+Consumers need explicit manual staging authority for this distinct contract;
+normal production, promotion, scheduling and image/source checks remain mandatory.
+Additional archive/provider GETs have a separate 15-minute stage deadline and
+finite byte/request quotas. Metadata still has one 180-second/256-GET/four-parallel
+phase with its original custody caps. Official `gh attestation verify` retains
+its default public-good TUF trust fetches outside the controlled GET byte quota;
+each verifier child, stdio and cache is bounded separately.
 
 In GitHub Actions, `N` has a floor derived from the workflow run ID and attempt
 (`run ID * 1000 + attempt`), so retries do not reuse versions hidden by stale
@@ -96,10 +138,74 @@ rejects a superseded attempt: dispatch a new workflow instead of retrying the
 older one. Fixed package groups remain aligned. An admitted retry publishes a fresh set rather than
 overwriting or removing any partially published versions.
 
-Two publish-coherence rules learned the hard way (all versions are 0.x):
+**Lockstep versions.** Every published `@opengeni/*` package is in one Changesets `fixed` group and always releases at one shared version (the line restarted at `1.0.0`); a new published package must join that group (`scripts/release/lockstep-version.test.ts` enforces it). Published manifests pin sibling packages exactly (`workspace:*` becomes the exact version), so consumers install every `@opengeni` package at the same version. The retired pre-reset line already burned some 1.x versions (for example `@opengeni/contracts@1.0.1`, `@opengeni/runtime@1.4.2`); `bun run changeset:version` runs `scripts/release/lockstep-version.ts`, which moves the whole group to the next free patch when the computed version is one of them (`1.0.1` → `1.0.2`), and rewrites the new CHANGELOG heading. The retired list in that script is closed history; never publish an `@opengeni` version by hand. After the 1.0.0 publication, an operator runs `bun scripts/release/deprecate-pre-1.0.ts` (dry run) and then `--execute` once to check `latest` and deprecate every pre-reset version.
 
-- **A minor bump of a package must cascade to its dependents.** Published manifests carry caret ranges (`^0.3.0`), and under 0.x caret semantics a minor bump (0.3.0 → 0.4.0) leaves every dependent's range. Add a patch changeset covering the dependent closure in the same release, or external consumers nest a stale copy of the bumped package.
+A publish-coherence rule learned the hard way:
+
 - **Merging a Version PR only creates versioned source; it does not publish.** GitHub branch protection may still require a review to merge into `main`. Ordinary candidate and operator admission bind the merged associated PR, not a later GitHub `APPROVE` or structured PASS body. Merge deliberately, then run the evidence-bound candidate, acceptance, and release workflows for that exact retained source.
+
+### Registry dependency export smoke
+
+`bun run test:publish-consumer` proves a local release train: its sibling tarballs
+and overrides intentionally do not prove compatibility with published dependencies.
+Build packages, then run `bun run test:effective-dependency-exports` before
+publication with Node/npm available. Candidate packing uses `npm pack` with
+scripts disabled to preserve publication file/ignore semantics. This stages
+the selected consumer dependency closure and exposes ordinary npm range
+resolution through a read-only loopback registry: existing dependency versions
+use integrity-checked immutable npm tarballs, while genuinely new versions use
+the cut's candidate tarballs and their pending stable `latest` tags. Each root
+consumer installs its locally packed candidate, including when that root's
+version already exists on npm, so registry root bytes cannot hide local imports.
+Shipped source, semantic manifest, and non-generated asset drift without a new
+version fail. Order-insensitive JSON metadata is normalized; conditional
+`exports`/`imports` order is preserved. No workspace links or install overrides
+substitute an invalid range.
+
+Generated `dist` `.js`/`.d.ts` files and matching maps outside asset subtrees are
+not required to be byte-identical to a published build: the current tsup entry
+expansion can depend on filesystem ordering even for identical source. This does
+not assert compiled runtime equivalence or replace a reproducible-build check. The export
+proof instead runs the actual local root build against immutable published
+dependency bytes. Source drift is only detectable for source files actually
+shipped in the package; extending generated-output or build-input provenance
+checks is separate work.
+Frozen Version PR CI and stable publication run this effective guard before any
+publish. Ordinary PRs run the hermetic regression because pending changesets do
+not yet represent frozen package versions.
+
+The hermetic regression is workflow-owned tooling: CI checks out the immutable
+`github.workflow_sha` separately, installs its frozen dependencies, and uses its
+Bun pin. It still runs when an older exact candidate predates the guard files.
+Missing tooling declarations, tests or helpers and failing tests fail the job
+rather than skipping coverage.
+The candidate checkout, impact plan, builds, and effective Version-PR closure
+remain bound to the selected candidate, with its Bun pin restored afterward.
+
+`bun run test:registry-dependency-exports --candidate` packs each selected package
+separately and installs only its declared registry dependency closure, without
+sibling candidates, links, or overrides. Build packages first. `--published-source`
+instead installs exact workspace versions from npm; `--published` checks current
+`latest`, or use `--package @opengeni/react@<version>` to reproduce a historical failure.
+
+Every stable publication route uses the shared `release:publish` prepublication
+guard with its admitted publication set. The stable workflows additionally run
+registry-only candidate and exact-published modes **after** registry reconciliation.
+These postpublication checks fail on an incoherent published closure but do not
+undo an npm publish.
+Running a registry-only candidate before its prerequisite versions are published
+fails intentionally, so this is not a pre-publication gate for an unpublished
+release train. Ordinary CI runs the hermetic missing-export regression.
+
+Both modes test normal resolution and the lowest **published** compatible version
+of each direct `@opengeni/*` runtime dependency; the effective mode also admits
+genuinely new versions from the intended publication set. Browser Vite builds
+retain all exports of the selected client entrypoints; Node imports cover the Connect,
+contracts, SDK, and Codemode profiles. Initial coverage is bounded to the explicit
+profiles in `scripts/test-registry-dependency-exports.ts`: not every package,
+subpath, conditional export, intermediate semver version, optional peer behavior,
+third-party minimum, native runtime, or computed dynamic import is proven. Add
+profiles and regression fixtures when extending the supported closure.
 
 ## Code Style
 
@@ -109,5 +215,5 @@ Two publish-coherence rules learned the hard way (all versions are 0.x):
 
 ## Migration Authoring
 
-- Migrations must be schema-agnostic: they run under a caller-selected schema/search path. Use `current_schema()` in policy/guard queries, and never pin OpenGeni tables to `public` or issue `SET search_path` inside a migration.
+- Migrations must be schema-agnostic: they run under a caller-selected schema/search path. Use `current_schema()` in policy/guard queries, and never pin Opengeni tables to `public` or issue `SET search_path` inside a migration.
 - `opengeni_app` grant blocks must also be schema-agnostic: use `current_schema()` with dynamic SQL (`EXECUTE format(... %I ...)`) instead of `IN SCHEMA public`, and include default privileges when future tables or sequences must inherit app-role access.

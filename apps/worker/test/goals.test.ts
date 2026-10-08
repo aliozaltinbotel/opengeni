@@ -37,6 +37,8 @@ describe("goalContinuationPrompt", () => {
 
     expect(prompt).toContain("Use the current applied goal frozen for this turn");
     expect(prompt).toContain("Completion audit:");
+    expect(prompt).toContain("Goal evidence is a short proof for the ledger, not the deliverable");
+    expect(prompt).toContain("finish this same turn with the requested user-facing answer");
     expect(prompt).toContain("Blocked audit:");
     expect(prompt).toContain("opengeni__goal_complete");
     expect(prompt).toContain("opengeni__goal_pause");
@@ -212,7 +214,7 @@ describe("goalContinuationModelDecision", () => {
       }),
     ).toMatchObject({
       model: "removed/provider-model",
-      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+      blocked: expect.stringContaining("selected model is unavailable"),
     });
   });
 
@@ -225,7 +227,7 @@ describe("goalContinuationModelDecision", () => {
       }),
     ).toMatchObject({
       model: "removed/provider-model",
-      blocked: expect.stringContaining("no longer in the deployment or workspace catalog"),
+      blocked: expect.stringContaining("selected model is unavailable"),
     });
   });
 

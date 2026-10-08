@@ -19,8 +19,10 @@ import {
   acquireCodexCredentialLease,
   applySessionTurnSettlement,
   armCodexCapacityWait,
+  claimSessionWorkForAttempt,
   CodexCredentialLeaseAttemptFencedError,
   createDb,
+  createSessionGoal,
   encryptEnvironmentValue,
   ensureCodexRotationSettings,
   getSessionCodexState,
@@ -30,11 +32,13 @@ import {
   listCodexAccountStatuses,
   loadCodexCredentialForRun,
   mutateSessionControlInTransaction,
+  materializeGoalContinuation,
   quarantineCodexCredentialForLease,
   recordCodexAccountUsage,
   recordCodexAccountUsageForFinalization,
   recordCodexAccountUsageWithWakeTargets,
   recordSessionCodexSelectionForTurnAttempt,
+  requestSessionTurnRecovery,
   recordCodexTokenRefresh,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -347,6 +351,183 @@ afterAll(async () => {
 }, 180_000);
 
 describe("credential allocator atomic Codex credential allocation", () => {
+  test("heartbeat cannot revive a lease expired behind an unchanged row lock", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    await connectCredential(ws!, "contended-heartbeat-fixture");
+    const turnId = await seedTurn(ws!);
+    const lease = await acquire(dbA, ws!, turnId);
+    await admin`update codex_credential_leases set leased_until = clock_timestamp() + interval '700 milliseconds'
+      where turn_id = ${turnId}`;
+    let notifyLocked!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      notifyLocked = resolve;
+    });
+    let releaseLock!: () => void;
+    const unlock = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const blocking = admin.begin(async (tx) => {
+      await tx`select id from codex_credential_leases where turn_id = ${turnId} for update`;
+      notifyLocked();
+      await unlock;
+    });
+    await locked;
+    const renewal = heartbeatCodexCredentialLeaseUntil(
+      dbA,
+      ws!.accountId,
+      ws!.workspaceId,
+      turnId,
+      lease.holderId!,
+      lease.generation!,
+    );
+    try {
+      await Bun.sleep(800);
+    } finally {
+      releaseLock();
+      await blocking;
+    }
+    expect(await renewal).toBeNull();
+  }, 180_000);
+
+  for (const source of ["workspace", "organization"] as const) {
+    for (const acceptedPolicy of [false, true]) {
+      test(`lease ${source} ${acceptedPolicy ? "reacquisition" : "first allocation"} does not invert queued workspace and turn locks`, async () => {
+        if (!available) return;
+        const [ws] = await freshAccount();
+        let credentialId: string;
+        if (source === "workspace") {
+          credentialId = await connectCredential(ws!, "lock-order-test");
+        } else {
+          const [credential] = await admin<{ id: string }[]>`
+          insert into codex_subscription_credentials
+            (account_id, organization_id, authority_scope, credential_encrypted, chatgpt_account_id, status)
+          values (${ws!.accountId}, ${ws!.accountId}, 'organization', 'ciphertext', 'lock-order-test', 'active')
+          returning id`;
+          credentialId = credential!.id;
+          await admin`
+          insert into organization_codex_rotation_settings (account_id, active_credential_id, rotation_enabled)
+          values (${ws!.accountId}, ${credentialId}, true)`;
+        }
+        const turnId = await seedTurn(ws!);
+        if (acceptedPolicy) {
+          // Reacquisition must preserve the accepted policy and holder identity.
+          const initial = await acquire(dbA, ws!, turnId);
+          expect(
+            await releaseCodexCredentialLease(
+              dbA,
+              ws!.accountId,
+              ws!.workspaceId,
+              turnId,
+              initial.holderId!,
+              initial.generation!,
+            ),
+          ).toBe(true);
+        }
+        const connectionUse = await admin.reserve();
+        const workspaceWriter = await admin.reserve();
+        const [useBackend] = await connectionUse<{ pid: number }[]>`select pg_backend_pid() as pid`;
+        const [writerBackend] = await workspaceWriter<
+          { pid: number }[]
+        >`select pg_backend_pid() as pid`;
+        const usePid = useBackend!.pid;
+        const writerPid = writerBackend!.pid;
+        let useTransactionOpen = false;
+        let writerTransactionOpen = false;
+        const pending: Promise<unknown>[] = [];
+        const waitForBlocker = async (blockedPid: number | null, blockerPid: number) => {
+          const deadline = Date.now() + 10_000;
+          while (Date.now() < deadline) {
+            const rows = await admin<{ pid: number }[]>`
+            select pid from pg_stat_activity
+            where datname = current_database()
+              and pid <> ${writerPid!}
+              and (${blockedPid}::int is null or pid = ${blockedPid})
+              and ${blockerPid} = any(pg_blocking_pids(pid))`;
+            if (rows[0]) return rows[0].pid;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          throw new Error(`Expected lock waiter behind backend ${blockerPid}`);
+        };
+        try {
+          await connectionUse`begin`;
+          useTransactionOpen = true;
+          await connectionUse`select id from workspaces where id = ${ws!.workspaceId} for update`;
+
+          await workspaceWriter`begin`;
+          writerTransactionOpen = true;
+          const writer = workspaceWriter`
+          select id from workspaces where id = ${ws!.workspaceId} for update
+        `.then(
+            async () => {
+              await workspaceWriter`commit`;
+              writerTransactionOpen = false;
+            },
+            async (error: unknown) => {
+              await workspaceWriter`rollback`;
+              writerTransactionOpen = false;
+              throw error;
+            },
+          );
+          pending.push(writer);
+          void writer.catch(() => undefined);
+          const deadline = Date.now() + 10_000;
+          while (true) {
+            const [row] = await admin<{ blocked: boolean }[]>`
+            select ${usePid!} = any(pg_blocking_pids(${writerPid!})) as blocked`;
+            if (row?.blocked) break;
+            if (Date.now() >= deadline) throw new Error("Workspace writer never queued");
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          const allocation = acquire(dbA, ws!, turnId);
+          pending.unshift(allocation);
+          void allocation.catch(() => undefined);
+          await waitForBlocker(null, writerPid!);
+
+          // This transaction already owns the workspace and now resolves a turn.
+          // Allocation must not own that turn while waiting behind workspace writers.
+          const use = connectionUse`
+          select id from session_turns where id = ${turnId} for update
+        `.then(
+            async () => {
+              await connectionUse`commit`;
+              useTransactionOpen = false;
+            },
+            async (error: unknown) => {
+              await connectionUse`rollback`;
+              useTransactionOpen = false;
+              throw error;
+            },
+          );
+          pending.push(use);
+          void use.catch(() => undefined);
+          const outcomes = await Promise.allSettled(pending);
+          expect(
+            outcomes.map((outcome) =>
+              outcome.status === "fulfilled"
+                ? outcome.status
+                : `rejected:${outcome.reason?.code ?? outcome.reason?.cause?.code ?? "unknown"}`,
+            ),
+          ).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+          const lease = await allocation;
+          expect(lease.credentialId).toBe(credentialId);
+          expect(lease.holderId).toBe(`holder:${turnId}`);
+          expect(lease.generation).toBe(1);
+          const reacquired = await acquire(dbB, ws!, turnId);
+          expect(reacquired.reused).toBe(true);
+          expect(reacquired.holderId).toBe(lease.holderId);
+          expect(reacquired.generation).toBe(lease.generation);
+        } finally {
+          if (useTransactionOpen) await connectionUse`rollback`;
+          if (writerTransactionOpen) await workspaceWriter`rollback`;
+          await Promise.allSettled(pending);
+          connectionUse.release();
+          workspaceWriter.release();
+        }
+      }, 180_000);
+    }
+  }
+
   for (const source of ["workspace", "organization"] as const) {
     test(`settled ${source} usage keeps exact accepted authority after source drift`, async () => {
       if (!available) return;
@@ -3329,6 +3510,153 @@ test("observed Codex assignments survive same-turn recovery without changing fro
   expect(
     (await getSessionCodexState(dbA, ws!.workspaceId, oldFence.sessionId))?.lastCredentialId,
   ).toBe(b);
+});
+
+test("SUB-ACCESS-01: Codex accepted source/policy snapshots survive recovery and goal continuation", async () => {
+  if (!available) return;
+  const [ws] = await freshAccount();
+  const credentialId = await connectCredential(ws!, "sub-access-codex");
+  const turnId = await seedTurn(ws!);
+  const [identity] = await admin<{ session_id: string; trigger_event_id: string }[]>`
+    select session_id, trigger_event_id from session_turns where id = ${turnId}`;
+  if (!identity) throw new Error("Codex accepted turn identity was not seeded");
+
+  const observedAllocatorContexts: Array<{
+    accounts: string[];
+    rotationEnabled: boolean;
+  }> = [];
+  const lease = async (exactTurnId: string) => {
+    const fence = await attemptFenceForTurn(exactTurnId);
+    return await acquireCodexCredentialLease(
+      dbA,
+      {
+        ...ws!,
+        ...fence,
+        turnId: exactTurnId,
+        holderId: `sub-access:${fence.attemptId}`,
+        advanceActivePointer: false,
+      },
+      (context) => {
+        observedAllocatorContexts.push({
+          accounts: context.accounts.map((account) => account.id),
+          rotationEnabled: context.rotationEnabled,
+        });
+        return selector(context);
+      },
+    );
+  };
+  await lease(turnId);
+  const [acceptedTurn] = await admin<{ metadata: Record<string, unknown> }[]>`
+    select metadata from session_turns where id = ${turnId}`;
+  const acceptedPolicy = readCodexCredentialPolicySnapshotV1(acceptedTurn?.metadata);
+  expect(acceptedPolicy.kind).toBe("valid");
+  if (acceptedPolicy.kind !== "valid") throw new Error("Codex policy was not frozen");
+  expect(acceptedPolicy.policy).toMatchObject({ source: "workspace", rotationEnabled: true });
+  expect(observedAllocatorContexts.at(-1)).toMatchObject({
+    accounts: [credentialId],
+    rotationEnabled: true,
+  });
+
+  // Change both live policy dimensions after acceptance. Recovery must keep
+  // using the accepted workspace source and rotation setting, not these values.
+  await updateCodexRotationSettings(dbA, ws!.workspaceId, { rotationEnabled: false });
+  await setWorkspaceCodexSubscriptionMode(dbA, {
+    ...ws!,
+    subjectId: null,
+    mode: "disabled",
+  });
+  const acceptedAttempt = await attemptFenceForTurn(turnId);
+  expect(
+    await requestSessionTurnRecovery(dbA, ws!.workspaceId, {
+      sessionId: identity.session_id,
+      turnId,
+      attemptId: acceptedAttempt.attemptId,
+      triggerEventId: identity.trigger_event_id,
+      reason: "worker_restart",
+    }),
+  ).toMatchObject({ action: "recovering" });
+  const recovered = await claimSessionWorkForAttempt(dbA, ws!.workspaceId, {
+    sessionId: identity.session_id,
+    workflowId: acceptedAttempt.workflowId,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(recovered.action).toBe("claimed");
+  if (recovered.action !== "claimed") throw new Error("Codex recovery did not reclaim the turn");
+  expect(recovered.turn.id).toBe(turnId);
+  await lease(turnId);
+  const [recoveredTurn] = await admin<{ metadata: Record<string, unknown> }[]>`
+    select metadata from session_turns where id = ${turnId}`;
+  expect(readCodexCredentialPolicySnapshotV1(recoveredTurn?.metadata)).toEqual(acceptedPolicy);
+  expect(observedAllocatorContexts.at(-1)).toMatchObject({
+    accounts: [credentialId],
+    rotationEnabled: true,
+  });
+
+  await createSessionGoal(clientA.db, {
+    accountId: ws!.accountId,
+    workspaceId: ws!.workspaceId,
+    sessionId: identity.session_id,
+    text: "Continue the accepted Codex work",
+    createdBy: "agent",
+  });
+  const active = await attemptFenceForTurn(turnId);
+  expect(
+    await applySessionTurnSettlement(clientA.db, ws!.workspaceId, {
+      sessionId: identity.session_id,
+      turnId,
+      triggerEventId: identity.trigger_event_id,
+      attemptId: active.attemptId,
+      turnStatus: "completed",
+      sessionStatus: "idle",
+      activeTurnId: null,
+      events: [],
+    }),
+  ).toMatchObject({ action: "settled" });
+
+  const materialized = await materializeGoalContinuation(clientA.db, {
+    accountId: ws!.accountId,
+    workspaceId: ws!.workspaceId,
+    sessionId: identity.session_id,
+    workflowId: `session-${identity.session_id}`,
+    budgetBlocked: null,
+    policy: {
+      model: "codex/gpt-5.6-sol",
+      reasoningEffort: "low",
+      latencyMode: "standard",
+      tools: [],
+      sandboxBackend: "modal",
+    },
+    prompt: (goal) => `Continue ${goal.text}`,
+  });
+  expect(materialized.action).toBe("continue");
+  if (materialized.action !== "continue")
+    throw new Error("Codex goal continuation was not created");
+
+  const claimed = await claimSessionWorkForAttempt(clientA.db, ws!.workspaceId, {
+    sessionId: identity.session_id,
+    workflowId: `session-${identity.session_id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId: crypto.randomUUID(),
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
+  });
+  expect(claimed.action).toBe("claimed");
+  if (claimed.action !== "claimed")
+    throw new Error(`Codex goal turn was not claimed: ${claimed.reason}`);
+  expect(claimed.turn.source).toBe("goal");
+  expect(readCodexCredentialPolicySnapshotV1(claimed.turn.metadata)).toEqual(acceptedPolicy);
+  const continuationLease = await lease(claimed.turn.id);
+  expect(continuationLease.credentialId).toBe(credentialId);
+  expect(observedAllocatorContexts.at(-1)).toMatchObject({
+    accounts: [credentialId],
+    rotationEnabled: true,
+  });
+  const [continuedTurn] = await admin<{ metadata: Record<string, unknown> }[]>`
+    select metadata from session_turns where id = ${claimed.turn.id}`;
+  expect(readCodexCredentialPolicySnapshotV1(continuedTurn?.metadata)).toEqual(acceptedPolicy);
 });
 
 describe("Codex plan entitlement state", () => {

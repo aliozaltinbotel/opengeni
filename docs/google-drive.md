@@ -1,27 +1,33 @@
 # Google Drive connection and scheduled knowledge sync
 
-OpenGeni can connect a Google account once, choose multiple Shared Drives or
+Opengeni can connect a Google account once, choose multiple Shared Drives or
 folder boundaries, and explicitly enable scheduled synchronization from the
 Capabilities page. Saving a selection alone is inert; enabling synchronization
 materializes a scoped knowledge source and a shared Schedule action:
 
 - OAuth and refresh tokens are server-side only and encrypted in the existing
   connection vault.
-- OpenGeni requests
+- Opengeni requests
   `https://www.googleapis.com/auth/drive.readonly` so it can resolve Shared
   Drive names and later read documents for ingestion.
 - Selecting folders or Shared Drives freezes their exact source boundary,
   organization/workspace/personal destination, initiating subject, owning
   connection identity, source configuration generation, and read policy.
-- The separate **Enable synchronization** decision creates one provider-neutral
-  `knowledge_source_sync` action per enabled boundary and starts an idempotent
-  initial backfill. The action never creates an agent session, invokes a model,
-  or records an agent-run charge.
+- The separate **Enable synchronization** decision creates one ordinary
+  `agent_turn` Schedule per enabled boundary, with the exact source and
+  connection selection in `agentConfig.knowledgeSource`, and starts the initial
+  run. Each run creates an agent session and uses the workspace's configured
+  model and normal agent/model usage accounting. A usable model connection or
+  Opengeni credits is therefore required.
 - Shared **Schedules** becomes canonical for cadence and the user's per-source
   pause state after creation. A later connector save does not overwrite either.
-- Source inventory, downloads/exports, canonical blobs, Documents, immutable
-  source-object/document-version provenance, and document indexing run in a
-  dedicated checkpointed Temporal workflow.
+- Within the accepted agent attempt, `knowledge_source_fetch` performs bounded,
+  checkpointed source inventory, downloads/exports, canonical storage,
+  source-object/document-version provenance, and source-content preparation.
+  `knowledge_source_read` lets the agent inspect the content changed in that
+  run, and `knowledge_save` records useful findings with evidence. The accepted
+  Agent learning settings govern publication: Automatic publishes, Review first
+  stages changes for review, and Off refuses new Knowledge.
 - The connector's read policy controls interactive connector actions only.
   Background sync is authorized solely by **Enable synchronization** and does
   not pause for per-run approval.
@@ -43,7 +49,7 @@ Production use requires Google's applicable verification and security review.
 
 ## Current source-selection surface
 
-The shipped selector is OpenGeni's custom server-backed folder browser, not
+The shipped selector is Opengeni's custom server-backed folder browser, not
 Google Picker. The browser starts at My Drive, asks the API to list folders with
 Shared Drive support enabled, and lets the user paste a folder or Shared Drive
 URL/ID when it is not reachable from My Drive navigation. The server resolves
@@ -53,11 +59,11 @@ types, and Drive IDs are not accepted as authority by themselves.
 The Connect and reconnect surface must stay explicit about the current product
 contract:
 
-- OpenGeni requests read-only access to browse folders and Shared Drives and to
+- Opengeni requests read-only access to browse folders and Shared Drives and to
   read supported files only after the user separately enables synchronization.
 - Selection alone remains inert. It records boundaries, destination authority,
   cadence defaults, and interactive read policy without starting ingestion.
-- OpenGeni cannot create, edit, or delete files in Drive. Outbound publishing is
+- Opengeni cannot create, edit, or delete files in Drive. Outbound publishing is
   a separate capability and is not implied by this connector.
 - Publication destination authority is frozen at turn acceptance: the exact
   output folder is copied into the accepted delegation, and a later
@@ -86,7 +92,7 @@ Shared Drive boundary. That product mode requires
 `https://www.googleapis.com/auth/drive.readonly`:
 
 - `drive.file` grants per-file access to files created by the app or explicitly
-  opened/shared with it. It does not prove that OpenGeni can continuously
+  opened/shared with it. It does not prove that Opengeni can continuously
   discover every present or future descendant of a selected folder or Shared
   Drive, so it never satisfies the recursive-source-sync capability.
 - `drive.metadata.readonly` can describe Drive items but cannot read document
@@ -95,7 +101,7 @@ Shared Drive boundary. That product mode requires
   content synchronization.
 - `drive.readonly` satisfies metadata discovery, content reads, and recursive
   source synchronization. A previously granted full `drive` scope is
-  semantically sufficient but OpenGeni does not request that broader scope.
+  semantically sufficient but Opengeni does not request that broader scope.
 - A future narrow Google Picker mode may use `drive.file` only when its source
   contract is explicitly limited to the individually selected files. It must
   not be represented as a recursively synchronized folder.
@@ -151,7 +157,7 @@ Run the source-controlled readiness command from the exact candidate checkout:
 bun run deployment:google-drive-readiness
 ```
 
-The command parses the ordinary OpenGeni runtime configuration and emits one
+The command parses the ordinary Opengeni runtime configuration and emits one
 secret-safe JSON receipt with schema
 `opengeni.google-drive-release-readiness.v1`. It verifies integration
 enablement, the presence of the OAuth client pair, signed-state and credential
@@ -192,8 +198,8 @@ download, and export requests. Only transport failures, HTTP `429`, and HTTP
 `5xx` responses are retried; permanent provider responses retain the existing
 credential, permission, cursor, and reconnect classifications. Retry delay
 honors a bounded `Retry-After` value and otherwise uses capped exponential
-backoff. Exhausting the local policy returns control to the durable sync
-workflow. Physical retry attempts have separate telemetry and do not consume
+backoff. Exhausting the local policy returns control to the accepted source-fetch
+attempt. Physical retry attempts have separate telemetry and do not consume
 additional units from the durable source run's logical provider-request budget.
 
 Use `deploy/helm/opengeni/values.google-drive-readiness.example.yaml` as a
@@ -237,7 +243,7 @@ The Capabilities card projects one explicit, durable state for the current
 subject-owned Google Drive connection:
 
 - **Connected** permits source browsing and configuration.
-- **Paused** is a local reversible stop. OpenGeni does not browse or use saved
+- **Paused** is a local reversible stop. Opengeni does not browse or use saved
   Drive locations until the same connection is resumed.
 - **Token revoked** means Google rejected the refresh grant. Reconnect with the
   same Google account to preserve the connection and configured locations.
@@ -273,14 +279,14 @@ added by pasting its full `https://drive.google.com/.../folders/...` URL or ID.
 
 The first successful run captures a Google Drive Changes start page token before
 recursively inventorying all existing supported documents inside an enabled
-boundary. For My Drive, OpenGeni resolves Google's `root` alias to the actual
+boundary. For My Drive, Opengeni resolves Google's `root` alias to the actual
 root folder ID before using parent ancestry to classify later changes; an
 unresolved or non-folder root fails closed instead of advancing the cursor.
 After that complete inventory settles, normal scheduled runs drain the Changes
 feed page by page and durably advance the provider cursor only with the
 successful source lease settlement. Shared Drive token, change, metadata, and
 inventory requests carry the exact drive identity plus Google's all-drives
-support parameters. OpenGeni does not overload the scoped-knowledge
+support parameters. Opengeni does not overload the scoped-knowledge
 `sync_cursor` column with provider cursor or execution checkpoint state.
 
 Changes checkpoints persist cumulative examined-change, provider-request, and
@@ -382,7 +388,7 @@ the first backfill slice:
   so a crash or bounded pause resumes without refetching or skipping the
   remainder of that page.
 - Google Docs, Sheets, Slides, and Drawings all use PDF as one deterministic,
-  dependency-free ingestible export format for the parser shipped in OpenGeni's
+  dependency-free ingestible export format for the parser shipped in Opengeni's
   workload images. Ordinary PDF and text-like files use authenticated download
   planning. Office and image conversion formats stay unsupported until their
   system converters are part of the workload contract. Export and unknown
@@ -430,22 +436,26 @@ UUIDs and principal identities are never projected. Citation construction calls
 the same live file-authorization predicate and returns no citation when any
 protector fails.
 
-Provider revision is observation metadata, not the immutable OpenGeni version
+Provider revision is observation metadata, not the immutable Opengeni version
 identity. A revision or metadata/ACL change is recorded even when the bytes,
 Document, and file are unchanged, so the next repair does not repeatedly
-download the same provider observation. Automatic Temporal retries also repair
-both persistence seams: a current immutable version without an index obligation
-gets one, and a pending obligation is re-indexed or settled before the item is
+download the same provider observation. Repeated checkpointed source fetches
+also repair both persistence seams: a current immutable version without an
+index obligation gets one, and a pending obligation is re-indexed or settled before the item is
 accepted as unchanged.
 
 Durable wake receipts retain `scheduled`, `manual`, `initial`, `retry`,
 `repair`, and future `provider_event` provenance even when overlapping fires
 coalesce. Source configuration and lifecycle generations fence wake admission,
-checkpointing, indexing obligations, ACL activation, and settlement. A stable
-per-source workflow ID plus a Postgres lease and one-item execution buffer
-enforce overlap and replay idempotency across worker restarts. Terminal runs
-emit separate knowledge-sync usage events plus low-cardinality run/item/byte
-metrics; they do not emit `agent_run.created`.
+checkpointing, indexing obligations, ACL activation, and settlement. The accepted
+scheduled-run identity, a Postgres source lease, and a one-item execution buffer
+enforce overlap and replay idempotency across worker restarts. Source processing
+emits knowledge-sync usage events and low-cardinality run/item/byte metrics.
+The ordinary scheduled agent session also records its normal agent/model usage;
+source processing does not bypass that accounting. Source-job settlement owns
+the checkpoint and summary, while the ordinary agent lifecycle owns task
+completion. Legacy dedicated source-sync schedules require migration before
+new dispatch; new Drive selections dispatch ordinary agent turns.
 
 A successful source run advances the live source sync generation, and lease
 settlement advances scheduler state to that exact output generation. Index and
@@ -481,7 +491,7 @@ the connector read-policy configuration used by the common connector-action
 boundary. Workspace Events subscription provisioning, provider ACL projection,
 policy-UI wiring, and memory updates are not activated by the inventory planner.
 
-Disconnecting revokes the OpenGeni connection locally. The confirmation dialog
+Disconnecting revokes the Opengeni connection locally. The confirmation dialog
 states that this deliberately does not call Google's project-wide token
 revocation endpoint, which can invalidate other grants for the same Google OAuth
 project. Reconnect replaces the credential in place and refuses a different
@@ -493,7 +503,7 @@ This section is the source-controlled, non-secret package for Google OAuth
 verification and the applicable restricted-scope security assessment. It
 describes shipped behavior and the evidence an authorized human/operator must
 assemble. It does not authorize a Google submission, create production
-credentials, approve legal language, deploy OpenGeni, or prove production
+credentials, approve legal language, deploy Opengeni, or prove production
 acceptance.
 
 ### Shipped product and security facts
@@ -501,7 +511,7 @@ acceptance.
 Use these facts consistently in the OAuth consent screen, verification form,
 demo video, privacy policy, user help, and security-assessment evidence:
 
-1. OpenGeni requests only
+1. Opengeni requests only
    `https://www.googleapis.com/auth/drive.readonly` for this connector. The
    authorization request does not request full `drive` or a write scope.
 2. The product uses a custom server-backed folder/Shared Drive browser. A user
@@ -514,7 +524,7 @@ demo video, privacy policy, user help, and security-assessment evidence:
    Google Drive Changes feed and use bounded full repairs plus provider
    revisions to avoid unchanged downloads. Workspace Events/Pub/Sub delivery is
    not currently shipped.
-5. OpenGeni reads supported file metadata and content within enabled selected
+5. Opengeni reads supported file metadata and content within enabled selected
    boundaries. It does not create, edit, rename, move, share, or delete Google
    Drive files.
 6. Signed OAuth state is short-lived and single-use, binds account, workspace,
@@ -548,8 +558,11 @@ Canonical implementation and proof:
 - `packages/contracts/src/google-drive.ts`
 - `packages/documents/src/google-drive.ts`
 - `apps/worker/src/activities/knowledge-source-sync.ts`
+- `apps/worker/src/activities/agent-turn/knowledge-source-tools.ts`
+- `apps/worker/src/activities/scheduled-tasks.ts`
 - `apps/api/test/google-drive.test.ts`
 - `apps/api/test/google-drive-oauth-isolation.test.ts`
+- `apps/worker/test/knowledge-source-agent-run.test.ts`
 - `packages/documents/test/google-drive.test.ts`
 - `apps/web/src/lib/google-drive-connection.test.ts`
 

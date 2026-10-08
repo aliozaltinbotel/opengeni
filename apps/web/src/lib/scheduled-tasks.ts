@@ -1,3 +1,4 @@
+import { isRetiredNativeAtlassianTask } from "@opengeni/contracts/atlassian-native-retirement";
 import type { OpenGeniClient } from "@opengeni/sdk";
 import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
@@ -99,9 +100,14 @@ export type ScheduledTaskFormState = {
   mcpServerIds?: string[];
   connectionAccounts?: import("@opengeni/sdk").McpConnectionAccountSelection[];
   slackBotConnectionId: string;
-  /** Channel a person chose for the OpenGeni bot's posts; empty means no posting. */
+  /** Channel a person chose for the Opengeni bot's posts; empty means no posting. */
   slackBotChannelId: string;
   resources: ResourceRef[];
+  /**
+   * What each run's agent can do. Undefined follows the workspace's agent
+   * defaults (nothing is sent); a value is frozen into the schedule.
+   */
+  agentCapabilities?: import("@opengeni/contracts").AgentCapabilities;
 };
 
 /**
@@ -112,8 +118,10 @@ export type ScheduledTaskFormState = {
 export function scheduledTaskStateLabel(task: ScheduledTask): {
   label: string;
   active: boolean;
-  reason: "active" | "user_paused" | "connection_paused" | "source_disabled";
+  reason: "active" | "user_paused" | "connection_paused" | "source_disabled" | "provider_retired";
 } {
+  if (isRetiredNativeAtlassianTask(task))
+    return { label: "Sync retired", active: false, reason: "provider_retired" };
   if (task.status === "paused") {
     return { label: "Paused", active: false, reason: "user_paused" };
   }
@@ -198,7 +206,7 @@ export function recurringSessionTaskFormState(
 ): ScheduledTaskFormState {
   return {
     ...newScheduledTaskFormState(includeOpenGeniTool, [], defaults),
-    name: "Recurring Slack task",
+    name: "",
     prompt: "Continue this task using the current session context and report the result.",
     scheduleType: "interval",
     intervalMinutes: 60,
@@ -273,6 +281,9 @@ export function formStateFromScheduledTask(
     overlapPolicy: task.overlapPolicy,
     slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
     slackBotChannelId: task.agentConfig.slackBotChannelId ?? "",
+    ...(task.agentConfig.agent?.capabilities !== undefined
+      ? { agentCapabilities: task.agentConfig.agent.capabilities }
+      : {}),
   };
 }
 
@@ -372,17 +383,50 @@ export function scheduleFromFormState(form: ScheduledTaskFormState): ScheduledTa
 export function agentConfigFromFormState(
   form: ScheduledTaskFormState,
   existingTask?: ScheduledTask,
+  initial?: ScheduledTaskFormState,
 ): ScheduledTaskAgentConfig {
+  const savedTools = new Map(existingTask?.agentConfig.tools.map((tool) => [tool.id, tool]));
   const tools = (
-    form.mcpServerIds?.map((id) => ({ kind: "mcp" as const, id })) ??
+    form.mcpServerIds?.map((id) => savedTools.get(id) ?? { kind: "mcp" as const, id }) ??
     existingTask?.agentConfig.tools ??
     []
   ).filter((tool) => !(tool.kind === "mcp" && tool.id === "opengeni"));
   if (form.includeOpenGeniTool) {
-    tools.push({ kind: "mcp", id: "opengeni" });
+    tools.push(savedTools.get("opengeni") ?? { kind: "mcp", id: "opengeni" });
   }
+  const unchangedModel =
+    existingTask &&
+    initial &&
+    form.modelFollowsDefault === initial.modelFollowsDefault &&
+    (form.modelFollowsDefault ||
+      (form.model === initial.model && form.reasoningEffort === initial.reasoningEffort));
+  // Keep what the form doesn't edit (identity, renderer, instructions) as saved.
+  const { capabilities: _savedCapabilities, ...savedAgent } = existingTask?.agentConfig.agent ?? {};
+  // Preserve fields this editor does not expose. Editable optional fields are
+  // removed first so clearing a model/machine/Slack selection still works.
+  const {
+    model: _model,
+    reasoningEffort: _effort,
+    machineTarget: _machine,
+    sandboxBackend: _backend,
+    slackBotConnectionId: _bot,
+    slackBotChannelId: _channel,
+    agent: _agent,
+    connectionAccounts: _accounts,
+    connectionAccountsFrozen: _frozen,
+    ...retainedConfig
+  } = { connectionAccountsFrozen: undefined, ...existingTask?.agentConfig };
+  const agent =
+    form.runMode === "existing_session"
+      ? undefined
+      : {
+          ...savedAgent,
+          ...(form.agentCapabilities !== undefined ? { capabilities: form.agentCapabilities } : {}),
+        };
   return {
-    prompt: form.prompt.trim(),
+    ...retainedConfig,
+    prompt: existingTask ? form.prompt : form.prompt.trim(),
+    ...(agent && Object.keys(agent).length > 0 ? { agent } : {}),
     ...(existingTask?.agentConfig.knowledgeSource
       ? { knowledgeSource: existingTask.agentConfig.knowledgeSource }
       : {}),
@@ -394,12 +438,21 @@ export function agentConfigFromFormState(
     ...(form.slackBotConnectionId && form.slackBotChannelId && form.runMode !== "existing_session"
       ? { slackBotChannelId: form.slackBotChannelId }
       : {}),
-    ...(form.modelFollowsDefault
-      ? {}
-      : {
-          ...(form.model ? { model: form.model } : {}),
-          reasoningEffort: form.reasoningEffort,
-        }),
+    ...(unchangedModel
+      ? {
+          ...(existingTask.agentConfig.model !== undefined
+            ? { model: existingTask.agentConfig.model }
+            : {}),
+          ...(existingTask.agentConfig.reasoningEffort !== undefined
+            ? { reasoningEffort: existingTask.agentConfig.reasoningEffort }
+            : {}),
+        }
+      : form.modelFollowsDefault
+        ? {}
+        : {
+            ...(form.model ? { model: form.model } : {}),
+            reasoningEffort: form.reasoningEffort,
+          }),
     ...(form.runMode !== "existing_session" &&
     form.executionTarget === "machine" &&
     form.machineSandboxId
@@ -805,6 +858,7 @@ const ACCESS_FAILURE_REASON: Record<ScheduledTaskRunAccessFailure["reason"], str
   personal_authority_unavailable: "your personal account is not available to this schedule",
   unsupported_auth: "its sign-in is not supported for scheduled runs",
   resource_scope_unavailable: "the resources it was allowed to use are no longer available",
+  designated_credential_unavailable: "the account chosen for it is no longer available",
 };
 
 /** "Couldn't use Slack: your personal account is not available to this schedule." */
@@ -900,7 +954,7 @@ export function scheduledTaskPolicyDriftLines(
 /**
  * Defaults the owner chose to keep off one schedule, for the task head they
  * looked at. Only additions a person may deliberately decline are dismissible:
- * workspace default connectors and OpenGeni tools. A broken account or a
+ * workspace default connectors and Opengeni tools. A broken account or a
  * connector the workspace removed is never hidden.
  */
 export type ScheduledTaskDriftDismissal = {

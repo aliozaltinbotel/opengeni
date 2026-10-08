@@ -8,7 +8,11 @@ import {
   UpdateScheduledTaskRequest,
   type AccessGrant,
 } from "@opengeni/contracts";
-import { listScheduledTaskRuns, listScheduledTasks } from "@opengeni/db";
+import {
+  getScheduledTaskRevisionAuthoritySubject,
+  listScheduledTaskRuns,
+  listScheduledTasks,
+} from "@opengeni/db";
 import type { Hono } from "hono";
 import type { ScheduledTask } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
@@ -74,7 +78,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       });
 
   // Channels a person may choose as a task's fixed Slack destination: active,
-  // non-shared channels the selected OpenGeni bot already belongs to.
+  // non-shared channels the selected Opengeni bot already belongs to.
   app.get("/v1/workspaces/:workspaceId/scheduled-task-slack-channels", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const authorization = await requireAccessGrantAuthorization(
@@ -269,7 +273,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
   });
 
   // The owner's explicit access refresh: re-freeze connectors, connector
-  // accounts and an agent-created task's OpenGeni tools with the calling
+  // accounts and an agent-created task's Opengeni tools with the calling
   // person's current authority. It changes neither the schedule nor its
   // status, so the Temporal schedule is untouched.
   app.post("/v1/workspaces/:workspaceId/scheduled-tasks/:taskId/refresh-access", async (c) => {
@@ -437,11 +441,22 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
         agentConfig: task.agentConfig,
         requireOnline: true,
       });
+      const taskAuthoritySubjectId = await getScheduledTaskRevisionAuthoritySubject(db, {
+        accountId: task.accountId,
+        workspaceId: task.workspaceId,
+        taskId: task.id,
+        taskAuthorityRevision: task.authorityRevision,
+      });
       await requireLimit(
         { ...deps, settings: catalogSettings },
         {
           accountId: grant.accountId,
           workspaceId,
+          // A manual trigger does not transfer the task's frozen human to
+          // the triggering administrator. Unavailable authority is refused
+          // visibly by worker dispatch; this edge still checks the workspace.
+          initiatingHumanSubjectId:
+            taskAuthoritySubjectId === task.ownerSubjectId ? taskAuthoritySubjectId : null,
           action: "agent_run:create",
           quantity: 1,
           // A model-less task is checked against the model its occurrence

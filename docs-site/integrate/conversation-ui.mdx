@@ -1,0 +1,168 @@
+---
+title: "Conversation UI & theming"
+description: "Render the full Opengeni conversation, brand it, and customize how tools appear."
+icon: "palette"
+---
+
+`OpenGeniChat` shows the user's chats and the open conversation. The chat list is a sidebar when there is room and a drawer when there is not, so it fits a side panel or a full page. Users can start, rename, and archive chats.
+
+<Frame caption="Example: OpenGeniChat embedded in a support app. Acme Support is a demo host app, not part of Opengeni.">
+  <img
+    className="block dark:hidden"
+    src="/images/embedded-conversation.png"
+    alt="The Opengeni chat embedded in a demo support app, asking to approve a refund"
+  />
+  <img
+    className="hidden dark:block"
+    src="/images/embedded-conversation-dark.png"
+    alt="The Opengeni chat embedded in a demo support app, asking to approve a refund"
+  />
+</Frame>
+
+```tsx
+<OpenGeniChat baseUrl="/api/opengeni" conversationProps={{ toolRegistry }} />
+```
+
+`baseUrl` is your proxy's mount. The component creates the browser client and uses the workspace your proxy resolved for the signed-in user.
+
+The new-chat composer is the same as the follow-up one: attachments, your `conversationProps.composerProps`, and the model picker when offered. Files attached to the first message are added to the new chat.
+
+Live voice is off unless you turn it on, because each call is paid from your Opengeni credits per minute and asks the browser for the microphone. Pass `realtimeVoice: true` to `createSessionProxyHandler`, or `conversationProps={{ realtimeVoice: true }}`. Once a chat exists, its composer then shows a voice button when your workspace has a voice model available (for example hosted GPT Live). The user talks, the voice model answers, hands work to the agent in the same chat, and the transcript appears in the timeline. `realtimeVoice: false` on the proxy refuses voice even when the component asks for it.
+
+The indicator shown while the agent starts says "Thinking…". Use `conversationProps={{ genieLoading: { phrases: ["One moment…"] } }}` for your own copy, or `genieLoading.render` for your own visual.
+
+For anonymous visitors on a public site, return `visitor: true` from the proxy's `resolve`. Visitors get no attach button (the proxy also refuses their uploads) unless you set `visitorUploads: true`.
+
+If your app authenticates with a bearer token instead of cookies, pass it on every request and read it in the proxy's `resolve`:
+
+```tsx
+<OpenGeniChat
+  baseUrl="/api/opengeni"
+  headers={() => ({ Authorization: `Bearer ${getAccessToken()}` })}
+/>
+```
+
+The function runs per request, so it can return a refreshed token. Pass `fetch` instead when the token must be awaited. A `client` you pass with `baseUrl` is used instead of the one the component would create.
+
+The list shows the chats the user created. Set `sessionList: "visible"` on the proxy to list every chat they can read. Control the selection with `sessionId` and `onSessionChange` (for example from the URL).
+
+For a single conversation, use `SessionConversation`. It includes streaming replies, tool activity, approvals, questions, attachments, the message queue, Steer, and Pause/Resume.
+
+```tsx
+import { SessionConversation } from "@opengeni/react/session-ui";
+import "@opengeni/react/compiled.css";
+
+<SessionConversation baseUrl="/api/opengeni" sessionId={sessionId} height="100%" />;
+```
+
+Import from `@opengeni/react/session-ui` for the smallest bundle; it has no optional peer dependencies. To share one client across several components or use the headless hooks, wrap them in `<OpenGeniProvider client={client} workspaceId={workspaceId}>` instead of passing `baseUrl`.
+
+## Props
+
+| Prop                                                   | Purpose                                                                                  |
+| ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| `sessionId`                                            | Required. The session to show                                                            |
+| `baseUrl`                                              | Your proxy's mount, such as `/api/opengeni`. Not needed inside an `OpenGeniProvider`     |
+| `headers`, `fetch`                                     | With `baseUrl`: headers for every request (static or a function), or a custom fetch      |
+| `attachments`                                          | File attachments in the composer. Defaults to `true`                                     |
+| `modelPicker`                                          | Show the model picker. Hidden unless the proxy sets `modelSelection: true`               |
+| `toolRegistry`                                         | Your own renderers for your tools                                                        |
+| `renderMessageText`                                    | Custom rendering for message text, such as links into your product                       |
+| `renderAllowanceExhausted`, `allowanceExhaustedLabels` | Replace the row or its words when a [usage allowance](/guides/usage-allowances) runs out |
+| `height`                                               | Defaults to filling its container                                                        |
+| `className`                                            | Class on the root element                                                                |
+| `composerProps`                                        | Composer options, such as placeholder text                                               |
+
+Remount the component when the signed-in user or tenant changes.
+
+## Brand it
+
+`compiled.css` is scoped to the components and needs no Tailwind. Out of the box it needs no extra cosmetic host CSS. To match your product, override the `--og-*` CSS variables on any ancestor:
+
+```css
+.assistant-panel {
+  --og-color-accent: oklch(0.55 0.2 280);
+  --og-color-bg: #ffffff;
+  --og-font-sans: "Inter", system-ui, sans-serif;
+  --og-radius-md: 8px;
+}
+```
+
+Dark is the default. Add `data-og-theme="light"` for the light theme and `data-og-density="compact"` for narrow panels:
+
+```tsx
+<aside className="assistant-panel" data-og-theme="light" data-og-density="compact">
+  <SessionConversation sessionId={sessionId} />
+</aside>
+```
+
+Menus and dialogs inherit the theme of the element that opened them. See [`tokens.css`](https://github.com/Cloudgeni-ai/opengeni/blob/main/packages/react/styles/tokens.css) for every token.
+
+## Error copy
+
+Error notices use neutral, brand-free text. To prefix or rewrite them, pass `formatError` to the provider:
+
+```tsx
+<OpenGeniProvider
+  client={client}
+  workspaceId={workspaceId}
+  formatError={(_error, defaultMessage) => `ACME Assistant: ${defaultMessage}`}
+>
+  <OpenGeniChat conversationProps={{ toolRegistry }} />
+</OpenGeniProvider>
+```
+
+An `ErrorMessageFormatter` has the signature `(error: unknown, defaultMessage: string) => string | undefined`. Returning `undefined` or an empty string, or a throwing callback, keeps the default. It receives the original error, so don't log it in the browser.
+
+Outside React, `formatErrorMessage(error, fallback?)` from `@opengeni/sdk` returns the same display text. Show that, not `error.message`.
+
+## Render your tools
+
+Calls to your own MCP server can render as product UI. Tool names are `<server id>__<tool name>`:
+
+```tsx
+import { createDefaultToolRegistry, type ToolRendererProps } from "@opengeni/react/session-ui";
+
+function TicketTool({ item }: ToolRendererProps) {
+  return <TicketCard call={item} />; // item.arguments, item.output, item.status
+}
+
+const toolRegistry = createDefaultToolRegistry({
+  entries: [{ match: "name", name: "acme__get_ticket", render: TicketTool }],
+});
+
+<SessionConversation sessionId={sessionId} toolRegistry={toolRegistry} />;
+```
+
+## Start sessions from the browser
+
+New chats go through the proxy's `createSession` hook. The browser sends only the first message; your hook returns the full request, so tools, skills, and model stay on your server:
+
+```ts
+createSessionProxyHandler(og, {
+  resolve,
+  createSession: (input) => ({
+    ...input,
+    agent: { capabilities: "none" }, // see Configure the agent
+    mcpServers: [{ id: "acme", url: ACME_MCP_URL }], // see Give the agent your data
+    tools: [{ kind: "mcp", id: "acme" }],
+    sandboxBackend: "none",
+  }),
+});
+```
+
+## Links, artifacts, and Sites
+
+File links download by file ID. Set `sandboxFiles: true` on the proxy to let users download files from the session's sandbox.
+
+To open artifacts and Sites, either route them to your own pages with `resolveLink`, or enable the proxy's `artifacts: true` and render `SessionArtifactViewer` from `@opengeni/react/artifacts` in `onOpenArtifact` (members need `artifacts:read`).
+
+## Other UI shapes
+
+- **Headless hooks** from `@opengeni/react/session` for a different interaction model with the same behavior.
+- **The SDK alone** for a non-React frontend, a CLI, or automation. See the [Vue recipe](https://github.com/Cloudgeni-ai/opengeni/blob/main/examples/vue-conversation/README.md).
+- **The chat facade** when you already have a chat UI. See [Keep your existing chat UI](/integrate/existing-chat-ui).
+
+See the [React reference](/reference/react) for every component.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

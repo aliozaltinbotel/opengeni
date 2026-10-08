@@ -1,13 +1,16 @@
 import type { ModelRequest } from "@openai/agents";
 import type { AuthorizeModelCallSource } from "@opengeni/contracts";
 import { persistModelCallSourceReceipt, readModelCallSourceReceipt, type NativeModelSourceRequest } from "@opengeni/db";
+import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
   readActiveSandbox,
   getWorkspaceCredentialProvider,
-  loadClaudeSubscriptionUsageCredential,
+  resolveClaudeAccountCredential,
+  ClaudeSubscriptionReconnectRequired,
 } from "@opengeni/db";
 import { routingEnabled } from "../../sandbox-routing";
+import { resolveAgentToolFamilies } from "@opengeni/contracts";
 import { createKnowledgeSourceSyncActivities } from "../knowledge-source-sync";
 import {
   assertModelConnectionAllowsTurn,
@@ -31,6 +34,7 @@ import {
   type BeforeModelCallSourceReceipt,
   REMOTE_COMPACTION_V2_BETA_FEATURE,
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
+  awaitModelCallAdmission,
   materializeSandboxFileDownloads,
   sandboxFileDownloadFailureNote,
   type SandboxFileDownload,
@@ -67,6 +71,7 @@ import {
   recordModelRequestPhase,
   recordCompanyBrainContributions,
   recordTurnStartupPhase,
+  measureTurnStartupPhase,
   runtimeMetricsHooksForObservability,
 } from "../../observability-metrics";
 import { summarizeCompanyBrainContributions } from "../../model-context-contributions";
@@ -75,7 +80,10 @@ import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
 import { checkpointHistoryBeforeProviderDispatch } from "./provider-dispatch-barrier";
-import { providerRecoveryCountAfterModelRequestPhase } from "./errors";
+import {
+  assertProviderOverloadRecoveryActive,
+  providerRecoveryCountAfterModelRequestPhase,
+} from "./errors";
 import { sandboxRunAs } from "@opengeni/runtime";
 import { randomUUID } from "node:crypto";
 import { createModelCheckpointMemoryCollector } from "../../model-checkpoint-memory-collector";
@@ -103,7 +111,7 @@ import {
   establishTurnSandbox,
   bindLazySandboxProvisioner,
 } from "./sandbox-establish";
-import { selectXaiTurnCapacity } from "./xai-capacity";
+import { selectXaiTurnCapacity, selectClaudeTurnCapacity } from "./xai-capacity";
 import { prepareRunCredentials } from "./run-credentials";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
@@ -204,6 +212,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       bus,
       runtime,
       summarizeContextForCompaction,
+      requestWorkerDrain,
+      turnFinalizationTimeoutMs,
       objectStorage,
       observability,
       wakeSessionWorkflow,
@@ -316,6 +326,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       workspaceId: input.workspaceId,
       codexWorkspaceKey,
       getTurnId: () => attempt.turnId,
+      getSessionId: () => input.sessionId,
     });
 
     const sandboxRuntime = createSandboxTurnRuntime({
@@ -403,12 +414,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       getModelRunSettings: () => eventing.modelRunSettings,
       getExecutionGeneration: () => attempt.executionGeneration,
     });
-    const checkpointBeforeProviderDispatch = () =>
-      checkpointHistoryBeforeProviderDispatch(historySink, {
+    // Diagnostic only: a timing observer can never fence or fail a request.
+    const observeProviderDispatch = () => {
+      try {
+        eventing.providerDispatchObserver?.();
+      } catch {
+        // Metrics emission must never affect a model call.
+      }
+    };
+    const assertRecoveryWindow = () =>
+      assertProviderOverloadRecoveryActive({
+        failureCode: attempt.providerRecoveryPolicyCode,
+        providerRecoveryCount: attempt.providerRecoveryCount,
+        recoveryStartedAt: attempt.providerRecoveryStartedAt,
+      });
+    const checkpointBeforeProviderDispatch = async () => {
+      assertRecoveryWindow();
+      await awaitModelCallAdmission();
+      await checkpointHistoryBeforeProviderDispatch(historySink, {
         effectiveSandboxBackend: eventing.modelRunSettings.sandboxBackend,
         routingEnabled: routingEnabled(settings),
         readActiveSandbox: () => readActiveSandbox(db, input.workspaceId, input.sessionId),
       });
+      assertRecoveryWindow();
+    };
 
     try {
       const claimed = await claimTurnAttempt({
@@ -439,6 +468,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!eventing.publish || !eventing.settle) {
         throw new Error("turn eventing was not wired during claim");
       }
+      assertRecoveryWindow();
       // Same object, narrowed type: every post-claim phase mutates this exact
       // context, so this must stay an assertion and never become a copy.
       const wiredEventing = eventing as EventingState & {
@@ -498,21 +528,35 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!attempt.turnId) {
         throw new Error("Turn id was not initialized");
       }
-      const learning = await freezeAgentLearningPolicy(db, {
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        actor: {
-          kind: "agent",
-          sessionId: input.sessionId,
-          turnId: attempt.turnId,
-          attemptId: input.attemptId,
-          executionGeneration: attempt.executionGeneration,
+      const learningActor = {
+        kind: "agent" as const,
+        sessionId: input.sessionId,
+        turnId: attempt.turnId,
+        attemptId: input.attemptId,
+        executionGeneration: attempt.executionGeneration,
+      };
+      const learning = await measureTurnStartupPhase(
+        observability,
+        {
+          phase: "learning_policy_freeze",
+          provider: turnExecutionPolicy.providerId,
+          backend: turn.sandboxBackend,
         },
-      });
-      const attachmentAuthority = await getSessionAuthorityProjection(
-        db,
-        input.workspaceId,
-        input.sessionId,
+        () =>
+          freezeAgentLearningPolicy(db, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            actor: learningActor,
+          }),
+      );
+      const attachmentAuthority = await measureTurnStartupPhase(
+        observability,
+        {
+          phase: "attachment_authority_projection",
+          provider: turnExecutionPolicy.providerId,
+          backend: turn.sandboxBackend,
+        },
+        () => getSessionAuthorityProjection(db, input.workspaceId, input.sessionId),
       );
       if (!attachmentAuthority) throw new Error("Session attachment authority unavailable");
       return await withSessionRlsActorContext(
@@ -576,11 +620,43 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             if ("exit" in codexCapacity) return codexCapacity.exit;
             const xaiCapacity = await selectXaiTurnCapacity(capacityDeps);
             if ("exit" in xaiCapacity) return xaiCapacity.exit;
+            const claudeCapacity = await selectClaudeTurnCapacity(capacityDeps);
+            if ("exit" in claudeCapacity) return claudeCapacity.exit;
           }
 
+          let selectedCapabilitySettings = capabilitySettings;
+          if (billingState.isClaudeTurn) {
+            const credentialId = providerTurn.effectiveClaudeCredentialId;
+            const subjectId = leases.claude.subjectId;
+            const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
+            if (!credentialId || !subjectId || !authoritySnapshot)
+              throw new Error("Claude serving account has no accepted authority");
+            leases.claude.assertUsable();
+            const credential = await resolveClaudeAccountCredential(db, settings, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              subjectId,
+              credentialId,
+              authoritySnapshot,
+            });
+            providerTurn.effectiveClaudeCredentialVersion = credential.version;
+            if ("reconnectRequired" in credential) throw new ClaudeSubscriptionReconnectRequired();
+            selectedCapabilitySettings = withClaudeConnectionCredential(
+              capabilitySettings,
+              "claude_subscription",
+              JSON.stringify(credential.secret),
+              authoritySnapshot.scope === "organization" ? "organization" : "workspace",
+              {
+                connectionId: credentialId,
+                credentialVersion: credential.version,
+              },
+            );
+          }
           const governance = await prepareGovernanceAndModel({
+            learningPolicy: learning,
             input,
             db,
+            observability,
             runtime,
             objectStorage,
             eventing,
@@ -588,7 +664,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             media,
             turn,
             session,
-            capabilitySettings,
+            capabilitySettings: selectedCapabilitySettings,
             fileAuthoritySubjectId,
             humanInputResume,
             turnExecutionPolicy,
@@ -601,6 +677,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             modelId: turnExecutionPolicy.productModelId,
             codexCredentialId: providerTurn.effectiveCodexCredentialId,
             xaiCredentialId: providerTurn.effectiveXaiCredentialId,
+            claudeCredentialId: providerTurn.effectiveClaudeCredentialId,
+            claudeAuthoritySnapshot: turn.claudeProviderAccountAuthoritySnapshot,
           });
           const {
             runtimePreparationStartedAt,
@@ -609,6 +687,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             agentHumanInputEnabled,
             codeSearchEnabled,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -681,8 +760,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     onUsageHeaders: (snapshot) => {
                       providerTurn.latestCodexUsage = snapshot;
                     }, // latest wins; flushed once in finally
-                    beforeProviderDispatch: () => {
-                      leases.codex.assertUsable();
+                    beforeProviderDispatch: async () => {
+                      await leases.codex.assertCurrentForDispatch();
+                      observeProviderDispatch();
                     },
                     onRequestPreparationDiagnostic: (phase) => {
                       if (
@@ -844,8 +924,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               credentialId: providerTurn.effectiveXaiCredentialId,
               authoritySnapshot: turn.xaiProviderAccountAuthoritySnapshot,
               hostedSearch: {
-                webSearch: runSettings.webSearchEnabled,
-                xSearch: runSettings.webSearchEnabled,
+                webSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
+                xSearch: resolveAgentToolFamilies(session.agent, {
+                  webSearch: runSettings.webSearchEnabled,
+                }).webSearch,
               },
               streamIdleTimeoutMs: runSettings.supergrokResponseStreamIdleTimeoutMs,
               nextRequestId: () => `${dispatchId}:xai:${++xaiModelRequestSequence}`,
@@ -956,6 +1040,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       },
                     },
                   ]);
+                  // SuperGrok places bytes on the wire immediately after this
+                  // awaited audit returns.
+                  if (event.phase === "started") observeProviderDispatch();
                   attempt.providerRecoveryCount = providerRecoveryCountAfterModelRequestPhase(
                     attempt.providerRecoveryCount,
                     event.phase,
@@ -982,15 +1069,62 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const claudeUsageObserver = await createClaudeUsageObserver(
             parseModelProvidersJson(runSettings.modelProvidersJson),
             providerTurn.latestClaudeUsage,
-            (scope) =>
-              loadClaudeSubscriptionUsageCredential(db, settings, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                scope,
-              }),
+            async () => null,
           );
           const withClaudeUsage = <T>(fn: () => Promise<T>): Promise<T> =>
-            withClaudeUsageObserver(claudeUsageObserver, fn);
+            withClaudeUsageObserver(claudeUsageObserver, fn, async (providerId, headers) => {
+              return claudeUsageObserver.prepareRequestWithObserver(
+                providerId,
+                headers,
+                async (binding) => {
+                  const credentialId = providerTurn.effectiveClaudeCredentialId;
+                  const authoritySnapshot = providerTurn.claudeAuthoritySnapshot;
+                  const subjectId = leases.claude.subjectId;
+                  if (
+                    !credentialId ||
+                    !authoritySnapshot ||
+                    !subjectId ||
+                    binding.expectedConnectionId !== credentialId ||
+                    binding.expectedCredentialVersion !==
+                      providerTurn.effectiveClaudeCredentialVersion ||
+                    binding.scope !==
+                      (authoritySnapshot.scope === "organization" ? "organization" : "workspace")
+                  )
+                    throw new Error(
+                      "Claude physical request is outside its accepted serving account",
+                    );
+                  await leases.claude.renew("runtime_event");
+                  leases.claude.assertUsable();
+                  await assertModelConnectionAllowsTurn(db, {
+                    workspaceId: input.workspaceId,
+                    subjectId,
+                    modelId: turnExecutionPolicy.productModelId,
+                    claudeCredentialId: credentialId,
+                    claudeAuthoritySnapshot: authoritySnapshot,
+                  });
+                  const credential = await resolveClaudeAccountCredential(
+                    db,
+                    settings,
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      subjectId,
+                      credentialId,
+                      authoritySnapshot,
+                    },
+                    { expectedCredentialVersion: binding.expectedCredentialVersion },
+                  );
+                  if ("reconnectRequired" in credential)
+                    throw new ClaudeSubscriptionReconnectRequired();
+                  leases.claude.assertUsable();
+                  return {
+                    token: credential.secret.token,
+                    connectionId: credential.id,
+                    credentialVersion: credential.version,
+                  };
+                },
+              );
+            });
           const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
             codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
           const withProviderRequestContext = <T>(fn: () => Promise<T>): Promise<T> =>
@@ -1040,6 +1174,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ),
             );
           const compactionPrep = await prepareCompaction({
+            entitlements,
             input,
             settings: capabilitySettings,
             db,
@@ -1063,6 +1198,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1129,7 +1265,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               recovered.instructionReceipts.length ||
               recovered.unavailable
             ) {
-              knowledgeRecoveryNote = `[OpenGeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
+              knowledgeRecoveryNote = `[Opengeni legacy confirmation recovery]\n${JSON.stringify(recovered)}\nThese are publication receipts for the human's earlier answer. Do not call the retired remember tools or duplicate these entries. Unavailable confirmations were not published. Inspect the current Knowledge or instruction review before taking further action.`;
               for (const receipt of recovered.instructionReceipts) {
                 await eventing.publish!(
                   [{ type: "instruction.confirmation.recovered", payload: { receipt } }],
@@ -1146,7 +1282,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } catch {
             cancellationSignal?.throwIfAborted();
             knowledgeRecoveryNote =
-              "[OpenGeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
+              "[Opengeni confirmation recovery unavailable] Do not assume an earlier remember confirmation was published. Inspect the current Knowledge or instruction review.";
           }
           const knowledgeSourcePreparationNote = knowledgeRecoveryNote;
 
@@ -1250,6 +1386,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sandboxRuntime,
             turn,
             session,
+            turnExecutionPolicy,
             fileAuthoritySubjectId,
             runSettings,
             workspaceVariableSet,
@@ -1470,6 +1607,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             supportsImageInput,
             agentHumanInputEnabled,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1491,6 +1629,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             trigger,
             preparationIndependentToolNames,
             codeSearchAvailable: toolRuntime.codeSearchAvailable,
+            promptToolAvailability: toolRuntime.promptToolAvailability,
             videoGenerationAcceptancesByCallId,
             activeSandboxBackend,
             groupBoxBackend,
@@ -1605,6 +1744,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnExecutionPolicy,
             resolvedModel,
             workspaceAgentInstructions,
+            workspaceAgentIdentity,
             workspaceGovernance,
             structuredWorkspacePolicyActive,
             workspaceMemory,
@@ -1909,6 +2049,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       });
     } finally {
       await finalizeTurnAttempt({
+        turnFinalizationTimeoutMs,
+        requestWorkerDrain,
         input,
         settings,
         db,
@@ -1942,7 +2084,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     }
   };
   return async (input: RunAgentTurnInput): Promise<RunAgentTurnResult> => {
+    const servicesStartedAt = performance.now();
     const resolvedServices = await services();
+    const servicesDurationSeconds = (performance.now() - servicesStartedAt) / 1_000;
     const correlationId = turnExecutionTelemetryKey(
       input.workspaceId,
       input.sessionId,
@@ -1959,6 +2103,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     try {
       return await withMcpTelemetry(resolvedServices.observability, correlationId, () =>
         withTraceContext(span, () => {
+          try {
+            recordTurnStartupPhase(resolvedServices.observability, {
+              phase: "services_initialization",
+              provider: "unresolved",
+              backend: "unresolved",
+              outcome: "completed",
+              durationSeconds: servicesDurationSeconds,
+            });
+          } catch {
+            // Service initialization telemetry never gates a claimed attempt.
+          }
           try {
             resolvedServices.observability.info("worker execution started", { correlationId });
           } catch {

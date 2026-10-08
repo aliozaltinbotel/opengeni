@@ -44,6 +44,21 @@ export interface IntegrationDefinition {
     arguments: Readonly<Record<string, unknown>>;
   }>;
   readonly facets: readonly IntegrationFacetDefinition[];
+  /**
+   * @deprecated Retained for source compatibility. Provider recommendations
+   * never prevent an authorized user from choosing Allow, Ask, or Block.
+   */
+  readonly autoApproval?: Readonly<{
+    forbiddenOperationKeys: readonly string[] | "all";
+  }>;
+}
+
+/** @deprecated Compatibility adapter. User choices are always overridable. */
+export function autoApprovalForbidden(
+  _definition: IntegrationDefinition | undefined,
+  _operationKey: string,
+): boolean {
+  return false;
 }
 
 export interface IntegrationFacetDefinition {
@@ -248,7 +263,6 @@ export const MICROSOFT_OUTLOOK_CALENDAR_INTEGRATION_DEFINITION: IntegrationDefin
       "/me/calendarGroups",
       "/me/calendarView",
       "/me/events",
-      "/me/findMeetingTimes",
       "/me/reminderView",
     ],
   },
@@ -504,7 +518,7 @@ function collectGoogleMethods(
       operationId: stringValue(rawMethod.id) ?? fallbackId,
       // Discovery descriptions are often full documentation paragraphs. Keep
       // them as descriptions and use the stable method identity for the short
-      // OpenGeni tool display name.
+      // Opengeni tool display name.
       summary: stringValue(rawMethod.id) ?? fallbackId,
       description: stringValue(rawMethod.description),
       parameters,

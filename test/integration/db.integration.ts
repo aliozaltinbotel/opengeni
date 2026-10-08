@@ -1960,9 +1960,9 @@ async function createRlsAppRole(
   );
   // Match the runtime role's exact target-schema-local capabilities. These
   // functions are intentionally excluded from the broad private helper grant
-  // and remain unavailable to PUBLIC. The session reference helper and xAI
-  // validator are invoker-rights; the latter evaluates immutable snapshot
-  // CHECK constraints on ordinary session inserts.
+  // and remain unavailable to PUBLIC. The session reference helper and provider
+  // snapshot validators are invoker-rights; the latter evaluate immutable
+  // snapshot CHECK constraints on ordinary session inserts.
   await db.execute(
     dbSql.raw(
       `GRANT EXECUTE ON FUNCTION public.session_private_actor_visible(uuid, uuid, uuid, text) TO "${role}"`,
@@ -1983,6 +1983,22 @@ async function createRlsAppRole(
       `GRANT EXECUTE ON FUNCTION public.xai_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
     ),
   );
+  await db.execute(
+    dbSql.raw(
+      `GRANT EXECUTE ON FUNCTION public.claude_provider_account_authority_snapshot_v1_valid(jsonb) TO "${role}"`,
+    ),
+  );
+  // Shared subscription-pool resolution reads the Claude/SuperGrok credential
+  // and rotation tables, whose RLS policies call these runtime-granted helpers.
+  for (const helper of [
+    "public.get_workspace_kind(uuid, uuid)",
+    "public.xai_subscription_pool_visible(uuid, uuid, text, text, uuid)",
+    "public.xai_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)",
+    "public.claude_subscription_pool_visible(uuid, uuid, text, text, uuid)",
+    "public.claude_subscription_authority_live(uuid, uuid, text, uuid, text, uuid, uuid, bigint)",
+  ]) {
+    await db.execute(dbSql.raw(`GRANT EXECUTE ON FUNCTION ${helper} TO "${role}"`));
+  }
   const url = new URL(ownerUrl);
   url.username = role;
   url.password = password;

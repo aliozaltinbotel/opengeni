@@ -1,5 +1,78 @@
 # @opengeni/xai-subscription
 
+## 1.4.4
+
+### Patch Changes
+
+- @opengeni/network@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- @opengeni/network@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- @opengeni/network@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- @opengeni/network@1.4.1
+
+## 1.4.0
+
+### Patch Changes
+
+- @opengeni/network@1.4.0
+
+## 1.3.0
+
+### Patch Changes
+
+- @opengeni/network@1.3.0
+
+## 1.2.0
+
+### Patch Changes
+
+- @opengeni/network@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- @opengeni/network@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- @opengeni/network@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+## 0.1.6
+
+### Patch Changes
+
+- Updated dependencies [3cc26b5]
+  - @opengeni/network@0.3.2
+
+## 0.1.5
+
+### Patch Changes
+
+- 6a97313: Publish grok-4.7 as the SuperGrok subscription model so it matches the model the published `@opengeni/config` already expects.
+
 ## 0.1.4
 
 ### Patch Changes

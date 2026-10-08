@@ -2,10 +2,12 @@ import { createKnowledgeIndexingActivities } from "./activities/knowledge-indexi
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createBrowserStateArtifactMaintenanceActivities } from "./activities/browser-state-artifact-reaper";
+import { createBrowserDeadlineCheckpointActivities } from "./activities/browser-deadline-checkpoint";
 import { createAutomationActivities } from "./activities/automations";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
 import { createGoalActivities } from "./activities/goals";
+import { createModelCallFactReconcilerActivities } from "./activities/model-call-fact-reconciler";
 import { createKnowledgeSourceSyncActivities } from "./activities/knowledge-source-sync";
 import { createRetainedScreenshotMaintenanceActivities } from "./activities/retained-screenshot-reaper";
 import { createRigVerificationActivities } from "./activities/rig-verification";
@@ -13,6 +15,8 @@ import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSiteAuthMaintenanceActivities } from "./activities/site-auth-maintenance";
 import { createSessionStateActivities } from "./activities/session-state";
+import { createSessionArchiveActivities } from "./activities/session-archive";
+import { createSessionStorageActivities } from "./activities/session-storage";
 import type { ActivityDependencies, ControlActivityServices } from "./activities/types";
 import { createWorkflowWakeActivities } from "./activities/workflow-wake";
 
@@ -33,13 +37,17 @@ export function createControlActivitiesFromServices(
     ...createKnowledgeIndexingActivities(services, resolveDocumentServices),
     ...createKnowledgeSourceSyncActivities(services, resolveDocumentServices),
     ...createSessionStateActivities(services),
+    ...createSessionStorageActivities(services),
+    ...createSessionArchiveActivities(services),
     ...createScheduledTaskActivities(services),
     ...createSiteAuthMaintenanceActivities(services),
     ...createGoalActivities(services),
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createBrowserStateArtifactMaintenanceActivities(services),
+    ...createBrowserDeadlineCheckpointActivities(services),
     ...createFileUploadReaperActivities(services),
+    ...createModelCallFactReconcilerActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     ...createSandboxLeaseActivities(services),

@@ -1,5 +1,385 @@
 # @opengeni/react
 
+## 1.4.4
+
+### Patch Changes
+
+- 6384dbd: Keep browser actions on the selected tab when earlier receipts arrive after a source, tab, controller or document change. Discard prior source state before paint and capture immutable controller fences. Preserve immediate input from completed receipts for the same page without extra accessibility requests. Prevent earlier action deliveries from replacing newer settled observations or failures while returning each operation's result to its caller. Fence selection observations and errors to their exact invocation so a selection round trip cannot revive an obsolete view. Order selection observations with refresh reads while preserving current action outcomes.
+
+  Prevent older tab-open and tab-close results from replacing later selections. Reconcile their inventory after pending selections settle without replacing the selected page's observation.
+
+- 6384dbd: Preserve the current Desktop selection and generation when an action receipt arrives after a view or source change. Discard previous source state before paint, while retaining current observations during same-source refreshes. Keep explicit focus behavior and fresh fences for immediate sequential input. Prevent earlier action deliveries and their refreshes from replacing newer settled observations or control failures while returning each operation's result to its caller. Fence selection observations and errors to their exact invocation so a selection round trip cannot revive an obsolete view. Order selection observations with refresh reads while preserving current action outcomes.
+- 6384dbd: Negotiate native desktop click continuation so viewers send the first click immediately and submit the real second click while its HTTP receipt is pending. Require the exact completed first operation plus one-use native delivery proof, preserve painted-frame coordinates and geometry, and reject failed, unknown, expired or unrelated continuations without replay. Later viewer input waits for both outcomes; Linux physical input serializes without queuing independent background AT-SPI actions. Background native mutation admission fences click proof through completion, cancellation and panic so overlapping work cannot restore authority.
+
+  Keep bounded original Window keyboard/clipboard identities across read-only refreshes, with live object, process, geometry and focus revalidation. Preflight whole key batches before input, and reject Window pointer points covered by another X11 client. Preserve uncertain outcomes after any possible input delivery.
+
+- 1405691: `OpenGeniChat` / `SessionList`: Rename and Archive are visible on touch devices. They were hover-only, so phone and tablet users of an embedded chat could not rename or archive a chat.
+- Updated dependencies [6384dbd]
+  - @opengeni/sdk@1.4.4
+  - @opengeni/connect@1.4.4
+
+## 1.4.3
+
+### Patch Changes
+
+- Updated dependencies [c0c0f74]
+  - @opengeni/sdk@1.4.3
+  - @opengeni/connect@1.4.3
+
+## 1.4.2
+
+### Patch Changes
+
+- b9bd35f: Every `@opengeni/react` entry is now marked `"use client"`, so a Next.js App Router Server Component (for example `app/page.tsx`) can render `<OpenGeniChat />` directly. Before, `next build` failed while prerendering with `TypeError: createContext is not a function`, and the host had to wrap the chat in its own client component.
+  - @opengeni/connect@1.4.2
+  - @opengeni/sdk@1.4.2
+
+## 1.4.1
+
+### Patch Changes
+
+- 9145bad: Connector catalogs no longer offer connectors that cannot connect on the current deployment. Some providers refuse OAuth self-registration (Asana, HubSpot, Front, Box, Dropbox, Canva, Vercel, and others). When the deployment has no operator-registered OAuth client for such a provider, the catalog reports `runtime.operatorOAuthClient.configured: false` and connector discovery hides the row. Rows that are already connected stay visible.
+- be95071: Live voice for embedded chats. `createSessionProxyHandler` now forwards the realtime model catalog and the live voice call routes (begin, connect, heartbeat, end, activate, transcript sync) as the resolved end user, with Opengeni's usual `sessions:control` and call-ownership checks; `beforeForwardMessage` sees voice start and transcript saves as `delivery: "realtime"`, and `realtimeVoice: false` turns it off. The stock `OpenGeniChat` composer shows the live voice button when the workspace offers an available voice model.
+- 1f112d5: An expired or revoked server API key no longer shows end users a raw `OpenGeni API 401: authentication required` message. `OpenGeniChat` and `SessionConversation` in `baseUrl` mode now say "Chat is unavailable right now. Ask an administrator for help." (other load failures use the same brand-neutral copy as the rest of the UI), and the session proxy logs one server-side warning telling the developer to create a new key and update `OPENGENI_API_KEY`.
+- 17bb58b: `useGoal` no longer refetches (and 404s) the goal on every turn and session event while the session has no goal; only goal events can create one.
+- 0e45b19: `@opengeni/react/compiled.css` no longer triggers Vite's "Transforming this CSS nesting syntax is not supported" build warning. The markdown table's last-row rule now nests with a leading `&`, which bundlers flatten for their default browser targets.
+- 6c69bb0: `@opengeni/react/compiled.css` no longer makes Next.js builds report "Compiled with warnings" (autoprefixer: `start value has mixed support`). The capability-setup label uses `align-items: flex-start`.
+- 37c7278: The conversation timeline now listens for `scrollend` natively. React 18 has no `onScrollEnd` prop, so React 18 hosts logged "Unknown event handler property `onScrollEnd`" and never ran the handler that decides when a reader has scrolled away from the live tip.
+- e852eb7: Voice input never deletes a real dictation on Cancel, Escape, or when live voice takes the microphone: anything longer than a few seconds stops and stays saved on the device to transcribe or discard explicitly, and an Escape already handled by a dialog or menu is ignored. A dictation left behind by a closed or crashed tab is offered again as soon as the app reopens instead of after the owner timeout. A transcript that was never inserted is offered plainly ("Insert it into your draft?") rather than as possibly duplicated. Dictation shows elapsed time and warns before the automatic stop. Saved/error explanations wrap instead of truncating, and on phones (including container-responsive embeds) they take the controls row while Pause, Stop, and Send stay. Fixed dictation failing after a remount (React StrictMode) because the recording store was reused after close. Live voice: a definitive failure before the first connection, including a blocked or missing microphone, ends the call and keeps an actionable reason visible next to the voice button until the user dismisses it or tries again (no "OpenGeni API 409" prefix or reference id); autostart makes one attempt instead of looping; the model menu says "Opengeni"; and a disabled start control names its blocker. `useVoiceInput` exposes `recordingStartedAt` and `maxRecordingSeconds`. A slow microphone prompt no longer fails live voice in a session that had an earlier call ("Realtime lease version changed"). The dictation start error is dismissible, live voice taking the microphone clears a stale one, and starting dictation retires a stale live-voice start failure, so the two never show side by side. Voice credit copy no longer says "out of credits" to an account holding only free chat credits.
+- Updated dependencies [9145bad]
+- Updated dependencies [be95071]
+- Updated dependencies [1f112d5]
+- Updated dependencies [784e862]
+- Updated dependencies [f290348]
+- Updated dependencies [e852eb7]
+  - @opengeni/sdk@1.4.1
+  - @opengeni/connect@1.4.1
+
+## 1.4.0
+
+### Minor Changes
+
+- 5a0c6f3: Add configurable Azure GPT Live hosted voice through the existing realtime controller, preserving connected subscriptions and workspace providers. Persist timed transcript fragments across connection rotation and graceful stop.
+- e0ccba8: Goal controls and sub-agent chats in the stock embedded chat.
+
+  - `createSessionProxyHandler` serves the session goal: `GET goal`, `PATCH goal` forwarding only `{ status: "paused" | "active" }` (a browser rationale is dropped; other fields are refused), and `DELETE goal`, the proxy's only `DELETE` route.
+  - `SessionConversation` shows the goal in its chrome with Pause, Resume, and Clear when the client can reach goals. An older proxy's 404 reads as "no goal".
+  - `SessionConversation` takes `onOpenSession`, forwarded to the timeline's sub-agent cards and the chrome's child updates. `OpenGeniChat` defaults it to opening the child chat in place.
+
+- 8e11301: Make the stock `OpenGeniChat` work end to end behind `createSessionProxyHandler`.
+
+  - Generated images and video, published files, and browser or computer screenshots now display in an embedded chat. Under `files` the proxy forwards a session's screenshot reads and the workspace artifact content (with `Range`) and video playback-source routes, and only for an artifact the API proves that session produced. `SessionConversation` supplies the loaders by default; `createWorkspaceRetainedArtifactLoader`, `createSessionRetainedScreenshotLoader`, and `createWorkspaceRetainedVideoLoader` are exported for custom timelines.
+  - The proxy's client config reports `artifacts: false` (unless `artifacts: true`), `sessionCreation`, and `archive`. Site previews show as unavailable without a request, and "New chat" and "Archive" are hidden when the proxy cannot serve them. A refused create from an older proxy shows the "New chats are not enabled" label.
+  - The composer microphone appears in `SessionConversation` and the new-chat composer when the deployment reports voice input available; `voiceInput={false}` opts out.
+  - The API's CORS policy allows the `X-OpenGeni-Session-Id` scope header, so a cross-origin browser client's conversation media and Site reads are not refused at preflight.
+
+- ef0f1c8: Metered voice input: add the `azure-mai` voice-input provider id and the `insufficient_credits`, `allowance_exhausted`, and `monthly_model_cost_limit` transcription error codes, which resumable recordings now also report as their `errorCode`. The composer transcription control adds `errorInsufficientCredits`, `errorAllowanceExhausted`, and `errorPolicyBlocked` messages; a caller whose payer cannot be verified now sees a policy refusal instead of a microphone-permission error.
+- e01662a: Deployment-funded live voice is credit-gated and billed per started minute. Heartbeats can return a `stop` instruction, the realtime controller ends the call gracefully and exposes `refusal` (`insufficient_credits`, `allowance_exhausted`, `monthly_model_cost_limit`, `realtime_voice_unavailable`), and catalog items carry `unavailableCode`. The voice control shows an out-of-credits state instead of a generic error.
+
+### Patch Changes
+
+- bd9521c: Approval reviews read as one action: multi-item work no longer shows "batch" in titles, a Block reports its own reason and a `blocked` status, and an older request whose saved arguments cannot be recovered still offers Decline so the session never stays stuck.
+- 3bd1060: Add a read-only capability access review and version-fenced root-to-child application helper so the web connection card can explicitly approve parent tool additions before selecting integration tools in a child chat. Preserve existing choices and child policy ceilings, and avoid adding mandatory runtime servers to explicit selections.
+
+  Preserve optional/eager connector flags when retaining workspace defaults, and keep setup owners valid across StrictMode replay while retiring work from changed access scopes.
+
+- 12f84ed: Loading older session history no longer tears down and reopens the live event stream. Rows that arrive while an older page is in flight append once, in order, onto the prepended window, and the connection state stays `live` (no "Connecting…" flash or repeated session reconciliation on every scroll-up). The stream still closes when a full backward page evicts the live tail and the timeline enters history mode.
+- 8e90088: The dark theme's composer focus glow is now the intended faint halo (10% of the accent) instead of a full-strength 24px glow, which showed as a strong grey haze on dark hosts.
+- Updated dependencies [5a0c6f3]
+- Updated dependencies [e0ccba8]
+- Updated dependencies [8e11301]
+- Updated dependencies [ef0f1c8]
+- Updated dependencies [e01662a]
+  - @opengeni/sdk@1.4.0
+  - @opengeni/connect@1.4.0
+
+## 1.3.0
+
+### Minor Changes
+
+- 178b5ae: Unify connector Allow, Ask first and Block decisions across tool transports and settings. Add durable programmatic approval handles, exact stored-operation continuation, and shared review facts with portable React presentation and paginated protected details.
+
+  Add lightweight Gmail message selection and bounded pagination/chunk helpers. Preserve exact access checks, uncertain outcomes and existing client compatibility. Deploy matching API, worker and native runtime artifacts through the documented maintenance migration.
+
+### Patch Changes
+
+- 2aed1a1: Embedded chat fixes for proxied embeds:
+
+  - `OpenGeniChat`'s new-chat composer is now the follow-up composer: file attachments, the model picker when offered, and `conversationProps.composerProps` (custom controls, voice input, copy). The first message's files and explicit model choice reach `createSession`, whose hook input now carries `resources` and, unless `modelSelection: false`, `model`, `reasoningEffort`, and `latencyMode`; the proxy adds those files and applies those choices to the request the hook returns.
+  - The session proxy forwards voice input (`POST .../transcriptions`) as the resolved user, and reports only one-shot recordings in the client config. `voiceInput: false` reports voice unavailable and refuses the route. Previously the config advertised voice while the route returned 404.
+  - `OpenGeniChat` and `SessionConversation` in `baseUrl` mode accept `headers` (static or per request) and `fetch` for bearer-token apps, and use a `client` passed alongside `baseUrl` instead of silently dropping it.
+
+- Updated dependencies [178b5ae]
+- Updated dependencies [2aed1a1]
+- Updated dependencies [414d416]
+  - @opengeni/sdk@1.3.0
+  - @opengeni/connect@1.3.0
+
+## 1.2.0
+
+### Minor Changes
+
+- d870f32: Support model-scoped signup and coupon credits with a shared operator default and
+  per-offer overrides. Update coverage at runtime, spend eligible promotions before
+  general credits, and preserve allocation and retry accounting. Keep scoped coupon
+  redemption separate from paid top-ups. Show credit funding in model selection and
+  current coverage on demand in billing. Legacy unrestricted grants stay unrestricted.
+
+### Patch Changes
+
+- e70ddfe: Refresh model funding when the embedded conversation's model picker opens, so
+  credit labels reflect current balances and promotional coverage without closing
+  the menu or adding labels to the closed selector.
+- 21c8904: Support optional HTTPS model catalog logos with safe image fallbacks, and declare the item type of the SDK filesystem function tool's command tuple.
+- d081155: Keep accepted startup feedback in the conversation with continuous loading presentation and immediate dispatch diagnostics. Show loading details after 30 seconds and slower-start copy after 60 seconds.
+- Updated dependencies [11c4d3c]
+- Updated dependencies [21c8904]
+- Updated dependencies [d870f32]
+  - @opengeni/sdk@1.2.0
+  - @opengeni/connect@1.2.0
+
+## 1.1.0
+
+### Patch Changes
+
+- c600e3a: Use the full scoped model catalog for goal continuation and validate goal Resume before changing state. Preserve specific admission pause reasons and show the actionable rationale in the existing goal controls.
+- Updated dependencies [411b3b5]
+- Updated dependencies [4d5053f]
+- Updated dependencies [208dec1]
+  - @opengeni/sdk@1.1.0
+  - @opengeni/connect@1.1.0
+
+## 1.0.2
+
+### Patch Changes
+
+- 43da85e: Write the product name as "Opengeni" in user-visible messages. Code identifiers, the `OpenGeni API <status>:` error prefix, and protocol values are unchanged.
+- ba5a639: Fix a dark composer on light pages: stock theme tokens rewritten by the host's CSS minifier (for example Next.js turning `#333333` into `#333`) are no longer mistaken for host customizations.
+- d4ada81: Expanding a live turn's work row now reads like a finished turn: its progress notes are listed in order between the steps, and the copies above the row fold away in one short motion while the row rises into the first note's place (or the top edge) with its list beginning just beneath. Closing reverses it. Nothing else on screen jumps: the reader's position is held through the moment the page is briefly shorter, and closing from the sticky header lands back on the closed row.
+- cbe4357: Simple embedding path. An organization API key acting as a user (`asUser`) on a
+  shared workspace of its own organization now adds that user's missing membership
+  once, with conversation permissions, when the key holds `members:manage` plus
+  those permissions; existing memberships are never changed. The `@opengeni/sdk/chat`
+  `OpenGeni` facade derives `organizationId` from the key, maps `{ user, tenant }`,
+  `{ user }` (one workspace per user), or `{ user, workspaceId }` to a workspace
+  created on first use, and `og.workspaceId({ tenant } | { user } | { workspaceId })`
+  translates your ids. The session proxy reports its resolved workspace in client
+  config, so `<OpenGeniChat baseUrl="/api/opengeni" />` and
+  `<SessionConversation baseUrl="/api/opengeni" sessionId={id} />` need no provider
+  or workspace id. Explicit membership APIs and provider-based usage are unchanged.
+- Updated dependencies [43da85e]
+- Updated dependencies [4476ca7]
+- Updated dependencies [cbe4357]
+  - @opengeni/sdk@1.0.1
+  - @opengeni/connect@1.0.1
+
+## 1.0.0
+
+### Major Changes
+
+- Reset package versioning: every published `@opengeni/*` package now releases together at one shared version, starting at 1.0.0. Install all `@opengeni` packages at the same version. Earlier versions are retired.
+
+### Patch Changes
+
+- Back to your message now floats 12px below the top of the conversation, and drops just below an expanded work-header strip only while that strip is pinned to the top, instead of always sitting below where the strip would be.
+
+## 7.8.1
+
+### Patch Changes
+
+- Updated dependencies [627ff68]
+  - @opengeni/sdk@7.8.1
+
+## 7.8.0
+
+### Minor Changes
+
+- 692a1f5: Show models by their clean display name and maker logo outside model settings. Add `modelDisplayName`/`modelVendor` (`@opengeni/sdk/model-display`) and `ModelName`/`ModelMark` (`@opengeni/react`). Picker rows, triggers, queue rows and fleet tiles no longer show routing ids, and organization- and workspace-connected copies of one model share one "API keys" group and render identically.
+- 395becb: Make the embedded chat look native inside host products. `OpenGeniChat` and `SessionConversation` now follow the host page's light/dark theme (an enclosing `data-og-theme`, `class="dark"`/`data-theme` on `<html>`/`<body>`, the host `color-scheme`, then the page background) instead of defaulting to dark, and derive their backgrounds and cards from the host background (`surface="host"`; `surface="theme"` and customized `--og-color-*` tokens are kept). Their composer shows a Stop control only while a response runs instead of the workstream Pause control, and the next message continues a stopped conversation (`composerProps.runControl` opts back into `"pause"`); `ChatComposer` gains `runControl`/`running` and the composer subpath exports `StopButton`. The model picker is hidden in these embeds unless `modelPicker` is set or the proxy reports `createSessionProxyHandler({ modelSelection: true })`. In these embeds a yes/no question renders as two buttons without "Other" (`HumanInputForm`/`HumanInputSurface` `decisionButtons`), the live "waiting on you" divider no longer repeats the turn's waiting header, the "Back to your message" pill stays inside the timeline and hides in short viewports, a failed load offers Try again (`labels` localizes it), the new-chat state has a heading, and with `compiled.css` host global list/paragraph/heading styles no longer leak into SDK markup. `MessageTimeline` gains `questionNavMinViewportHeight`.
+
+### Patch Changes
+
+- f893cb5: Preserve annotation review scrolling and focus across parent and layout updates by consuming each requested note focus once.
+- 92e4045: Add accessible Back and Forward controls to the Browser address bar using the existing target and document fenced history actions. Disable them while navigation is pending or no tab is selected, refuse observations from a previously selected tab, and retain existing address draft, focus, and failure handling.
+- af57cf9: Use canonical ComputerSession frames and actions for screen and window viewers. Preserve the painted frame fence, reflect authorized human input availability, and enforce human sandbox input policy on each action while retaining separate agent tool authority. Older controllers keep frame viewing behind an encrypted proxy without receiving RFB input grants.
+
+  App-only viewers require an explicit current input posture before enabling mutations. Refresh rechecks permission without starting a stream or native action, and physical machine screen-control consent remains separate from viewing.
+
+- 8ce490f: Support multiple Claude subscription accounts with shared workspace, organization and owning-user account controls, verified browser sign-in profiles, usage windows, exact credential leases and quota-aware rotation. Preserve accepted work during capacity waits and recovery. Upgrade existing encrypted subscription credentials through the documented maintenance migration before starting matching runtime binaries.
+- 424f44d: Make the conversation's floating navigation compact. Jump to latest and Back to your message are now identical small round arrow buttons at fixed, centered spots: the down arrow just above the bottom of the conversation and the up arrow just below the top. Their labels remain available to assistive technology and as tooltips, and touch screens get a larger invisible tap area instead of a larger button.
+- e518530: Keep Desktop menus inside the viewer, make long lists scroll, and close viewer menus with Escape, an outside pointer, or focus moving out. Return focus to the menu trigger after keyboard choices without taking focus from pointer actions.
+- 49fc1c0: `SessionCapabilityFrame` accepts optional `details` content inside the card and an `actionUnavailable` explanation that replaces the action when the viewer cannot start setup.
+- b96f26e: Show an active goal as Waiting while other session work runs, with an explanation that the goal continues automatically after that work finishes.
+- 3caca71: Jump to latest no longer shows while the reader is already at the bottom. Using a control in the conversation (Copy, a connection card) hands the view to the reader; the pill now appears only once something lands below them.
+- 3cc26b5: Identify the default pinned HTTP client with a User-Agent, preserve caller overrides, and show retryable MCP sign-in discovery failures in connection setup.
+- fe1739f: Use neutral model-group labels and icons in the stock embedded picker, while keeping explicit host branding and external-provider identities. Expose appearance-only picker customization on the complete conversation and preserve explicit first-party console branding.
+- 978981a: Present expected sandbox lifecycle waits during model preparation as waiting rather than failed. Retain technical failure receipts and keep actual model and provider failures visible.
+- 272c016: Expose command readiness separately from edit permission. Pause presentation mutations while earlier changes await settlement, preserving drafts, slide navigation, and zoom.
+- 97d4f07: Require an explicit server-enforced screen grant for managed ComputerSession RFB input. Preserve viewing with pixel-only grants, recheck controller and target authority before forwarding packets, and use canonical frames and actions with older controllers. Desktop viewers default old attachments to view only.
+- bb52f56: Open the whole desktop by default, show a screen selector for multiple displays, and move app/window views into the Advanced menu. Preserve explicit target choices and existing input authority across refreshes.
+- Updated dependencies [af57cf9]
+- Updated dependencies [8ce490f]
+- Updated dependencies [692a1f5]
+- Updated dependencies [395becb]
+- Updated dependencies [3395acc]
+- Updated dependencies [00000d7]
+- Updated dependencies [746464c]
+- Updated dependencies [272c016]
+- Updated dependencies [6cdc0aa]
+- Updated dependencies [0fba21e]
+- Updated dependencies [97d4f07]
+- Updated dependencies [1826595]
+- Updated dependencies [b4d1c5b]
+- Updated dependencies [14e95e9]
+  - @opengeni/sdk@7.8.0
+
+## 7.7.0
+
+### Minor Changes
+
+- 351cd79: Add `includePinned: false` to session-page reads so callers loading the pinned section separately can skip repeated pin hydration. The default response and ordinary-page pin exclusion are unchanged.
+
+  Bound the browser event working set to 16 MiB or 20,000 events, with durable history accessible through existing navigation. Avoid copying the event window when no additional question evidence is needed.
+
+### Patch Changes
+
+- 9f0f7d3: Anchor the conversation's floating navigation in one stable place. Jump to latest and Back to your message now stack centered at the bottom of the timeline, with the later-activity status above them, instead of measuring the rows beneath them and sliding sideways or dropping below toolbars as content streamed or the host resized. The pills no longer wander on narrow, embedded, or mobile layouts, and both keep a 44px touch target on coarse pointers.
+- 45e1b4f: Advertise background window input separately from background semantic controls. The CUA pilot viewer accepts targeted clicks and typing without offering unsupported foreground focus; existing native backends retain their focus guard.
+- b786e5c: Keep failed or unconfirmed browser input visible while live frames continue. An explicit fresh check of the same browser clears the notice without replaying input.
+- f336d3e: Show a pending approval once: readable turns no longer repeat the live "Approval needed" banner when the turn header already says "Waiting for you". `ApprovalSurface` lists flat arguments as labeled fields with an "exact arguments" toggle (nested arguments stay JSON), and the composer no longer shows a default keyboard hint (shortcuts stay in the send button title).
+- 110bcb7: Fit computer frames to the dock, including small window captures, while preserving aspect ratio, capture resolution, and pointer coordinates. Refit on dock and frame size changes without measuring every incoming frame.
+- 76ff363: Support workspace OpenAI and Azure OpenAI API keys with provider verification, isolated encrypted credentials, and externally billed model selection. Add the optional model verification flag to connection creation and preserve shell cancellation on macOS local sandboxes.
+- c7be92c: Keep desktop IME candidate text and selection keys local until the person commits the text, then send that text once.
+- 065316d: Keep desktop controls unavailable after a control service failure even while frames continue arriving. Reconnect refreshes the same desktop's control and media channels. App inspection failures, target refusals, and uncertain input outcomes remain separate from service outages.
+- 946f6c3: Keep OAuth completion polling active when browser isolation detaches the provider window, and discover authentication for custom MCP connection setup from the live endpoint. Resolve tool-permission discovery for selectors with a single matching account, refusing ambiguous account choices.
+- 5dacdd7: Add brand-neutral SDK error presentation and a shared native React host error-copy override, preserving diagnostic errors and delivery/retry state.
+
+  Keep NewChat's full-height composer contained when using shipped CSS without a host reset.
+
+- 8a5f977: Show named desktop actions and editable values in App controls. Structural accessibility nodes no longer crowd out usable controls, and the control count matches the available actions.
+- cbb3e36: A send that names a model no longer in the live catalog now returns its 422 with `details: { code: "model_unavailable", modelId }` (the status, code and message are unchanged). `@opengeni/react` maps it to plain composer copy, offers Edit message instead of a Retry that cannot succeed, and exports `COMPOSER_MODEL_UNAVAILABLE_MESSAGE` and `isModelUnavailableSubmissionError`.
+- Updated dependencies [7798558]
+- Updated dependencies [45e1b4f]
+- Updated dependencies [351cd79]
+- Updated dependencies [da4ba6f]
+- Updated dependencies [56584f9]
+- Updated dependencies [31e3771]
+- Updated dependencies [76ff363]
+- Updated dependencies [d2fe11d]
+- Updated dependencies [946f6c3]
+- Updated dependencies [5dacdd7]
+- Updated dependencies [479ec20]
+- Updated dependencies [351cd79]
+- Updated dependencies [70af8bb]
+  - @opengeni/sdk@7.7.0
+  - @opengeni/connect@0.3.2
+
+## 7.6.1
+
+### Patch Changes
+
+- d03b4a8: Clarify that window app controls work in the background and label explicit foreground activation as “Bring to front”.
+- cf1570d: Keep desktop images usable in narrow panels by placing app controls below the image. Wider viewers retain their side panel. Keep the foreground activation button readable within the image bounds.
+- 09a991f: Hide Jump to latest when readers scroll back to the live bottom after returning to their question, preserving scroll intent across renders and releasing stale question focus.
+- Updated dependencies [3f7ff5b]
+  - @opengeni/sdk@7.6.1
+
+## 7.6.0
+
+### Patch Changes
+
+- 9b3c40e: Show factual response-waiting copy once a model request is dispatched, while preserving the loading indicator and host customization.
+- a1a23d2: Recover raw PostgreSQL rollback failures during turn startup using the existing exact-attempt recovery boundary. Present database failures without raw SQL or parameters, including historical failure events.
+- Updated dependencies [e5b0123]
+  - @opengeni/sdk@7.6.0
+
+## 7.5.0
+
+### Minor Changes
+
+- b45621d: Artifacts and Sites now work inside an embedding product with the same components the OpenGeni console uses. `@opengeni/react/artifacts` gains the console's inline Site/HTML preview (`ChatInteractiveBlock`, `ArtifactSandbox`, `DeferredChatMedia`), `SiteView`, `EditableArtifactView`, and a host-mountable `SessionArtifactViewer`; `SessionConversation` renders `opengeni-site` fences inline and opens agent artifact links through `onOpenArtifact` (`viewerLinkResolver` for a custom timeline). `createSessionProxyHandler({ artifacts: true })` serves only the artifacts OpenGeni lists for the requesting session (read, editor live ticket, Site detail and sandboxed HTML), and client config advertises the live socket URL and browser cache partition. The SDK client adds `withHeaders`, `apiUrl`, and `fetchApi` for host-authenticated transports. Every built-in artifact string is translatable through a `labels` prop (partial `ArtifactLabels`) on `SessionArtifactViewer` and `ChatInteractiveBlock`, or `ArtifactLabelsProvider`. Document and presentation editors compose one projection at a time, so opening an artifact with a long history no longer floods the artifact Worker's request queue.
+- 709eef2: Usage allowance UI. `@opengeni/react/usage` adds `useUsage`, `UsageMeter`,
+  `UsageLimitNotice` (the calm near/at-limit composer line) and
+  `UsageMemberList` (an admin roster with a share-of-budget slider that shows
+  oversubscription as allowed). The conversation renders an allowance refusal as
+  a structured "usage limit reached" row that hosts reword with
+  `allowanceExhaustedLabels` or replace with `renderAllowanceExhausted`, and a
+  queued prompt refused before it starts stays above that row.
+  `@opengeni/sdk/usage-allowances` exposes allowance reads and administration as
+  free functions over `requestJson` for browser code without the root client.
+
+### Patch Changes
+
+- c85f432: Show failed-send reasons inline rather than hiding them in a tooltip. Credit and usage-allowance refusals no longer offer an unchanged Retry; Edit message restores a definitively refused prompt and its attachments into an empty composer while preserving the current model selection. Transient and uncertain deliveries keep their existing retry and reconciliation behavior.
+- 2253be0: Clarify that browser diagnostic counts include earlier pages in the same tab. Show unavailable counts until an observation exists, preserving observed zero counts.
+- c9c59b5: Explain when a chat's browser was lost or failed instead of silently showing an empty viewer.
+- 726f09d: Respect the desktop backend's mouse and keyboard availability. Encoded-frame views allow supported input independently; RFB views require both capabilities for direct control. Keep screenshots visible and show a view-only notice when direct input is unavailable.
+- 28c2b3f: Show Latest question only after the chat's initial history is ready, so startup cannot silently cancel that navigation.
+- 5ba250d: Offer Add note for text selected while the timeline's annotation controls are still loading.
+- 45d1301: Expose repeated empty final replies as a typed, informational completed-turn notice without failing goals or deferring later updates.
+- b45621d: Fix embedded artifact viewing for external users by resolving fresh effective workspace grants, checking exact session associations on every request, and binding live editor tickets to their source session. Keep editor authority and reconnect reads current when clients or sessions change, and allow retrying temporary viewer configuration failures.
+
+  Source-bound editor sockets renew a 15-second lease through the host proxy, rechecking product authorization; existing unbound console sockets are unchanged. Compact authenticated source tickets remain within the existing wire limit.
+
+  Add server-only `@opengeni/sdk/session-proxy` helpers. Stream embedded Site HTML with backpressure and cancellation and enforce a 25 MiB actual-byte ceiling; oversized streams fail with `site_html_too_large`. Preserve the console's existing shared artifact components and list behavior.
+
+  Allow PostgreSQL test fixtures to use an explicitly configured native server while preserving restricted-role and FORCE-RLS verification.
+
+- d60f96a: Preserve history reading position when Markdown tables are remeasured during host rerenders or tail streaming, without changing table overflow, copy controls or viewport resizing.
+- 0bbe2e7: Keep all React root exports available without requiring optional workbench peers at build time. Add terminal, editor, and desktop opt-in loader subpaths; hosts mounting those surfaces enable the installed peers once, with optional grammar and WebGL loaders supplied by the host.
+- 45d1301: Load client-config model defaults for the exact workspace requested by the workspace model catalog hook.
+- 0bbe2e7: `@opengeni/react/session-ui` exports `OpenGeniProvider` and the tool-renderer
+  registry (`createDefaultToolRegistry`, `createToolRegistry`,
+  `defaultToolRegistry`), so a host can render `OpenGeniChat` or
+  `SessionConversation` from that entry alone without the root's optional
+  workbench peers.
+- 5f7aa12: The conversation's floating "Jump to latest" and "Latest question" pills slide sideways when their resting spot would cover a control, such as the active turn's "Working" row or an inline Site card's toolbar. Only the pill moves; the timeline's scroll geometry is unchanged.
+- 5b48f00: Add recoverable allowance lifecycle state and idempotent clear receipts.
+  Preserve typed allowance scope and reset details in web, MCP, and Slack
+  refusals with administrator-specific remedies.
+  Expose browser-safe refusal helpers through `@opengeni/sdk/allowance-refusal`
+  without widening React's runtime dependency boundary.
+
+  Recheck allowance after paid compaction and align continuation admission with
+  its frozen causal lineage. Keep allowance storage compatible with rolling
+  deployment, preserve settled usage across period edits, harden definer search
+  paths, and order organization locks before tenancy fences.
+
+- 5b48f00: Default missing webhook lanes only after signature verification, preserve the
+  public organization webhook event vocabulary while rejecting usage subscriptions,
+  and keep allowance refusal presentation schema-runtime-free for browsers and
+  React Native. Emit the focused integration and refusal entries in published builds.
+
+  Fence the next model dispatch on settled usage and frozen-human admission, refuse
+  fresh delegated work before interruption, and repair workspace-less Knowledge
+  indexing and historical migration fixture dependencies.
+
+- Updated dependencies [a6ff780]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [d9ec660]
+- Updated dependencies [45d1301]
+- Updated dependencies [fd5fb34]
+- Updated dependencies [b45621d]
+- Updated dependencies [b45621d]
+- Updated dependencies [45d1301]
+- Updated dependencies [f874217]
+- Updated dependencies [b45621d]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [3545ca3]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [0bbe2e7]
+- Updated dependencies [b45621d]
+- Updated dependencies [5b48f00]
+- Updated dependencies [5b48f00]
+- Updated dependencies [709eef2]
+- Updated dependencies [5b48f00]
+- Updated dependencies [0bbe2e7]
+  - @opengeni/sdk@7.5.0
+  - @opengeni/connect@0.3.1
+
 ## 7.4.0
 
 ### Minor Changes

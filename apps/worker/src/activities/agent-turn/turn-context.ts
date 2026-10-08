@@ -28,6 +28,7 @@ import type { ToolPathPhaseTimer } from "./tool-path-phase-timing";
 import type { ResumedTurnSandbox, TurnSandboxLeaseHolderId } from "../../sandbox-resume";
 import type { TurnEventPublisher } from "./model-usage";
 import type { TurnSandboxProvisioner } from "./sandbox-provision";
+import { InitialModelWireDispatchClock } from "./model-wire-dispatch";
 
 /** Stamps the claimed turn/attempt ids onto a phase's own outcome. */
 export type ClaimedResult = (
@@ -50,6 +51,7 @@ export type TurnSettleFn = (input: {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   suppressGoalContinuation?: boolean;
+  allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
 }) => Promise<boolean>;
@@ -68,6 +70,16 @@ export type AttemptIdentityState = {
   triggerEventId: string | undefined;
   executionGeneration: number;
   providerRecoveryCount: number;
+  /** Durable recovery policy reason; never inferred from display wording. */
+  providerRecoveryPolicyCode?: string | undefined;
+  providerRecoveryStartedAt?: number | undefined;
+  providerRecoveryObservation?:
+    | import("./provider-recovery-metrics").ProviderRecoveryObservation
+    | undefined;
+  modelMetricRoute?: { provider: string; model: string };
+  /** Public display labels of the accepted model route, for recovery copy only. */
+  modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
+  claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -78,6 +90,7 @@ export type AttemptIdentityState = {
 export type BillingState = {
   isCodexTurn: boolean;
   isXaiTurn: boolean;
+  isClaudeTurn: boolean;
   isExternallyBilledTurn: boolean;
   chargesOpenGeniCredits: boolean;
   countsTowardTokenCap: boolean;
@@ -97,6 +110,9 @@ export type SandboxRuntimeState = {
   }>;
   turnSandboxProvisioner: TurnSandboxProvisioner<ResumedTurnSandbox> | null;
   resumeManagedGroupBox: (() => Promise<ResumedTurnSandbox>) | null;
+  /** Physical resumeBoxForTurn promises still running for this attempt; the
+   * finalizer joins them so a cancelled establish completes its own cleanup. */
+  inFlightSandboxResumes: Set<Promise<unknown>>;
   prefetchedManagedBox: Promise<ResumedTurnSandbox> | null;
   prefetchedManagedBoxResult: ResumedTurnSandbox | null;
   setupBoxSession: unknown;
@@ -148,6 +164,10 @@ export type EventingState = {
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
+  initialModelWireDispatch: InitialModelWireDispatchClock;
+  /** Diagnostic only: the current stream's timing hook for a native transport's
+   *  literal provider dispatch. Never joins, fences or fails the request. */
+  providerDispatchObserver: (() => void) | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -176,6 +196,11 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  effectiveClaudeCredentialId: string | null;
+  effectiveClaudeCredentialVersion: number | null;
+  claudeUpstreamModelId: string | null;
+  claudeRotationEnabled: boolean;
+  claudeAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   effectiveXaiCredentialId: string | null;
   xaiRotationEnabled: boolean;
   xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
@@ -194,10 +219,7 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
-  latestClaudeUsage: Map<
-    "workspace" | "organization",
-    import("./claude-usage-observer").CapturedClaudeUsage
-  >;
+  latestClaudeUsage: Map<string, import("./claude-usage-observer").CapturedClaudeUsage>;
   lastCodexRequestOpaqueArtifacts: readonly string[];
   /** F-2: the turn's frozen route declaration (set at claim), for the settlement of a declared budget or fallback. */
   turnRouteDeclaration: TurnRouteDeclarationV1 | null;
@@ -245,6 +267,7 @@ export function createTurnContext(input: {
     billingState: {
       isCodexTurn: false,
       isXaiTurn: false,
+      isClaudeTurn: false,
       isExternallyBilledTurn: false,
       chargesOpenGeniCredits: true,
       countsTowardTokenCap: true,
@@ -259,6 +282,7 @@ export function createTurnContext(input: {
       firstModelPreparationNestedSandboxPhases: [],
       turnSandboxProvisioner: null,
       resumeManagedGroupBox: null,
+      inFlightSandboxResumes: new Set(),
       prefetchedManagedBox: null,
       prefetchedManagedBoxResult: null,
       setupBoxSession: null,
@@ -301,6 +325,8 @@ export function createTurnContext(input: {
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
+      initialModelWireDispatch: new InitialModelWireDispatchClock(),
+      providerDispatchObserver: null,
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },
@@ -314,6 +340,11 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      effectiveClaudeCredentialId: null,
+      effectiveClaudeCredentialVersion: null,
+      claudeUpstreamModelId: null,
+      claudeRotationEnabled: false,
+      claudeAuthoritySnapshot: null,
       effectiveXaiCredentialId: null,
       xaiRotationEnabled: false,
       xaiAuthoritySnapshot: null,

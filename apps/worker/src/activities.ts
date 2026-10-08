@@ -69,6 +69,12 @@ export function createActivityTestHarness(dependencies: ActivityDependencies = {
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(common.observability),
           }),
+        requestWorkerDrain:
+          dependencies.requestWorkerDrain ??
+          (() => {
+            throw new Error("Test host must provide requestWorkerDrain for stalled cleanup");
+          }),
+        turnFinalizationTimeoutMs: dependencies.turnFinalizationTimeoutMs,
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
         documentServices: dependencies.documentServices ?? createDocumentServices(common.settings),
@@ -99,6 +105,8 @@ export const persistSessionAttemptQuiescence =
   defaultControlActivities.persistSessionAttemptQuiescence;
 export const reconcileSessionAttemptQuiescence =
   defaultControlActivities.reconcileSessionAttemptQuiescence;
+export const reconcileSettledSessionAttempt =
+  defaultControlActivities.reconcileSettledSessionAttempt;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const recoverEscapedMcpTimeout = defaultControlActivities.recoverEscapedMcpTimeout;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
@@ -117,14 +125,20 @@ export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
 export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
 export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
 export const prepareSandboxLeaseSweep = defaultControlActivities.prepareSandboxLeaseSweep;
+export const listDueBrowserCheckpoints = defaultControlActivities.listDueBrowserCheckpoints;
+export const checkpointBrowserBeforeDeadline =
+  defaultControlActivities.checkpointBrowserBeforeDeadline;
 export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const maintainSessionStorage = defaultControlActivities.maintainSessionStorage;
+export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
+export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;
 export const maintainSiteAuthConnections = defaultControlActivities.maintainSiteAuthConnections;
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;

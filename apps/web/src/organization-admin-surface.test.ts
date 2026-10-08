@@ -61,8 +61,12 @@ const workspaceCodexSource = await Bun.file(
   `${import.meta.dir}/components/models/codex-models.tsx`,
 ).text();
 const organizationModelsSource = await Bun.file(
-  `${import.meta.dir}/components/models/organization-models-page.tsx`,
+  `${import.meta.dir}/components/models/workspace-models-page.tsx`,
 ).text();
+const organizationCodexModelsSource = await Bun.file(
+  `${import.meta.dir}/components/models/organization-codex-models.tsx`,
+).text();
+const appSource = await Bun.file(`${import.meta.dir}/App.tsx`).text();
 const providerPageSource = await Bun.file(
   `${import.meta.dir}/components/ai-gateway-connection.tsx`,
 ).text();
@@ -78,10 +82,16 @@ const tenancyDocs = await Bun.file(
 ).text();
 
 describe("organization administration surface", () => {
-  test("manages Gateway and OpenRouter as peer organization BYOK providers", () => {
-    expect(routeSource).toContain("<OrganizationModelsPage");
-    expect(organizationModelsSource).toContain('providerKind: "vercel_gateway"');
-    expect(organizationModelsSource).toContain('providerKind: "openrouter"');
+  test("manages Gateway, OpenRouter and Opper as peer organization BYOK providers", () => {
+    // One Models page, in Organization settings: a workspace's old Models URL
+    // redirects to that workspace's page there.
+    expect(routeSource).toContain("<OrganizationModelsSectionWithName");
+    expect(appSource).toContain("workspaceModelsRedirect(");
+    expect(organizationModelsSource).toContain("useOrganizationProviderConnection(");
+    expect(organizationModelsSource).toContain('vercel: "vercel_gateway"');
+    expect(organizationModelsSource).toContain('openrouter: "openrouter"');
+    expect(organizationModelsSource).toContain('opper: "opper"');
+    expect(organizationCodexModelsSource).toContain("export function OrgCodexAccountPage");
     for (const method of [
       "getOrganizationModelProviderConnection",
       "upsertOrganizationModelProviderConnection",
@@ -143,25 +153,28 @@ describe("organization administration surface", () => {
     // Owners and admins in an administrator session: one rule, shared with the picker.
     expect(accessSource).toContain("administersOrganization(input)");
     expect(workspacesLibSource).toContain('role === "owner" || role === "admin"');
-    // Models is shown only to organization administrators.
-    expect(accessSource).toMatch(/if \(administrator\) \{[^}]*visible\.add\("models"\)/u);
+    // Models is an organization page for owners, admins and workspace admins.
+    expect(accessSource).toContain('visible.add("models")');
+    expect(accessSource).toContain("administeredWorkspaceIds.length > 0");
     expect(organizationCodexSource).toContain("setLoadError(");
-    expect(organizationModelsSource).toContain("<ErrorMessage");
-    expect(organizationModelsSource).toContain("Try again");
+    expect(workspaceCodexSource).toContain("Couldn't load the organization's Codex accounts.");
+    expect(workspaceCodexSource).toContain("Try again");
     // Workspace Codex: no source control; one line says which pool new work uses, with
-    // "Use automatically" for a saved explicit choice. The only link to organization
-    // settings is on a shared account's page, for org admins.
+    // "Use automatically" for a saved explicit choice. Organization admins open a
+    // shared account's own page on the same Models page.
     expect(workspaceCodexSource).not.toContain('label="Subscriptions from"');
     expect(workspaceCodexSource).toContain("export function CodexPoolNotice");
     expect(workspaceCodexSource).toContain("Use automatically");
-    expect(workspaceCodexSource).toContain("Manage in organization settings");
-    expect(workspaceCodexSource).toContain("manageInOrganization");
+    expect(workspaceCodexSource).not.toContain("Manage in organization settings");
+    expect(workspaceCodexSource).toContain("organization.openAccount(account.id)");
     expect(routeSource).toContain("canManageOrganizationKnowledge");
     expect(accessSource).toContain('accountGrant?.role === "owner"');
     expect(accessSource).toContain('"account:admin"');
-    expect(identitySource).toContain("client.getCompanyProfileAgentPolicy(");
-    expect(identitySource).toContain("client.updateCompanyProfileAgentPolicy(");
-    expect(identitySource).toContain('label: "Automatic"');
+    // Identity shows its agent policy as one row; owners change it on Agent learning,
+    // in the same words as the workspace's modes.
+    expect(identitySource).toContain(".getCompanyProfileAgentPolicy(workspaceId)");
+    expect(identitySource).not.toContain("updateCompanyProfileAgentPolicy(");
+    expect(identitySource).toContain("LEARNING_MODE_LABEL[IDENTITY_POLICY_MODE[policy.mode]]");
     expect(identitySource).toContain("Organization identity is read-only for you");
     expect(recoverySource).toContain("overview.eligibleMembers");
     expect(recoverySource).not.toContain("listOrganizationAdministrationMembers");
@@ -192,7 +205,8 @@ describe("organization administration surface", () => {
     expect(apiKeySource).toContain(
       "Server credentials that create and run every shared workspace, never Personal ones.",
     );
-    expect(apiKeySource).toContain("It can't open Personal workspaces or read secret values.");
+    expect(apiKeySource).toContain("It never opens Personal workspaces.");
+    expect(apiKeySource).toContain("Can't change anything or read secret values.");
     expect(apiKeySource).toContain('title="API key created"');
     expect(apiKeySource).not.toContain("fixedPermissions");
     expect(apiKeySource).not.toContain('"workspace:read"');

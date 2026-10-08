@@ -12,7 +12,9 @@ completion is still obtained from the backend, never from that handle.
 injected `ConnectNavigation` adapter and either `popup` or `redirect` mode.
 Call popup mode directly from a user gesture: opening is synchronous, a blocked
 popup throws explicitly, and only backend polling determines the result. The
-popup is closed when polling settles. Cancellation stops polling, not the
+popup is closed when polling settles if the browser still permits it. The human
+closes provider windows that remain on a foreign origin or have become detached.
+Cancellation stops polling, not the
 durable server attempt; cancel that explicitly through the controller if desired.
 
 For redirect mode, retain the opaque attempt ID in host-owned state before
@@ -24,7 +26,7 @@ optional setup and account presentation lives in `@opengeni/react/connect`.
 
 # @opengeni/connect
 
-Framework-neutral state for a durable OpenGeni connection setup attempt. This
+Framework-neutral state for a durable Opengeni connection setup attempt. This
 package contains no React, browser storage, provider SDK, or server credentials.
 Use `ConnectController` with an authenticated `ConnectTransport`; use
 `@opengeni/react/connect` to observe that same controller from React.
@@ -71,7 +73,7 @@ workspace access; browser-supplied actor IDs are not proof of identity.
 
 Catalog readiness reflects curated provider configuration and current access.
 Accounts expose connection metadata, not credentials. `disconnect` uses the
-existing local connection-revocation endpoint: it removes OpenGeni access, not
+existing local connection-revocation endpoint: it removes Opengeni access, not
 upstream provider consent. Aborting an in-flight mutation stops observation and
 does not guarantee that the server rolled it back; recover durable attempts
 before deciding whether to retry. A signal already aborted before dispatch

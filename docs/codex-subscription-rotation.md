@@ -22,7 +22,7 @@ The **effective credential pool is the complete scheduling boundary**.
   the target workspace. Schema guards accept an organization credential only
   for that workspace's current organization source or the exact turn's accepted
   organization source. A turn never borrows another turn's source authority.
-- Workspace-local duplicate connections remain independent. OpenGeni does not
+- Workspace-local duplicate connections remain independent. Opengeni does not
   correlate a ChatGPT account connected separately in multiple workspace pools
   or across managed organizations.
 - Organization rows are visible at management time only to active organization
@@ -65,9 +65,13 @@ preparation. Leasing is execution ownership, not a rotation feature flag:
    `codex_rotation_settings` for a workspace pool or
    `organization_codex_rotation_settings` for an organization pool. Concurrent
    replicas using the same pool wait; they do not `SKIP LOCKED`.
-2. Lock the durable turn for update and verify it belongs to the exact
-   account/workspace. If a downstream policy supplies an opaque accepted-turn
-   scope resolver, resolve it from that locked turn metadata while the rotation
+2. Take the shared workspace-control prefix, then the actual workspace row
+   `FOR KEY SHARE`, before locking the session, durable turn and exact attempt.
+   The workspace identity lock must precede the turn lock: taking it only through
+   the lease insert's FK can deadlock behind a workspace writer waiting for that
+   turn. Source-advisory and rotation-row order is unchanged. Verify the turn
+   belongs to the exact account/workspace. If a downstream policy supplies an
+   opaque accepted-turn scope resolver, resolve it from that locked turn metadata while the rotation
    transaction remains held. A present
    `codexCredentialPolicySnapshotV1` is the accepted allocator policy for this
    logical turn; malformed present metadata fails closed.
@@ -95,7 +99,17 @@ release, quarantine, and settlement all carry the non-reused holder identity.
 Heartbeat renewal is fail-closed: a response that returns after the prior
 worker-confirmed deadline is discarded rather than extending ownership, and
 expiry-sensitive lease SQL uses the execution-time database clock after its
-relevant locks are acquired.
+relevant locks are acquired. Runtime-event and model-usage checkpoints reuse an
+unexpired confirmed lease between renewals, rather than renewing for every
+stream event. The shared Codex, SuperGrok, and Claude lifecycle renews when
+60 seconds have elapsed from the last confirmed acquisition/renewal request
+start, with its independent 60-second timer still active. An event renewal just
+before a timer tick can defer the next quiet renewal to the following tick,
+within 120 seconds of the previous request start. Every checkpoint
+checks the prior deadline before coalescing; a failed renewal retains that
+deadline and can retry at the next checkpoint. This does not change the
+five-minute TTL, exact holder/turn/generation fences, or physical dispatch
+checks.
 
 6. On the first allocator decision, write the bounded accepted allocator policy
    snapshot to the locked turn row in the same transaction, even when the
@@ -298,13 +312,18 @@ Codex quota adds three deliberately separate product seams:
   token `version`, health, connection, cooldown, quota history, active leases,
   and accepted turns remain independent; reconnect, refresh and redemption never
   auto-enable the row.
-- **Reset redemption** has no SDK method, MCP/Codemode tool, worker activity,
-  scheduled/background hook, or allocator/rotation call. Its REST mutation
-  requires managed product mode, an actual Better Auth cookie with no
-  `Authorization` header, workspace admin, the exact `user:<id>` who most
-  recently connected the credential through a direct cookie session, exact
-  same-origin `Origin`, `Sec-Fetch-Site: same-origin`, and a five-minute
-  session-bound HMAC confirmation. The deployment must configure
+- **Reset redemption** is something a person does: in the web app, or through
+  an agent they signed in to the organization MCP, which acts as them. Nothing
+  redeems automatically: there is no worker activity, scheduled/background
+  hook, or allocator/rotation call. The REST mutation requires managed product
+  mode, `connections:write` for the exact `user:<id>` who most recently
+  connected the credential, and a five-minute HMAC confirmation from
+  `prepare`. A browser caller additionally needs an actual Better Auth cookie
+  with no `Authorization` header, exact same-origin `Origin` and
+  `Sec-Fetch-Site: same-origin`, and its confirmation is bound to that browser
+  session; an agent acting as the person skips those browser-only checks and
+  its confirmation is bound to a stable per-person agent hash. API keys and
+  other bearer tokens are refused. The deployment must configure
   `publicBaseUrl`; the route never derives a trusted origin from request
   `Host`/URL headers. Legacy/nonhuman-connected rows are view-only.
   The overview returns only a closed, secret-free ownership reason. A legacy

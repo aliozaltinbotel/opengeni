@@ -1,4 +1,28 @@
+export { parseCustomMcpSetupRequest } from "./prepared-mcp-setup";
 export type {
+  AvailableOpenGeniSlackBots,
+  OpenGeniSlackBotOrganizationAccess,
+  UpdateOpenGeniSlackBotOrganizationAccess,
+} from "./types";
+export type {
+  ToolActionReview,
+  ToolReviewDetailsPage,
+  ToolReviewStatus,
+} from "@opengeni/contracts";
+export {
+  toolReviewAction,
+  toolReviewFields,
+  toolReviewDetails,
+} from "@opengeni/contracts/tool-review-presentation";
+export type {
+  SubscriptionAccountSummary,
+  SubscriptionPoolSettings,
+  ClaudeSubscriptionSetupTokenRequest,
+  ClaudeSubscriptionAccount,
+  ClaudeSubscriptionAccountsResponse,
+} from "@opengeni/contracts";
+export type {
+  ArtifactPinResponse,
   ArtifactCatalogKind,
   ArtifactCatalogItem,
   ArtifactCatalogListOptions,
@@ -12,9 +36,12 @@ export type {
   SessionMessagePreviewReference,
 } from "./session-message-search";
 export { OpenGeniEmbeddingClient as OpenGeniClient } from "./embedding-client";
+export type { Chats } from "./chats";
 export type { ServiceContext } from "./embedding-client";
 export {
+  OPENGENI_TEST_REQUEST_NIL_ID,
   OPENGENI_WEBHOOK_HEADERS,
+  OPENGENI_WEBHOOK_TEST_EVENT_TYPE,
   OpenGeniSignatureError,
   WORKSPACE_WEBHOOK_EVENT_TYPES,
   signOpenGeniPayload,
@@ -45,6 +72,7 @@ export type {
   CreateWorkspaceWebhookRequest,
   CreateWorkspaceWebhookResponse,
   CredentialProviderRequest,
+  CredentialProviderInitiatorContext,
   CredentialProviderResponse,
   GetWorkspaceCredentialProviderResponse,
   ListWorkspaceWebhookDeliveriesResponse,
@@ -58,9 +86,44 @@ export type {
   WorkspaceWebhookDelivery,
   WorkspaceWebhookEvent,
   WorkspaceWebhookEventType,
+  SessionWorkspaceWebhookEvent,
+  WorkspaceUsageWebhookEvent,
+  WorkspaceTestWebhookEvent,
+  IntegrationEndpointTestResult,
+  TestWorkspaceWebhookResponse,
+  TestWorkspaceCredentialProviderResponse,
+  WorkspaceInheritedIntegrationsResponse,
 } from "./workspace-integrations";
+export type {
+  AllowanceExhaustedRefusal,
+  ClearWorkspaceAllowanceRequest,
+  ClearWorkspaceAllowanceResponse,
+  GetUsageRequest,
+  GetMyUsageRequest,
+  GrantWorkspaceCreditsRequest,
+  MemberAllowance,
+  MemberAllowanceDefault,
+  MemberAllowanceRule,
+  MemberAllowanceUsage,
+  SetMemberAllowanceRequest,
+  SetWorkspaceAllowanceRequest,
+  UsageAllowancePeriod,
+  UsageAllowanceStatus,
+  UsageAllowanceWindow,
+  WorkspaceAllowance,
+  WorkspaceAllowanceConfig,
+  WorkspaceAllowanceState,
+  WorkspaceAllowanceUsage,
+  WorkspaceCreditGrant,
+  WorkspaceUsageResponse,
+} from "@opengeni/contracts/usage-allowances";
 export { pluginMcpUnavailableReason } from "@opengeni/contracts/plugin-discovery";
 export type { ToolDisplayMetadata } from "@opengeni/contracts";
+export {
+  EMPTY_FINAL_REPLY_NOTICE,
+  turnCompletedWithEmptyFinalReply,
+} from "@opengeni/contracts/session-final-reply";
+export type { EmptyFinalReplyCompletion } from "@opengeni/contracts/session-final-reply";
 export { parseToolDisplayMetadata } from "./tool-display-metadata";
 export type {
   PluginDiscoveryItem,
@@ -81,7 +144,11 @@ export type {
   ExternalIdentityLinkPreview,
   ExternalIdentityLinkPage,
 } from "@opengeni/contracts/external-identities";
-export type { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "./types";
+export type {
+  ModelConnectionAccessKind,
+  ModelConnectionAccessPolicy,
+  ModelConnectionAccessResponse,
+} from "./types";
 export {
   OpenGeniToolCallError,
   OpenGeniToolReapprovalRequiredError,
@@ -163,9 +230,12 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSetupError,
+  OpenGeniAllowanceExhaustedError,
   OpenGeniSecureContextRequiredError,
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
+  formatErrorMessage,
   isRetryableStreamError,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
@@ -178,9 +248,21 @@ export {
   sessionTitleIsPending,
 } from "./session-titles";
 export type { SessionDisplayTitleInput, SessionDisplayTitleOptions } from "./session-titles";
+// Preserve the published root aliases through the dependency-free leaf, never
+// the contracts root (which would load its schema runtime in native bundles).
+export {
+  humanizeModelSlug,
+  isRawModelLabel,
+  modelDisplayName,
+  modelSlug,
+  modelVendor,
+} from "./model-display";
+export type { ModelDisplayInput, ModelVendor } from "./model-display";
 export type {
+  AgentPromptModuleId,
   ModelContextInstructionLayer,
   ModelContextInstructionLayerId,
+  ModelContextInstructionModule,
   ModelContextSkill,
   ModelContextSkillKind,
   ModelContextSnapshot,
@@ -197,7 +279,7 @@ export {
   sessionEventsToSseStream,
 } from "./proxy";
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
-export { createSessionProxyHandler } from "./session-proxy";
+export { artifactViewerCapability, createSessionProxyHandler } from "./session-proxy";
 export type {
   SessionProxyContext,
   SessionProxyCreateInput,
@@ -206,7 +288,10 @@ export type {
   SessionProxyMessageInput,
   SessionProxyResolution,
   SessionProxyResolve,
+  SessionProxyToolServer,
 } from "./session-proxy";
+export { ToolRequestError, verifyToolRequest } from "./tool-auth";
+export type { ToolRequestIdentity, ToolRequestLike, VerifyToolRequestOptions } from "./tool-auth";
 export {
   openGeniConsolePath,
   parseOpenGeniLink,
@@ -214,6 +299,7 @@ export {
   openGeniLinkScheme,
   parseRetainedFileReference,
   parseSandboxLink,
+  SESSION_SCOPE_HEADER,
 } from "./message-links";
 export type { OpenGeniLinkTarget } from "./message-links";
 export { parseSseStream } from "./sse";
@@ -274,9 +360,11 @@ export type {
   CodexRealtimeControllerStatus,
   CodexRealtimeMicrophoneState,
   CodexRealtimeOwnerStorage,
+  CodexRealtimeRefusal,
   CreateCodexRealtimeControllerOptions,
   RealtimeControllerTransportStarter,
 } from "./codex-realtime-controller";
+export { codexRealtimeRefusal } from "./codex-realtime-controller";
 export {
   createGatewayRealtimeTransportStarter,
   createXaiSubscriptionRealtimeTransportStarter,
@@ -541,6 +629,7 @@ export {
 } from "./types";
 export type {
   AccessContext,
+  AccessCredential,
   ActivateCodexRealtimeConnectionRequest,
   AccessGrant,
   AccountGrant,
@@ -554,15 +643,22 @@ export type {
   AgentToolCallOutputPayload,
   ApiKey,
   BillingBalance,
+  PromotionalCreditScope,
+  PromotionalCreditBalance,
   BillingEntitlementsResponse,
   BillingMode,
   BillingSummary,
+  BillingCheckoutStatus,
   ListManagedOrganizationMembershipsResponse,
   ManagedOrganizationMembership,
   OrganizationAdministrationMember,
   OrganizationAdministrationMemberWorkspaceAccess,
   OrganizationAdministrationOverview,
   OrganizationApiKeyAccess,
+  OrganizationAccessPreset,
+  OrganizationWorkspaceScope,
+  OrganizationAccessPolicy,
+  OrganizationActor,
   OrganizationInvitation,
   OrganizationMember,
   OrganizationMembershipRole,
@@ -610,10 +706,12 @@ export type {
   InsightsDepthBucket,
   InsightsModelFacet,
   InsightsSpendDriver,
+  InsightsProjectRow,
   InsightsWarmGroupRow,
   InsightsLiveWarmLease,
   InsightsFloorSession,
   InsightsScheduleRow,
+  InsightsScope,
   WorkspaceInsightsSnapshot,
   WorkspaceInsightsResponse,
   CapabilityCatalogItem,
@@ -657,6 +755,7 @@ export type {
   SessionRealtimeMode,
   SessionRealtimeModel,
   SessionRealtimeMutationResponse,
+  SessionRealtimeStopInstruction,
   SessionRealtimeState,
   WorkspaceModelCatalogModel,
   WorkspaceModelCatalogResponse,
@@ -670,9 +769,17 @@ export type {
   WorkspaceOpenRouterCustomModelsResponse,
   CreateWorkspaceOpenRouterCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
+  WorkspaceOpperCustomModel,
+  WorkspaceOpperCustomModelsResponse,
+  CreateWorkspaceOpperCustomModelRequest,
+  DeleteWorkspaceOpperCustomModelRequest,
   OrganizationModelProviderKind,
   ClaudeSubscriptionUsage,
+  ClaudeSubscriptionOAuthStartResponse,
+  ClaudeSubscriptionOAuthCompleteRequest,
+  ClaudeSubscriptionOAuthCompleteResponse,
   ClaudeUsageWindow,
+  ClaudeUsageRequestStatus,
   OrganizationModelProviderConnection,
   UpsertOrganizationModelProviderConnectionRequest,
   RevokeOrganizationModelProviderConnectionRequest,
@@ -753,6 +860,31 @@ export type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateOrganizationApiKeyRequest,
+  UpdateOrganizationApiKeyRequest,
+  OrganizationMcpConnection,
+  OrganizationMcpConnectionList,
+  UpdateOrganizationMcpConnectionRequest,
+  OrganizationServiceAccount,
+  OrganizationServiceAccountRole,
+  ListOrganizationServiceAccountsResponse,
+  CreateOrganizationServiceAccountRequest,
+  UpdateOrganizationServiceAccountRequest,
+  McpConnectionRequest,
+  McpConnectionDecision,
+  NativeAppPlatform,
+  NativeAppAuthorizeInput,
+  NativeAppTokenInput,
+  NativeAppToken,
+  NativePushDevice,
+  NativePushRule,
+  InboxItem,
+  InboxItemChoice,
+  InboxItemKind,
+  InboxSettings,
+  InboxTidyPolicy,
+  ListInboxResponse,
+  UpdateInboxItemInput,
+  RegisterNativePushDeviceInput,
   CreateCapabilityCatalogItemRequest,
   OpenGeniSlackBotInstallRequest,
   OpenGeniSlackBotInstallStart,
@@ -765,7 +897,13 @@ export type {
   UpdateSlackChannelRoutesRequest,
   SlackReactionChannel,
   SlackReactionChannelListResponse,
+  ApiKeyConnectionCredential,
+  ConnectionCredentialPlacement,
   CreateConnectionRequest,
+  InlineOpenApiDocumentSource,
+  IntegrationSourceInput,
+  IntegrationSourceProjection,
+  SessionApprovalRequest,
   CreateBillingPortalRequest,
   CreateBillingPortalResponse,
   CreateCheckoutRequest,
@@ -778,6 +916,7 @@ export type {
   CreateKnowledgeDropRequest,
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
+  CreateSessionScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
   CreateWorkspaceEnvironmentRequest,
@@ -972,6 +1111,7 @@ export type {
   ScheduledTaskTriggerType,
   Session,
   SessionBackgroundCommand,
+  SessionBackgroundCommandReconciliation,
   SessionBackgroundCommandActivity,
   SessionBackgroundCommandListResponse,
   CancelSessionBackgroundCommandResult,
@@ -986,6 +1126,9 @@ export type {
   AgentTopologyPageResponse,
   AgentTopologySession,
   SessionListResponse,
+  SessionListTotals,
+  SessionListEntry,
+  SessionListEntryResponse,
   SessionLineageResponse,
   SessionEffectiveToolPolicy,
   SessionQueueMutationResponse,
@@ -1165,10 +1308,25 @@ export type {
   UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionAttentionRequest,
   UpdateSessionArchiveRequest,
+  UpdateSessionRetentionRequest,
+  SessionRetention,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
   UpdateSessionVariableSetsRequest,
   UpdateSessionToolPolicyRequest,
+  UpdateSessionAgentRequest,
+  AgentCapabilityId,
+  AgentSkillsCapability,
+  AgentCapabilityToggles,
+  AgentCapabilities,
+  AgentRenderer,
+  AgentConfigRequest,
+  WorkspaceAgentDefaults,
+  ResolvedAgentCapabilities,
+  ResolvedAgentConfig,
+  AgentEffectiveTools,
+  ClientAgentConfig,
+  AgentConfigErrorCode,
   UpdateVariableSetRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,
@@ -1324,5 +1482,7 @@ export type {
   ConnectorToolPermissionsResponse,
   UpdateConnectorToolPermissionsRequest,
 } from "./types";
+
+export { sessionListEntry } from "./session-list-entries";
 
 export type { ModelCallSourceReceipt, ModelCallSourceBasisResponse, ModelSourceRef, ModelSourceInput, ImportedMessageOrigin } from "@opengeni/contracts";

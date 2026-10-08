@@ -33,11 +33,11 @@ export const ORGANIZATION_PROVIDER_META: Record<
     shortName: "Claude",
     provider: "claude_subscription",
     billedTo: "The connected Claude subscription",
-    summary: "Use your Claude plan in OpenGeni. Connect using Claude Code on your computer.",
+    summary: "Use your Claude plan in Opengeni. Sign in to check usage and reset times.",
     keyHelp:
-      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; OpenGeni does not refresh setup tokens.",
+      "Run claude setup-token in your terminal, then paste the token here. The token uses your subscription limits. Replace it when it expires or is revoked; Opengeni does not refresh setup tokens.",
     keyAriaLabel: "Claude subscription setup token",
-    credentialLabelText: "Setup token",
+    credentialLabelText: "Sign-in",
     customModelsHeading: "Claude models",
     customModelsDescription:
       "Choose models for your workspaces. Availability depends on your Claude plan.",
@@ -90,6 +90,27 @@ export const ORGANIZATION_PROVIDER_META: Record<
     waitingModelDescription: "Waiting for an OpenRouter key",
     unavailableModelDescription: "Connection status unavailable",
     modelToastName: "OpenRouter model",
+    connectionManagerDescription: "",
+  },
+  opper: {
+    title: "Opper",
+    shortName: "Opper",
+    provider: "opper",
+    billedTo: "The organization's Opper account",
+    summary:
+      "Use models through the organization's Opper account in shared workspaces, billed to Opper.",
+    keyHelp: "Create one at platform.opper.ai under API keys.",
+    keyAriaLabel: "Organization Opper API key",
+    customModelsHeading: "Custom models",
+    customModelsDescription:
+      "Exact Opper model ids shared workspaces can pick: a pool such as gemini-3.8-flash or a pinned EU route such as aws/claude-opus-5-5. Separate from deployment-provided Opper models.",
+    customModelInputAriaLabel: "Opper organization model id",
+    customModelPlaceholder: "aws/claude-opus-5-5",
+    emptyCustomModelsDescription: "No custom models yet. Add one to offer it in shared workspaces.",
+    readyModelDescription: "Ready in shared workspaces",
+    waitingModelDescription: "Waiting for an Opper key",
+    unavailableModelDescription: "Connection status unavailable",
+    modelToastName: "Opper model",
     connectionManagerDescription: "",
   },
 };

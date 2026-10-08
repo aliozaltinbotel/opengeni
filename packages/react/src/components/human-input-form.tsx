@@ -1,5 +1,4 @@
 import type {
-  HumanInputAnswer,
   HumanInputQuestion,
   SkillRecord,
   SessionHumanInputRequest,
@@ -8,61 +7,24 @@ import type {
 import { ChevronDownIcon, ChevronUpIcon, MessageCircleQuestionIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { cn } from "../lib/cn";
+import { useErrorMessage } from "../lib/error-message";
+import {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  emptyDraft,
+  initialDrafts,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
+} from "../human-input-model";
 
-export type HumanInputAnswerDraft = {
-  values: string[];
-  other: string;
-  otherSelected: boolean;
+export {
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+  type HumanInputAnswerDraft,
+  type HumanInputFormMessages,
 };
 
-export type HumanInputFormMessages = {
-  title: string;
-  description: string;
-  submit: string;
-  skip: string;
-  submitting: string;
-  other: string;
-  deadlineLabel: string;
-  formatDeadline: (value: string) => string;
-  required: string;
-  otherRequired: string;
-  minSelections: (count: number) => string;
-  maxSelections: (count: number) => string;
-  optional: string;
-  /** Shown when the question list overflows the card and more content is below. */
-  moreBelow: string;
-  questionCount: (count: number) => string;
-  collapse: string;
-  expand: string;
-  selectionHint: (min: number | null | undefined, max: number | null | undefined) => string | null;
-};
-
-export const defaultHumanInputFormMessages: HumanInputFormMessages = {
-  title: "Input required",
-  /** Multi-question chrome has no default subtitle; hosts may still override. */
-  description: "",
-  submit: "Send answers",
-  skip: "Skip",
-  submitting: "Submitting…",
-  other: "Other",
-  deadlineLabel: "Expires",
-  formatDeadline,
-  required: "This question is required.",
-  otherRequired: "Enter a value for Other.",
-  minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
-  maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
-  optional: "Optional",
-  moreBelow: "More below",
-  questionCount: (count) => `${count} questions`,
-  collapse: "Collapse",
-  expand: "Expand",
-  selectionHint: (min, max) => {
-    if (min != null && max != null) return `Choose ${min}–${max}.`;
-    if (min != null) return `Choose at least ${min}.`;
-    if (max != null) return `Choose up to ${max}.`;
-    return null;
-  },
-};
+class SkillReviewVerificationError extends Error {}
 
 export type HumanInputFormProps = {
   /** Scoped immutable revision reader. Saving a Skill fails closed without its full preview. */
@@ -83,6 +45,12 @@ export type HumanInputFormProps = {
   autoFocus?: boolean | undefined;
   /** Start collapsed to a compact bar (drafts still retained). */
   defaultCollapsed?: boolean | undefined;
+  /**
+   * Answer a yes/no decision (one required choice between an accept and a
+   * decline option, without Other) with two buttons instead of a radio list.
+   * Off by default; embedded conversations turn it on.
+   */
+  decisionButtons?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -114,10 +82,14 @@ function HumanInputRequestForm({
   messages: messageOverrides,
   autoFocus = true,
   defaultCollapsed = false,
+  decisionButtons = false,
   className,
 }: HumanInputFormProps) {
+  const formatError = useErrorMessage();
   const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
   const singleQuestion = request.questions.length === 1 ? request.questions[0]! : null;
+  const decision = decisionButtons ? binaryDecision(request.questions) : null;
+  const [decisionChoice, setDecisionChoice] = useState<string | null>(null);
   const resolvedTitle =
     title === undefined
       ? singleQuestion
@@ -184,7 +156,7 @@ function HumanInputRequestForm({
       questions.map(async (question) => {
         if (!loadSkillReview)
           throw new Error(
-            "This client cannot preview Skill files. Open this request in Opengeni to review it.",
+            "This client cannot preview Skill files. Ask your administrator for a review-capable client.",
           );
         const reference = question.reference;
         const record = await loadSkillReview(reference);
@@ -194,7 +166,9 @@ function HumanInputRequestForm({
           (record.removalOperationId ?? undefined) !== reference.removalOperationId ||
           !record.files.some((file) => file.path === "SKILL.md")
         ) {
-          throw new Error("The requested Skill revision could not be verified.");
+          throw new SkillReviewVerificationError(
+            "The requested Skill revision could not be verified.",
+          );
         }
         return [question.id, record] as const;
       }),
@@ -214,13 +188,20 @@ function HumanInputRequestForm({
             loader: loadSkillReview,
             identity: reviewIdentity,
             records: {},
-            error: cause instanceof Error ? cause.message : "Could not load the Skill files.",
+            error: formatError(
+              cause,
+              cause instanceof SkillReviewVerificationError
+                ? cause.message
+                : !loadSkillReview
+                  ? "This client cannot preview Skill files. Ask your administrator for a review-capable client."
+                  : undefined,
+            ),
           });
       });
     return () => {
       current = false;
     };
-  }, [loadSkillReview, reviewIdentity, reviewReload]);
+  }, [loadSkillReview, reviewIdentity, reviewReload, formatError]);
   const visibleReviews =
     reviews?.loader === loadSkillReview && reviews?.identity === reviewIdentity ? reviews : null;
   const preview = (question: HumanInputQuestion) => {
@@ -319,7 +300,7 @@ function HumanInputRequestForm({
       await onSubmit(response);
     } catch (cause) {
       if (generation === submissionGeneration.current) {
-        setSubmissionError(cause instanceof Error ? cause.message : String(cause));
+        setSubmissionError(formatError(cause));
       }
     } finally {
       if (generation === submissionGeneration.current) {
@@ -445,7 +426,7 @@ function HumanInputRequestForm({
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
               <h2 id={titleId} className="text-og-md font-semibold text-og-fg">
                 {resolvedTitle}
-                {singleQuestion?.required && !request.allowSkip ? (
+                {singleQuestion?.required && !request.allowSkip && !decision ? (
                   <span aria-hidden className="ml-1 text-og-status-failed">
                     *
                   </span>
@@ -492,106 +473,239 @@ function HumanInputRequestForm({
         </div>
       </header>
 
-      <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-        <div
-          ref={scrollRef}
-          className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
-        >
-          <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
-            {request.questions.map((question, index) => {
-              if (singleQuestion) {
-                // Title already carries the question; only render the control + help extras.
-                return (
-                  <div key={question.id} data-human-input-question={question.id}>
-                    {preview(question)}
-                    <QuestionControls
-                      question={question}
-                      questionNumber={null}
-                      labelledBy={titleId}
-                      draft={drafts[question.id] ?? emptyDraft()}
-                      fieldId={`${formId}-${index}`}
-                      error={validationErrors[question.id]}
-                      messages={messages}
-                      autoFocus={autoFocus}
-                      firstOption
-                      showPromptChrome={false}
-                      allowSkip={request.allowSkip}
-                      busy={busy}
-                      onUpdate={(apply) => update(question.id, apply)}
-                    />
-                  </div>
-                );
-              }
+      {decision ? (
+        <>
+          {decision.question.helpText ||
+          decision.accept.description ||
+          decision.decline.description ? (
+            <div className="shrink-0 space-y-1 px-4 pt-3 text-og-sm text-og-fg-muted">
+              {decision.question.label && decision.question.helpText ? (
+                <p>{decision.question.helpText}</p>
+              ) : null}
+              {[decision.accept, decision.decline].map((option) =>
+                option.description ? (
+                  <p key={option.id}>
+                    <span className="font-medium text-og-fg">{option.label}</span>
+                    {" · "}
+                    {option.description}
+                  </p>
+                ) : null,
+              )}
+            </div>
+          ) : null}
+          {(error ?? submissionError) ? (
+            <p role="alert" className="shrink-0 px-4 pt-3 text-og-sm text-og-status-failed">
+              {error ?? submissionError}
+            </p>
+          ) : null}
+          <footer
+            className="flex shrink-0 flex-wrap items-center justify-end gap-2 px-4 py-3"
+            data-human-input-decision=""
+          >
+            {request.allowSkip ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void submitResponse({ outcome: "skipped" })}
+                className="mr-auto inline-flex min-h-9 items-center rounded-og-md px-2 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-hover hover:text-og-fg disabled:opacity-50 pointer-coarse:min-h-11"
+              >
+                {resolvedSkipLabel}
+              </button>
+            ) : null}
+            {[decision.decline, decision.accept].map((option) => {
+              const primary = option === decision.accept;
               return (
-                <div
-                  key={question.id}
-                  data-human-input-question={question.id}
-                  className="flex flex-col gap-1.5"
+                <button
+                  key={option.id}
+                  type="button"
+                  disabled={busy}
+                  ref={
+                    !primary && autoFocus
+                      ? (node) => {
+                          if (node && !node.dataset.ogFocused) {
+                            node.dataset.ogFocused = "";
+                            node.focus({ preventScroll: true });
+                          }
+                        }
+                      : undefined
+                  }
+                  data-human-input-choice={option.id}
+                  onClick={() => {
+                    setDecisionChoice(option.id);
+                    void submitResponse({
+                      outcome: "answered",
+                      answers: [{ questionId: decision.question.id, values: [option.id] }],
+                    });
+                  }}
+                  className={cn(
+                    "inline-flex min-h-9 items-center rounded-og-md border px-3.5 py-1.5 text-og-sm font-medium transition disabled:opacity-50 pointer-coarse:min-h-11",
+                    primary
+                      ? "border-og-primary-border bg-og-primary text-og-primary-fg hover:bg-og-primary-hover"
+                      : "border-og-border bg-og-surface-1 text-og-fg hover:bg-og-surface-2",
+                  )}
                 >
-                  {preview(question)}
-                  <QuestionControls
-                    question={question}
-                    questionNumber={index + 1}
-                    labelledBy={undefined}
-                    draft={drafts[question.id] ?? emptyDraft()}
-                    fieldId={`${formId}-${index}`}
-                    error={validationErrors[question.id]}
-                    messages={messages}
-                    autoFocus={autoFocus && index === 0}
-                    firstOption={index === 0}
-                    showPromptChrome
-                    allowSkip={request.allowSkip}
-                    busy={busy}
-                    onUpdate={(apply) => update(question.id, apply)}
-                  />
-                </div>
+                  {busy && decisionChoice === option.id ? messages.submitting : option.label}
+                </button>
               );
             })}
-          </fieldset>
-        </div>
-        {overflowBelow ? (
-          <div
-            className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
-            aria-hidden="true"
-          >
-            <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
-            <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
-              {messages.moreBelow}
-            </span>
+          </footer>
+        </>
+      ) : (
+        <>
+          <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div
+              ref={scrollRef}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain [scrollbar-gutter:stable]"
+            >
+              <fieldset disabled={busy} className="min-w-0 space-y-4 px-4 py-3">
+                {request.questions.map((question, index) => {
+                  if (singleQuestion) {
+                    // Title already carries the question; only render the control + help extras.
+                    return (
+                      <div key={question.id} data-human-input-question={question.id}>
+                        {preview(question)}
+                        <QuestionControls
+                          question={question}
+                          questionNumber={null}
+                          labelledBy={titleId}
+                          draft={drafts[question.id] ?? emptyDraft()}
+                          fieldId={`${formId}-${index}`}
+                          error={validationErrors[question.id]}
+                          messages={messages}
+                          autoFocus={autoFocus}
+                          firstOption
+                          showPromptChrome={false}
+                          allowSkip={request.allowSkip}
+                          busy={busy}
+                          onUpdate={(apply) => update(question.id, apply)}
+                        />
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      key={question.id}
+                      data-human-input-question={question.id}
+                      className="flex flex-col gap-1.5"
+                    >
+                      {preview(question)}
+                      <QuestionControls
+                        question={question}
+                        questionNumber={index + 1}
+                        labelledBy={undefined}
+                        draft={drafts[question.id] ?? emptyDraft()}
+                        fieldId={`${formId}-${index}`}
+                        error={validationErrors[question.id]}
+                        messages={messages}
+                        autoFocus={autoFocus && index === 0}
+                        firstOption={index === 0}
+                        showPromptChrome
+                        allowSkip={request.allowSkip}
+                        busy={busy}
+                        onUpdate={(apply) => update(question.id, apply)}
+                      />
+                    </div>
+                  );
+                })}
+              </fieldset>
+            </div>
+            {overflowBelow ? (
+              <div
+                className="pointer-events-none absolute inset-x-0 bottom-0 z-[1] flex flex-col items-center"
+                aria-hidden="true"
+              >
+                <div className="h-10 w-full bg-gradient-to-t from-og-surface-1 via-og-surface-1/85 to-transparent" />
+                <span className="-mt-5 mb-1 rounded-og-full bg-og-surface-1 px-2.5 py-0.5 text-og-xs font-medium text-og-fg-muted shadow-og-sm ring-1 ring-og-border/60">
+                  {messages.moreBelow}
+                </span>
+              </div>
+            ) : null}
           </div>
-        ) : null}
-      </div>
 
-      {(error ?? submissionError) ? (
-        <p
-          role="alert"
-          className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
-        >
-          {error ?? submissionError}
-        </p>
-      ) : null}
+          {(error ?? submissionError) ? (
+            <p
+              role="alert"
+              className="relative z-10 shrink-0 px-4 pb-1 text-og-sm text-og-status-failed"
+            >
+              {error ?? submissionError}
+            </p>
+          ) : null}
 
-      <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
-        {request.allowSkip ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void submitResponse({ outcome: "skipped" })}
-            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
-          >
-            {resolvedSkipLabel}
-          </button>
-        ) : null}
-        <button
-          type="submit"
-          disabled={busy}
-          className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
-        >
-          {busy ? messages.submitting : resolvedSubmitLabel}
-        </button>
-      </footer>
+          <footer className="relative z-10 flex shrink-0 items-center justify-end gap-2 border-t border-og-status-waiting/20 bg-og-surface-1/95 px-4 py-3 backdrop-blur-[2px]">
+            {request.allowSkip ? (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void submitResponse({ outcome: "skipped" })}
+                className="inline-flex min-h-9 items-center rounded-og-md border border-og-border px-3 py-1.5 text-og-sm font-medium text-og-fg-muted transition-colors hover:bg-og-surface-1 hover:text-og-fg disabled:opacity-50"
+              >
+                {resolvedSkipLabel}
+              </button>
+            ) : null}
+            <button
+              type="submit"
+              disabled={busy}
+              className="inline-flex min-h-9 items-center rounded-og-md border border-og-primary-border bg-og-primary text-og-primary-fg px-3 py-1.5 text-og-sm font-medium transition hover:bg-og-primary-hover disabled:opacity-50"
+            >
+              {busy ? messages.submitting : resolvedSubmitLabel}
+            </button>
+          </footer>
+        </>
+      )}
     </form>
   );
+}
+
+// Unambiguous approve/decline verbs only: "Continue with A" vs "Keep B" is a
+// real choice between two options, not a yes/no decision.
+const ACCEPT_WORDS = new Set(["approve", "approved", "yes", "confirm", "allow", "accept"]);
+const DECLINE_WORDS = new Set(["cancel", "decline", "reject", "deny", "no", "don't", "dont"]);
+
+function firstWord(label: string): string {
+  return (
+    label
+      .trim()
+      .toLowerCase()
+      .replace(/[’]/g, "'")
+      .split(/[\s,.:;!?()]+/)[0] ?? ""
+  );
+}
+
+/**
+ * A yes/no decision (an approval asked as a question): one required
+ * single-choice question with exactly an accept and a decline option. It is
+ * answered with two buttons; an "Other" free-text answer has no meaning for it,
+ * and the composer still accepts a different instruction.
+ */
+export function binaryDecision(questions: readonly HumanInputQuestion[]): {
+  question: HumanInputQuestion;
+  accept: HumanInputQuestion["options"][number];
+  decline: HumanInputQuestion["options"][number];
+} | null {
+  if (questions.length !== 1) return null;
+  const question = questions[0]!;
+  if (
+    question.kind !== "single_select" ||
+    question.skillReview ||
+    // The runtime marks every choice question `allowOther`, so it is not a
+    // signal here; a different answer goes through the composer instead.
+    !question.required ||
+    question.options.length !== 2
+  )
+    return null;
+  const [first, second] = question.options as [
+    HumanInputQuestion["options"][number],
+    HumanInputQuestion["options"][number],
+  ];
+  const kind = (option: HumanInputQuestion["options"][number]) => {
+    const word = firstWord(option.label);
+    return ACCEPT_WORDS.has(word) ? "accept" : DECLINE_WORDS.has(word) ? "decline" : null;
+  };
+  const a = kind(first);
+  const b = kind(second);
+  if (a === "accept" && b === "decline") return { question, accept: first, decline: second };
+  if (a === "decline" && b === "accept") return { question, accept: second, decline: first };
+  return null;
 }
 
 function QuestionControls({
@@ -850,74 +964,4 @@ function QuestionControls({
       ) : null}
     </>
   );
-}
-
-export function answersFromDrafts(
-  questions: HumanInputQuestion[],
-  drafts: Record<string, HumanInputAnswerDraft>,
-  messageOverrides: Partial<HumanInputFormMessages> = {},
-): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
-  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
-  const answers: HumanInputAnswer[] = [];
-  const errors: Record<string, string> = {};
-  for (const question of questions) {
-    const draft = drafts[question.id] ?? emptyDraft();
-    const values = question.kind === "text" ? draft.values.filter(Boolean) : draft.values;
-    const other = draft.otherSelected ? draft.other : "";
-    const hasOther = Boolean(other.trim());
-    const supplied = values.length + (hasOther ? 1 : 0);
-
-    // Other-selected-but-empty must win over generic "required" — otherwise the
-    // user sees the wrong diagnosis next to a clearly selected control.
-    if (question.kind !== "text" && draft.otherSelected && !hasOther) {
-      errors[question.id] = messages.otherRequired;
-      continue;
-    }
-
-    if (question.required && supplied === 0) {
-      errors[question.id] = messages.required;
-      continue;
-    }
-    if (question.kind !== "text") {
-      const min = question.validation?.minSelections;
-      const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
-      if (min != null && supplied < min) {
-        errors[question.id] = messages.minSelections(min);
-        continue;
-      }
-      if (max != null && supplied > max) {
-        errors[question.id] = messages.maxSelections(max);
-        continue;
-      }
-    }
-    if (supplied > 0) {
-      answers.push({
-        questionId: question.id,
-        values,
-        ...(hasOther ? { other } : {}),
-      });
-    }
-  }
-  return { answers, errors };
-}
-
-function initialDrafts(questions: HumanInputQuestion[]): Record<string, HumanInputAnswerDraft> {
-  return Object.fromEntries(questions.map((question) => [question.id, emptyDraft()]));
-}
-
-function emptyDraft(): HumanInputAnswerDraft {
-  return { values: [], other: "", otherSelected: false };
-}
-
-function formatDeadline(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return value;
-  const ms = date.getTime() - Date.now();
-  if (ms <= 0) return "deadline passed";
-  const minutes = Math.round(ms / 60_000);
-  if (minutes < 1) return "in under a minute";
-  if (minutes < 60) return `in ${minutes}m`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 48) return `in ${hours}h`;
-  return date.toLocaleString();
 }

@@ -1,0 +1,50 @@
+---
+title: "Approvals & questions"
+description: "Require a human to approve tool calls, and let the agent ask structured questions."
+icon: "hand"
+---
+
+A session can pause mid-turn and wait for a person: to approve a tool call, or to answer a question. `SessionConversation` renders both inline, and the turn continues once someone answers. See [Approvals and human input](/concepts/approvals-and-human-input) for the full model.
+
+## Set tool approval defaults
+
+Set the initial recommendation with `requireApproval` on a per-session MCP server: `true` for every tool, or a list of tool names. Explicit account choices take precedence:
+
+```ts
+mcpServers: [
+  {
+    id: "acme",
+    url: "https://api.acme.com/mcp",
+    headers: { Authorization: `Bearer ${token}` },
+    requireApproval: ["update_ticket", "refund_order"], // reads run freely; writes wait
+  },
+],
+tools: [{ kind: "mcp", id: "acme" }],
+```
+
+Use the names from the server's `tools/list` (`update_ticket`, not `acme__update_ticket`). Use `getConnectorToolPermissions` and `updateConnectorToolPermissions` for account-specific Allow, Ask first, Block and reset choices. Pass the returned revision as `expectedRevision` to detect concurrent changes. API Integration `autoApprovedTools` remains a compatibility input: omission preserves existing choices, while an explicit value updates them. See [Your data](/integrate/your-data).
+
+When the agent proposes a gated call, the session enters `requires_action` and the conversation shows Approve and Reject. A rejection goes back to the agent as the tool's result so it can adapt. Only people can approve tool calls.
+
+## Let the agent ask questions
+
+The agent can ask free-text, single-select, or multi-select questions and gets the answers as the tool's output. Turn this off with the `humanInput` capability in [Configure the agent](/integrate/configure-the-agent).
+
+## Answering without the React UI
+
+| Surface     | Approve or reject      | Answer a question                                         |
+| ----------- | ---------------------- | --------------------------------------------------------- |
+| SDK         | `sendApprovalDecision` | `listHumanInputRequests`, then `submitHumanInputResponse` |
+| Chat facade | `chat.respond(...)`    | `chat.respond(...)`                                       |
+
+Custom React UIs can use `projectPendingApprovals` and `useHumanInputRequests` from `@opengeni/react/session`.
+
+Pass the approval's `id` from the `session.requiresAction` event to `sendApprovalDecision`. Fetch its portable facts with `getToolActionReview`, and paginated saved arguments with `getToolReviewDetails`. The shared `ToolActionReviewCard` and `ToolActionReviewDetails` components use the same data as the web console. Present the exact account, action and consequences before enabling approval; keep full details accessible without dumping large JSON into the primary view.
+
+The current Codemode client returns a durable pending handle for an action that needs review. After a decision, a current authorized attempt reads or resumes that handle. Preserve the operation ID; do not rebuild or resubmit its arguments. Older clients receive a safe approval-required error. External MCP clients without a supported human approval round trip cannot execute tools whose effective setting asks for review.
+
+If a user sends a normal message while a session waits, the pending approval or question is cancelled and the message runs as a Steer.
+
+To notify people who are not watching, subscribe a [webhook](/guides/webhooks-and-credentials#webhooks) to `session.requiresAction` and `session.humanInput.requested`.
+
+<Tip>Using a coding agent? The [opengeni-client skill](/reference/for-ai-agents) covers this.</Tip>

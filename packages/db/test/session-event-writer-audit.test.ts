@@ -106,6 +106,10 @@ function parseSourceFile(path: string, source: string): SourceFile {
 }
 
 const expectedWriters: Record<string, ExpectedWriter> = {
+  "packages/db/src/archived-session-imports.ts#appendTimeline": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
   "packages/db/src/index.ts#switchSessionCodexAccount": {
     inserts: 1,
     contract: "canonical",
@@ -120,6 +124,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "owned_suffix",
   },
   "packages/db/src/index.ts#reconcileCodexCapacityWait": {
+    inserts: 1,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
+  "packages/db/src/index.ts#reconcileCompletedSandboxSetup": {
     inserts: 1,
     contract: "canonical",
     requiresControlRevalidation: true,
@@ -229,9 +238,13 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
     requiresControlRevalidation: true,
   },
-  "packages/db/src/index.ts#commitSessionAttemptQuiescence": {
-    inserts: 2,
-    contract: "canonical",
+  "packages/db/src/index.ts#recordSessionAttemptQuiescenceInTransaction": {
+    inserts: 1,
+    contract: "owned_suffix",
+  },
+  "packages/db/src/index.ts#projectPausedRecovery": {
+    inserts: 1,
+    contract: "owned_suffix",
   },
   "packages/db/src/index.ts#settleSessionAttemptInterruptions": {
     inserts: 1,
@@ -261,7 +274,11 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#recoverSessionDispatch": { inserts: 2, contract: "canonical" },
+  "packages/db/src/index.ts#recoverSessionOwner": {
+    inserts: 3,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#addSessionSystemUpdateWithSourceMutation": {
     // pending event, producer-side supersession event, consumed-on-arrival
     // cancellation, goal.resumed
@@ -277,7 +294,7 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 2,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#mutateAndAppendSessionEventsForTurnAttempt": {
+  "packages/db/src/index.ts#persist": {
     inserts: 1,
     contract: "turn_attempt_fence",
   },
@@ -371,9 +388,15 @@ const callerOwnedControlWriters = new Set([
 ]);
 
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
+  appendTimeline: ["importArchivedSession", "appendArchivedSessionEvents"],
   cancelSessionSubtreeInTransaction: ["mutateSessionControlInTransaction"],
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
   supersedeXaiCapacityWaitInTransaction: ["reconcileXaiCapacityWait"],
+  projectPausedRecovery: ["commitSessionAttemptQuiescence"],
+  recordSessionAttemptQuiescenceInTransaction: [
+    "commitSessionAttemptQuiescence",
+    "recoverSessionOwner",
+  ],
   supersedeSessionCurrentDirectionInTransaction: [
     "steerAgentSessionInTransaction",
     "steerQueuedTurnInTransaction",
@@ -390,7 +413,7 @@ const expectedOwnedSuffixCallers: Record<string, string[]> = {
     "settleCodexCredentialLeaseLoss",
     "settleCodexCredentialFailover",
     "requestSessionTurnRecovery",
-    "recoverSessionDispatch",
+    "recoverSessionOwner",
   ],
 };
 
@@ -423,7 +446,7 @@ const expectedFailedChildOutboxCallers = [
   // before atomically emitting a false-capacity-recovery terminal boundary.
   "armCodexCapacityWait",
   "failSessionWorkBeforeAttemptClaim",
-  "recoverSessionDispatch",
+  "recoverSessionOwner",
   "settleCodexCredentialFailover",
 ];
 const expectedSharedFailedChildOutboxCallers = [
@@ -470,6 +493,69 @@ const DEV_SEED_PATH = "scripts/dev-seed-design-preview.ts";
 const DEV_SEED_CONVERSATION_WRITER = `${DEV_SEED_PATH}#seedConversations`;
 // Links finished preview sessions to their seeded schedule runs (metadata only).
 const DEV_SEED_SCHEDULE_RUN_WRITER = `${DEV_SEED_PATH}#seedScheduleRuns`;
+const ARCHIVED_IMPORT_PATH = "packages/db/src/archived-session-imports.ts";
+const ARCHIVED_IMPORT_WRITER = `${ARCHIVED_IMPORT_PATH}#appendTimeline`;
+
+/** Inert imports have no turns/attempts. Only these two activity-gated callers
+ * may delegate a timeline write after owning the workspace/session/cursor prefix. */
+function expectArchivedImportBoundary(source: string): void {
+  const sourceFile = parseSourceFile(ARCHIVED_IMPORT_PATH, source);
+  const functions = new Map<string, FunctionLikeDeclaration>();
+  const visit = (node: t.Node): void => {
+    if (isFunctionDeclaration(node) && node.id) functions.set(node.id.name, node);
+    forEachChild(node, visit);
+  };
+  visit(sourceFile.program);
+  for (const caller of expectedOwnedSuffixCallers.appendTimeline!) {
+    const functionNode = functions.get(caller)!;
+    expect(functionNode, caller).toBeDefined();
+    expect(functionCalls(functionNode, "withWorkspaceSubjectSessionActivityRls"), caller).toBe(
+      true,
+    );
+    const activityCalls: t.CallExpression[] = [];
+    const visitActivity = (node: t.Node): void => {
+      if (isCallExpression(node) && callName(node) === "withWorkspaceSubjectSessionActivityRls") {
+        activityCalls.push(node);
+      }
+      forEachChild(node, visitActivity);
+    };
+    forEachChild(functionNode, visitActivity);
+    expect(activityCalls, caller).toHaveLength(1);
+    const membershipFence = activityCalls[0]!.arguments[6];
+    expect(membershipFence?.type, caller).toBe("Literal");
+    expect(
+      membershipFence && "value" in membershipFence ? membershipFence.value : null,
+      caller,
+    ).toBe(true);
+    const locks = callPositions(functionNode, "lockSessionEventWriteRows");
+    const writes = callPositions(functionNode, "appendTimeline");
+    expect(locks, caller).toHaveLength(1);
+    expect(writes, caller).toHaveLength(1);
+    expect(locks[0], caller).toBeLessThan(writes[0]!);
+    expect(
+      functionCallHasProperty(functionNode, "lockSessionEventWriteRows", "sessionIds"),
+      caller,
+    ).toBe(true);
+  }
+  expect(source).toContain("row.importedArchiveImportId !== input.importId");
+  expect(source).toContain("row.importedArchiveSubjectId !== input.subjectId");
+  expect(source).toContain("importedArchiveImportId: payload.importId");
+  expect(source).toContain("turnAssociation: null");
+  const migration = readFileSync(
+    join(repoRoot, "packages/db/drizzle/0560_archived_session_imports.sql"),
+    "utf8",
+  );
+  expect(migration).toContain("sessions_imported_archive_inert_check");
+  expect(migration).toContain("MESSAGE = 'SESSION_IMPORTED_READ_ONLY'");
+  // Turn and attempt guards cover updates as well as fresh admission: the
+  // historical attempt-binding guard alone only covers inserts.
+  expect(migration).toContain("CREATE TRIGGER session_turns_imported_archive_guard");
+  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turns");
+  expect(migration).toContain("CREATE TRIGGER session_turn_attempts_imported_archive_guard");
+  expect(migration).toContain("BEFORE INSERT OR UPDATE ON session_turn_attempts");
+  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_turn_attempts");
+  expect(migration).toContain("OR EXISTS (SELECT 1 FROM session_history_items");
+}
 
 /** The DEV-only seed may only write to this worktree's loopback dev stack. */
 function expectDevSeedGuards(source: string): void {
@@ -501,14 +587,16 @@ function productionTypeScriptFiles(): string[] {
   return files.sort();
 }
 
-function namedTopLevelFunction(
+function namedEnclosingFunction(
   node: t.Node,
+  outermost = false,
 ): { name: string; node: FunctionLikeDeclaration } | null {
   let current: t.Node | undefined = node;
   let result: { name: string; node: FunctionLikeDeclaration } | null = null;
   while (current) {
     if (isFunctionDeclaration(current) && current.id) {
       result = { name: current.id.name, node: current };
+      if (!outermost) return result;
     } else if (
       (isArrowFunctionExpression(current) || isFunctionExpression(current)) &&
       isVariableDeclarator(parentNodes.get(current))
@@ -516,11 +604,20 @@ function namedTopLevelFunction(
       const parent = parentNodes.get(current);
       if (isVariableDeclarator(parent) && isIdentifier(parent.id)) {
         result = { name: parent.id.name, node: current };
+        if (!outermost) return result;
       }
     }
     current = parentNodes.get(current);
   }
   return result;
+}
+
+function isNamedFunctionNode(node: t.Node): boolean {
+  return (
+    isFunctionDeclaration(node) ||
+    ((isArrowFunctionExpression(node) || isFunctionExpression(node)) &&
+      isVariableDeclarator(parentNodes.get(node)))
+  );
 }
 
 function callName(node: t.CallExpression): string | null {
@@ -559,6 +656,110 @@ function writesSessions(node: t.CallExpression): boolean {
   );
 }
 
+const sessionActivityGateWrappers = [
+  "withSessionActivityRlsContext",
+  "withRestoredSessionActivityRlsContext",
+  "withWorkspaceSessionActivityRls",
+  "withWorkspaceSubjectSessionActivityRls",
+  "retrySessionActivityRls",
+  "withWorkspaceSessionEventActivityRls",
+  "retryWorkspaceSessionEventActivityPersistence",
+  "withSessionCodexCapacityMutation",
+  "withScopedCapacityWaiterRls",
+];
+
+function expectScopedCapacityWaiterActivityBoundary(source: string): string {
+  const sourceFile = parseSourceFile("capacity-waiter.ts", source);
+  const wrappers: t.Function[] = [];
+  const visit = (node: t.Node): void => {
+    if (isFunctionDeclaration(node) && node.id?.name === "withScopedCapacityWaiterRls") {
+      wrappers.push(node);
+    }
+    forEachChild(node, visit);
+  };
+  visit(sourceFile.program);
+  expect(wrappers).toHaveLength(1);
+  const wrapper = wrappers[0]!;
+  expect(namedEnclosingFunction(wrapper, true)?.name).toBe(
+    "createScopedSubscriptionCapacityWaiters",
+  );
+  expect(source.slice(wrapper.start, wrapper.body!.start)).toContain(
+    "fn: (db: SessionActivityDatabase) => Promise<T>",
+  );
+  expect(wrapper.body!.body).toHaveLength(2);
+  const [guard, dispatch] = wrapper.body!.body;
+  expect(guard).toMatchObject({
+    type: "IfStatement",
+    test: {
+      type: "UnaryExpression",
+      operator: "!",
+      argument: {
+        type: "CallExpression",
+        callee: {
+          type: "MemberExpression",
+          object: { type: "Identifier", name: "subjectId" },
+          property: { type: "Identifier", name: "trim" },
+        },
+        arguments: [],
+      },
+    },
+    consequent: { type: "BlockStatement", body: [{ type: "ThrowStatement" }] },
+    alternate: null,
+  });
+  const gatedBranch = (name: string, args: string[]) => ({
+    type: "AwaitExpression",
+    argument: {
+      type: "CallExpression",
+      callee: { type: "Identifier", name },
+      arguments: args.map((argument) => ({ type: "Identifier", name: argument })),
+    },
+  });
+  expect(dispatch).toMatchObject({
+    type: "ReturnStatement",
+    argument: {
+      type: "ConditionalExpression",
+      test: {
+        type: "BinaryExpression",
+        operator: "===",
+        left: {
+          type: "MemberExpression",
+          object: { type: "Identifier", name: "snapshot" },
+          property: { type: "Identifier", name: "scope" },
+        },
+        right: { type: "Literal", value: "user" },
+      },
+      consequent: gatedBranch("withWorkspaceSubjectSessionActivityRls", [
+        "db",
+        "workspaceId",
+        "subjectId",
+        "fn",
+      ]),
+      alternate: gatedBranch("withWorkspaceSessionActivityRls", ["db", "workspaceId", "fn"]),
+    },
+  });
+  return source.slice(wrapper.start, wrapper.end);
+}
+
+function hasSessionActivityBoundary(node: t.Node, source: string): boolean {
+  let ancestor = parentNodes.get(node);
+  while (ancestor) {
+    if (
+      isCallExpression(ancestor) &&
+      sessionActivityGateWrappers.includes(callName(ancestor) ?? "")
+    ) {
+      return true;
+    }
+    ancestor = parentNodes.get(ancestor);
+  }
+  const enclosing = namedEnclosingFunction(node);
+  return Boolean(
+    enclosing?.node.body &&
+    /\bSessionActivityDatabase\b/.test(
+      source.slice(enclosing.node.start, enclosing.node.body.start),
+    ),
+  );
+}
+
 const tenancyQuiescenceTables = {
   sessions: "sessions",
   sessionTurns: "session_turns",
@@ -571,6 +772,7 @@ const tenancyQuiescenceTables = {
   sessionGoals: "session_goals",
   codexCapacityWaiters: "codex_capacity_waiters",
   xaiCapacityWaiters: "xai_capacity_waiters",
+  claudeCapacityWaiters: "claude_capacity_waiters",
   sessionRealtimeModes: "session_realtime_modes",
   sessionRealtimeConnections: "session_realtime_connections",
   scheduledTasks: "scheduled_tasks",
@@ -611,6 +813,132 @@ function writesTenancyQuiescenceTable(node: t.CallExpression): boolean {
   );
 }
 
+function objectPropertyValue(object: t.ObjectExpression, name: string): t.Node | null {
+  for (const property of object.properties) {
+    if (
+      isObjectProperty(property) &&
+      ((isIdentifier(property.key) && property.key.name === name) ||
+        (isStringLiteral(property.key) && property.key.value === name))
+    ) {
+      return property.value;
+    }
+  }
+  return null;
+}
+
+/** Resolve the actual table object, not the provider label or a guessed table name. */
+function resolveTableObject(
+  path: string,
+  sourceFile: SourceFile,
+  node: t.Node,
+): t.ObjectExpression {
+  if (isObjectExpression(node)) return node;
+  if (!isIdentifier(node)) throw new Error(`Unresolved table binding in ${path}`);
+  let initializer: t.Node | null = null;
+  const visit = (candidate: t.Node): void => {
+    if (
+      isVariableDeclarator(candidate) &&
+      isIdentifier(candidate.id) &&
+      candidate.id.name === node.name
+    ) {
+      initializer = candidate.init ?? null;
+    }
+    forEachChild(candidate, visit);
+  };
+  visit(sourceFile.program);
+  if (initializer) return resolveTableObject(path, sourceFile, initializer);
+  for (const statement of sourceFile.program.body) {
+    if (statement.type !== "ImportDeclaration" || !statement.source.value.startsWith(".")) {
+      continue;
+    }
+    for (const specifier of statement.specifiers) {
+      if (
+        specifier.type !== "ImportSpecifier" ||
+        specifier.local.name !== node.name ||
+        !isIdentifier(specifier.imported)
+      ) {
+        continue;
+      }
+      const importedPath = resolve(path, "..", `${statement.source.value}.ts`);
+      const imported = parseSourceFile(importedPath, readFileSync(importedPath, "utf8"));
+      return resolveTableObject(importedPath, imported, specifier.imported);
+    }
+  }
+  throw new Error(`Unresolved table object ${node.name} in ${path}`);
+}
+
+function subscriptionWaiterBindings(): Map<string, string[]> {
+  const factories = new Map<string, string[]>([
+    ["createScopedSubscriptionCapacityWaiters", []],
+    ["createSubscriptionAccountRepository", []],
+  ]);
+  for (const path of productionTypeScriptFiles()) {
+    const source = readFileSync(path, "utf8");
+    if (![...factories.keys()].some((name) => source.includes(name))) continue;
+    const sourceFile = parseSourceFile(path, source);
+    const visit = (node: t.Node): void => {
+      if (isCallExpression(node)) {
+        const binding = factories.get(callName(node) ?? "");
+        if (binding) {
+          const options = node.arguments[0];
+          if (!options || !isObjectExpression(options)) {
+            throw new Error(`Unresolved subscription options in ${path}`);
+          }
+          const tables = objectPropertyValue(options, "tables");
+          if (!tables) throw new Error(`Missing subscription table binding in ${path}`);
+          const waiter = objectPropertyValue(
+            resolveTableObject(path, sourceFile, tables),
+            "capacityWaiters",
+          );
+          if (!waiter || !isMemberExpression(waiter) || !isIdentifier(waiter.property)) {
+            throw new Error(`Unresolved subscription waiter table in ${path}`);
+          }
+          const table =
+            tenancyQuiescenceTables[waiter.property.name as keyof typeof tenancyQuiescenceTables];
+          if (!table) throw new Error(`Uninventoried subscription waiter ${waiter.property.name}`);
+          binding.push(table);
+        }
+      }
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+  }
+  for (const [factory, tables] of factories) {
+    expect(tables.sort(), factory).toEqual(["claude_capacity_waiters", "xai_capacity_waiters"]);
+  }
+  return factories;
+}
+
+function parameterizedWaiterMutationTables(
+  node: t.CallExpression,
+  bindings: Map<string, string[]>,
+): string[] {
+  if (
+    !isMemberExpression(node.callee) ||
+    !["insert", "update", "delete"].includes(callName(node) ?? "")
+  ) {
+    return [];
+  }
+  const table = node.arguments[0];
+  if (
+    !table ||
+    !isMemberExpression(table) ||
+    !isIdentifier(table.object) ||
+    table.object.name !== "tables" ||
+    !isIdentifier(table.property) ||
+    table.property.name !== "capacityWaiters"
+  )
+    return [];
+  let ancestor: t.Node | undefined = node;
+  while (ancestor) {
+    if (isFunctionDeclaration(ancestor) && ancestor.id && bindings.has(ancestor.id.name)) {
+      return bindings.get(ancestor.id.name)!;
+    }
+    ancestor = parentNodes.get(ancestor);
+  }
+  throw new Error("Unresolved parameterized capacity-waiter writer");
+}
+
 function deletedTenancyCascadeRoot(node: t.CallExpression): string | null {
   if (!isMemberExpression(node.callee) || callName(node) !== "delete") return null;
   const table = node.arguments[0];
@@ -638,9 +966,14 @@ function insertsSessionSystemUpdateOutbox(node: t.CallExpression): boolean {
   );
 }
 
-function functionCalls(functionNode: FunctionLikeDeclaration, expectedName: string): boolean {
+function functionCalls(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  recursive = false,
+): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
+    if (!recursive && isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) found = true;
     if (!found) forEachChild(node, visit);
   };
@@ -655,6 +988,7 @@ function functionCallHasProperty(
 ): boolean {
   let found = false;
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (
       isCallExpression(node) &&
       callName(node) === expectedName &&
@@ -689,6 +1023,7 @@ function callPositionsWithStringProperty(
 ): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (
       isCallExpression(node) &&
       callName(node) === expectedName &&
@@ -721,6 +1056,7 @@ function callPositionsWithStringArgument(
 ): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       const argument = node.arguments[argumentIndex];
       if (argument !== undefined && isStringLiteral(argument) && argument.value === argumentValue) {
@@ -765,9 +1101,14 @@ function genericPrefixPositions(functionNode: FunctionLikeDeclaration): number[]
   );
 }
 
-function callPositions(functionNode: FunctionLikeDeclaration, expectedName: string): number[] {
+function callPositions(
+  functionNode: FunctionLikeDeclaration,
+  expectedName: string,
+  recursive = false,
+): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (!recursive && isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && callName(node) === expectedName) {
       positions.push(nodeStart(node));
     }
@@ -780,6 +1121,7 @@ function callPositions(functionNode: FunctionLikeDeclaration, expectedName: stri
 function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
   const positions: number[] = [];
   const visit = (node: t.Node): void => {
+    if (isNamedFunctionNode(node)) return;
     if (isCallExpression(node) && insertsSessionEvents(node)) {
       positions.push(nodeStart(node));
     }
@@ -790,9 +1132,120 @@ function insertPositions(functionNode: FunctionLikeDeclaration): number[] {
 }
 
 describe("session_events writer inventory", () => {
-  test("pins all 17 tenancy-quiescence mutation surfaces behind workspace RLS entry", () => {
+  test("scoped capacity waiters retain activity admission in both authority branches", () => {
+    const source = readFileSync(join(repoRoot, "packages/db/src/index.ts"), "utf8");
+    const wrapper = expectScopedCapacityWaiterActivityBoundary(source);
+    const fixture = `function createScopedSubscriptionCapacityWaiters() { ${wrapper} }`;
+    for (const [gated, ungated] of [
+      ["withWorkspaceSubjectSessionActivityRls", "withWorkspaceSubjectRls"],
+      ["withWorkspaceSessionActivityRls", "withWorkspaceRls"],
+    ]) {
+      expect(() =>
+        expectScopedCapacityWaiterActivityBoundary(fixture.replaceAll(gated!, ungated!)),
+      ).toThrow();
+    }
+    expect(() =>
+      expectScopedCapacityWaiterActivityBoundary(
+        fixture.replace("if (!subjectId.trim())", "if (false)"),
+      ),
+    ).toThrow();
+  });
+
+  test("nested factory writers cannot borrow sibling lock or gate evidence", () => {
+    const sourceFile = parseSourceFile(
+      "factory.ts",
+      `
+      function createScopedSubscriptionCapacityWaiters() {
+        function protectedWriter(tx: SessionActivityDatabase) {
+          lockSessionEventWriteRows(tx, { controlLock: "share" });
+          tx.insert(schema.sessionEvents);
+          tx.insert(tables.capacityWaiters);
+          tx.update(schema.sessions);
+        }
+        const unprotectedWriter = (tx: Database) => {
+          tx.insert(schema.sessionEvents);
+          tx.insert(tables.capacityWaiters);
+          tx.update(schema.sessions);
+        };
+        return { protectedWriter, unprotectedWriter };
+      }
+    `,
+    );
+    const writers: Array<{ name: string; node: FunctionLikeDeclaration }> = [];
+    const violations: string[] = [];
+    const aliasedWriters: Record<string, string[]> = {};
+    const bindings = new Map([
+      [
+        "createScopedSubscriptionCapacityWaiters",
+        ["claude_capacity_waiters", "xai_capacity_waiters"],
+      ],
+    ]);
+    const visit = (node: t.Node): void => {
+      if (isCallExpression(node) && insertsSessionEvents(node)) {
+        writers.push(namedEnclosingFunction(node)!);
+      }
+      if (isCallExpression(node)) {
+        const tables = parameterizedWaiterMutationTables(node, bindings);
+        if (tables.length) aliasedWriters[namedEnclosingFunction(node)!.name] = tables;
+        if (writesSessions(node) && !hasSessionActivityBoundary(node, sourceFile.source)) {
+          violations.push(namedEnclosingFunction(node)!.name);
+        }
+      }
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+    expect(violations).toEqual(["unprotectedWriter"]);
+    expect(aliasedWriters).toEqual({
+      protectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+      unprotectedWriter: ["claude_capacity_waiters", "xai_capacity_waiters"],
+    });
+    expect(writers.map((writer) => writer.name)).toEqual(["protectedWriter", "unprotectedWriter"]);
+    const factory = sourceFile.program.body[0]!;
+    expect(isFunctionDeclaration(factory)).toBe(true);
+    if (!isFunctionDeclaration(factory)) throw new Error("Expected a factory declaration");
+    expect(callPositions(factory, "lockSessionEventWriteRows")).toEqual([]);
+    expect(insertPositions(factory)).toEqual([]);
+    expect(controlAwarePrefixPositions(writers[0]!.node)).toHaveLength(1);
+    expect(insertPositions(writers[0]!.node)).toHaveLength(1);
+    expect(controlAwarePrefixPositions(writers[1]!.node)).toEqual([]);
+    expect(functionCalls(writers[1]!.node, "lockSessionEventWriteRows")).toBe(false);
+    expect(insertPositions(writers[1]!.node)).toHaveLength(1);
+    expect(
+      sourceFile.source.slice(writers[1]!.node.start, writers[1]!.node.body!.start),
+    ).not.toContain("SessionActivityDatabase");
+  });
+
+  test("forbidden effects inside invoked named retry callbacks remain visible", () => {
+    const sourceFile = parseSourceFile(
+      "retry.ts",
+      `
+      function command() {
+        function retryCallback() { publishSessionEventIds(); }
+        return runSessionCommandPersistenceTransaction(retryCallback);
+      }
+    `,
+    );
+    const visit = (node: t.Node): void => {
+      forEachChild(node, visit);
+    };
+    visit(sourceFile.program);
+    const command = sourceFile.program.body[0]!;
+    if (!isFunctionDeclaration(command)) throw new Error("Expected a command declaration");
+    expect(functionCalls(command, "runSessionCommandPersistenceTransaction")).toBe(true);
+    // Scope-local positive evidence cannot certify the sibling callback, while
+    // recursive forbidden-effect checks must still reject its publication.
+    expect(functionCalls(command, "publishSessionEventIds")).toBe(false);
+    expect(functionCalls(command, "publishSessionEventIds", true)).toBe(true);
+    const persistence = callPositions(command, "runSessionCommandPersistenceTransaction")[0]!;
+    const forbidden = callPositions(command, "publishSessionEventIds", true);
+    expect(forbidden).toHaveLength(1);
+    expect(forbidden[0]).toBeLessThan(persistence);
+  });
+
+  test("pins all 18 tenancy-quiescence mutation surfaces behind workspace RLS entry", () => {
     const discovered = new Set<string>();
     const writers = new Set<string>();
+    const bindings = subscriptionWaiterBindings();
     const sqlTables = Object.values(tenancyQuiescenceTables).join("|");
     const rawMutation = new RegExp(
       `\\b(?:insert\\s+into|update|delete\\s+from)\\s+(?:[a-z_]+\\.)?(?:${sqlTables})\\b`,
@@ -802,14 +1255,15 @@ describe("session_events writer inventory", () => {
       const source = readFileSync(path, "utf8");
       if (
         !Object.keys(tenancyQuiescenceTables).some((name) => source.includes(name)) &&
-        !Object.values(tenancyQuiescenceTables).some((name) => source.includes(name))
+        !Object.values(tenancyQuiescenceTables).some((name) => source.includes(name)) &&
+        !source.includes("tables.capacityWaiters")
       )
         continue;
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const recordWriter = (node: t.Node, table: string): void => {
         discovered.add(table);
-        const enclosing = namedTopLevelFunction(node);
+        const enclosing = namedEnclosingFunction(node);
         writers.add(
           enclosing ? `${file}#${enclosing.name}` : `${file}:${lineNumber(source, node)}`,
         );
@@ -822,6 +1276,11 @@ describe("session_events writer inventory", () => {
               node,
               tenancyQuiescenceTables[table.property.name as keyof typeof tenancyQuiescenceTables],
             );
+          }
+        }
+        if (isCallExpression(node)) {
+          for (const table of parameterizedWaiterMutationTables(node, bindings)) {
+            recordWriter(node, table);
           }
         }
         if (isTaggedTemplateExpression(node)) {
@@ -851,7 +1310,22 @@ describe("session_events writer inventory", () => {
       migration.indexOf("];", migration.indexOf("hot_tables constant text[]")),
     );
     const guardedTables = [...declaration.matchAll(/'([^']+)'/gu)].map((match) => match[1]);
-    expect(guardedTables.sort()).toEqual([...Object.values(tenancyQuiescenceTables)].sort());
+    // 0345's original 17-table ledger is immutable. 0598 clones xAI's complete
+    // trigger contract onto Claude, adding the eighteenth current hot table.
+    expect(guardedTables.sort()).toEqual(
+      Object.entries(tenancyQuiescenceTables)
+        .filter(([name]) => name !== "claudeCapacityWaiters")
+        .map(([, table]) => table)
+        .sort(),
+    );
+    const claudeMigration = readFileSync(
+      join(repoRoot, "packages/db/drizzle/0598_claude_subscription_account_pools.sql"),
+      "utf8",
+    );
+    expect(claudeMigration).toContain("'xai_session_account_pins', 'xai_capacity_waiters'");
+    expect(claudeMigration).toMatch(
+      /SELECT pg_get_triggerdef\(oid\) AS definition FROM pg_trigger[\s\S]*?AND NOT tgisinternal[\s\S]*?EXECUTE replace\(item\.definition, 'xai_', 'claude_'\)/u,
+    );
     expect(migration).toMatch(
       /BEFORE INSERT OR UPDATE OR DELETE[\s\S]*?require_session_tenancy_fence/u,
     );
@@ -877,7 +1351,7 @@ describe("session_events writer inventory", () => {
       const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const recordDelete = (node: t.Node, root: string): void => {
-        const enclosing = namedTopLevelFunction(node);
+        const enclosing = namedEnclosingFunction(node);
         if (!enclosing) throw new Error(`Unnamed ${root} delete in ${file}`);
         const key = `${file}#${enclosing.name}`;
         const writer = writers.get(key) ?? {
@@ -932,16 +1406,6 @@ describe("session_events writer inventory", () => {
 
   test("every production session-row writer has an activity gate or exact maintenance boundary", () => {
     const violations: string[] = [];
-    const gateWrappers = [
-      "withSessionActivityRlsContext",
-      "withRestoredSessionActivityRlsContext",
-      "withWorkspaceSessionActivityRls",
-      "withWorkspaceSubjectSessionActivityRls",
-      "retrySessionActivityRls",
-      "withWorkspaceSessionEventActivityRls",
-      "retryWorkspaceSessionEventActivityPersistence",
-      "withSessionCodexCapacityMutation",
-    ];
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
@@ -950,14 +1414,8 @@ describe("session_events writer inventory", () => {
       const sourceFile = parseSourceFile(path, source);
       const checked = new Set<string>();
       const checkWriter = (node: t.Node): void => {
-        let ancestor = parentNodes.get(node);
-        while (ancestor) {
-          if (isCallExpression(ancestor) && gateWrappers.includes(callName(ancestor) ?? "")) {
-            return;
-          }
-          ancestor = parentNodes.get(ancestor);
-        }
-        const enclosing = namedTopLevelFunction(node);
+        if (hasSessionActivityBoundary(node, source)) return;
+        const enclosing = namedEnclosingFunction(node);
         if (!enclosing) {
           violations.push(`${file}:${lineNumber(source, node)} unnamed session writer`);
           return;
@@ -965,6 +1423,12 @@ describe("session_events writer inventory", () => {
         const key = `${file}#${enclosing.name}`;
         if (checked.has(key)) return;
         checked.add(key);
+        if (key === ARCHIVED_IMPORT_WRITER) {
+          // The unbranded suffix receives the create hook's Database handle;
+          // its closed caller inventory and import boundary are pinned below.
+          expectArchivedImportBoundary(source);
+          return;
+        }
         if (key === "packages/db/src/skill-config-migration.ts#migrateLegacySkillConfigurations") {
           // The parser-backed maintenance migration cannot use the runtime
           // Drizzle activity handle. Its only writer updates dormant Skill
@@ -987,7 +1451,12 @@ describe("session_events writer inventory", () => {
           expect(callers).toEqual(["packages/db/src/migrate.ts"]);
           return;
         }
-        if (key === DEV_SEED_CONVERSATION_WRITER || key === DEV_SEED_SCHEDULE_RUN_WRITER) {
+        const outer = namedEnclosingFunction(node, true);
+        const outerKey = `${file}#${outer?.name}`;
+        if (
+          outerKey === DEV_SEED_CONVERSATION_WRITER ||
+          outerKey === DEV_SEED_SCHEDULE_RUN_WRITER
+        ) {
           // The DEV-only design-preview seed writes fixture history into the
           // local dev stack through the migrations role, outside the runtime's
           // Drizzle handle. seedConversations replays the full open -> finalized
@@ -1002,10 +1471,7 @@ describe("session_events writer inventory", () => {
           violations.push(`${key} has no function body`);
           return;
         }
-        const signature = source.slice(enclosing.node.start, body.start);
-        if (!/\bSessionActivityDatabase\b/.test(signature)) {
-          violations.push(`${key} has no activity-gated handle or wrapper`);
-        }
+        violations.push(`${key} has no activity-gated handle or wrapper`);
       };
       const visit = (node: t.Node): void => {
         if (isCallExpression(node) && writesSessions(node)) checkWriter(node);
@@ -1087,7 +1553,9 @@ describe("session_events writer inventory", () => {
 
     for (const path of productionTypeScriptFiles()) {
       const source = readFileSync(path, "utf8");
+      const file = relative(repoRoot, path).replaceAll("\\", "/");
       if (
+        file !== "packages/db/src/session-attempt-fence.ts" &&
         !source.includes("sessionEvents") &&
         !source.includes("session_events") &&
         !source.includes("sessionSystemUpdateOutbox") &&
@@ -1095,16 +1563,18 @@ describe("session_events writer inventory", () => {
       ) {
         continue;
       }
-      const file = relative(repoRoot, path).replaceAll("\\", "/");
       const sourceFile = parseSourceFile(path, source);
       const visit = (node: t.Node): void => {
-        if (isFunctionDeclaration(node) && node.id) {
-          const definitions = functionDefinitions.get(node.id.name) ?? [];
-          definitions.push({ sourceFile, functionNode: node });
-          functionDefinitions.set(node.id.name, definitions);
+        if (isNamedFunctionNode(node)) {
+          const enclosing = namedEnclosingFunction(node);
+          if (enclosing) {
+            const definitions = functionDefinitions.get(enclosing.name) ?? [];
+            definitions.push({ sourceFile, functionNode: enclosing.node });
+            functionDefinitions.set(enclosing.name, definitions);
+          }
         }
         if (isCallExpression(node)) {
-          const enclosing = namedTopLevelFunction(node);
+          const enclosing = namedEnclosingFunction(node);
           if (insertsSessionEvents(node)) {
             if (!enclosing) throw new Error(`Unnamed session_events writer in ${file}`);
             const key = `${file}#${enclosing.name}`;
@@ -1152,7 +1622,7 @@ describe("session_events writer inventory", () => {
           if (
             /\binsert\s+into\s+(?:[a-z_]+\.)?session_events\b/i.test(sqlText) &&
             // The DEV-only seed's pinned exception; see DEV_SEED_CONVERSATION_WRITER.
-            `${file}#${namedTopLevelFunction(node)?.name}` !== DEV_SEED_CONVERSATION_WRITER
+            `${file}#${namedEnclosingFunction(node, true)?.name}` !== DEV_SEED_CONVERSATION_WRITER
           ) {
             rawSqlWriters.push(`${file}:${lineNumber(sourceFile.source, node)}`);
           }
@@ -1431,10 +1901,10 @@ describe("session_events writer inventory", () => {
     expect(functionCalls(retryHelper!, "runIdempotentPersistenceTransaction")).toBe(true);
     expect(functionCalls(retryHelper!, "withWorkspaceSessionActivityRls")).toBe(true);
     expect(functionCalls(retryHelper!, "withWorkspaceSubjectSessionActivityRls")).toBe(true);
-    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand")).toBe(false);
-    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent")).toBe(false);
-    expect(functionCalls(retryHelper!, "publishSessionEventIds")).toBe(false);
-    expect(functionCalls(retryHelper!, "requestControlWakeDispatch")).toBe(false);
+    expect(functionCalls(retryHelper!, "publishAndWakeAgentCommand", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "publishWorkspaceControlEvent", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "publishSessionEventIds", true)).toBe(false);
+    expect(functionCalls(retryHelper!, "requestControlWakeDispatch", true)).toBe(false);
 
     for (const commandName of [
       "sendAgentSessionMessage",
@@ -1456,7 +1926,7 @@ describe("session_events writer inventory", () => {
         "publishSessionEventIds",
         "requestControlWakeDispatch",
       ]) {
-        for (const effect of callPositions(command!, externalEffect)) {
+        for (const effect of callPositions(command!, externalEffect, true)) {
           expect(persistence).toBeLessThan(effect);
         }
       }

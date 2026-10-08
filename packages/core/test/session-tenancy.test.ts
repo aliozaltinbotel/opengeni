@@ -7,10 +7,15 @@ import {
   createSession,
   ensureManagedAccessForUser,
   getSessionForSubject,
+  importArchivedSession,
+  createFileUpload,
+  completeFileUpload,
+  withSessionRlsActorContext,
   SessionTenancyConflictError,
   SessionTenancyNotActivatedError,
   transitionSessionVisibility,
   type DbClient,
+  nestedPostgresSqlState,
 } from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
@@ -20,6 +25,7 @@ import {
 import type { AccessGrantAuthorization } from "../src/access";
 import { HTTPException } from "hono/http-exception";
 import { SessionAuthorizationDeniedError } from "../src/session-authorization";
+import { readSessionAttachmentFiles } from "../src/domain/session-file-access";
 import {
   forkManagedHumanSession,
   getManagedHumanSessionCreateCapabilities,
@@ -52,6 +58,90 @@ afterAll(async () => {
 }, 180_000);
 
 describe("managed-human session tenancy application service", () => {
+  test("imported originals use the normal core attachment read path and forks fail with the typed read-only error", async () => {
+    if (!shared || !client) return;
+    const userId = crypto.randomUUID();
+    const access = await ensureManagedAccessForUser(client.db, {
+      userId,
+      email: `${userId}@example.test`,
+      name: "Imported attachment owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    await shared.admin`insert into session_tenancy_activations(account_id,activation_version,inventory_digest,parity_digest,activated_by) values(${grant.accountId},1,${"0".repeat(64)},${"1".repeat(64)},'core-archive')`;
+    const owner = { subjectId: grant.subjectId, privateFileOwnerSubjectId: grant.subjectId };
+    const imported = await withSessionRlsActorContext(owner, async () => {
+      const upload = await createFileUpload(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        privateOwnerSubjectId: grant.subjectId,
+        fileId: crypto.randomUUID(),
+        filename: "history.png",
+        safeFilename: "history.png",
+        contentType: "image/png",
+        sizeBytes: 3,
+        bucket: "test",
+        objectKey: crypto.randomUUID(),
+        expiresAt: new Date(Date.now() + 60_000),
+      });
+      const file = await completeFileUpload(client!.db, grant.workspaceId, upload.uploadId);
+      const result = await importArchivedSession(client!.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        subjectId: grant.subjectId,
+        fileOwnerSubjectId: grant.subjectId,
+        requireLiveSubject: true,
+        createdBy: { kind: "subject", subjectId: grant.subjectId },
+        payload: {
+          importId: "core-file",
+          title: "Imported file",
+          createdAt: "2019-01-01T00:00:00Z",
+          events: [
+            {
+              type: "user.message",
+              createdAt: "2019-01-01T00:00:00Z",
+              payload: { resources: [{ kind: "file", fileId: file.id }] },
+            },
+          ],
+        },
+      });
+      return { result, file };
+    });
+    const sessionAuthorization: SessionAuthorizationPort = {
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "root" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    };
+    const deps = { db: client.db, bus: new MemoryEventBus(), sessionAuthorization };
+    expect(
+      (
+        await readSessionAttachmentFiles(
+          deps,
+          { ...grant, subjectId: "user:archive-viewer" },
+          imported.result.session.id,
+          [imported.file.id],
+        )
+      ).map((file) => file.id),
+    ).toEqual([imported.file.id]);
+    await expect(
+      forkManagedHumanSession(
+        deps,
+        {
+          grant,
+          accountGrant: access.accountGrants[0] ?? null,
+          authenticatedSubjectId: grant.subjectId,
+          contextIntegrity: true,
+          canonicalManagedHumanSession: true,
+        },
+        grant.workspaceId,
+        imported.result.session.id,
+        {
+          idempotencyKey: "core-no-import-fork",
+          visibility: "shared",
+          workspaceSharedAcknowledged: false,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "SESSION_IMPORTED_READ_ONLY" });
+  });
+
   test("reports private-create availability to members only after organization enablement", async () => {
     if (!shared || !client) return;
     const userId = `core-private-create-${crypto.randomUUID()}`;
@@ -89,26 +179,15 @@ describe("managed-human session tenancy application service", () => {
       ),
     ).rejects.toMatchObject({ status: 403 });
 
+    // No activation receipt and no setting row (0611): Only me defaults on.
     await expect(
       getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
     ).resolves.toEqual({
-      activated: false,
-      canCreatePrivate: false,
-      reason: "not_activated",
+      activated: true,
+      canCreatePrivate: true,
+      reason: "available",
     });
-    await shared.admin`
-      insert into session_tenancy_activations (
-        account_id, activation_version, inventory_digest, parity_digest, activated_by
-      ) values (
-        ${grant.accountId}, 1, ${"5".repeat(64)}, ${"6".repeat(64)}, 'core-private-create'
-      )`;
-    await expect(
-      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
-    ).resolves.toEqual({
-      activated: false,
-      canCreatePrivate: false,
-      reason: "not_activated",
-    });
+    // An explicit owner/admin disable is the only thing that turns it off.
     const [membership] = await shared.admin<{ id: string }[]>`
       select id from organization_memberships
       where account_id = ${grant.accountId} and subject_id = ${subjectId}`;
@@ -116,7 +195,17 @@ describe("managed-human session tenancy application service", () => {
     await shared.admin`
       insert into organization_private_session_settings (
         account_id, enabled, version, updated_by_membership_id
-      ) values (${grant.accountId}, true, 1, ${membership.id})`;
+      ) values (${grant.accountId}, false, 1, ${membership.id})`;
+    await expect(
+      getManagedHumanSessionCreateCapabilities({ db: client.db }, canonical, grant.workspaceId),
+    ).resolves.toEqual({
+      activated: false,
+      canCreatePrivate: false,
+      reason: "not_activated",
+    });
+    await shared.admin`
+      update organization_private_session_settings set enabled = true, version = 2
+      where account_id = ${grant.accountId}`;
     await shared.admin`
       update organization_memberships set role = 'member' where id = ${membership.id}`;
     await expect(
@@ -156,7 +245,7 @@ describe("managed-human session tenancy application service", () => {
     });
   }, 180_000);
 
-  test("returns empty personal-resource discovery before activation while mutations stay closed", async () => {
+  test("serves personal-resource discovery for a receipt-less organization; unknown authorities deny", async () => {
     if (!shared || !client) return;
     const userId = `core-personal-discovery-inactive-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
@@ -183,7 +272,7 @@ describe("managed-human session tenancy application service", () => {
       db: client.db,
       sessionAuthorization: {
         authorizeSession: async () => {
-          throw new Error("host authorization must not run before activation");
+          throw new Error("host authorization must not run for an unknown authority");
         },
         resolveListScope: async () => ({ kind: "all" as const }),
       },
@@ -219,8 +308,9 @@ describe("managed-human session tenancy application service", () => {
         limit: 100,
       }),
     ).resolves.toEqual({ authorities: [], nextCursor: null });
-    await expect(
-      issueManagedHumanUserResourceGrant(
+    let issueFailure: unknown;
+    try {
+      await issueManagedHumanUserResourceGrant(
         deps,
         authorization,
         grant.workspaceId,
@@ -232,8 +322,13 @@ describe("managed-human session tenancy application service", () => {
           context: "user_private",
           workspaceSharedAcknowledged: false,
         },
-      ),
-    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+      );
+    } catch (error) {
+      issueFailure = error;
+    }
+    // The database authority check (not an activation gate) denies it.
+    expect(issueFailure).not.toBeInstanceOf(SessionTenancyNotActivatedError);
+    expect(nestedPostgresSqlState(issueFailure)).toBe("42501");
     await expect(
       revokeManagedHumanUserResourceGrant(
         deps,
@@ -241,7 +336,7 @@ describe("managed-human session tenancy application service", () => {
         grant.workspaceId,
         crypto.randomUUID(),
       ),
-    ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+    ).rejects.not.toBeInstanceOf(SessionTenancyNotActivatedError);
   }, 180_000);
 
   test("lists, issues, reissues expired identities, and route-fences revocation", async () => {
@@ -814,7 +909,7 @@ describe("managed-human session tenancy application service", () => {
     ).rejects.toMatchObject({ status: 403 } satisfies Partial<HTTPException>);
   });
 
-  test("rejects an unactivated organization before any target or host authorization", async () => {
+  test("a receipt-less organization has no activation pre-gate and reaches ordinary target authorization", async () => {
     if (!shared || !client) return;
     const userId = `core-session-tenancy-inactive-${crypto.randomUUID()}`;
     const subjectId = `user:${userId}`;
@@ -853,15 +948,16 @@ describe("managed-human session tenancy application service", () => {
           expectedAuthorityEpoch: 1,
           idempotencyKey: `inactive-visibility-${sessionId}`,
         }),
-      ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+      ).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
       await expect(
         forkManagedHumanSession(deps, authorization, grant.workspaceId, sessionId, {
           idempotencyKey: `inactive-fork-${sessionId}`,
           visibility: "private",
           workspaceSharedAcknowledged: false,
         }),
-      ).rejects.toBeInstanceOf(SessionTenancyNotActivatedError);
+      ).rejects.toBeInstanceOf(SessionAuthorizationDeniedError);
     }
+    // A missing target is denied before any host authorization.
     expect(hostCalls).toBe(0);
   });
 });
