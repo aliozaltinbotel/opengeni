@@ -79,7 +79,7 @@ The legacy `PATCH /v1/workspaces/:workspaceId/external-members/:subjectId`
 accepts `{ identity, expectedPermissions, permissions }` and keeps its
 compare-and-set contract. It uses the same permission-update lifecycle, including
 authorization-revision invalidation on narrowing. An empty permission set keeps
-the existing membership with no permissions (migration 0550); empty onboarding
+the existing membership with no permissions (migration 0656); empty onboarding
 grants and empty keyed HTTP updates remain invalid.
 
 ## Withdraw access, including a grant still in flight
