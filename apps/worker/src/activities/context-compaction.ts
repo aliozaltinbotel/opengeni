@@ -14,6 +14,12 @@ import {
   bindModelSourceInput,
   modelSourceInputBinding,
   omitModelSourceInputBinding,
+  buildCompactionPromptInput,
+  fitCompactionPrefix,
+  ANTHROPIC_REQUEST_MAX_BYTES,
+  AnthropicSizeRecoveryExhaustedError,
+  type AnthropicRequestSize,
+  omitOpaqueArtifactsFromPortableCompactionHistory,
   buildCompactionReplacementHistory,
   buildRemoteV2ReplacementHistory,
   compactionThresholdTokens,
@@ -70,6 +76,8 @@ export type CompactionSummarizer = ((
   estimatePrefixTokens?: () => number;
   /** Last successful request on this exact callable; reset before each invocation. */
   successfulModelSourceKey?: () => string | undefined;
+  /** Exact provider wire size, with the same projection as the checkpoint call. */
+  measureInputBytes?: (settings: Settings, input: CompactionItem[]) => Promise<number>;
 };
 
 /** Returns the opaque Codex remote compaction v2 item. */
@@ -119,6 +127,8 @@ export async function maybeCompactContext(
     materializeHistory?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
     /** Turn-scoped attachment/modality view; canonical persisted rows stay untouched. */
     projectModelInput?: (items: CompactionItem[]) => Promise<CompactionItem[]>;
+    /** A typed pre-dispatch size rejection parks the newest complete work unit. */
+    requestSizeRecovery?: { maxBytes: number; size: AnthropicRequestSize };
   } = {},
 ): Promise<MaybeCompactResult> {
   if (options.codexCompactionMode === "remote_v2" && options.isCodexSubscriptionTurn !== true) {
@@ -225,9 +235,14 @@ export async function maybeCompactContext(
     expectedAttemptId: scope.attemptId,
     trigger,
     estimatedTokensBefore,
+    ...(options.requestSizeRecovery
+      ? { requestSizeRecovery: options.requestSizeRecovery.size }
+      : {}),
     ...(useRemoteV2 ? { implementation: REMOTE_COMPACTION_V2_IMPLEMENTATION } : {}),
   });
   if (!started.recorded) {
+    if (started.reason === "request_size_recovery_exhausted")
+      throw new AnthropicSizeRecoveryExhaustedError();
     throw new TurnAttemptFencedError(
       `turn attempt was fenced while recording context compaction start: ${started.reason}`,
     );
@@ -480,33 +495,83 @@ async function compactContextPortable(
   options: {
     clearRequestedCompaction?: boolean;
     trigger?: "auto" | "operator" | "proactive" | "overflow";
+    requestSizeRecovery?: { maxBytes: number };
   },
   projectForWire: (items: CompactionItem[]) => Promise<CompactionItem[]>,
   sourceIdsByItem: ReadonlyMap<CompactionItem,string>,
 ): Promise<MaybeCompactResult> {
   const estimatedTokensBefore = estimateTokens(items);
-  const summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
-  const summaryBody = summarized.summaryBody;
-  const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
+  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
   const outputReserve = compactionSummaryOutputTokens(settings.contextWindowTokens);
   const structuralBudget = Math.min(
     contextInputBudgetTokens(settings) || settings.contextWindowTokens - outputReserve,
     settings.contextWindowTokens - outputReserve,
   );
-  const prefixTokens = Math.max(0, Math.ceil(summarize.estimatePrefixTokens?.() ?? 0));
+  let summarizedItems = canonicalItems;
+  let deferredItems: CompactionItem[] = [];
+  let summarized: Awaited<ReturnType<typeof summarizeWithCodexOverflowTrimming>>;
+  if (summarize.measureInputBytes) {
+    const budget = Math.max(0, structuralBudget - prefixTokens);
+    const maxBytes = Math.min(
+      ANTHROPIC_REQUEST_MAX_BYTES,
+      options.requestSizeRecovery?.maxBytes ?? ANTHROPIC_REQUEST_MAX_BYTES,
+    );
+    const prepare = async (prefix: CompactionItem[]) =>
+      buildCompactionPromptInput(
+        omitOpaqueArtifactsFromPortableCompactionHistory(await projectForWire(prefix)),
+      );
+    const cut = await fitCompactionPrefix(
+      canonicalItems,
+      async (prefix) => {
+        const projected = await prepare(prefix);
+        return (
+          estimateTokens(projected) <= budget &&
+          (await summarize.measureInputBytes!(settings, projected)) <= maxBytes
+        );
+      },
+      Boolean(options.requestSizeRecovery),
+    );
+    if (cut === null)
+      throw new EmptyCompactionSummaryError({
+        stage: "portable_byte_budget",
+        reason: "no_complete_prefix_fit",
+      });
+    summarizedItems = canonicalItems.slice(0, cut);
+    deferredItems = canonicalItems.slice(cut);
+    const projected = await prepare(summarizedItems);
+    summarized = {
+      summaryBody: await summarize(settings, projected),
+      preparation: {
+        input: projected,
+        estimatedInputTokens: estimateTokens(projected),
+        rewrittenToolOutputs: 0,
+        droppedHistoryItems: 0,
+      },
+      providerCalls: 1,
+    };
+  } else summarized = await summarizeWithCodexOverflowTrimming(summarize, settings, items);
+  const summaryBody = summarized.summaryBody;
+  const retainedTokens = await retentionTokenCounts(canonicalItems, projectForWire);
   const summaryTokens = estimateTokens([buildSummaryItem(summaryBody)]);
   const replacementHistory = buildCompactionReplacementHistory(
-    canonicalItems,
+    summarizedItems,
     summaryBody,
     (item) => retainedTokens.get(item) ?? estimateTokens([item]),
     Math.min(outputReserve, Math.max(0, structuralBudget - prefixTokens - summaryTokens)),
   );
-  const estimatedTokensAfter = estimateTokens(await projectForWire(replacementHistory));
+  const estimatedTokensAfter = estimateTokens(
+    await projectForWire([...replacementHistory, ...deferredItems]),
+  );
   if (estimatedTokensAfter + prefixTokens > structuralBudget) {
     return await settleSkippedAfterStart(db, scope, options, "replacement_exceeds_model_budget");
   }
-  const replacementFingerprint = compactionReplacementFingerprint(replacementHistory);
-  const previousReplacementFingerprint = latestCompactionReplacementFingerprint(canonicalItems);
+  const replacementFingerprint = compactionReplacementFingerprint([
+    ...replacementHistory,
+    ...deferredItems,
+  ]);
+  const previousReplacementFingerprint = deferredItems.length
+    ? compactionReplacementFingerprint(canonicalItems)
+    : latestCompactionReplacementFingerprint(canonicalItems);
   const summaryIndex =
     replacementHistory.length -
     (readReasoningConfiguration(replacementHistory.at(-1) ?? {}) ? 2 : 1);
@@ -531,8 +596,12 @@ async function compactContextPortable(
     expectedExecutionGeneration: scope.executionGeneration,
     expectedAttemptId: scope.attemptId,
     replacementItems: replacementHistory.slice(0, summaryIndex).map(omitModelSourceInputBinding),
-    ...(replacementHistory.length > summaryIndex + 1
-      ? { trailingItems: replacementHistory.slice(summaryIndex + 1).map(omitModelSourceInputBinding) }
+    ...(replacementHistory.length > summaryIndex + 1 || deferredItems.length > 0
+      ? {
+          trailingItems: [...replacementHistory.slice(summaryIndex + 1), ...deferredItems].map(
+            omitModelSourceInputBinding,
+          ),
+        }
       : {}),
     summaryItem: omitModelSourceInputBinding(summaryItem),
     ...(summaryModelSourceKey === undefined ? {} : { summaryModelSourceKey }),
@@ -549,6 +618,9 @@ async function compactContextPortable(
       compactionInputToolOutputsRewritten: summarized.preparation.rewrittenToolOutputs,
       compactionInputHistoryItemsDropped: summarized.preparation.droppedHistoryItems,
       compactionInputProviderCalls: summarized.providerCalls,
+      ...(summarize.measureInputBytes
+        ? { compactionDeferredHistoryItems: deferredItems.length }
+        : {}),
     },
   });
   if (!applied.applied) {

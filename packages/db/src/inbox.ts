@@ -1,4 +1,4 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { rawRows, withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
@@ -13,7 +13,11 @@ export type InboxItemRow = {
   kind: "question" | "approval" | "goal_paused" | "notification";
   sourceKey: string;
   title: string;
+  subtitle: string;
   body: string;
+  facts: Array<{ label: string; value: string }>;
+  link: { url: string; label: string } | null;
+  eventSequence: number | null;
   choices: Array<{ id: string; label: string }>;
   urgency: "normal" | "time_sensitive";
   status: "open" | "resolved" | "withdrawn" | "dismissed";
@@ -31,7 +35,11 @@ type InboxItemRecord = {
   kind: InboxItemRow["kind"];
   source_key: string;
   title: string;
+  subtitle: string;
   body: string;
+  facts: unknown;
+  link: unknown;
+  event_sequence: number | null;
   choices: unknown;
   urgency: InboxItemRow["urgency"];
   status: InboxItemRow["status"];
@@ -60,6 +68,31 @@ function choicesOf(value: unknown): Array<{ id: string; label: string }> {
   });
 }
 
+function jsonValue(value: unknown): unknown {
+  return typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+}
+
+function factsOf(value: unknown): Array<{ label: string; value: string }> {
+  const parsed = jsonValue(value);
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .flatMap((fact: unknown) => {
+      if (typeof fact !== "object" || fact === null) return [];
+      const { label, value: text } = fact as { label?: unknown; value?: unknown };
+      return typeof label === "string" && typeof text === "string" ? [{ label, value: text }] : [];
+    })
+    .slice(0, 4);
+}
+
+function linkOf(value: unknown): { url: string; label: string } | null {
+  const parsed = jsonValue(value);
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const { url, label } = parsed as { url?: unknown; label?: unknown };
+  return typeof url === "string" && /^https:\/\//iu.test(url) && typeof label === "string"
+    ? { url, label }
+    : null;
+}
+
 /** The person's open items in one account, newest first. */
 export async function listInboxItems(
   db: Database,
@@ -67,7 +100,7 @@ export async function listInboxItems(
 ): Promise<InboxItemRow[]> {
   const rows = await rawRows<InboxItemRecord>(
     db,
-    sql`select * from opengeni_private.list_inbox_items_v1(
+    sql`select * from opengeni_private.list_inbox_items_v2(
       ${input.accountId}::uuid, ${input.subjectId}::text
     )`,
   );
@@ -78,7 +111,11 @@ export async function listInboxItems(
     kind: row.kind,
     sourceKey: row.source_key,
     title: row.title,
+    subtitle: row.subtitle ?? "",
     body: row.body,
+    facts: factsOf(row.facts),
+    link: linkOf(row.link),
+    eventSequence: row.event_sequence ?? null,
     choices: choicesOf(row.choices),
     urgency: row.urgency,
     status: row.status,
@@ -196,6 +233,97 @@ export async function setInboxTidyPolicy(
     ) as policy`,
   );
   return row?.policy ?? input.policy;
+}
+
+export type InboxSettingsValue = { tidyPolicy: InboxTidyPolicyValue; pausedGoals: boolean };
+
+/** The person's inbox settings in one account (0663). */
+export async function getInboxSettings(
+  db: Database,
+  input: { accountId: string; subjectId: string },
+): Promise<InboxSettingsValue> {
+  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+    db,
+    sql`select * from opengeni_private.inbox_settings_v2(
+      ${input.accountId}::uuid, ${input.subjectId}::text
+    )`,
+  );
+  return {
+    tidyPolicy: row?.tidy_policy ?? "own_sessions",
+    pausedGoals: row?.paused_goals ?? false,
+  };
+}
+
+/** Change some of the person's inbox settings; omitted ones stay as they are. */
+export async function setInboxSettings(
+  db: Database,
+  input: {
+    accountId: string;
+    subjectId: string;
+    tidyPolicy?: InboxTidyPolicyValue | undefined;
+    pausedGoals?: boolean | undefined;
+  },
+): Promise<InboxSettingsValue> {
+  const [row] = await rawRows<{ tidy_policy: InboxTidyPolicyValue; paused_goals: boolean }>(
+    db,
+    sql`select * from opengeni_private.set_inbox_settings_v2(
+      ${input.accountId}::uuid, ${input.subjectId}::text,
+      ${input.tidyPolicy ?? null}::text, ${input.pausedGoals ?? null}::boolean
+    )`,
+  );
+  return {
+    tidyPolicy: row?.tidy_policy ?? input.tidyPolicy ?? "own_sessions",
+    pausedGoals: row?.paused_goals ?? input.pausedGoals ?? false,
+  };
+}
+
+/**
+ * The person a session works for (its owner, else the person who started it)
+ * and its parent, or null for sessions no person owns. Matches the recipient
+ * the inbox projection uses (0656).
+ */
+export async function getSessionInboxRecipient(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{ subjectId: string; parentSessionId: string | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        owner: schema.sessions.ownerSubjectId,
+        creator: schema.sessions.createdBySubjectId,
+        parent: schema.sessions.parentSessionId,
+      })
+      .from(schema.sessions)
+      .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
+      .limit(1);
+    if (!row) return null;
+    let subjectId = row.owner?.startsWith("user:")
+      ? row.owner
+      : row.creator.startsWith("user:")
+        ? row.creator
+        : null;
+    if (!subjectId) {
+      // A scheduled run works for the schedule's owner (0661).
+      const [run] = await scopedDb
+        .select({ owner: schema.scheduledTasks.ownerSubjectId })
+        .from(schema.scheduledTaskRuns)
+        .innerJoin(
+          schema.scheduledTasks,
+          eq(schema.scheduledTasks.id, schema.scheduledTaskRuns.taskId),
+        )
+        .where(
+          and(
+            eq(schema.scheduledTaskRuns.workspaceId, workspaceId),
+            eq(schema.scheduledTaskRuns.sessionId, sessionId),
+          ),
+        )
+        .orderBy(desc(schema.scheduledTaskRuns.createdAt))
+        .limit(1);
+      subjectId = run?.owner?.startsWith("user:") ? run.owner : null;
+    }
+    return subjectId ? { subjectId, parentSessionId: row.parent ?? null } : null;
+  });
 }
 
 /** Titles of sessions in one workspace, read under that workspace's context. */

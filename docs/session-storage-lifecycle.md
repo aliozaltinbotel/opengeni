@@ -78,8 +78,10 @@ Off by default. Enable it per deployment:
 
 The archive requires the deployment's object storage. The same maintenance
 Schedule runs it after content compaction; each pass keeps archiving batches
-of eligible sessions until its time budget ends or none remain, so a backlog
-drains steadily after the archive is first enabled.
+of eligible sessions until its ten-minute budget ends or none remain, so a
+backlog drains steadily after the archive is first enabled. Compaction and
+delta folding get the same budget in the same workflow, so neither starves the
+other while a backlog drains.
 
 ### What qualifies
 
@@ -106,11 +108,16 @@ all of these hold for the idle period:
    `content_archive_state = 'archiving'`, recording the planned object keys.
    From that moment the database refuses new turns, attempts, history, goals,
    workflow wakes and machine inputs for the session (`SESSION_ARCHIVED_READ_ONLY`),
-   and the API refuses sends and steers with 409. A message cannot race the
-   archive.
+   the API refuses sends and steers with 409, and the agent tools
+   `session_send_message` and `session_steer` return a non-retryable
+   `<tool>_session_read_only` error that says to start a new session. A
+   message cannot race the archive.
 2. The worker streams two zstd-compressed JSON-lines objects to a temporary
    file and uploads them through the bounded object-storage path, which reads
-   every byte back before success:
+   every byte back before success. On object stores without read-after-write
+   consistency a just-written object can briefly read as missing, so readback
+   is retried with a short backoff (about 16 seconds in total) before the
+   attempt fails; size or digest mismatches fail at once:
    - `bundle.jsonl.zst`: a header with the exact `sessions` row, then every row
      of the session's turns, attempts, goals, goal revisions, all events,
      history items, machine inputs, realtime entries, code-mode calls, tool
@@ -134,7 +141,9 @@ What stays in PostgreSQL: the session row, turns, attempts, goals and every
 readable timeline event, so the web app, `session_events` and the SDK read an
 archived session exactly as before, and every durable reference (task notes,
 artifact versions, Knowledge lifecycle, usage, billing and audit facts) is
-unchanged. Small per-turn audit snapshots also stay.
+unchanged. Small per-turn audit snapshots also stay, as do a scheduled run's
+delivered occurrence updates (immutable schedule evidence) and the history
+items they delivered.
 
 Archiving is one-way: there is no restore to an executable state. Start a new
 session to continue the work. A late machine input for an archived session (a

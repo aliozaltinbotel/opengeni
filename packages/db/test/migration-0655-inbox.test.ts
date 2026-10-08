@@ -11,8 +11,10 @@ import {
   createSession,
   dismissInboxNotification,
   getInboxItem,
+  getInboxSettings,
   getInboxTidyPolicy,
   listInboxItems,
+  setInboxSettings,
   setInboxTidyPolicy,
   updateInboxItemAttention,
   type DbClient,
@@ -227,9 +229,37 @@ describe("0655 inbox", () => {
     expect(bySource.get("multi")).toEqual([]);
   });
 
+  test("paused goals stay out of the inbox until the person turns them on (0663)", async () => {
+    if (!client) return;
+    const person = await personWithSession("goal-off");
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    expect(await getInboxSettings(db(), owner)).toEqual({
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Done for now" },
+      },
+    ]);
+    expect(await inbox(person)).toHaveLength(0);
+    // A partial change keeps the other setting.
+    await setInboxSettings(db(), { ...owner, tidyPolicy: "any_agent" });
+    expect(await setInboxSettings(db(), { ...owner, pausedGoals: true })).toEqual({
+      tidyPolicy: "any_agent",
+      pausedGoals: true,
+    });
+  });
+
   test("an agent's pause waits on the person until the goal resumes", async () => {
     if (!client) return;
     const person = await personWithSession("goal");
+    await setInboxSettings(db(), {
+      accountId: person.scope.accountId,
+      subjectId: person.subjectId,
+      pausedGoals: true,
+    });
     await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
       { type: "goal.paused", payload: { actor: "user", reason: "user" } },
     ]);
@@ -246,6 +276,80 @@ describe("0655 inbox", () => {
       { type: "goal.resumed", payload: { actor: "user" } },
     ]);
     expect(await inbox(person)).toHaveLength(0);
+  });
+
+  test("a sub-agent's paused goal waits on its parent, but its questions reach the person (0661)", async () => {
+    if (!client) return;
+    const person = await personWithSession("sub-agent");
+    const child = await createSession(db(), {
+      ...person.scope,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: person.session.id,
+      createdBy: { kind: "subject", subjectId: person.subjectId, label: "User sub-agent" },
+      createdByContext: { label: "User sub-agent" },
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, child.id, [
+      {
+        type: "goal.paused",
+        payload: { actor: "agent", reason: "agent", rationale: "Waiting for the parent" },
+      },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { id: "child-question", questions: [{ prompt: "Which region?" }] } },
+      },
+    ]);
+    const items = await inbox(person);
+    expect(items.map((item) => [item.kind, item.sessionId])).toEqual([["question", child.id]]);
+  });
+
+  test("a notification carries its subtitle, message, facts and link; every item its moment (0664)", async () => {
+    if (!client) return;
+    const person = await personWithSession("notify-rich");
+    const [question] = await appendSessionEvents(
+      db(),
+      person.scope.workspaceId,
+      person.session.id,
+      [
+        {
+          type: "session.humanInput.requested",
+          payload: { request: { id: "rich-q", questions: [{ prompt: "Ship it?" }] } },
+        },
+      ],
+    );
+    const body = `Deployed **all** services:\n- api\n- web\n${"x".repeat(600)}`;
+    const [posted] = await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      {
+        type: "session.notification.posted",
+        payload: {
+          key: "release",
+          title: "Release is out",
+          subtitle: "v2.4.0",
+          body,
+          facts: [{ label: "Tests", value: "412 passed" }],
+          link: { url: "https://example.com/pr/1", label: "Pull request" },
+          urgency: "time_sensitive",
+          replaced: false,
+        },
+      },
+    ]);
+    const items = await inbox(person);
+    const note = items.find((item) => item.kind === "notification");
+    expect(note).toMatchObject({
+      subtitle: "v2.4.0",
+      body,
+      facts: [{ label: "Tests", value: "412 passed" }],
+      link: { url: "https://example.com/pr/1", label: "Pull request" },
+      urgency: "time_sensitive",
+      eventSequence: posted!.sequence,
+    });
+    // Every item remembers the moment that raised it (0664).
+    expect(items.find((item) => item.kind === "question")?.eventSequence).toBe(question!.sequence);
   });
 
   test("notifications update in place, keep the person's dismissal, and can be withdrawn", async () => {
@@ -345,5 +449,26 @@ describe("0655 inbox", () => {
       select count(*)::int as count from opengeni_private.inbox_items
       where session_id = ${person.session.id}`;
     expect(count?.count).toBe(0);
+  });
+
+  test("a session's owner is its recipient, else the person who started it (0656)", async () => {
+    if (!client) return;
+    const rows = await owned!.admin<Array<{ recipient: string | null }>>`
+      select opengeni_private.session_recipient_v1(owner, creator) as recipient
+      from (values
+        ('user:owner', 'internal-update', 1),
+        (null, 'user:starter', 2),
+        ('user:owner', 'user:starter', 3),
+        (null, 'internal-update', 4),
+        ('apikey:x', 'apikey:y', 5)
+      ) as cases(owner, creator, position)
+      order by position`;
+    expect(rows.map((row) => row.recipient)).toEqual([
+      "user:owner",
+      "user:starter",
+      "user:owner",
+      null,
+      null,
+    ]);
   });
 });

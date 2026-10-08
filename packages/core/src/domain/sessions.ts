@@ -44,6 +44,7 @@ import {
   ORGANIZATION_OPPER_MODEL_ID_PREFIX,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
   allowedFirstPartyMcpToolsForSession,
+  resolveSessionFirstPartyMcpTools,
   deploymentUnavailableFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   policyProviderIdForModel,
@@ -3413,7 +3414,9 @@ async function createSessionForRequestInFileScope(
   );
   const creatorFirstPartyMcpTools = resolveFirstPartyMcpToolsForCreate(
     payload.firstPartyMcpTools,
-    parentSession ? parentSession.firstPartyMcpTools : undefined,
+    parentSession
+      ? resolveSessionFirstPartyMcpTools(settings, parentSession, workspace.settings)
+      : undefined,
     workspaceFirstPartyDefaults && !parentSession
       ? {
           ...deploymentFirstPartyMcpToolPolicy,
@@ -3422,6 +3425,12 @@ async function createSessionForRequestInFileScope(
       : deploymentFirstPartyMcpToolPolicy,
   );
   // Capabilities only narrow the creator's exact legacy selection; "all" keeps it.
+  if (
+    payload.firstPartyMcpTools === undefined &&
+    (!parentSession || parentSession.toolPolicy.firstPartyMode === "workspace_default")
+  ) {
+    toolPolicy = { ...toolPolicy, firstPartyMode: "workspace_default" };
+  }
   const firstPartyMcpTools = applySessionAgentConfigWriteThrough({
     config: agentConfig,
     firstPartyMcpTools: creatorFirstPartyMcpTools,
@@ -4498,17 +4507,19 @@ async function acceptSessionUserMessageInFileScope(
     // raw column is not the connector allow-list this follow-up executes with.
     // Freeze accounts against the same resolved list the composer and the
     // worker see.
+    const connectionWorkspace = await requireWorkspace(db, workspaceId);
     const connectionAccountTools = sessionToolsForConnectionAccounts({
       session: existingSession,
       runtimeMcpServers: runtimeSettings.mcpServers,
       defaultMcpServerIds: workspaceSessionToolPolicyDefaultServerIdsFor(
         capabilityRuntimeSettings.mcpServers,
-        (await requireWorkspace(db, workspaceId)).settings,
+        connectionWorkspace.settings,
       ),
     });
-    const existingEffectiveFirstPartyTools = allowedFirstPartyMcpToolsForSession(
+    const existingEffectiveFirstPartyTools = resolveSessionFirstPartyMcpTools(
       settings,
-      existingSession.firstPartyMcpTools,
+      existingSession,
+      connectionWorkspace.settings,
     );
     const { personalConnectionDelegations, mcpAccountBindings } = await freezeConnectionAccounts({
       db,
@@ -4929,6 +4940,7 @@ function toolPolicyAuditSnapshot(
   const toolRefs = allToolRefs.slice(0, maxToolPolicyAuditRefs);
   return {
     mode: policy.mode,
+    ...(policy.firstPartyMode ? { firstPartyMode: policy.firstPartyMode } : {}),
     inheritedFromSessionId: policy.inheritedFromSessionId,
     ...(policy.excludedMcpServerIds?.length
       ? {
@@ -4957,8 +4969,6 @@ function sessionToolPolicyCeiling(
   runtimeSettings: Settings,
   workspaceDefaults: ReturnType<typeof resolveWorkspaceSessionToolDefaults>,
 ): { tools: ToolRef[]; firstPartyMcpTools: FirstPartyMcpToolName[] } {
-  const policy = resolveFirstPartyMcpToolPolicy(settings);
-  const allowed = new Set(policy.allowed);
   return {
     tools: withFirstPartyTools(
       session.toolPolicy.mode === "workspace_default"
@@ -4974,9 +4984,9 @@ function sessionToolPolicyCeiling(
       (tool) =>
         tool.id === "opengeni" || !session.toolPolicy.excludedMcpServerIds?.includes(tool.id),
     ),
-    firstPartyMcpTools: [...(session.firstPartyMcpTools ?? policy.default)].filter((tool) =>
-      allowed.has(tool),
-    ),
+    firstPartyMcpTools: resolveSessionFirstPartyMcpTools(settings, session, {
+      sessionToolDefaults: workspaceDefaults,
+    }),
   };
 }
 
@@ -5118,6 +5128,9 @@ export async function updateSessionToolPolicy(
           nextPolicy = {
             mode: "workspace_default",
             inheritedFromSessionId: parent.id,
+            ...(parent.toolPolicy.firstPartyMode === "workspace_default"
+              ? { firstPartyMode: "workspace_default" as const }
+              : {}),
             ...defaultPolicyExclusions([
               ...(parent.toolPolicy.excludedMcpServerIds ?? []),
               ...requestedExclusions,
@@ -5156,7 +5169,10 @@ export async function updateSessionToolPolicy(
           mode: requestedMode,
           inheritedFromSessionId: null,
           ...(requestedMode === "workspace_default"
-            ? defaultPolicyExclusions(requestedExclusions)
+            ? {
+                firstPartyMode: "workspace_default" as const,
+                ...defaultPolicyExclusions(requestedExclusions),
+              }
             : {}),
         };
       }
@@ -5171,6 +5187,10 @@ export async function updateSessionToolPolicy(
         nextFirstPartyMcpTools = [
           ...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
         ];
+        delete nextPolicy.firstPartyMode;
+        if (session.toolPolicy.firstPartyMode) {
+          nextPolicy.firstPartyMode = session.toolPolicy.firstPartyMode;
+        }
       }
       if (!connectorOnlyEdit) {
         nextTools = withoutExcludedMcpServers(nextTools, nextPolicy.excludedMcpServerIds);
@@ -5194,6 +5214,14 @@ export async function updateSessionToolPolicy(
         nextPolicy = clamped.toolPolicy;
       }
       if (agentAttemptCaller && !session.parentSessionId) {
+        if (
+          nextPolicy.firstPartyMode === "workspace_default" &&
+          session.toolPolicy.firstPartyMode !== "workspace_default"
+        ) {
+          throw new HTTPException(403, {
+            message: "an agent may not replace a pinned built-in selection with future defaults",
+          });
+        }
         // A human or API key may widen a top-level session; a live agent
         // attempt may only narrow relative to the session's CURRENT
         // effective policy, in either mode. Adopting workspace defaults is a
@@ -5242,7 +5270,7 @@ export async function updateSessionToolPolicy(
           "an agent may only narrow its session tool policy",
         );
         const currentFirstPartyCeiling = effectiveFirstPartyMcpToolCeiling(
-          session.firstPartyMcpTools,
+          resolveSessionFirstPartyMcpTools(deps.settings, session, workspace.settings),
           deploymentFirstPartyMcpToolPolicy,
         );
         const widenedFirstPartyTool = nextFirstPartyMcpTools.find(
@@ -5414,9 +5442,11 @@ export async function updateSessionAgent(
           goal: goalOpen,
         }),
       );
-      const currentFirstPartyMcpTools = [
-        ...(session.firstPartyMcpTools ?? deploymentFirstPartyMcpToolPolicy.default),
-      ];
+      const currentFirstPartyMcpTools = resolveSessionFirstPartyMcpTools(
+        deps.settings,
+        session,
+        workspace.settings,
+      );
       const added = agentAttemptCaller
         ? []
         : agentConfigAddedFirstPartyMcpTools(
@@ -5455,7 +5485,7 @@ export async function updateSessionAgent(
           !session.parentSessionId &&
           toolPolicy.mode === "explicit"
         ) {
-          toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
+          toolPolicy = { ...toolPolicy, mode: "workspace_default", inheritedFromSessionId: null };
         }
       }
       let firstPartyMcpTools = [...new Set([...currentFirstPartyMcpTools, ...added])];

@@ -9,6 +9,12 @@ import {
 export { bindModelSourceInput, omitModelSourceInputBinding, modelSourceInputBinding, modelSourceBindings } from "./model-request-capture";
 export { preparedCompactionRequest, queuePreparedCompaction } from "./prepared-compaction-request";
 import { AnthropicMessagesModel } from "./anthropic-messages";
+import { anthropicCompactionRequest } from "./anthropic-compaction";
+export {
+  createAnthropicCompactionSizer,
+  fitCompactionPrefix,
+  compactionPrefixCuts,
+} from "./anthropic-compaction";
 export { AnthropicProviderRejection } from "./anthropic-messages";
 import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
@@ -20,6 +26,7 @@ import {
 } from "@opengeni/contracts";
 export { RunMcpCredentials, RunMcpCredentialError } from "./mcp-run-credentials";
 export { AnthropicRequestError } from "./anthropic-request-error";
+export * from "./anthropic-request-size";
 import { executeCommandReadWithRefresh } from "./command-read-refresh";
 import {
   captureMcpOperationDispatch,
@@ -368,6 +375,7 @@ import {
   withRunCredentialsSession,
   type RunCredentialSessionReady,
 } from "./sandbox";
+import { SynchronousCommandOutcomeUnknownError } from "./sandbox/synchronous-command";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
 import {
   sandboxCommandExitCode,
@@ -534,6 +542,7 @@ export {
   MCP_TOOL_CALL_OUTCOMES,
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
   SANDBOX_READINESS_REPLACEMENT_OUTCOMES,
+  WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
   mcpToolMetricLabel,
   type McpLifecycleOutcome,
@@ -542,6 +551,7 @@ export {
   type McpToolCallOutcome,
   type RuntimeMetricsHooks,
   type SandboxReadinessReplacementOutcome,
+  type WorkspaceCaptureSkipReason,
 } from "./metrics";
 export type {
   ModelPreparationMeasurement,
@@ -786,6 +796,7 @@ export {
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
+  omitOpaqueArtifactsFromPortableCompactionHistory,
   SUMMARY_BUFFER_TOKENS,
   compactionSummaryOutputTokens,
   SUMMARY_PREFIX,
@@ -1409,7 +1420,16 @@ export async function summarizeForCompaction(
             provider,
             model,
             instrumentedModelFetch(provider.id, globalThis.fetch),
-          ).getResponse(request)
+          ).getResponse(
+            anthropicCompactionRequest(input, {
+              maxOutputTokens: maxTokens,
+              ...(options.systemInstructions
+                ? { systemInstructions: options.systemInstructions }
+                : {}),
+              ...(options.promptCacheKey ? { promptCacheKey: options.promptCacheKey } : {}),
+              ...(options.signal ? { signal: options.signal } : {}),
+            }),
+          )
         : new CompactionResponsesModel(client, model, provider).fetchResponse(request));
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
@@ -2800,12 +2820,20 @@ export function mcpToolErrorOutput(error: unknown): {
   const details = exactErrorMessage(error);
   // An uncertain outcome says so first (upstream); E-14 (Cendra agent-ops): a refusal the host
   // marked final never invites a retry. Neither text says "Please try again".
-  const text = isIntegrationInvocationOutcomeUnknownError(error)
-    ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${details}`
-    : toolErrorIsFinal(error)
+  const uncertain =
+    (error instanceof SynchronousCommandOutcomeUnknownError ? error.message : null) ??
+    (isRoutingMutationOutcomeUnknownError(error)
+      ? renderRoutingMutationOutcomeUnknownToolResult(error)
+      : null) ??
+    (isIntegrationInvocationOutcomeUnknownError(error)
+      ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${details}`
+      : null);
+  const text =
+    uncertain ??
+    (toolErrorIsFinal(error)
       ? `An error occurred while running the tool. Error: ${details}`
       : (invalidToolArgumentsText(error) ??
-        `An error occurred while running the tool. Please try again. Error: ${details}`);
+        `An error occurred while running the tool. Please try again. Error: ${details}`));
   return { isError: true, content: [{ type: "text", text }] };
 }
 

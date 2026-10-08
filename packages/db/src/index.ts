@@ -57,6 +57,7 @@ export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
 import {
   CODEX_CREDENTIAL_POLICY_SNAPSHOT_METADATA_KEY,
   ToolReviewContext,
+  WorkspaceModelCompactionThresholdsPatch,
 } from "@opengeni/contracts";
 import { recordToolApproval } from "@opengeni/observability";
 import { connectorActionFingerprint } from "./connector-action-fingerprint";
@@ -255,7 +256,10 @@ import {
   type ConfigurationEffort,
 } from "@opengeni/codex";
 export { getSessionAttemptMcpApprovalPolicies } from "./session-mcp-approval";
-import { sessionAttemptPendingWritersSql } from "./session-attempt-writers";
+import {
+  crashedWorkerOrphanAdmissionSql,
+  sessionAttemptPendingWritersSql,
+} from "./session-attempt-writers";
 import {
   childRecentTurnOutcomesSql,
   childLifecycleEvidenceCandidatesSql,
@@ -3492,6 +3496,24 @@ export async function updateWorkspaceSettings(
     controlLockTimeoutMs?: number;
   } = {},
 ): Promise<Workspace> {
+  const { modelCompactionThresholds, ...ordinaryPatch } = patch;
+  const thresholds =
+    modelCompactionThresholds === undefined
+      ? undefined
+      : WorkspaceModelCompactionThresholdsPatch.parse(modelCompactionThresholds);
+  // Merge each exact-model key inside the SQL update, not a read/modify/write
+  // in the API: simultaneous edits to different models must both survive.
+  const settingsPatch = (
+    base: typeof schema.workspaces.settings | ReturnType<typeof sql>,
+    values: Record<string, unknown>,
+  ) => {
+    const merged = sql`${base} || ${JSON.stringify(values)}::jsonb`;
+    return thresholds === undefined
+      ? merged
+      : sql`jsonb_set((${merged}), '{modelCompactionThresholds}',
+      jsonb_strip_nulls((case when jsonb_typeof(${schema.workspaces.settings}->'modelCompactionThresholds') = 'object'
+        then ${schema.workspaces.settings}->'modelCompactionThresholds' else '{}'::jsonb end) || ${JSON.stringify(thresholds)}::jsonb))`;
+  };
   if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
     const requested = patch.maxNestedAgentDepth;
     if (
@@ -3505,7 +3527,7 @@ export async function updateWorkspaceSettings(
     ) {
       throw new Error("maxNestedAgentDepth must be null or a non-negative 32-bit integer");
     }
-    const nextPatch = { ...patch };
+    const nextPatch = { ...ordinaryPatch };
     if (requested === null) delete nextPatch.maxNestedAgentDepth;
     return await withWorkspaceRls(
       db,
@@ -3525,8 +3547,11 @@ export async function updateWorkspaceSettings(
             .set({
               settings:
                 requested === null
-                  ? sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth') || ${JSON.stringify(nextPatch)}::jsonb`
-                  : sql`${schema.workspaces.settings} || ${JSON.stringify(nextPatch)}::jsonb`,
+                  ? settingsPatch(
+                      sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth')`,
+                      nextPatch,
+                    )
+                  : settingsPatch(schema.workspaces.settings, nextPatch),
               updatedAt: new Date(),
             })
             .where(eq(schema.workspaces.id, workspaceId))
@@ -3543,7 +3568,7 @@ export async function updateWorkspaceSettings(
   const [row] = await db
     .update(schema.workspaces)
     .set({
-      settings: sql`${schema.workspaces.settings} || ${JSON.stringify(patch)}::jsonb`,
+      settings: settingsPatch(schema.workspaces.settings, ordinaryPatch),
       updatedAt: new Date(),
     })
     .where(eq(schema.workspaces.id, workspaceId))
@@ -21723,9 +21748,24 @@ export async function updateSessionVariableSets(
                   and request_row.session_id = ${input.sessionId}
                   and request_row.status = 'pending')
               then 'pending_human_input'
+            -- Same live-receipt predicate as migration 0658: a receipt stranded
+            -- by a terminal turn whose attempt settled can never be resumed.
             when exists (select 1 from ${schema.sessionPendingToolCalls} tool_row
                 where tool_row.workspace_id = ${input.workspaceId}
-                  and tool_row.session_id = ${input.sessionId})
+                  and tool_row.session_id = ${input.sessionId}
+                  and (exists (select 1 from ${schema.sessionTurns} owner_turn
+                      where owner_turn.workspace_id = tool_row.workspace_id
+                        and owner_turn.id = tool_row.turn_id
+                        and owner_turn.status not in (
+                          'completed', 'failed', 'cancelled', 'superseded', 'withdrawn_for_edit'
+                        ))
+                    or exists (select 1 from ${schema.sessionTurnAttempts} owner_attempt
+                      where owner_attempt.workspace_id = tool_row.workspace_id
+                        and owner_attempt.id = tool_row.attempt_id
+                        and (owner_attempt.state <> 'closed'
+                          or (owner_attempt.quiesced_at is null and exists (
+                            select 1 from ${schema.sessionAttemptInterruptions} interruption
+                            where interruption.attempt_id = owner_attempt.id))))))
               then 'pending_tool_receipt'
             when exists (select 1 from ${schema.agentRunStates} run_state
                 where run_state.workspace_id = ${input.workspaceId}
@@ -45289,10 +45329,12 @@ export async function recordStartedContextCompaction(
     trigger: "auto" | "operator" | "proactive" | "overflow";
     implementation?: string;
     estimatedTokensBefore?: number;
+    /** One request-byte recovery per logical turn, including recovered attempts. */
+    requestSizeRecovery?: Record<string, number>;
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
-  | { recorded: false; reason: TurnAttemptFenceRejectReason }
+  | { recorded: false; reason: TurnAttemptFenceRejectReason | "request_size_recovery_exhausted" }
 > {
   return await withSessionActivityRlsContext(
     db,
@@ -45307,6 +45349,18 @@ export async function recordStartedContextCompaction(
           attemptId: input.expectedAttemptId,
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
+        if (input.requestSizeRecovery) {
+          if (fence.turn!.metadata.claudeRequestSizeRecoveryUsed === true)
+            return { recorded: false as const, reason: "request_size_recovery_exhausted" as const };
+          await tx
+            .update(schema.sessionTurns)
+            .set({
+              metadata: { ...fence.turn!.metadata, claudeRequestSizeRecoveryUsed: true },
+              version: fence.turn!.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.sessionTurns.id, input.turnId));
+        }
         const inserted = await tx
           .insert(schema.sessionEvents)
           .values(
@@ -45323,6 +45377,7 @@ export async function recordStartedContextCompaction(
                 type: "session.context.compaction.started",
                 payload: {
                   trigger: input.trigger,
+                  ...(input.requestSizeRecovery ? { requestSize: input.requestSizeRecovery } : {}),
                   ...(input.implementation ? { implementation: input.implementation } : {}),
                   ...(typeof input.estimatedTokensBefore === "number"
                     ? { estimatedTokensBefore: input.estimatedTokensBefore }
@@ -46694,6 +46749,7 @@ type LeaseRow = {
   /** Transaction-local PostgreSQL-clock projection used only by bounded waiters. */
   archive_capture_remaining_ms?: number | string | null;
   archive_capture_published_at: Date | string | null;
+  archive_capture_concurrent_capture_id?: string | null;
   reaper_hold_id: string | null;
   reaper_hold_until: Date | string | null;
   reaper_hold_reason: string | null;
@@ -48843,7 +48899,12 @@ function validatedLegacyNativeSnapshotAdoption(
  * holds the workspace inference fence, which also serializes new claims. */
 async function hasSandboxGroupAttemptActivityTx(
   tx: Database,
-  input: { workspaceId: string; sandboxGroupId: string; idleGraceMs: number },
+  input: {
+    workspaceId: string;
+    sandboxGroupId: string;
+    idleGraceMs: number;
+    writerMode?: "physical" | "containment";
+  },
 ): Promise<boolean> {
   const sessions = await tx.execute<{ id: string; active: boolean }>(sql`
     select session.id, exists(select 1 from session_turn_attempts attempt
@@ -48860,6 +48921,7 @@ async function hasSandboxGroupAttemptActivityTx(
       (await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
         sessionId: session.id,
+        writerMode: input.writerMode ?? "physical",
       }))
     )
       return true;
@@ -53437,6 +53499,23 @@ async function linkedLostProviderCommandSessionIdsTx(
         and process.provider_backend = ${input.lostBackend}
         and process.provider_instance_id = ${input.lostInstanceId}
         and process.state = 'active'
+      union
+      -- A closed, unquiesced owner of an open request on the lost box is woken
+      -- by the settlement; lock its session in the canonical prefix first.
+      select admission.session_id
+      from sandbox_workspace_mutation_admissions admission
+      join session_turn_attempts attempt on attempt.id = admission.attempt_id
+        and attempt.workspace_id = admission.workspace_id
+        and attempt.session_id = admission.session_id
+      where admission.account_id = ${input.accountId}
+        and admission.workspace_id = ${input.workspaceId}
+        and admission.lease_id = ${input.leaseId}
+        and admission.sandbox_group_id = ${input.sandboxGroupId}
+        and admission.lease_epoch = ${input.lostEpoch}
+        and admission.provider_backend = ${input.lostBackend}
+        and admission.provider_instance_id = ${input.lostInstanceId}
+        and admission.settled_at is null
+        and attempt.state = 'closed' and attempt.quiesced_at is null
       ) owners order by session_id
     `,
   );
@@ -53676,6 +53755,38 @@ async function settleExactLostProviderWorkspaceBlockersTx(
           and attempt.state = 'closed' and attempt.quiesced_at is null
           and attempt.temporal_workflow_id is not null
           and process.id = any(${`{${lostProcesses.map((p) => p.id).join(",")}}`}::uuid[])
+        order by attempt.session_id, attempt.temporal_workflow_id
+      `,
+    );
+    for (const owner of owners) {
+      await enqueueSessionWorkflowWakeInTransaction(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: owner.session_id,
+        temporalWorkflowId: owner.temporal_workflow_id,
+        reason: "attempt_writer_provider_settled",
+      });
+    }
+  }
+
+  if (rejectedAdmissions.length) {
+    // A rejected request whose closed owner still awaits its quiescence receipt
+    // (a crashed worker's orphan) has no process delivery to wake that
+    // owner either; the receipt reconciliation runs from this durable wake.
+    const owners = await rawRows<{ session_id: string; temporal_workflow_id: string }>(
+      tx,
+      sql`
+        select distinct attempt.session_id, attempt.temporal_workflow_id
+        from session_turn_attempts attempt
+        join sandbox_workspace_mutation_admissions admission
+          on admission.attempt_id = attempt.id
+          and admission.workspace_id = attempt.workspace_id
+          and admission.session_id = attempt.session_id
+        where attempt.workspace_id = ${input.workspaceId}
+          and attempt.account_id = ${input.accountId}
+          and attempt.state = 'closed' and attempt.quiesced_at is null
+          and attempt.temporal_workflow_id is not null
+          and admission.id = any(${`{${rejectedAdmissions.map((a) => a.id).join(",")}}`}::uuid[])
         order by attempt.session_id, attempt.temporal_workflow_id
       `,
     );
@@ -55313,6 +55424,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
     sandboxGroupId: string;
     leaseId: string;
     windowMs: number;
+    writerMode: "physical" | "containment";
   },
 ): Promise<boolean> {
   const [facts] = await rawRows<{
@@ -55427,6 +55539,7 @@ async function sandboxGroupIdleForCommandContainmentTx(
       (await hasPendingSessionAttemptQuiescenceTx(tx, {
         workspaceId: input.workspaceId,
         sessionId: session.id,
+        writerMode: input.writerMode,
       }))
     )
       return false;
@@ -55453,12 +55566,34 @@ export const COMMAND_CONTAINMENT_TURN_STARTING_UPDATE_KINDS = (() => {
   };
 })();
 
+/** Whether a lease's provider capture images the paused box at one instant
+ * (Modal native filesystem/directory snapshots). Mirrors the runtime's
+ * `providerWorkspaceCaptureIsPointInTime` for the lease envelope: only such a
+ * capture may run around a crashed worker's orphaned request, so
+ * containment may treat the orphan as non-blocking only then; otherwise its
+ * drain could never capture and the box would stay fenced until it died. */
+function leaseCaptureIsPointInTime(backend: string, resumeState: unknown): boolean {
+  if (backend !== "modal" || !resumeState || typeof resumeState !== "object") return false;
+  const sessionState = (resumeState as { sessionState?: unknown }).sessionState;
+  const session =
+    sessionState && typeof sessionState === "object"
+      ? (sessionState as Record<string, unknown>)
+      : (resumeState as Record<string, unknown>);
+  const providerState =
+    session.providerState && typeof session.providerState === "object"
+      ? (session.providerState as Record<string, unknown>)
+      : null;
+  const persistence = providerState?.workspacePersistence ?? session.workspacePersistence;
+  return persistence === "snapshot_filesystem" || persistence === "snapshot_directory";
+}
+
 /** The deadline backstop's owner test is the idle rule's: a closed turn owner
  * must hold no pending quiescence (unsettled interruption or attempt writer). */
 async function deadlineOwnerQuiescencePending(
   tx: Database,
   workspaceId: string,
   processes: readonly { session_id: string; owner_attempt_id: string | null }[],
+  writerMode: "physical" | "containment",
 ): Promise<boolean> {
   for (const process of processes) {
     if (
@@ -55467,6 +55602,7 @@ async function deadlineOwnerQuiescencePending(
         workspaceId,
         sessionId: process.session_id,
         attemptId: process.owner_attempt_id,
+        writerMode,
       }))
     )
       return true;
@@ -55519,6 +55655,9 @@ export async function enrollRetainedCommandContainment(
             ...input,
             leaseId: lease.id,
             windowMs: input.idleCommandContainmentMs,
+            writerMode: leaseCaptureIsPointInTime(lease.backend, lease.resumeState)
+              ? "containment"
+              : "physical",
           }))));
     // Round-robin inventory: an ineligible live lease cannot starve later rows.
     // This updates only the inspection cursor, never provider/holder authority.
@@ -55596,11 +55735,16 @@ export async function enrollRetainedCommandContainment(
       order by process.id for update of process
     `,
     );
-    const admissions = await rawRows<{ id: string }>(
+    const admissions = await rawRows<{ id: string; orphaned: boolean }>(
       tx,
       sql`
-      select id from sandbox_workspace_mutation_admissions
-      where lease_id = ${initial.id} and settled_at is null order by id for update
+      select admission.id,
+        (admission.lease_epoch = ${initial.leaseEpoch}
+          and admission.provider_instance_id = ${initial.instanceId}
+          and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}) as orphaned
+      from sandbox_workspace_mutation_admissions admission
+      where admission.lease_id = ${initial.id} and admission.settled_at is null
+      order by admission.id for update of admission
     `,
     );
     const rows = await tx.execute<LeaseRow>(sql`
@@ -55624,8 +55768,14 @@ export async function enrollRetainedCommandContainment(
       processes.some((p) => !ids.includes(p.id))
     )
       return null;
+    // A request a crashed worker left on this exact box is not a writer that
+    // can finish. Only a point-in-time drain captures around it (the cold
+    // commit settles it once the box is terminated); for a tar-style capture
+    // it stays a blocker, or the enrolled drain could never capture.
+    const pointInTime = leaseCaptureIsPointInTime(initial.backend, initial.resumeState);
+    const writerMode = pointInTime ? ("containment" as const) : ("physical" as const);
     const parents = new Set(processes.map((p) => p.parent_admission_id));
-    if (admissions.some((a) => !parents.has(a.id))) return null;
+    if (admissions.some((a) => !parents.has(a.id) && !(pointInTime && a.orphaned))) return null;
     const holders = await rawRows<{ kind: string; holder_id: string }>(
       tx,
       sql`
@@ -55661,10 +55811,11 @@ export async function enrollRetainedCommandContainment(
     } else if (
       deadlineRotation &&
       processes.every((p) => p.deadline_ready) &&
-      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes)) &&
+      !(await deadlineOwnerQuiescencePending(tx, input.workspaceId, processes, writerMode)) &&
       !(await hasSandboxGroupAttemptActivityTx(tx, {
         ...input,
         idleGraceMs: deadlineStopGraceMs,
+        writerMode,
       }))
     ) {
       mode = "deadline";
@@ -55674,6 +55825,7 @@ export async function enrollRetainedCommandContainment(
         ...input,
         leaseId: lease.id,
         windowMs: input.idleCommandContainmentMs,
+        writerMode,
       }))
     ) {
       mode = "idle";
@@ -56172,6 +56324,10 @@ export async function confirmDrainCold(
     providerMissingBeforeCapture?: boolean;
     /** The idle window named in contained commands' agent notice. */
     idleCommandContainmentMs?: number | undefined;
+    /** The reaper stopped the exact provider box (or proved it gone) before
+     * this commit. Only then may a crashed worker's orphaned request on it be
+     * settled; a selfhosted machine or backend-less lease is never stopped. */
+    providerStopped?: boolean;
   },
 ): Promise<{
   wentCold: boolean;
@@ -56222,8 +56378,33 @@ export async function confirmDrainCold(
         ) {
           return { wentCold: false };
         }
+        // A request a crashed worker left on this exact box let the drain
+        // capture around it (crashedWorkerOrphanAdmissionSql). The box is now
+        // terminated, so nothing it started can still run: settle it with the
+        // exact provider blockers instead of leaving it to pin its attempt's
+        // quiescence forever. Selfhosted and backend-less leases are never
+        // terminated by a drain and keep their requests.
+        const orphanedRequests =
+          observed.instance_id &&
+          (input.providerStopped === true || input.providerMissingBeforeCapture === true)
+            ? await rawRows<{ present: boolean }>(
+                tx,
+                sql`
+                  select exists (
+                    select 1 from sandbox_workspace_mutation_admissions admission
+                    where admission.lease_id = ${observed.id}
+                      and admission.lease_epoch = ${input.expectedEpoch}
+                      and admission.provider_backend = ${observed.backend}
+                      and admission.provider_instance_id = ${observed.instance_id}
+                      and ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
+                  ) as present
+                `,
+              )
+            : [];
         const blockerScope =
-          (input.providerMissingBeforeCapture || observed.unobservable_command_drain_ids?.length) &&
+          (input.providerMissingBeforeCapture ||
+            observed.unobservable_command_drain_ids?.length ||
+            orphanedRequests[0]?.present === true) &&
           observed.instance_id
             ? {
                 accountId: input.accountId,
@@ -56320,6 +56501,9 @@ export async function confirmDrainCold(
         const lateArchiveCapture =
           workspaceLost &&
           row.archive_capture_id !== null &&
+          // A warm claim that ran around commands may predate their writes; a
+          // late adoption would publish it as the complete workspace.
+          row.archive_capture_concurrent_capture_id !== row.archive_capture_id &&
           row.archive_capture_provider_request_id !== null &&
           row.archive_capture_generation !== null &&
           row.archive_capture_published_at === null &&
@@ -57093,7 +57277,14 @@ async function lockWorkspaceMutationSessionTx(
  * an acknowledged edge-trigger. */
 async function hasPendingSessionAttemptQuiescenceTx(
   tx: Database,
-  input: { workspaceId: string; sessionId: string; attemptId?: string },
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    attemptId?: string;
+    /** `containment` ignores crashed-worker orphan requests, which sandbox
+     * containment and drains settle themselves after exact termination. */
+    writerMode?: "physical" | "containment";
+  },
 ): Promise<boolean> {
   const [row] = await tx.execute<{ pending: boolean }>(sql`
     select exists (
@@ -57105,7 +57296,7 @@ async function hasPendingSessionAttemptQuiescenceTx(
         and attempt.state = 'closed'
         and attempt.quiesced_at is null
         and (
-          ${sessionAttemptPendingWritersSql(sql`attempt`)}
+          ${sessionAttemptPendingWritersSql(sql`attempt`, input.writerMode ?? "physical")}
           or exists (
             select 1
             from session_attempt_interruptions interruption
@@ -59661,6 +59852,64 @@ function noActiveSupervisedProcesses(leaseId: SQL): SQL {
   )`;
 }
 
+/** The exact active, unsupervised background command on one lease epoch and
+ * provider instance. Such a command may keep running across a warm checkpoint:
+ * Modal pauses the whole box while it snapshots, so the command is frozen rather
+ * than racing the read, but a file it was in the middle of writing can be saved
+ * half-written. That is deliberate. A long-running command used to
+ * refuse every checkpoint for the box's whole lifetime, so an uncaptured
+ * provider death lost everything since the last capture. Supervised commands
+ * keep their separate proof gate (`noActiveSupervisedProcesses`); every other
+ * holder and every in-flight request still blocks the capture. */
+function activeUnsupervisedLeaseProcess(
+  process: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`${process}.lease_id = ${lease.id}
+    and ${process}.lease_epoch = ${lease.epoch}
+    and ${process}.provider_instance_id = ${lease.instanceId}
+    and ${process}.state = 'active'
+    and not (coalesce(${process}.provider_command, '{}'::jsonb) ? 'supervision')`;
+}
+
+/** A process holder owned by a background command that may run through a warm
+ * checkpoint (see `activeUnsupervisedLeaseProcess`). */
+function concurrentCommandHolder(
+  holder: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`(${holder}.kind = 'process' and exists (
+    select 1 from sandbox_retained_processes concurrent_process
+    where concurrent_process.holder_id = ${holder}.holder_id
+      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+  ))`;
+}
+
+/** The parent admission of a background command that may run through a warm
+ * checkpoint. It stays open for the command's lifetime; it is not an in-flight
+ * request, and treating it as one starved checkpoints for hours. */
+function concurrentCommandAdmission(
+  admission: SQL,
+  lease: { id: SQL; epoch: SQL; instanceId: SQL },
+): SQL {
+  return sql`exists (
+    select 1 from sandbox_retained_processes concurrent_process
+    where concurrent_process.parent_admission_id = ${admission}.id
+      and ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, lease)}
+  )`;
+}
+
+/** True when this exact capture claim ran around active background commands
+ * (recorded at claim time, see `claimWorkspaceArchiveCapture`). Its snapshot is
+ * a real recovery point but may predate their later writes: the warm
+ * publication records it one generation behind the workspace, so later
+ * periodic captures continue and a loss restore carries the discontinuity
+ * warning; every other publication path must not present it as complete. */
+function captureRanAroundCommands(lease: SQL): SQL {
+  return sql`(${lease}.archive_capture_id is not null
+    and ${lease}.archive_capture_concurrent_capture_id is not distinct from ${lease}.archive_capture_id)`;
+}
+
 /** Read the exact generation a verified capture must later fold. This is a
  * preflight only: persistWarmSnapshot/persistDrainSnapshot repeat the full
  * epoch, provider, liveness, and generation CAS under the archive-fold lock. */
@@ -59726,6 +59975,7 @@ export async function readWorkspaceArchiveCapturePreflight(
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
@@ -60062,6 +60312,12 @@ export async function claimWorkspaceArchiveCapture(
       attemptId: string;
       holderId: string;
     };
+    /** The provider capture is a point-in-time image of a paused box (Modal
+     * native filesystem/directory snapshots). A warm one may run around active
+     * background commands, and any may run around a crashed worker's orphaned
+     * request. Tar-style captures read files one by one from a
+     * running box and keep both as blockers. */
+    pointInTimeCapture?: boolean;
   },
 ): Promise<ClaimWorkspaceArchiveCaptureResult> {
   if (
@@ -60214,6 +60470,15 @@ export async function claimWorkspaceArchiveCapture(
       if (input.minIntervalMs > 0 && row.periodic_capture_throttled) {
         return { status: "throttled" as const };
       }
+      const leaseIdentity = {
+        id: sql`${row.id}::uuid`,
+        epoch: sql`${Number(row.lease_epoch)}`,
+        instanceId: sql`${input.expectedInstanceId}`,
+      };
+      // Neither a new process nor a new admission can appear while this claim
+      // is held, so "a command was running at claim time" is exactly the
+      // condition under which the snapshot may miss later writes.
+      const aroundCommands = input.warmAttempt !== undefined && input.pointInTimeCapture === true;
       const holderCounts = input.warmAttempt
         ? await scopedDb.execute<{
             total: number;
@@ -60227,6 +60492,11 @@ export async function claimWorkspaceArchiveCapture(
               )::integer as exact
             from sandbox_lease_holders
             where lease_id = ${row.id}
+              ${
+                aroundCommands
+                  ? sql`and not ${concurrentCommandHolder(sql`sandbox_lease_holders`, leaseIdentity)}`
+                  : sql``
+              }
           `)
         : await scopedDb.execute<{
             total: number;
@@ -60252,6 +60522,10 @@ export async function claimWorkspaceArchiveCapture(
       // control-plane generation admission. Never delete a live viewer receipt
       // and snapshot behind that still-valid tunnel. A skipped turn-end capture
       // is recovered by the zero-holder drain capture after the viewer detaches.
+      // A running background command is the one exception (warm only): its
+      // holder and parent admission never release before it exits, and waiting
+      // for that starved checkpoints for the box's whole lifetime. See
+      // `activeUnsupervisedLeaseProcess` for the accepted trade-off.
       const expectedHolderCount = input.warmAttempt ? 1 : 0;
       if ((holderCounts[0]?.total ?? 0) !== expectedHolderCount) {
         return { status: "holder_in_progress" as const };
@@ -60277,12 +60551,40 @@ export async function claimWorkspaceArchiveCapture(
             and not exists(select 1 from sandbox_retained_processes process
               where process.id = any(${`{${(row.unobservable_command_drain_ids ?? []).join(",")}}`}::uuid[])
                 and process.parent_admission_id = admission.id and process.lease_id = ${row.id})
+            ${
+              aroundCommands
+                ? sql`and not ${concurrentCommandAdmission(sql`admission`, leaseIdentity)}`
+                : sql``
+            }
+            ${
+              // A crashed worker's request may still be running a command. Only
+              // a point-in-time capture may run around it: a warm one marks the
+              // claim below, a drain terminates the box next. A file-by-file
+              // tar read of the running box could publish torn state as complete.
+              input.pointInTimeCapture === true
+                ? sql`and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}`
+                : sql``
+            }
             and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
         ) as present
       `);
       if (unsettled[0]?.present) {
         return { status: "mutation_in_progress" as const };
       }
+      const [concurrentCommands] = aroundCommands
+        ? await scopedDb.execute<{ present: boolean }>(sql`
+            select exists (
+              select 1 from sandbox_retained_processes concurrent_process
+              where ${activeUnsupervisedLeaseProcess(sql`concurrent_process`, leaseIdentity)}
+            ) or exists (
+              select 1 from sandbox_workspace_mutation_admissions orphaned_request
+              where orphaned_request.lease_id = ${row.id}
+                and orphaned_request.lease_epoch = ${input.expectedEpoch}
+                and orphaned_request.provider_instance_id = ${input.expectedInstanceId}
+                and ${crashedWorkerOrphanAdmissionSql(sql`orphaned_request`)}
+            ) as present
+          `)
+        : [];
       const sessionState =
         row.resume_state?.sessionState && typeof row.resume_state.sessionState === "object"
           ? (row.resume_state.sessionState as Record<string, unknown>)
@@ -60322,6 +60624,9 @@ export async function claimWorkspaceArchiveCapture(
           archive_capture_deadline_at = now() +
             (${input.captureTimeoutMs}::bigint * interval '1 millisecond'),
           archive_capture_published_at = null,
+          archive_capture_concurrent_capture_id = ${
+            concurrentCommands?.present === true ? input.captureId : null
+          }::uuid,
           updated_at = now()
         where id = ${row.id}
           and archive_capture_id is null
@@ -60478,6 +60783,13 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
           archive_capture_id = ${input.captureId}::uuid,
           archive_capture_operation_id = ${input.operationId}::uuid,
           archive_capture_attempt = ${input.attempt},
+          -- A replayed provider request would return the warm-time snapshot of
+          -- a claim that ran around commands; request a fresh one.
+          archive_capture_provider_request_id = case
+            when ${captureRanAroundCommands(sql`lease`)} then ${randomUUID()}::uuid
+            else lease.archive_capture_provider_request_id
+          end,
+          archive_capture_concurrent_capture_id = null,
           archive_capture_generation = lease.workspace_generation,
           archive_capture_started_at = now(),
           archive_capture_deadline_at = now() +
@@ -60536,6 +60848,7 @@ export async function replaceWorkspaceArchiveCaptureAfterProof(
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id
                   and process.lease_epoch = lease.lease_epoch
                   and process.provider_instance_id = lease.instance_id)
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         returning lease.*
@@ -61479,6 +61792,7 @@ export async function persistDrainSnapshot(
               and not exists(select 1 from sandbox_retained_processes process
                 where process.id = any(lease.unobservable_command_drain_ids)
                   and process.parent_admission_id = admission.id and process.lease_id = lease.id)
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           ) as unsettled_mutation
         from sandbox_leases as lease
@@ -61777,7 +62091,11 @@ async function foldWorkspaceArchiveOntoLease(
   const currentInstanceId = input.livenessGuard === "cold_late" ? null : input.expectedInstanceId;
   const livenessGuard =
     input.livenessGuard === "draining"
-      ? sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)`
+      ? // A warm claim that ran around commands may predate their last writes;
+        // it can never publish the final drain archive. Its release
+        // lets the drain recapture the now-quiet box.
+        sql`lease.liveness = 'draining' and (lease.refcount = 0 or lease.unobservable_command_drain_ids is not null)
+          and not ${captureRanAroundCommands(sql`lease`)}`
       : input.livenessGuard === "warm"
         ? sql`lease.liveness = 'warm'`
         : sql`lease.liveness = 'cold' and lease.refcount = 0 and lease.archive_capture_id is null`;
@@ -61884,6 +62202,11 @@ async function foldWorkspaceArchiveOntoLease(
     `);
     if (candidate.length !== 1) return false;
   }
+  const warmLeaseIdentity = {
+    id: sql`lease.id`,
+    epoch: sql`lease.lease_epoch`,
+    instanceId: sql`lease.instance_id`,
+  };
   const rows = await scopedDb.execute<{ id: string }>(sql`
     update sandbox_leases as lease set
       resume_state = ${foldedJson}::jsonb,
@@ -61893,6 +62216,12 @@ async function foldWorkspaceArchiveOntoLease(
       ${
         input.livenessGuard === "warm"
           ? sql`
+              workspace_generation = case
+                when ${captureRanAroundCommands(sql`lease`)}
+                  then lease.workspace_generation + 1
+                else lease.workspace_generation
+              end,
+              archive_capture_concurrent_capture_id = null,
               archive_capture_id = null,
               archive_capture_operation_id = null,
               archive_capture_provider_request_id = null,
@@ -61960,6 +62289,12 @@ async function foldWorkspaceArchiveOntoLease(
               and process.parent_admission_id = admission.id and process.lease_id = lease.id
               and process.lease_epoch = lease.lease_epoch
               and process.provider_instance_id = lease.instance_id)
+          ${
+            input.livenessGuard === "warm"
+              ? sql`and not ${concurrentCommandAdmission(sql`admission`, warmLeaseIdentity)}`
+              : sql``
+          }
+          and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
           and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
@@ -62208,6 +62543,15 @@ export async function persistWarmSnapshot(
               and admission.provider_instance_id = lease.instance_id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
+              and not (
+                lease.liveness = 'warm'
+                and ${concurrentCommandAdmission(sql`admission`, {
+                  id: sql`lease.id`,
+                  epoch: sql`lease.lease_epoch`,
+                  instanceId: sql`lease.instance_id`,
+                })}
+              )
+              and not ${crashedWorkerOrphanAdmissionSql(sql`admission`)}
               and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         for update
@@ -75026,6 +75370,7 @@ export async function claimSessionWorkForAttempt(
               ? "agent"
               : sessionTurnSurfaceOrNull(latestStarted?.surface);
           let scheduledEffectiveMcpServerIds: string[] | null = null;
+          let scheduledFirstPartyMcpTools: FirstPartyMcpToolName[] | null = null;
           let sandboxOs = latestStarted?.sandboxOs ?? session.sandboxOs;
           if (scheduledTaskRunId) {
             const [scheduledRun] = await tx
@@ -75069,6 +75414,8 @@ export async function claimSessionWorkForAttempt(
             const targetPolicy = accepted.targetSessionExecution;
             if (targetPolicy) {
               scheduledEffectiveMcpServerIds = targetPolicy.effectiveMcpServerIds;
+              scheduledFirstPartyMcpTools =
+                targetPolicy.effectiveFirstPartyMcpTools ?? targetPolicy.firstPartyMcpTools;
               const targetMcpServers = await tx
                 .select({ id: schema.sessionMcpServers.serverId })
                 .from(schema.sessionMcpServers)
@@ -75327,6 +75674,7 @@ export async function claimSessionWorkForAttempt(
                   internalUpdateCount: delivered.count,
                   ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                   ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                  ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
                 },
                 frozenTurnExecutionPolicy,
               )
@@ -75334,6 +75682,7 @@ export async function claimSessionWorkForAttempt(
                 internalUpdateCount: delivered.count,
                 ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                 ...(scheduledEffectiveMcpServerIds ? { scheduledEffectiveMcpServerIds } : {}),
+                ...(scheduledFirstPartyMcpTools ? { scheduledFirstPartyMcpTools } : {}),
               };
           const continuationCodexPolicy = routingGoalUpdate
             ? readCodexCredentialPolicySnapshotV1(routingGoalUpdate.lineage)
