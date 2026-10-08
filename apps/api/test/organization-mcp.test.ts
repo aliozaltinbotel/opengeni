@@ -122,7 +122,7 @@ describe("organization MCP action catalog", () => {
     // Independently require the complete route union, not only generator parity.
     const callable = new Set(
       [...registered, ...surface.routes]
-        .filter((route) => !isActionCatalogExempt(route.path))
+        .filter((route) => !isActionCatalogExempt(route.path, route.method))
         .map(routeKey),
     );
     expect(listed).toEqual(callable);

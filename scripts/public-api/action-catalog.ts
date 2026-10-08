@@ -46,8 +46,47 @@ export const ACTION_CATALOG_EXEMPTIONS: ReadonlyArray<{ pattern: RegExp; reason:
   { pattern: /^\/v1\/catalog-assets\//, reason: "static files" },
 ];
 
-export function isActionCatalogExempt(path: string): boolean {
-  return ACTION_CATALOG_EXEMPTIONS.some((exemption) => exemption.pattern.test(path));
+/**
+ * Cendra fork routes (MAINT-P09-433): routes the embedding host calls for its own
+ * bookkeeping, not organization actions, so agents never reach them through the
+ * organization MCP. Matched exactly by method and path: `DELETE /files/:fileId`
+ * shares its path with the catalogued file read.
+ */
+export const CENDRA_HOST_ROUTE_EXEMPTIONS: ReadonlyArray<{
+  method: string;
+  path: string;
+  reason: string;
+}> = [
+  {
+    method: "DELETE",
+    path: "/v1/workspaces/:workspaceId/files/:fileId",
+    reason: "Cendra host: release of a session's temporary model image upload",
+  },
+  {
+    method: "GET",
+    path: "/v1/workspaces/:workspaceId/files/temporary-model-images",
+    reason: "Cendra host: custody listing of temporary model images",
+  },
+  {
+    method: "GET",
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/model-source-basis",
+    reason: "Cendra host: exact model-call source receipt for host source admission",
+  },
+  {
+    method: "PATCH",
+    path: "/v1/workspaces/:workspaceId/external-members/:subjectId",
+    reason: "Cendra host: legacy external-member permission update owned by host reconcile",
+  },
+];
+
+export function isActionCatalogExempt(path: string, method?: string): boolean {
+  return (
+    ACTION_CATALOG_EXEMPTIONS.some((exemption) => exemption.pattern.test(path)) ||
+    (method !== undefined &&
+      CENDRA_HOST_ROUTE_EXEMPTIONS.some(
+        (exemption) => exemption.path === path && exemption.method === method.toUpperCase(),
+      ))
+  );
 }
 
 /**
@@ -166,7 +205,7 @@ export function buildActionCatalog(
         response: route?.response ?? [],
       };
     })
-    .filter((route) => !isActionCatalogExempt(route.path));
+    .filter((route) => !isActionCatalogExempt(route.path, route.method));
   const preferred = included.map((route) => {
     const names = route.sdk.map((name) => name.split(".").pop()!);
     return (
