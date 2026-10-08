@@ -784,7 +784,14 @@ export function createCodexRealtimeController(
           return;
         }
       }
-    } else if (error instanceof OpenGeniApiError && !error.retryable && !connectedInMode) {
+    } else if (
+      error instanceof OpenGeniApiError &&
+      !error.retryable &&
+      !connectedInMode &&
+      // Cendra fork (d1c387444): a reload that reconciles a retained pending begin keeps that
+      // owner intent and becomes terminal below; ending here would re-issue the begin from stop().
+      !(cause === "reload" && owner && !state.mode)
+    ) {
       await endAfterFailure(message, null);
       return;
     } else if (error instanceof OpenGeniApiError && !error.retryable) {
