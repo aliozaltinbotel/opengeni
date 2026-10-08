@@ -968,6 +968,8 @@ async function provisionExternalMemberOnFirstUse(
   permission: Permission | undefined,
 ): Promise<boolean> {
   if (
+    // Cendra fork: first-use membership is a deployment opt-in, off by default.
+    deps.settings.externalMemberFirstUseEnabled !== true ||
     !external.firstUseMembership ||
     external.linked ||
     // A request that would 403 on its own permission anyway creates nothing.

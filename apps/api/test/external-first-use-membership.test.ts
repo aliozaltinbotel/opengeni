@@ -95,6 +95,13 @@ app.onError((error, c) => {
 let routesRegistered = false;
 let productionApp: ReturnType<typeof createApp>;
 const delegationSecret = "first-use-membership-test-secret-at-least-32-bytes";
+// Cendra fork: first-use membership is a deployment opt-in (off by default); these cases opt in.
+const routeSettings = testSettings({
+  productAccessMode: "configured",
+  sandboxBackend: "none",
+  delegationSecret,
+  externalMemberFirstUseEnabled: true,
+});
 
 async function organization(
   permissions: Permission[] = CAPABLE,
@@ -103,11 +110,7 @@ async function organization(
   if (!routesRegistered) {
     const deps = {
       db: db.db,
-      settings: testSettings({
-        productAccessMode: "configured",
-        sandboxBackend: "none",
-        delegationSecret,
-      }),
+      settings: routeSettings,
       bus: new MemoryEventBus(),
     } as unknown as ApiRouteDeps;
     registerWorkspaceRoutes(app, deps);
@@ -203,6 +206,21 @@ test("a capable key creates the missing membership once and the request succeeds
   expect(await lifecycleEvents(org.workspace.id)).toEqual([
     { actor_service_subject: `api_key:${org.key.id}`, kind: "grant" },
   ]);
+}, 60_000);
+
+test("with first-use membership off (the Cendra default) a capable key's user is refused", async () => {
+  const org = await organization(CAPABLE, { composition: "production" });
+  const { externalId, client } = org.user();
+  routeSettings.externalMemberFirstUseEnabled = false;
+  try {
+    expect(await status(client.getWorkspace(org.workspace.id))).toBe(403);
+    expect(await memberships(org.workspace.id, await subjectOf(org.accountId, externalId))).toHaveLength(0);
+    expect(await lifecycleEvents(org.workspace.id)).toEqual([]);
+  } finally {
+    routeSettings.externalMemberFirstUseEnabled = true;
+  }
+  // The same request admits once the deployment opts in.
+  expect((await client.getWorkspace(org.workspace.id)).id).toBe(org.workspace.id);
 }, 60_000);
 
 test("a key without the onboarding authority keeps the 403", async () => {

@@ -157,6 +157,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     voiceInputResumableMaxSizeBytes: 512 * 1024 * 1024,
     voiceInputResumableMaxChunkSizeBytes: 8 * 1024 * 1024,
     sessionArchiveEnabled: false,
+    externalMemberFirstUseEnabled: false,
     sessionArchiveIdleDays: 30,
     voiceInputResumableRetentionSeconds: 24 * 60 * 60,
     voiceInputFfmpegPath: "ffmpeg",
