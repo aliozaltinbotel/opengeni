@@ -55,7 +55,7 @@ const producedSources = new WeakMap<ModelRequestCapture, {
   restoreHistorySources: (items:readonly unknown[])=>void;
   outputs: Map<string,InputBinding|null>;
   outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
-  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:string; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
+  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
@@ -134,7 +134,18 @@ export function recordModelToolProjection(callId:string|undefined,modelName:stri
   if(!capture || !callId) return;
   const tool=sourceState(capture).tools.get(callId);
   if(!tool || tool.source.nativeModelSourceKey!==capture.toolSourceKeys?.get(callId))return;
-  tool.projection=toSmartString(output);tool.modelName=modelName;
+  // The installed SDK projects text-content returns to input_text arrays.
+  // Register only the actual owning invocation's public text protocol values;
+  // an arbitrary next-input array never establishes its own source.
+  const returned=Array.isArray(output)?output:[output];
+  const textParts=returned.map(part=>protocol.ToolOutputText.safeParse(part));
+  tool.projection=returned.length>0 && textParts.every(part=>part.success)
+    ? textParts.map(part=>{
+      if(!part.success)throw new Error("MODEL_TOOL_TEXT_PROJECTION_INVALID");
+      return protocol.InputText.parse({...part.data,type:"input_text"});
+    })
+    : {type:"text",text:toSmartString(output)};
+  tool.modelName=modelName;
 }
 
 /** Native client discovery produces these exact schemas, not model-authored
@@ -202,7 +213,7 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
     if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName
-      || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson({type:"text",text:tool.projection}))continue;
+      || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.projection))continue;
     bindModelSourceInput(item,{kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
       parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult});
   }
