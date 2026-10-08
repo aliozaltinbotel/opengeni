@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- MAINT-P09-425: fair recurring temporary-image cleanup after late PUT completion.
 -- Only selection order changes. Preserve the installed function, global reaper
 -- authorization, claim eligibility, locking, bounded batch and result shape.
