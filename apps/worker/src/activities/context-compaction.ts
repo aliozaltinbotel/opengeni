@@ -516,10 +516,18 @@ async function compactContextPortable(
       ANTHROPIC_REQUEST_MAX_BYTES,
       options.requestSizeRecovery?.maxBytes ?? ANTHROPIC_REQUEST_MAX_BYTES,
     );
-    const prepare = async (prefix: CompactionItem[]) =>
-      buildCompactionPromptInput(
-        omitOpaqueArtifactsFromPortableCompactionHistory(await projectForWire(prefix)),
+    // Cendra fork: the exact retained source items of the last prepared input (summary provenance).
+    let preparedSources: CompactionItem[] = [];
+    const prepare = async (prefix: CompactionItem[]) => {
+      const sources: CompactionItem[] = [];
+      const input = buildCompactionPromptInput(
+        omitOpaqueArtifactsFromPortableCompactionHistory(await projectForWire(prefix), (source) =>
+          sources.push(source),
+        ),
       );
+      preparedSources = sources;
+      return input;
+    };
     const cut = await fitCompactionPrefix(
       canonicalItems,
       async (prefix) => {
@@ -539,9 +547,11 @@ async function compactContextPortable(
     summarizedItems = canonicalItems.slice(0, cut);
     deferredItems = canonicalItems.slice(cut);
     const projected = await prepare(summarizedItems);
+    const sourceItems = preparedSources;
     summarized = {
       summaryBody: await summarize(settings, projected),
       preparation: {
+        sourceItems,
         input: projected,
         estimatedInputTokens: estimateTokens(projected),
         rewrittenToolOutputs: 0,
