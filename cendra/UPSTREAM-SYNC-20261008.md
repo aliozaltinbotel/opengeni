@@ -249,6 +249,46 @@ and on a clean checkout of the pin `6c2c7eaf1` (if the fork touches it). Classif
 | Already red at the pin (same cases) | 10 | session-authorization-routes (5 cases), session-realtime-ledger and agent-session-commands (`claim.turn.modelContext`, c376f0d13), cache-notice-replay (2), optional-repository-access-loss (`MODEL_OUTPUT_PRODUCER_INEXACT`), runtime (recovery notice text), model-call-source-receipts (same file, timeout-shaped: merged fails 1 case, the pin 3), runtime-posture (table-class count 419 vs 418), browser-client-surface (`getSessionModelSourceBasis`), evidence-assessor-files (needs `OPENGENI_EVIDENCE_ASSESSOR_TEST_APP_URL`) |
 | Inherited upstream defect inside a fork test | 3 cases | session-create-fresh-outcome: the three cases that read a 403/500 JSON body over HTTP (finding 1 below). With those, that file is 6 pass, 1 skip, 3 fail when run alone. |
 
+## Tests (round 2, on `37c6a85b3`)
+
+| Gate | Result |
+| --- | --- |
+| `bun install` (Bun 1.3.14) | rc 0; `bun.lock` byte-identical to upstream `e1395d4f0`'s |
+| `bun run typecheck` | rc 0, all projects clean (the merge alone failed with TS2741 until `ec39c5657`) |
+| `bun scripts/check-migration-ordinals.ts --base e1395d4f0...` | PASS (666 migrations, next 0668) |
+| `bun scripts/public-api/check.ts --write`, Site runtime `--check`, action catalog `--write` | PASS; surface unchanged, catalog adds upstream's inbox routes |
+| Ledger proofs (round 2 table above) | PASS |
+
+Red before, green after, in round 2:
+
+| Test | Before | After |
+| --- | --- | --- |
+| `http-rejection-telemetry` gzip case (`b0c49cf11`) | empty body | 10/10 |
+| `organization-mcp` (`72d7e4d12`) | red (also upstream) | 22/22; red again without one exemption |
+| `external-first-use-membership` Cendra-default case (`a3da958f0`) | membership created | 19/19 |
+| `chat-quickstart-onboarding`, `member-learning-read` (opt in, `37c6a85b3`) | 403 under the new default | 7/7 |
+
+Package suite (api, worker, core, db, runtime, sdk, contracts; 1867 files), merged tree:
+
+- First pass: 1374 files, 96 failing. 62 of the 96 were collateral: upstream's `sandbox-lease` (red upstream) drops
+  its BYPASSRLS role in `finally`, the drop fails while another test's database still depends on it, and the shared
+  `opengeni_app` stays a member, so every later role-normalizing fixture refuses. The run was stopped, the test
+  server recreated, and the failures rerun with `sandbox-lease` excluded.
+- Rerun of the 95: 30 still fail. Then 62 of the remaining 492 files ran (3 fail) before free disk fell to 4.5 GB
+  from other sessions; the run was stopped. **431 files were not run in round 2** (round 1 ran all 1840 on
+  `fe750ae24`).
+
+The 33 failing files, classified:
+
+| Class | Files |
+| --- | --- |
+| Red on clean upstream `e1395d4f0` (new in round 2) | 9: agent-config-enforcement (84, `db.select` on the test's fake db through upstream's new `requireWorkspace`), agent-run-admission, goal-continuation-admission, goal-continuation-credential-restriction, scheduled-task-creator-policy, agent-widening-fences, child-lifecycle-notices, connector-action-parallel, migration-0264 |
+| Red on upstream `89e3a2ad9` (round 1) | 13: connections-routes, embedded-gmail-connect, managed-auth-session-sets.integration, native-mcp-shared-admission, slack-interactions-integration, assistant-message-events, final-reply-postgres, usage-allowance-regressions-postgres, browser-bundle-boundary, insights-usage, connections, postgres-tls-retention, session-control-mega-migration |
+| Red at the pin (round 1, same cases) | 7: evidence-assessor-files, session-authorization-routes, cache-notice-replay, optional-repository-access-loss, model-call-source-receipts, agent-session-commands, runtime-posture |
+| Fork divergence (finding 4) | 1: context-compaction-activity, upstream's new byte-continuation case |
+| Same error as migration-0264 (`task.owner_subject_id`), not separately verified | 2: migration-0345, migration-0478 |
+| Unclassified | 1: migration-0363 (`toMatchObject`) |
+
 ## Findings (round 1) and their resolution (round 2)
 
 1. **Empty JSON error bodies under gzip: fixed in `b0c49cf11`, an upstreamable fix that must land before the repin
@@ -318,7 +358,9 @@ and on a clean checkout of the pin `6c2c7eaf1` (if the fork touches it). Classif
 - The next sync renumbers the fork migrations again if upstream passes 0667 (safe by their bodies).
 - Repin observations: carrier approval mode under managed tool decisions, first-turn tool search for cendra-pms, the
   0598 encryption key on staging, and the 0586 session-tenancy activation Job.
-- The package suite was not rerun in full after the fixes; the affected files and their neighbours were.
+- Round 2 ran 1436 of 1867 package test files (disk); migration-0363 is unclassified and migration-0345/0478 are
+  unverified against upstream.
+- Upstream's `sandbox-lease` leaks a BYPASSRLS role membership on a shared test server; run it alone.
 - Gate logs are kept untracked in the worktree's `.local/gates` until review. `.local/` is not git-ignored in the
   fork, so a follow-on must not `git add -A`.
 - Lesson for the next sync: moving fork migrations after the upstream chain moves fork DDL past every upstream test
