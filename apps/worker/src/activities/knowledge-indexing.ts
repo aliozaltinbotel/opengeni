@@ -1,5 +1,10 @@
 import { configuredStaticUsageLimits } from "@opengeni/config";
-import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "@opengeni/core";
+import { EMBEDDING_CALL_USAGE_EVENT_TYPE } from "@opengeni/contracts";
+import {
+  documentEmbeddingCostMicros,
+  embeddingCallUsageAttributes,
+  paidDocumentEmbedding,
+} from "@opengeni/core";
 import {
   applyCreditDebitAfterUse,
   appendKnowledgeIndexChunks,
@@ -268,6 +273,27 @@ export function createKnowledgeIndexingActivities(
                 sourceResourceType: "knowledge_revision",
                 sourceResourceId: claim.revisionId,
                 idempotencyKey: `knowledge.embedding_bytes:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+              });
+              // MAINT-P09-430: the batch's one provider request as its own
+              // per-call fact, priced at the generation's frozen byte rate.
+              await recordUsageEvent(lockedDb, {
+                accountId: claim.accountId,
+                workspaceId: current.billingWorkspaceId,
+                eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+                quantity: 1,
+                unit: "call",
+                sourceResourceType: "knowledge_revision",
+                sourceResourceId: claim.revisionId,
+                idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
+                attributes: embeddingCallUsageAttributes({
+                  callKind: "index",
+                  provider: settings.documentEmbeddingProvider ?? "unspecified",
+                  model: claim.model,
+                  inputBytes: bytes,
+                  inputItems: chunks.length,
+                  rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
+                  billingPath: paid ? "opengeni_credits" : "external",
+                }),
               });
               if (frozenPolicy.mode === "shadow" && frozenPolicy.rateMicrosPerMillionBytes > 0) {
                 const estimate = documentEmbeddingCostMicros(

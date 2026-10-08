@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   applyCreditDebitUpToBalance,
   recordUsageEvent,
@@ -23,6 +24,7 @@ import {
   OPENGENI_GATEWAY_PROVIDER_ID,
   WORKSPACE_GATEWAY_PROVIDER_ID,
   type ModelUsageInput,
+  type ModelPricingScheduleV1,
   type ModelProviderApi,
   type Settings,
 } from "@opengeni/config";
@@ -35,6 +37,9 @@ import {
   recordModelInputTokens,
 } from "../../observability-metrics";
 import {
+  MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
+  MODEL_CALL_USAGE_EVENT_TYPE,
+  ModelCallUsageAttributes,
   type LatencyMode,
   type ModelContextContributionSummary,
   type SessionEvent,
@@ -102,6 +107,14 @@ export type ModelResponseEventState = {
   responseCount: number;
   contextSignal: { revision: number; totalTokens: number } | null;
   claimedSourceKeys: Set<string>;
+  /**
+   * Source keys of terminal responses that exposed no usage, in order. The
+   * stream settles them once it knows whether an aggregate fallback covers
+   * them (no per-response usage at all) or each must be recorded as an
+   * unknown call (some responses did report usage): see
+   * `recordUnreportedModelCalls`.
+   */
+  unreportedSourceKeys: string[];
 };
 
 export type CompactionModelUsageEventState = {
@@ -116,6 +129,7 @@ export function createModelResponseEventState(
     responseCount: 0,
     contextSignal: null,
     claimedSourceKeys,
+    unreportedSourceKeys: [],
   };
 }
 
@@ -245,6 +259,11 @@ export async function processModelResponseTerminalEvent(input: {
   input.state.responseCount = responseOrdinal;
 
   const responseUsage = terminal.usage;
+  if (!responseUsage) {
+    // A provider call happened but reported nothing. It is settled with the
+    // stream (recordUnreportedModelCalls), never written as zero usage.
+    input.state.unreportedSourceKeys.push(sourceKey);
+  }
 
   const normalizedUsage = normalizeModelCallUsage(responseUsage?.usage);
   const accountContext = modelCallAccountContext({
@@ -268,6 +287,9 @@ export async function processModelResponseTerminalEvent(input: {
         turnId: input.turnId,
         turnAttemptId: input.turnAttemptId,
         model: input.model,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        callKind: "response",
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -416,6 +438,9 @@ export async function processCompactionModelUsageEvent(input: {
         turnId: input.turnId,
         turnAttemptId: input.turnAttemptId,
         model: input.model,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        callKind: input.sourceKind === "session-title" ? "session_title" : "compaction",
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -624,6 +649,18 @@ export async function recordModelUsageAndDebitCredits(
     turnId: string;
     turnAttemptId: string;
     model: string;
+    /** The serving provider and API of the call; resolved from the model when omitted. */
+    provider?: string;
+    providerApi?: ModelProviderApi;
+    /** What made the call; a per-response turn call unless named. */
+    callKind?: ModelCallUsageAttributes["callKind"];
+    /** `aggregate` only for the stream fallback that stands for unreported calls. */
+    scope?: ModelCallUsageAttributes["scope"];
+    /**
+     * False only when the usage frame evidences no provider call (the stream
+     * fallback's default zero frame): the caller then records the call itself.
+     */
+    recordCall?: boolean;
     externallyBilled: boolean;
     chargesOpenGeniCredits?: boolean;
     countsTowardTokenCap?: boolean;
@@ -717,6 +754,39 @@ export async function recordModelUsageAndDebitCredits(
     : estimatedProviderCostMicros !== null
       ? ("configured_list_price" as const)
       : null;
+  // MAINT-P09-430: the call's own authoritative per-call fact, on every billing
+  // path and before anything else is recorded for it. Durable like
+  // model.tokens: a refused write rejects (never a soft fail), and the
+  // idempotency key makes a replay of the same call the same row.
+  const resolvedCallProvider =
+    input.provider === undefined || input.providerApi === undefined
+      ? resolveModelProvider(settings, input.model)?.provider
+      : undefined;
+  if (input.recordCall !== false)
+    await recordModelCallUsageEvent(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
+      sourceKey: input.sourceKey,
+      callKind: input.callKind ?? "response",
+      scope: input.scope ?? "call",
+      provider: input.provider ?? resolvedCallProvider?.id ?? settings.openaiProvider ?? "openai",
+      providerApi: input.providerApi ?? resolvedCallProvider?.api ?? "responses",
+      upstreamProvider: gatewayBilling?.finalProvider ?? null,
+      model: input.model,
+      billingPath: chargesOpenGeniCredits ? "opengeni_credits" : "external",
+      billing: {
+        normalizedUsage,
+        estimatedProviderCostMicros,
+        pricingSource,
+        priceVersion:
+          pricingSource === "configured_list_price" && configuredPricingModel
+            ? modelPricingScheduleVersion(pricingSchedules[configuredPricingModel]!)
+            : null,
+      },
+    });
   // Provider settlement and workspace-facing cost are separate. Externally
   // metered subscription/workspace turns remain exempt from the OpenGeni token
   // cap, while a deployment-funded free model still records model.tokens. Every
@@ -876,6 +946,127 @@ export async function recordAuthoritativeModelCallFact(input: {
       ...safeErrorDiagnostic(error),
     });
   }
+}
+
+/** Key-sorted JSON: the canonical text a pricing schedule's identity is taken over. */
+function canonicalScheduleJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalScheduleJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalScheduleJson(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The identity of the configured price schedule a `configured_list_price`
+ * estimate used: sha256 over the schedule's key-sorted JSON. Any change to a
+ * rate, a tier or the margin yields a new version.
+ */
+export function modelPricingScheduleVersion(schedule: ModelPricingScheduleV1): string {
+  return `schedule-sha256:${createHash("sha256").update(canonicalScheduleJson(schedule)).digest("hex")}`;
+}
+
+/**
+ * Write the authoritative per-call `model.call` usage row (MAINT-P09-430).
+ *
+ * One row per provider call, idempotent on `usage:model.call:{turnId}:{sourceKey}`
+ * (the same source key model.tokens/model.cost use), quantity 1, unit `call`.
+ * `billing: null` records a call whose usage the provider never reported: every
+ * token pool and the cost are null, never 0. The attributes are validated
+ * against the published contract before the write, so a malformed fact fails
+ * here rather than on the host export.
+ */
+export async function recordModelCallUsageEvent(
+  db: ActivityServices["db"],
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnAttemptId: string;
+    sourceKey: string;
+    callKind: ModelCallUsageAttributes["callKind"];
+    scope: ModelCallUsageAttributes["scope"];
+    provider: string;
+    providerApi: string;
+    upstreamProvider: string | null;
+    model: string;
+    billingPath: ModelCallUsageAttributes["billingPath"];
+    billing: {
+      normalizedUsage: ModelCallUsageNormalization;
+      estimatedProviderCostMicros: number | null;
+      pricingSource: ModelCallUsageAttributes["pricingSource"];
+      priceVersion: string | null;
+    } | null;
+  },
+): Promise<void> {
+  const telemetry = input.billing?.normalizedUsage.telemetry ?? null;
+  const attributes = ModelCallUsageAttributes.parse({
+    schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
+    callKind: input.callKind,
+    scope: input.scope,
+    sourceKey: input.sourceKey,
+    provider: input.provider,
+    providerApi: input.providerApi,
+    upstreamProvider: input.upstreamProvider,
+    model: input.model,
+    outcome: "completed",
+    usageReported: input.billing !== null,
+    inputTokens: telemetry?.inputTokens ?? null,
+    outputTokens: telemetry?.outputTokens ?? null,
+    cachedTokens: telemetry?.cachedTokens ?? null,
+    cacheWriteTokens: telemetry?.cacheWriteTokens ?? null,
+    reasoningTokens: telemetry?.reasoningTokens ?? null,
+    totalTokens: input.billing?.normalizedUsage.totalTokens ?? null,
+    estimatedProviderCostMicros: input.billing?.estimatedProviderCostMicros ?? null,
+    pricingSource: input.billing?.pricingSource ?? null,
+    priceVersion: input.billing?.priceVersion ?? null,
+    billingPath: input.billingPath,
+  });
+  await recordUsageEvent(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    eventType: MODEL_CALL_USAGE_EVENT_TYPE,
+    quantity: 1,
+    unit: "call",
+    sourceResourceType: "model_response",
+    sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
+    idempotencyKey: `usage:${MODEL_CALL_USAGE_EVENT_TYPE}:${input.turnId}:${input.sourceKey}`,
+    attributes,
+  });
+}
+
+/**
+ * Settle the terminal responses of one stream that reported no usage, once the
+ * stream knows how they are covered: when no response of the stream reported
+ * usage, the aggregate fallback row stands for all of them and nothing is
+ * written here; otherwise each is recorded as its own unknown call (null usage,
+ * null cost) so a partially reported stream never silently drops a call.
+ */
+export async function recordUnreportedModelCalls(
+  db: ActivityServices["db"],
+  input: Omit<
+    Parameters<typeof recordModelCallUsageEvent>[1],
+    "sourceKey" | "scope" | "billing"
+  > & {
+    sourceKeys: readonly string[];
+    coveredByAggregate: boolean;
+  },
+): Promise<number> {
+  if (input.coveredByAggregate) return 0;
+  const { sourceKeys, coveredByAggregate: _covered, ...call } = input;
+  for (const sourceKey of sourceKeys) {
+    await recordModelCallUsageEvent(db, { ...call, sourceKey, scope: "call", billing: null });
+  }
+  return sourceKeys.length;
 }
 
 export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): ModelUsageInput {

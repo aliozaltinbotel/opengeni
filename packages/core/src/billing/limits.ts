@@ -3,12 +3,14 @@ import {
   resolveModelProviderForTurn,
   type Settings,
 } from "@opengeni/config";
-import type {
-  LimitAction,
-  LimitDecision,
-  SessionTurnSource,
-  TurnInitiator,
-  TurnInitiatorContext,
+import {
+  EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA,
+  EmbeddingCallUsageAttributes,
+  type LimitAction,
+  type LimitDecision,
+  type SessionTurnSource,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   countActiveApiKeysForWorkspace,
@@ -24,6 +26,42 @@ import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "../dependencies";
 
 export type LimitDependencies = Pick<ApiRouteDeps, "db" | "settings">;
+
+/**
+ * The per-request `embedding.call` facts (MAINT-P09-430). The embedder returns
+ * vectors only, so token counts are not observed (null). The configured byte
+ * rate prices an OpenAI request when it is positive; any other provider or a
+ * zero rate leaves the cost unknown (null), never 0.
+ */
+export function embeddingCallUsageAttributes(input: {
+  callKind: EmbeddingCallUsageAttributes["callKind"];
+  provider: string;
+  model: string;
+  inputBytes: number;
+  inputItems: number;
+  rateMicrosPerMillionBytes: number;
+  billingPath: EmbeddingCallUsageAttributes["billingPath"];
+}): EmbeddingCallUsageAttributes {
+  const priced = input.provider === "openai" && input.rateMicrosPerMillionBytes > 0;
+  const rate = input.rateMicrosPerMillionBytes;
+  const estimate = priced
+    ? Number((BigInt(input.inputBytes) * BigInt(rate) + 999_999n) / 1_000_000n)
+    : null;
+  return EmbeddingCallUsageAttributes.parse({
+    schema: EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA,
+    callKind: input.callKind,
+    provider: input.provider,
+    model: input.model,
+    outcome: "completed",
+    inputBytes: input.inputBytes,
+    inputItems: input.inputItems,
+    inputTokens: null,
+    estimatedProviderCostMicros: estimate,
+    pricingSource: priced ? "configured_byte_rate" : null,
+    rateMicrosPerMillionBytes: priced ? rate : null,
+    billingPath: input.billingPath,
+  });
+}
 
 /** Deterministic/local embeddings never debit credits, even in paid mode. */
 export function paidDocumentEmbedding(settings: Settings): boolean {

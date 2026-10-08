@@ -1914,6 +1914,11 @@ describe("production model-response usage callback authority", () => {
       expect(durableUsageSourceKeys).toEqual(new Set([response.id]));
       expect([...billingRows.values()]).toEqual([
         expect.objectContaining({
+          eventType: "model.call",
+          quantity: 1,
+          idempotencyKey: `usage:model.call:turn-1:${response.id}`,
+        }),
+        expect.objectContaining({
           eventType: "model.cost",
           quantity: 0,
           idempotencyKey: `usage:model.cost:turn-1:${response.id}`,
@@ -1990,7 +1995,8 @@ describe("production model-response usage callback authority", () => {
       expect(restartedState.responseCount).toBe(1);
       expect(restartedState.contextSignal).toBeNull();
       expect(fencedInputs).toHaveLength(restartedInputsBefore);
-      expect(billingRows).toHaveLength(1);
+      // The restart replays the same two durable keys (per-call fact and cost marker); nothing new.
+      expect(billingRows).toHaveLength(2);
       const metricsAfterRestart = await observability.prometheusMetrics();
       expect(metricsAfterRestart).toMatch(
         /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
@@ -2087,6 +2093,17 @@ describe("production model-response usage callback authority", () => {
         sourceKey: "resp-workspace-gateway",
       });
       expect(usageRows).toEqual([
+        expect.objectContaining({
+          eventType: "model.call",
+          quantity: 1,
+          attributes: expect.objectContaining({
+            provider: WORKSPACE_GATEWAY_PROVIDER_ID,
+            upstreamProvider: "anthropic",
+            pricingSource: "gateway_reported",
+            estimatedProviderCostMicros: 4,
+            billingPath: "external",
+          }),
+        }),
         expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
       ]);
       expect(eventPayloads).toEqual([
@@ -2439,9 +2456,19 @@ describe("production model-response usage callback authority", () => {
       );
       expect([...billingRows.values()]).toEqual([
         expect.objectContaining({
+          eventType: "model.call",
+          quantity: 1,
+          idempotencyKey: "usage:model.call:turn-1:activity-A:response-1",
+        }),
+        expect.objectContaining({
           eventType: "model.cost",
           quantity: 0,
           idempotencyKey: "usage:model.cost:turn-1:activity-A:response-1",
+        }),
+        expect.objectContaining({
+          eventType: "model.call",
+          quantity: 1,
+          idempotencyKey: "usage:model.call:turn-1:activity-A:response-2",
         }),
         expect.objectContaining({
           eventType: "model.cost",
@@ -2545,7 +2572,11 @@ describe("production model-response usage callback authority", () => {
       expect(await process()).toEqual({ status: "duplicate", sourceKey: usage.responseId });
       expect(state.usageCount).toBe(1);
       expect(leaseRenewals).toBe(1);
-      expect(billingRows.size).toBe(1);
+      // The compaction call's per-call fact (MAINT-P09-430) and its model.cost marker.
+      expect([...billingRows.keys()]).toEqual([
+        `usage:model.call:turn-1:${usage.responseId}`,
+        `usage:model.cost:turn-1:${usage.responseId}`,
+      ]);
 
       const restartedState = createCompactionModelUsageEventState();
       expect(await process(restartedState, new Set<string>(), "activity-B")).toMatchObject({
@@ -2555,7 +2586,7 @@ describe("production model-response usage callback authority", () => {
       });
       expect(restartedState.usageCount).toBe(1);
       expect(leaseRenewals).toBe(2);
-      expect(billingRows.size).toBe(1);
+      expect(billingRows.size).toBe(2);
       expect(durableUsageSourceKeys).toEqual(new Set([usage.responseId]));
       expect(factRows).toEqual([
         expect.objectContaining({

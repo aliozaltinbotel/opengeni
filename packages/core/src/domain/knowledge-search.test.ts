@@ -166,11 +166,64 @@ test("shadow query usage meters bytes without checking or consuming credits", as
     settings,
   );
   expect(found.searchMode).toBe("vector");
-  expect(usage.mock.calls.at(-1)?.[1]).toMatchObject({
+  const [bytesRow, callRow] = usage.mock.calls
+    .slice(-2)
+    .map((call) => call[1] as { quantity: number; eventType: string; sourceResourceId?: string });
+  if (!bytesRow) throw new Error("query bytes row missing");
+  expect(bytesRow).toMatchObject({
     quantity: 2,
     eventType: "document.query_embedding_bytes",
   });
+  // MAINT-P09-430: the query's one provider request as its own per-call fact, in the same
+  // transaction: the configured byte rate prices it, tokens are not observed (null).
+  expect(callRow).toMatchObject({
+    eventType: "embedding.call",
+    quantity: 1,
+    unit: "call",
+    sourceResourceType: "knowledge_query",
+    sourceResourceId: bytesRow.sourceResourceId,
+    idempotencyKey: `usage:embedding.call:query:${bytesRow.sourceResourceId}`,
+    attributes: {
+      schema: "opengeni.embedding-call-usage/v1",
+      callKind: "query",
+      provider: "openai",
+      model: "test",
+      outcome: "completed",
+      inputBytes: 2,
+      inputItems: 1,
+      inputTokens: null,
+      estimatedProviderCostMicros: 2,
+      pricingSource: "configured_byte_rate",
+      rateMicrosPerMillionBytes: 1_000_000,
+      billingPath: "external",
+    },
+  });
   expect(debits.mock.calls.length).toBe(before);
+});
+
+test("an unpriced query embedding records its call with an unknown cost, never 0", async () => {
+  const settings = {
+    documentEmbeddingProvider: "openai",
+    documentEmbeddingBillingMode: "shadow",
+    documentEmbeddingRateMicrosPerMillionBytes: 0,
+  } as Settings;
+  const found = await searchKnowledgeEntries(
+    {} as never,
+    { accountId: "account", workspaceId: "workspace" } as never,
+    { query: "abc", mode: "vector" },
+    () => ({ model: "test", dimensions: 3, embedQuery: async () => [1, 0, 0] }) as never,
+    settings,
+  );
+  expect(found.searchMode).toBe("vector");
+  expect(usage.mock.calls.at(-1)?.[1]).toMatchObject({
+    eventType: "embedding.call",
+    attributes: {
+      inputBytes: 3,
+      estimatedProviderCostMicros: null,
+      pricingSource: null,
+      rateMicrosPerMillionBytes: null,
+    },
+  });
 });
 
 test("paid query does not debit when vector retrieval fails after embedding", async () => {

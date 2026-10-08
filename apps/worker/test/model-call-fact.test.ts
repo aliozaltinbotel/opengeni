@@ -303,6 +303,7 @@ describe("recordAuthoritativeModelCallFact", () => {
       }),
     ]);
     expect(usageSpy.mock.calls.map(([, input]) => input)).toEqual([
+      expect.objectContaining({ eventType: "model.call", quantity: 1 }),
       expect.objectContaining({ eventType: "model.tokens", quantity: 1500 }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
     ]);
@@ -388,9 +389,25 @@ describe("recordAuthoritativeModelCallFact", () => {
       });
     }
 
-    expect(recordSpy).toHaveBeenCalledTimes(2);
+    expect(recordSpy).toHaveBeenCalledTimes(4);
     expect(recordSpy.mock.calls.map(([, input]) => input)).toEqual([
+      expect.objectContaining({
+        eventType: "model.call",
+        quantity: 1,
+        attributes: expect.objectContaining({
+          estimatedProviderCostMicros: null,
+          pricingSource: null,
+        }),
+      }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
+      expect.objectContaining({
+        eventType: "model.call",
+        quantity: 1,
+        attributes: expect.objectContaining({
+          estimatedProviderCostMicros: null,
+          pricingSource: null,
+        }),
+      }),
       expect.objectContaining({ eventType: "model.cost", quantity: 0 }),
     ]);
     expect(debitSpy).not.toHaveBeenCalled();

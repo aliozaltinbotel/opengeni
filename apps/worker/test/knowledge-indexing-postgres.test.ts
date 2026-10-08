@@ -143,6 +143,22 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
   const [usage] =
     await shared.admin`SELECT sum(quantity)::int AS chunks FROM usage_events WHERE source_resource_id=${saved.revisionId} AND event_type='document.indexed'`;
   expect(usage?.chunks).toBe(chunks.length);
+  // MAINT-P09-430: one durable embedding.call per committed provider batch (32, then the rest),
+  // unpriced here (no byte rate is configured), so its cost is unknown, never 0.
+  const calls = await shared.admin<Array<{ attributes: Record<string, unknown> }>>`
+    SELECT attributes FROM usage_events WHERE source_resource_id=${saved.revisionId} AND event_type='embedding.call' ORDER BY idempotency_key`;
+  expect(
+    calls.map((call) => call.attributes.inputItems).sort((a, b) => Number(b) - Number(a)),
+  ).toEqual([32, chunks.length - 32]);
+  for (const call of calls) {
+    expect(call.attributes).toMatchObject({
+      schema: "opengeni.embedding-call-usage/v1",
+      callKind: "index",
+      model: "knowledge-index-test",
+      estimatedProviderCostMicros: null,
+      pricingSource: null,
+    });
+  }
   const found = await searchKnowledgeEntries(
     client.db,
     context,

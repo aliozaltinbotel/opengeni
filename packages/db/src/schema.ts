@@ -12165,6 +12165,9 @@ export const usageEvents = pgTable(
       withTimezone: true,
     }),
     billingProviderEventId: text("billing_provider_event_id"),
+    // Per-call facts of a `model.call` / `embedding.call` row (0553); written
+    // once with the row, immutable, and copied into the host usage export.
+    attributes: jsonb("attributes").$type<Record<string, unknown>>(),
   },
   (table) => ({
     idempotency: uniqueIndex("usage_events_idempotency_idx").on(table.idempotencyKey),
@@ -12215,6 +12218,16 @@ export const usageEvents = pgTable(
       sql`${table.origin} is null or ${table.origin} in (
         'user', 'scheduled_task', 'api', 'goal', 'system', 'compaction'
       )`,
+    ),
+    attributesShape: check(
+      "usage_events_attributes_shape_check",
+      sql`${table.attributes} is null
+        or (jsonb_typeof(${table.attributes}) = 'object' and octet_length(${table.attributes}::text) <= 4096)`,
+    ),
+    callAttributes: check(
+      "usage_events_call_attributes_check",
+      sql`${table.eventType} not in ('model.call', 'embedding.call')
+        or (${table.attributes} is not null and jsonb_typeof(${table.attributes} -> 'schema') = 'string')`,
     ),
   }),
 );

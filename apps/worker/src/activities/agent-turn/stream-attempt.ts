@@ -127,8 +127,10 @@ import {
   processModelResponseTerminalEvent,
   processSessionTitleModelUsageEvent,
   emitModelCallUsage,
+  recordModelCallUsageEvent,
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
+  recordUnreportedModelCalls,
 } from "./model-usage";
 import {
   sessionTitleGenerationOptions,
@@ -598,6 +600,7 @@ export async function runTurnStreamAttempt(
       throw new Error("Run input was not prepared");
     }
     const responseCountBeforeStream = modelResponseState.responseCount;
+    const unreportedBeforeStream = modelResponseState.unreportedSourceKeys.length;
     eventing.stream = undefined;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
@@ -1575,6 +1578,15 @@ export async function runTurnStreamAttempt(
           leaseLost: leases.servingLost,
           leaseLostMessage: "Provider credential lease expired during the active turn",
           recordUsage: async () => {
+            const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
+            const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
+            // MAINT-P09-430: the fallback row stands for every provider call of
+            // this stream (none reported per-response usage). A zero frame is
+            // the SDK's default, not a report: such calls are recorded once as
+            // an unknown aggregate, never as zero usage, and a stream with no
+            // provider response and no usage records no call at all.
+            const responsesInStream = modelResponseState.responseCount - responseCountBeforeStream;
+            const aggregateReported = (normalizedAggregateUsage.totalTokens ?? 0) > 0;
             const billing = await recordModelUsageAndDebitCredits(settings, db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1582,6 +1594,11 @@ export async function runTurnStreamAttempt(
               turnId: activeTurnId,
               turnAttemptId: input.attemptId,
               model: turn.model,
+              provider: aggregateProvider,
+              providerApi: aggregateProviderApi,
+              callKind: "response",
+              scope: "aggregate",
+              recordCall: aggregateReported,
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -1591,8 +1608,24 @@ export async function runTurnStreamAttempt(
               latencyMode: turnExecutionPolicy.latencyMode,
               observability,
             });
-            const aggregateProvider = resolvedModel?.provider.id ?? settings.openaiProvider;
-            const aggregateProviderApi = resolvedModel?.provider.api ?? "responses";
+            if (!aggregateReported && responsesInStream > 0) {
+              await recordModelCallUsageEvent(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                turnAttemptId: input.attemptId,
+                sourceKey: aggregateSourceKey,
+                callKind: "response",
+                scope: "aggregate",
+                provider: aggregateProvider,
+                providerApi: aggregateProviderApi,
+                upstreamProvider: null,
+                model: turn.model,
+                billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
+                billing: null,
+              });
+            }
             aggregateAuthoritative = await emitModelCallUsage({
               observability,
               publish: eventing.publish,
@@ -1644,6 +1677,23 @@ export async function runTurnStreamAttempt(
         });
       }
     }
+    // MAINT-P09-430: a stream where some responses reported usage and others
+    // did not has no aggregate row; each unreported call is its own unknown row.
+    await recordUnreportedModelCalls(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: activeTurnId,
+      turnAttemptId: input.attemptId,
+      callKind: "response",
+      provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+      providerApi: resolvedModel?.provider.api ?? "responses",
+      upstreamProvider: null,
+      model: turn.model,
+      billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
+      sourceKeys: modelResponseState.unreportedSourceKeys.slice(unreportedBeforeStream),
+      coveredByAggregate: !streamSawPerResponseUsage,
+    });
     if (eventing.stream.interruptions.length > 0) {
       await historySink.reconcileConversationTruth({ requireDurable: true });
       const approvals = runtime.serializeApprovals(eventing.stream.interruptions);

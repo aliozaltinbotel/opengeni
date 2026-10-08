@@ -4973,6 +4973,11 @@ export async function recordUsageEvent(
     origin?: SessionTurnSource | null;
     idempotencyKey: string;
     occurredAt?: Date;
+    /**
+     * Per-call facts (`model.call` / `embedding.call`, 0553). Written once with
+     * the row: a replay of the same key must present the same object.
+     */
+    attributes?: Record<string, unknown> | null;
   },
 ): Promise<UsageEvent> {
   if (input.turnId && !input.sessionId) {
@@ -5016,6 +5021,7 @@ export async function recordUsageEvent(
           origin: input.origin ?? null,
           idempotencyKey: input.idempotencyKey,
           occurredAt: input.occurredAt ?? new Date(),
+          attributes: input.attributes ?? null,
         })
         .onConflictDoUpdate({
           target: schema.usageEvents.idempotencyKey,
@@ -5054,11 +5060,35 @@ export async function recordUsageEvent(
         if (input.origin && row.origin !== input.origin) {
           throw new Error("recordUsageEvent: idempotency key resolved to a different origin");
         }
+        // Attributes are never rewritten by a replay (the conflict update does not
+        // name them, and 0553's trigger refuses a change): the first write stands,
+        // and a replay that presents different facts for the same key is refused.
+        if (
+          input.attributes &&
+          usageAttributesCanonical(row.attributes ?? null) !==
+            usageAttributesCanonical(input.attributes)
+        ) {
+          throw new Error("recordUsageEvent: idempotency key resolved to different attributes");
+        }
         return mapUsageEvent(row);
       }
       throw new Error("Failed to record usage event");
     },
   );
+}
+
+/** Key-sorted JSON text of a usage attributes object (jsonb does not keep key order). */
+function usageAttributesCanonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(usageAttributesCanonical).join(",")}]`;
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .filter((key) => record[key] !== undefined)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${usageAttributesCanonical(record[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
 }
 
 export type ModelCallBillingPath = "opengeni_credits" | "external";
@@ -85685,6 +85715,8 @@ function mapUsageEvent(row: typeof schema.usageEvents.$inferSelect): UsageEvent 
     recordedAt: row.recordedAt.toISOString(),
     exportedToBillingAt: row.exportedToBillingAt ? row.exportedToBillingAt.toISOString() : null,
     billingProviderEventId: row.billingProviderEventId,
+    // Only per-call rows carry attributes; every other row keeps its shape.
+    ...(row.attributes ? { attributes: row.attributes } : {}),
   };
 }
 
