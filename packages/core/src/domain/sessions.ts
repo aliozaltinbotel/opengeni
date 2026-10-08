@@ -2322,7 +2322,7 @@ async function createSessionForRequestInFileScope(
     (resource) => resource.kind === "file" && resource.asImage === true,
   );
   if (imageResources.length > 0) {
-    if (!payload.requestedSessionId || !grant.subjectId ||
+    if (payload.policyRole !== "evidence-assessor" || !payload.requestedSessionId || !grant.subjectId ||
         payload.agentAccess !== "session" || payload.memoryScope !== "off" ||
         payload.rigId !== null || payload.sandboxBackend !== "none" ||
         (payload.variableSetIds?.length ?? 0) !== 0 ||
@@ -2843,6 +2843,7 @@ async function createSessionForRequestInFileScope(
     personalResourceSubjectId ?? grant.subjectId,
     resources,
     attachmentOwnerContext,
+    payload.requestedSessionId,
   );
   // Every selected Variable Set is independently authorized. Scope does not
   // affect precedence: explicit order is low-to-high and later sets win name

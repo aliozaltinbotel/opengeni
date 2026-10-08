@@ -311,7 +311,7 @@ compaction input. History preserves JSON key order; JSONB serves queries.
 Opt-in `asImage` refs use that same authorized image projector. Temporary image
 uploads bind a preallocated file/session to the actual uploader in the existing
 signed-upload audit. Image-only session creation requires isolated tool-less
-scope, an explicit null rig, no variable sets or sandbox, and no ongoing goal;
+scope with the exact evidence-assessor role, an explicit null rig, no variable sets or sandbox, and no ongoing goal;
 its validated output bound is immutable session metadata. Admitted assessor
 image turns select no tenant-authored rules, preferences or memory, and record
 no Company Brain material-selection receipt. Current authority and model-policy
@@ -319,8 +319,12 @@ checks remain mandatory, and the actual SDK agent exposes no tools. No image byt
 or filenames enter durable history. Text-only wires emit the canonical omission
 marker; image-capable wires fail closed on unavailable pixels. Images bypass
 sandbox materialization. The uploader's DELETE revokes reads before object
-cleanup; unsettled cleanup is recovered from audit facts, terminal turns and
-expired leases. Sources: `packages/core/src/domain/sessions.ts`,
+cleanup and atomically fences pending upload finalization. Temporary input is
+excluded from ordinary file listing, downloads and attachment admission; only
+the current uploader/session image path reads it. Signed PUT lifetime is bounded
+to 30 seconds, and successful early deletion retains existing audit custody
+until a post-expiry deletion records purge. Unsettled cleanup is recovered from
+audit facts, terminal turns and expired leases. Sources: `packages/core/src/domain/sessions.ts`,
 `apps/api/src/routes/files.ts`, `packages/db/src/index.ts`,
 `apps/worker/src/activities/run-input.ts`, and
 `apps/worker/src/activities/agent-turn/{file-resources,agent-build}.ts`.

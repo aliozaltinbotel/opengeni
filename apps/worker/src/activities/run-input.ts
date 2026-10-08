@@ -782,12 +782,14 @@ async function resolveUserMessageFileAttachments(
     accountId,
     workspaceId,
     subjectId,
-    fileIds: fileResources.map((resource) => resource.fileId),
+    fileIds: fileResources.filter(resource => resource.asImage !== true).map((resource) => resource.fileId),
   });
   for (const resource of fileResources.filter(ref => ref.asImage === true)) {
-    if (!subjectId || !sessionId || !(await getTemporaryModelImageFile(db, {
+    const image = subjectId && sessionId ? await getTemporaryModelImageFile(db, {
       accountId, workspaceId, subjectId, sessionId, fileId: resource.fileId,
-    }))) throw new Error("Session image custody is unavailable");
+    }) : null;
+    if (!image || image.status !== "ready") throw new Error("Session image custody is unavailable");
+    files.push(image);
   }
   const fileById = new Map(files.map((file) => [file.id, file]));
   return fileResources.map((resource) => {

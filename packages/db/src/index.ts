@@ -6905,20 +6905,36 @@ export async function listTemporaryModelImageCleanup(
   });
 }
 
-/** Revoke model/file reads before the idempotent storage delete outside SQL. */
+/** Revoke reads and fence finalize in the same upload→file lock order as completion. */
 export async function revokeTemporaryModelImageFile(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string; sessionId: string; fileId: string },
-): Promise<FileAsset | null> {
-  const file = await getTemporaryModelImageFile(db, input);
-  if (!file) return null;
-  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb.update(schema.files).set({ status: "failed", updatedAt: new Date() })
-      .where(and(eq(schema.files.accountId, input.accountId),
-        eq(schema.files.workspaceId, input.workspaceId), eq(schema.files.id, input.fileId)))
-      .returning();
-    return row ? mapFile(row) : null;
-  });
+): Promise<{ file: FileAsset; uploadExpiresAt: Date } | null> {
+  if (!(await getTemporaryModelImageFile(db, input))) return null;
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
+    scopedDb.transaction(async (tx) => {
+      const uploads = await tx.select().from(schema.fileUploads).where(and(
+        eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
+        eq(schema.fileUploads.fileId, input.fileId),
+      )).orderBy(asc(schema.fileUploads.id)).for("update");
+      if (uploads.length === 0) return null;
+      const [file] = await tx.select().from(schema.files).where(and(
+        eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+        eq(schema.files.id, input.fileId), isNull(schema.files.privateOwnerSubjectIds),
+      )).for("update").limit(1);
+      if (!file || !(await getTemporaryModelImageFile(tx, input))) return null;
+      const now = new Date();
+      await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(and(
+        eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
+        eq(schema.fileUploads.fileId, input.fileId), eq(schema.fileUploads.status, "pending"),
+      ));
+      const [row] = await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(and(
+        eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+        eq(schema.files.id, input.fileId),
+      )).returning();
+      return row ? { file: mapFile(row), uploadExpiresAt: new Date(Math.max(...uploads.map(upload => upload.expiresAt.getTime()))) } : null;
+    }),
+  );
 }
 
 export async function getFile(
@@ -6986,6 +7002,12 @@ export async function requireFileForSubject(
               isNotNull(schema.files.privateOwnerSubjectIds),
             ),
             eq(schema.files.id, input.fileId),
+            sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS temporary_input
+              WHERE temporary_input.account_id = ${schema.files.accountId}
+                AND temporary_input.workspace_id = ${schema.files.workspaceId}
+                AND temporary_input.target_id = ${schema.files.id}::text
+                AND temporary_input.action = 'file.signed_upload.issued'
+                AND temporary_input.metadata->>'temporaryForSessionId' IS NOT NULL)`,
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid,
@@ -7100,6 +7122,12 @@ export async function listFilesForSubject(
               : input.scope === "personal"
                 ? isNotNull(schema.files.privateOwnerSubjectIds)
                 : undefined,
+            sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS temporary_input
+              WHERE temporary_input.account_id = ${schema.files.accountId}
+                AND temporary_input.workspace_id = ${schema.files.workspaceId}
+                AND temporary_input.target_id = ${schema.files.id}::text
+                AND temporary_input.action = 'file.signed_upload.issued'
+                AND temporary_input.metadata->>'temporaryForSessionId' IS NOT NULL)`,
             sql`google_drive_file_authorized(${input.accountId}::uuid, ${input.workspaceId}::uuid, ${input.subjectId}::text, ${schema.files.id})`,
             after
               ? sql`(${schema.files.createdAt}, ${schema.files.id}) < (${after.at}::text::timestamptz, ${after.id}::uuid)`
@@ -7166,6 +7194,12 @@ export async function getFilesForSubject(
               isNotNull(schema.files.privateOwnerSubjectIds),
             ),
             inArray(schema.files.id, ids),
+            sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS temporary_input
+              WHERE temporary_input.account_id = ${schema.files.accountId}
+                AND temporary_input.workspace_id = ${schema.files.workspaceId}
+                AND temporary_input.target_id = ${schema.files.id}::text
+                AND temporary_input.action = 'file.signed_upload.issued'
+                AND temporary_input.metadata->>'temporaryForSessionId' IS NOT NULL)`,
             sql`google_drive_file_authorized(
               ${input.accountId}::uuid,
               ${input.workspaceId}::uuid,
@@ -7188,13 +7222,25 @@ export async function getFilesForSubject(
       const access = currentSessionAttachmentReadAccess();
       if (!access) return ordinary;
       const missing = ids.filter((id) => !ordinary.some((file) => file.id === id));
+      const temporaryRows = missing.length === 0 ? [] : await scopedDb.select({ fileId: schema.auditEvents.targetId })
+        .from(schema.auditEvents).where(and(eq(schema.auditEvents.accountId, input.accountId),
+          eq(schema.auditEvents.workspaceId, input.workspaceId), inArray(schema.auditEvents.targetId, missing),
+          eq(schema.auditEvents.action, "file.signed_upload.issued"),
+          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`));
+      const temporaryIds = new Set(temporaryRows.flatMap(row => row.fileId ? [row.fileId] : []));
+      const images: FileAsset[] = [];
+      if (input.subjectId) for (const fileId of temporaryIds) {
+        const image = await getTemporaryModelImageFile(scopedDb, { accountId: input.accountId,
+          workspaceId: input.workspaceId, subjectId: input.subjectId, sessionId: access.sessionId, fileId });
+        if (image?.status === "ready") images.push(image);
+      }
       const shared = await readSessionFileAttachments(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        fileIds: missing,
+        fileIds: missing.filter(id => !temporaryIds.has(id)),
         access,
       });
-      return [...ordinary, ...shared];
+      return [...ordinary, ...shared, ...images];
     },
   );
 }
