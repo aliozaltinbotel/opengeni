@@ -96,7 +96,7 @@ test("native temporary images bind uploader/session, reject unrelated owners and
  expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([{fileId,sessionId}]);
  await expireSyntheticUpload(grant,upload.uploadId);
  expect((await request(grant,"DELETE",`${base}/${fileId}?temporaryForSessionId=${sessionId}`)).status).toBe(204);
- expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([]);
+ expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([{fileId,sessionId}]);
  const denied=await request(grant,"POST",`${base}/${fileId}/download-url`,{});expect(denied.status).toBe(404);
 },60_000);
 
@@ -123,7 +123,7 @@ test("pending image revoke fences late HTTP finalize and keeps retry custody",as
  await expireSyntheticUpload(grant,upload.uploadId);
  expect((await request(grant,"DELETE",`${base}/${fileId}?temporaryForSessionId=${sessionId}`)).status).toBe(204);
  expect(liveObjects.has(durable.file.objectKey)).toBe(false);
- expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([]);
+ expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([{fileId,sessionId}]);
  expect((await request(grant,"POST",`${base}/uploads/${upload.uploadId}/complete`,{})).status).toBe(409);
 },60_000);
 
@@ -143,6 +143,15 @@ test("revoked image cleanup survives no later assessor through the installed rea
  const reaper=createFileUploadReaperActivities(async()=>({db:client.db,objectStorage:storage,observability} as unknown as ControlActivityServices));
  const result=await reaper.reapExpiredFileUploads();expect(result.failed).toBe(0);
  expect(liveObjects.has(durable.file.objectKey)).toBe(false);
- expect((await getFileUpload(client.db,grant.workspaceId,upload.uploadId))?.status).toBe("expired");
+ // Observe the late completion even on the old terminalizing source.
+ // A PUT that began before URL expiry can finish AFTER this reaper deletion.
+ liveObjects.add(durable.file.objectKey);
+ await withWorkspaceRls(client.db,grant.workspaceId,async db=>{await db.update(fileUploads).set({updatedAt:new Date(Date.now()-FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS-1000)})
+  .where(and(eq(fileUploads.workspaceId,grant.workspaceId),eq(fileUploads.id,upload.uploadId)));});
+ expect((await reaper.reapExpiredFileUploads()).failed).toBe(0);
+ expect(liveObjects.has(durable.file.objectKey)).toBe(false);
+ expect((await getFileUpload(client.db,grant.workspaceId,upload.uploadId))?.status).toBe("cleanup_pending");
+ expect(result.deleted).toBeGreaterThan(0);
+ expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([{fileId,sessionId}]);
  expect((await request(grant,"POST",`${base}/uploads/${upload.uploadId}/complete`,{})).status).toBe(409);
 },60_000);

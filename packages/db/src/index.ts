@@ -6909,7 +6909,7 @@ export async function listTemporaryModelImageCleanup(
 export async function revokeTemporaryModelImageFile(
   db: Database,
   input: { accountId: string; workspaceId: string; subjectId: string; sessionId: string; fileId: string },
-): Promise<{ file: FileAsset; uploadExpiresAt: Date } | null> {
+): Promise<FileAsset | null> {
   if (!(await getTemporaryModelImageFile(db, input))) return null;
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
@@ -6932,7 +6932,7 @@ export async function revokeTemporaryModelImageFile(
         eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
         eq(schema.files.id, input.fileId),
       )).returning();
-      return row ? { file: mapFile(row), uploadExpiresAt: new Date(Math.max(...uploads.map(upload => upload.expiresAt.getTime()))) } : null;
+      return row ? mapFile(row) : null;
     }),
   );
 }
@@ -8525,6 +8525,24 @@ async function completeFileUploadCleanupInOwnerScope(
           .limit(1);
         if (!upload || upload.fileId !== input.fileId) {
           return false;
+        }
+        const [temporaryInput] = await tx.select({ id: schema.auditEvents.id }).from(schema.auditEvents).where(and(
+          eq(schema.auditEvents.accountId, input.accountId), eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.targetId, input.fileId), eq(schema.auditEvents.action, "file.signed_upload.issued"),
+          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
+        )).limit(1);
+        // Signed URL expiry does not bound a PUT already in flight. Keep this
+        // existing owner recurring until the provider proves completion/cancellation.
+        if (temporaryInput) {
+          await tx.update(schema.fileUploads).set({ status: "cleanup_pending", updatedAt: new Date() }).where(and(
+            eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
+            eq(schema.fileUploads.id, input.uploadId),
+          ));
+          await tx.update(schema.files).set({ status: "failed", updatedAt: new Date() }).where(and(
+            eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+          ));
+          return true;
         }
         if (upload.status === input.terminalStatus) {
           return true;

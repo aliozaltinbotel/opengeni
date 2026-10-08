@@ -254,18 +254,15 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!grant.subjectId || !sessionId || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(sessionId))
       throw new HTTPException(422, { message: "Temporary session binding is required" });
     if (!objectStorage) throw new HTTPException(503, { message: "object storage is not configured" });
-    const revoked = await revokeTemporaryModelImageFile(db, {
+    const file = await revokeTemporaryModelImageFile(db, {
       accountId: grant.accountId, workspaceId, subjectId: grant.subjectId,
       sessionId, fileId: c.req.param("fileId"),
     });
-    if (!revoked) throw new HTTPException(404, { message: "Temporary model image not found" });
-    const { file, uploadExpiresAt } = revoked;
+    if (!file) throw new HTTPException(404, { message: "Temporary model image not found" });
     // Failure leaves revoked metadata and the same exact custody available for retry.
     await objectStorage.deleteObject(file.objectKey);
-    // An outstanding signed PUT can recreate bytes. Keep existing custody until a post-window delete.
-    if (uploadExpiresAt.getTime() <= Date.now()) await recordAuditEvent(db, { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId,
-      action: "file.temporary_input.purged", targetType: "workspace_file", targetId: file.id,
-      metadata: { temporaryForSessionId: sessionId } });
+    // Acknowledges this delete only. In-flight PUT completion remains unknown;
+    // existing cleanup_pending ownership continues without a permanent purge fact.
     return c.body(null, 204);
   });
 

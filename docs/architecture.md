@@ -322,11 +322,12 @@ sandbox materialization. The uploader's DELETE revokes reads before object
 cleanup and atomically fences pending upload finalization. Temporary input is
 excluded from ordinary file listing, downloads and attachment admission; only
 the current uploader/session image path reads it. Signed PUT lifetime is bounded
-to 30 seconds, and successful early deletion retains existing audit custody
-until a post-expiry deletion records purge. Revoked uploads enter the existing
-cleanup_pending owner so the installed reaper can delete even if no later
-assessor runs. Unsettled cleanup is recovered from
-audit facts, terminal turns and expired leases. Sources: `packages/core/src/domain/sessions.ts`,
+to 30 seconds. Deletion acknowledges only that delete attempt; it never records
+permanent purge from URL expiry. A PUT started before expiry may finish later.
+Revoked uploads stay with the existing recurring cleanup_pending owner until an
+actual provider completion/cancellation boundary is established. The installed
+reaper can retry deletion without another assessor run. Unsettled cleanup is
+recovered from audit facts, terminal turns and expired leases. Sources: `packages/core/src/domain/sessions.ts`,
 `apps/api/src/routes/files.ts`, `packages/db/src/index.ts`,
 `apps/worker/src/activities/run-input.ts`, and
 `apps/worker/src/activities/agent-turn/{file-resources,agent-build}.ts`.
