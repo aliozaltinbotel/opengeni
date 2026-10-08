@@ -7,17 +7,17 @@ upstream `Cloudgeni-ai/opengeni` `main` with `--no-ff`. No fork commit was rebas
 
 | Item | Value |
 | --- | --- |
-| Upstream SHA merged | `89e3a2ad95e0fca58e1e1483cadcb1c6bc3661ce` ("fix(native): the inbox says when it couldn't load (#3857)") |
-| Upstream commit time | 2026-10-08T15:18:06Z; fetched 2026-10-08T15:50:04Z |
+| Upstream SHA merged (round 2, current) | `e1395d4f0ca48debe5c54d042262529cf7b9732b` ("feat(native): open images full screen in the app, and take a photo from the composer (#3887)"), committed 2026-10-08T20:43:23Z, fetched 2026-10-08T20:49:52Z; merge commit `49b70335e` (parents `fe750ae24`, `e1395d4f0`) |
+| Upstream SHA merged (round 1) | `89e3a2ad95e0fca58e1e1483cadcb1c6bc3661ce` ("fix(native): the inbox says when it couldn't load (#3857)"), committed 2026-10-08T15:18:06Z, fetched 2026-10-08T15:50:04Z; 25 commits before `e1395d4f0` |
 | Merge base | `665e8495dee2f43f8e3dc0fe903131dfecf7dd75` (2026-09-30) |
 | Fork side / upstream side | 58 commits / 800 commits |
-| Merge commit | `f3d4a15d5e01006965f8839e939d13fd2d956819` (parents: pin, upstream) |
-| Follow-up commits | `f933c6bb8` migration renumbering; `708b36be5` regenerated surface and Site runtime; `fb10c5dc1` test fits; `d8ad352d1` SDK fix; `8f9627e77` runtime error-text order and more test fits; this report |
-| Upstream head at report time | `42a50cd1f1b5ac1a231d42fb7a9291633970716f` (3 commits later, adds `0656_inbox_owner_recipient`); not merged |
+| Merge commit (round 1) | `f3d4a15d5e01006965f8839e939d13fd2d956819` (parents: pin, upstream `89e3a2ad9`) |
+| Round 1 follow-ups | `f933c6bb8` migrations to 0656-0658; `708b36be5` regenerated surface and Site runtime; `fb10c5dc1` test fits; `d8ad352d1` SDK fix; `8f9627e77` runtime error-text order and test fits; report |
+| Round 2 follow-ups | `4e1948b65` migrations to 0665-0667; `b0c49cf11` gzip error-body fix (finding 1); `72d7e4d12` organization MCP exemptions (finding 2); `ec39c5657`, `5ba8c1eab` compaction source fixes; `a3da958f0` first-use membership opt-in (review P1-a); report |
 
 Fork `main` (`11febf6a7db69f479fecd162ae82b5fda3c58088`) and `production` (`e6453c8271ac6e198bbd1970a23f222e5613affc`)
-are untouched. A later fetch moved the local `refs/remotes/upstream/main` to `42a50cd1f`; the merge is anchored by
-SHA `89e3a2ad9`.
+are untouched. Both merges are anchored by SHA. Round 1 was reviewed at `fe750ae24` (MERGE_WITH_FIXES); round 2
+adds the newer upstream and the review fixes on top, with no history rewritten.
 
 History. The shared fork clone is shallow at `662b922f3` (2026-07-02), far below the merge base. All 800 upstream
 commits since the merge base were fetched without depth limits and with no missing objects, so the merge base is exact.
@@ -58,6 +58,14 @@ upstream's bytes and were then regenerated (`708b36be5`).
 | `scripts/public-api/surface.gen.json` | Hand union at merge time; replaced by the regenerated surface in `708b36be5`. |
 | `scripts/release-schema-contract.test.ts` | Upstream's derived `latestMigration`/`fileCount`; the fork migrations stay in the forward (appended) lists under their new names. |
 
+### Round 2 conflicts (merge of `e1395d4f0`, 4 files)
+
+| File | Resolution |
+| --- | --- |
+| `apps/worker/src/activities/context-compaction.ts` | Unions of imports and summarizer fields; upstream's byte-budget deferred items join the trailing items, every persisted item still loses its native binding. Two follow-ups: `ec39c5657` records the retained summary sources on upstream's new byte-budget path (the merge did not typecheck without it, TS2741), and `5ba8c1eab` keeps `trailingSourceIds` index-aligned with the deferred items. |
+| `packages/runtime/src/index.ts` | Upstream's `anthropicCompactionRequest` runs inside the fork's exact-call source dispatch wrapper; upstream's synchronous-command and routing-mutation uncertain outcomes join the uncertain branch ahead of E-14. |
+| `scripts/public-api/surface.gen.json`, `scripts/release-schema-contract.test.ts` | Unions; the surface regenerated identical, the action catalog was regenerated (`72d7e4d12`). |
+
 ## Retained delta (FORK_DELTA_OF_PRODUCTION, 58 entries)
 
 Method: for each of the 55 non-merge fork commits, every non-trivial line it added that is still present at the pin
@@ -81,15 +89,15 @@ F-2/NPD-013 contract segments (`TurnRouteDeclarationV1`, `TURN_ROUTE_TERMINAL_RE
 | 42c60c365 deferModelSchemasForEagerMcpServerIds | Survives at the same seam. See coordinator check 2. |
 | b24faac92 tool-path timing | Adapted: `ensure_run_allowed` times upstream's per-model-call admission. |
 | 32a430695, f2f9bfac3 | Survive. |
-| 5cb0d9aa1 external-member reconcile, guarded contexts | Survives. See coordinator check 4. |
+| 5cb0d9aa1 external-member reconcile, guarded contexts | Survives; upstream's first-use auto-membership is now a deployment opt-in, off by default (`a3da958f0`). See coordinator check 4. |
 | d1c387444 realtime begin intent | Adapted (`d8ad352d1`): upstream's new end-on-refusal path called `stop()`, whose pending-begin reconciliation re-issued the begin; a reload reconciling a retained pending begin now stays terminal as at the pin. |
-| 0f796816f E-14 | Adapted (`8f9627e77`): outcome-unknown text first (upstream), then E-14's final text, then invalid arguments, then the generic retry text. None of the first three says "Please try again". |
+| 0f796816f E-14 | Adapted (`8f9627e77`, round 2 extended): upstream's uncertain-outcome texts first (integration, synchronous command, routing mutation), then E-14's final text, then invalid arguments, then the generic retry text. None of the first three says "Please try again". Ordering note only (review P2). |
 | d3ffce6da F-2 route and budget | Survives; the fallback recovery metadata now also carries upstream's recovery facts. |
 | b3e80df88, 09deeac08, b4c66b449, 087b8b39a | Survive (contract lists byte-identical; PQA-0044 at the same seam). |
 | 42e636fe1 previous sync merge | Merge commit; its 198 merge-own lines are all present. |
-| f95ae3e6e legacy member permission updates | Adapted: migration 0550 is now 0656 with an idempotent body; TS lifecycle unchanged. |
+| f95ae3e6e legacy member permission updates | Adapted: migration 0550 is now 0665 with an idempotent body; TS lifecycle unchanged. |
 | 3f5282b58, 5ce76cb51, ad3819509, 474ee6c00 | Survive. |
-| c5bea8a03 native exact call source receipts | Adapted: migration 0551 is now 0657 with an idempotent body; API, SDK and worker code survive. |
+| c5bea8a03 native exact call source receipts | Adapted: migration 0551 is now 0666 with an idempotent body; summary and trailing source ids follow upstream's byte-budget compaction (`ec39c5657`, `5ba8c1eab`); API, SDK and worker code survive. |
 | 2ad2e9fc3, 8fed749f8, 771d33945, 4cea606f1, 8bfa9bd31, bd8b57045 | Survive. |
 | ea564b0a7 committed fresh creation outcome | Adapted into upstream's measured create path. |
 | ef0b846cb, 5ab92a842, 2e96edbfb | Survive. |
@@ -103,7 +111,7 @@ F-2/NPD-013 contract segments (`TurnRouteDeclarationV1`, `TURN_ROUTE_TERMINAL_RE
 | d65ae8c80 isolated image assembly | Adapted: no workspace agent identity in an isolated assessment. |
 | 4d8551444 assessor image scope | Survives (temporary image session id passed in upstream's moved validation). |
 | dfba3c0db, bba6b9fb1, 819c4635b | Survive. |
-| 0f1efe4a8 recurring cleanup fairness | Adapted: migration 0552 is now 0658 with an idempotent body. |
+| 0f1efe4a8 recurring cleanup fairness | Adapted: migration 0552 is now 0667 with an idempotent body. |
 | e03bcea26 release registration | Superseded by upstream's derived contract; names updated in the forward lists. |
 | 6c2c7eaf1 evidence assessor merge | Merge commit with no own lines; covered by its constituents. |
 
@@ -121,18 +129,28 @@ Nothing was dropped.
    First-turn behaviour on staging is a repin observation.
 3. 334c470b0 idle-session archive: off by default (`sessionArchiveEnabled` default false in `packages/config`,
    `sessionArchive.enabled: false` in Helm values).
-4. First-use auto-membership (cbe4357c7, `ensureExternalWorkspaceMemberOnFirstUse`): grants defaults through the same
-   `prepare` lifecycle 0656 patches and never narrows, so the fork's legacy narrowing path is untouched. Risk: if
-   Cendra's organization key holds `members:manage` plus the default conversation permissions, an `asUser` request can
-   create a membership before Cendra's reconcile chooses permissions. The repin must check the key's permissions.
-5. Stopped-fleet migrations since the base (maintenance mode with the live application-role check): 0585, 0597,
-   **0598**, 0600, 0603, 0608, 0619, 0621 (eight; 0598 was missing from the coordinator list). Maintenance mode
-   without that check: 0586, 0645. Rolling migrations that read the application-role list: 0588, 0589, 0590, 0604,
-   0632. 0598 converts Claude credentials and needs `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` wherever Anthropic
-   `api_key` connection rows exist (an empty database needs none).
-6. Ordinals: renumbered after the merged SHA's last migration (0655). `bun scripts/check-migration-ordinals.ts --base
-   89e3a2ad9...` passes (657 migrations, next 0659). Against upstream head `42a50cd1f` it fails: 0656 collides with
-   `0656_inbox_owner_recipient`. The next sync renumbers again; the idempotent bodies make that safe.
+4. First-use auto-membership (cbe4357c7): `accessGrantAuthorization` set `firstUseMembership` for every non-linked,
+   non-service external actor and `provisionExternalMemberOnFirstUse` created the missing membership with seven
+   default permissions whenever the key held `members:manage` (a legacy key with `workspace:admin` qualifies). That
+   breaks Cendra's contract that `asUser` never creates membership. **Cendra fork feature (`a3da958f0`):** the setting
+   `externalMemberFirstUseEnabled` (`OPENGENI_EXTERNAL_MEMBER_FIRST_USE_ENABLED`) defaults to false; until a deployment
+   enables it, an external actor without a membership is refused 403 and nothing is written. Upstream's simple embed
+   path needs it on. Regression: `external-first-use-membership` "with first-use membership off (the Cendra default) a
+   capable key's user is refused" fails without the guard and passes with it; upstream's cases opt in (19/19).
+5. Drain set for the repin (review P1-c): the ten `-- deployment-mode: maintenance` migrations since the base, all to
+   run with API and workers stopped:
+   - 0585, 0597, 0598, 0600, 0603, 0608, 0619, 0621 also refuse a live application role (`pg_stat_activity` check);
+   - 0586 is inert SQL (`SELECT 1`) and a release marker: its header says the matching production migration Job
+     activates session tenancy for every existing organization while all writers are parked, and fails without a
+     receipt;
+   - 0645 changes the runtime-posture relation/grant contract, has no role check, and must run after old binaries drain.
+   After 0600 and 0603, run `db:provision-roles` before starting policy-aware binaries (fork `AGENTS.md`: both are drained
+   cutovers that provision roles). 0598 converts Claude credentials and needs `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`
+   wherever Anthropic `api_key` connection rows exist. Rolling migrations that read the application-role list: 0588,
+   0589, 0590, 0604, 0632. The nine upstream migrations added in round 2 (0656-0664) are all rolling.
+6. Ordinals: round 2 renumbered after the latest upstream head's last migration (0664): 0665-0667.
+   `bun scripts/check-migration-ordinals.ts --base e1395d4f0...` passes (666 migrations, next 0668). Nothing has
+   deployed this branch's earlier 0656-0658, so only the pin path matters; the idempotent bodies cover it anyway.
 
 ## Migrations
 
@@ -143,9 +161,9 @@ before upstream's later changes to the same tables.
 
 | Old (pin) | New | Body |
 | --- | --- | --- |
-| 0550_external_workspace_member_empty_permission_updates | 0656 | Accepts exactly the pre-image (`md5(prosrc)` `0b629b03...`, anchor once: rebuild) or the post-image (`b7505fb5...`, replacement once, no anchor: no-op). After a rebuild, `pg_proc` metadata (owner, ACL, SECURITY DEFINER, config) must be unchanged and the post-image md5 exact. |
-| 0551_model_call_source_receipts | 0657 | Every object guarded (column, table, policy, triggers, FK); exact column shapes asserted; `fork_session_content` rebuilt only when all five anchors are present once, a no-op when all five replacements are present once and no anchor, refused otherwise. |
-| 0552_recurring_temporary_image_cleanup_fairness | 0658 | Pre-image md5 pin `f9c5c9a6...` kept; exact post-image `59b622ef...` accepted as applied. |
+| 0550_external_workspace_member_empty_permission_updates | 0665 (round 1: 0656) | Accepts exactly the pre-image (`md5(prosrc)` `0b629b03...`, anchor once: rebuild) or the post-image (`b7505fb5...`, replacement once, no anchor: no-op). After a rebuild, `pg_proc` metadata (owner, ACL, SECURITY DEFINER, config) must be unchanged and the post-image md5 exact. |
+| 0551_model_call_source_receipts | 0666 (round 1: 0657) | Every object guarded (column, table, policy, triggers, FK); exact column shapes asserted; `fork_session_content` rebuilt only when all five anchors are present once, a no-op when all five replacements are present once and no anchor, refused otherwise. |
+| 0552_recurring_temporary_image_cleanup_fairness | 0667 (round 1: 0658) | Pre-image md5 pin `f9c5c9a6...` kept; exact post-image `59b622ef...` accepted as applied. |
 
 All three set `lock_timeout`. No ledger alias was added: the 283 "fix0550" was itself a forward migration and
 `migrate.ts` has no alias mechanism. Re-running converges a database whose earlier fork run preceded upstream's later
@@ -159,7 +177,20 @@ Physical difference: on an upgraded database the fork columns `session_history_i
 `model_call_facts.source_receipt_id` precede upstream's later columns; on a fresh database they follow them. Column
 order is not semantic, but a schema dump comparison must normalize it.
 
-### Proof (real PostgreSQL 17.11, own container, data on tmpfs, removed afterwards)
+### Round 2 proof (0665-0667 on `e1395d4f0`; PostgreSQL 17.11, own container, removed afterwards)
+
+Same non-superuser owner bootstrap. Bodies are byte-identical to round 1 apart from the header comment.
+
+| Path | Result |
+| --- | --- |
+| (a) empty PG17 -> branch migrator | rc 0; 666 ledger rows, head 0667; 0547 present; 0665/0666/0667 recorded, no old names; md5s `b7505fb5...`/`59b622ef...`; receipts FK, policy, ENABLE+FORCE RLS, pinned guard `search_path` |
+| (a) branch migrator again | rc 0; schema dump byte-identical |
+| (b) pin `6c2c7eaf1` migrator -> branch migrator | pin rc 0 (559 rows, 0550-0552); branch rc 0; 669 rows (0547, upstream 0550/0552-0664, 0665-0667); same md5s and objects as (a) |
+| (b) branch migrator again | rc 0; dump byte-identical |
+| (c) 0665/0666/0667 applied directly twice on (b) | rc 0 all six; dump byte-identical |
+| (a) vs (b), normalized | only the install timestamp upstream 0515 bakes into a function |
+
+### Round 1 proof (as 0656-0658 on `89e3a2ad9`; real PostgreSQL 17.11, own container, data on tmpfs, removed afterwards)
 
 Pin `6c2c7eaf1` migrator (read-only use of an existing pin install) as a NOSUPERUSER/NOBYPASSRLS owner, then the three
 new files applied as that owner:
@@ -184,7 +215,10 @@ This branch's migrator, after the install (second container, same owner bootstra
 
 The proof ran without `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` and without a live application role, as on an empty fleet.
 
-## Tests
+## Tests (round 1, on `fe750ae24`)
+
+Round 2 results are in the next section.
+
 
 Toolchain Bun 1.3.14 (`bun --version`). The installs ran once free disk recovered above the floor plus the install
 footprint (18-29 GB at the time). Real PostgreSQL 17.11 in an own container (data on tmpfs). One test file per Bun
@@ -209,33 +243,41 @@ and on a clean checkout of the pin `6c2c7eaf1` (if the fork touches it). Classif
 
 | Class | Files | Detail |
 | --- | --- | --- |
-| Inherited from upstream (red on `89e3a2ad9` too) | 34 | api: connections-routes, embedded-gmail-connect, managed-auth-session-sets.integration, native-mcp-shared-admission, organization-mcp, sandbox-shared-and-viewer, session-agent-access, session-agent-routes, session-attach-default-variable-sets, session-proxy-chats, slack-bot, slack-interactions-integration, workspace-control-busy-routes; worker: assistant-message-events, child-terminal-result-answer, codemode-dispatcher, connected-command-cleanup-integration, final-reply-postgres, initialized-native-worker, sandbox-lease (same cases on a rerun), usage-allowance-regressions-postgres; contracts: browser-bundle-boundary, insights-usage; db: connections, postgres-tls-retention, session-control-mega-migration; runtime: lazy-provisioning, modal-command-router-wire, modal-exec-readiness, modal-sdk-command-start-recovery, modal-supervision-control, ownership-inversion; sdk: adapters, core-bundle-boundary |
+| Inherited from upstream (red on `89e3a2ad9` too) | 34 | api: connections-routes, embedded-gmail-connect, managed-auth-session-sets.integration, native-mcp-shared-admission, organization-mcp, sandbox-shared-and-viewer, session-agent-access, session-agent-routes (same file, timeout-shaped: merged fails 1 case, upstream 5), session-attach-default-variable-sets, session-proxy-chats, slack-bot, slack-interactions-integration, workspace-control-busy-routes; worker: assistant-message-events, child-terminal-result-answer, codemode-dispatcher, connected-command-cleanup-integration, final-reply-postgres, initialized-native-worker, sandbox-lease (same cases on a rerun), usage-allowance-regressions-postgres; contracts: browser-bundle-boundary, insights-usage; db: connections, postgres-tls-retention, session-control-mega-migration; runtime: lazy-provisioning, modal-command-router-wire, modal-exec-readiness, modal-sdk-command-start-recovery, modal-supervision-control, ownership-inversion; sdk: adapters, core-bundle-boundary |
 | Merge interactions, fixed (red before, green after) | 10 | session-create-observability (7/7), session-create-fresh-outcome repair case, tool-path-phase-timing (8/8), agent-turn PQA-0044, codex-realtime-controller (36/36, source fix `d8ad352d1`), slack-rest-mcp-preparation (4/4, source fix `8f9627e77`), tool-approval-upgrade (1/1), migration-0343 (2/2), agent-config-enforcement (90/90), durable-tool-op-finalization (4/4) |
 | Load timeouts, green when run alone | 3 + 2 cases | session-effective-tools-routes (1/1), session-events-mcp (10/10), session-human-input-routes (5/5); the fresh-outcome cancelled-observation case (passes alone, and with a 60 s fence wait); one agent-turn timing assertion (145 ms vs < 100 ms) |
-| Already red at the pin (same cases) | 10 | session-authorization-routes (5 cases), session-realtime-ledger and agent-session-commands (`claim.turn.modelContext`, c376f0d13), cache-notice-replay (2), optional-repository-access-loss (`MODEL_OUTPUT_PRODUCER_INEXACT`), runtime (recovery notice text), model-call-source-receipts (1 of the pin's 3), runtime-posture (table-class count 419 vs 418), browser-client-surface (`getSessionModelSourceBasis`), evidence-assessor-files (needs `OPENGENI_EVIDENCE_ASSESSOR_TEST_APP_URL`) |
+| Already red at the pin (same cases) | 10 | session-authorization-routes (5 cases), session-realtime-ledger and agent-session-commands (`claim.turn.modelContext`, c376f0d13), cache-notice-replay (2), optional-repository-access-loss (`MODEL_OUTPUT_PRODUCER_INEXACT`), runtime (recovery notice text), model-call-source-receipts (same file, timeout-shaped: merged fails 1 case, the pin 3), runtime-posture (table-class count 419 vs 418), browser-client-surface (`getSessionModelSourceBasis`), evidence-assessor-files (needs `OPENGENI_EVIDENCE_ASSESSOR_TEST_APP_URL`) |
 | Inherited upstream defect inside a fork test | 3 cases | session-create-fresh-outcome: the three cases that read a 403/500 JSON body over HTTP (finding 1 below). With those, that file is 6 pass, 1 skip, 3 fail when run alone. |
 
-## Findings that need a fork fix or a decision
+## Findings (round 1) and their resolution (round 2)
 
-1. **Empty JSON error bodies under gzip (upstream defect, repin blocker candidate).** On Bun 1.3.14, a JSON error
-   response (seen for 403 and 500) requested with `Accept-Encoding: gzip` is served as an empty 20-byte gzip stream;
-   with `identity` the body is complete. It reproduces in-process (`app.request`) on clean upstream `89e3a2ad9`, not on
-   the pin. Cause by bisection: upstream 1489689ad's rejection telemetry (`readRejectionEnvelope`,
-   `apps/api/src/http/rejection-telemetry.ts`) reads `c.res.clone().text()` inside the logging middleware before the
-   outer `compress` middleware gzips `c.res.body`; stubbing that read restores the body (144-byte gzip). A plain
-   `Response` clone-then-gzip does not reproduce it, so the interaction is inside the Hono composition. Upstream CI
-   runs Bun 1.4.0; this was not tested there. Cendra's API serves this composition on Bun 1.3.14, so error codes and
-   reasons would reach browsers empty. Needs a fork fix (read the envelope without consuming the response, or skip
-   it for compressed responses) before the repin. Finding 1 blocks the repin (MAINT-P09-434), not this sync.
-2. **Organization MCP action catalog vs fork routes (decision).** Upstream's new organization MCP requires every
-   registered route to be catalogued or exempted. The fork registers four routes upstream lacks: `DELETE
-   /files/:fileId`, `GET /files/temporary-model-images`, `GET /sessions/:sessionId/model-source-basis`, `PATCH
-   /external-members/:subjectId`. Cataloguing exposes them to agents acting through the organization MCP; exempting
-   them keeps them host-only. Not decided here; `organization-mcp.test.ts` stays red (it is also red upstream for
-   upstream's own inbox routes).
-3. **Claimed turn carries `modelContext` (pre-existing fork divergence).** c376f0d13 added `modelContext` to the
-   execution-turn projection, which is also the claim result; upstream tests in session-realtime-ledger and
-   agent-session-commands forbid it there. Red at the pin and on the merge alike; flagged for the fork owner.
+1. **Empty JSON error bodies under gzip: fixed in `b0c49cf11`, an upstreamable fix that must land before the repin
+   (review P1-b).** On Bun 1.3.14, upstream 1489689ad's `readRejectionEnvelope`
+   (`apps/api/src/http/rejection-telemetry.ts`) read the `response.body` getter before `clone()`; once the clone was
+   read, the original body was empty, and the outer `compress` middleware sent a 20-byte empty gzip body for every
+   403/500 JSON error. Reproduced with plain Hono (compression outside, the envelope read inside). `clone().text()`
+   itself is safe; the null-body guard was redundant (a null body clones to `""`, which parses to `undefined`), so the
+   fix removes that one getter access and keeps upstream's telemetry unchanged. Regression in
+   `apps/api/test/http-rejection-telemetry.test.ts` ("a gzip-compressed rejection keeps its JSON body after the
+   envelope is read"): red before (empty body), green after; file 10/10. Upstream CI runs Bun 1.4.0, where this was not
+   tested.
+2. **Organization MCP catalog: decided and implemented in `72d7e4d12`.** The four fork-only routes are the embedding
+   host's own bookkeeping, not organization actions, so agents never reach them through the organization MCP. They are
+   exempted by exact method and path in `CENDRA_HOST_ROUTE_EXEMPTIONS` (`scripts/public-api/action-catalog.ts`), one
+   reason each: `DELETE /files/:fileId` (release of a session's temporary model image upload; the path is shared with
+   the catalogued file read, hence method-exact), `GET /files/temporary-model-images` (custody listing),
+   `GET /sessions/:sessionId/model-source-basis` (exact model-call source receipt for host source admission),
+   `PATCH /external-members/:subjectId` (legacy permission update owned by host reconcile). The regenerated catalog
+   adds only upstream's own inbox routes. `organization-mcp.test.ts`: red before (also red upstream), 22/22 after;
+   dropping one exemption turns it red again.
+3. **Claimed turn carries `modelContext` (pre-existing fork divergence): unchanged, for the fork owner.** c376f0d13 put
+   `modelContext` on the execution-turn projection, which is also the claim result; upstream tests in
+   session-realtime-ledger and agent-session-commands forbid it there. Red at the pin and on the merge alike.
+4. **Legacy unattributed history (fork owner).** The fork refuses model outputs whose producing call's source receipt
+   is incomplete (`MODEL_OUTPUT_PRODUCER_INEXACT`); a session whose history holds a generated row or summary without
+   source basis therefore cannot persist further model output. Already red at the pin (`optional-repository-access-loss`)
+   and now also hit by upstream's new `context-compaction-activity` case "post-compaction byte continuation" (receipt
+   reason `UNRESOLVED_PARENT`, seeded legacy assistant row). Unchanged here.
 
 ## Adapter-facing differences for the repin (MAINT-P09-434)
 
@@ -261,19 +303,21 @@ and on a clean checkout of the pin `6c2c7eaf1` (if the fork touches it). Classif
   `mcpCredentialUpdates`; the user message, steer and fork source-ref fields are unchanged.
 - Branding: upstream renamed "OpenGeni" to "Opengeni" in messages (2 to 245 string occurrences in source). Cendra tests
   that match exact refusal text will need updating.
-- Database: the stopped-fleet migrations above require a drained fleet; 0598 needs the encryption key where Claude API
-  key connections exist; the renumbered fork migrations re-run as verified no-ops on staging.
+- Database: the drain set and provisioning steps in coordinator check 5; the renumbered fork migrations re-run as
+  verified no-ops on staging.
+- New fork setting `OPENGENI_EXTERNAL_MEMBER_FIRST_USE_ENABLED` (default false): Cendra keeps it off, so `asUser`
+  never creates membership.
+- The 25 upstream commits of round 2 change no declaration the adapter imports (`createDb` appears only in tests);
+  `OPENGENI_API_CONTRACT_REVISION` is unchanged.
 
 ## Open risks
 
-- Finding 1 (empty gzip error bodies) is inherited from upstream and affects Cendra's Bun 1.3.14 runtime; fix it in
-  the fork before the repin.
-- Finding 2 (organization MCP catalog) needs a decision on exposing the four fork routes.
+- Findings 3 and 4 are fork-owner items; finding 1's fix must land with the repin.
 - MAINT-P09-430's local commit adds `0553_usage_event_call_attributes.sql`, which collides with upstream's 0553; it must
-  land at 0659 or later on top of this branch.
-- Upstream's main already uses 0656; the next sync renumbers the fork migrations again (safe by their bodies).
-- Repin observations: carrier approval mode under managed tool decisions, first-turn tool search for cendra-pms,
-  first-use auto-membership versus Cendra's reconcile, and the 0598 encryption key on staging.
+  land at 0668 or later on top of this branch.
+- The next sync renumbers the fork migrations again if upstream passes 0667 (safe by their bodies).
+- Repin observations: carrier approval mode under managed tool decisions, first-turn tool search for cendra-pms, the
+  0598 encryption key on staging, and the 0586 session-tenancy activation Job.
 - The package suite was not rerun in full after the fixes; the affected files and their neighbours were.
 - Gate logs are kept untracked in the worktree's `.local/gates` until review. `.local/` is not git-ignored in the
   fork, so a follow-on must not `git add -A`.
