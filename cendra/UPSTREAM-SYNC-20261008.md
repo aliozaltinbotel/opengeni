@@ -15,6 +15,10 @@ upstream `Cloudgeni-ai/opengeni` `main` with `--no-ff`. No fork commit was rebas
 | Follow-up commits | `f933c6bb8` migration renumbering; `708b36be5` regenerated surface and Site runtime; `fb10c5dc1` test fits; `d8ad352d1` SDK fix; `8f9627e77` runtime error-text order and more test fits; this report |
 | Upstream head at report time | `42a50cd1f1b5ac1a231d42fb7a9291633970716f` (3 commits later, adds `0656_inbox_owner_recipient`); not merged |
 
+Fork `main` (`11febf6a7db69f479fecd162ae82b5fda3c58088`) and `production` (`e6453c8271ac6e198bbd1970a23f222e5613affc`)
+are untouched. A later fetch moved the local `refs/remotes/upstream/main` to `42a50cd1f`; the merge is anchored by
+SHA `89e3a2ad9`.
+
 History. The shared fork clone is shallow at `662b922f3` (2026-07-02), far below the merge base. All 800 upstream
 commits since the merge base were fetched without depth limits and with no missing objects, so the merge base is exact.
 
@@ -222,7 +226,7 @@ and on a clean checkout of the pin `6c2c7eaf1` (if the fork touches it). Classif
    `Response` clone-then-gzip does not reproduce it, so the interaction is inside the Hono composition. Upstream CI
    runs Bun 1.4.0; this was not tested there. Cendra's API serves this composition on Bun 1.3.14, so error codes and
    reasons would reach browsers empty. Needs a fork fix (read the envelope without consuming the response, or skip
-   it for compressed responses) before the repin.
+   it for compressed responses) before the repin. Finding 1 blocks the repin (MAINT-P09-434), not this sync.
 2. **Organization MCP action catalog vs fork routes (decision).** Upstream's new organization MCP requires every
    registered route to be catalogued or exempted. The fork registers four routes upstream lacks: `DELETE
    /files/:fileId`, `GET /files/temporary-model-images`, `GET /sessions/:sessionId/model-source-basis`, `PATCH
@@ -271,3 +275,8 @@ and on a clean checkout of the pin `6c2c7eaf1` (if the fork touches it). Classif
 - Repin observations: carrier approval mode under managed tool decisions, first-turn tool search for cendra-pms,
   first-use auto-membership versus Cendra's reconcile, and the 0598 encryption key on staging.
 - The package suite was not rerun in full after the fixes; the affected files and their neighbours were.
+- Gate logs are kept untracked in the worktree's `.local/gates` until review. `.local/` is not git-ignored in the
+  fork, so a follow-on must not `git add -A`.
+- Lesson for the next sync: moving fork migrations after the upstream chain moves fork DDL past every upstream test
+  that holds an intermediate ledger and writes through the current Drizzle schema (tool-approval-upgrade,
+  migration-0343 here). Grep for that fixture idiom before running the suite.
