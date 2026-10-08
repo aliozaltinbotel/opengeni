@@ -145,7 +145,7 @@ test("installed SDK projection keeps exact bytes, owner scope and ambiguous-outp
   const ambiguous = new ModelRequestCaptureModel({ async getResponse() { return { usage: new SDKUsage(), output: [structuredClone(actual), { ...actual, id: "different-raw-id" }] }; }, getStreamedResponse(): AsyncIterable<StreamEvent> { throw Error("unused"); } });
   await withModelRequestCapture(captureWithKey("ambiguous-source"), async () => {
     await ambiguous.getResponse(requestWith([]));
-    await expect(model.getResponse(requestWith([structuredClone(continued)]))).rejects.toThrow("UNKNOWN_SOURCE");
+    await expect(model.getResponse(requestWith([structuredClone(continued)]))).rejects.toThrow("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
   });
   let collisionCalls = 0;
   const collisionCapture = captureWithKey("unused");

@@ -5,13 +5,14 @@ import { historyRowsToAppend, pendingToolCallFromSdkEvent, completedToolCallFrom
 import { projectHistoryForProvider } from "../../../packages/runtime/src/provider-history-adapter";
 import { HistoryPrefixGuard } from "../src/activities/agent-turn/history-prefix";
 import postgres from "postgres";
+import { installLazyToolRuntime, LazyToolModelProvider } from "../../../packages/runtime/src/lazy-tool-transport";
 import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
 import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, canonicalModelSourceJson, ModelSourceRef } from "@opengeni/contracts";
 import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput } from "@opengeni/runtime";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
+import { Agent, tool, Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { appendSessionEventsForTurnAttempt, listSessionEvents, ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
@@ -20,12 +21,12 @@ let shared:SharedTestDatabase;
 let app:ReturnType<typeof createDb>;
 beforeAll(async()=>{const external=process.env.OPENGENI_MODEL_SOURCE_TEST_APP_URL;if(external){const adminUrl=process.env.OPENGENI_MODEL_SOURCE_TEST_ADMIN_URL;if(!adminUrl)throw Error("External source receipt fixture requires its exact admin URL");const admin=postgres(adminUrl,{max:1});shared={appUrl:external,adminUrl,admin,release:async()=>{await admin.end();}};app=createDb(external,{max:4});return;}const acquired=await acquireSharedTestDatabase("model-call-source-receipts");if(!acquired)throw Error("PostgreSQL required");shared=acquired;app=createDb(shared.appUrl,{max:4});},180_000);
 afterAll(async()=>{await app?.close();await shared?.release();},60_000);
-async function fixture(options:{metadata?:Record<string,unknown>;initialModelContext?:string;managed?:boolean}={}){
+async function fixture(options:{metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean}={}){
  const suffix=crypto.randomUUID();
  const userId=`native-source-${suffix}`;const subjectId=options.managed?`user:${userId}`:suffix;
  const access=options.managed?await ensureManagedAccessForUser(app.db,{userId,email:`${userId}@example.test`,name:"Synthetic owner"}):await bootstrapWorkspace(app.db,{accountExternalSource:"source-receipt",accountExternalId:suffix,accountName:"Test",workspaceExternalSource:"source-receipt",workspaceExternalId:suffix,workspaceName:"Test",subjectId:suffix});
  const {accountId,workspaceId}=access.workspaceGrants[0]!;if(!workspaceId)throw Error("workspace");
- const session=await createSession(app.db,{accountId,workspaceId,initialMessage:"Synthetic request",createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
+ const session=await createSession(app.db,{accountId,workspaceId,initialMessage:"Synthetic request",...(options.initialMessageModelSourceRefs?{initialMessageModelSourceRefs:options.initialMessageModelSourceRefs}:{}),createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
  await initializeSessionStartAtomically(app.db,{accountId,workspaceId,sessionId:session.id,reasoningEffortFallback:"low",createdEventPayload:{}});
  const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(app.db,workspaceId,{sessionId:session.id,workflowId:`session-${session.id}`,workflowRunId:crypto.randomUUID(),dispatchId:suffix,attemptId,trigger:{kind:"next"}});
  if(claim.action!=="claimed")throw Error("claim");
@@ -41,6 +42,109 @@ test("persistence removes only native source binding and keeps unknown symbols r
  Object.defineProperty(owned,Symbol("unknown-owner"),{value:"untrusted",enumerable:true});expect(()=>toPostgresLosslessJson(omitModelSourceInputBinding(owned))).toThrow("Canonical JSON cannot contain symbol keys");
  const hidden=bindModelSourceInput({...json},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:crypto.randomUUID(),sha256:"b".repeat(64)},parents:[],retainedSources:[]});Object.defineProperty(hidden,Symbol("unknown-hidden-owner"),{value:"untrusted",enumerable:false});expect(()=>toPostgresLosslessJson(omitModelSourceInputBinding(hidden))).toThrow("Canonical JSON cannot contain symbol keys");
 });
+
+for (const streaming of [false, true]) {
+ test(`actual SDK native tool search ${streaming ? "streaming" : "ordinary"} persists exact discovery ancestry before second model call`, async()=>{
+  const retained={owner:"cendra.knowledge.retrieval_use",id:crypto.randomUUID(),sha256:createHash("sha256").update("Synthetic selected origin").digest("hex"),version:"1"};
+  const f=await fixture({initialMessageModelSourceRefs:[retained]}); const receipts:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>[]=[];
+  const selected=tool({name:"fixture__procedure_draft",description:"Create a synthetic procedure draft",parameters:{type:"object",properties:{},required:[],additionalProperties:false},strict:true,execute:()=>"unused"});
+  const agent=new Agent({name:"source-search",model:"scripted",instructions:"Search the available tools.",tools:[selected]});
+  const runtime=installLazyToolRuntime(agent,"openai_native",new Set(["fixture"]));
+  let calls=0;let continuation:ModelRequest|undefined;
+  const step=()=>++calls===1 ? {output:[{type:"tool_search_call" as const,call_id:"source-search-call",execution:"client" as const,status:"completed" as const,arguments:{query:"",names:[selected.name]}}]} : {outputText:"Synthetic completed discovery"};
+  const model:Model={async getResponse(sent){return new ScriptedModel([step()]).getResponse(sent);},async *getStreamedResponse(sent){yield*new ScriptedModel([step()]).getStreamedResponse(sent);}};
+  const capture:ModelRequestCapture=()=>{};
+  capture.beforeCall=async sent=>{
+   const receipt=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:receipts.length+1},{instructions:sent.systemInstructions,tools:sent.tools,input:sent.input,sourceBindings:modelSourceBindings(sent.input),instructionSelections:f.instructionSelections});
+   receipts.push(receipt);continuation=sent;
+   expect(receipt.incompleteReasons).toEqual([]);expect(receipt.complete).toBe(true);
+   return receipt.sourceKey;
+  };
+  const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  for(const row of rows)bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]});
+  const settings=testSettings({sandboxBackend:"none",webSearchEnabled:false});
+  let result:Awaited<ReturnType<Runner["run"]>>|undefined;
+  const sink=createTurnHistorySink({db:app.db,accountId:f.identity.accountId,workspaceId:f.identity.workspaceId,sessionId:f.identity.sessionId,attemptId:f.identity.attemptId,
+   getTurnId:()=>f.identity.turnId,getExecutionGeneration:()=>f.identity.executionGeneration,getStream:()=>result,getModelRunSettings:()=>settings,
+   media:{retainNativeGeneratedImagesFromHistory:async()=>{},retainedScreenshotReceiptsByCallId:new Map(),generatedImageReceiptsByProviderItemId:new Map()},
+  } as unknown as Parameters<typeof createTurnHistorySink>[0]);
+  const input=rows.map(row=>row.item) as ModelRequest["input"];
+  sink.seedHistory(input,rows.length);sink.nextHistoryPosition=Math.max(...rows.map(row=>row.position))+1;
+  capture.callCompleted=(_key,_id,_response,restore)=>{sink.recordModelSourceRestorer(restore);};
+  capture.onModelToolSource=async source=>{sink.recordModelToolSource(source);};
+  const batcher=createRuntimeBatcher(async events=>{
+   const appended=await appendSessionEventsForTurnAttempt(app.db,f.identity.workspaceId,f.identity.sessionId,f.identity.turnId,f.identity.executionGeneration,f.identity.attemptId,events);
+   expect(appended.accepted).toBe(true);expect(appended.events).toHaveLength(events.length);
+  });
+  await withModelRequestCapture(capture,async()=>{
+   const runner=new Runner({tracingDisabled:true,modelProvider:new LazyToolModelProvider({getModel:async()=>model},runtime)});
+   if(streaming){
+    const running=await runner.run(agent,input,{stream:true,historyOwnership:"external"});result=running;
+    for await(const event of running){
+     if((event.type==="raw_model_stream_event" && event.data.type==="response_done") || (event.type==="run_item_stream_event" && event.item.type==="tool_search_output_item"))await sink.reconcileConversationTruth({requireDurable:true});
+     pendingToolCallFromSdkEvent(event);completedToolCallFromSdkEvent(event);
+     for(const normalized of normalizeSdkEvent(event))await batcher.push(normalized);
+    }
+    await running.completed;
+   } else {
+    result=await runner.run(agent,input,{historyOwnership:"external"});
+    // Ordinary Runner exposes the same actual SDK RunItems after completion.
+    for(const item of result.newItems){
+     const event={type:"run_item_stream_event" as const,name:item.type,item};
+     for(const normalized of normalizeSdkEvent(event))await batcher.push(normalized);
+    }
+   }
+   await sink.reconcileConversationTruth({requireDurable:true});await batcher.flush();
+  });
+  expect(receipts).toHaveLength(2);expect(calls).toBe(2);
+  const produced=(continuation!.input as import("@openai/agents").AgentInputItem[]).find(item=>item.type==="tool_search_output")!;
+  const basis=modelSourceBindings([produced])[0]!;
+  const changed=structuredClone(produced) as Record<string,unknown>;
+  (changed.tools as Record<string,unknown>[])[0]!.description="Changed selected schema";
+  const changedBinding={...basis,sourceRef:{...basis.sourceRef,sha256:createHash("sha256").update(JSON.stringify(changed)).digest("hex")}};
+  const mutations=[{item:changed,binding:changedBinding},
+   {item:structuredClone(produced),binding:{...basis,nativeProducerSourceKey:"not-current-producing-call"}},
+   {item:structuredClone(produced),binding:{...basis,rawToolSource:{...basis.rawToolSource!,sourceCallId:"other-search-call"}}}];
+  for(const [offset,mutation] of mutations.entries()){
+   const rejected=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:4+offset},{input:[mutation.item],sourceBindings:[mutation.binding],instructionSelections:f.instructionSelections});
+   expect(rejected.complete).toBe(false);expect(rejected.incompleteReasons).toContain("UNRESOLVED_PARENT");
+  }
+  const saved=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  const discovery=saved.find(row=>row.item.type==="tool_search_output")!;expect(discovery).toBeDefined();
+  const [durable]=await shared.admin`select source_basis from session_history_items where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and session_id=${f.identity.sessionId} and id=${discovery.id}`;
+  expect(durable!.source_basis.kind).toBe("TOOL_RESULT");expect(durable!.source_basis.rawToolSource.nativeModelSourceKey).toBe(receipts[0]!.sourceKey);
+  const events=await listSessionEvents(app.db,f.identity.workspaceId,f.identity.sessionId);
+  expect(events.some(event=>event.type==="agent.toolCall.output")).toBe(true);
+  // Select only discovery: a transcript without its adjacent call must still
+  // retain the exact producing call's current host sources through durable basis.
+  const selectedRow=bindModelSourceInput(discovery.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:discovery.id,sha256:discovery.sourceSha256!},parents:[],retainedSources:[]});
+  const replay=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:3},{input:[selectedRow],sourceBindings:modelSourceBindings([selectedRow]),instructionSelections:f.instructionSelections});
+  expect(replay.incompleteReasons).toEqual([]);expect(replay.complete).toBe(true);
+  expect(replay.closure.some(node=>node.sourceRef.owner==="model_call_source_receipts" && node.sourceRef.id===receipts[0]!.id && node.sourceRef.sha256===receipts[0]!.digest)).toBe(true);
+  expect(replay.closure.flatMap(node=>node.retainedSources)).toContainEqual(retained);
+  const validation=await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:replay.sourceKey,requestIndex:3},receipt:replay});
+  expect(validation.sources).toContainEqual({sourceRef:retained,status:"HOST_AUTHORITY_REQUIRED",reason:"HOST_AUTHORITY_REQUIRED"});
+  let replayCalls=0;
+  const reloadCapture:ModelRequestCapture=()=>{};
+  reloadCapture.beforeCall=async sent=>{
+   const current=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:7},{input:sent.input,sourceBindings:modelSourceBindings(sent.input),instructionSelections:f.instructionSelections});
+   expect(current.incompleteReasons).toEqual([]);expect(current.complete).toBe(true);return current.sourceKey;
+  };
+  const reloadModel:Model={async getResponse(){replayCalls++;return {usage:new Usage(),output:[]};},async *getStreamedResponse(){replayCalls++;yield {type:"response_done",response:{id:"reloaded",output:[],usage:{inputTokens:0,outputTokens:0,totalTokens:0}}};}};
+  await withModelRequestCapture(reloadCapture,async()=>{
+   if(streaming){for await(const _ of runtime.wrapModel(reloadModel).getStreamedResponse(request([selectedRow]))){} }
+   else await runtime.wrapModel(reloadModel).getResponse(request([selectedRow]));
+  });
+  expect(replayCalls).toBe(1);
+  // The native receipt preserves evidence; it cannot convert host withdrawal
+  // into authority or reach a provider after that host refuses the same origin.
+  const withdrawn:ModelRequestCapture=()=>{};
+  withdrawn.beforeCall=async()=>{expect(replay.closure.flatMap(node=>node.retainedSources)).toContainEqual(retained);throw Error("HOST_SOURCE_WITHDRAWN");};
+  await expect(withModelRequestCapture(withdrawn,()=>runtime.wrapModel(model).getResponse(request([selectedRow])))).rejects.toThrow("HOST_SOURCE_WITHDRAWN");
+  expect(calls).toBe(2);
+
+ },60_000);
+}
 
 for (const streaming of [false, true]) {
 test(`actual SDK transient ${streaming ? "streaming" : "ordinary"} long continuations retain distinct exact sources and refuse source mutants`,async()=>{

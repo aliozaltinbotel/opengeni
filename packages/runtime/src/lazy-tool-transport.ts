@@ -1,6 +1,7 @@
 import {
   tool as agentTool,
   toolSearchTool,
+  getToolSearchRuntimeToolKey,
   type Model,
   type ModelProvider,
   type ModelRequest,
@@ -11,7 +12,7 @@ import {
 } from "@openai/agents";
 import { isSearchableMcpFunctionTool, searchToolPool } from "./codex-tool-search";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "./mcp-network";
-import { ModelRequestCaptureModel } from "./model-request-capture";
+import { ModelRequestCaptureModel, recordModelToolSearchSource } from "./model-request-capture";
 
 /** Provider-contained progressive-disclosure strategy for one resolved turn. */
 export type LazyToolTransport = "codex_native" | "openai_native" | "generic_dispatch";
@@ -150,6 +151,9 @@ function modelVisibleToolDefinition(tool: Tool): Record<string, unknown> | null 
     description: tool.description,
     parameters: tool.parameters,
     strict: tool.strict,
+    ...(tool.deferLoading !== undefined ? {deferLoading: tool.deferLoading} : {}),
+    ...(tool.allowedCallers ? {allowedCallers: tool.allowedCallers} : {}),
+    ...(tool.outputSchema ? {outputSchema: tool.outputSchema} : {}),
   };
 }
 
@@ -530,7 +534,21 @@ export class LazyToolRuntime {
         // configured tools on this request. Search may disclose only the
         // lazy set; returning an eager tool again would create a second
         // routed identity for one tool.
-        return searchToolPool(this.searchableTools(tools), args.toolCall?.arguments);
+        const selected = searchToolPool(this.searchableTools(tools), args.toolCall?.arguments);
+        // This native catalog projection owns schema disclosure. The SDK owns
+        // its search-output envelope; capture admits only that exact projection.
+        // A namespace needs its own exact declaration, never a guessed flat name.
+        for (const tool of selected) {
+          if (isFunctionTool(tool) && getToolSearchRuntimeToolKey(tool) !== tool.name)
+            throw new Error("MODEL_TOOL_SEARCH_NAMESPACE_UNSUPPORTED");
+        }
+        const definitions = selected.map(tool => {
+          const definition = modelVisibleToolDefinition(tool);
+          if (!definition) throw new Error("MODEL_TOOL_SEARCH_SCHEMA_UNSUPPORTED");
+          return definition;
+        });
+        await recordModelToolSearchSource(args.toolCall, {tools: definitions});
+        return selected;
       }) as never,
     }) as unknown as Tool;
   }

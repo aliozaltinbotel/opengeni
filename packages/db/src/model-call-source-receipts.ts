@@ -91,7 +91,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
             sql`((${schema.sessionHistoryItems.item}->>'type'='message' and ${schema.sessionHistoryItems.item}->>'role'='developer' and starts_with(${schema.sessionHistoryItems.item}->>'content',${SKILL_CATALOG_CONTEXT_PREFIX}) and strpos(${schema.sessionHistoryItems.item}->>'content','- {')>0) or (${schema.sessionHistoryItems.item}->>'type'='function_call' and ${schema.sessionHistoryItems.item}->>'name'='skill_read'))`)).limit(1);
           if (skill) return false;
         }
-        if (canonicalModelSourceJson(row.item).includes("opengeni_context_summary") || canonicalModelSourceJson(row.item).includes(IMPORTED_HISTORY_CONTEXT_HEADER) || (row.item as {type?:string}).type==="function_call_result") return false;
+        if (canonicalModelSourceJson(row.item).includes("opengeni_context_summary") || canonicalModelSourceJson(row.item).includes(IMPORTED_HISTORY_CONTEXT_HEADER) || ["function_call_result","tool_search_output"].includes((row.item as {type?:string}).type ?? "")) return false;
         closureNodes.set(ref.id,{sourceRef:ref,kind:"HISTORY_ROW",parents:[],retainedSources:[]});
         return true;
       }
@@ -108,9 +108,16 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         const raw=row.basis.rawToolSource;
         if(parent.owner==="native.tool.result" && raw && raw.nativeModelSourceKey && canonicalModelSourceJson(parent)===canonicalModelSourceJson(raw.rawSourceRef)) {
           if(!row.turnId) return false;
-          const [sourceReceipt]=await tx.select({id:schema.modelCallSourceReceipts.id}).from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,row.sessionId),eq(schema.modelCallSourceReceipts.turnId,row.turnId),eq(schema.modelCallSourceReceipts.sourceKey,raw.nativeModelSourceKey))).limit(1);
+          if(row.item.type==="tool_search_output") {
+            const item=row.item as {providerData?:{call_id?:string};status?:string;tools?:unknown};
+            if(item.status!==undefined || item.providerData?.call_id!==raw.sourceCallId || !Array.isArray(item.tools)
+              || modelSourceContentDigest({tools:item.tools})!==raw.rawSourceRef.sha256)return false;
+          }
+          const [sourceReceipt]=await tx.select({id:schema.modelCallSourceReceipts.id,digest:schema.modelCallSourceReceipts.digest}).from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,row.sessionId),eq(schema.modelCallSourceReceipts.turnId,row.turnId),eq(schema.modelCallSourceReceipts.sourceKey,raw.nativeModelSourceKey))).limit(1);
           if(!sourceReceipt) return false;
-          closureNodes.set(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[],retainedSources:raw.retainedSources});
+          const producerRef={owner:"model_call_source_receipts",id:sourceReceipt.id,sha256:sourceReceipt.digest};
+          if(!await closure(producerRef,next,depth+1,"AGENT"))return false;
+          closureNodes.set(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[producerRef],retainedSources:raw.retainedSources});
         } else if (!await closure(parent,next,depth+1,row.basis.kind==="HISTORY_ROW"?"AGENT":"COMPACTION")) return false;
       }
       return true;
@@ -190,8 +197,13 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
             .map(ref=>[canonicalModelSourceJson(ref),ref])).values()];
           const raw=binding.rawToolSource;
           if(binding.kind==="TOOL_RESULT") {
-            const item=value as {type?:string;callId?:string};
-            if(!raw || item.type!=="function_call_result" || item.callId!==raw.sourceCallId || raw.nativeModelSourceKey!==producer.sourceKey
+            const item=value as {type?:string;callId?:string;providerData?:{call_id?:string};tools?:unknown;status?:string};
+            const search=item.type==="tool_search_output";
+            const callId=search?item.providerData?.call_id:item.callId;
+            const rawSearch=binding.rawToolResult as {tools?:unknown}|null|undefined;
+            const exactSearch=!search || ((item.status==="completed" || item.status===undefined) && Array.isArray(item.tools) && rawSearch && Array.isArray(rawSearch.tools)
+              && canonicalModelSourceJson(item.tools)===canonicalModelSourceJson(rawSearch.tools));
+            if(!raw || (!search && item.type!=="function_call_result") || !exactSearch || callId!==raw.sourceCallId || raw.nativeModelSourceKey!==producer.sourceKey
               || raw.rawSourceRef.owner!=="native.tool.result" || !ModelSourceRef.safeParse(raw.rawSourceRef).success
               || binding.rawToolResult===undefined || modelSourceContentDigest(binding.rawToolResult)!==raw.rawSourceRef.sha256
               || canonicalModelSourceJson(binding.parents)!==canonicalModelSourceJson([raw.rawSourceRef])

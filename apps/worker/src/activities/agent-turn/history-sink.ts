@@ -1,5 +1,5 @@
 import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
-import { bindModelSourceInput, modelSourceInputBinding, sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
+import { toolCallIdFromSdkItem, bindModelSourceInput, modelSourceInputBinding, sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
 import type { Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
@@ -155,9 +155,9 @@ export class TurnHistorySink {
               modelToolOutputTruncationTokens:
                 this.deps.getModelRunSettings().modelToolOutputTruncationTokens,
               items:rows.map(row=>{
-                const callId=typeof row.item.callId==="string"?row.item.callId:typeof row.item.call_id==="string"?row.item.call_id:null;
+                const callId=toolCallIdFromSdkItem(row.item);
                 const source=callId?this.toolSourcesByCallId.get(callId):undefined;
-                return {...row,...(source && String(row.item.type).includes("result") ? {sourceBasis:{kind:"TOOL_RESULT" as const,parents:[source.rawSourceRef],retainedSources:source.retainedSources,rawToolSource:source}}:{})};
+                return {...row,...(source && (String(row.item.type).includes("result") || row.item.type==="tool_search_output") ? {sourceBasis:{kind:"TOOL_RESULT" as const,parents:[source.rawSourceRef],retainedSources:source.retainedSources,rawToolSource:source}}:{})};
               }),
             });
             if (!appended) {

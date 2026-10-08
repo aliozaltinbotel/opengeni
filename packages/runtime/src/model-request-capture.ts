@@ -4,6 +4,9 @@ import { toSmartString } from "@openai/agents-core/utils";
 import { protocol } from "@openai/agents-core";
 import { rememberPreparedModelRequest } from "./prepared-compaction-request";
 import { stripProviderItemId } from "./model-input";
+import { toolCallIdFromSdkItem } from "./tool-call-identity";
+import { normalizeProtocolJsonValue } from "./protocol-json";
+import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
@@ -52,7 +55,7 @@ const producedSources = new WeakMap<ModelRequestCapture, {
   restoreHistorySources: (items:readonly unknown[])=>void;
   outputs: Map<string,InputBinding|null>;
   outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
-  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:string; modelName?:string}>;
+  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:string; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
@@ -117,8 +120,8 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
       const priorProjection=outputs.get(projectedSha256);
       outputs.set(projectedSha256,priorProjection!==undefined && priorProjection?.sourceRef.id!==projectedBinding.sourceRef.id?null:projectedBinding);
     }
-    const callId=typeof item.callId==="string"?item.callId:typeof item.call_id==="string"?item.call_id:null;
-    if(item.type!=="function_call" || !callId) continue;
+    const callId=toolCallIdFromSdkItem(item);
+    if((item.type!=="function_call" && item.type!=="tool_search_call") || !callId) continue;
     const prior=capture.toolSourceKeys.get(callId);
     if(prior && prior!==sourceKey) throw new Error("MODEL_SOURCE_CALL_ID_COLLISION");
     capture.toolSourceKeys.set(callId,sourceKey);
@@ -134,6 +137,40 @@ export function recordModelToolProjection(callId:string|undefined,modelName:stri
   tool.projection=toSmartString(output);tool.modelName=modelName;
 }
 
+/** Native client discovery produces these exact schemas, not model-authored
+ * instructions. Keep its existing raw-tool owner and producing call; the SDK
+ * supplies the envelope. No serialized input can register this ownership. */
+export async function recordModelToolSearchSource(call:unknown, result:{tools:Record<string,unknown>[]}):Promise<void> {
+  const capture=modelRequestCapture.getStore();
+  if(!capture?.beforeCall)return;
+  const callId=toolCallIdFromSdkItem(call);
+  restoreProducedSourceBindings([call],capture);
+  const binding=modelSourceInputBinding(call);
+  const sourceKey=callId?capture.toolSourceKeys?.get(callId):undefined;
+  if((call as {type?:string}|undefined)?.type!=="tool_search_call" || !callId || !sourceKey || binding?.nativeProducerSourceKey!==sourceKey || binding.sourceRef.sha256!==inputDigest(call))
+    throw new Error("MODEL_TOOL_SEARCH_CALL_UNBOUND");
+  const rawResult=structuredClone(normalizeProtocolJsonValue(result)),sha256=inputDigest(rawResult);
+  const source:NativeModelToolSource={sourceCallId:callId,nativeModelSourceKey:sourceKey,
+    rawSourceRef:{owner:"native.tool.result",id:`tool-search:${sourceKey}:${callId}:${sha256}`,sha256},retainedSources:[]};
+  const state=sourceState(capture);
+  if(state.tools.has(callId))throw new Error("MODEL_TOOL_SEARCH_CALL_COLLISION");
+  await recordModelToolSource(source,rawResult);
+  // These are the installed public protocol's two envelope projections. The
+  // schema bytes are the native producer's frozen result, never read from input.
+  const output={type:"tool_search_output" as const,status:"completed",tools:rawResult.tools,providerData:{call_id:callId,execution:"client"}};
+  const parsed=protocol.ToolSearchOutputItem.parse(output);
+  const projections=[output,parsed,stripProviderItemId(output),stripProviderItemId(parsed)];
+  const searchOutputs=new Map<string,InputBinding>();
+  for(const item of [...projections,...projections.map(value=>canonicalizePersistedHistoryItem(value))]) {
+    const digest=inputDigest(item);
+    const projected:InputBinding={kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${source.rawSourceRef.id}:${digest}`,sha256:digest},
+      parents:[source.rawSourceRef],retainedSources:source.retainedSources,nativeProducerSourceKey:sourceKey,rawToolSource:source,rawToolResult:rawResult};
+    searchOutputs.set(digest,projected);
+    state.outputOwners.set(projected,{outputId:source.rawSourceRef.id,identity:canonicalModelSourceJson(projected)});
+  }
+  state.tools.get(callId)!.searchOutputs=searchOutputs;
+}
+
 /** SDK continuation objects may be copies. Match only this scope's actual native
  * output bytes or its exact completed call and final text projection. */
 function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelRequestCapture|undefined):void {
@@ -142,20 +179,26 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
   for(const value of input) {
     if(!value || typeof value!=="object")continue;
     const item=value as Record<string,unknown>;
+    if(item.type==="tool_search_output")normalizeProtocolJsonValue(omitModelSourceInputBinding(item));
     const sha256=inputDigest(item),model=state.outputs.get(sha256);
+    const searchCallId=item.type==="tool_search_output"?toolCallIdFromSdkItem(item):undefined;
+    const searchSource=searchCallId?state.tools.get(searchCallId):undefined;
+    const search=searchSource?.source.nativeModelSourceKey===capture.toolSourceKeys?.get(searchCallId!)?searchSource?.searchOutputs?.get(sha256):undefined;
+    const projectionBinding=model ?? search;
     const carried=modelSourceInputBinding(item);
     if(carried) {
       if(carried.sourceRef.sha256===sha256)continue;
       // Ordinary Runner id stripping spreads this owner's symbol along with
       // the output. Repair only a registered, unchanged binding from this
       // capture and the same raw output's unambiguous exact projection.
-      const owner=state.outputOwners.get(carried),projection=model?state.outputOwners.get(model):undefined;
-      if(model && owner && projection && owner.outputId===projection.outputId
-        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(model))bindModelSourceInput(item,model);
+      const owner=state.outputOwners.get(carried),projection=projectionBinding?state.outputOwners.get(projectionBinding):undefined;
+      if(projectionBinding && owner && projection && owner.outputId===projection.outputId
+        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(projectionBinding))bindModelSourceInput(item,projectionBinding);
       continue;
     }
     if(model) {bindModelSourceInput(item,model);continue;}
     if(state.outputs.has(sha256))throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
+    if(search){bindModelSourceInput(item,search);continue;}
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
     if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName

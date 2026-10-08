@@ -7,6 +7,7 @@ import {
   Usage,
   tool,
   toolSearchTool,
+  toolNamespace,
   type Model,
   type ModelProvider,
   type ModelRequest,
@@ -23,7 +24,7 @@ import {
   restoreGenericDispatchHistoryItems,
   transformGenericDispatchResponse,
 } from "../src/lazy-tool-transport";
-import { boundModelToolOutputItem } from "@opengeni/codex";
+import { boundModelToolOutputItem, canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import { MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES } from "../src/mcp-network";
 import { normalizeSdkEvent } from "../src/run-events";
 import { restoreInterruptedRunState } from "../src/index";
@@ -43,6 +44,76 @@ const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
 
 describe("lazy model source admission", () => {
+  for(const streaming of [false,true]) {
+    test(`actual SDK native search ${streaming?"streaming":"ordinary"} binds declared schemas and rejects changed or unowned outputs`,async()=>{
+      const selected=tool({name:WEATHER_TOOL,description:"Read synthetic weather",parameters:{type:"object",properties:{city:{type:"string"}},required:["city"],additionalProperties:false},strict:true,
+        deferLoading:true,allowedCallers:["direct","programmatic"],outputSchema:{type:"object",properties:{temperature:{type:"number"}},required:["temperature"],additionalProperties:false},execute:()=>"unused"});
+      const agent=agentWith(selected as Tool),runtime=installLazyToolRuntime(agent,"openai_native",new Set([SERVER_ID]));
+      let calls=0,receipts=0,restore:((items:readonly unknown[])=>void)|undefined;
+      const outputs=()=>++calls===1?[{type:"tool_search_call" as const,call_id:"catalog-source-call",execution:"client" as const,status:"completed",arguments:{query:"",names:[WEATHER_TOOL]}}]:[finalMessage("searched")];
+      const inner:Model={async getResponse(){return {usage:new Usage(),output:outputs()};},async *getStreamedResponse(){yield responseDone("search-response",outputs());}};
+      const capture:ModelRequestCapture=()=>{};
+      capture.beforeCall=async request=>{
+        for(const item of request.input)if(typeof item==="object" && item.type==="tool_search_output") {
+          const binding=modelSourceInputBinding(item);
+          if(!binding || binding.sourceRef.sha256!==modelSourceContentDigest(omitModelSourceInputBinding(item)))throw Error("UNKNOWN_SOURCE");
+          expect(binding.kind).toBe("TOOL_RESULT");expect(binding.nativeProducerSourceKey).toBe("catalog-receipt-1");
+          expect(binding.rawToolSource?.rawSourceRef.owner).toBe("native.tool.result");
+        }
+        return `catalog-receipt-${++receipts}`;
+      };
+      capture.callCompleted=(_key,_id,_response,current)=>{restore=current;};
+      let discovered:Record<string,unknown>|undefined;
+      await withModelRequestCapture(capture,async()=>{
+        const runner=new Runner({tracingDisabled:true,modelProvider:new LazyToolModelProvider(providerFor(inner),runtime)});
+        const result=streaming?await runner.run(agent,"Synthetic search",{stream:true,historyOwnership:"external"}):await runner.run(agent,"Synthetic search",{historyOwnership:"external"});
+        if("toStream" in result){for await(const _ of result.toStream()){}await result.completed;}
+        restore!(result.history);
+        discovered=result.history.find(item=>item.type==="tool_search_output") as Record<string,unknown>;
+        expect(discovered).toBeDefined();expect(modelSourceInputBinding(discovered)?.kind).toBe("TOOL_RESULT");
+        const schema=(discovered.tools as Record<string,unknown>[])[0]!;
+        expect(schema.deferLoading).toBe(selected.deferLoading);expect(schema.allowedCallers).toEqual(selected.allowedCallers);expect(schema.outputSchema).toEqual(selected.outputSchema);
+        const canonical=canonicalizePersistedHistoryItem(discovered);
+        expect(canonical.status).toBeUndefined();
+        // Exercise the actual native persistence projection with its carried
+        // owner, then a detached SDK copy, before the next provider request.
+        for(const item of [canonical,structuredClone(canonical)])await runtime.wrapModel(inner).getResponse({...baseRequest([]),input:[item] as ModelRequest["input"]});
+        const baselineCalls=calls;
+        // Every declared field must keep its exact value and presence. These
+        // mutations derive from the installed SDK's real output, not a fixture list.
+        for(const field of Object.keys(schema))for(const remove of [false,true]){
+          const mutant=structuredClone(discovered),tools=mutant.tools as Record<string,unknown>[];
+          if(remove)delete tools[0]![field];else tools[0]![field]=`changed:${field}`;
+          await expect(runtime.wrapModel(inner).getResponse({...baseRequest([]),input:[mutant] as ModelRequest["input"]})).rejects.toThrow("UNKNOWN_SOURCE");
+        }
+        for(const mutant of [
+          {...structuredClone(discovered),providerData:{call_id:"unowned-call",execution:"client"}},
+          {...structuredClone(discovered),tools:[]},
+          {...structuredClone(discovered),extra:"unowned"},
+        ])await expect(runtime.wrapModel(inner).getResponse({...baseRequest([]),input:[mutant] as ModelRequest["input"]})).rejects.toThrow("UNKNOWN_SOURCE");
+        for(const nested of [false,true]){
+          const mutant=structuredClone(discovered);const target=nested?(mutant.tools as object[])[0]!:mutant;
+          Object.defineProperty(target,Symbol("foreign-source"),{value:"invalid",enumerable:false});
+          await expect(runtime.wrapModel(inner).getResponse({...baseRequest([]),input:[mutant] as ModelRequest["input"]})).rejects.toThrow("cannot contain symbol keys");
+        }
+        expect(calls).toBe(baselineCalls);
+      });
+      const unrelated:ModelRequestCapture=()=>{};
+      unrelated.beforeCall=async request=>{if(request.input.some(item=>typeof item==="object" && !modelSourceInputBinding(item)))throw Error("UNKNOWN_SOURCE");return "unrelated";};
+      await expect(withModelRequestCapture(unrelated,()=>runtime.wrapModel(inner).getResponse({...baseRequest([]),input:[structuredClone(discovered!)] as ModelRequest["input"]}))).rejects.toThrow("UNKNOWN_SOURCE");
+      expect(calls).toBe(4);
+    });
+  }
+
+  test("native search refuses a namespace without an exact native catalog projection",async()=>{
+    const raw=weatherTool();if(raw.type!=="function")throw Error("Expected function tool");
+    const selected=toolNamespace({name:"weather",description:"Synthetic namespace",tools:[raw]})[0]!;
+    const agent=agentWith(selected),runtime=installLazyToolRuntime(agent,"openai_native",new Set([SERVER_ID]));
+    const inner:Model={async getResponse(){return {usage:new Usage(),output:[{type:"tool_search_call",call_id:"namespaced-search",execution:"client",arguments:{query:"",names:[WEATHER_TOOL]}}]};},getStreamedResponse(){throw Error("unused");}};
+    const capture:ModelRequestCapture=()=>{};capture.beforeCall=async()=>"namespaced-source";
+    await expect(withModelRequestCapture(capture,()=>new Runner({tracingDisabled:true,modelProvider:new LazyToolModelProvider(providerFor(inner),runtime)}).run(agent,"Synthetic search"))).rejects.toThrow("MODEL_TOOL_SEARCH_NAMESPACE_UNSUPPORTED");
+  });
+
   test("generic projection never repairs mutated bytes or a foreign producer binding", async () => {
     const agent = agentWith(weatherTool());
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
