@@ -59,7 +59,12 @@ async function fixture() {
   });
   const deps = {
     db: client.db,
-    settings: testSettings({ productAccessMode: "configured", delegationSecret }),
+    // Cendra fork: first-use membership is a deployment opt-in (off by default); this suite opts in.
+    settings: testSettings({
+      productAccessMode: "configured",
+      delegationSecret,
+      externalMemberFirstUseEnabled: true,
+    }),
     bus: new MemoryEventBus(),
   } as unknown as ApiRouteDeps;
   registerWorkspaceRoutes(app, deps);

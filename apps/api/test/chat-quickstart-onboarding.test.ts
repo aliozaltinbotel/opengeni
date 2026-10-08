@@ -63,7 +63,9 @@ async function fixture() {
   const noop = async () => undefined;
   const deps = {
     db: db.db,
+    // Cendra fork: the no-onboarding quickstart needs first-use membership, a deployment opt-in.
     settings: testSettings({
+      externalMemberFirstUseEnabled: true,
       databaseUrl: shared.appUrl,
       productAccessMode: "configured",
       sandboxBackend: "none",
