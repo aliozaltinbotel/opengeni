@@ -1,4 +1,8 @@
-import { KnowledgeEntryListRequest, type KnowledgeEntryListResponse } from "@opengeni/contracts";
+import {
+  EMBEDDING_CALL_USAGE_EVENT_TYPE,
+  KnowledgeEntryListRequest,
+  type KnowledgeEntryListResponse,
+} from "@opengeni/contracts";
 import type { Settings } from "@opengeni/config";
 import {
   applyCreditDebitAfterUse,
@@ -15,7 +19,11 @@ import {
 } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { z } from "zod";
-import { documentEmbeddingCostMicros, paidDocumentEmbedding } from "../billing/limits";
+import {
+  documentEmbeddingCostMicros,
+  embeddingCallUsageAttributes,
+  paidDocumentEmbedding,
+} from "../billing/limits";
 
 // Safety ceilings, not a commercial tariff. Paid queries have no durable
 // reusable vector cache, so each bounded request consumes the provider once.
@@ -141,6 +149,27 @@ export async function searchKnowledgeEntries(
         sourceResourceType: "knowledge_query",
         sourceResourceId: usageId,
         idempotencyKey: `knowledge.query_bytes:${usageId}`,
+      });
+      // MAINT-P09-430: the provider request's own per-call fact, in the same
+      // transaction as its byte meter.
+      await recordUsageEvent(queryDb, {
+        accountId: context.accountId,
+        workspaceId: context.workspaceId,
+        eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+        quantity: 1,
+        unit: "call",
+        sourceResourceType: "knowledge_query",
+        sourceResourceId: usageId,
+        idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:query:${usageId}`,
+        attributes: embeddingCallUsageAttributes({
+          callKind: "query",
+          provider: settings.documentEmbeddingProvider ?? "unspecified",
+          model: embedding.model,
+          inputBytes: bytes,
+          inputItems: 1,
+          rateMicrosPerMillionBytes: settings.documentEmbeddingRateMicrosPerMillionBytes ?? 0,
+          billingPath: paidSettings ? "opengeni_credits" : "external",
+        }),
       });
       if (paidSettings && cost > 0)
         await recordUsageEvent(queryDb, {

@@ -148,7 +148,16 @@ test.each(["delayed", "fresh-large"] as const)(
           : ["before-compaction", "after-compaction-1", "after-compaction-2"],
       );
       expect(state.responseCount).toBe(usageSources.length);
-      expect(usageSpy).toHaveBeenCalledTimes(usageSources.length);
+      // Per bound response: its per-call fact (MAINT-P09-430) and its model.cost marker.
+      const writes = usageSpy.mock.calls.map(([, input]) => input);
+      expect(
+        writes
+          .filter((input) => input.eventType === "model.call")
+          .map((input) => input.idempotencyKey),
+      ).toEqual(usageSources.map((sourceKey) => `usage:model.call:turn:${sourceKey}`));
+      expect(writes.filter((input) => input.eventType !== "model.call")).toHaveLength(
+        usageSources.length,
+      );
     } finally {
       usageSpy.mockRestore();
       factSpy.mockRestore();

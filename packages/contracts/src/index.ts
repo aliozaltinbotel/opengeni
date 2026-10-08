@@ -3793,8 +3793,139 @@ export const UsageEventType = z.enum([
   "sandbox.warm_seconds",
   // usd_micros: warm-seconds x the per-provider per-second warm rate.
   "sandbox.warm_cost",
+  // --- per-call AI usage (one row per provider call; quantity 1, unit "call") ---
+  // The authoritative per-call fact: provider, model, token pools and the
+  // estimated provider cost live in `attributes` (ModelCallUsageAttributes).
+  "model.call",
+  // The same for one embedding provider request (EmbeddingCallUsageAttributes).
+  "embedding.call",
 ]);
 export type UsageEventType = z.infer<typeof UsageEventType>;
+
+/** Event type of the per-call model usage fact. */
+export const MODEL_CALL_USAGE_EVENT_TYPE = "model.call" as const;
+/** Event type of the per-request embedding usage fact. */
+export const EMBEDDING_CALL_USAGE_EVENT_TYPE = "embedding.call" as const;
+export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.model-call-usage/v1" as const;
+export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.embedding-call-usage/v1" as const;
+/** The database bound on `usage_events.attributes` (UTF-8 bytes of its JSON text). */
+export const USAGE_EVENT_ATTRIBUTES_MAX_BYTES = 4096;
+
+/** A provider-reported count; null when the provider did not report it (never 0 by default). */
+const UsageCallTokenCount = z.number().int().nonnegative().nullable();
+
+/**
+ * One provider model call, as OpenGeni metered it. Unknown is null, never 0:
+ * a call whose usage the provider did not report carries null token pools, and
+ * a call OpenGeni cannot price carries a null `estimatedProviderCostMicros`
+ * with a null `pricingSource`. `estimatedProviderCostMicros` is the provider-rate
+ * cost before any OpenGeni margin (`configured_list_price`: the configured
+ * schedule identified by `priceVersion`; `gateway_reported`: the gateway's own
+ * reported inference cost, no schedule). `scope: "aggregate"` marks the one
+ * fallback row a stream writes when no terminal response exposed per-call usage:
+ * it may stand for several provider requests.
+ */
+export const ModelCallUsageAttributes = z
+  .object({
+    schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
+    callKind: z.enum(["response", "compaction", "session_title"]),
+    scope: z.enum(["call", "aggregate"]),
+    sourceKey: z.string().min(1).max(512),
+    provider: z.string().min(1).max(128),
+    providerApi: z.string().min(1).max(64),
+    upstreamProvider: z.string().min(1).max(128).nullable(),
+    model: z.string().min(1).max(512),
+    outcome: z.enum(["completed"]),
+    usageReported: z.boolean(),
+    inputTokens: UsageCallTokenCount,
+    outputTokens: UsageCallTokenCount,
+    cachedTokens: UsageCallTokenCount,
+    cacheWriteTokens: UsageCallTokenCount,
+    reasoningTokens: UsageCallTokenCount,
+    totalTokens: UsageCallTokenCount,
+    estimatedProviderCostMicros: z.number().int().nonnegative().nullable(),
+    pricingSource: z.enum(["configured_list_price", "gateway_reported"]).nullable(),
+    priceVersion: z
+      .string()
+      .regex(/^schedule-sha256:[0-9a-f]{64}$/)
+      .nullable(),
+    billingPath: z.enum(["opengeni_credits", "external"]),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.estimatedProviderCostMicros === null) !== (value.pricingSource === null)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "estimatedProviderCostMicros and pricingSource are known together or unknown together",
+      });
+    }
+    if ((value.priceVersion !== null) !== (value.pricingSource === "configured_list_price")) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "priceVersion names the configured schedule of a configured_list_price estimate only",
+      });
+    }
+    if (
+      !value.usageReported &&
+      (value.estimatedProviderCostMicros !== null ||
+        [
+          value.inputTokens,
+          value.outputTokens,
+          value.cachedTokens,
+          value.cacheWriteTokens,
+          value.reasoningTokens,
+          value.totalTokens,
+        ].some((count) => count !== null))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "a call without reported usage carries no token count and no cost",
+      });
+    }
+  });
+export type ModelCallUsageAttributes = z.infer<typeof ModelCallUsageAttributes>;
+
+/**
+ * One embedding provider request. The embedder returns vectors only, so token
+ * counts are not observed (null); `inputBytes` is the exact UTF-8 input size.
+ * `estimatedProviderCostMicros` is the configured byte rate applied to those
+ * bytes (`configured_byte_rate`) when a positive rate is configured, else null.
+ */
+export const EmbeddingCallUsageAttributes = z
+  .object({
+    schema: z.literal(EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA),
+    callKind: z.enum(["query", "index"]),
+    provider: z.string().min(1).max(128),
+    model: z.string().min(1).max(512),
+    outcome: z.enum(["completed"]),
+    inputBytes: z.number().int().nonnegative(),
+    inputItems: z.number().int().positive(),
+    inputTokens: UsageCallTokenCount,
+    estimatedProviderCostMicros: z.number().int().nonnegative().nullable(),
+    pricingSource: z.enum(["configured_byte_rate"]).nullable(),
+    rateMicrosPerMillionBytes: z.number().int().positive().nullable(),
+    billingPath: z.enum(["opengeni_credits", "external"]),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const known = value.estimatedProviderCostMicros !== null;
+    if (
+      known !== (value.pricingSource !== null) ||
+      known !== (value.rateMicrosPerMillionBytes !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "an embedding estimate, its pricing source and its rate are known together",
+      });
+    }
+  });
+export type EmbeddingCallUsageAttributes = z.infer<typeof EmbeddingCallUsageAttributes>;
+
+/** Bounded per-row usage attributes as persisted and exported (a JSON object). */
+export const UsageEventAttributes = z.record(z.string(), z.unknown());
+export type UsageEventAttributes = z.infer<typeof UsageEventAttributes>;
 
 export const UsageEvent = z.object({
   id: z.string().uuid(),
@@ -3811,6 +3942,12 @@ export const UsageEvent = z.object({
   recordedAt: z.string(),
   exportedToBillingAt: z.string().nullable(),
   billingProviderEventId: z.string().nullable(),
+  /**
+   * Per-call facts of a `model.call` / `embedding.call` row; null for every
+   * other usage type and for rows written before the column existed. Optional
+   * so an older writer's export batch still parses during a rolling upgrade.
+   */
+  attributes: UsageEventAttributes.nullable().optional(),
 });
 export type UsageEvent = z.infer<typeof UsageEvent>;
 
