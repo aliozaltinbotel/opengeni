@@ -618,7 +618,8 @@ async function compactContextPortable(
     ...(summarized.preparation.sourceItems.every(item=>sourceIdsByItem.has(item))
       ? {summarySourceIds:summarized.preparation.sourceItems.map(item=>sourceIdsByItem.get(item)!)} : {}),
     replacementSourceIds:replacementHistory.slice(0,summaryIndex).map(item=>sourceIdsByItem.get(item) ?? null),
-    trailingSourceIds:replacementHistory.slice(summaryIndex+1).map(item=>sourceIdsByItem.get(item) ?? null),
+    // Index-aligned with trailingItems, upstream's deferred items included.
+    trailingSourceIds:[...replacementHistory.slice(summaryIndex+1), ...deferredItems].map(item=>sourceIdsByItem.get(item) ?? null),
     ...(options.clearRequestedCompaction ? { clearRequestedCompaction: true } : {}),
     eventPayload: {
       trigger: options.trigger ?? "auto",
