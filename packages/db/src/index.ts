@@ -6924,9 +6924,9 @@ export async function revokeTemporaryModelImageFile(
       )).for("update").limit(1);
       if (!file || !(await getTemporaryModelImageFile(tx, input))) return null;
       const now = new Date();
-      await tx.update(schema.fileUploads).set({ status: "failed", updatedAt: now }).where(and(
+      await tx.update(schema.fileUploads).set({ status: "cleanup_pending", updatedAt: now }).where(and(
         eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
-        eq(schema.fileUploads.fileId, input.fileId), eq(schema.fileUploads.status, "pending"),
+        eq(schema.fileUploads.fileId, input.fileId), inArray(schema.fileUploads.status, ["pending", "completed", "failed"]),
       ));
       const [row] = await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(and(
         eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
