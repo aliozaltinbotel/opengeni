@@ -2,7 +2,7 @@
 -- PQA-0197: append-only, exact-call source receipts; historical facts remain unattributed.
 --
 -- Cendra fork migration, first shipped as 0551_model_call_source_receipts.sql and
--- renumbered after upstream 0655 by the 2026-10-08 upstream sync (MAINT-P09-433).
+-- renumbered after upstream 0664 by the 2026-10-08 upstream sync (MAINT-P09-433).
 -- A database that recorded the old name already holds every object below; each
 -- statement then verifies or re-asserts the same definition and adds nothing.
 -- A fresh database installs it here, after upstream's own changes to the same

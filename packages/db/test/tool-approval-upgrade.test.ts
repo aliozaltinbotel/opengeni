@@ -86,7 +86,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       add column content_archived_at timestamptz,
       add column content_archive jsonb,
       add column content_archive_purged_at timestamptz`;
-    // Cendra fork 0657 (model-call source receipts) adds this history column after the
+    // Cendra fork 0666 (model-call source receipts) adds this history column after the
     // upstream ledger, so the current history writer needs it on this older ledger too.
     await owner`alter table session_history_items add column source_basis jsonb`;
     const session = await createSession(client.db, {

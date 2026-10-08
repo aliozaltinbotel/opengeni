@@ -5,7 +5,7 @@
 --
 -- Cendra fork migration, first shipped as
 -- 0552_recurring_temporary_image_cleanup_fairness.sql and renumbered after
--- upstream 0655 by the 2026-10-08 upstream sync (MAINT-P09-433): upstream
+-- upstream 0664 by the 2026-10-08 upstream sync (MAINT-P09-433): upstream
 -- assigned 0552 to a different file. A database that recorded the old name
 -- already holds the exact post-image; this file then verifies it and changes
 -- nothing. Exactly one of the two exact images is accepted.

@@ -6,7 +6,7 @@
 --
 -- Cendra fork migration, first shipped as
 -- 0550_external_workspace_member_empty_permission_updates.sql and renumbered
--- after upstream 0655 by the 2026-10-08 upstream sync (MAINT-P09-433): upstream
+-- after upstream 0664 by the 2026-10-08 upstream sync (MAINT-P09-433): upstream
 -- assigned 0550 to a different file. A database that recorded the old name
 -- already holds the post-image; this file then verifies it and changes nothing.
 -- Exactly one of the two exact images is accepted; anything else is refused.

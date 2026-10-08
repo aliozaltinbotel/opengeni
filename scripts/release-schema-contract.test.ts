@@ -2401,7 +2401,7 @@ describe("release schema contract", () => {
       "0546_organization_integration_primitives.sql",
       "0547_idle_command_containment.sql",
       "0549_claude_subscription_usage.sql",
-      "0656_external_workspace_member_empty_permission_updates.sql",
+      "0665_external_workspace_member_empty_permission_updates.sql",
       "0548_lost_sandbox_group_continuity.sql",
       "0550_organization_oauth_pending_states.sql",
       "0552_usage_allowances.sql",
@@ -2506,8 +2506,8 @@ describe("release schema contract", () => {
       "0662_session_first_party_default_intent.sql",
       "0663_inbox_paused_goal_setting.sql",
       "0664_inbox_rich_notifications.sql",
-      "0657_model_call_source_receipts.sql",
-      "0658_recurring_temporary_image_cleanup_fairness.sql",
+      "0666_model_call_source_receipts.sql",
+      "0667_recurring_temporary_image_cleanup_fairness.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
