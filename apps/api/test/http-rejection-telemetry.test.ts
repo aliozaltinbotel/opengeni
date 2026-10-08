@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
+import { Hono } from "hono";
+import { compress } from "hono/compress";
 import {
   httpRejectionFactsFromEnvelope,
   httpRejectionFactsFromError,
@@ -86,6 +88,29 @@ describe("HTTP rejection telemetry", () => {
       headers: { "content-type": "application/json", "content-length": String(1 << 20) },
     });
     expect(await readRejectionEnvelope(large)).toBeUndefined();
+  });
+
+  test("a gzip-compressed rejection keeps its JSON body after the envelope is read", async () => {
+    // Cendra fork (MAINT-P09-433): on Bun 1.3.14, Response.clone().text() of a string body
+    // emptied the original, so the outer compression sent an empty 20-byte gzip body for every
+    // JSON error. Same order as the API: compression outside, the envelope read inside.
+    const app = new Hono();
+    app.use("/v1/*", compress({ encoding: "gzip", contentTypeFilter: /^application\/json(?:;|$)/i }));
+    let envelope: unknown;
+    app.use("*", async (c, next) => {
+      await next();
+      envelope = await readRejectionEnvelope(c.res);
+    });
+    const error = { status: 403, code: "forbidden", message: "missing permission: sessions:create" };
+    app.get("/v1/denied", (c) => c.json({ error }, 403));
+    const response = await app.request("/v1/denied", { headers: { "accept-encoding": "gzip" } });
+    expect(response.status).toBe(403);
+    expect(response.headers.get("content-encoding")).toBe("gzip");
+    const body = await new Response(
+      response.body!.pipeThrough(new DecompressionStream("gzip")),
+    ).text();
+    expect(body).toBe(JSON.stringify({ error }));
+    expect(envelope).toEqual({ error });
   });
 
   test("structured logs keep bounded rejection fields and drop malformed ones", () => {

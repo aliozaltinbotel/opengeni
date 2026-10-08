@@ -104,7 +104,9 @@ export function httpRejectionFactsFromError(
  * the client. Streams, non-JSON bodies, and large bodies are never read.
  */
 export async function readRejectionEnvelope(response: Response): Promise<unknown> {
-  if (!response.body) return undefined;
+  // Never touch `response.body` here: on Bun 1.3.14, reading the getter before clone() left the
+  // original with an empty body once the clone was read, and the outer gzip middleware then sent
+  // a 20-byte empty body for every JSON error. A null body clones to "" and parses to undefined.
   if (!/^application\/json(?:;|$)/i.test(response.headers.get("content-type") ?? "")) {
     return undefined;
   }
