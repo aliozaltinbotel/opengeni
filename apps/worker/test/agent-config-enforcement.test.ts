@@ -649,7 +649,9 @@ function assertLegacyRequestContract(request: ModelRequest) {
       reason: { type: "string", minLength: 1, maxLength: 2000 },
     },
     required: ["operationId", "source", "reason"],
-    additionalProperties: true,
+    // Cendra fork 15d6d4432 (agents-core patch): an explicitly closed MCP input root stays
+    // closed on the non-strict conversion; upstream opens it.
+    additionalProperties: false,
   });
   expect(install.description).toContain("Off prevents agent installation");
   expect(install.description).toContain("requires its current installation version");

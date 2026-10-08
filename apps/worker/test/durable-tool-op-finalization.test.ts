@@ -150,6 +150,8 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
           throwIfTurnCancelled() {},
           recordCompanyBrainContributionReceiptOnce() {},
           withProviderRequestContext: async (operation: () => Promise<unknown>) => operation(),
+          // Cendra fork (c5bea8a03): every production attempt carries the exact-call source owner.
+          beforeModelCallSourceReceipt: async () => "source-key",
           finalizeTurnOpStreamOps: async (callIds?: readonly string[]) => {
             order.push("finalize");
             finalizations.push(callIds);

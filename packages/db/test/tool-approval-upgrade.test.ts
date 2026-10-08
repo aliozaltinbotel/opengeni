@@ -86,6 +86,9 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       add column content_archived_at timestamptz,
       add column content_archive jsonb,
       add column content_archive_purged_at timestamptz`;
+    // Cendra fork 0657 (model-call source receipts) adds this history column after the
+    // upstream ledger, so the current history writer needs it on this older ledger too.
+    await owner`alter table session_history_items add column source_basis jsonb`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -209,6 +212,7 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       drop column content_archived_at,
       drop column content_archive,
       drop column content_archive_purged_at`;
+    await owner`alter table session_history_items drop column source_basis`;
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(

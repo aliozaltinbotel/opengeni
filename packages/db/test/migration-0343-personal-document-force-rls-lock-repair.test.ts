@@ -130,6 +130,8 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     // The current claim writer uses ordered JSON. Bridge it to this historical
     // schema, then remove the bridge so 0434 performs its actual backfill.
     await admin`alter table session_history_items add column item_ordered json`;
+    // Cendra fork 0657 (model-call source receipts) adds this column after the upstream chain.
+    await admin`alter table session_history_items add column source_basis jsonb`;
     await admin.unsafe(`
       create function fixture_0343_history_write() returns trigger language plpgsql as $$
       begin
@@ -305,6 +307,7 @@ describe("migration 0343 personal Document FORCE-RLS lock repair", () => {
     await admin`drop trigger fixture_0343_history_write on session_history_items`;
     await admin`drop function fixture_0343_history_write()`;
     await admin`alter table session_history_items drop column item_ordered`;
+    await admin`alter table session_history_items drop column source_basis`;
     await admin`
       alter table workspace_inference_controls
       drop column timer_id,

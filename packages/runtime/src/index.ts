@@ -2798,14 +2798,14 @@ export function mcpToolErrorOutput(error: unknown): {
   const interactionFailure = interactionToolErrorOutput(error);
   if (interactionFailure) return interactionFailure;
   const details = exactErrorMessage(error);
-  // E-14 (Cendra agent-ops): a refusal the host marked final never invites a retry.
-  const text = toolErrorIsFinal(error)
-    ? `An error occurred while running the tool. Error: ${details}`
-    : (invalidToolArgumentsText(error) ??
-      (isIntegrationInvocationOutcomeUnknownError(error)
-        ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${details}`
-        : null) ??
-      `An error occurred while running the tool. Please try again. Error: ${details}`);
+  // An uncertain outcome says so first (upstream); E-14 (Cendra agent-ops): a refusal the host
+  // marked final never invites a retry. Neither text says "Please try again".
+  const text = isIntegrationInvocationOutcomeUnknownError(error)
+    ? `The tool outcome is uncertain. Do not retry automatically; check the provider before a new attempt. Error: ${details}`
+    : toolErrorIsFinal(error)
+      ? `An error occurred while running the tool. Error: ${details}`
+      : (invalidToolArgumentsText(error) ??
+        `An error occurred while running the tool. Please try again. Error: ${details}`);
   return { isError: true, content: [{ type: "text", text }] };
 }
 
