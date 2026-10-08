@@ -58,6 +58,12 @@ for (const streaming of [false, true]) {
    const receipt=await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:receipts.length+1},{instructions:sent.systemInstructions,tools:sent.tools,input:sent.input,sourceBindings:modelSourceBindings(sent.input),instructionSelections:f.instructionSelections});
    receipts.push(receipt);continuation=sent;
    expect(receipt.incompleteReasons).toEqual([]);expect(receipt.complete).toBe(true);
+   for(const item of sent.input)if(typeof item==="object" && item.type==="tool_search_output"){
+    const binding=modelSourceBindings([item])[0]!;
+    const discoveryInput=receipt.inputs.find(input=>input.contentSha256===binding.sourceRef.sha256)!;
+    expect(discoveryInput.kind).toBe("TOOL_RESULT");
+    expect(receipt.closure.find(node=>node.sourceRef.id===discoveryInput.sourceRef!.id)?.kind).toBe("TOOL_RESULT");
+   }
    return receipt.sourceKey;
   };
   const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);

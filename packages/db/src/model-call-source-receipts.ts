@@ -158,7 +158,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       if (row) cursor=index+1;
       const basis=row?.basis as Basis|null|undefined;
       if (await missingSkillOrigin(value,basis ?? binding ?? null,identity.sessionId)) reasons.add("UNRESOLVED_PARENT");
-      let kind:ModelSourceInput["kind"]=basis?.kind??((value as {type?:string})?.type==="function_call_result"?"TOOL_RESULT":"HISTORY_ROW");
+      let kind:ModelSourceInput["kind"]=basis?.kind??(["function_call_result","tool_search_output"].includes((value as {type?:string})?.type ?? "")?"TOOL_RESULT":"HISTORY_ROW");
       // Historical derived rows have no owner closure. A summary marker never authenticates ancestry.
       if (!basis && canonicalModelSourceJson(value).includes("opengeni_context_summary")) {kind="SUMMARY";reasons.add("UNRESOLVED_PARENT");}
       let sourceRef=binding?.sourceRef ?? (row?{owner:"session_history_items",id:row.id,sha256:row.rowSha}:null);
