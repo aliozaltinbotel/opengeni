@@ -4,10 +4,11 @@ import {AccessGrant,CreateSessionRequest,OPENGENI_API_CONTRACT_HEADER,OPENGENI_A
 import {bootstrapWorkspace,completeFileUpload,getFileUpload,createDb,getSession,getTemporaryModelImageFile,listTemporaryModelImageCleanup,withWorkspaceRls,withSessionRlsActorContext} from "@opengeni/db";
 import {MemoryEventBus,testSettings} from "@opengeni/testing";
 import type {SessionWorkflowClient} from "@opengeni/core";
+import {UPLOAD_URL_TTL_SECONDS} from "@opengeni/storage";
 import type {ObjectStorage} from "@opengeni/storage";
 import {fileUploads} from "@opengeni/db/schema";
 import {and,eq} from "drizzle-orm";
-import {createFileUploadReaperActivities,FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS} from "../../worker/src/activities/file-upload-reaper";
+import {createFileUploadReaperActivities,FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS,FILE_UPLOAD_CLEANUP_BATCH_SIZE,FILE_UPLOAD_CLEANUP_GRACE_MS} from "../../worker/src/activities/file-upload-reaper";
 import type {ControlActivityServices} from "../../worker/src/activities/types";
 import {createApp} from "../src/app";
 
@@ -26,7 +27,7 @@ beforeAll(()=>{
  client=createDb(databaseUrl,{max:2});
  const noop=async()=>undefined;
  storage={bucket:"synthetic-assessor",backend:"s3-compatible",maxSinglePutSizeBytes:10*1024*1024,
-   createPutUrl:async({key,expiresInSeconds}:{key:string;expiresInSeconds?:number})=>{expect(expiresInSeconds).toBe(30);liveObjects.add(key);return {url:"https://example.test/synthetic-upload",expiresAt:new Date(Date.now()+30_000),requiredHeaders:{}};},
+   createPutUrl:async({key,expiresInSeconds}:{key:string;expiresInSeconds?:number})=>{if(expiresInSeconds!==undefined)expect(expiresInSeconds).toBe(30);liveObjects.add(key);return {url:"https://example.test/synthetic-upload",expiresAt:new Date(Date.now()+(expiresInSeconds??UPLOAD_URL_TTL_SECONDS)*1000),requiredHeaders:{}};},
    fileExists:async()=>true,headFile:async()=>({ContentLength:photo.length,ContentType:"image/png",Metadata:{sha256:photoSha}}),
    deleteObject:async(key:string)=>{if(failDelete)throw new Error("Synthetic cleanup dependency unavailable");deleted.push(key);liveObjects.delete(key);},
   } as unknown as ObjectStorage;
@@ -155,3 +156,42 @@ test("revoked image cleanup survives no later assessor through the installed rea
  expect(await listTemporaryModelImageCleanup(client.db,{accountId:grant.accountId,workspaceId:grant.workspaceId,subjectId:grant.subjectId})).toEqual([{fileId,sessionId}]);
  expect((await request(grant,"POST",`${base}/uploads/${upload.uploadId}/complete`,{})).status).toBe(409);
 },60_000);
+
+test("recurring cleanup fairly reaches beyond the installed batch and ordinary expired uploads",async()=>{
+ const nonce=randomUUID();const access=await bootstrapWorkspace(client.db,{accountExternalSource:"assessor-image-test",accountExternalId:nonce,accountName:"Synthetic assessor",
+  workspaceExternalSource:"assessor-image-test",workspaceExternalId:nonce,workspaceName:"Synthetic assessor",subjectId:`assessor:${nonce}`});
+ const grant=AccessGrant.parse(access.workspaceGrants[0]);const base=`/v1/workspaces/${grant.workspaceId}/files`;
+ const inputs:Array<{uploadId:string;fileId:string;key:string}>=[];
+ for(let index=0;index<FILE_UPLOAD_CLEANUP_BATCH_SIZE+1;index++){
+  const sessionId=randomUUID(),fileId=randomUUID();
+  const response=await request(grant,"POST",`${base}/uploads`,{requestedFileId:fileId,temporaryForSessionId:sessionId,scope:"workspace",filename:"input-image",contentType:"image/png",sizeBytes:photo.length,sha256:photoSha});
+  expect(response.status).toBe(201);const upload=await response.json();
+  expect((await request(grant,"DELETE",`${base}/${fileId}?temporaryForSessionId=${sessionId}`)).status).toBe(204);
+  const durable=await getFileUpload(client.db,grant.workspaceId,upload.uploadId);if(!durable)throw new Error("Synthetic upload custody missing");
+  inputs.push({uploadId:upload.uploadId,fileId,key:durable.file.objectKey});
+ }
+ const ordinaryResponse=await request(grant,"POST",`${base}/uploads`,{scope:"workspace",filename:"ordinary.png",contentType:"image/png",sizeBytes:photo.length,sha256:photoSha});
+ expect(ordinaryResponse.status).toBe(201);const ordinary=await ordinaryResponse.json();
+ const ordinaryCustody=await getFileUpload(client.db,grant.workspaceId,ordinary.uploadId);if(!ordinaryCustody)throw new Error("Synthetic ordinary upload missing");
+ const initial=Date.now()-FILE_UPLOAD_CLEANUP_GRACE_MS-FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS*3;
+ await withWorkspaceRls(client.db,grant.workspaceId,async db=>{
+  for(const [index,input] of [...inputs,{uploadId:ordinary.uploadId}].entries())await db.update(fileUploads)
+   .set({expiresAt:new Date(initial+index),updatedAt:new Date(initial+index)})
+   .where(and(eq(fileUploads.workspaceId,grant.workspaceId),eq(fileUploads.id,input.uploadId)));
+ });
+ const reaper=createFileUploadReaperActivities(async()=>({db:client.db,objectStorage:storage,observability:{info:()=>undefined,warn:()=>undefined}} as unknown as ControlActivityServices));
+ const before=deleted.length;expect((await reaper.reapExpiredFileUploads()).failed).toBe(0);
+ const servedKeys=new Set(deleted.slice(before));const served=inputs.filter(input=>servedKeys.has(input.key));
+ expect(served.length).toBe(FILE_UPLOAD_CLEANUP_BATCH_SIZE);
+ // All recurring rows become due again at the production cadence. Earlier
+ // served rows retain earlier immutable expiry, but have newer last-claim time.
+ await withWorkspaceRls(client.db,grant.workspaceId,async db=>{for(const input of served)await db.update(fileUploads)
+  .set({updatedAt:new Date(Date.now()-FILE_UPLOAD_CLEANUP_CLAIM_TIMEOUT_MS*2)})
+  .where(and(eq(fileUploads.workspaceId,grant.workspaceId),eq(fileUploads.id,input.uploadId)));});
+ const unserved=inputs.filter(input=>!servedKeys.has(input.key));expect(unserved.length).toBeGreaterThan(0);
+ for(const input of unserved)liveObjects.add(input.key); // late PUT on a later, not-yet-reaped key.
+ expect((await reaper.reapExpiredFileUploads()).failed).toBe(0);
+ for(const input of unserved){expect(liveObjects.has(input.key)).toBe(false);expect((await getFileUpload(client.db,grant.workspaceId,input.uploadId))?.status).toBe("cleanup_pending");}
+ expect(liveObjects.has(ordinaryCustody.file.objectKey)).toBe(false);
+ expect((await getFileUpload(client.db,grant.workspaceId,ordinary.uploadId))?.status).toBe("expired");
+},120_000);

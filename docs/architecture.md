@@ -326,7 +326,9 @@ to 30 seconds. Deletion acknowledges only that delete attempt; it never records
 permanent purge from URL expiry. A PUT started before expiry may finish later.
 Revoked uploads stay with the existing recurring cleanup_pending owner until an
 actual provider completion/cancellation boundary is established. The installed
-reaper can retry deletion without another assessor run. Unsettled cleanup is
+reaper can retry deletion without another assessor run; recurring selection
+orders by last claim time so later keys and ordinary expired uploads are not
+starved. Unsettled cleanup is
 recovered from audit facts, terminal turns and expired leases. Sources: `packages/core/src/domain/sessions.ts`,
 `apps/api/src/routes/files.ts`, `packages/db/src/index.ts`,
 `apps/worker/src/activities/run-input.ts`, and
