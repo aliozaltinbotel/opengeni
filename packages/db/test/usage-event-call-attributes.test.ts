@@ -142,7 +142,7 @@ describe("model.call usage attributes (real PostgreSQL)", () => {
         inputBytes: 16, inputItems: 1, rateMicrosPerMillionBytes: 1000, billingPath: "external",
       }) },
     ];
-    const insert = async (eventType: string, attributes: Record<string, unknown>) =>
+    const insert = async (eventType: string, attributes: Parameters<typeof shared.admin.json>[0]) =>
       await shared.admin`INSERT INTO usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at, attributes)
         VALUES (${turn.accountId}, ${turn.workspaceId}, ${eventType}, 1, 'call', ${`missing-schema:${crypto.randomUUID()}`}, now(), ${shared.admin.json(attributes)})`;
     for (const fixture of fixtures) {
