@@ -316,6 +316,19 @@ linux-arm64-gnu 11592938685 `4b48b425...`; linux-arm64-musl 11593043644 `d28cb46
 `a4aec9ca...`; linux-x64-musl 11593860194 `22172be9...`; wasm-web 11593865123 `07c5cdff...`; win32-x64-msvc 11594015259
 `70e20faa...`.
 
+**The 431 package test files not run in round 2**, against H with real PostgreSQL 17 (fresh server), 430 at
+concurrency 4 and `sandbox-lease` alone: 430 files, 5931 pass, 16 fail, 22 skip, in 14 files; `sandbox-lease` 72
+pass, 1 fail. Classification (every failing case named below is the same case as in the earlier rounds):
+
+| Class | Files |
+| --- | --- |
+| Red on upstream (round 1, same cases) | 9: lazy-provisioning, modal-command-router-wire, modal-exec-readiness, modal-supervision-control, modal-sdk-command-start-recovery, ownership-inversion, sdk adapters, core-bundle-boundary, sandbox-lease |
+| Red at the pin (same cases) | 3: session-realtime-ledger (claimed turn `modelContext`, finding 3), runtime (recovery notice text), browser-client-surface (`getSessionModelSourceBasis`) |
+| Load-shaped, green alone | 2: session-control-plane (110/110 alone), synchronous-command-collection (21/21 alone) |
+| Upstream-identical code, timeout-shaped | 1: run-credential-argv; fails alone too, on a different case each run (60 s timeout). The fork changes nothing it imports (no diff against `e1395d4f0` in `packages/runtime/src/sandbox/` or the test); upstream e71295407, in round 2's range, changed `turn-tool-cancellation.ts`. Not run on a clean upstream checkout (that checkout was removed for disk). |
+
+With rounds 1 and 2, every package test file has now run on the merged branch at least once.
+
 ## Findings (round 1) and their resolution (round 2)
 
 1. **Empty JSON error bodies under gzip: fixed in `b0c49cf11`, an upstreamable fix that must land before the repin
@@ -385,8 +398,9 @@ linux-arm64-gnu 11592938685 `4b48b425...`; linux-arm64-musl 11593043644 `d28cb46
 - The next sync renumbers the fork migrations again if upstream passes 0667 (safe by their bodies).
 - Repin observations: carrier approval mode under managed tool decisions, first-turn tool search for cendra-pms, the
   0598 encryption key on staging, and the 0586 session-tenancy activation Job.
-- Round 2 ran 1436 of 1867 package test files (disk); migration-0363 is unclassified and migration-0345/0478 are
-  unverified against upstream.
+- Round 2 ran 1436 of 1867 package test files and round 3 the other 431; migration-0363 is unclassified (the
+  coordinator notes a lease flake) and migration-0345/0478 are unverified against upstream (same `owner_subject_id`
+  replay error as migration-0264, which is red upstream).
 - Upstream's `sandbox-lease` leaks a BYPASSRLS role membership on a shared test server; run it alone.
 - Gate logs are kept untracked in the worktree's `.local/gates` until review. `.local/` is not git-ignored in the
   fork, so a follow-on must not `git add -A`.
