@@ -48,10 +48,46 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       return call !== undefined;
     };
     const closureNodes = new Map<string, ModelSourceClosureNode>();
+    // Per-production memo only: owner reads remain inside the current write fence.
+    // Replay ordered node writes because a later route can replace a node (notably
+    // a transient tool leaf with its durable producer), without moving its map slot.
+    type Walk = { nodes: Map<string, ModelSourceClosureNode>; ids: Set<string>; leaves: Set<string>; maxDepth: number };
+    const walks: Walk[] = [];
+    const memo = new Map<string, Walk>();
+    const setClosureNode = (key: string, node: ModelSourceClosureNode): void => {
+      closureNodes.set(key, node);
+      for (const walk of walks) walk.nodes.set(key, node);
+    };
     const closure = async (ref:ModelSourceRef, path:Set<string>, depth=0, expectedPurpose:"AGENT"|"COMPACTION"="COMPACTION"):Promise<boolean> => {
       if (depth>128 || path.size>16384) {reasons.add("CAP_EXCEEDED");return false;}
-      if([...closureNodes.values()].some(node=>canonicalModelSourceJson(node.sourceRef)===canonicalModelSourceJson(ref) && node.parents.length===0))return true;
-      if(ref.owner==="native.runtime.artifact") {closureNodes.set(`artifact-parent:${ref.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources:[]});return true;}
+      const refKey = canonicalModelSourceJson(ref);
+      for (const active of walks) { active.ids.add(ref.id); active.maxDepth = Math.max(active.maxDepth, depth); }
+      const isLeaf = (source: string): boolean => [...closureNodes.values()].some(node => node.parents.length === 0 && canonicalModelSourceJson(node.sourceRef) === source);
+      if (isLeaf(refKey)) {
+        for (const active of walks) active.leaves.add(refKey);
+        return true;
+      }
+      const key = `${expectedPurpose}:${canonicalModelSourceJson(ref)}`;
+      const prior = memo.get(key);
+      if (prior && depth + prior.maxDepth <= 128 && ![...prior.ids].some(id => path.has(id)) && [...prior.leaves].every(isLeaf)) {
+        for (const [nodeKey, node] of prior.nodes) setClosureNode(nodeKey, node);
+        for (const walk of walks) {
+          for (const id of prior.ids) walk.ids.add(id);
+          for (const leaf of prior.leaves) walk.leaves.add(leaf);
+          walk.maxDepth = Math.max(walk.maxDepth, depth + prior.maxDepth);
+        }
+        return true;
+      }
+      const walk: Walk = { nodes: new Map(), ids: new Set([ref.id]), leaves: new Set(), maxDepth: depth };
+      walks.push(walk);
+      let complete: boolean;
+      try { complete = await resolveClosure(ref, path, depth, expectedPurpose); }
+      finally { walks.pop(); }
+      if (complete) memo.set(key, { ...walk, maxDepth: walk.maxDepth - depth });
+      return complete;
+    };
+    const resolveClosure = async (ref:ModelSourceRef, path:Set<string>, depth:number, expectedPurpose:"AGENT"|"COMPACTION"):Promise<boolean> => {
+      if(ref.owner==="native.runtime.artifact") {setClosureNode(`artifact-parent:${ref.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources:[]});return true;}
       if(ref.owner==="model_call_source_receipts") {
         if(path.has(ref.id) || !/^[a-f0-9-]{36}$/.test(ref.id))return false;
         const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.id,ref.id))).limit(1);
@@ -60,11 +96,11 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         if(receipt.digest!==ref.sha256 || receipt.id!==stored.id || receipt.accountId!==identity.accountId || receipt.workspaceId!==identity.workspaceId || receipt.sessionId!==stored.sessionId || receipt.turnId!==stored.turnId || receipt.attemptId!==stored.attemptId || receipt.executionGeneration!==stored.executionGeneration || receipt.sourceKey!==stored.sourceKey || receipt.purpose!==expectedPurpose || !receipt.complete)return false;
         const next=new Set(path);next.add(ref.id);
         const parents=receipt.inputs.flatMap(input=>input.sourceRef?[input.sourceRef]:[]);
-        closureNodes.set(`receipt:${ref.id}`,{sourceRef:ref,kind:receipt.purpose==="AGENT"?"HISTORY_ROW":"SUMMARY",parents,retainedSources:receipt.inputs.flatMap(input=>input.retainedSources)});
+        setClosureNode(`receipt:${ref.id}`,{sourceRef:ref,kind:receipt.purpose==="AGENT"?"HISTORY_ROW":"SUMMARY",parents,retainedSources:receipt.inputs.flatMap(input=>input.retainedSources)});
         // Artifacts/selection nodes are authenticated by the exact stored request digest. History and nested
         // call parents are still recursively resolved from their owners, so a cached graph cannot hide absence.
         for(const node of receipt.closure) {
-          if(node.sourceRef.owner!=="session_history_items" && node.sourceRef.owner!=="model_call_source_receipts")closureNodes.set(`receipt-node:${canonicalModelSourceJson(node.sourceRef)}`,node);
+          if(node.sourceRef.owner!=="session_history_items" && node.sourceRef.owner!=="model_call_source_receipts")setClosureNode(`receipt-node:${canonicalModelSourceJson(node.sourceRef)}`,node);
         }
         for(const node of receipt.closure) {
           if((node.sourceRef.owner==="session_history_items" || node.sourceRef.owner==="model_call_source_receipts") && !await closure(node.sourceRef,next,depth+1,node.kind==="HISTORY_ROW"?"AGENT":"COMPACTION"))return false;
@@ -92,10 +128,10 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           if (skill) return false;
         }
         if (canonicalModelSourceJson(row.item).includes("opengeni_context_summary") || canonicalModelSourceJson(row.item).includes(IMPORTED_HISTORY_CONTEXT_HEADER) || ["function_call_result","tool_search_output"].includes((row.item as {type?:string}).type ?? "")) return false;
-        closureNodes.set(ref.id,{sourceRef:ref,kind:"HISTORY_ROW",parents:[],retainedSources:[]});
+        setClosureNode(ref.id,{sourceRef:ref,kind:"HISTORY_ROW",parents:[],retainedSources:[]});
         return true;
       }
-      closureNodes.set(ref.id,{sourceRef:ref,kind:row.basis.kind,parents:row.basis.parents,retainedSources:row.basis.retainedSources ?? []});
+      setClosureNode(ref.id,{sourceRef:ref,kind:row.basis.kind,parents:row.basis.parents,retainedSources:row.basis.retainedSources ?? []});
       if (!Array.isArray(row.basis.parents)||row.basis.parents.length===0) return false;
       if(row.basis.kind==="HISTORY_ROW" && row.basis.parents.length!==1)return false;
       if((row.basis.kind==="SUMMARY" || row.basis.kind==="HISTORY_ROW") && row.basis.parents.filter(parent=>parent.owner==="model_call_source_receipts").length!==1)return false;
@@ -117,7 +153,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           if(!sourceReceipt) return false;
           const producerRef={owner:"model_call_source_receipts",id:sourceReceipt.id,sha256:sourceReceipt.digest};
           if(!await closure(producerRef,next,depth+1,"AGENT"))return false;
-          closureNodes.set(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[producerRef],retainedSources:raw.retainedSources});
+          setClosureNode(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[producerRef],retainedSources:raw.retainedSources});
         } else if (!await closure(parent,next,depth+1,row.basis.kind==="HISTORY_ROW"?"AGENT":"COMPACTION")) return false;
       }
       return true;
@@ -127,7 +163,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       if (value===undefined || value===null || value==="") return;
       const hash=modelSourceContentDigest(value);
       const sourceRef={owner:"native.runtime.artifact",id:`${purpose}:${hash}`,sha256:hash};
-      closureNodes.set(`artifact:${purpose}:${hash}`,{sourceRef,kind:"INSTRUCTION",parents:[],retainedSources:[]});
+      setClosureNode(`artifact:${purpose}:${hash}`,{sourceRef,kind:"INSTRUCTION",parents:[],retainedSources:[]});
       inputs.push({ordinal:inputs.length,kind:"INSTRUCTION",contentSha256:hash,sourceRef,parents:[],retainedSources:[]});
     };
     addArtifact(request.instructions,"instructions");addArtifact(request.tools,"tools");
@@ -141,7 +177,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         if(selection.companyProfileIncluded)retainedSources.push({owner:"company_profile_snapshots",id:request.instructionSelections.companyProfileSnapshotId,version:selection.companyProfileSnapshotHash,sha256:selection.companyProfileSnapshotHash});
         if(selection.preferenceDescriptorHash && request.instructionSelections.preferenceSnapshotId)retainedSources.push({owner:"preference_registry_snapshots",id:request.instructionSelections.preferenceSnapshotId,version:selection.preferenceDescriptorHash,sha256:selection.preferenceDescriptorHash});
         if(selection.legacyWorkspaceInstructionsTruncated)reasons.add("CAP_EXCEEDED");
-        closureNodes.set(`selection:${selection.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources});
+        setClosureNode(`selection:${selection.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources});
         const instructions=inputs[0];if(instructions){instructions.parents.push(ref);instructions.retainedSources.push(...retainedSources);const node=closureNodes.get(`artifact:instructions:${instructions.contentSha256}`);if(node){node.parents.push(ref);node.retainedSources.push(...retainedSources);}}
       }
     }
@@ -186,7 +222,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           // Reuse authenticated native leaves, while resolving history and nested
           // compaction ancestry again through their owners rather than a cached graph.
           for(const node of producer.closure)if(node.sourceRef.owner!=="session_history_items" && node.sourceRef.owner!=="model_call_source_receipts")
-            closureNodes.set(`producer-node:${canonicalModelSourceJson(node.sourceRef)}`,node);
+            setClosureNode(`producer-node:${canonicalModelSourceJson(node.sourceRef)}`,node);
           const ancestors=producer.inputs.flatMap(input=>input.sourceRef?[input.sourceRef]:[]);
           for(const ancestor of ancestors)if(!await closure(ancestor,new Set()))reasons.add("UNRESOLVED_PARENT");
           parents.push(...ancestors);
@@ -208,7 +244,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
               || binding.rawToolResult===undefined || modelSourceContentDigest(binding.rawToolResult)!==raw.rawSourceRef.sha256
               || canonicalModelSourceJson(binding.parents)!==canonicalModelSourceJson([raw.rawSourceRef])
               || canonicalModelSourceJson(binding.retainedSources)!==canonicalModelSourceJson(raw.retainedSources))reasons.add("UNRESOLVED_PARENT");
-            else closureNodes.set(`tool:${raw.rawSourceRef.id}`,{sourceRef:raw.rawSourceRef,kind:"TOOL_RESULT",parents:[],retainedSources:raw.retainedSources});
+            else setClosureNode(`tool:${raw.rawSourceRef.id}`,{sourceRef:raw.rawSourceRef,kind:"TOOL_RESULT",parents:[],retainedSources:raw.retainedSources});
           } else if(raw || binding.parents.length!==0 || binding.retainedSources.length!==0)reasons.add("UNRESOLVED_PARENT");
         }
       }
@@ -218,11 +254,11 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           sourceRef={owner:"native.runtime.artifact",id:`title-input:${contentSha256}`,sha256:contentSha256};
           const parent={owner:"session_turns",id:identity.turnId,sha256:modelSourceContentDigest(turn.prompt)};parents.push(parent);
           retainedSources=ModelSourceRef.array().max(16384).parse(turn.metadata?.nativeMessageModelSourceRefs ?? []);
-          closureNodes.set(`turn:${identity.turnId}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
+          setClosureNode(`turn:${identity.turnId}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
         }
       }
       if(sourceRef?.owner==="native.runtime.artifact") {for(const parent of parents) if(!await closure(parent,new Set())) reasons.add("UNRESOLVED_PARENT");}
-      if(sourceRef?.owner==="native.runtime.artifact") closureNodes.set(`artifact:${sourceRef.id}:${sourceRef.sha256}`,{sourceRef,kind:binding?.kind ?? kind,parents,retainedSources});
+      if(sourceRef?.owner==="native.runtime.artifact") setClosureNode(`artifact:${sourceRef.id}:${sourceRef.sha256}`,{sourceRef,kind:binding?.kind ?? kind,parents,retainedSources});
       if (!sourceRef) reasons.add("UNKNOWN_SOURCE");
       else if (sourceRef.owner!=="native.runtime.artifact" && !await closure(sourceRef,new Set())) reasons.add(kind==="IMPORTED"?"UNATTRIBUTED_IMPORT":"UNRESOLVED_PARENT");
       inputs.push({ordinal:inputs.length,kind,contentSha256,sourceRef,parents,retainedSources});

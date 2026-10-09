@@ -175,12 +175,18 @@ export async function persistAndAuthorizeModelCallSource(
   request: NativeModelSourceRequest,
   authorize?: AuthorizeModelCallSource,
   signal?: AbortSignal,
+  telemetry?: { observability: Parameters<typeof measureTurnStartupPhase>[0]; provider: string; backend: string },
 ): Promise<string> {
   throwIfTurnOperationCancelled(signal);
-  const receipt = await persistModelCallSourceReceipt(db, identity, request);
+  const persist = () => persistModelCallSourceReceipt(db, identity, request);
+  const receipt = telemetry
+    ? await measureTurnStartupPhase(telemetry.observability, { phase: "model_source_receipt_persistence", provider: telemetry.provider, backend: telemetry.backend }, persist)
+    : await persist();
   throwIfTurnOperationCancelled(signal);
   if (authorize) {
-    await waitForTurnOperation(authorize(receipt, signal ? { signal } : {}), signal, undefined);
+    const admit = () => waitForTurnOperation(authorize(receipt, signal ? { signal } : {}), signal, undefined);
+    if (telemetry) await measureTurnStartupPhase(telemetry.observability, { phase: "model_source_authorization", provider: telemetry.provider, backend: telemetry.backend }, admit);
+    else await admit();
   }
   throwIfTurnOperationCancelled(signal);
   return identity.sourceKey;
@@ -506,7 +512,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const admittedSourceKey = await persistAndAuthorizeModelCallSource(db,{accountId:input.accountId,workspaceId:input.workspaceId,sessionId:input.sessionId,
           turnId:turn.id,attemptId:input.attemptId,executionGeneration:attempt.executionGeneration,sourceKey,requestIndex},
           {instructions:request.systemInstructions,input:request.input,tools:request.tools,purpose,sourceBindings:modelSourceBindings(request.input),...(purpose!=="TITLE" && nativeInstructionSelections?{instructionSelections:nativeInstructionSelections}:{})},
-          resolvedServices.authorizeModelCallSource, runtimeCancellationSignal);
+          resolvedServices.authorizeModelCallSource, runtimeCancellationSignal,
+          { observability: resolvedServices.observability, provider: turnExecutionPolicy.providerId, backend: turn.sandboxBackend });
         await throwIfTurnCancelled();
         return admittedSourceKey;
       };

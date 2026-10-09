@@ -71,7 +71,11 @@ source references before projection or spill. A missing owner, unavailable input
 or exceeded cap cannot be recorded as complete. Native completeness describes
 input graph coverage, never a host's Knowledge authorization or business outcome.
 An exact session-authorized API/SDK read returns one call's receipt; it does not
-substitute a latest attempt snapshot. Historical facts remain unattributed.
+substitute a latest attempt snapshot. Historical facts remain unattributed. Receipt ancestry is memoized only inside
+one fenced persistence transaction: successful walks replay their ordered node
+writes, preserve cycle/depth limits and purpose checks, and every later request
+resolves durable owners again. Worker preparation spans separately measure
+`model_source_receipt_persistence` and `model_source_authorization`.
 
 Embedded workers may install the public `activityDependencies.authorizeModelCallSource`
 callback. The shared native producer awaits it after committing the exact receipt
