@@ -72,9 +72,12 @@ or exceeded cap cannot be recorded as complete. Native completeness describes
 input graph coverage, never a host's Knowledge authorization or business outcome.
 An exact session-authorized API/SDK read returns one call's receipt; it does not
 substitute a latest attempt snapshot. Historical facts remain unattributed. Receipt ancestry is memoized only inside
-one fenced persistence transaction: successful walks replay their ordered node
-writes, preserve cycle/depth limits and purpose checks, and every later request
-resolves durable owners again. Worker preparation spans separately measure
+one fenced persistence transaction: successful walks share a dependency graph,
+index leaf references and replay only replaced node writes. Cycle/depth limits
+and purpose checks remain in force. Before insertion, authenticated history
+content and source bases are rechecked under retained row locks; receipt parents
+are retained through their exact attempt foreign keys and receipts are revalidated.
+Every later request resolves durable owners again. Worker preparation spans separately measure
 `model_source_receipt_persistence` and `model_source_authorization`.
 
 Embedded workers may install the public `activityDependencies.authorizeModelCallSource`

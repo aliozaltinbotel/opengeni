@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { canonicalModelSourceJson, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
@@ -7,7 +7,8 @@ import * as schema from "./schema";
 import { resolveCompanyBrainContextSelection } from "./company-brain-context-selection";
 
 export const modelSourceContentDigest = (value: unknown): string => { canonicalModelSourceJson(value); return createHash("sha256").update(JSON.stringify(value)).digest("hex"); };
-export type NativeModelSourceRequest = { instructions?: unknown; input?: unknown; tools?: unknown; purpose?: ModelCallSourceReceipt["purpose"]; sourceBindings?:readonly ModelSourceBinding[]; instructionSelections?:{instructionPolicySnapshotId:string;preferenceSnapshotId:string|null;companyProfileSnapshotId:string} };
+export type ModelSourcePersistenceWork = { closureVisits: number; leafLookups: number; nodeWrites: number; idChecks: number; invalidations: number; effectChecks: number; replays: number; sourceNodes: number; sourceEdges: number; maximumDepth: number };
+export type NativeModelSourceRequest = { onPersistenceWork?: (work: Readonly<ModelSourcePersistenceWork>) => void; instructions?: unknown; input?: unknown; tools?: unknown; purpose?: ModelCallSourceReceipt["purpose"]; sourceBindings?:readonly ModelSourceBinding[]; instructionSelections?:{instructionPolicySnapshotId:string;preferenceSnapshotId:string|null;companyProfileSnapshotId:string} };
 export type ModelCallSourceIdentity = { accountId: string; workspaceId: string; sessionId: string; turnId: string; attemptId: string; executionGeneration: number; sourceKey: string; requestIndex: number };
 type Basis = ModelHistorySourceBasis;
 /** Validate the immutable persisted bytes before accepting a receipt as ancestry. */
@@ -19,12 +20,48 @@ export function validatedStoredModelCallSourceReceipt(row:{receipt:unknown;canon
 
 /** Exact-call native producer. No model, provider, host lookup or other network occurs in this transaction. */
 export async function persistModelCallSourceReceiptWithFence(db: Database, identity: ModelCallSourceIdentity, request: NativeModelSourceRequest, assertFence:(tx:Database)=>Promise<void>): Promise<ModelCallSourceReceipt> {
-  return withRlsContext(db, {accountId:identity.accountId,workspaceId:identity.workspaceId}, scoped => scoped.transaction(async tx => {
+  const work: ModelSourcePersistenceWork = { closureVisits: 0, leafLookups: 0, nodeWrites: 0, idChecks: 0, invalidations: 0, effectChecks: 0, replays: 0, sourceNodes: 0, sourceEdges: 0, maximumDepth: 0 };
+  try {
+  return await withRlsContext(db, {accountId:identity.accountId,workspaceId:identity.workspaceId}, scoped => scoped.transaction(async tx => {
     await assertFence(tx);
     const reasons = new Set<ModelCallSourceReceipt["incompleteReasons"][number]>();
     const rows = await tx.select({id:schema.sessionHistoryItems.id,item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,
       rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
       .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.sessionId,identity.sessionId),eq(schema.sessionHistoryItems.active,true))).orderBy(schema.sessionHistoryItems.position);
+    type HistoryOwner = { item: Record<string, unknown>; basis: typeof schema.sessionHistoryItems.$inferSelect["sourceBasis"]; sessionId: string; turnId: string | null; position: number; rowSha: string };
+    const historyOwners = new Map<string, HistoryOwner>();
+    const receiptOwners = new Map<string, typeof schema.modelCallSourceReceipts.$inferSelect>();
+    const receiptSources = new Map<string, typeof schema.modelCallSourceReceipts.$inferSelect>();
+    const parsedReceipts = new Map<string, ModelCallSourceReceipt>();
+    const sourceLookupKey = (sessionId: string, turnId: string, sourceKey: string): string => JSON.stringify([sessionId, turnId, sourceKey]);
+    const rememberReceipt = (row: typeof schema.modelCallSourceReceipts.$inferSelect): void => {
+      if (!receiptOwners.has(row.id)) {
+        receiptOwners.set(row.id, row); receiptSources.set(sourceLookupKey(row.sessionId, row.turnId, row.sourceKey), row);
+        try {
+          const value = validatedStoredModelCallSourceReceipt(row); parsedReceipts.set(row.id, value);
+          work.sourceNodes += 1 + value.inputs.length + value.closure.length;
+          work.sourceEdges += [...value.inputs, ...value.closure].reduce((count, node) => count + node.parents.length + node.retainedSources.length, 0);
+        } catch { /* The existing identity-specific checks refuse malformed ancestry. */ }
+      }
+    };
+    const receiptById = async (id: string) => {
+      const remembered = receiptOwners.get(id); if (remembered) return remembered;
+      const [row] = await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.id,id))).limit(1);
+      if (row) rememberReceipt(row); return row;
+    };
+    const receiptBySource = async (sessionId: string, turnId: string, sourceKey: string) => {
+      const remembered = receiptSources.get(sourceLookupKey(sessionId, turnId, sourceKey));
+      if (remembered) return remembered;
+      const [row] = await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,sessionId),eq(schema.modelCallSourceReceipts.turnId,turnId),eq(schema.modelCallSourceReceipts.sourceKey,sourceKey))).limit(1);
+      if (row) rememberReceipt(row); return row;
+    };
+    const historyById = async (id: string) => {
+      const remembered = historyOwners.get(id); if (remembered) return remembered;
+      const [row] = await tx.select({item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,sessionId:schema.sessionHistoryItems.sessionId,turnId:schema.sessionHistoryItems.turnId,position:schema.sessionHistoryItems.position,rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
+        .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.id,id))).limit(1);
+      if (row) { historyOwners.set(id, row); work.sourceNodes++; work.sourceEdges += row.basis?.parents.length ?? 0; }
+      return row;
+    };
     // These native producers carried instruction text before retained origins were installed.
     // Preserve their transcript, but never invent origins from the visible body on a later call.
     const missingSkillOrigin = async (item: unknown, basis: {kind?:string;parents?:readonly ModelSourceRef[];retainedSources?:readonly ModelSourceRef[]} | null, sessionId: string): Promise<boolean> => {
@@ -48,51 +85,143 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       return call !== undefined;
     };
     const closureNodes = new Map<string, ModelSourceClosureNode>();
-    // Per-production memo only: owner reads remain inside the current write fence.
-    // Replay ordered node writes because a later route can replace a node (notably
-    // a transient tool leaf with its durable producer), without moving its map slot.
-    type Walk = { nodes: Map<string, ModelSourceClosureNode>; ids: Set<string>; leaves: Set<string>; maxDepth: number };
+    // Per-production only. Effects already applied by a successful walk are
+    // reused until a real node replacement invalidates it or a child walk.
+    // Dependencies form a DAG; a hit replays only replaced keys and never unions it
+    // into every active ancestor. Durable owners are locked/rechecked before INSERT.
+    type Walk = { key: string; depth: number; nodes: Map<string, { node: ModelSourceClosureNode; event: number }>; effects: Map<string, ModelSourceClosureNode | null>; dirty: Set<string>; ids: Set<number>; minId: number; maxId: number; membership: Map<number, boolean>; children: Map<Walk, number>; parents: Set<Walk>; leaves: Set<string>; maxDepth: number; valid: boolean; settled: boolean };
     const walks: Walk[] = [];
+    let event = 0;
     const memo = new Map<string, Walk>();
+    const idIndexes = new Map<string, number>();
+    const idIndex = (id: string): number => { let index = idIndexes.get(id); if (index === undefined) { index = idIndexes.size; idIndexes.set(id, index); } return index; };
+    const containsId = (entry: Walk, index: number): boolean => {
+      work.idChecks++; // Membership work, not materialization of descendant sets.
+      if (index < entry.minId || index > entry.maxId) return false;
+      const remembered = entry.membership.get(index);
+      if (remembered !== undefined) return remembered;
+      let present = entry.ids.has(index);
+      if (!present) for (const child of entry.children.keys()) { if (containsId(child, index)) { present = true; break; } }
+      entry.membership.set(index, present); return present;
+    };
+    const nodeDependents = new Map<string, Set<Walk>>();
+    const leafDependents = new Map<string, Set<Walk>>();
+    const leafCounts = new Map<string, number>();
+    const leafByNodeKey = new Map<string, string>();
+    const nodeCanonical = new Map<string, string>();
+    const invalidate = (entries: Iterable<Walk>): void => {
+      const pending = [...entries], visited = new Set<Walk>();
+      while (pending.length) {
+        const entry = pending.pop()!;
+        if (!entry.valid || visited.has(entry)) continue;
+        visited.add(entry); work.invalidations++;
+        entry.valid = false;
+        if (memo.get(entry.key) === entry) memo.delete(entry.key);
+        pending.push(...entry.parents);
+      }
+    };
+    const effectForKey = (entry: Walk, key: string): ModelSourceClosureNode | null => {
+      work.effectChecks++;
+      if (entry.effects.has(key)) return entry.effects.get(key)!;
+      const own = entry.nodes.get(key);
+      let latest = own?.event ?? -1, node = own?.node ?? null;
+      for (const [child, applied] of entry.children) {
+        work.effectChecks++;
+        if (applied <= latest) continue;
+        const inherited = effectForKey(child, key);
+        if (inherited) { latest = applied; node = inherited; }
+      }
+      entry.effects.set(key, node); return node;
+    };
+    const isLeaf = (source: string): boolean => { work.leafLookups++; return leafCounts.has(source); };
     const setClosureNode = (key: string, node: ModelSourceClosureNode): void => {
-      closureNodes.set(key, node);
-      for (const walk of walks) walk.nodes.set(key, node);
+      work.nodeWrites++;
+      walks.at(-1)?.nodes.set(key, { node, event: ++event });
+      const canonical = canonicalModelSourceJson(node);
+      if (nodeCanonical.get(key) !== canonical) {
+        // A successful subtree remains authenticated when an unrelated path
+        // replaces one of its writes. Mark only that key for lazy replay; do
+        // not invalidate or copy the whole descendant graph.
+        const pending = [...(nodeDependents.get(key) ?? [])], visited = new Set<Walk>();
+        while (pending.length) {
+          const entry = pending.pop()!;
+          if (!entry.valid || !entry.settled || visited.has(entry)) continue;
+          visited.add(entry); work.invalidations++;
+          const desired = effectForKey(entry, key);
+          if (desired && canonicalModelSourceJson(desired) !== canonical) entry.dirty.add(key);
+          else entry.dirty.delete(key);
+          pending.push(...entry.parents);
+        }
+      }
+      const previousLeaf = leafByNodeKey.get(key);
+      const nextLeaf = node.parents.length === 0 ? canonicalModelSourceJson(node.sourceRef) : undefined;
+      if (previousLeaf !== nextLeaf) {
+        if (previousLeaf !== undefined) {
+          const count = leafCounts.get(previousLeaf)! - 1;
+          if (count === 0) { leafCounts.delete(previousLeaf); invalidate(leafDependents.get(previousLeaf) ?? []); }
+          else leafCounts.set(previousLeaf, count);
+          leafByNodeKey.delete(key);
+        }
+        if (nextLeaf !== undefined) {
+          leafCounts.set(nextLeaf, (leafCounts.get(nextLeaf) ?? 0) + 1);
+          leafByNodeKey.set(key, nextLeaf);
+        }
+      }
+      closureNodes.set(key, node); nodeCanonical.set(key, canonical);
+    };
+    const link = (child: Walk, depth: number): void => {
+      const parent = walks.at(-1);
+      if (!parent) return;
+      parent.children.set(child, ++event); child.parents.add(parent);
+      parent.minId = Math.min(parent.minId, child.minId); parent.maxId = Math.max(parent.maxId, child.maxId);
+      parent.maxDepth = Math.max(parent.maxDepth, depth - parent.depth + child.maxDepth);
     };
     const closure = async (ref:ModelSourceRef, path:Set<string>, depth=0, expectedPurpose:"AGENT"|"COMPACTION"="COMPACTION"):Promise<boolean> => {
+      work.closureVisits++; work.maximumDepth = Math.max(work.maximumDepth, depth);
       if (depth>128 || path.size>16384) {reasons.add("CAP_EXCEEDED");return false;}
       const refKey = canonicalModelSourceJson(ref);
-      for (const active of walks) { active.ids.add(ref.id); active.maxDepth = Math.max(active.maxDepth, depth); }
-      const isLeaf = (source: string): boolean => [...closureNodes.values()].some(node => node.parents.length === 0 && canonicalModelSourceJson(node.sourceRef) === source);
       if (isLeaf(refKey)) {
-        for (const active of walks) active.leaves.add(refKey);
+        const parent = walks.at(-1);
+        if (parent) { const index = idIndex(ref.id); parent.ids.add(index); parent.minId = Math.min(parent.minId, index); parent.maxId = Math.max(parent.maxId, index); parent.leaves.add(refKey); parent.maxDepth = Math.max(parent.maxDepth, depth - parent.depth); }
         return true;
       }
-      const key = `${expectedPurpose}:${canonicalModelSourceJson(ref)}`;
+      const key = `${expectedPurpose}:${refKey}`;
       const prior = memo.get(key);
-      if (prior && depth + prior.maxDepth <= 128 && ![...prior.ids].some(id => path.has(id)) && [...prior.leaves].every(isLeaf)) {
-        for (const [nodeKey, node] of prior.nodes) setClosureNode(nodeKey, node);
-        for (const walk of walks) {
-          for (const id of prior.ids) walk.ids.add(id);
-          for (const leaf of prior.leaves) walk.leaves.add(leaf);
-          walk.maxDepth = Math.max(walk.maxDepth, depth + prior.maxDepth);
+      // The path is capped by the existing depth guard; iterate that small path,
+      // rather than every id in the cached subtree.
+      if (prior?.valid && depth + prior.maxDepth <= 128 && ![...path].some(id => containsId(prior, idIndex(id)))) {
+        for (const changed of [...prior.dirty]) {
+          const effect = effectForKey(prior, changed);
+          if (effect) { work.replays++; setClosureNode(changed, effect); }
+          prior.dirty.delete(changed);
         }
-        return true;
+        link(prior, depth); return true;
       }
-      const walk: Walk = { nodes: new Map(), ids: new Set([ref.id]), leaves: new Set(), maxDepth: depth };
-      walks.push(walk);
+      const index = idIndex(ref.id);
+      const entry: Walk = { key, depth, nodes: new Map(), effects: new Map(), dirty: new Set(), ids: new Set([index]), minId: index, maxId: index, membership: new Map(), children: new Map(), parents: new Set(), leaves: new Set(), maxDepth: 0, valid: true, settled: false };
+      walks.push(entry);
       let complete: boolean;
       try { complete = await resolveClosure(ref, path, depth, expectedPurpose); }
       finally { walks.pop(); }
-      if (complete) memo.set(key, { ...walk, maxDepth: walk.maxDepth - depth });
+      if (complete) {
+        entry.settled = true;
+        entry.valid = [...entry.leaves].every(isLeaf);
+        if (entry.valid) {
+          memo.set(key, entry);
+          for (const node of entry.nodes.keys()) { let owners = nodeDependents.get(node); if (!owners) { owners = new Set(); nodeDependents.set(node, owners); } owners.add(entry); }
+          for (const leaf of entry.leaves) { let owners = leafDependents.get(leaf); if (!owners) { owners = new Set(); leafDependents.set(leaf, owners); } owners.add(entry); }
+        }
+        link(entry, depth);
+      }
       return complete;
     };
     const resolveClosure = async (ref:ModelSourceRef, path:Set<string>, depth:number, expectedPurpose:"AGENT"|"COMPACTION"):Promise<boolean> => {
       if(ref.owner==="native.runtime.artifact") {setClosureNode(`artifact-parent:${ref.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources:[]});return true;}
       if(ref.owner==="model_call_source_receipts") {
         if(path.has(ref.id) || !/^[a-f0-9-]{36}$/.test(ref.id))return false;
-        const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.id,ref.id))).limit(1);
+        const stored = await receiptById(ref.id);
         if(!stored)return false;
-        let receipt:ModelCallSourceReceipt;try{receipt=validatedStoredModelCallSourceReceipt(stored);}catch{return false;}
+        let receipt:ModelCallSourceReceipt;try{receipt=parsedReceipts.get(stored.id) ?? validatedStoredModelCallSourceReceipt(stored);}catch{return false;}
         if(receipt.digest!==ref.sha256 || receipt.id!==stored.id || receipt.accountId!==identity.accountId || receipt.workspaceId!==identity.workspaceId || receipt.sessionId!==stored.sessionId || receipt.turnId!==stored.turnId || receipt.attemptId!==stored.attemptId || receipt.executionGeneration!==stored.executionGeneration || receipt.sourceKey!==stored.sourceKey || receipt.purpose!==expectedPurpose || !receipt.complete)return false;
         const next=new Set(path);next.add(ref.id);
         const parents=receipt.inputs.flatMap(input=>input.sourceRef?[input.sourceRef]:[]);
@@ -108,8 +237,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         return parents.length>0;
       }
       if (ref.owner!=="session_history_items" || !/^[a-f0-9-]{36}$/.test(ref.id) || path.has(ref.id)) return false;
-      const [row] = await tx.select({item:schema.sessionHistoryItems.item,basis:schema.sessionHistoryItems.sourceBasis,sessionId:schema.sessionHistoryItems.sessionId,turnId:schema.sessionHistoryItems.turnId,position:schema.sessionHistoryItems.position,rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
-        .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.id,ref.id))).limit(1);
+      const row = await historyById(ref.id);
       if (!row || row.rowSha!==ref.sha256) return false;
       if (await missingSkillOrigin(row.item,row.basis,row.sessionId)) return false;
       if (!row.basis) {
@@ -138,7 +266,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       const next = new Set(path);next.add(ref.id);
       for (const parent of row.basis.parents) {
         if((row.basis.kind==="SUMMARY" || row.basis.kind==="HISTORY_ROW") && parent.owner==="model_call_source_receipts") {
-          const [scope]=await tx.select({sessionId:schema.modelCallSourceReceipts.sessionId,turnId:schema.modelCallSourceReceipts.turnId}).from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.id,parent.id))).limit(1);
+          const scope = await receiptById(parent.id);
           if(!scope || scope.sessionId!==row.sessionId || scope.turnId!==row.turnId)return false;
         }
         const raw=row.basis.rawToolSource;
@@ -149,7 +277,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
             if(item.status!==undefined || item.providerData?.call_id!==raw.sourceCallId || !Array.isArray(item.tools)
               || modelSourceContentDigest({tools:item.tools})!==raw.rawSourceRef.sha256)return false;
           }
-          const [sourceReceipt]=await tx.select({id:schema.modelCallSourceReceipts.id,digest:schema.modelCallSourceReceipts.digest}).from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,row.sessionId),eq(schema.modelCallSourceReceipts.turnId,row.turnId),eq(schema.modelCallSourceReceipts.sourceKey,raw.nativeModelSourceKey))).limit(1);
+          const sourceReceipt = await receiptBySource(row.sessionId, row.turnId, raw.nativeModelSourceKey);
           if(!sourceReceipt) return false;
           const producerRef={owner:"model_call_source_receipts",id:sourceReceipt.id,sha256:sourceReceipt.digest};
           if(!await closure(producerRef,next,depth+1,"AGENT"))return false;
@@ -178,7 +306,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         if(selection.preferenceDescriptorHash && request.instructionSelections.preferenceSnapshotId)retainedSources.push({owner:"preference_registry_snapshots",id:request.instructionSelections.preferenceSnapshotId,version:selection.preferenceDescriptorHash,sha256:selection.preferenceDescriptorHash});
         if(selection.legacyWorkspaceInstructionsTruncated)reasons.add("CAP_EXCEEDED");
         setClosureNode(`selection:${selection.id}`,{sourceRef:ref,kind:"INSTRUCTION",parents:[],retainedSources});
-        const instructions=inputs[0];if(instructions){instructions.parents.push(ref);instructions.retainedSources.push(...retainedSources);const node=closureNodes.get(`artifact:instructions:${instructions.contentSha256}`);if(node){node.parents.push(ref);node.retainedSources.push(...retainedSources);}}
+        const instructions=inputs[0];if(instructions){instructions.parents.push(ref);instructions.retainedSources.push(...retainedSources);const node=closureNodes.get(`artifact:instructions:${instructions.contentSha256}`);if(node){node.parents.push(ref);node.retainedSources.push(...retainedSources);setClosureNode(`artifact:instructions:${instructions.contentSha256}`,node);}}
       }
     }
     if (!Array.isArray(request.input) && typeof request.input!=="string") reasons.add("UNAVAILABLE_INPUT");
@@ -191,7 +319,7 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       const contentSha256=modelSourceContentDigest(value);
       const index=binding?.sourceRef.owner==="session_history_items"?rows.findIndex(row=>row.id===binding.sourceRef.id):rows.findIndex((row,i)=>i>=cursor && modelSourceContentDigest(row.item)===contentSha256);
       const row=index<0?undefined:rows[index];
-      if (row) cursor=index+1;
+      if (row) { cursor=index+1; await historyById(row.id); }
       const basis=row?.basis as Basis|null|undefined;
       if (await missingSkillOrigin(value,basis ?? binding ?? null,identity.sessionId)) reasons.add("UNRESOLVED_PARENT");
       let kind:ModelSourceInput["kind"]=basis?.kind??(["function_call_result","tool_search_output"].includes((value as {type?:string})?.type ?? "")?"TOOL_RESULT":"HISTORY_ROW");
@@ -205,13 +333,9 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       if(binding?.nativeProducerSourceKey) {
         // Transient SDK output is admitted only against its exact committed call,
         // in this still-current attempt. A projection digest is not the raw tool digest.
-        const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(
-          eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),
-          eq(schema.modelCallSourceReceipts.sessionId,identity.sessionId),eq(schema.modelCallSourceReceipts.turnId,identity.turnId),
-          eq(schema.modelCallSourceReceipts.attemptId,identity.attemptId),eq(schema.modelCallSourceReceipts.executionGeneration,identity.executionGeneration),
-          eq(schema.modelCallSourceReceipts.sourceKey,binding.nativeProducerSourceKey))).limit(1);
+        const stored = await receiptBySource(identity.sessionId, identity.turnId, binding.nativeProducerSourceKey);
         let producer:ModelCallSourceReceipt|null=null;
-        if(stored) {try {producer=validatedStoredModelCallSourceReceipt(stored);}catch { /* Refuse unavailable immutable ancestry. */ }}
+        if(stored) {try {producer=parsedReceipts.get(stored.id) ?? validatedStoredModelCallSourceReceipt(stored);}catch { /* Refuse unavailable immutable ancestry. */ }}
         if(sourceRef?.owner!=="native.runtime.artifact" || sourceRef.sha256!==contentSha256 || !producer || !producer.complete || producer.incompleteReasons.length!==0
           || producer.purpose!=="AGENT" || producer.requestIndex>=identity.requestIndex
           || producer.accountId!==identity.accountId || producer.workspaceId!==identity.workspaceId || producer.sessionId!==identity.sessionId
@@ -264,6 +388,56 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       inputs.push({ordinal:inputs.length,kind,contentSha256,sourceRef,parents,retainedSources});
     }
     if (values.length===0) reasons.add("EMPTY_BASIS");
+    // A copied owner can be erased by another session's archive while this
+    // READ COMMITTED walk is running. Linearize completeness at INSERT: retain
+    // every observed durable owner, in UUID order, until the outer COMMIT.
+    // NOWAIT prevents a purge with a different row order from creating a cycle.
+    try {
+      const current = await tx.transaction(async ownersTx => {
+        if (historyOwners.size) {
+          const locked = await ownersTx.select({id:schema.sessionHistoryItems.id,basis:schema.sessionHistoryItems.sourceBasis,sessionId:schema.sessionHistoryItems.sessionId,turnId:schema.sessionHistoryItems.turnId,position:schema.sessionHistoryItems.position,rowSha:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
+            .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),inArray(schema.sessionHistoryItems.id,[...historyOwners.keys()])))
+            .orderBy(schema.sessionHistoryItems.id).for("share", { noWait: true });
+          if (locked.length !== historyOwners.size || locked.some(row => row.sessionId !== historyOwners.get(row.id)!.sessionId || row.turnId !== historyOwners.get(row.id)!.turnId || row.position !== historyOwners.get(row.id)!.position || row.rowSha !== historyOwners.get(row.id)!.rowSha || canonicalModelSourceJson(row.basis) !== canonicalModelSourceJson(historyOwners.get(row.id)!.basis))) return false;
+        }
+        if (receiptOwners.size) {
+          // Receipts are SELECT/INSERT-only with an immutable UPDATE guard.
+          // Their only native deletion is the exact attempt FK cascade. Retain
+          // that parent using its existing lock privilege, rather than widening
+          // receipt grants. KEY SHARE permits settled-attempt state updates.
+          const attempts = new Map([...receiptOwners.values()].map(row => [row.attemptId, row]));
+          const parents = await ownersTx.select({ id: schema.sessionTurnAttempts.id }).from(schema.sessionTurnAttempts)
+            .where(or(...[...attempts.values()].map(row => and(
+              eq(schema.sessionTurnAttempts.accountId, identity.accountId), eq(schema.sessionTurnAttempts.workspaceId, identity.workspaceId),
+              eq(schema.sessionTurnAttempts.sessionId, row.sessionId), eq(schema.sessionTurnAttempts.turnId, row.turnId), eq(schema.sessionTurnAttempts.id, row.attemptId)))))
+            .orderBy(schema.sessionTurnAttempts.id).for("key share", { noWait: true });
+          if (parents.length !== attempts.size) return false;
+          const locked = await ownersTx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,identity.accountId),eq(schema.modelCallSourceReceipts.workspaceId,identity.workspaceId),inArray(schema.modelCallSourceReceipts.id,[...receiptOwners.keys()])))
+            .orderBy(schema.modelCallSourceReceipts.id);
+          if (locked.length !== receiptOwners.size) return false;
+          for (const row of locked) {
+            const previous = receiptOwners.get(row.id)!;
+            try {
+              if (canonicalModelSourceJson(validatedStoredModelCallSourceReceipt(row)) !== canonicalModelSourceJson(validatedStoredModelCallSourceReceipt(previous))
+                || row.accountId !== previous.accountId || row.workspaceId !== previous.workspaceId || row.sessionId !== previous.sessionId || row.turnId !== previous.turnId
+                || row.attemptId !== previous.attemptId || row.executionGeneration !== previous.executionGeneration || row.sourceKey !== previous.sourceKey) return false;
+            } catch { return false; }
+          }
+        }
+        return true;
+      });
+      if (!current) reasons.add("UNRESOLVED_PARENT");
+    } catch (error) {
+      let cause: unknown = error;
+      const visited = new Set<object>(); let contention = false;
+      while (cause && typeof cause === "object" && !visited.has(cause)) {
+        visited.add(cause);
+        if ("code" in cause && cause.code === "55P03") { contention = true; break; }
+        cause = "cause" in cause ? cause.cause : undefined;
+      }
+      if (!contention) throw error;
+      reasons.add("UNRESOLVED_PARENT");
+    }
     const payload={version:1 as const,id:randomUUID(),...identity,purpose:request.purpose ?? "AGENT",inputs,closure:[...closureNodes.values()],complete:reasons.size===0,incompleteReasons:[...reasons].sort()};
     const canonical=canonicalModelSourceJson(payload);
     if (Buffer.byteLength(canonical)>16*1024*1024) throw new RangeError("MODEL_CALL_SOURCE_RECEIPT_CAP_EXCEEDED");
@@ -272,6 +446,10 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
     await tx.insert(schema.modelCallSourceReceipts).values({...identity,id:receipt.id,receipt,canonical,digest});
     return receipt;
   }));
+  } finally {
+    try { void Promise.resolve(request.onPersistenceWork?.(Object.freeze({ ...work }))).catch(() => undefined); }
+    catch { /* Diagnostics never replace persistence or authority outcomes. */ }
+  }
 }
 
 /** Reads one exact call, never a latest-per-attempt snapshot. API establishes subject/session visibility first. */

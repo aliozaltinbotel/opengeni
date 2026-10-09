@@ -725,3 +725,88 @@ test("memoized ancestry keeps depth and cycle refusals after a shallow route suc
   const cyclic = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, request);
   expect(cyclic.complete).toBe(false); expect(cyclic.incompleteReasons).toContain("UNRESOLVED_PARENT");
 });
+
+test("copied ancestry purged between shared paths cannot commit complete provenance", async () => {
+  const source = await fixture();
+  const sourceRows = await getActiveSessionHistoryItemsPaged(app.db, source.identity.workspaceId, source.identity.sessionId);
+  await appendSessionHistoryItems(app.db, { ...source.write, items: [{ position: Math.max(...sourceRows.map(row => row.position)) + 1,
+    item: { type: "message", role: "user", content: "Synthetic copied source" },
+    sourceBasis: { kind: "COPIED", parents: [{ owner: "session_history_items", id: sourceRows[0]!.id, sha256: sourceRows[0]!.sourceSha256! }] },
+  }] });
+  const copied = (await getActiveSessionHistoryItemsPaged(app.db, source.identity.workspaceId, source.identity.sessionId)).at(-1)!;
+  await applySessionTurnSettlement(app.db, source.identity.workspaceId, { sessionId: source.identity.sessionId, turnId: source.identity.turnId, triggerEventId: source.triggerEventId,
+    attemptId: source.identity.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: {} }] });
+  // Exact owned source archive posture; exercise the real installed purge seam.
+  await shared.admin`update sessions set content_archive_state='archived',content_archive_started_at=now(),content_archived_at=now(),content_archive=${shared.admin.json({ sha256: "a".repeat(64) })} where id=${source.identity.sessionId} and account_id=${source.identity.accountId} and workspace_id=${source.identity.workspaceId}`;
+  const session = await createSession(app.db, { accountId: source.identity.accountId, workspaceId: source.identity.workspaceId, initialMessage: "Synthetic destination", createdBy: { kind: "subject", subjectId: source.subjectId }, resources: [], metadata: {}, model: "scripted", reasoningEffort: "low", latencyMode: "standard", sandboxBackend: "none" });
+  await initializeSessionStartAtomically(app.db, { accountId: source.identity.accountId, workspaceId: source.identity.workspaceId, sessionId: session.id, reasoningEffortFallback: "low", createdEventPayload: {} });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(app.db, source.identity.workspaceId, { sessionId: session.id, workflowId: `session-${session.id}`, workflowRunId: crypto.randomUUID(), dispatchId: crypto.randomUUID(), attemptId, trigger: { kind: "next" } });
+  if (claim.action !== "claimed") throw Error("Destination not claimed");
+  const identity = { ...source.identity, sessionId: session.id, turnId: claim.turn.id, attemptId, executionGeneration: claim.turn.executionGeneration, sourceKey: crypto.randomUUID() };
+  const initial = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  await appendSessionHistoryItems(app.db, { accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, turnId: identity.turnId, expectedAttemptId: attemptId, expectedExecutionGeneration: identity.executionGeneration,
+    items: ["Synthetic copy A", "Synthetic copy B"].map((content, index) => ({ position: Math.max(...initial.map(row => row.position)) + index + 1,
+      item: { type: "message", role: "user", content }, sourceBasis: { kind: "COPIED" as const, parents: [{ owner: "session_history_items", id: copied.id, sha256: copied.sourceSha256! }] } })) });
+  let purged = false;
+  // Transparent query wrapper: pause after B's owner read, once A's full copied
+  // subtree is authenticated, and commit the independent archive purge before
+  // returning B. No private source fields or fake database results are supplied.
+  const wrap = (target: object): object => new Proxy(target, { get(value, key) {
+    const member: unknown = Reflect.get(value, key);
+    if (typeof member !== "function") return member;
+    if (key === "transaction") return (callback: (tx: object) => unknown, ...rest: unknown[]) => Reflect.apply(member, value, [(tx: object) => callback(wrap(tx)), ...rest]);
+    if (key === "then") return (resolve: (rows: unknown) => unknown, reject: (error: unknown) => unknown) => {
+      const pending = Reflect.apply(member, value, [async (rows: unknown) => {
+        if (!purged && Array.isArray(rows) && rows.length === 1 && rows[0]?.sessionId === identity.sessionId && rows[0]?.item?.content === "Synthetic copy B") {
+          purged = true;
+          await shared.admin.begin(async tx => {
+            await tx`select set_config('opengeni.account_id',${identity.accountId},true),set_config('opengeni.workspace_id',${identity.workspaceId},true)`;
+            await tx`select opengeni_private.purge_archived_session_content(${identity.workspaceId}::uuid,${source.identity.sessionId}::uuid,'session_history_items',10000)`;
+          });
+        }
+        return rows;
+      }]) as Promise<unknown>;
+      return pending.then(resolve, reject);
+    };
+    return (...args: unknown[]) => { const result: unknown = Reflect.apply(member, value, args); return result && typeof result === "object" ? wrap(result) : result; };
+  } });
+  const observedDb = wrap(app.db) as Parameters<typeof persistModelCallSourceReceipt>[0];
+  const { registerDbBinding } = await import("@opengeni/db"); registerDbBinding(observedDb, {});
+  const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  const receipt = await persistModelCallSourceReceipt(observedDb, identity, { input: rows.map(row => row.item) });
+  expect(purged).toBe(true);
+  const remaining = await shared.admin`select id from session_history_items where session_id=${source.identity.sessionId} and account_id=${identity.accountId} and workspace_id=${identity.workspaceId}`;
+  expect(remaining).toHaveLength(0); expect(receipt.complete).toBe(false); expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
+});
+
+
+test("copied receipt owner attempt contention refuses completeness without receipt UPDATE privilege", async () => {
+  const source = await fixture();
+  const initial = await getActiveSessionHistoryItemsPaged(app.db, source.identity.workspaceId, source.identity.sessionId);
+  const producer = await persistModelCallSourceReceipt(app.db, source.identity, { input: initial.map(row => row.item) });
+  await appendSessionHistoryItems(app.db, { ...source.write, items: [{ position: Math.max(...initial.map(row => row.position)) + 1,
+    item: { type: "message", role: "assistant", content: "Synthetic durable answer" },
+    nativeProducerSourceKey: producer.sourceKey,
+  }] });
+  const answer = (await getActiveSessionHistoryItemsPaged(app.db, source.identity.workspaceId, source.identity.sessionId)).at(-1)!;
+  await applySessionTurnSettlement(app.db, source.identity.workspaceId, { sessionId: source.identity.sessionId, turnId: source.identity.turnId,
+    triggerEventId: source.triggerEventId, attemptId: source.identity.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: {} }] });
+  const session = await createSession(app.db, { accountId: source.identity.accountId, workspaceId: source.identity.workspaceId,
+    initialMessage: "Synthetic follow-on", initialModelContext: `${IMPORTED_HISTORY_CONTEXT_HEADER}\nassistant: Synthetic durable answer`,
+    metadata: { nativeImportedHistoryOrigins: [{ source: "session_history_items", externalId: answer.id, sha256: answer.sourceSha256! }] },
+    resources: [], model: "scripted", reasoningEffort: "low", latencyMode: "standard", sandboxBackend: "none" });
+  await initializeSessionStartAtomically(app.db, { accountId: source.identity.accountId, workspaceId: source.identity.workspaceId, sessionId: session.id, reasoningEffortFallback: "low", createdEventPayload: {} });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(app.db, source.identity.workspaceId, { sessionId: session.id, workflowId: `session-${session.id}`, workflowRunId: crypto.randomUUID(), dispatchId: crypto.randomUUID(), attemptId, trigger: { kind: "next" } });
+  if (claim.action !== "claimed") throw Error("Destination not claimed");
+  const identity = { ...source.identity, sessionId: session.id, turnId: claim.turn.id, attemptId, executionGeneration: claim.turn.executionGeneration, sourceKey: crypto.randomUUID() };
+  const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  await shared.admin.begin(async lockTx => {
+    await lockTx`select id from session_turn_attempts where account_id=${identity.accountId} and workspace_id=${identity.workspaceId} and session_id=${source.identity.sessionId} and turn_id=${source.identity.turnId} and id=${source.identity.attemptId} for update`;
+    const refused = await persistModelCallSourceReceipt(app.db, identity, { input: rows.map(row => row.item) });
+    expect(refused.complete).toBe(false); expect(refused.incompleteReasons).toContain("UNRESOLVED_PARENT");
+  });
+  const retained = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, { input: rows.map(row => row.item) });
+  expect(retained.complete).toBe(true); expect(retained.closure.some(node => node.sourceRef.id === producer.id)).toBe(true);
+});
