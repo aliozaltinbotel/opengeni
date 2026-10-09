@@ -1757,7 +1757,7 @@ function AttachmentChips({
     const attachmentId = attachment.id;
     const local = localPreview(attachment);
     const releaseSource = local ? onRetainPreview(attachmentId) : undefined;
-    let src = local ?? storedThumbs[attachmentId];
+    let src: string | undefined = local ?? storedThumbs[attachmentId];
     // An unretained local URL may already be revoked: prefer the stored copy.
     if (!releaseSource && canLoadPreview) src = storedThumbs[attachmentId];
     if (!src && canLoadPreview) {

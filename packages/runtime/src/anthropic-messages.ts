@@ -101,7 +101,7 @@ function providerRejection(
 ): AnthropicProviderRejection | undefined {
   if (status !== 403) return undefined;
   const requestId = responseHeaders.get("request-id") ?? undefined;
-  const headers = responseHeaders.has("retry-after")
+  const headers: Record<string, string> = responseHeaders.has("retry-after")
     ? { "retry-after": responseHeaders.get("retry-after")! }
     : {};
   const error =
