@@ -51,7 +51,7 @@ beforeAll(async () => {
 }, 180_000);
 afterAll(async () => { await counted?.close(); await app?.close(); await shared?.release(); }, 60_000);
 
-type Measurement = { turn: number; request: number; inputs: number; closure: number; receiptOwners: number; receiptScopeRows: number; rawToolRows: number; transientProducers: number; statements: number; receiptReads: number; historyReads: number; ms: number };
+type Measurement = { turn: number; request: number; inputs: number; closure: number; receiptOwners: number; receiptScopeRows: number; rawToolRows: number; transientProducers: number; statements: number; receiptReads: number; historyReads: number; ms: number; work: Parameters<NonNullable<import("@opengeni/db").NativeModelSourceRequest["onPersistenceWork"]>>[0] };
 
 async function snapshots(identity: ModelCallSourceIdentity, subjectId: string) {
   return withSessionRlsActorContext({ subjectId: "worker:source-receipt-cost", initiatingHumanSubjectId: subjectId }, async () => {
@@ -114,16 +114,17 @@ async function driveSession(turns: number, callsPerTurn: number): Promise<Measur
       statements.all = 0; statements.receipts = 0; statements.history = 0; statements.counting = true;
       const started = performance.now();
       let receipt: Awaited<ReturnType<typeof persistModelCallSourceReceipt>>;
+      let work: Parameters<NonNullable<import("@opengeni/db").NativeModelSourceRequest["onPersistenceWork"]>>[0] | undefined;
       try {
-        receipt = await persistModelCallSourceReceipt(counted.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex }, { instructions: sent.systemInstructions, tools: sent.tools, input: sent.input, sourceBindings: modelSourceBindings(sent.input), instructionSelections });
+        receipt = await persistModelCallSourceReceipt(counted.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex }, { instructions: sent.systemInstructions, tools: sent.tools, input: sent.input, sourceBindings: modelSourceBindings(sent.input), instructionSelections, onPersistenceWork: value => { work = value; } });
       } finally { statements.counting = false; }
       const ms = performance.now() - started;
       expect(receipt.incompleteReasons).toEqual([]);
       expect(receipt.complete).toBe(true);
-      measurements.push({ turn, request: measurements.length + 1, inputs: receipt.inputs.length, closure: receipt.closure.length, receiptOwners: new Set(receipt.closure.filter(node => node.sourceRef.owner === "model_call_source_receipts").map(node => node.sourceRef.id)).size, receiptScopeRows: receipt.closure.filter(node => node.sourceRef.owner === "session_history_items" && node.parents.some(parent => parent.owner === "model_call_source_receipts")).length, rawToolRows: receipt.closure.filter(node => node.sourceRef.owner === "session_history_items" && node.parents.some(parent => parent.owner === "native.tool.result")).length, transientProducers: (modelSourceBindings(sent.input) ?? []).filter(binding => binding.nativeProducerSourceKey !== undefined).length, statements: statements.all, receiptReads: statements.receipts, historyReads: statements.history, ms: Math.round(ms * 10) / 10 });
+      measurements.push({ turn, request: measurements.length + 1, inputs: receipt.inputs.length, closure: receipt.closure.length, receiptOwners: new Set(receipt.closure.filter(node => node.sourceRef.owner === "model_call_source_receipts").map(node => node.sourceRef.id)).size, receiptScopeRows: receipt.closure.filter(node => node.sourceRef.owner === "session_history_items" && node.parents.some(parent => parent.owner === "model_call_source_receipts")).length, rawToolRows: receipt.closure.filter(node => node.sourceRef.owner === "session_history_items" && node.parents.some(parent => parent.owner === "native.tool.result")).length, transientProducers: (modelSourceBindings(sent.input) ?? []).filter(binding => binding.nativeProducerSourceKey !== undefined).length, statements: statements.all, receiptReads: statements.receipts, historyReads: statements.history, ms: Math.round(ms * 10) / 10, work: work! });
       return receipt.sourceKey;
     };
-    const step = () => ++calls <= callsPerTurn ? { output: [functionCall("synthetic_lookup", { n: calls }, `synthetic-call-${turn}-${calls}`)] } : { outputText: `Synthetic answer ${turn}` };
+    const step = () => ++calls <= callsPerTurn ? { output: [...Array.from({ length: 2 }, (_, branch) => functionCall("synthetic_lookup", { n: calls }, `synthetic-call-${turn}-${calls}-${branch}`))] } : { outputText: `Synthetic answer ${turn}` };
     const model = new ModelRequestCaptureModel({ async getResponse(sent) { return new ScriptedModel([step()]).getResponse(sent); }, async *getStreamedResponse(sent) { yield* new ScriptedModel([step()]).getStreamedResponse(sent); } });
     try {
       let stream: Awaited<ReturnType<Runner["run"]>> | undefined;
@@ -168,6 +169,13 @@ test(`receipt production work per model request grows by a constant across ${TUR
   // producer separately. Derive this linear budget from the produced graph,
   // including separate outputs of one receipt, rather than session length.
   for (const current of measurements) {
-    expect(current.receiptReads).toBeLessThanOrEqual(2 * (current.receiptOwners + current.receiptScopeRows + current.rawToolRows) + current.transientProducers);
+    expect(current.receiptReads).toBeLessThanOrEqual(2 * (current.receiptOwners + current.receiptScopeRows + current.rawToolRows) + current.transientProducers + 1);
+    const work = current.work;
+    // Lookup work is bounded by one lookup per visit and the installed owner's
+    // released nodes/edges. Full-closure scans violate this even with SQL memo.
+    expect(work.leafLookups).toBeLessThanOrEqual(work.closureVisits + 2 * (work.sourceNodes + work.sourceEdges));
+    // Dependency processing is bounded by the actual graph and its observed
+    // ancestry depth. Cache hits replay only changed keys and perform no ancestor-ID union.
+    expect(work.closureVisits + work.nodeWrites + work.idChecks + work.invalidations + work.effectChecks + work.replays).toBeLessThanOrEqual(2 * (work.maximumDepth + 1) * (work.sourceNodes + work.sourceEdges + current.inputs));
   }
 }, 600_000);
