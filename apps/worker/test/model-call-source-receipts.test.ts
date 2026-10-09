@@ -6,6 +6,7 @@ import { projectHistoryForProvider } from "../../../packages/runtime/src/provide
 import { HistoryPrefixGuard } from "../src/activities/agent-turn/history-prefix";
 import postgres from "postgres";
 import { installLazyToolRuntime, LazyToolModelProvider } from "../../../packages/runtime/src/lazy-tool-transport";
+import { createObservability } from "@opengeni/observability";
 import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
 import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, canonicalModelSourceJson, ModelSourceRef } from "@opengeni/contracts";
 import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput } from "@opengeni/runtime";
@@ -486,6 +487,7 @@ test("host admission is awaited after exact durable receipt and refuses every mo
   const { identity } = await fixture();
   const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
   for (const purpose of ["AGENT", "COMPACTION", "TITLE"] as const) {
+    const observability = createObservability(testSettings(), { component: "worker" });
     let dispatched = false;
     const sourceKey = crypto.randomUUID();
     const refusal = new Error(`HOST_SOURCE_REFUSED_${purpose}`);
@@ -493,9 +495,12 @@ test("host admission is awaited after exact durable receipt and refuses every mo
       expect(receipt.sourceKey).toBe(sourceKey); expect(receipt.purpose).toBe(purpose);
       expect((await readModelCallSourceReceipt(app.db, { ...identity, sourceKey })).receipt).toEqual(receipt);
       throw refusal;
-    }).then(() => { dispatched = true; });
+    }, undefined, { observability, provider: "scripted", backend: "none" }).then(() => { dispatched = true; });
     await expect(attempt).rejects.toBe(refusal);
     expect(dispatched).toBe(false);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(/opengeni_turn_startup_phase_duration_seconds_count\{[^}]*outcome="completed"[^}]*phase="model_source_receipt_persistence"[^}]*\} 1\b/);
+    expect(metrics).toMatch(/opengeni_turn_startup_phase_duration_seconds_count\{[^}]*outcome="failed"[^}]*phase="model_source_authorization"[^}]*\} 1\b/);
   }
 });
 
@@ -680,4 +685,43 @@ test("live output registry refuses changed bytes and ambiguous producer identiti
  const ambiguous=JSON.parse(JSON.stringify(output)) as Record<string,unknown>;
  expect(()=>restorers[0]!([ambiguous])).toThrow("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
  expect(modelSourceBindings([ambiguous])).toEqual([]);
+});
+
+test("memoized ancestry keeps depth and cycle refusals after a shallow route succeeds", async () => {
+  const { identity, write } = await fixture();
+  const original = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  const lastPosition = Math.max(...original.map(row => row.position));
+  // The producer's depth limit is 128. Derive the overflow chain from that
+  // installed guard rather than an independent fixture count.
+  const source = await readFile(new URL("../../../packages/db/src/model-call-source-receipts.ts", import.meta.url), "utf8");
+  const depthLimit = Number(source.match(/depth>(\d+)/)?.[1]);
+  expect(Number.isSafeInteger(depthLimit)).toBe(true);
+  await appendSessionHistoryItems(app.db, { ...write, items: Array.from({ length: depthLimit + 1 }, (_, index) => ({
+    position: lastPosition + index + 1, item: { type: "message", role: "user", content: `Synthetic ancestry ${index}` },
+  })) });
+  const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+  const chain = rows.filter(row => row.position > lastPosition);
+  // Inject adversarial immutable ancestry in this fixture only; normal writers
+  // cannot rewrite a source basis. All production reads still use restricted RLS.
+  await shared.admin.begin(async tx => {
+    await tx`set local session_replication_role=replica`;
+    for (const [index, row] of chain.entries()) {
+      const parent = index === 0 ? original[0]! : chain[index - 1]!;
+      const basis = { kind: "COPIED", parents: [{ owner: "session_history_items", id: parent.id, sha256: parent.sourceSha256! }] };
+      await tx`update session_history_items set source_basis=${tx.json(basis)} where id=${row.id} and account_id=${identity.accountId} and workspace_id=${identity.workspaceId}`;
+    }
+  });
+  // The shallow path is visited first, so the later deep path reaches an
+  // already memoized subtree whose relative depth must still count.
+  const request = { input: [chain[0]!.item, chain.at(-1)!.item] };
+  const exceeded = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, request);
+  expect(exceeded.complete).toBe(false); expect(exceeded.incompleteReasons).toContain("CAP_EXCEEDED");
+  const end = chain.at(-1)!;
+  await shared.admin.begin(async tx => {
+    await tx`set local session_replication_role=replica`;
+    const basis = { kind: "COPIED", parents: [{ owner: "session_history_items", id: end.id, sha256: end.sourceSha256! }] };
+    await tx`update session_history_items set source_basis=${tx.json(basis)} where id=${end.id} and account_id=${identity.accountId} and workspace_id=${identity.workspaceId}`;
+  });
+  const cyclic = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, request);
+  expect(cyclic.complete).toBe(false); expect(cyclic.incompleteReasons).toContain("UNRESOLVED_PARENT");
 });

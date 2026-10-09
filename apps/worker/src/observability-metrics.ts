@@ -2233,6 +2233,8 @@ export type TurnStartupPhase =
   | "model_prepare_input_filter_tool_output"
   | "model_prepare_input_filter_modality"
   | "model_prepare_input_filter_context"
+  | "model_source_receipt_persistence"
+  | "model_source_authorization"
   | "model_prepare_responses_input_conversion"
   | "model_prepare_responses_request_build"
   | "model_credential_resolution"
