@@ -13,7 +13,8 @@ upstream `Cloudgeni-ai/opengeni` `main` with `--no-ff`. No fork commit was rebas
 | Fork side / upstream side | 58 commits / 800 commits |
 | Merge commit (round 1) | `f3d4a15d5e01006965f8839e939d13fd2d956819` (parents: pin, upstream `89e3a2ad9`) |
 | Round 1 follow-ups | `f933c6bb8` migrations to 0656-0658; `708b36be5` regenerated surface and Site runtime; `fb10c5dc1` test fits; `d8ad352d1` SDK fix; `8f9627e77` runtime error-text order and test fits; report |
-| Round 2 follow-ups | `4e1948b65` migrations to 0665-0667; `b0c49cf11` gzip error-body fix (finding 1); `72d7e4d12` organization MCP exemptions (finding 2); `ec39c5657`, `5ba8c1eab` compaction source fixes; `a3da958f0` first-use membership opt-in (review P1-a); report |
+| Round 2 follow-ups | `4e1948b65` migrations to 0665-0667; `b0c49cf11` gzip error-body fix (finding 1); `72d7e4d12` organization MCP exemptions (finding 2); `ec39c5657`, `5ba8c1eab` compaction source fixes; `a3da958f0` first-use membership opt-in (review P1-a); `37c6a85b3` test opt-ins; report |
+| Round 3 (repin blockers) | `5567862ca254da34712f52d9c32ca1dc05e20aef` = **H**: two upstream type annotations; artifact runtime built for H (below) |
 
 Fork `main` (`11febf6a7db69f479fecd162ae82b5fda3c58088`) and `production` (`e6453c8271ac6e198bbd1970a23f222e5613affc`)
 are untouched. Both merges are anchored by SHA. Round 1 was reviewed at `fe750ae24` (MERGE_WITH_FIXES); round 2
@@ -288,6 +289,32 @@ The 33 failing files, classified:
 | Fork divergence (finding 4) | 1: context-compaction-activity, upstream's new byte-continuation case |
 | Same error as migration-0264 (`task.owner_subject_id`), not separately verified | 2: migration-0345, migration-0478 |
 | Unclassified | 1: migration-0363 (`toMatchObject`) |
+
+## Round 3: repin blockers on the fork side
+
+**Type annotations (`5567862ca`, upstreamable).** Two sources from upstream `e1395d4f0` compile under the fork's
+`exactOptionalPropertyTypes` option set but not under plain `strict`, which Cendra's consumers use:
+`packages/runtime/src/anthropic-messages.ts` (the conditional `retry-after` header object, TS2345 at two uses; now
+`Record<string, string>`) and `packages/react/src/components/composer.tsx` (`src` later assigned `undefined`, TS2322;
+now `string | undefined`). Patch from MAINT-P09-434 (`docs/tasks/MAINT-P09-434/patches/fork-conformance-strictness-types.patch`),
+`git apply --check` clean, applied unchanged. `bun run typecheck` rc 0; anthropic tests 78/78; composer tests 110/110.
+The Cendra-side proof (`opengeni:compile:pins`, web2 strict typecheck) is the repin's.
+
+**Artifact runtime for H**, built as for the pin (`cendra/artifact-runtime-6c2c7eaf` @ `34205e850`, run
+37721763225: one caller workflow on top of the exact source that runs the reusable `artifact-runtime.yml` with
+`source_sha`; that reusable workflow is unchanged since the pin):
+
+| Item | Value |
+| --- | --- |
+| Branch / caller commit | `cendra/artifact-runtime-5567862c` @ `8c9f86d1e5eab5b84b204ca83a45e624ec77a4ac` (parent H; adds `.github/workflows/cendra-artifact-runtime-5567862c.yml` only) |
+| Run | 37878090595, "Cendra artifact runtime for 5567862c", success, 2026-10-09T03:11:01Z-03:20:06Z, 9/9 jobs (8 native/WASM smoke receipts + container assembly) |
+| Containers artifact | `artifact-runtime-containers-5567862ca254da34712f52d9c32ca1dc05e20aef`, id 11593217578, 5400840 bytes, digest `sha256:ddb91a43875c86999af881f5dcaa2e8647c7a27c11214462a166768701de8ab8` (the downloaded ZIP's sha256 matches) |
+| Container receipt | `artifact-runtime-container-receipt.json`, sha256 `7936582358286b1c93585627c8774cc8747b93b286bf7806afe13de5eea36753`, `sourceSha` = H, 2 installations (amd64, arm64) |
+
+Target artifacts (id, digest): darwin-arm64 11593073522 `9c1add83...`; darwin-x64 11592854323 `cd25afb6...`;
+linux-arm64-gnu 11592938685 `4b48b425...`; linux-arm64-musl 11593043644 `d28cb466...`; linux-x64-gnu 11593540290
+`a4aec9ca...`; linux-x64-musl 11593860194 `22172be9...`; wasm-web 11593865123 `07c5cdff...`; win32-x64-msvc 11594015259
+`70e20faa...`.
 
 ## Findings (round 1) and their resolution (round 2)
 
