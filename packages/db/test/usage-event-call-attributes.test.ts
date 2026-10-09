@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { readFile } from "node:fs/promises";
+import { embeddingCallUsageAttributes } from "@opengeni/core";
 import {
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
   ModelCallUsageAttributes,
@@ -131,6 +133,45 @@ function callInput(
 }
 
 describe("model.call usage attributes (real PostgreSQL)", () => {
+  test("both call kinds refuse a missing schema from their valid attributes; original 0668 admits it", async () => {
+    const turn = await startedTurn("missing-schema");
+    const fixtures = [
+      { eventType: "model.call", attributes: callAttributes() },
+      { eventType: "embedding.call", attributes: embeddingCallUsageAttributes({
+        callKind: "query", provider: "openai", model: "text-embedding-3-small",
+        inputBytes: 16, inputItems: 1, rateMicrosPerMillionBytes: 1000, billingPath: "external",
+      }) },
+    ];
+    const insert = async (eventType: string, attributes: Record<string, unknown>) =>
+      await shared.admin`INSERT INTO usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at, attributes)
+        VALUES (${turn.accountId}, ${turn.workspaceId}, ${eventType}, 1, 'call', ${`missing-schema:${crypto.randomUUID()}`}, now(), ${shared.admin.json(attributes)})`;
+    for (const fixture of fixtures) {
+      const { schema: _schema, ...missingSchema } = fixture.attributes;
+      await insert(fixture.eventType, fixture.attributes);
+      await expect(insert(fixture.eventType, missingSchema)).rejects.toThrow("usage_events_call_attributes_check");
+    }
+    // The actual immutable predecessor supplies the negative control. Both its
+    // permissive inserts and the temporary constraint replacement roll back.
+    const predecessor = await readFile(new URL("../drizzle/0668_usage_event_call_attributes.sql", import.meta.url), "utf8");
+    const start = predecessor.indexOf("ALTER TABLE usage_events\n  ADD CONSTRAINT usage_events_call_attributes_check CHECK (");
+    const end = predecessor.indexOf("\n  ) NOT VALID;", start);
+    if (start < 0 || end < 0) throw new Error("0668 call constraint not found");
+    const rollback = new Error("ROLL_BACK_PREDECESSOR_CONTROL");
+    await expect(shared.admin.begin(async (sql) => {
+      await sql`ALTER TABLE usage_events DROP CONSTRAINT usage_events_call_attributes_check`;
+      await sql.unsafe(predecessor.slice(start, end + "\n  ) NOT VALID;".length));
+      for (const fixture of fixtures) {
+        const { schema: _schema, ...missingSchema } = fixture.attributes;
+        await sql`INSERT INTO usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at, attributes)
+          VALUES (${turn.accountId}, ${turn.workspaceId}, ${fixture.eventType}, 1, 'call', ${`missing-schema:${crypto.randomUUID()}`}, now(), ${sql.json(missingSchema)})`;
+      }
+      throw rollback;
+    })).rejects.toThrow(rollback.message);
+    for (const fixture of fixtures) {
+      const { schema: _schema, ...missingSchema } = fixture.attributes;
+      await expect(insert(fixture.eventType, missingSchema)).rejects.toThrow("usage_events_call_attributes_check");
+    }
+  });
   test("persist with the row, replay identically, keep the first price, and refuse different usage", async () => {
     const turn = await startedTurn("replay");
     const attributes = callAttributes();

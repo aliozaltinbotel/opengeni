@@ -12387,7 +12387,7 @@ export const usageEvents = pgTable(
     callAttributes: check(
       "usage_events_call_attributes_check",
       sql`${table.eventType} not in ('model.call', 'embedding.call')
-        or (${table.attributes} is not null and jsonb_typeof(${table.attributes} -> 'schema') = 'string')`,
+        or (${table.attributes} is not null and coalesce(jsonb_typeof(${table.attributes} -> 'schema') = 'string', false))`,
     ),
   }),
 );

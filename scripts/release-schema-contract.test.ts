@@ -2508,6 +2508,8 @@ describe("release schema contract", () => {
       "0664_inbox_rich_notifications.sql",
       "0666_model_call_source_receipts.sql",
       "0667_recurring_temporary_image_cleanup_fairness.sql",
+      "0668_usage_event_call_attributes.sql",
+      "0669_usage_event_call_attributes_schema_required.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
