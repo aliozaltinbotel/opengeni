@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for 5567862c
+
+# Upstream sync MAINT-P09-433 (upstream e1395d4f0 merged); reusable workflow checks the exact source in every target.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-5567862c
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 5567862ca254da34712f52d9c32ca1dc05e20aef
