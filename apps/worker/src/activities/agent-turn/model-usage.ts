@@ -883,6 +883,17 @@ export async function recordModelUsageAndDebitCredits(
     input.provider === undefined || input.providerApi === undefined
       ? resolveModelProvider(settings, input.model)?.provider
       : undefined;
+  // The schedule that produced the estimate, chosen exactly as the estimate is:
+  // the list (comparison) schedule when its snapshot priced the call, else the
+  // configured debit schedule.
+  const estimateSchedule =
+    pricingSource !== "configured_list_price"
+      ? null
+      : listSnapshot?.providerCostMicros != null && configuredListPricingModel
+        ? (listPricingSchedules[configuredListPricingModel] ?? null)
+        : configuredPricingModel
+          ? (pricingSchedules[configuredPricingModel] ?? null)
+          : null;
   if (input.recordCall !== false)
     await recordModelCallUsageEvent(db, {
       accountId: input.accountId,
@@ -902,10 +913,7 @@ export async function recordModelUsageAndDebitCredits(
         normalizedUsage,
         estimatedProviderCostMicros,
         pricingSource,
-        priceVersion:
-          pricingSource === "configured_list_price" && configuredPricingModel
-            ? modelPricingScheduleVersion(pricingSchedules[configuredPricingModel]!)
-            : null,
+        priceVersion: estimateSchedule ? modelPricingScheduleVersion(estimateSchedule) : null,
       },
     });
   // Provider settlement and workspace-facing cost are separate. Externally

@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
-import { OPENGENI_GATEWAY_MODELS, configuredModelPricingSchedules } from "@opengeni/config";
+import {
+  OPENGENI_GATEWAY_MODELS,
+  configuredModelListPricingSchedules,
+  configuredModelPricingSchedules,
+} from "@opengeni/config";
 import {
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
   MODEL_CALL_USAGE_EVENT_TYPE,
@@ -152,6 +156,39 @@ describe("model.call usage row", () => {
     // so model.call is the only row that carries the call's cost.
     expect(rows.map((row) => row.eventType)).toEqual(["model.call", "model.cost"]);
     expect(rows.find((row) => row.eventType === "model.cost")?.quantity).toBe(0);
+  });
+
+  test("a reviewed list-only model names the list schedule that produced its estimate, never the debit schedule", async () => {
+    const { rows, spy } = captureUsageRows();
+    restores.push(() => spy.mockRestore());
+    const settings = {
+      ...billedSettings(),
+      openaiModel: "gpt-6.1-sol",
+      openaiAllowedModels: "gpt-6.1-sol",
+    };
+    // gpt-6.1-sol has a reviewed list price and no configured debit price.
+    expect(configuredModelPricingSchedules(settings)["gpt-6.1-sol"]).toBeUndefined();
+    const listSchedule = configuredModelListPricingSchedules(settings)["gpt-6.1-sol"];
+    expect(listSchedule).toBeDefined();
+
+    await recordModelUsageAndDebitCredits(settings, db, {
+      accountId: ACCOUNT,
+      workspaceId: WORKSPACE,
+      sessionId: "sess-list-only",
+      turnId: "turn-list-only",
+      turnAttemptId: "attempt-list-only",
+      model: "gpt-6.1-sol",
+      externallyBilled: true,
+      usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+      sourceKey: "response-list-only",
+    });
+
+    const attributes = ModelCallUsageAttributes.parse(callRows(rows)[0]!.attributes);
+    expect(attributes).toMatchObject({
+      estimatedProviderCostMicros: 7000,
+      pricingSource: "configured_list_price",
+      priceVersion: `schedule-sha256:${createHash("sha256").update(sortedJson(listSchedule)).digest("hex")}`,
+    });
   });
 
   test("an unpriced model records a null cost, a null pricing source and no schedule, never 0", async () => {
