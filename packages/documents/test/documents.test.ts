@@ -588,13 +588,24 @@ test("OpenAI adapter retains immutable completed-response receipts before dimens
     data,
     usage: { prompt_tokens: 0, total_tokens: 0 },
   });
+  let malformed = false;
+  const encodings: unknown[] = [];
   const preconnect = globalThis.fetch.preconnect;
   const fetch = spyOn(globalThis, "fetch").mockImplementation(
     Object.assign(
-      async () =>
-        new Response(JSON.stringify(response()), {
+      async (...args: Parameters<typeof globalThis.fetch>) => {
+        const request = new Request(args[0], args[1]);
+        const body = (await request.json()) as { encoding_format?: unknown };
+        encodings.push(body.encoding_format);
+        const released = response();
+        // Deliberately corrupt the released response shape on the HTTP wire.
+        const wire = malformed
+          ? { ...released, data: released.data.map((item) => ({ ...item, embedding: null })) }
+          : released;
+        return new Response(JSON.stringify(wire), {
           headers: { "content-type": "application/json" },
-        }),
+        });
+      },
       { preconnect },
     ),
   );
@@ -613,8 +624,14 @@ test("OpenAI adapter retains immutable completed-response receipts before dimens
     await expect(provider.embedQuery("query", (receipt) => receipts.push(receipt))).rejects.toThrow(
       "no query embedding",
     );
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(receipts).toHaveLength(2);
+    data = [{ object: "embedding", index: 0, embedding: [1, 0, 0] }];
+    malformed = true;
+    await expect(
+      provider.embedQuery("malformed", (receipt) => receipts.push(receipt)),
+    ).rejects.toThrow();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(receipts).toHaveLength(3);
+    expect(encodings).toEqual(receipts.map(() => "float"));
     expect(receipts[0]).toMatchObject({
       provider: "openai",
       model: provider.model,

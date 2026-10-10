@@ -431,6 +431,9 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
         model: this.model,
         input: batch,
         dimensions: this.dimensions,
+        // Explicit float leaves validation here, after the completion receipt,
+        // rather than in the SDK's default base64 response transformation.
+        encoding_format: "float",
       });
       completed?.(
         Object.freeze({

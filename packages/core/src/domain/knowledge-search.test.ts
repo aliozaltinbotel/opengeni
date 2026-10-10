@@ -703,7 +703,9 @@ test("real OpenAI query validation failure still settles its provider-completion
   let data: {
     object: "embedding";
     index: number;
-    embedding: Awaited<ReturnType<import("@opengeni/documents").DocumentEmbedder["embedQuery"]>>;
+    embedding: Awaited<
+      ReturnType<import("@opengeni/documents").DocumentEmbedder["embedQuery"]>
+    > | null;
   }[] = [{ object: "embedding", index: 0, embedding: [1, 0] }];
   const preconnect = globalThis.fetch.preconnect;
   const fetch = spyOn(globalThis, "fetch").mockImplementation(
@@ -752,7 +754,19 @@ test("real OpenAI query validation failure still settles its provider-completion
       searchMode: "keyword",
       fallbackReason: "provider_unavailable",
     });
-    expect(durableCalls.slice(before)).toHaveLength(2);
+    data = [{ object: "embedding", index: 0, embedding: null }];
+    const reads = list.mock.calls.length;
+    await expect(
+      searchKnowledgeEntries(
+        {} as never,
+        serviceContext,
+        { query: "malformed", mode: "vector" },
+        () => provider,
+      ),
+    ).rejects.toThrow();
+    expect(list.mock.calls.length).toBe(reads);
+    expect(durableCalls.slice(before)).toHaveLength(3);
+    expect(fetch).toHaveBeenCalledTimes(3);
     for (const call of durableCalls.slice(before))
       expect(call.attributes).toMatchObject({
         provider: "openai",

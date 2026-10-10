@@ -250,6 +250,7 @@ test("incomplete returned index vectors preserve the completed call without publ
 
 test("real OpenAI index adapter validation failure preserves the completed response without publication or debit", async () => {
   const { OpenAIEmbeddingProvider } = await import("@opengeni/documents");
+  let malformed = false;
   const preconnect = globalThis.fetch.preconnect;
   const fetch = spyOn(globalThis, "fetch").mockImplementation(
     Object.assign(
@@ -260,7 +261,10 @@ test("real OpenAI index adapter validation failure preserves the completed respo
           data: [{ object: "embedding", index: 0, embedding: [1, 0] }],
           usage: { prompt_tokens: 0, total_tokens: 0 },
         };
-        return new Response(JSON.stringify(response), {
+        const wire = malformed
+          ? { ...response, data: response.data.map((item) => ({ ...item, embedding: null })) }
+          : response;
+        return new Response(JSON.stringify(wire), {
           headers: { "content-type": "application/json" },
         });
       },
@@ -279,8 +283,10 @@ test("real OpenAI index adapter validation failure preserves the completed respo
     debits = debit.mock.calls.length;
   try {
     expect((await worker(provider).indexKnowledge()).deferred).toBe(1);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    expect(durableCalls.size).toBe(before + 1);
+    malformed = true;
+    expect((await worker(provider).indexKnowledge()).deferred).toBe(1);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(durableCalls.size).toBe(before + 2);
     expect([...durableCalls.values()].at(-1)?.attributes).toMatchObject({
       provider: "openai",
       model: provider.model,
