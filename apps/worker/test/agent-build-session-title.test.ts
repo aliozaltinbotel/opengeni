@@ -391,6 +391,36 @@ describe("managed OpenRouter free route", () => {
 });
 
 describe("startParallelSessionTitleGeneration", () => {
+  test("completed provider title settles before finish and retains a refused receipt", async () => {
+    let observed = false;
+    const failure = new Error("title receipt unavailable");
+    const task = startParallelSessionTitleGeneration({
+      generate: async () => ({ sourceKey: "native-title", title: null, usage: null }),
+      settle: async result => {
+        expect(result.sourceKey).toBe("native-title");
+        observed = true;
+        throw failure;
+      },
+    });
+    await Bun.sleep(0);
+    expect(observed).toBe(true);
+    await expect(task.finish()).rejects.toBe(failure);
+  });
+
+  test("a provider response completed after cancellation still settles its receipt", async () => {
+    let settled = false;
+    const task = startParallelSessionTitleGeneration({
+      generate: async signal => {
+        await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+        return { sourceKey: "native-late-title", title: null, usage: null };
+      },
+      settle: async () => { settled = true; },
+    });
+    await task.cancel();
+    expect(settled).toBe(true);
+    expect(await task.finish()).toBeNull();
+  });
+
   test("starts immediately and returns a completed title without blocking the caller", async () => {
     let started = false;
     const task = startParallelSessionTitleGeneration({

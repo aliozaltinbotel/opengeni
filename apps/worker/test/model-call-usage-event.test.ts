@@ -17,6 +17,8 @@ import { testSettings } from "@opengeni/testing";
 
 import {
   createModelResponseEventState,
+  createCompactionModelUsageEventState,
+  processCompactionModelUsageEvent,
   processModelResponseTerminalEvent,
   recordModelCallUsageEvent,
   recordModelUsageAndDebitCredits,
@@ -403,5 +405,19 @@ describe("model.call usage row", () => {
     expect(refusedInput.state.claimedSourceKeys.size).toBe(0);
     expect(refusedInput.state.unreportedSourceKeys).toEqual([]);
     expect(await processModelResponseTerminalEvent(refusedInput)).toMatchObject({ status: "processed" });
+
+    for (const callKind of ModelCallUsageAttributes.shape.callKind.options.filter(kind => kind !== "response")) {
+      const compactInput: Parameters<typeof processCompactionModelUsageEvent>[0] = {
+        ...input, usage: null, nativeSourceKey: `source-${callKind}`,
+        state: createCompactionModelUsageEventState(),
+        sourceKind: callKind === "session_title" ? "session-title" : "compaction",
+      };
+      await processCompactionModelUsageEvent(compactInput);
+      const persisted = ModelCallUsageAttributes.parse(callRows(rows).at(-1)?.attributes);
+      expect(persisted).toMatchObject({ callKind, usageReported: false, estimatedProviderCostMicros: null });
+      expect(await processCompactionModelUsageEvent(compactInput)).toMatchObject({ status: "duplicate" });
+      await expect(processCompactionModelUsageEvent({ ...compactInput, nativeSourceKey: undefined,
+        state: createCompactionModelUsageEventState() })).rejects.toThrow("MODEL_SOURCE_RESPONSE_UNBOUND");
+    }
   });
 });

@@ -414,36 +414,6 @@ export async function runTurnStreamAttempt(
     const generated = await parallelSessionTitle?.finish();
     if (!generated) return;
 
-    if (generated.usage) {
-      await processSessionTitleModelUsageEvent({
-        usage: generated.usage,
-        creditPolicyRevision: titleCreditPolicyRevision,
-        ...(generated.sourceKey?{nativeSourceKey:generated.sourceKey}:{}),
-        state: sessionTitleUsageState,
-        dispatchId: modelUsageDispatchId,
-        settings,
-        db,
-        observability,
-        publish: eventing.publish,
-        accountId: input.accountId,
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        turnId: activeTurnId,
-        turnAttemptId: input.attemptId,
-        provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-        providerApi: resolvedModel?.provider.api ?? "responses",
-        model: resolvedModel?.configured.id ?? turn.model,
-        externallyBilled: billingState.isExternallyBilledTurn,
-        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-        countsTowardTokenCap: billingState.countsTowardTokenCap,
-        servingCredentialId: providerTurn.effectiveCodexCredentialId,
-        priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-        emittedSourceKeys: emittedModelUsageSourceKeys,
-        renewLease: () => leases.renewServing("model_usage"),
-        leaseLost: leases.servingLost,
-        leaseLostMessage: "Provider credential lease expired during session title generation",
-      });
-    }
     if (!generated.title) return;
 
     try {
@@ -2227,6 +2197,38 @@ export async function runTurnStreamAttempt(
             }),beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {})},
           ),
         ),
+      settle: async generated => {
+        if (generated.usage || generated.sourceKey) {
+          await processSessionTitleModelUsageEvent({
+            usage: generated.usage,
+            creditPolicyRevision: titleCreditPolicyRevision,
+            ...(generated.sourceKey?{nativeSourceKey:generated.sourceKey}:{}),
+            state: sessionTitleUsageState,
+            dispatchId: modelUsageDispatchId,
+            settings,
+            db,
+            observability,
+            publish: eventing.publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            turnAttemptId: input.attemptId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: resolvedModel?.configured.id ?? turn.model,
+            externallyBilled: billingState.isExternallyBilledTurn,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+            countsTowardTokenCap: billingState.countsTowardTokenCap,
+            servingCredentialId: providerTurn.effectiveCodexCredentialId,
+            priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+            emittedSourceKeys: emittedModelUsageSourceKeys,
+            renewLease: () => leases.renewServing("model_usage"),
+            leaseLost: leases.servingLost,
+            leaseLostMessage: "Provider credential lease expired during session title generation",
+          });
+        }
+      },
       onError: (error) => {
         observability.warn("parallel session title generation failed", {
           ...safeErrorDiagnostic(error),

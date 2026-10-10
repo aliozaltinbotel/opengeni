@@ -150,6 +150,8 @@ export function startParallelSessionTitleGeneration(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   onError?: (error: unknown) => void;
+  /** Receipt durability remains mandatory even if a completed title is discarded. */
+  settle?: (result: GeneratedSessionTitle) => Promise<void>;
 }): ParallelSessionTitleGeneration {
   const cancellationController = new AbortController();
   const timeoutSignal = AbortSignal.timeout(input.timeoutMs ?? PARALLEL_SESSION_TITLE_TIMEOUT_MS);
@@ -158,11 +160,18 @@ export function startParallelSessionTitleGeneration(input: {
   const signal = AbortSignal.any(signals);
   const generation = input
     .generate(signal)
-    .then((result) => (signal.aborted ? null : result))
     .catch((error: unknown) => {
       if (!signal.aborted) input.onError?.(error);
       return null;
+    })
+    .then(async (result) => {
+      if (!result) return null;
+      await input.settle?.(result);
+      return signal.aborted ? null : result;
     });
+  // The owning activity joins this promise through finish/cancel; do not emit
+  // an unhandled rejection while it is still processing the main stream.
+  void generation.catch(() => undefined);
   let finished: Promise<GeneratedSessionTitle | null> | null = null;
 
   return {

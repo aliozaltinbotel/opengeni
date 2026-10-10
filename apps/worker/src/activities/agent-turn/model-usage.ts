@@ -444,7 +444,7 @@ export async function processModelResponseTerminalEvent(input: {
  * cross-process authority after a worker restart.
  */
 export async function processCompactionModelUsageEvent(input: {
-  usage: ModelResponseUsage;
+  usage: ModelResponseUsage | null;
   nativeSourceKey?:string;
   state: CompactionModelUsageEventState;
   sourceKind?: "compaction" | "session-title";
@@ -476,9 +476,42 @@ export async function processCompactionModelUsageEvent(input: {
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
 > {
+  if (input.usage === null) {
+    const sourceKey = input.nativeSourceKey;
+    if (!sourceKey) throw new Error("MODEL_SOURCE_RESPONSE_UNBOUND");
+    if (input.state.claimedSourceKeys.has(sourceKey)) return { status: "duplicate", sourceKey };
+    await recordCompletedModelCallBeforeOwnershipFences({
+      renewLease: input.renewLease,
+      leaseLost: input.leaseLost,
+      leaseLostMessage: input.leaseLostMessage,
+      recordUsage: async () => {
+        await recordModelCallUsageEvent(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          callKind: input.sourceKind === "session-title" ? "session_title" : "compaction",
+          scope: "call",
+          provider: input.provider,
+          providerApi: input.providerApi,
+          upstreamProvider: null,
+          model: input.model,
+          billingPath: (input.chargesOpenGeniCredits ?? !input.externallyBilled)
+            ? "opengeni_credits" : "external",
+          billing: null,
+        });
+        input.state.claimedSourceKeys.add(sourceKey);
+        input.state.usageCount += 1;
+      },
+    });
+    return { status: "processed", sourceKey, authoritative: true };
+  }
+  const usage = input.usage;
   const usageOrdinal = input.state.usageCount + 1;
   const sourceKey = input.nativeSourceKey ?? modelUsageSourceKey({
-    responseId: input.usage.responseId,
+    responseId: usage.responseId,
     dispatchId: input.dispatchId,
     positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
   });
@@ -493,7 +526,7 @@ export async function processCompactionModelUsageEvent(input: {
     priorSessionCredentialId: input.priorSessionCredentialId,
     isFirstCallOfTurn: usageOrdinal === 1,
   });
-  const normalizedUsage = normalizeModelCallUsage(input.usage.usage);
+  const normalizedUsage = normalizeModelCallUsage(usage.usage);
   let authoritative = false;
   await recordCompletedModelCallBeforeOwnershipFences({
     renewLease: input.renewLease,
@@ -518,9 +551,9 @@ export async function processCompactionModelUsageEvent(input: {
         ...(input.countsTowardTokenCap !== undefined
           ? { countsTowardTokenCap: input.countsTowardTokenCap }
           : {}),
-        usage: input.usage.usage,
+        usage: usage.usage,
         normalizedUsage,
-        gatewayBilling: input.usage.gatewayBilling,
+        gatewayBilling: usage.gatewayBilling,
         sourceKey,
         observability: input.observability,
         metricProvider: input.provider,
@@ -536,7 +569,7 @@ export async function processCompactionModelUsageEvent(input: {
         providerApi: input.providerApi,
         model: input.model,
         sourceKey,
-        usage: input.usage,
+        usage: usage,
         normalizedUsage,
         ...(billing ? { billingPath: billing.billingPath } : {}),
         ...(billing ? { billingSnapshot: billing } : {}),

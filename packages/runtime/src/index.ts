@@ -1297,6 +1297,8 @@ export async function summarizeForCompaction(
     preparedRequest?: Omit<ModelRequest, "input">;
     signal?: AbortSignal;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
+    /** Awaited terminal fact when the provider returned no usage pools. */
+    onUnreportedUsage?: () => void | Promise<void>;
   } = {},
 ): Promise<string> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
@@ -1336,6 +1338,8 @@ export async function summarizeForCompaction(
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
       await options.onUsage?.(usage);
+    } else {
+      await options.onUnreportedUsage?.();
     }
     const choice = (
       completion as {
@@ -1437,6 +1441,8 @@ export async function summarizeForCompaction(
   const usage = modelResponseUsageFromResponse(response);
   if (usage) {
     await options.onUsage?.(usage);
+  } else {
+    await options.onUnreportedUsage?.();
   }
   if (
     (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
@@ -1642,6 +1648,7 @@ export async function requestRemoteCompactionV2(
     captureAgent?: object;
     signal?: AbortSignal | undefined;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
+    onUnreportedUsage?: () => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
   const { signal: _priorSignal, ...prefix } = options.preparedRequest;
@@ -1683,6 +1690,8 @@ export async function requestRemoteCompactionV2(
   const usage = modelResponseUsageFromResponse(response);
   if (usage) {
     await options.onUsage?.(usage);
+  } else {
+    await options.onUnreportedUsage?.();
   }
   if (isFailedCompactionProviderResponse(response)) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));

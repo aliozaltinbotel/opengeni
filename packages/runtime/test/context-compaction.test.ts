@@ -1095,7 +1095,7 @@ describe("provider-proof compaction transcript", () => {
     expect(JSON.stringify(seenInput)).not.toContain("callId");
   });
 
-  test("passes prompt_cache_key through summarizer Responses calls when provided", async () => {
+  test.each([true, false])("preserves summarizer cache key and settles reported=%s usage", async (reported) => {
     let seenKey: unknown;
     const usages: unknown[] = [];
     const fakeClient = {
@@ -1104,11 +1104,11 @@ describe("provider-proof compaction transcript", () => {
           seenKey = request.prompt_cache_key;
           return {
             id: "resp_summary",
-            usage: {
+            ...(reported ? { usage: {
               input_tokens: 321,
               output_tokens: 12,
               total_tokens: 333,
-            },
+            } } : {}),
             output: [
               {
                 type: "message",
@@ -1131,17 +1131,18 @@ describe("provider-proof compaction transcript", () => {
         model: "scripted-model",
         promptCacheKey: "session-123",
         onUsage: async (usage) => usages.push(usage),
+        onUnreportedUsage: async () => { usages.push(null); },
       },
     );
 
     expect(summary).toBe("rendered summary");
     expect(seenKey).toBe("session-123");
-    expect(usages).toEqual([
+    expect(usages).toEqual(reported ? [
       {
         responseId: "resp_summary",
         usage: { inputTokens: 321, outputTokens: 12, totalTokens: 333 },
       },
-    ]);
+    ] : [null]);
   });
 
   test("rejects a semantically empty provider response with content-free diagnostics", async () => {
