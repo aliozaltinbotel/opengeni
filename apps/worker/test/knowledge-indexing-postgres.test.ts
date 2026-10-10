@@ -1001,9 +1001,11 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
       requestIdToCompletion: Map<unknown, unknown> }> };
   };
   let nativePolls = { started: 0, returned: 0, rejected: 0 };
+  let workerGeneration = 0, workerIdentity = "";
   const startWorker = async () => {
+    workerIdentity = `maint430-hosted-parent:${process.pid}:${++workerGeneration}`;
     worker = await Worker.create({ connection: native, namespace, taskQueue, workflowBundle: { code },
-      activities: activities(), maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
+      identity: workerIdentity, activities: activities(), maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
     nativePolls = { started: 0, returned: 0, rejected: 0 };
     const custody = worker as unknown as WorkerCustody;
     const poll = custody.nativeWorker.pollWorkflowActivation.bind(custody.nativeWorker);
@@ -1014,6 +1016,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
       catch (error) { counts.rejected++; throw error; }
     };
     running = worker.run();
+    console.error("KNOWLEDGE_HOSTED_WORKER_INSTANCE_RUNNING", workerIdentity);
     runningFailure = new Promise<never>((_resolve, reject) => {
       void running!.catch(error => {
         const category = error instanceof Error ? error.name.replace(/[^A-Za-z0-9_]/g, "").slice(0, 80) : "UnknownError";
@@ -1023,7 +1026,11 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     });
     void runningFailure.catch(() => undefined);
   };
-  const stopWorker = async () => { worker?.shutdown(); await running; worker = undefined; running = undefined; };
+  const stopWorker = async () => {
+    worker?.shutdown(); await running;
+    console.error("KNOWLEDGE_HOSTED_WORKER_INSTANCE_STOPPED", workerIdentity);
+    worker = undefined; running = undefined;
+  };
   const start = async (input: KnowledgeQueryWorkflowRequest | KnowledgePreparationWorkflowRequest, preparation = false) => {
     const callId = knowledgeQueryOperationId(context, input.operationId, preparation ? "preparation" : "query");
     const bindingDigest = createHash("sha256").update(JSON.stringify({ context, request: input.request })).digest("hex");
@@ -1097,6 +1104,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
             const response=await fetch(process.env.OPENGENI_RECEIPT_TEST_PROVIDER_URL);await response.json();return [1,0,0];}}}));
       const worker=await Worker.create({connection:native,namespace:process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE,
         taskQueue:process.env.OPENGENI_RECEIPT_TEST_TASK_QUEUE,workflowBundle:{codePath:'./apps/worker/dist/workflow-bundle.js'},activities,
+        identity:'maint430-hosted-child:'+process.pid,
         maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2});
       await worker.run();
     `;
@@ -1148,6 +1156,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
       if (!worker || observations++ >= 16) return;
       const status = worker.getStatus();
       console.error("KNOWLEDGE_HOSTED_RECOVERY_WORKER_STATUS", JSON.stringify({
+        workerIdentity,
         runState: status.runState, workflowPollerState: status.workflowPollerState,
         activityPollerState: status.activityPollerState, hasOutstandingWorkflowPoll: status.hasOutstandingWorkflowPoll,
         numInFlightWorkflowActivations: status.numInFlightWorkflowActivations,
