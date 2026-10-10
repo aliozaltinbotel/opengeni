@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for e04f50bc
+
+# MAINT-P09-434 compatible compound descendant of reviewed upstream/fork history; exact source is checked in every target.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-e04f50bc
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: e04f50bc0191b0ac9fb4ad04dfa1ab687bc755bb
