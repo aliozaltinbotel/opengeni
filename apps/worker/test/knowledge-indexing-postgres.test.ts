@@ -959,6 +959,8 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
   const taskQueue = `knowledge-receipts-${crypto.randomUUID()}`;
   const handles: Array<{ cancel(): Promise<void>; result(): Promise<unknown>; describe(): Promise<{ status: { name: string } }> }> = [];
   const suffix = crypto.randomUUID();
+  // Fixed stage names and local array indices only; no business/provider data.
+  const stage = (name: string, index?: number) => console.error("KNOWLEDGE_HOSTED_AWAIT_STAGE", name, index ?? "");
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "knowledge-receipts", accountExternalId: suffix, accountName: "Receipt owner",
     workspaceExternalSource: "knowledge-receipts", workspaceExternalId: suffix, workspaceName: "Receipt owner",
@@ -1186,54 +1188,115 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
       throw new Error(`Recovery process exited while hosted owner active (exit ${exitCode}; private diagnostic ${path}; ${diagnostic.length} bytes)`);
     });
     void recoveryExited.catch(() => undefined);
+    stage("crash-result:start");
     const crashFailure = await Promise.race([crashed.result().then(() => {
       throw new Error("Unknown provider call unexpectedly completed");
     }, error => error), recoveryExited]);
+    stage("crash-result:complete");
     expect(crashFailure).toBeInstanceOf(WorkflowFailedError);
     expect(crashFailure.cause).toMatchObject({ type: "KNOWLEDGE_QUERY_OUTCOME_UNKNOWN", nonRetryable: true });
+    stage("crash-describe:start");
     expect((await crashed.describe()).status.name).toBe("FAILED");
+    stage("crash-describe:complete");
     expect(physicalCalls).toBe(callsBeforeRecovery);
     const crashedCallId = knowledgeQueryOperationId(context, crashedInput.operationId);
+    stage("crash-facts:start");
     const crashFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
       WHERE account_id=${grant.accountId} AND source_resource_id=${crashedCallId}`;
+    stage("crash-facts:complete");
     expect(crashFacts.some(row => row.event_type === "knowledge.query.indeterminate" && row.attributes.providerReceipt.estimatedProviderCostMicros === null)).toBeTrue();
     expect(crashFacts.some(row => row.event_type === "embedding.call" || row.event_type === "knowledge.query.closed")).toBeFalse();
     expect(crashProviderCalls).toBe(1);
+    stage("crash-duplicate:start");
     await expect(start(crashedInput)).rejects.toBeInstanceOf(WorkflowExecutionAlreadyStartedError);
+    stage("crash-duplicate:complete");
+    stage("crash-pressure:start");
     const crashPressure = await pendingKnowledgeQueryPressure(client.db, { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId });
+    stage("crash-pressure:complete");
     expect(crashPressure.bytes).toBe(4 + Buffer.byteLength(crashedInput.request.query!, "utf8"));
     expect(crashPressure.micros).toBe(crashPressure.bytes);
-    await Worker.runReplayHistory({ workflowBundle: { code } }, await crashed.fetchHistory(), crashed.workflowId);
+    stage("crash-history:start");
+    const crashHistory = await crashed.fetchHistory();
+    stage("crash-history:complete");
+    stage("crash-replay:start");
+    await Worker.runReplayHistory({ workflowBundle: { code } }, crashHistory, crashed.workflowId);
+    stage("crash-replay:complete");
     loseResponse = false; revokeOnReturn = true;
+    stage("revoked-balance:start");
     const beforeRevocation = (await getBillingBalance(client.db, grant.accountId)).balanceMicros;
+    stage("revoked-balance:complete");
     const revokedInput = { ...paidInput, operationId: `revoked:${suffix}` };
+    stage("revoked-start:start");
     const revoked = await start(revokedInput);
+    stage("revoked-start:complete");
+    stage("revoked-result:start");
     await expect(Promise.race([revoked.result(), recoveryExited])).rejects.toThrow();
+    stage("revoked-result:complete");
+    stage("revoked-describe:start");
     expect((await revoked.describe()).status.name).toBe("FAILED");
+    stage("revoked-describe:complete");
     const revokedCallId = knowledgeQueryOperationId(context, revokedInput.operationId);
+    stage("revoked-facts:start");
     const revokedFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
       WHERE account_id=${grant.accountId} AND source_resource_id=${revokedCallId}`;
+    stage("revoked-facts:complete");
     expect(revokedFacts.some(row => row.event_type === "embedding.call" && row.attributes.outcome === "completed")).toBeTrue();
     expect(revokedFacts.some(row => row.event_type === "knowledge.query.closed" && row.attributes.settlement === "provider_completed_unsettled")).toBeTrue();
+    stage("revoked-balance-readback:start");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(beforeRevocation);
+    stage("revoked-balance-readback:complete");
     const beforeRefusal = physicalCalls;
+    stage("refused-start:start");
     const refused = await start({ ...paidInput, operationId: `refused:${suffix}` });
+    stage("refused-start:complete");
+    stage("refused-result:start");
     await expect(Promise.race([refused.result(), recoveryExited])).rejects.toThrow();
+    stage("refused-result:complete");
+    stage("refused-describe:start");
     expect((await refused.describe()).status.name).toBe("FAILED");
+    stage("refused-describe:complete");
     expect(physicalCalls).toBe(beforeRefusal);
+    stage("business-assertions:complete");
   } finally {
-    for (const handle of handles) {
-      if ((await handle.describe()).status.name === "RUNNING") {
-        await handle.cancel(); await handle.result().catch(() => undefined);
+    stage("cleanup:start");
+    for (const [index, handle] of handles.entries()) {
+      stage("cleanup-describe:start", index);
+      const status = (await handle.describe()).status.name;
+      stage("cleanup-describe:complete", index);
+      if (status === "RUNNING") {
+        stage("cleanup-cancel:start", index);
+        await handle.cancel();
+        stage("cleanup-cancel:complete", index);
+        stage("cleanup-result:start", index);
+        await handle.result().catch(() => undefined);
+        stage("cleanup-result:complete", index);
       }
     }
     if (recoveryChild) {
       stoppingRecovery = true;
+      stage("cleanup-child-signal:start");
       if (recoveryChild.process.exitCode === null) recoveryChild.process.kill("SIGTERM");
-      expect(await recoveryChild.process.exited).toBe(0); await recoveryChild.diagnostics;
+      stage("cleanup-child-signal:complete");
+      stage("cleanup-child-exit:start");
+      expect(await recoveryChild.process.exited).toBe(0);
+      stage("cleanup-child-exit:complete");
+      stage("cleanup-child-diagnostics:start");
+      await recoveryChild.diagnostics;
+      stage("cleanup-child-diagnostics:complete");
     }
+    stage("cleanup-provider:start");
     hostedProvider?.stop(true);
-    await stopWorker(); await native.close(); await connection.close();
+    stage("cleanup-provider:complete");
+    stage("cleanup-parent-worker:start");
+    await stopWorker();
+    stage("cleanup-parent-worker:complete");
+    stage("cleanup-native:start");
+    await native.close();
+    stage("cleanup-native:complete");
+    stage("cleanup-client:start");
+    await connection.close();
+    stage("cleanup-client:complete");
+    stage("test-callback:complete");
   }
 }, 240_000);
 
