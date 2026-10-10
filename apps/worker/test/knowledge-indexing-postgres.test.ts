@@ -1095,6 +1095,8 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)(`released knowledge wor
     const heldCrashResponse = new Promise<Response>(resolve => { releaseCrashProvider = resolve; });
     let crashProviderCalls = 0, prefillProviderCalls = 0;
     let crashDispatchObserved = false;
+    let providerRevocationCommitted!: () => void;
+    const observedProviderRevocation = new Promise<void>(resolve => { providerRevocationCommitted = resolve; });
     let providerPhase: "prefill" | "crash" | "recovery" = "prefill";
     const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
       if (providerPhase === "prefill") {
@@ -1109,8 +1111,12 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)(`released knowledge wor
       // Later legitimate calls exercise the same live membership revocation
       // after provider return; recovery itself must never reach this provider.
       physicalCalls++;
-      if (revokeOnReturn) await shared.admin`UPDATE workspace_memberships SET permissions='[]'::jsonb
-        WHERE account_id=${grant.accountId} AND workspace_id=${grant.workspaceId!} AND subject_id=${grant.subjectId}`;
+      if (revokeOnReturn) {
+        await shared.admin`UPDATE workspace_memberships SET permissions='[]'::jsonb
+          WHERE account_id=${grant.accountId} AND workspace_id=${grant.workspaceId!} AND subject_id=${grant.subjectId}`;
+        // Only the committed live membership change releases the next call.
+        providerRevocationCommitted();
+      }
       return Response.json({ vector: [1, 0, 0] });
     } });
     hostedProvider = provider;
@@ -1259,6 +1265,15 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)(`released knowledge wor
     stage("revoked-start:start");
     const revoked = await start(revokedInput);
     stage("revoked-start:complete");
+    stage("revoked-provider-commit:start");
+    await observedProviderRevocation;
+    stage("revoked-provider-commit:complete");
+    const beforeRefusal = physicalCalls;
+    stage("refused-start:start");
+    const refused = await start({ ...paidInput, operationId: `refused:${suffix}` });
+    stage("refused-start:complete");
+    // The current-authority refusal can run while the first workflow's client
+    // observes its terminal result; it still starts after actual revocation.
     stage("revoked-result:start");
     await expect(Promise.race([revoked.result(), recoveryExited])).rejects.toThrow();
     stage("revoked-result:complete");
@@ -1275,10 +1290,6 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)(`released knowledge wor
     stage("revoked-balance-readback:start");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(beforeRevocation);
     stage("revoked-balance-readback:complete");
-    const beforeRefusal = physicalCalls;
-    stage("refused-start:start");
-    const refused = await start({ ...paidInput, operationId: `refused:${suffix}` });
-    stage("refused-start:complete");
     stage("refused-result:start");
     await expect(Promise.race([refused.result(), recoveryExited])).rejects.toThrow();
     stage("refused-result:complete");
