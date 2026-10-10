@@ -412,7 +412,7 @@ describe("session realtime ledger", () => {
     await check(active.connection, "attachment");
     for (const overrides of [{ connectionEpoch: active.connection.connectionEpoch + 1 },
       { ownerSubjectId: "different-authenticated-owner" }, { model: "different-model" }]) {
-      await expect(check(active.connection, "attachment", overrides)).rejects.toThrow("changed");
+      await expect(check(active.connection, "attachment", overrides)).rejects.toBeInstanceOf(SessionRealtimeConflictError);
     }
     const replacement = await transaction(value.owner.workspaceId, tx => claimSessionRealtimeConnectionInTransaction(tx, {
       ...ownerProof(value, active.mode.version), operationId: crypto.randomUUID(),
