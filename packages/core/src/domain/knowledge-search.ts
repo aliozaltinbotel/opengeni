@@ -102,9 +102,22 @@ export async function searchKnowledgeEntries(
       : billingActor.kind === "service"
         ? { kind: "service" }
         : { kind: "unknown" };
+  let authorityRefusal: { error: unknown } | undefined;
+  const authorize = async (tx: Database) => {
+    try { await execution?.authorize(tx); }
+    catch (error) { authorityRefusal = { error }; throw error; }
+  };
+  const authorizedRead = <T>(queryDb: Database, read: (tx: Database) => Promise<T>): Promise<T> => {
+    if (!execution) return read(queryDb);
+    if (isTransactionHandle(queryDb)) return authorize(queryDb).then(() => read(queryDb));
+    return withRlsContext(queryDb, callOwner, async tx => {
+      await authorize(tx);
+      return read(tx);
+    }, undefined, "none");
+  };
   if (!request.query || request.mode === "keyword") {
     return {
-      ...(await listKnowledgeEntries(db, context, request)),
+      ...(await authorizedRead(db, tx => listKnowledgeEntries(tx, context, request))),
       searchMode: "keyword" as const,
     };
   }
@@ -119,7 +132,7 @@ export async function searchKnowledgeEntries(
   ) => {
     if (request.mode === "vector") throw error;
     return {
-      ...(await listKnowledgeEntries(queryDb, context, { ...retrievalRequest, mode: "keyword" })),
+      ...(await authorizedRead(queryDb, tx => listKnowledgeEntries(tx, context, { ...retrievalRequest, mode: "keyword" }))),
       searchMode: "keyword" as const,
       fallbackReason,
     };
@@ -154,7 +167,7 @@ export async function searchKnowledgeEntries(
   const locked = <T>(fn: (tx: Database) => Promise<T>): Promise<T> =>
     withRlsContext(db, callOwner, async tx => {
       // External organization lifecycle precedes the shared tenancy/usage locks.
-      await execution?.authorize(tx);
+      await authorize(tx);
       return withKnowledgeQueryAccountLock(tx, context.accountId, context.workspaceId, fn);
     }, undefined, "none");
   const sourceFact = (eventType: "knowledge.query.admitted" | "knowledge.query.dispatched" | "knowledge.query.closed",
@@ -252,6 +265,9 @@ export async function searchKnowledgeEntries(
           attributes: { ...admission.attributes, ...dispatch.attributes,
             outcome: "indeterminate", inputTokens: null, estimatedProviderCostMicros: null, pricingSource: null } });
       }
+      // A current-authority refusal is never a provider outage. Keep any
+      // durable unknown dispatch fact above, then propagate the refusal.
+      if (authorityRefusal) throw authorityRefusal.error;
       return keywordFallback(queryDb, error, "provider_unavailable");
     }
     // Older/local embedders expose vectors only. Their successful return is

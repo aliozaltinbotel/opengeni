@@ -2510,6 +2510,7 @@ describe("release schema contract", () => {
       "0667_recurring_temporary_image_cleanup_fairness.sql",
       "0668_usage_event_call_attributes.sql",
       "0669_usage_event_call_attributes_schema_required.sql",
+      "0670_knowledge_index_receipt_owner.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

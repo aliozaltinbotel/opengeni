@@ -52,7 +52,10 @@ mock.module("@opengeni/db", () => ({
   ...nativeDbExports,
   listKnowledgeEntries: list,
   withRlsContext: async (_db: unknown, _scope: unknown, fn: (db: unknown) => Promise<unknown>) => fn({}),
-  readKnowledgeQueryUsageFact: async () => null,
+  readKnowledgeQueryUsageFact: async (_db: unknown, input: { callId: string; eventType: string }) => {
+    const fact = usage.mock.calls.map(call => call[1]).find(row => row.sourceResourceId === input.callId && row.eventType === input.eventType);
+    return fact ? { attributes: fact.attributes, occurredAt: fact.occurredAt ?? new Date(0) } : null;
+  },
   pendingKnowledgeQueryPressure: async () => ({ bytes: 0, micros: 0, workspaceMicros: 0, memberMicros: 0, indexedChunks: 0, queryMicros: 0 }),
   getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
   applyCreditDebitAfterUse: debits,
@@ -89,6 +92,8 @@ mock.module("@opengeni/db", () => ({
   countActiveOrganizationApiKeysForAccount: async () => 0,
 }));
 const { searchKnowledgeEntries } = await import("./knowledge-search");
+const { authorizeKnowledgeQueryOwner } = await import("./knowledge");
+const queryAuthorityDb = await import("@opengeni/db");
 const { checkLimit } = await import("../billing/limits");
 afterAll(() => mock.restore());
 const unavailable = () => {
@@ -818,4 +823,58 @@ test("actual embedding SDK preserves dispatch identity, awaits its receipt and n
     await expect(provider.embedQuery("retry forbidden", undefined, { callId: "failed-call", beforeDispatch: async () => { dispatchObserved = true; } })).rejects.toThrow("provider unavailable");
     expect(calls).toBe(2);
   } finally { release(); fetch.mockRestore(); }
+});
+
+for (const refuseAt of ["dispatch_lock", "before_dispatch"] as const) {
+  test(`hybrid workflow propagates revoked-key authority at ${refuseAt} without lexical exposure`, async () => {
+    let checks = 0, embedded = 0;
+    const keyContext: KnowledgeContext = { ...serviceContext, actor: { kind: "service", principalKind: "api_key",
+      subjectId: `api_key:${crypto.randomUUID()}`, writeScopes: [], settingsScopes: [], review: false } };
+    const grant = { accountId: keyContext.accountId, workspaceId: keyContext.workspaceId,
+      subjectId: keyContext.actor.kind === "service" ? keyContext.actor.subjectId : "", principalKind: "api_key" as const,
+      permissions: ["documents:search" as const] };
+    const key = spyOn(queryAuthorityDb, "findActiveWorkspaceApiKeyById").mockImplementation(async () =>
+      ++checks >= (refuseAt === "dispatch_lock" ? 2 : 3) ? null : { permissions: grant.permissions } as never);
+    const before = list.mock.calls.length, debitBefore = debits.mock.calls.length;
+    const callId = crypto.randomUUID();
+    const execution = { callId, owner: { workflowId: `knowledge-query:${callId}`, workflowRunId: "run", activityId: "query" },
+      authorize: async (tx: Parameters<typeof authorizeKnowledgeQueryOwner>[0]) =>
+        authorizeKnowledgeQueryOwner(tx, { context: keyContext, grant, externalContinuation: null }) };
+    try {
+      await expect(searchKnowledgeEntries({} as never, keyContext, { query: "private", mode: "hybrid" }, () => ({
+        model: "test", dimensions: 3,
+        embedQuery: async (_query: string, _completed: unknown, dispatch: { beforeDispatch: (receipt: unknown) => Promise<void> }) => {
+          await dispatch.beforeDispatch({ callId, model: "test", inputBytes: 7, inputItems: 1 });
+          embedded++; return [1, 0, 0];
+        },
+      }) as never, undefined, execution)).rejects.toThrow("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+      expect(list.mock.calls.length).toBe(before);
+      expect(debits.mock.calls.length).toBe(debitBefore);
+      expect(embedded).toBe(0);
+      if (refuseAt === "before_dispatch") expect(usage.mock.calls.map(call => call[1]).find(row =>
+        row.sourceResourceId === callId && row.eventType === "knowledge.query.indeterminate")?.attributes).toMatchObject({
+          outcome: "indeterminate", inputTokens: null, estimatedProviderCostMicros: null });
+    } finally { key.mockRestore(); }
+  });
+}
+
+test("delayed over-limit hybrid fallback authenticates before any early read", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const refusal = new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+  let checks = 0, embedded = 0;
+  const before = list.mock.calls.length;
+  const callId = crypto.randomUUID();
+  const result = searchKnowledgeEntries({} as never, serviceContext, { query: "é".repeat(600) }, () => {
+    embedded++; throw new Error("provider must not run");
+  }, { documentEmbeddingProvider: "openai", documentEmbeddingBillingMode: "credits",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000 } as Settings,
+  { callId, owner: { workflowId: `knowledge-query:${callId}`, workflowRunId: "run", activityId: "query" },
+    authorize: async () => { checks++; await pending; throw refusal; } });
+  await Promise.resolve();
+  expect(list.mock.calls.length).toBe(before);
+  release();
+  await expect(result).rejects.toBe(refusal);
+  expect(checks).toBe(1);
+  expect(embedded).toBe(0);
 });

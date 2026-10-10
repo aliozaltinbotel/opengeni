@@ -121,3 +121,40 @@ test("initial Codex absence cannot close accounting; confirmed attachment requir
   read.mockResolvedValue(new Response(null, { status: 401 }));
   expect(await observeRealtimeSession({ ...input, previouslyAttached: true })).toEqual({ action: "waiting" });
 });
+
+
+test("observed Azure final survives the observation timer while its attachment receipt is blocked", async () => {
+  let acknowledge!: () => void, timeout!: () => void, pulse!: () => void;
+  const attached = new Promise<void>(resolve => { acknowledge = resolve; });
+  let socket!: Socket, closed = 0, heartbeats = 0;
+  class Socket {
+    onopen: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    close() { closed++; this.onclose?.(); }
+    constructor() { socket = this; }
+  }
+  spies.push(spyOn(globalThis, "WebSocket").mockImplementation((() => new Socket()) as never));
+  const clear = spyOn(globalThis, "clearTimeout").mockImplementation(() => {}); spies.push(clear);
+  spies.push(spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    expect(delay).toBe(30_000); timeout = callback; return 1;
+  }) as never));
+  spies.push(spyOn(globalThis, "setInterval").mockImplementation(((callback: () => void, delay: number) => {
+    expect(delay).toBe(5_000); pulse = callback; return 2;
+  }) as never));
+  spies.push(spyOn(globalThis, "clearInterval").mockImplementation(() => {}));
+  let settled = false;
+  const result = observeRealtimeSession({ url: "wss://voice.example.test", headers: {}, source, previouslyAttached: false,
+    heartbeat: () => { heartbeats++; }, onAttached: () => attached }).then(value => { settled = true; return value; });
+  socket.onopen?.();
+  socket.onmessage?.({ data: JSON.stringify({ type: "session.closed", reason: "remote_hangup" }) });
+  // Exercise a timer callback already queued before cancellation too.
+  timeout(); pulse();
+  await Promise.resolve(); await Promise.resolve();
+  expect(settled).toBeFalse();
+  expect(heartbeats).toBe(1);
+  expect(closed).toBeGreaterThan(0);
+  acknowledge();
+  expect(await result).toEqual({ action: "closed", outcome: "completed" });
+  expect(clear).toHaveBeenCalled();
+});

@@ -22,6 +22,8 @@ import {
   createDb,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
+  getKnowledgeEntry,
+  withRlsContext,
   type Database,
 } from "@opengeni/db";
 import { createNatsEventBus, type ResponderConnection } from "@opengeni/events";
@@ -35,6 +37,7 @@ import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/dev
 import {
   resolveCatalogSettings,
   knowledgeQueryOperationId,
+  authorizeKnowledgeQueryOwner,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
 } from "@opengeni/core";
 import {
@@ -154,7 +157,18 @@ export async function createTemporalWorkflowClient(
       const handle = temporal.workflow.getHandle(workflowId);
       if (existing && await handle.query<string>("knowledgeQueryBinding") !== bindingDigest)
         throw new Error("KNOWLEDGE_QUERY_OPERATION_INPUT_CONFLICT");
-      return await handle.result();
+      const result: Awaited<ReturnType<NonNullable<SessionWorkflowClient["prepareKnowledge"]>>> = await handle.result();
+      await withRlsContext(db, input.context, async tx => {
+        await authorizeKnowledgeQueryOwner(tx, input, settings);
+        for (const view of ["published", "needs_review"] as const)
+          for (const entry of result.matches[view].entries)
+            if (!await getKnowledgeEntry(tx, input.context, entry.id, { revisionId: entry.revision.id, view }))
+              throw new Error("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+        for (const collection of result.collections.entries)
+          if (!await getKnowledgeEntry(tx, input.context, collection.id, { revisionId: collection.revisionId, view: collection.view }))
+            throw new Error("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+      }, undefined, "none");
+      return result;
     },
     queryKnowledge: async (input) => {
       const callId = knowledgeQueryOperationId(input.context, input.operationId);
@@ -170,7 +184,14 @@ export async function createTemporalWorkflowClient(
       const handle = temporal.workflow.getHandle(workflowId);
       if (existing && await handle.query<string>("knowledgeQueryBinding") !== bindingDigest)
         throw new Error("KNOWLEDGE_QUERY_OPERATION_INPUT_CONFLICT");
-      return await handle.result();
+      const result: Awaited<ReturnType<NonNullable<SessionWorkflowClient["queryKnowledge"]>>> = await handle.result();
+      await withRlsContext(db, input.context, async tx => {
+        await authorizeKnowledgeQueryOwner(tx, input, settings);
+        for (const entry of result.entries)
+          if (!await getKnowledgeEntry(tx, input.context, entry.id, { revisionId: entry.revision.id, view: input.request.view ?? "published" }))
+            throw new Error("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+      }, undefined, "none");
+      return result;
     },
     startRealtimeUsageObservation: async (input) => {
       try {

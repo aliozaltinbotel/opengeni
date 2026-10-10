@@ -26,7 +26,7 @@ export async function observeRealtimeSession(input: ObserverInput): Promise<Obse
       settled = true; clearTimeout(timer); clearInterval(pulse); socket.close();
       if (error) reject(error); else resolve(value);
     };
-    const timer = setTimeout(() => finish({ action: "waiting" }), 30_000);
+    const timer = setTimeout(() => { if (!finalObserved) finish({ action: "waiting" }); }, 30_000);
     const pulse = setInterval(() => {
       try { input.heartbeat(); } catch (error) { finish({ action: "waiting" }, error); }
     }, 5_000);
@@ -42,8 +42,12 @@ export async function observeRealtimeSession(input: ObserverInput): Promise<Obse
       const closed = message as { type?: unknown; reason?: unknown };
       // This provider event is defined by Azure GPT Live. Do not ascribe its
       // semantics to other providers merely because their JSON resembles it.
-      if (input.source.provider !== "azure-live" || closed.type !== "session.closed") return;
+      if (settled || finalObserved || input.source.provider !== "azure-live" || closed.type !== "session.closed") return;
       finalObserved = true;
+      // The authenticated final has already arrived. Retire transport now,
+      // but keep heartbeats until its required attachment receipt commits.
+      clearTimeout(timer);
+      socket.close();
       const outcome: ModelCallOutcome = closed.reason === "content" ? "failed"
         : closed.reason === "connection_lost" ? "indeterminate"
         : ["close_requested", "expired", "remote_hangup"].includes(String(closed.reason))
