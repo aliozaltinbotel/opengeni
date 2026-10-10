@@ -1071,7 +1071,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
             const response=await fetch(process.env.OPENGENI_RECEIPT_TEST_PROVIDER_URL);await response.json();return [1,0,0];}}}));
       const worker=await Worker.create({connection:native,namespace:process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE,
         taskQueue:process.env.OPENGENI_RECEIPT_TEST_TASK_QUEUE,workflowBundle:{codePath:'./apps/worker/dist/workflow-bundle.js'},activities,
-        maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:1});
+        maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2});
       await worker.run();
     `;
     const child = Bun.spawn([process.execPath, "--no-install", "--no-env-file", "-e", childCode], {
