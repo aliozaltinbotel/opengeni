@@ -52,6 +52,9 @@ export type SignalCodexCapacityWorkflow = (input: {
 export type StartSandboxReaperWorkflow = () => Promise<"started" | "already_running">;
 
 /** Start-or-observe the one durable reconciler for a paid video operation. */
+export type RealtimeUsageInput = { accountId: string; workspaceId: string; sessionId: string; connectionId: string };
+export type StartRealtimeUsageWorkflow = (input: RealtimeUsageInput) => Promise<"started" | "already_running">;
+
 export type StartVideoGenerationWorkflow = (input: {
   accountId: string;
   workspaceId: string;
@@ -105,6 +108,7 @@ export type SharedActivityServices = {
    * deliberately retains the composite implementation for embedded/test hosts. */
   startSandboxReaperWorkflow?: StartSandboxReaperWorkflow | null;
   startVideoGenerationWorkflow?: StartVideoGenerationWorkflow | null;
+  startRealtimeUsageWorkflow?: StartRealtimeUsageWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
   // AND the mid-stream budget valve) delegates the funding decision to

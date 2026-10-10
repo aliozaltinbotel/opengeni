@@ -1,5 +1,6 @@
 import { afterAll, expect, mock, spyOn, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
+import { EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA } from "@opengeni/contracts";
 import type { KnowledgeContext, recordUsageEvent } from "@opengeni/db";
 const lockedDb = {} as never;
 let lockActive = false;
@@ -50,6 +51,9 @@ const nativeDbExports = await import("@opengeni/db");
 mock.module("@opengeni/db", () => ({
   ...nativeDbExports,
   listKnowledgeEntries: list,
+  withRlsContext: async (_db: unknown, _scope: unknown, fn: (db: unknown) => Promise<unknown>) => fn({}),
+  readKnowledgeQueryUsageFact: async () => null,
+  pendingKnowledgeQueryPressure: async () => ({ bytes: 0, micros: 0, workspaceMicros: 0, memberMicros: 0, indexedChunks: 0, queryMicros: 0 }),
   getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
   applyCreditDebitAfterUse: debits,
   checkWorkspaceAllowance: allowanceChecks,
@@ -206,9 +210,9 @@ test("shadow query usage meters bytes without checking or consuming credits", as
     settings,
   );
   expect(found.searchMode).toBe("vector");
-  const [bytesRow, callRow] = usage.mock.calls
-    .slice(-2)
-    .map((call) => call[1] as { quantity: number; eventType: string; sourceResourceId?: string });
+  const rows = usage.mock.calls.map(call => call[1]);
+  const bytesRow = [...rows].reverse().find(row => row.eventType === "document.query_embedding_bytes");
+  const callRow = [...rows].reverse().find(row => row.eventType === "embedding.call");
   if (!bytesRow) throw new Error("query bytes row missing");
   expect(bytesRow).toMatchObject({
     quantity: 2,
@@ -223,7 +227,7 @@ test("shadow query usage meters bytes without checking or consuming credits", as
     sourceResourceId: bytesRow.sourceResourceId,
     idempotencyKey: `usage:embedding.call:query:${bytesRow.sourceResourceId}`,
     attributes: {
-      schema: "opengeni.embedding-call-usage/v1",
+      schema: EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA,
       callKind: "query",
       provider: "openai",
       model: "test",
@@ -656,7 +660,7 @@ test("query without settings records the completed provider call with truthful u
   );
   expect(durableCalls.slice(before)).toHaveLength(1);
   expect(durableCalls.at(-1)?.attributes).toMatchObject({
-    provider: "unspecified",
+    provider: null,
     model: "test",
     inputBytes: 3,
     inputItems: 1,
@@ -668,7 +672,7 @@ test("query without settings records the completed provider call with truthful u
   });
 });
 
-test("query call receipt failure surfaces after retrieval without a fallback", async () => {
+test("query call receipt failure surfaces before retrieval without a fallback", async () => {
   const reads = list.mock.calls.length;
   failCallReceipt = true;
   try {
@@ -680,7 +684,7 @@ test("query call receipt failure surfaces after retrieval without a fallback", a
         () => ({ model: "test", dimensions: 3, embedQuery: async () => [1, 0, 0] }) as never,
       ),
     ).rejects.toThrow("call receipt unavailable");
-    expect(list.mock.calls.length).toBe(reads + 1);
+    expect(list.mock.calls.length).toBe(reads);
   } finally {
     failCallReceipt = false;
   }
@@ -783,4 +787,35 @@ test("real OpenAI query validation failure still settles its provider-completion
   } finally {
     fetch.mockRestore();
   }
+});
+
+test("actual embedding SDK preserves dispatch identity, awaits its receipt and never retries provider errors", async () => {
+  const { OpenAIEmbeddingProvider } = await import("@opengeni/documents");
+  let status = 200, dispatchObserved = false, calls = 0;
+  const preconnect = globalThis.fetch.preconnect;
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(Object.assign(async () => {
+    expect(dispatchObserved).toBeTrue(); calls += 1;
+    return new Response(JSON.stringify(status === 200 ? {
+      object: "list", model: "fixture", data: [{ object: "embedding", index: 0, embedding: [1, 0] }],
+      usage: { prompt_tokens: 1, total_tokens: 1 },
+    } : { error: { message: "provider unavailable", type: "server_error" } }), { status, headers: { "content-type": "application/json" } });
+  }, { preconnect }));
+  const provider = new OpenAIEmbeddingProvider({ apiKey: "fixture-not-a-credential", baseURL: "https://embedding-fixture.invalid/v1", model: "fixture", dimensions: 2 });
+  let release!: () => void, entered!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const receiptEntered = new Promise<void>(resolve => { entered = resolve; });
+  let returned = false;
+  try {
+    const call = provider.embedQuery("é", async receipt => {
+      expect(receipt).toMatchObject({ callId: "physical-call", provider: "openai", model: "fixture", inputBytes: 2, inputItems: 1 });
+      entered(); await held;
+    }, { callId: "physical-call", beforeDispatch: async receipt => {
+      expect(receipt.callId).toBe("physical-call"); dispatchObserved = true;
+    } }).then(value => { returned = true; return value; });
+    await receiptEntered; expect(returned).toBeFalse(); release();
+    expect(await call).toEqual([1, 0]);
+    status = 503;
+    await expect(provider.embedQuery("retry forbidden", undefined, { callId: "failed-call", beforeDispatch: async () => { dispatchObserved = true; } })).rejects.toThrow("provider unavailable");
+    expect(calls).toBe(2);
+  } finally { release(); fetch.mockRestore(); }
 });

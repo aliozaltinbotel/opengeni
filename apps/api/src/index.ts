@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
@@ -33,6 +34,7 @@ import { createObjectStorage } from "@opengeni/storage";
 import { isArtifactRuntimeConfigured } from "@opengeni/artifact-tool/runtime/development";
 import {
   resolveCatalogSettings,
+  knowledgeQueryOperationId,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
 } from "@opengeni/core";
 import {
@@ -66,6 +68,7 @@ import {
 import { editableArtifactSourceSessionAuthorizer } from "./editable-artifact-source-session";
 import type { ApiWebSocketConnection } from "./api-websocket";
 import { InteractionFrameProxyTransport } from "./interaction-frame-proxy";
+import { createRealtimeUsageProxyLifecycle, realtimeProxyRootSecret } from "./realtime-usage-proxy";
 import { apiRequestBindingsForTransportPeer } from "./http/request-source";
 import { startApiMetricsListener } from "./http/metrics-listener";
 import { createLocalBrowserBoundary } from "./http/local-browser-boundary";
@@ -137,6 +140,47 @@ export async function createTemporalWorkflowClient(
     },
   });
   const client: SessionWorkflowClient = {
+    prepareKnowledge: async (input) => {
+      const callId = knowledgeQueryOperationId(input.context, input.operationId, "preparation");
+      const bindingDigest = createHash("sha256").update(JSON.stringify({ context: input.context, request: input.request })).digest("hex");
+      const workflowId = `knowledge-query:${callId}`;
+      let existing = false;
+      try {
+        await temporal.workflow.start("knowledgePreparationWorkflow", {
+          taskQueue: settings.temporalTaskQueue, workflowId, workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [{ ...input, callId, bindingDigest, baseTaskQueue: settings.temporalTaskQueue }],
+        });
+      } catch (error) { if (!isWorkflowAlreadyStarted(error)) throw error; existing = true; }
+      const handle = temporal.workflow.getHandle(workflowId);
+      if (existing && await handle.query<string>("knowledgeQueryBinding") !== bindingDigest)
+        throw new Error("KNOWLEDGE_QUERY_OPERATION_INPUT_CONFLICT");
+      return await handle.result();
+    },
+    queryKnowledge: async (input) => {
+      const callId = knowledgeQueryOperationId(input.context, input.operationId);
+      const bindingDigest = createHash("sha256").update(JSON.stringify({ context: input.context, request: input.request })).digest("hex");
+      const workflowId = `knowledge-query:${callId}`;
+      let existing = false;
+      try {
+        await temporal.workflow.start("knowledgeQueryWorkflow", {
+          taskQueue: settings.temporalTaskQueue, workflowId, workflowIdReusePolicy: "REJECT_DUPLICATE",
+          args: [{ ...input, callId, bindingDigest, baseTaskQueue: settings.temporalTaskQueue }],
+        });
+      } catch (error) { if (!isWorkflowAlreadyStarted(error)) throw error; existing = true; }
+      const handle = temporal.workflow.getHandle(workflowId);
+      if (existing && await handle.query<string>("knowledgeQueryBinding") !== bindingDigest)
+        throw new Error("KNOWLEDGE_QUERY_OPERATION_INPUT_CONFLICT");
+      return await handle.result();
+    },
+    startRealtimeUsageObservation: async (input) => {
+      try {
+        await temporal.workflow.start("realtimeUsageWorkflow", {
+          taskQueue: settings.temporalTaskQueue, workflowId: `realtime-usage:${input.connectionId}`,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          args: [{ ...input, baseTaskQueue: settings.temporalTaskQueue }],
+        });
+      } catch (error) { if (!isWorkflowAlreadyStarted(error)) throw error; }
+    },
     triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
       try {
         await temporal.workflow.start("automationRunWorkflow", {
@@ -480,7 +524,7 @@ export async function startApi(options: StartApiOptions = {}) {
     editableArtifactSourceSessionAuthorizer(routeDeps),
   );
   const interactionFrameProxies = new InteractionFrameProxyTransport(
-    resolveFirstPartyDelegationSecret(settings),
+    realtimeProxyRootSecret(routeDeps), Date.now, createRealtimeUsageProxyLifecycle(routeDeps),
   );
   // WebSocket upgrades bypass the Hono app, so the local-mode browser boundary
   // (http/local-browser-boundary.ts) is applied to them in the dispatcher;

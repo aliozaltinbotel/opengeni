@@ -53,9 +53,7 @@ function createWebsocketRealtimeTransportStarter(
 
     const websocket = new WebSocket(
       answer.url,
-      dialect === "xai"
-        ? [`xai-client-secret.${answer.token}`]
-        : ["ai-gateway-realtime.v1", `ai-gateway-auth.${answer.token}`],
+      ["opengeni-realtime.v1", `opengeni-frame-proxy.${answer.token}`],
     );
     const channel = new GatewayRealtimeDataChannel((payload) =>
       handleBridgeOutbound(websocket, payload, dialect),

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { listWorkspaceIdsAfter, reconcileModelCallFacts, reconcileQuiescedModelCallReceipts } from "@opengeni/db";
+import { listWorkspaceIdsAfter, reconcileModelCallFacts, reconcileQuiescedModelCallReceipts, listPendingRealtimeSessionUsageSources } from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
 /** Recent charged calls are rechecked on every run; older gaps use the backfill script. */
@@ -30,6 +30,7 @@ export type ModelCallFactReconcilerOptions = {
   reconcile?: typeof reconcileModelCallFacts;
   reconcileReceipts?: typeof reconcileQuiescedModelCallReceipts;
   listWorkspaces?: typeof listWorkspaceIdsAfter;
+  listRealtimeSources?: typeof listPendingRealtimeSessionUsageSources;
 };
 
 /**
@@ -50,7 +51,7 @@ export function createModelCallFactReconcilerActivities(
   const listWorkspaces = options.listWorkspaces ?? listWorkspaceIdsAfter;
 
   async function reconcileRecentModelCallFacts(): Promise<ReconcileRecentModelCallFactsResult> {
-    const { db, observability } = await services();
+    const { db, observability, startRealtimeUsageWorkflow } = await services();
     const startedAt = now();
     const until = new Date(startedAt - MODEL_CALL_FACT_RECONCILE_SETTLE_MS);
     const since = new Date(until.getTime() - MODEL_CALL_FACT_RECONCILE_LOOKBACK_MS);
@@ -77,6 +78,13 @@ export function createModelCallFactReconcilerActivities(
         }
         result.workspaces += 1;
         try {
+          if (startRealtimeUsageWorkflow) {
+            const pending = await (options.listRealtimeSources ?? listPendingRealtimeSessionUsageSources)(db, { workspaceId, limit: MODEL_CALL_FACT_RECONCILE_WORKSPACE_LIMIT });
+            for (const source of pending) {
+              if (now() - startedAt >= runBudgetMs) { result.budgetExhausted = true; break; }
+              await startRealtimeUsageWorkflow(source);
+            }
+          }
           const receipts = await reconcileReceipts(db, { workspaceId, limit: MODEL_CALL_FACT_RECONCILE_WORKSPACE_LIMIT });
           result.unknownReceiptsSettled += receipts.settled;
           const outcome = await reconcile(db, {

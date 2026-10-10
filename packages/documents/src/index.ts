@@ -120,6 +120,13 @@ export type EmbeddingProviderCompletionReceipt = Readonly<{
   completedAt: string;
 }>;
 
+/** The exact physical call is chosen before SDK dispatch. A durable owner may
+ * commit its admission here; the SDK never silently retries provider effects. */
+export type EmbeddingProviderDispatch = {
+  callId?: string;
+  beforeDispatch?: (receipt: Omit<EmbeddingProviderCompletionReceipt, "completedAt"> & { dispatchedAt: string }) => Promise<void>;
+};
+
 export type DocumentEmbedder = {
   model: string;
   dimensions: number;
@@ -127,11 +134,13 @@ export type DocumentEmbedder = {
   // then throws. They capture facts only; persistence belongs to the caller.
   embedMany: (
     texts: string[],
-    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void | Promise<void>,
+    dispatch?: EmbeddingProviderDispatch,
   ) => Promise<number[][]>;
   embedQuery: (
     text: string,
-    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void | Promise<void>,
+    dispatch?: EmbeddingProviderDispatch,
   ) => Promise<number[]>;
 };
 
@@ -420,14 +429,20 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
 
   async embedMany(
     texts: string[],
-    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void | Promise<void>,
+    dispatch?: EmbeddingProviderDispatch,
   ): Promise<number[][]> {
     if (texts.length === 0) return [];
+    if (dispatch?.callId && texts.length > 64) throw new Error("EMBEDDING_CALL_ID_REQUIRES_SINGLE_PROVIDER_BATCH");
     const out: number[][] = [];
     for (let start = 0; start < texts.length; start += 64) {
       const batch = texts.slice(start, start + 64);
+      const receipt = Object.freeze({ callId: dispatch?.callId ?? randomUUID(), provider: "openai", model: this.model,
+        inputBytes: batch.reduce((sum, text) => sum + Buffer.byteLength(text, "utf8"), 0), inputItems: batch.length });
+      const client = await this.openai();
+      await dispatch?.beforeDispatch?.({ ...receipt, dispatchedAt: new Date().toISOString() });
       const response = await (
-        await this.openai()
+        client
       ).embeddings.create({
         model: this.model,
         input: batch,
@@ -436,13 +451,9 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
         // rather than in the SDK's default base64 response transformation.
         encoding_format: "float",
       });
-      completed?.(
+      await completed?.(
         Object.freeze({
-          callId: randomUUID(),
-          provider: "openai",
-          model: this.model,
-          inputBytes: batch.reduce((sum, text) => sum + Buffer.byteLength(text, "utf8"), 0),
-          inputItems: batch.length,
+          ...receipt,
           completedAt: new Date().toISOString(),
         }),
       );
@@ -455,9 +466,10 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
 
   async embedQuery(
     text: string,
-    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void | Promise<void>,
+    dispatch?: EmbeddingProviderDispatch,
   ): Promise<number[]> {
-    const [embedding] = await this.embedMany([text], completed);
+    const [embedding] = await this.embedMany([text], completed, dispatch);
     if (!embedding) {
       throw new Error("Embedding provider returned no query embedding");
     }
@@ -472,6 +484,8 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
       ({ default: OpenAIClient }) =>
         new OpenAIClient({
           apiKey: this.apiKey,
+          maxRetries: 0,
+          timeout: 30_000,
           ...(this.baseURL ? { baseURL: this.baseURL } : {}),
           ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
           ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),

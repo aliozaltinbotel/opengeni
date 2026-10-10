@@ -97,8 +97,12 @@ const defaultTurnActivities = createTurnActivities();
 export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
+export const observeRealtimeSessionUsage = defaultControlActivities.observeRealtimeSessionUsage;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const indexKnowledge = defaultControlActivities.indexKnowledge;
+export const executeKnowledgeQuery = defaultControlActivities.executeKnowledgeQuery;
+export const executeKnowledgePreparation = defaultControlActivities.executeKnowledgePreparation;
+export const settleKnowledgeQueryUnknown = defaultControlActivities.settleKnowledgeQueryUnknown;
 export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
 export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
 export const persistSessionAttemptQuiescence =

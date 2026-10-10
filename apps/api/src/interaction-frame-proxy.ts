@@ -1,5 +1,8 @@
-import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { canonicalPublicOrigin } from "@opengeni/config";
+import { AccessGrant, RealtimeSessionUsageSource, REALTIME_SESSION_SOURCE_SCHEMA } from "@opengeni/contracts";
+import { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import type { KnowledgeQueryWorkflowRequest } from "@opengeni/core";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import type {
   ApiWebSocketConnection,
@@ -25,7 +28,20 @@ type ProxyGrant = Readonly<{
   responseProtocol: string;
   origin: string | null;
   expiresAt: number;
+  realtime?: RealtimeProxySource;
 }>;
+
+/** Signed/encrypted server-origin continuation, never a public query field. */
+export type RealtimeProxySource = {
+  authority: Pick<KnowledgeQueryWorkflowRequest, "context" | "grant" | "externalContinuation" | "nativeContinuation">;
+  sessionId: string;
+  source: Omit<RealtimeSessionUsageSource, "schema" | "billingPath">;
+};
+export type RealtimeProxyLifecycle = {
+  beforeDispatch: (source: RealtimeProxySource, ownerId: string) => Promise<void>;
+  observe: (source: RealtimeProxySource, message: Record<string, unknown>) => Promise<void>;
+  closed: (source: RealtimeProxySource, ownerId: string) => Promise<void>;
+};
 
 export type InteractionFrameProxyAttachment = Readonly<{
   url: string;
@@ -89,16 +105,19 @@ export function createInteractionFrameProxyAttachment(input: {
   upstreamProtocols: readonly string[];
   origin: string | null;
   expiresAt: string;
+  realtime?: RealtimeProxySource;
 }): InteractionFrameProxyAttachment {
   const grant = validateGrant({
     version: TOKEN_VERSION,
     upstreamUrl: input.upstreamUrl,
     upstreamProtocols: input.upstreamProtocols,
-    responseProtocol: input.upstreamProtocols[0] ?? "",
+    responseProtocol: input.realtime ? "opengeni-realtime.v1" : input.upstreamProtocols[0] ?? "",
     origin: input.origin,
     expiresAt: Date.parse(input.expiresAt),
+    ...(input.realtime ? { realtime: input.realtime } : {}),
   });
   const token = encryptGrant(grant, input.rootSecret);
+  if (token.length > TOKEN_MAX_BYTES) throw new Error("WebSocket proxy grant is too large");
   const url = new URL(
     resolveInteractionFrameProxyRequestUrl({
       requestUrl: input.requestUrl,
@@ -125,6 +144,7 @@ export class InteractionFrameProxyTransport {
   constructor(
     private readonly rootSecret: string | undefined,
     private readonly clock: () => number = Date.now,
+    private readonly realtimeLifecycle?: RealtimeProxyLifecycle,
   ) {}
 
   handles(request: Request): boolean {
@@ -161,7 +181,8 @@ export class InteractionFrameProxyTransport {
     if (origin !== grant.origin) {
       return new Response("WebSocket origin is not allowed", { status: 403 });
     }
-    const connection = new InteractionFrameProxyConnection(grant);
+    if (grant.realtime && !this.realtimeLifecycle) return new Response("Service Unavailable", { status: 503 });
+    const connection = new InteractionFrameProxyConnection(grant, this.realtimeLifecycle);
     const upgraded = server.upgrade(request, {
       data: connection,
       headers: { "sec-websocket-protocol": grant.responseProtocol },
@@ -175,10 +196,12 @@ export class InteractionFrameProxyConnection implements ApiWebSocketConnection {
   private upstream: UpstreamWebSocket | null = null;
   private upstreamOpen = false;
   private terminal = false;
-  private queued: Uint8Array[] = [];
+  private queued: Array<Uint8Array | string> = [];
   private queuedBytes = 0;
+  private observations: Promise<void> = Promise.resolve();
+  private readonly ownerId = randomUUID();
 
-  constructor(private readonly grant: ProxyGrant) {}
+  constructor(private readonly grant: ProxyGrant, private readonly lifecycle?: RealtimeProxyLifecycle) {}
 
   attach(socket: ApiWebSocketLike): void {
     if (this.socket || this.terminal) {
@@ -186,6 +209,14 @@ export class InteractionFrameProxyConnection implements ApiWebSocketConnection {
       return;
     }
     this.socket = socket;
+    if (this.grant.realtime) {
+      void this.lifecycle!.beforeDispatch(this.grant.realtime, this.ownerId).then(() => {
+        if (!this.terminal) this.openUpstream();
+      }, () => this.fail(4403, "realtime authority unavailable"));
+    } else this.openUpstream();
+  }
+
+  private openUpstream(): void {
     let upstream: UpstreamWebSocket;
     try {
       upstream = new UpstreamWebSocket(this.grant.upstreamUrl, [...this.grant.upstreamProtocols], {
@@ -203,12 +234,27 @@ export class InteractionFrameProxyConnection implements ApiWebSocketConnection {
         return;
       }
       this.upstreamOpen = true;
-      for (const message of this.queued) upstream.send(webSocketBinary(message));
+      for (const message of this.queued) upstream.send(typeof message === "string" ? message : webSocketBinary(message));
       this.queued = [];
       this.queuedBytes = 0;
     });
-    upstream.on("message", (data) => {
+    upstream.on("message", (data, isBinary) => {
       if (this.terminal || !this.socket) return;
+      if (this.grant.realtime) {
+        if (isBinary) { this.fail(4400, "text frames required"); return; }
+        const bytes = binaryMessage(data);
+        if (!bytes) { this.fail(4400, "invalid realtime event"); return; }
+        const text = new TextDecoder().decode(bytes);
+        let message: unknown;
+        try { message = JSON.parse(text); } catch { this.fail(4400, "invalid realtime event"); return; }
+        if (!message || typeof message !== "object" || Array.isArray(message)) { this.fail(4400, "invalid realtime event"); return; }
+        this.observations = this.observations.then(async () => {
+          await this.lifecycle!.observe(this.grant.realtime!, message as Record<string, unknown>);
+          if (!this.terminal && this.socket && this.socket.send(text, false) <= 0) this.fail(1011, "stream unavailable");
+        });
+        void this.observations.catch(() => this.fail(1011, "realtime receipt unavailable"));
+        return;
+      }
       const bytes = binaryMessage(data);
       if (!bytes || this.socket.send(bytes, false) <= 0) {
         this.fail(1011, "stream unavailable");
@@ -216,12 +262,27 @@ export class InteractionFrameProxyConnection implements ApiWebSocketConnection {
     });
     upstream.on("error", () => this.fail(1011, "upstream unavailable"));
     upstream.once("close", (code, reason) => {
+      if (this.grant.realtime) {
+        // Only the actual owned upstream close event supplies this proof. A
+        // browser disconnect, timeout or absent process heartbeat does not.
+        void this.observations.then(() => this.lifecycle!.closed(this.grant.realtime!, this.ownerId))
+          .catch(() => this.fail(1011, "realtime receipt unavailable"));
+      }
       this.fail(safeCloseCode(code), boundedReason(reason.toString("utf8")));
     });
   }
 
   receive(message: string | Uint8Array | ArrayBuffer): void {
     if (this.terminal) return;
+    if (this.grant.realtime) {
+      if (typeof message !== "string") { this.fail(4400, "text frames required"); return; }
+      if (this.upstreamOpen && this.upstream) { this.upstream.send(message); return; }
+      const bytes = Buffer.byteLength(message, "utf8");
+      if (this.queued.length + 1 > MAX_QUEUED_MESSAGES || this.queuedBytes + bytes > MAX_QUEUED_BYTES) {
+        this.fail(4409, "viewer is too fast"); return;
+      }
+      this.queued.push(message); this.queuedBytes += bytes; return;
+    }
     if (typeof message === "string") {
       this.fail(4400, "binary frames required");
       return;
@@ -307,7 +368,7 @@ function validateGrant(value: unknown): ProxyGrant {
   const upstreamProtocols = requireProtocols(grant.upstreamProtocols);
   if (
     typeof grant.responseProtocol !== "string" ||
-    grant.responseProtocol !== upstreamProtocols[0]
+    grant.responseProtocol !== (grant.realtime ? "opengeni-realtime.v1" : upstreamProtocols[0])
   ) {
     throw new Error("invalid proxy response protocol");
   }
@@ -316,13 +377,25 @@ function validateGrant(value: unknown): ProxyGrant {
   if (!Number.isSafeInteger(grant.expiresAt) || (grant.expiresAt as number) <= 0) {
     throw new Error("invalid proxy expiry");
   }
+  let realtime: RealtimeProxySource | undefined;
+  if (grant.realtime) {
+    const value = grant.realtime as RealtimeProxySource;
+    const authority = value.authority;
+    const access = AccessGrant.parse(authority.grant);
+    const source = RealtimeSessionUsageSource.parse({ ...value.source, schema: REALTIME_SESSION_SOURCE_SCHEMA, billingPath: "external" });
+    if (authority.context.accountId !== access.accountId || authority.context.workspaceId !== access.workspaceId ||
+      !/^[0-9a-f-]{36}$/i.test(value.sessionId) || !["ai-gateway", "xai-subscription"].includes(source.provider)) throw new Error("invalid realtime grant");
+    realtime = { ...value, authority: { ...authority, grant: access,
+      externalContinuation: authority.externalContinuation ? ExternalActorContinuation.parse(authority.externalContinuation) : null } };
+  }
   return Object.freeze({
     version: TOKEN_VERSION,
     upstreamUrl,
     upstreamProtocols: Object.freeze(upstreamProtocols),
-    responseProtocol: upstreamProtocols[0]!,
+    responseProtocol: grant.responseProtocol as string,
     origin,
     expiresAt: grant.expiresAt as number,
+    ...(realtime ? { realtime } : {}),
   });
 }
 

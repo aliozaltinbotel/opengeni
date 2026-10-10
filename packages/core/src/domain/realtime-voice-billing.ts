@@ -10,7 +10,8 @@ import {
   type RealtimeVoicePricing,
   type Settings,
 } from "@opengeni/config";
-import { REALTIME_SESSION_SOURCE_EVENT_TYPE, RealtimeSessionUsageSource,
+import { REALTIME_SESSION_SOURCE_EVENT_TYPE, REALTIME_SESSION_SOURCE_SCHEMA, RealtimeSessionUsageSource, ReadRealtimeSessionUsageSource,
+  RealtimeSessionDispatchUsageSource, RealtimeConnectionClosedUsageSource,
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, MODEL_CALL_USAGE_EVENT_TYPE, ModelCallUsageAttributes,
   type SessionRealtimeModel, type ModelCallOutcome } from "@opengeni/contracts";
 import {
@@ -21,6 +22,7 @@ import {
   getSpendableCreditBalance,
   loadSessionRealtimeBillingFacts,
   loadRealtimeSessionUsageSource,
+  loadRealtimeSessionDispatch,
   recordUsageEvent,
   isTransactionHandle,
   sumUsageQuantity,
@@ -252,6 +254,51 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
   }
 
   return {
+    /** Durably bind exactly one physical creation owner before provider I/O.
+     * An immutable replay with another owner refuses; intent is not occurrence
+     * or a final accounting key, so late independent usage remains writable. */
+    async recordProviderSessionDispatch(input: {
+      accountId: string; workspaceId: string; sessionId: string; ownerId: string;
+      source: Omit<RealtimeSessionUsageSource, "schema" | "billingPath">;
+      authorize: (tx: Database) => Promise<void>;
+    }): Promise<void> {
+      if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
+      const source = RealtimeSessionUsageSource.parse({ ...input.source, schema: REALTIME_SESSION_SOURCE_SCHEMA,
+        billingPath: deploymentRealtimeVoice(deps.settings, input.source.model) && billingActive() ? "opengeni_credits" : "external" });
+      await withRlsContext(deps.db, { accountId: input.accountId, workspaceId: input.workspaceId }, async tx => {
+        await input.authorize(tx);
+        await recordUsageEvent(tx, { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId,
+          eventType: "model.realtime.session.dispatched", quantity: 1, unit: "dispatch",
+          sourceResourceType: "model_realtime_session", sourceResourceId: source.connectionId,
+          idempotencyKey: `usage:model.realtime.session.dispatched:${source.connectionId}`,
+          attributes: RealtimeSessionDispatchUsageSource.parse({ ...source, schema: "opengeni.realtime-session-dispatch/v1", ownerId: input.ownerId,
+            outcome: "indeterminate", usageReported: false, inputTokens: null, outputTokens: null, cachedTokens: null,
+            cacheWriteTokens: null, reasoningTokens: null, totalTokens: null, estimatedProviderCostMicros: null,
+            pricingSource: null, priceVersion: null }),
+        });
+      }, undefined, "none");
+    },
+    /** Called only after the native upstream socket's actual close event.
+     * This closes the connection owner, not the provider's accounting session. */
+    async recordProviderConnectionClosed(input: {
+      accountId: string; workspaceId: string; sessionId: string; connectionId: string; ownerId: string;
+    }): Promise<void> {
+      if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
+      const dispatch = await loadRealtimeSessionDispatch(deps.db, input);
+      if (!dispatch || dispatch.attributes.ownerId !== input.ownerId) throw new Error("REALTIME_PROVIDER_OWNER_UNBOUND");
+      const claimed = RealtimeSessionDispatchUsageSource.parse(dispatch.attributes);
+      const source = RealtimeSessionUsageSource.parse({ schema: REALTIME_SESSION_SOURCE_SCHEMA,
+        connectionId: claimed.connectionId, connectionEpoch: claimed.connectionEpoch, provider: claimed.provider,
+        providerSessionId: claimed.providerSessionId, providerCredentialId: claimed.providerCredentialId,
+        model: claimed.model, upstreamModel: claimed.upstreamModel, billingPath: claimed.billingPath });
+      await recordUsageEvent(deps.db, { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId,
+        eventType: "model.realtime.session.connection_closed", quantity: 1, unit: "connection",
+        sourceResourceType: "model_realtime_session", sourceResourceId: input.connectionId,
+        idempotencyKey: `usage:model.realtime.session.connection_closed:${input.connectionId}`,
+        attributes: RealtimeConnectionClosedUsageSource.parse({ ...source, schema: "opengeni.realtime-connection-closed/v1",
+          ownerId: input.ownerId, providerFinalObserved: false, outcome: "indeterminate" }),
+      });
+    },
     /** Persist an independently authenticated provider-created native session.
      * This non-billing occurrence remains open for later provider final usage.
      * It is mandatory even when OpenGeni credit billing is inactive. */
@@ -261,7 +308,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     }): Promise<void> {
       if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
       const source = RealtimeSessionUsageSource.parse({ ...input.source,
-        schema: "opengeni.realtime-session-source/v1",
+        schema: REALTIME_SESSION_SOURCE_SCHEMA,
         billingPath: deploymentRealtimeVoice(deps.settings, input.source.model) && billingActive()
           ? "opengeni_credits" : "external",
       });
@@ -279,12 +326,12 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
      * token pools and provider price stay null, independent of minute debits. */
     async recordProviderSessionFinal(input: {
       accountId: string; workspaceId: string; sessionId: string;
-      source: RealtimeSessionUsageSource; outcome: ModelCallOutcome;
+      source: ReadRealtimeSessionUsageSource; outcome: ModelCallOutcome;
     }): Promise<void> {
       if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
-      const claimed = RealtimeSessionUsageSource.parse(input.source);
+      const claimed = ReadRealtimeSessionUsageSource.parse(input.source);
       const observation = await loadRealtimeSessionUsageSource(deps.db, { ...input, connectionId: claimed.connectionId });
-      if (!observation || JSON.stringify(RealtimeSessionUsageSource.parse(observation.source)) !== JSON.stringify(claimed)) throw new Error("REALTIME_PROVIDER_SOURCE_UNBOUND");
+      if (!observation || JSON.stringify(ReadRealtimeSessionUsageSource.parse(observation.source)) !== JSON.stringify(claimed)) throw new Error("REALTIME_PROVIDER_SOURCE_UNBOUND");
       const { source } = observation;
       const attributes = ModelCallUsageAttributes.parse({
         schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, callKind: "realtime_session", scope: "call",

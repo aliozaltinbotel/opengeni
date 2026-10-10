@@ -1,9 +1,14 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
-import { searchKnowledgeEntries } from "@opengeni/core";
+import { EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA } from "@opengeni/contracts";
+import { knowledgeQueryOperationId, searchKnowledgeEntries, type KnowledgeQueryWorkflowRequest, type KnowledgePreparationWorkflowRequest } from "@opengeni/core";
 import {
   createDb,
+  bootstrapWorkspace,
+  pendingKnowledgeQueryPressure,
+  setWorkspaceAllowance,
+  setMemberAllowance,
   getBillingBalance,
   saveKnowledgeEntry,
   getKnowledgeEntry,
@@ -57,7 +62,7 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
   const content = "A private supply agreement.  🚀\u0000 Original wording is retained.\n".repeat(
     850,
   );
-  const saved = await saveKnowledgeEntry(client.db, context, {
+  let saved = await saveKnowledgeEntry(client.db, context, {
     operationId: crypto.randomUUID(),
     entryId: crypto.randomUUID(),
     expectedVersion: 0,
@@ -132,7 +137,17 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
       )
     ).entries,
   ).toHaveLength(0);
+  const lostRevision=saved.revisionId;
   failProvider = false;
+  await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${lostRevision}`;
+  expect((await makeWorker().indexKnowledge()).deferred).toBe(1);
+  // An unknown physical dispatch is not retried after a worker restart.
+  expect(embedded).toBe(0);
+  const unknown=await shared.admin`SELECT attributes FROM usage_events WHERE source_resource_id=${lostRevision} AND event_type='knowledge.index.indeterminate'`;
+  expect(unknown).toHaveLength(1);expect(unknown[0]!.attributes.providerReceipt.estimatedProviderCostMicros).toBeNull();
+  // An actual new source revision is distinct work, not a retry or an expiry release.
+  saved=await saveKnowledgeEntry(client.db,context,{operationId:crypto.randomUUID(),entryId:saved.entryId,expectedVersion:saved.version,
+    scope:'personal',entry:{kind:'source',title:'Acme contract revised',content,source:{kind:'manual',externalId:'acme-contract',retention:'full_text'}}});
   await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;
   expect((await makeWorker().indexKnowledge()).advanced).toBe(1);
   const [partial] =
@@ -154,7 +169,7 @@ test("worker resumes batches, meters committed chunks once, and serves scoped se
   ).toEqual([32, chunks.length - 32]);
   for (const call of calls) {
     expect(call.attributes).toMatchObject({
-      schema: "opengeni.embedding-call-usage/v1",
+      schema: EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA,
       callKind: "index",
       model: "knowledge-index-test",
       estimatedProviderCostMicros: null,
@@ -924,5 +939,255 @@ test("completed embedding facts survive rollback and concurrent settlement on a 
     expect(queryFacts?.calls).toBe(queries.length);
   } finally {
     await single.close();
+  }
+}, 30_000);
+
+// This proof needs the coordinated native Temporal allocation as well as the
+// restricted PostgreSQL fixture. Ordinary PG runs explicitly report it skipped.
+test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge workflows replay and restart without repeating an unknown provider call", async () => {
+  const { Client, Connection, WorkflowExecutionAlreadyStartedError } = await import("@temporalio/client");
+  const { NativeConnection, Worker } = await import("@temporalio/worker");
+  const { createHash } = await import("node:crypto");
+  const address = process.env.OPENGENI_TEST_TEMPORAL_ADDRESS!;
+  const namespace = process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE ?? "default";
+  const code = await Bun.file(new URL("../dist/workflow-bundle.js", import.meta.url)).text();
+  const connection = await Connection.connect({ address });
+  const native = await NativeConnection.connect({ address });
+  const temporal = new Client({ connection, namespace });
+  const taskQueue = `knowledge-receipts-${crypto.randomUUID()}`;
+  const handles: Array<{ cancel(): Promise<void>; result(): Promise<unknown>; describe(): Promise<{ status: { name: string } }> }> = [];
+  const suffix = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "knowledge-receipts", accountExternalId: suffix, accountName: "Receipt owner",
+    workspaceExternalSource: "knowledge-receipts", workspaceExternalId: suffix, workspaceName: "Receipt owner",
+    subjectId: `receipt-owner:${suffix}`,
+  });
+  const grant = access.workspaceGrants[0]!;
+  fixtureAccounts.push(grant.accountId);
+  const context: KnowledgeContext = { accountId: grant.accountId, workspaceId: grant.workspaceId!, actor: {
+    kind: "human", principalKind: "human_session", subjectId: grant.subjectId,
+    writeScopes: ["workspace"], settingsScopes: ["workspace"], review: true,
+  } };
+  const settings = { billingMode: "stripe", usageLimitsMode: "managed", staticUsageLimitsJson: "{}",
+    documentEmbeddingProvider: "openai", documentEmbeddingBillingMode: "credits",
+    documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
+    documentEmbeddingRateMicrosPerMillionBytes: 1_000_000 } as Settings;
+  await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
+    VALUES(${grant.accountId},'grant',1,${`temporal-receipts:${suffix}`})`;
+  let physicalCalls = 0, loseResponse = false, revokeOnReturn = false;
+  const activities = () => createKnowledgeIndexingActivities(
+    async () => ({ db: client.db, settings, observability: { warn: () => undefined } }) as ControlActivityServices,
+    async () => ({ embedder: { model: "temporal-receipts", dimensions: 3,
+      embedMany: async texts => texts.map(() => [1, 0, 0]), embedQuery: async () => {
+        physicalCalls++;
+        const rows = await client.db.execute<{ transaction_id: string | null }>(sql`SELECT txid_current_if_assigned()::text AS transaction_id`);
+        expect(rows[0]?.transaction_id).toBeNull();
+        if (loseResponse) throw new Error("synthetic lost provider response");
+        if (revokeOnReturn) await shared.admin`UPDATE workspace_memberships SET permissions='[]'::jsonb
+          WHERE account_id=${grant.accountId} AND workspace_id=${grant.workspaceId!} AND subject_id=${grant.subjectId}`;
+        return [1, 0, 0];
+      },
+    } }) as DocumentServices,
+  );
+  let running: Promise<void> | undefined, worker: InstanceType<typeof Worker> | undefined;
+  const startWorker = async () => {
+    worker = await Worker.create({ connection: native, namespace, taskQueue, workflowBundle: { code },
+      activities: activities(), maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
+    running = worker.run();
+  };
+  const stopWorker = async () => { worker?.shutdown(); await running; worker = undefined; running = undefined; };
+  const start = async (input: KnowledgeQueryWorkflowRequest | KnowledgePreparationWorkflowRequest, preparation = false) => {
+    const callId = knowledgeQueryOperationId(context, input.operationId, preparation ? "preparation" : "query");
+    const bindingDigest = createHash("sha256").update(JSON.stringify({ context, request: input.request })).digest("hex");
+    const handle = await temporal.workflow.start(preparation ? "knowledgePreparationWorkflow" : "knowledgeQueryWorkflow", {
+      taskQueue, workflowId: `knowledge-query:${callId}`, workflowIdReusePolicy: "REJECT_DUPLICATE",
+      args: [{ ...input, callId, bindingDigest, baseTaskQueue: taskQueue }],
+    });
+    handles.push(handle); return handle;
+  };
+  try {
+    await startWorker();
+    const paidInput: KnowledgeQueryWorkflowRequest = { context, grant, externalContinuation: null,
+      operationId: `paid:${suffix}`, request: { query: "abcd", mode: "vector", limit: 20 } as KnowledgeQueryWorkflowRequest["request"] };
+    const paid = await start(paidInput);
+    expect((await paid.result() as { searchMode: string }).searchMode).toBe("vector");
+    expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(-3);
+    await Worker.runReplayHistory({ workflowBundle: { code } }, await paid.fetchHistory(), paid.workflowId);
+    await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
+      VALUES(${grant.accountId},'grant',100,${`temporal-recovery-funding:${suffix}`})`;
+    // Actual preparation is unpaid by its existing contract and shares one
+    // provider occurrence across both discovery views.
+    settings.documentEmbeddingBillingMode = "shadow";
+    const preparationInput: KnowledgePreparationWorkflowRequest = { context, grant, externalContinuation: null,
+      operationId: `prepare:${suffix}`, request: { query: "terms" } as KnowledgePreparationWorkflowRequest["request"] };
+    const beforePreparation = physicalCalls;
+    const prepared = await start(preparationInput, true);
+    await prepared.result();
+    expect(physicalCalls - beforePreparation).toBe(1);
+    await Worker.runReplayHistory({ workflowBundle: { code } }, await prepared.fetchHistory(), prepared.workflowId);
+    settings.documentEmbeddingBillingMode = "credits";
+    loseResponse = true;
+    const lostInput = { ...paidInput, operationId: `lost:${suffix}`, request: { ...paidInput.request, query: "lost" } };
+    const lost = await start(lostInput);
+    await expect(lost.result()).rejects.toThrow();
+    const callId = knowledgeQueryOperationId(context, lostInput.operationId);
+    const rows = await shared.admin`SELECT event_type,attributes FROM usage_events
+      WHERE account_id=${grant.accountId} AND source_resource_id=${callId}`;
+    expect(rows.some(row => row.event_type === "knowledge.query.indeterminate" && row.attributes.providerReceipt.estimatedProviderCostMicros === null)).toBeTrue();
+    expect(rows.some(row => row.event_type === "embedding.call" || row.event_type === "knowledge.query.closed")).toBeFalse();
+    const beforeRestart = physicalCalls;
+    await stopWorker(); await startWorker();
+    await expect(start(lostInput)).rejects.toBeInstanceOf(WorkflowExecutionAlreadyStartedError);
+    await expect(temporal.workflow.getHandle(lost.workflowId).result()).rejects.toThrow();
+    expect(physicalCalls).toBe(beforeRestart);
+    const pressure = await pendingKnowledgeQueryPressure(client.db, { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId });
+    expect(pressure.bytes).toBe(4); expect(pressure.micros).toBe(4);
+    await Worker.runReplayHistory({ workflowBundle: { code } }, await lost.fetchHistory(), lost.workflowId);
+    // Kill the actual activity process only after an independent loopback
+    // provider has observed the physical request. No finally/catch can run.
+    await stopWorker();
+    let crashProviderEntered!: () => void, releaseCrashProvider!: (response: Response) => void;
+    const observedCrashDispatch = new Promise<void>(resolve => { crashProviderEntered = resolve; });
+    const heldCrashResponse = new Promise<Response>(resolve => { releaseCrashProvider = resolve; });
+    let crashProviderCalls = 0;
+    const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
+      crashProviderCalls++; crashProviderEntered(); return heldCrashResponse;
+    } });
+    const childCode = `
+      import { NativeConnection, Worker } from '@temporalio/worker';
+      import { createDb } from '@opengeni/db';
+      import { sql } from 'drizzle-orm';
+      import { createKnowledgeIndexingActivities } from './apps/worker/src/activities/knowledge-indexing';
+      const db=createDb(process.env.OPENGENI_RECEIPT_TEST_DB_URL,{max:1});
+      const native=await NativeConnection.connect({address:process.env.OPENGENI_TEST_TEMPORAL_ADDRESS});
+      const settings=JSON.parse(process.env.OPENGENI_RECEIPT_TEST_SETTINGS);
+      const activities=createKnowledgeIndexingActivities(async()=>({db:db.db,settings,observability:{warn:()=>{}}}),
+        async()=>({embedder:{model:'process-loss-receipts',dimensions:3,embedMany:async texts=>texts.map(()=>[1,0,0]),
+          embedQuery:async()=>{const rows=await db.db.execute(sql\`SELECT txid_current_if_assigned()::text AS transaction_id\`);
+            if(rows[0]?.transaction_id!==null)throw new Error('PROVIDER_INSIDE_TRANSACTION');
+            const response=await fetch(process.env.OPENGENI_RECEIPT_TEST_PROVIDER_URL);await response.json();return [1,0,0];}}}));
+      const worker=await Worker.create({connection:native,namespace:process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE,
+        taskQueue:process.env.OPENGENI_RECEIPT_TEST_TASK_QUEUE,workflowBundle:{codePath:'./apps/worker/dist/workflow-bundle.js'},activities,
+        maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:1});
+      await worker.run();
+    `;
+    const child = Bun.spawn([process.execPath, "--no-install", "--no-env-file", "-e", childCode], {
+      cwd: new URL("../../../", import.meta.url).pathname,
+      env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "", OPENGENI_TEST_TEMPORAL_ADDRESS: address,
+        OPENGENI_TEST_TEMPORAL_NAMESPACE: namespace, OPENGENI_RECEIPT_TEST_DB_URL: shared.appUrl,
+        OPENGENI_RECEIPT_TEST_SETTINGS: JSON.stringify(settings), OPENGENI_RECEIPT_TEST_TASK_QUEUE: taskQueue,
+        OPENGENI_RECEIPT_TEST_PROVIDER_URL: provider.url.toString() }, stdout: "ignore", stderr: "ignore",
+    });
+    const crashedInput = { ...paidInput, operationId: `crashed:${suffix}`, request: { ...paidInput.request, query: "crash" } };
+    const crashed = await start(crashedInput);
+    try {
+      await Promise.race([observedCrashDispatch, child.exited.then(() => { throw new Error("Activity process exited before physical dispatch"); })]);
+      child.kill("SIGKILL"); await child.exited;
+    } finally {
+      if (child.exitCode === null) { child.kill("SIGKILL"); await child.exited; }
+      releaseCrashProvider(Response.json({ vector: [1, 0, 0] })); provider.stop(true);
+      await startWorker();
+    }
+    // The production start-to-close timeout is unchanged. Its timer schedules
+    // only recovery; it never proves provider completion or releases pressure.
+    await expect(crashed.result()).rejects.toThrow();
+    const crashedCallId = knowledgeQueryOperationId(context, crashedInput.operationId);
+    const crashFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
+      WHERE account_id=${grant.accountId} AND source_resource_id=${crashedCallId}`;
+    expect(crashFacts.some(row => row.event_type === "knowledge.query.indeterminate" && row.attributes.providerReceipt.estimatedProviderCostMicros === null)).toBeTrue();
+    expect(crashFacts.some(row => row.event_type === "embedding.call" || row.event_type === "knowledge.query.closed")).toBeFalse();
+    expect(crashProviderCalls).toBe(1);
+    await expect(start(crashedInput)).rejects.toBeInstanceOf(WorkflowExecutionAlreadyStartedError);
+    const crashPressure = await pendingKnowledgeQueryPressure(client.db, { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId });
+    expect(crashPressure.bytes).toBe(4 + Buffer.byteLength(crashedInput.request.query!, "utf8"));
+    expect(crashPressure.micros).toBe(crashPressure.bytes);
+    await Worker.runReplayHistory({ workflowBundle: { code } }, await crashed.fetchHistory(), crashed.workflowId);
+    loseResponse = false; revokeOnReturn = true;
+    const beforeRevocation = (await getBillingBalance(client.db, grant.accountId)).balanceMicros;
+    const revokedInput = { ...paidInput, operationId: `revoked:${suffix}` };
+    const revoked = await start(revokedInput);
+    await expect(revoked.result()).rejects.toThrow();
+    const revokedCallId = knowledgeQueryOperationId(context, revokedInput.operationId);
+    const revokedFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
+      WHERE account_id=${grant.accountId} AND source_resource_id=${revokedCallId}`;
+    expect(revokedFacts.some(row => row.event_type === "embedding.call" && row.attributes.outcome === "completed")).toBeTrue();
+    expect(revokedFacts.some(row => row.event_type === "knowledge.query.closed" && row.attributes.settlement === "provider_completed_unsettled")).toBeTrue();
+    expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(beforeRevocation);
+    const beforeRefusal = physicalCalls;
+    const refused = await start({ ...paidInput, operationId: `refused:${suffix}` });
+    await expect(refused.result()).rejects.toThrow();
+    expect(physicalCalls).toBe(beforeRefusal);
+  } finally {
+    for (const handle of handles) {
+      if ((await handle.describe()).status.name === "RUNNING") {
+        await handle.cancel(); await handle.result().catch(() => undefined);
+      }
+    }
+    await stopWorker(); await native.close(); await connection.close();
+  }
+}, 240_000);
+
+test("paid concurrent query admission includes account ceilings and workspace/member pending pressure", async () => {
+  const source = await Bun.file(new URL("../../../packages/core/src/domain/knowledge-search.ts", import.meta.url)).text();
+  const ceiling = /const MAX_PAID_QUERY_BYTES_PER_MINUTE = (\d+) \* (\d+);/.exec(source);
+  if (!ceiling) throw new Error("The released paid query ceiling could not be derived");
+  const minuteBytes = Number(ceiling[1]) * Number(ceiling[2]);
+  for (const boundary of ["account_bytes", "account_credit", "workspace", "member"] as const) {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "query-pressure", accountExternalId: suffix, accountName: "Query pressure",
+      workspaceExternalSource: "query-pressure", workspaceExternalId: suffix, workspaceName: "Query pressure",
+      subjectId: `query-pressure:${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const accountId = grant.accountId, workspaceId = grant.workspaceId!;
+    fixtureAccounts.push(accountId);
+    const context: KnowledgeContext = { accountId, workspaceId, actor: { kind: "human", principalKind: "human_session",
+      subjectId: grant.subjectId, writeScopes: ["workspace"], settingsScopes: ["workspace"], review: true } };
+    const settings = { billingMode: "stripe", usageLimitsMode: "managed", staticUsageLimitsJson: "{}",
+      documentEmbeddingProvider: "openai", documentEmbeddingBillingMode: "credits",
+      documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z", documentEmbeddingRateMicrosPerMillionBytes: 1_000_000 } as Settings;
+    const available = boundary === "account_credit" ? 1 : 100_000;
+    await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
+      VALUES(${accountId},'grant',${available},${`query-pressure:${suffix}`})`;
+    const query = "abcd", bytes = Buffer.byteLength(query, "utf8");
+    if (boundary === "account_bytes") await recordUsageEvent(client.db, { accountId, workspaceId,
+      eventType: "document.query_embedding_bytes", quantity: minuteBytes - bytes, unit: "byte",
+      idempotencyKey: `query-pressure:prior-bytes:${suffix}` });
+    if (boundary === "workspace" || boundary === "member") {
+      await setWorkspaceAllowance(client.db, { accountId, workspaceId, actorSubjectId: grant.subjectId,
+        includedCredits: boundary === "workspace" ? 1 : available, period: "none", expectedVersion: 0 });
+      if (boundary === "member") await setMemberAllowance(client.db, { accountId, workspaceId,
+        actorSubjectId: grant.subjectId, subjectId: grant.subjectId, rule: { credits: 1 }, expectedVersion: 0 });
+    }
+    let entered!: () => void, release!: () => void, physicalCalls = 0;
+    const providerEntered = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const embedder: DocumentServices["embedder"] = { model: "query-pressure", dimensions: 3,
+      embedMany: async texts => texts.map(() => [1, 0, 0]), embedQuery: async () => {
+        physicalCalls++; entered(); await held; return [1, 0, 0];
+      } };
+    const first = searchKnowledgeEntries(client.db, context, { query, mode: "vector" }, () => embedder, settings);
+    try {
+      await Promise.race([providerEntered, first.then(() => { throw new Error("Provider admission was not observed"); })]);
+      const pressure = await pendingKnowledgeQueryPressure(client.db, { accountId, workspaceId, subjectId: grant.subjectId });
+      expect(pressure.bytes).toBe(bytes); expect(pressure.micros).toBe(bytes);
+      let nextContext = context;
+      if (boundary === "account_credit" || boundary === "account_bytes") {
+        // The same funding/safety account covers its other workspace too.
+        const otherWorkspaceId = crypto.randomUUID();
+        await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${otherWorkspaceId},${accountId},'Other pressure workspace')`;
+        nextContext = { ...context, workspaceId: otherWorkspaceId };
+      }
+      const second = searchKnowledgeEntries(client.db, nextContext, { query, mode: "vector" }, () => embedder, settings);
+      if (boundary === "account_credit") await expect(second).rejects.toMatchObject({ code: "knowledge_vector_funding_required" });
+      else if (boundary === "account_bytes") await expect(second).rejects.toMatchObject({ code: "quota" });
+      else await expect(second).rejects.toMatchObject({ code: "allowance_exhausted", scope: boundary });
+      expect(physicalCalls).toBe(1);
+    } finally { release(); await first.catch(() => undefined); }
+    expect((await first).searchMode).toBe("vector");
+    const pressure = await pendingKnowledgeQueryPressure(client.db, { accountId, workspaceId, subjectId: grant.subjectId });
+    expect(pressure.bytes).toBe(0); expect(pressure.micros).toBe(0);
+    expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(available - bytes);
   }
 }, 30_000);

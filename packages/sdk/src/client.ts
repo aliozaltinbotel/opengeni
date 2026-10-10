@@ -842,6 +842,8 @@ function defaultApiContractMode(options: OpenGeniClientOptions): "strict" | "com
 
 /** Per-request cancellation for operations whose caller owns an AbortSignal. */
 export type OpenGeniRequestOptions = {
+  /** Stable caller-owned identity for an exact retry, using the existing correlation header. */
+  operationId?: string | undefined;
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
   /** Opt-in void response handling for focused helpers using the shared transport. */
@@ -7476,11 +7478,12 @@ export class OpenGeniClient {
   async listKnowledgeEntries(
     workspaceId: string,
     request: KnowledgeEntryListRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<KnowledgeEntryListResponse> {
     return this.requestJson(
       "POST",
       `/v1/workspaces/${workspaceId}/knowledge/entries/search`,
-      request,
+      request, {}, options,
     );
   }
 
@@ -9836,7 +9839,8 @@ export class OpenGeniClient {
     query: Record<string, string> = {},
     options: OpenGeniRequestOptions = {},
   ): Promise<T> {
-    const correlationId = crypto.randomUUID();
+    if (options.operationId !== undefined && !/^[A-Za-z0-9._:-]{1,256}$/.test(options.operationId)) throw new TypeError("Request operation identity is invalid");
+    const correlationId = options.operationId ?? crypto.randomUUID();
     const abort = requestAbortSignal(options);
     try {
       if (abort.signal?.aborted) {

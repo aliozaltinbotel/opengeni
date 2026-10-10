@@ -1,4 +1,5 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import {
   ExternalActorSelection,
   ExternalActorAttribution,
@@ -58,6 +59,92 @@ const accessResolvedRequests = new WeakSet<Request>();
 const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
 const developerSetupGrants = new WeakSet<AccessGrant>();
+type NativeContinuationOrigin = {
+  kind: "configured" | "delegated";
+  mode: Settings["productAccessMode"];
+  authRequired: boolean;
+  expiresAt: number | null;
+  secret: string | null;
+};
+const configuredPerimeterRequests = new WeakMap<Request, NativeContinuationOrigin>();
+const nativeContinuationContexts = new WeakMap<AccessContext, NativeContinuationOrigin>();
+const nativeContinuationAuthorizations = new WeakMap<AccessGrantAuthorization, NativeContinuationOrigin>();
+
+/** Called only by the installed network perimeter after its exact key check,
+ * or by the trusted embedded host mode. Never a caller-controlled header. */
+export function recordConfiguredPerimeterRequest(request: Request, settings: Settings): void {
+  if (settings.productAccessMode !== "configured") return;
+  configuredPerimeterRequests.set(request, {
+    kind: "configured", mode: settings.productAccessMode, authRequired: settings.authRequired,
+    expiresAt: null, secret: settings.accessKey || null,
+  });
+}
+
+/** Private workflow input, never a public request credential. No bearer or
+ * issuer secret is serialized. Embedded hosts without an issuer retain their
+ * existing trusted-host boundary and still require the current native grant. */
+export type NativeAccessContinuation = {
+  version: 1;
+  kind: NativeContinuationOrigin["kind"];
+  mode: Settings["productAccessMode"];
+  authRequired: boolean;
+  expiresAt: number | null;
+  grant: AccessGrant;
+  proof: string | null;
+};
+function continuationBody(value: Omit<NativeAccessContinuation, "proof">): string {
+  const ordered = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(ordered);
+    if (input && typeof input === "object") return Object.fromEntries(Object.entries(input)
+      .filter(([, item]) => item !== undefined).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, ordered(item)]));
+    return input;
+  };
+  return JSON.stringify(ordered(value));
+}
+function continuationProof(secret: string, body: string): string {
+  return createHmac("sha256", secret).update("OpenGeni native access continuation v1\n").update(body).digest("hex");
+}
+export function nativeAccessContinuationForAuthorization(authorization: AccessGrantAuthorization): NativeAccessContinuation | null {
+  const origin = nativeContinuationAuthorizations.get(authorization);
+  if (!origin || !resolvedAccessGrantAuthorizations.has(authorization) || !authorization.contextIntegrity) return null;
+  const body: Omit<NativeAccessContinuation, "proof"> = {
+    version: 1, kind: origin.kind, mode: origin.mode, authRequired: origin.authRequired,
+    expiresAt: origin.expiresAt, grant: structuredClone(authorization.grant),
+  };
+  return { ...body, proof: origin.secret ? continuationProof(origin.secret, continuationBody(body)) : null };
+}
+
+/** Recheck the actual existing issuer and exact frozen grant. Configured grants
+ * additionally need current membership; delegated service grants remain signed
+ * synthetic authority and never acquire membership by bootstrap. */
+export async function requireNativeAccessContinuationAuthority(
+  db: Database, settings: Settings, continuation: NativeAccessContinuation, grant: AccessGrant, permission: Permission,
+): Promise<void> {
+  const refuse = (): never => { throw new Error("NATIVE_ACCESS_CONTINUATION_UNAVAILABLE"); };
+  const { proof, ...body } = continuation;
+  if (continuation.version !== 1 || continuation.mode !== settings.productAccessMode ||
+    continuation.authRequired !== settings.authRequired ||
+    !hasPermission(grant.permissions, permission, grant.permissionMode) ||
+    continuationBody({ ...body, grant }) !== continuationBody(body)) refuse();
+  const secret = continuation.kind === "delegated" ? resolveFirstPartyDelegationSecret(settings) : settings.accessKey;
+  if (secret) {
+    const expected = continuationProof(secret, continuationBody(body));
+    if (typeof proof !== "string" || !/^[0-9a-f]{64}$/.test(proof) ||
+      !timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(expected, "hex"))) refuse();
+  } else if (continuation.kind !== "configured" || settings.authRequired || proof !== null) refuse();
+  if (continuation.kind === "delegated") {
+    if (typeof continuation.expiresAt !== "number" || !Number.isInteger(continuation.expiresAt) ||
+      continuation.expiresAt < Math.floor(Date.now() / 1000) || grant.metadata?.delegated !== true) refuse();
+    return;
+  }
+  if (continuation.kind !== "configured" || settings.productAccessMode !== "configured" ||
+    continuation.expiresAt !== null || grant.principalKind !== "configured_key" || grant.metadata?.delegated === true) refuse();
+  await lockExternalWorkspaceMembershipLifecycle(db, grant.accountId);
+  const current = await withWorkspaceSubjectRls(db, grant.workspaceId, grant.subjectId,
+    scoped => getWorkspaceGrant(scoped, grant.subjectId, grant.workspaceId, { accountId: grant.accountId, lock: "share" }));
+  if (!current || current.accountId !== grant.accountId || !hasPermission(current.permissions, permission, current.permissionMode)) refuse();
+}
 // Request-local permission semantics. The durable grant carries permissionMode;
 // callers of the existing array API cannot accidentally expand a policy admin.
 const explicitPermissionSets = new WeakSet<readonly Permission[]>();
@@ -705,6 +792,8 @@ export function accessGrantAuthorizationFromContext(
     canonicalLocalHumanSession: isCanonicalLocalHumanSession(context, grant),
   };
   resolvedAccessGrantAuthorizations.add(authorization);
+  const nativeOrigin = nativeContinuationContexts.get(context);
+  if (nativeOrigin && contextIntegrity && context.workspaceGrants.includes(grant)) nativeContinuationAuthorizations.set(authorization, nativeOrigin);
   if (contextIntegrity && developerSetupApiKeyContexts.has(context)) {
     developerSetupAuthorizations.set(authorization, grant);
     developerSetupGrants.add(grant);
@@ -1362,7 +1451,7 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
     if (deps.settings.delegationSecret) {
       return null;
     }
-    return await bootstrapWorkspace(deps.db, {
+    const context = await bootstrapWorkspace(deps.db, {
       accountExternalSource: "opengeni:configured",
       accountExternalId: "default",
       accountName: "Configured",
@@ -1372,6 +1461,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
       subjectId: configuredSubject(c),
       subjectLabel: "Configured key",
     });
+    const perimeter = configuredPerimeterRequests.get(c.req.raw);
+    if (perimeter) nativeContinuationContexts.set(context, perimeter);
+    return context;
   }
 
   const bearer = bearerToken(c);
@@ -1798,6 +1890,8 @@ async function delegatedAccessContext(
     defaultWorkspaceId: payload.workspaceId,
   };
   if (restricted) developerSetupApiKeyContexts.add(context);
+  nativeContinuationContexts.set(context, { kind: "delegated", mode,
+    authRequired: deps.settings.authRequired, expiresAt: payload.exp, secret: delegationSecret });
   return context;
 }
 

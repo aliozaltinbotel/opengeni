@@ -8503,6 +8503,17 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   // per-call AI usage (one row per provider call; facts in `attributes`).
   "model.call",
   "embedding.call",
+  "model.call.dispatch",
+  "model.realtime.session.observed",
+  "model.realtime.session.attached",
+  "model.realtime.session.dispatched",
+  "model.realtime.session.connection_closed",
+  "knowledge.query.admitted",
+  "knowledge.query.dispatched",
+  "knowledge.query.indeterminate",
+  "knowledge.query.closed",
+  "knowledge.index.dispatched",
+  "knowledge.index.indeterminate",
 ] as const;
 
 export type KnownUsageEventType = (typeof KNOWN_USAGE_EVENT_TYPES)[number];

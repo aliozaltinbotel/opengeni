@@ -1,23 +1,21 @@
 import {
   KnowledgeSavePreparationRequest,
+  KnowledgeEntryListRequest,
   type KnowledgeSavePreparationResponse,
 } from "@opengeni/contracts";
 import {
   getKnowledgeEntry,
   listKnowledgeEntries,
+  withRlsContext,
+  isTransactionHandle,
   type Database,
   type KnowledgeContext,
 } from "@opengeni/db";
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { Settings } from "@opengeni/config";
 import { paidDocumentEmbedding } from "../billing/limits";
-import { searchKnowledgeEntries } from "./knowledge-search";
+import { searchKnowledgeEntries, knowledgeQueryRetrievalRequest, type KnowledgeQueryExecution } from "./knowledge-search";
 
-const defaults = {
-  get: getKnowledgeEntry,
-  list: listKnowledgeEntries,
-  search: searchKnowledgeEntries,
-};
 // Normal workspaces return the whole map in one call. Larger maps explicitly
 // continue at a complete page boundary, never silently omit collections.
 const CATALOG_PAGE_SIZE = 25;
@@ -30,9 +28,11 @@ export async function prepareKnowledgeSave(
   context: KnowledgeContext,
   input: KnowledgeSavePreparationRequest,
   embedder: () => DocumentEmbedder,
-  services = defaults,
+  services = { get: getKnowledgeEntry, list: listKnowledgeEntries, search: searchKnowledgeEntries },
   settings?: Settings,
+  execution?: KnowledgeQueryExecution,
 ): Promise<KnowledgeSavePreparationResponse> {
+  if (isTransactionHandle(db)) throw new Error("KNOWLEDGE_QUERY_REQUIRES_ROOT_DATABASE");
   const request = KnowledgeSavePreparationRequest.parse(input);
   if (context.actor.kind !== "agent" && !(context.actor.kind === "human" && context.actor.review)) {
     throw Object.assign(
@@ -48,8 +48,8 @@ export async function prepareKnowledgeSave(
     return {
       model: current.model,
       dimensions: current.dimensions,
-      embedMany: (texts) => current.embedMany(texts),
-      embedQuery: (query) => (queryEmbedding ??= current.embedQuery(query)),
+      embedMany: (texts, completed, dispatch) => current.embedMany(texts, completed, dispatch),
+      embedQuery: (query, completed, dispatch) => (queryEmbedding ??= current.embedQuery(query, completed, dispatch)),
     };
   };
   const collections: KnowledgeSavePreparationResponse["collections"] = {
@@ -64,8 +64,11 @@ export async function prepareKnowledgeSave(
   // failure would leave no deliverable preparation result. Paid mode uses
   // keyword discovery until a single-operation settlement seam exists.
   const paid = settings != null && paidDocumentEmbedding(settings);
-  const published = await services.search(
-    db,
+  const authorizedRead = <T>(read: (scoped: Database) => Promise<T>): Promise<T> => execution
+    ? withRlsContext(db, context, async scoped => { await execution.authorize(scoped); return read(scoped); }, undefined, "none")
+    : read(db);
+  const publishedSearch = (searchDb: Database) => services.search(
+    searchDb,
     context,
     {
       query: request.query,
@@ -75,11 +78,24 @@ export async function prepareKnowledgeSave(
     },
     sharedEmbedder,
     paid ? undefined : settings,
+    execution,
   );
-  // Reuse the first request's provider result (and charge). If it fell back
-  // to keyword because funding or the provider was unavailable, do not retry
-  // an unfunded embedding request in the second review view.
-  const needsReview = await services.search(
+  // Semantic search owns its short admission/settlement transactions. Keyword
+  // reads can stay in the current-authority transaction without provider I/O.
+  const published = paid && execution ? await authorizedRead(scoped => services.list(scoped, context, {
+    query: request.query, limit: request.limit, view: "published", mode: "keyword",
+  })).then(found => ({ ...found, searchMode: "keyword" as const })) : await publishedSearch(db);
+  const cachedValues = queryEmbedding && published.searchMode !== "keyword" ? await queryEmbedding : null;
+  // One provider occurrence serves both views. Reuse its vector through the
+  // installed reader rather than inventing another completed provider call.
+  const needsReview = published.searchMode !== "keyword" && queryEmbedding && provider
+    ? { ...await authorizedRead(scoped => services.list(scoped, context,
+        knowledgeQueryRetrievalRequest(KnowledgeEntryListRequest.parse({ query: request.query, limit: request.limit, view: "needs_review", mode: published.searchMode })),
+        { model: provider!.model, values: cachedValues! })), searchMode: published.searchMode }
+    : execution ? { ...await authorizedRead(scoped => services.list(scoped, context, {
+        query: request.query, limit: request.limit, view: "needs_review", mode: "keyword",
+      })), searchMode: "keyword" as const }
+    : await services.search(
     db,
     context,
     {
@@ -89,6 +105,8 @@ export async function prepareKnowledgeSave(
       ...(published.searchMode === "keyword" ? { mode: "keyword" as const } : {}),
     },
     sharedEmbedder,
+    undefined,
+    execution,
   );
   const matches = { published, needs_review: needsReview };
   for (const view of ["published", "needs_review"] as const) {
@@ -96,19 +114,19 @@ export async function prepareKnowledgeSave(
     let cursor = request.collectionCursors?.[view] ?? undefined;
     let bytes = 0;
     for (let pageNumber = 0; pageNumber < CATALOG_PAGE_BUDGET; pageNumber++) {
-      const page = await services.list(db, context, {
+      const page = await authorizedRead(scoped => services.list(scoped, context, {
         kind: "group",
         view,
         limit: CATALOG_PAGE_SIZE,
         ...(cursor ? { cursor } : {}),
-      });
+      }));
       const records: Array<Awaited<ReturnType<typeof getKnowledgeEntry>>> = [];
       for (let offset = 0; offset < page.entries.length; offset += 4) {
         records.push(
           ...(await Promise.all(
             page.entries
               .slice(offset, offset + 4)
-              .map((summary) => services.get(db, context, summary.id, { view })),
+              .map((summary) => authorizedRead(scoped => services.get(scoped, context, summary.id, { view }))),
           )),
         );
       }

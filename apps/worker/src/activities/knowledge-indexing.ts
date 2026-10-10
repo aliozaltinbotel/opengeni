@@ -1,9 +1,17 @@
+import { createHash } from "node:crypto";
 import { configuredStaticUsageLimits } from "@opengeni/config";
 import { EMBEDDING_CALL_USAGE_EVENT_TYPE } from "@opengeni/contracts";
 import {
   documentEmbeddingCostMicros,
   embeddingCallUsageAttributes,
+  embeddingCallSourceAttributes,
   paidDocumentEmbedding,
+  searchKnowledgeEntries,
+  authorizeKnowledgeQueryOwner,
+  knowledgeQueryOperationId,
+  type KnowledgeQueryWorkflowRequest,
+  type KnowledgePreparationWorkflowRequest,
+  prepareKnowledgeSave,
 } from "@opengeni/core";
 import {
   applyCreditDebitAfterUse,
@@ -19,6 +27,10 @@ import {
   guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
   readKnowledgeIndexSource,
+  hasIndeterminateKnowledgeIndexDispatch,
+  pendingKnowledgeQueryPressure,
+  readKnowledgeQueryUsageFact,
+  withKnowledgeQueryAccountLock,
   isTransactionHandle,
   recordUsageEvent,
   sumUsageQuantity,
@@ -27,6 +39,7 @@ import {
 } from "@opengeni/db";
 import type { DocumentServices, EmbeddingProviderCompletionReceipt } from "@opengeni/documents";
 import type { ControlActivityServices } from "./types";
+import { Context } from "@temporalio/activity";
 
 /** The configured monthly indexed-chunk limit, not a provider failure. */
 export class KnowledgeIndexUsageLimitError extends Error {
@@ -125,6 +138,86 @@ export function createKnowledgeIndexingActivities(
   // operator's explicit timestamp so process restarts cannot change eligibility.
   let activationTime: Promise<Date> | undefined;
   return {
+    executeKnowledgePreparation: async (input: KnowledgePreparationWorkflowRequest & { callId: string }) => {
+      const { db, settings } = await services();
+      if (!resolveDocumentServices) throw new Error("KNOWLEDGE_QUERY_PROVIDER_UNAVAILABLE");
+      const documentServices = await resolveDocumentServices();
+      const { workflowExecution, activityId } = Context.current().info;
+      if (!workflowExecution || input.callId !== knowledgeQueryOperationId(input.context, input.operationId, "preparation") || workflowExecution.workflowId !== `knowledge-query:${input.callId}`)
+        throw new Error("KNOWLEDGE_QUERY_EXECUTION_OWNER_CONFLICT");
+      return prepareKnowledgeSave(db, input.context, input.request, () => documentServices.embedder, undefined, settings, {
+        callId: input.callId, owner: { workflowId: workflowExecution.workflowId, workflowRunId: workflowExecution.runId, activityId },
+        authorize: async tx => { const current = await services();
+          await authorizeKnowledgeQueryOwner(tx, input, current.catalogSourceSettings ?? current.settings); },
+      });
+    },
+    executeKnowledgeQuery: async (input: KnowledgeQueryWorkflowRequest & { callId: string }) => {
+      const { db, settings } = await services();
+      if (!resolveDocumentServices) throw new Error("KNOWLEDGE_QUERY_PROVIDER_UNAVAILABLE");
+      const documentServices = await resolveDocumentServices();
+      const { workflowExecution, activityId } = Context.current().info;
+      if (!workflowExecution || input.callId !== knowledgeQueryOperationId(input.context, input.operationId) || workflowExecution.workflowId !== `knowledge-query:${input.callId}`)
+        throw new Error("KNOWLEDGE_QUERY_EXECUTION_OWNER_CONFLICT");
+      return searchKnowledgeEntries(db, input.context, input.request, () => documentServices.embedder, settings, {
+        callId: input.callId,
+        owner: { workflowId: workflowExecution.workflowId, workflowRunId: workflowExecution.runId, activityId },
+        authorize: async tx => { const current = await services();
+          await authorizeKnowledgeQueryOwner(tx, input, current.catalogSourceSettings ?? current.settings); },
+      });
+    },
+    settleKnowledgeQueryUnknown: async (input: (KnowledgeQueryWorkflowRequest | KnowledgePreparationWorkflowRequest) & { callId: string; operationKind?: "query" | "preparation" }) => {
+      const { db } = await services();
+      if (isTransactionHandle(db)) throw new Error("KNOWLEDGE_QUERY_REQUIRES_ROOT_DATABASE");
+      const { workflowExecution } = Context.current().info;
+      if (!workflowExecution || input.callId !== knowledgeQueryOperationId(input.context, input.operationId, input.operationKind ?? "query") || workflowExecution.workflowId !== `knowledge-query:${input.callId}`)
+        throw new Error("KNOWLEDGE_QUERY_EXECUTION_OWNER_CONFLICT");
+      const scope = { accountId: input.context.accountId, workspaceId: input.context.workspaceId, callId: input.callId };
+      const admission = await readKnowledgeQueryUsageFact(db, { ...scope, eventType: "knowledge.query.admitted" });
+      const dispatch = await readKnowledgeQueryUsageFact(db, { ...scope, eventType: "knowledge.query.dispatched" });
+      if (!dispatch) {
+        await withKnowledgeQueryAccountLock(db, scope.accountId, scope.workspaceId, async tx => {
+          // The permanent closure fences a late activity at admission and at
+          // final dispatch; a Temporal timeout alone is not physical quiescence.
+          if (await readKnowledgeQueryUsageFact(tx, { ...scope, eventType: "knowledge.query.dispatched" })) return;
+          await recordUsageEvent(tx, { ...scope, eventType: "knowledge.query.closed", quantity: 1, unit: "call",
+            sourceResourceType: "knowledge_query", sourceResourceId: scope.callId,
+            idempotencyKey: `usage:knowledge.query.closed:query:${scope.callId}`,
+            attributes: { ...(admission?.attributes ?? {
+              schema: "opengeni.knowledge-query-source/v1",
+              requestDigest: createHash("sha256").update(JSON.stringify(input.request)).digest("hex"),
+              actorDigest: createHash("sha256").update(JSON.stringify(input.context.actor, Object.keys(input.context.actor).sort())).digest("hex"),
+            }), settlement: "no_dispatch" } });
+        });
+        return;
+      }
+      const owner = dispatch.attributes.owner as Record<string, unknown> | null;
+      if (!owner || owner.workflowId !== workflowExecution.workflowId || owner.workflowRunId !== workflowExecution.runId)
+        throw new Error("KNOWLEDGE_QUERY_EXECUTION_OWNER_CONFLICT");
+      const terminal = await readKnowledgeQueryUsageFact(db, { ...scope, eventType: "embedding.call" });
+      if (terminal) {
+        if (terminal.attributes.outcome !== "completed") return;
+        await withKnowledgeQueryAccountLock(db, scope.accountId, scope.workspaceId, async tx => {
+          if (await readKnowledgeQueryUsageFact(tx, { ...scope, eventType: "knowledge.query.closed" })) return;
+          // A completed provider fact survives retrieval/debit rollback. The
+          // same lock fences any late settlement before releasing its pressure.
+          await recordUsageEvent(tx, { ...scope, eventType: "knowledge.query.closed", quantity: 1, unit: "call",
+            sourceResourceType: "knowledge_query", sourceResourceId: scope.callId,
+            idempotencyKey: `usage:knowledge.query.closed:query:${scope.callId}`,
+            attributes: { ...admission?.attributes, settlement: "provider_completed_unsettled" } });
+        });
+        return;
+      }
+      if (!admission) throw new Error("KNOWLEDGE_QUERY_SOURCE_INVALID");
+      const attributes = { ...admission.attributes, ...dispatch.attributes };
+      if (!Number.isSafeInteger(attributes.inputBytes) || Number(attributes.inputBytes) < 0) throw new Error("KNOWLEDGE_QUERY_SOURCE_INVALID");
+      await recordUsageEvent(db, { ...scope, eventType: "knowledge.query.indeterminate", quantity: 1, unit: "call",
+        sourceResourceType: "knowledge_query", sourceResourceId: scope.callId,
+        idempotencyKey: `usage:knowledge.query.indeterminate:query:${scope.callId}`, occurredAt: admission.occurredAt,
+        attributes: { ...attributes, outcome: "indeterminate", inputTokens: null, estimatedProviderCostMicros: null, pricingSource: null } });
+      // Unknown dispatch retains allowance/funding/ceiling pressure. A workflow
+      // timeout cannot prove physical quiescence or reserve the immutable final
+      // embedding.call key ahead of a late producer's known completion.
+    },
     indexKnowledge: async () => {
       const result = { completed: 0, advanced: 0, deferred: 0, unavailable: 0 };
       if (!resolveDocumentServices) return result;
@@ -151,7 +244,8 @@ export function createKnowledgeIndexingActivities(
       });
       for (const claim of claims) {
         let stage: KnowledgeIndexFailureStage = "processing";
-        const completedCalls: Parameters<typeof recordUsageEvent>[1][] = [];
+        const completedCalls: Promise<void>[] = [];
+        const dispatchState: { fact: Parameters<typeof recordUsageEvent>[1] | null } = { fact: null };
         try {
           const source = await readKnowledgeIndexSource(db, claim);
           if (!source) {
@@ -161,7 +255,7 @@ export function createKnowledgeIndexingActivities(
           // The checkpoint, chunk/byte meters and post-use debit commit together. A new
           // generation requires funding once; committed batches may finish even
           // if their accumulated cost takes the balance below zero.
-          const prepared = await withWorkspaceUsageLock(db, source.billingWorkspaceId, async (lockedDb) => {
+          const prepared = await withKnowledgeQueryAccountLock(db, claim.accountId, source.billingWorkspaceId, async (lockedDb) => {
             const current = await readKnowledgeIndexSource(lockedDb, claim);
             if (!current) {
               result.unavailable++;
@@ -274,10 +368,12 @@ export function createKnowledgeIndexingActivities(
             // if its lease/checkpoint has not changed.
             const callId = crypto.randomUUID();
             const providerName = settings.documentEmbeddingProvider ?? "unspecified";
-            const captureCompleted = (receipt: EmbeddingProviderCompletionReceipt) => {
+            const captureCompleted = async (receipt: EmbeddingProviderCompletionReceipt) => {
+              if (receipt.callId !== callId || receipt.model !== claim.model || receipt.inputBytes !== bytes || receipt.inputItems !== chunks.length)
+                throw new Error("KNOWLEDGE_INDEX_PROVIDER_CALL_ID_CONFLICT");
               // MAINT-P09-430: the completed provider call survives publication refusal
               // and rollback. This fact grants no source/publication authority.
-              completedCalls.push({
+              const fact: Parameters<typeof recordUsageEvent>[1] = {
                 accountId: claim.accountId,
                 workspaceId: current.billingWorkspaceId,
                 occurredAt: new Date(receipt.completedAt),
@@ -296,13 +392,73 @@ export function createKnowledgeIndexingActivities(
                   rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
                   billingPath: paid ? "opengeni_credits" : "external",
                 }),
+              };
+              const write = recordUsageEvent(db, fact).then(() => undefined);
+              completedCalls.push(write);
+              // Await the authoritative root write before SDK vector validation
+              // and before any publication/settlement transaction can begin.
+              await write;
+            };
+            const completionKey = `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}:${callId}`;
+            const dispatchFact: Parameters<typeof recordUsageEvent>[1] = {
+              accountId: claim.accountId, workspaceId: current.billingWorkspaceId,
+              eventType: "knowledge.index.dispatched", quantity: 1, unit: "call",
+              sourceResourceType: "knowledge_revision", sourceResourceId: claim.revisionId,
+              idempotencyKey: `usage:knowledge.index.dispatched:index:${callId}`,
+              subjectId: claim.billingAttribution.kind === "turn" || claim.billingAttribution.kind === "human"
+                ? claim.billingAttribution.initiatingHumanSubjectId : null,
+              attributes: { schema: "opengeni.knowledge-index-dispatch/v1", callId, completionKey,
+                providerReceipt: embeddingCallSourceAttributes({ callId, completionKey, callKind: "index", provider: providerName,
+                  model: claim.model, inputBytes: bytes, inputItems: chunks.length,
+                  rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes, billingPath: paid ? "opengeni_credits" : "external" }),
+                generation: claim.generation, nextIndex: current.nextIndex, leaseId: claim.leaseId,
+                provider: providerName, model: claim.model, inputBytes: bytes, inputItems: chunks.length,
+                costBoundMicros: paid ? documentEmbeddingCostMicros({ ...settings, documentEmbeddingRateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes }, bytes) : 0,
+                billingPath: paid ? "opengeni_credits" : "external", outcome: "indeterminate",
+                inputTokens: null, estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null },
+            };
+            const beforeDispatch = async (receipt?: Omit<EmbeddingProviderCompletionReceipt, "completedAt"> & { dispatchedAt: string }) => {
+              if (receipt && (receipt.callId !== callId || receipt.model !== claim.model || receipt.inputBytes !== bytes || receipt.inputItems !== chunks.length))
+                throw new Error("KNOWLEDGE_INDEX_PROVIDER_DISPATCH_CONFLICT");
+              await withKnowledgeQueryAccountLock(db, claim.accountId, current.billingWorkspaceId, async tx => {
+                const latest = await readKnowledgeIndexSource(tx, claim);
+                if (!latest || latest.nextIndex !== current.nextIndex || latest.billingWorkspaceId !== current.billingWorkspaceId)
+                  throw new Error("KNOWLEDGE_INDEX_SOURCE_CHANGED");
+                if (await hasIndeterminateKnowledgeIndexDispatch(tx, { accountId: claim.accountId,
+                  workspaceId: current.billingWorkspaceId, revisionId: claim.revisionId,
+                  generation: claim.generation, nextIndex: current.nextIndex, callId }))
+                  throw new Error("KNOWLEDGE_INDEX_PROVIDER_OUTCOME_UNKNOWN");
+                const subjectId = claim.billingAttribution.kind === "turn" || claim.billingAttribution.kind === "human"
+                  ? claim.billingAttribution.initiatingHumanSubjectId : null;
+                const pressure = await pendingKnowledgeQueryPressure(tx, { accountId: claim.accountId,
+                  workspaceId: current.billingWorkspaceId, subjectId, excludeIndexCallId: callId });
+                if (paid && current.nextIndex === 0 && (await getSpendableCreditBalance(tx, claim.accountId)).balanceMicros-pressure.micros<=0)
+                  throw new Error("KNOWLEDGE_INDEX_FUNDING_CHANGED");
+                if (paid && await checkWorkspaceAllowance(tx, { accountId: claim.accountId,
+                  workspaceId: current.billingWorkspaceId, subjectId,
+                  pendingWorkspaceMicros: pressure.workspaceMicros, pendingMemberMicros: pressure.memberMicros }))
+                  throw new Error("KNOWLEDGE_INDEX_ALLOWANCE_CHANGED");
+                if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
+                  const limit = configuredStaticUsageLimits(settings).maxDocumentIndexedChunksPerWorkspace;
+                  if (limit) {
+                    const now = new Date();
+                    const used = await sumUsageQuantity(tx, { workspaceId: current.billingWorkspaceId,
+                      eventType: "document.indexed", since: new Date(Date.UTC(now.getUTCFullYear(),now.getUTCMonth(),1)) });
+                    if (used+pressure.indexedChunks+chunks.length>limit) throw new KnowledgeIndexUsageLimitError();
+                  }
+                }
+                await recordUsageEvent(tx, dispatchFact);
               });
+              dispatchState.fact = dispatchFact;
             };
             stage = "embedding";
-            vectors = await embedder.embedMany(inputs, captureCompleted);
+            // Also protect compatible embedders that do not implement the SDK
+            // dispatch hook; the installed SDK rechecks at its physical boundary.
+            await beforeDispatch();
+            vectors = await embedder.embedMany(inputs, captureCompleted, { callId, beforeDispatch });
             stage = "processing";
             if (completedCalls.length === 0)
-              captureCompleted({
+              await captureCompleted({
                 callId,
                 provider: providerName,
                 model: claim.model,
@@ -314,7 +470,7 @@ export function createKnowledgeIndexingActivities(
           }
           // Re-enter only to settle the exact prepared lease/generation/checkpoint.
           // The provider never runs while a DB transaction or usage lock is held.
-          await withWorkspaceUsageLock(db, current.billingWorkspaceId, async lockedDb => {
+          await withKnowledgeQueryAccountLock(db, claim.accountId, current.billingWorkspaceId, async lockedDb => {
             const latest = await readKnowledgeIndexSource(lockedDb, claim);
             if (!latest || latest.nextIndex !== current.nextIndex || latest.billingWorkspaceId !== current.billingWorkspaceId) {
               result.unavailable++;
@@ -450,6 +606,10 @@ export function createKnowledgeIndexingActivities(
             }
           });
         } catch (error) {
+          if (dispatchState.fact && completedCalls.length === 0) await recordUsageEvent(db, {
+            ...dispatchState.fact, eventType: "knowledge.index.indeterminate",
+            idempotencyKey: dispatchState.fact.idempotencyKey.replace("knowledge.index.dispatched", "knowledge.index.indeterminate"),
+          });
           // Provider failures retain the last completed projection. The durable
           // queue owns retry/backoff; do not retry an entire activity implicitly.
           // The stored reason stays the SQL lifecycle's fixed code; the log
@@ -467,10 +627,9 @@ export function createKnowledgeIndexingActivities(
           });
           result.deferred++;
         } finally {
-          // Preserve the exact completed provider fact after the usage lock has
-          // released, including rollback/refusal paths. Never consume another
-          // connection while holding that lock, and never soft-fail this write.
-          for (const completedCall of completedCalls) await recordUsageEvent(db, completedCall);
+          // Do not suppress a failed authoritative completion write. These are
+          // the same already-awaited root writes, never another provider effect.
+          await Promise.all(completedCalls);
         }
       }
       return result;

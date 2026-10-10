@@ -7,6 +7,7 @@ import {
 import {
   EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA,
   EmbeddingCallUsageAttributes,
+  EmbeddingCallUsageSource,
   type LimitAction,
   type LimitDecision,
   type SessionTurnSource,
@@ -37,14 +38,15 @@ export type LimitDependencies = Pick<ApiRouteDeps, "db" | "settings">;
  */
 export function embeddingCallUsageAttributes(input: {
   callKind: EmbeddingCallUsageAttributes["callKind"];
-  provider: string;
-  model: string;
+  provider: string | null;
+  model: string | null;
   inputBytes: number;
   inputItems: number;
   rateMicrosPerMillionBytes: number;
   billingPath: EmbeddingCallUsageAttributes["billingPath"];
+  outcome?: EmbeddingCallUsageAttributes["outcome"];
 }): EmbeddingCallUsageAttributes {
-  const priced = input.provider === "openai" && input.rateMicrosPerMillionBytes > 0;
+  const priced = (input.outcome ?? "completed") === "completed" && input.provider === "openai" && input.rateMicrosPerMillionBytes > 0;
   const rate = input.rateMicrosPerMillionBytes;
   const estimate = priced
     ? Number((BigInt(input.inputBytes) * BigInt(rate) + 999_999n) / 1_000_000n)
@@ -54,7 +56,7 @@ export function embeddingCallUsageAttributes(input: {
     callKind: input.callKind,
     provider: input.provider,
     model: input.model,
-    outcome: "completed",
+    outcome: input.outcome ?? "completed",
     inputBytes: input.inputBytes,
     inputItems: input.inputItems,
     inputTokens: null,
@@ -62,6 +64,15 @@ export function embeddingCallUsageAttributes(input: {
     pricingSource: priced ? "configured_byte_rate" : null,
     rateMicrosPerMillionBytes: priced ? rate : null,
     billingPath: input.billingPath,
+  });
+}
+
+/** Existing usage-event admission retains its private owner; export this public receipt only. */
+export function embeddingCallSourceAttributes(input: Parameters<typeof embeddingCallUsageAttributes>[0] & { callId: string; completionKey?: string }): EmbeddingCallUsageSource {
+  return EmbeddingCallUsageSource.parse({
+    ...embeddingCallUsageAttributes({ ...input, outcome: "indeterminate" }),
+    schema: "opengeni.embedding-call-source/v1", callId: input.callId,
+    completionKey: input.completionKey ?? `usage:embedding.call:${input.callKind}:${input.callId}`,
   });
 }
 

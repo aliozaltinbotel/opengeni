@@ -1,3 +1,4 @@
+import { createRealtimeUsageActivities } from "./activities/realtime-usage";
 import { createKnowledgeIndexingActivities } from "./activities/knowledge-indexing";
 import { createSharedActivityServices } from "./activity-services";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
@@ -48,6 +49,7 @@ export function createControlActivitiesFromServices(
     ...createBrowserDeadlineCheckpointActivities(services),
     ...createFileUploadReaperActivities(services),
     ...createModelCallFactReconcilerActivities(services),
+    ...createRealtimeUsageActivities(services),
     ...createRetainedScreenshotMaintenanceActivities(services),
     ...createWorkflowWakeActivities(services),
     ...createSandboxLeaseActivities(services),

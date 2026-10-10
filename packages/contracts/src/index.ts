@@ -3799,6 +3799,17 @@ export const UsageEventType = z.enum([
   "model.call",
   // Non-billing dispatch intent; never evidence of provider completion or cost.
   "model.call.dispatch",
+  // Non-billing provider occurrence/attachment and exact query-owner pressure.
+  "model.realtime.session.observed",
+  "model.realtime.session.attached",
+  "model.realtime.session.dispatched",
+  "model.realtime.session.connection_closed",
+  "knowledge.query.admitted",
+  "knowledge.query.dispatched",
+  "knowledge.query.indeterminate",
+  "knowledge.query.closed",
+  "knowledge.index.dispatched",
+  "knowledge.index.indeterminate",
   // The same for one embedding provider request (EmbeddingCallUsageAttributes).
   "embedding.call",
 ]);
@@ -3811,7 +3822,8 @@ export const MODEL_CALL_DISPATCH_EVENT_TYPE = "model.call.dispatch" as const;
 export const EMBEDDING_CALL_USAGE_EVENT_TYPE = "embedding.call" as const;
 export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.model-call-usage/v1" as const;
 export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.model-call-usage/v2" as const;
-export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.embedding-call-usage/v1" as const;
+export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.embedding-call-usage/v1" as const;
+export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.embedding-call-usage/v2" as const;
 /** The database bound on `usage_events.attributes` (UTF-8 bytes of its JSON text). */
 export const USAGE_EVENT_ATTRIBUTES_MAX_BYTES = 4096;
 
@@ -3910,7 +3922,8 @@ export const ReadModelCallUsageAttributes = z.union([ModelCallUsageAttributesV1,
  * not a final accounting receipt; credential mint and browser claims cannot
  * produce it. Only opaque credential references are durable, never secrets. */
 export const REALTIME_SESSION_SOURCE_EVENT_TYPE = "model.realtime.session.observed" as const;
-export const RealtimeSessionUsageSource = z.object({
+export const REALTIME_SESSION_SOURCE_SCHEMA = "opengeni.realtime-session-source/v2" as const;
+export const RealtimeSessionUsageSourceV1 = z.object({
   schema: z.literal("opengeni.realtime-session-source/v1"),
   connectionId: z.string().uuid(),
   connectionEpoch: z.number().int().positive(),
@@ -3921,7 +3934,28 @@ export const RealtimeSessionUsageSource = z.object({
   upstreamModel: z.string().min(1).max(512).nullable(),
   billingPath: z.enum(["opengeni_credits", "external"]),
 }).strict();
+export const RealtimeSessionUsageSource = RealtimeSessionUsageSourceV1.extend({
+  schema: z.literal(REALTIME_SESSION_SOURCE_SCHEMA),
+  // An authenticated provider session-start event can prove occurrence without
+  // returning an ID. The native connection ID never impersonates a provider ID.
+  providerSessionId: z.string().min(1).max(512).nullable(),
+}).strict();
 export type RealtimeSessionUsageSource = z.infer<typeof RealtimeSessionUsageSource>;
+export const ReadRealtimeSessionUsageSource = z.union([RealtimeSessionUsageSourceV1, RealtimeSessionUsageSource]);
+export type ReadRealtimeSessionUsageSource = z.infer<typeof ReadRealtimeSessionUsageSource>;
+
+/** The physical owner commits this before dispatch, without claiming that a
+ * provider session occurred or supplying final accounting. */
+export const RealtimeSessionDispatchUsageSource = RealtimeSessionUsageSource.extend({
+  schema: z.literal("opengeni.realtime-session-dispatch/v1"), ownerId: z.string().uuid(),
+  outcome: z.literal("indeterminate"), usageReported: z.literal(false),
+  inputTokens: z.null(), outputTokens: z.null(), cachedTokens: z.null(), cacheWriteTokens: z.null(),
+  reasoningTokens: z.null(), totalTokens: z.null(), estimatedProviderCostMicros: z.null(), pricingSource: z.null(), priceVersion: z.null(),
+}).strict();
+export const RealtimeConnectionClosedUsageSource = RealtimeSessionUsageSource.extend({
+  schema: z.literal("opengeni.realtime-connection-closed/v1"), ownerId: z.string().uuid(),
+  providerFinalObserved: z.literal(false), outcome: z.literal("indeterminate"),
+}).strict();
 
 /**
  * One embedding provider request. The embedder returns vectors only, so token
@@ -3929,9 +3963,9 @@ export type RealtimeSessionUsageSource = z.infer<typeof RealtimeSessionUsageSour
  * `estimatedProviderCostMicros` is the configured byte rate applied to those
  * bytes (`configured_byte_rate`) when a positive rate is configured, else null.
  */
-export const EmbeddingCallUsageAttributes = z
+const EmbeddingCallUsageAttributesV1Shape = z
   .object({
-    schema: z.literal(EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA),
+    schema: z.literal(EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA_V1),
     callKind: z.enum(["query", "index"]),
     provider: z.string().min(1).max(128),
     model: z.string().min(1).max(512),
@@ -3944,8 +3978,8 @@ export const EmbeddingCallUsageAttributes = z
     rateMicrosPerMillionBytes: z.number().int().positive().nullable(),
     billingPath: z.enum(["opengeni_credits", "external"]),
   })
-  .strict()
-  .superRefine((value, context) => {
+  .strict();
+function refineEmbeddingCallUsage(value: { estimatedProviderCostMicros: number | null; pricingSource: string | null; rateMicrosPerMillionBytes: number | null }, context: z.RefinementCtx): void {
     const known = value.estimatedProviderCostMicros !== null;
     if (
       known !== (value.pricingSource !== null) ||
@@ -3956,8 +3990,37 @@ export const EmbeddingCallUsageAttributes = z
         message: "an embedding estimate, its pricing source and its rate are known together",
       });
     }
-  });
+}
+export const EmbeddingCallUsageAttributesV1 = EmbeddingCallUsageAttributesV1Shape.superRefine(refineEmbeddingCallUsage);
+export const EmbeddingCallUsageAttributes = EmbeddingCallUsageAttributesV1Shape.extend({
+  schema: z.literal(EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA),
+  outcome: ModelCallOutcome,
+  provider: EmbeddingCallUsageAttributesV1Shape.shape.provider.nullable(),
+  model: EmbeddingCallUsageAttributesV1Shape.shape.model.nullable(),
+}).superRefine((value, context) => {
+  refineEmbeddingCallUsage(value, context);
+  if (value.outcome !== "completed" && value.estimatedProviderCostMicros !== null) {
+    context.addIssue({ code: "custom", message: "unknown provider execution cannot establish a byte-priced estimate" });
+  }
+});
 export type EmbeddingCallUsageAttributes = z.infer<typeof EmbeddingCallUsageAttributes>;
+
+/** Public provider-boundary source truth; no request, authority or workflow payload. */
+export const EmbeddingCallUsageSource = EmbeddingCallUsageAttributesV1Shape.extend({
+  schema: z.literal("opengeni.embedding-call-source/v1"),
+  callId: z.uuid(),
+  completionKey: z.string().min(1).max(2048),
+  provider: EmbeddingCallUsageAttributesV1Shape.shape.provider.nullable(),
+  model: EmbeddingCallUsageAttributesV1Shape.shape.model.nullable(),
+  outcome: z.literal("indeterminate"),
+  inputTokens: z.null(), estimatedProviderCostMicros: z.null(),
+  pricingSource: z.null(), rateMicrosPerMillionBytes: z.null(),
+}).strict().superRefine((value, context) => {
+  const expected = value.callKind === "query" ? value.completionKey === `usage:embedding.call:query:${value.callId}`
+    : new RegExp(`^usage:embedding\\.call:index:[0-9a-f-]{36}:[1-9][0-9]*:[0-9]+:${value.callId}$`, "u").test(value.completionKey);
+  if (!expected) context.addIssue({ code: "custom", message: "source binds the physical provider call's final receipt key" });
+});
+export type EmbeddingCallUsageSource = z.infer<typeof EmbeddingCallUsageSource>;
 
 /** Bounded per-row usage attributes as persisted and exported (a JSON object). */
 export const UsageEventAttributes = z.record(z.string(), z.unknown());

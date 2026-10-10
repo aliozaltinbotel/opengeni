@@ -71,6 +71,21 @@ function makeClient(
   return { client, requests };
 }
 
+test("knowledge retries preserve explicit request identity and default calls remain distinct", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({ entries: [], nextCursor: null, searchMode: "vector" }));
+  const query = { query: "fixture", mode: "vector" as const };
+  await client.listKnowledgeEntries(WORKSPACE_ID, query, { operationId: "knowledge-retry:1" });
+  await client.listKnowledgeEntries(WORKSPACE_ID, query, { operationId: "knowledge-retry:1" });
+  await client.listKnowledgeEntries(WORKSPACE_ID, query);
+  await client.listKnowledgeEntries(WORKSPACE_ID, query);
+  expect(requests[0]!.headers[OPENGENI_CORRELATION_HEADER]).toBe("knowledge-retry:1");
+  expect(requests[1]!.headers[OPENGENI_CORRELATION_HEADER]).toBe("knowledge-retry:1");
+  expect(requests[2]!.headers[OPENGENI_CORRELATION_HEADER]).not.toBe(requests[3]!.headers[OPENGENI_CORRELATION_HEADER]);
+  expect(requests.every(request => request.body === JSON.stringify(query))).toBeTrue();
+  await expect(client.listKnowledgeEntries(WORKSPACE_ID, query, { operationId: "invalid identity" })).rejects.toThrow("Request operation identity is invalid");
+  expect(requests).toHaveLength(4);
+});
+
 test("metadata-only tab opening opts into inventory while default opening still returns observation", async () => {
   const browserSessionId = "11111111-1111-4111-8111-111111111111";
   const target: BrowserObservation["target"] = {

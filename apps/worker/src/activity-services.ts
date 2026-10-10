@@ -81,6 +81,7 @@ export function createSharedActivityServices(
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         startSandboxReaperWorkflow: dependencies.startSandboxReaperWorkflow ?? null,
         startVideoGenerationWorkflow: dependencies.startVideoGenerationWorkflow ?? null,
+        startRealtimeUsageWorkflow: dependencies.startRealtimeUsageWorkflow ?? null,
         entitlements: dependencies.entitlements ?? null,
         connectionCredentials:
           dependencies.connectionCredentials ??

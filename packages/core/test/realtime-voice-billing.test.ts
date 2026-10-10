@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { REALTIME_SESSION_SOURCE_SCHEMA } from "@opengeni/contracts";
 import {
   parseRealtimeVoicePricingJson,
   parseRealtimeVoicePricingTableJson,
@@ -145,7 +146,7 @@ test("native occurrence is separate from immutable final accounting and remains 
     await billing.recordProviderSessionOccurrence({ accountId: "account", workspaceId: "workspace", sessionId: "session", source });
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ eventType: "model.realtime.session.observed", unit: "session", attributes: {
-      schema: "opengeni.realtime-session-source/v1", providerSessionId: source.providerSessionId, billingPath: "external",
+      schema: REALTIME_SESSION_SOURCE_SCHEMA, providerSessionId: source.providerSessionId, billingPath: "external",
     } });
     expect(rows.some(row => row.eventType === "model.call")).toBe(false);
     const occurredAt = new Date("2026-10-09T23:59:00.000Z");

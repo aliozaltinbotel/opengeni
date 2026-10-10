@@ -1,4 +1,4 @@
-export { knowledgeIndexingWorkflow } from "./workflows/knowledge-indexing";
+export { knowledgeIndexingWorkflow, knowledgeQueryWorkflow, knowledgePreparationWorkflow } from "./workflows/knowledge-indexing";
 export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workflows/document-index";
 export {
   approvalDecision,
@@ -44,3 +44,5 @@ export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,
 } from "./workflows/rig-verification";
+
+export { realtimeUsageWorkflow } from "./workflows/realtime-usage";

@@ -1,4 +1,9 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
+import * as database from "@opengeni/db";
+import { ReadRealtimeSessionUsageSource, type AccessGrant } from "@opengeni/contracts";
+import { testSettings } from "@opengeni/testing";
+import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengeni/core";
+import { createRealtimeUsageProxyAttachment, createRealtimeUsageProxyLifecycle } from "../src/realtime-usage-proxy";
 import type {
   ApiWebSocketConnection,
   ApiWebSocketLike,
@@ -13,9 +18,18 @@ import {
 const rootSecret = "test-root-secret-with-enough-entropy-for-proxy-tests";
 const publicOrigin = "https://opengeni.example";
 const servers: Array<ReturnType<typeof Bun.serve>> = [];
+const relaySpies: Array<{ mockRestore(): void }> = [];
+const producedRelayFacts: Array<{ provider: string; final: boolean; events: Array<Parameters<typeof database.recordUsageEvent>[1]> }> = [];
+// Explicit fixture regeneration captures the actual native writer, not a
+// manually recreated receipt shape. Normal tests never write an artifact.
+afterAll(async () => {
+  const file = process.env.OPENGENI_TEST_NATIVE_VOICE_FIXTURE_FILE;
+  if (file) await Bun.write(file, JSON.stringify({ producer: "native core voice writer through actual API relay", cases: producedRelayFacts }, null, 2) + "\n");
+});
 
 afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
+  for (const spy of relaySpies.splice(0)) spy.mockRestore();
 });
 
 describe("interaction frame proxy", () => {
@@ -243,3 +257,85 @@ async function eventually(predicate: () => boolean): Promise<void> {
     await Bun.sleep(10);
   }
 }
+
+
+class NativeTextSocket implements ApiWebSocketLike {
+  readonly messages: string[] = [];
+  readonly closes: number[] = [];
+  constructor(readonly data: ApiWebSocketConnection) {}
+  send(data: string | Uint8Array): number { if (typeof data !== "string") throw new Error("native provider must remain text"); this.messages.push(data); return Buffer.byteLength(data); }
+  close(code = 1000): void { this.closes.push(code); }
+}
+
+test.each([
+  { provider: "ai-gateway" as const, final: false },
+  { provider: "ai-gateway" as const, final: true },
+  { provider: "xai-subscription" as const, final: false },
+])("native voice proxy commits one durable owner: $provider final=$final", async ({ provider, final }) => {
+  const accountId = crypto.randomUUID(), workspaceId = crypto.randomUUID(), sessionId = crypto.randomUUID(), keyId = crypto.randomUUID();
+  const grant: AccessGrant = { accountId, workspaceId, subjectId: `api_key:${keyId}`, principalKind: "api_key", permissions: ["sessions:control"] };
+  const authorization = accessGrantAuthorizationFromContext({ mode: "configured", subjectId: grant.subjectId,
+    accountGrants: [{ accountId, subjectId: grant.subjectId, permissions: grant.permissions }], workspaceGrants: [grant],
+    defaultAccountId: accountId, defaultWorkspaceId: workspaceId }, grant);
+  const root = {} as database.Database, tx = {} as database.Database;
+  const rows = new Map<string, Parameters<typeof database.recordUsageEvent>[1]>();
+  let providerConnections = 0, inTransaction = false;
+  relaySpies.push(spyOn(database, "withRlsContext").mockImplementation(async (_db, _scope, fn) => { inTransaction = true; try { return await fn(tx); } finally { inTransaction = false; } }));
+  relaySpies.push(spyOn(database, "findActiveWorkspaceApiKeyById").mockResolvedValue({ permissions: ["sessions:control"], permissionMode: "explicit" } as never));
+  relaySpies.push(spyOn(database, "recordUsageEvent").mockImplementation(async (db, row) => {
+    if (row.eventType === "model.realtime.session.dispatched") { expect(db).toBe(tx); if (!rows.has(row.idempotencyKey)) expect(providerConnections).toBe(0); }
+    else expect(db).toBe(root);
+    const previous = rows.get(row.idempotencyKey);
+    if (previous && JSON.stringify(previous.attributes) !== JSON.stringify(row.attributes)) throw new Error("immutable dispatch owner conflict");
+    rows.set(row.idempotencyKey, previous ?? row); return {} as never;
+  }));
+  relaySpies.push(spyOn(database, "loadRealtimeSessionUsageSource").mockImplementation(async (_db, ref) => {
+    const row = rows.get(`usage:model.realtime.session.observed:${ref.connectionId}`);
+    return row ? { source: ReadRealtimeSessionUsageSource.parse(row.attributes), occurredAt: new Date("2026-10-10T00:00:00Z") } : null;
+  }));
+  relaySpies.push(spyOn(database, "loadRealtimeSessionDispatch").mockImplementation(async (_db, ref) => {
+    const row = rows.get(`usage:model.realtime.session.dispatched:${ref.connectionId}`);
+    return row ? { attributes: row.attributes!, occurredAt: new Date() } : null;
+  }));
+  const upstream = Bun.serve({ port: 0, fetch(request, server) {
+    expect(inTransaction).toBeFalse(); expect(rows.size).toBe(1);
+    return server.upgrade(request, { headers: { "sec-websocket-protocol": provider === "ai-gateway" ? "ai-gateway-realtime.v1" : "xai-client-secret.provider-ephemeral-fixture" } }) ? undefined : new Response("failed", { status: 400 });
+  }, websocket: { open(socket) { providerConnections++; socket.send(JSON.stringify(provider === "ai-gateway"
+      ? { type: "session-started", sessionId: "provider-session-fixture" }
+      : { type: "session.created", session: { object: "realtime.session" } })); },
+    message(socket) { socket.send(JSON.stringify(final
+      ? { type: "session-closed", sessionId: "provider-session-fixture", reason: "closed", usage: { seconds: 12 } }
+      : { type: provider === "ai-gateway" ? "response-done" : "response.done", responseId: "turn-only", status: "completed" })); } } });
+  servers.push(upstream);
+  const settings = testSettings({ productAccessMode: "configured", delegationSecret: rootSecret, billingMode: "disabled", usageLimitsMode: "none" });
+  const deps = { db: root, settings, workflowClient: { startRealtimeUsageObservation: async () => {} } } as ApiRouteDeps;
+  const connectionId = crypto.randomUUID();
+  const sealed = await createRealtimeUsageProxyAttachment({ deps, authorization, request: new Request(publicOrigin, { headers: { origin: publicOrigin } }),
+    sessionId, connectionId, connectionEpoch: 1, provider, model: "fixture-realtime-model",
+    secret: { url: `ws://127.0.0.1:${upstream.port}`, token: "provider-ephemeral-fixture", upstreamModelId: "fixture-upstream", expiresAt: null } });
+  expect(JSON.stringify(sealed)).not.toContain("provider-ephemeral-fixture");
+  const attachment = { url: sealed.url, protocols: ["opengeni-realtime.v1", `opengeni-frame-proxy.${sealed.token}`] };
+  let connection: ApiWebSocketConnection | null = null;
+  const transport = new InteractionFrameProxyTransport(rootSecret, Date.now, createRealtimeUsageProxyLifecycle(deps));
+  expect(transport.upgrade(proxyRequest(attachment, publicOrigin), { upgrade(_request, options) { connection = options.data; return true; } })).toBeUndefined();
+  const socket = new NativeTextSocket(connection!); connection!.attach(socket);
+  // A browser claiming a final event remains just outbound data.
+  connection!.receive(JSON.stringify({ type: "session-closed", usage: { seconds: 100000 } }));
+  try { await eventually(() => socket.messages.length === 2); } catch { throw new Error(JSON.stringify({ providerConnections, rowTypes: [...rows.values()].map(row => row.eventType), received: socket.messages.length, closes: socket.closes })); }
+  expect(rows.has(`usage:model.call:realtime:${connectionId}`)).toBe(final);
+  if (final) {
+    const receipt = rows.get(`usage:model.call:realtime:${connectionId}`)!;
+    expect(receipt.occurredAt).toEqual(new Date("2026-10-10T00:00:00Z"));
+    expect(receipt.attributes).toMatchObject({ outcome: "indeterminate", usageReported: false, totalTokens: null, estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null });
+  }
+  const occurrence = rows.get(`usage:model.realtime.session.observed:${connectionId}`)!;
+  expect(occurrence.attributes).toMatchObject({ providerSessionId: provider === "ai-gateway" ? "provider-session-fixture" : null, schema: "opengeni.realtime-session-source/v2" });
+  connection!.transportClosed();
+  await eventually(() => rows.has(`usage:model.realtime.session.connection_closed:${connectionId}`));
+  expect(rows.has(`usage:model.call:realtime:${connectionId}`)).toBe(final);
+  expect(rows.get(`usage:model.realtime.session.dispatched:${connectionId}`)!.attributes).toMatchObject({ providerSessionId: null, outcome: "indeterminate", totalTokens: null, estimatedProviderCostMicros: null });
+  const replaySocket = { upgrade(_request: Request, options: { data: ApiWebSocketConnection }) { const duplicate = options.data; duplicate.attach(new NativeTextSocket(duplicate)); return true; } };
+  transport.upgrade(proxyRequest(attachment, publicOrigin), replaySocket as ApiWebSocketUpgradeServer);
+  await Bun.sleep(30); expect(providerConnections).toBe(1);
+  producedRelayFacts.push({ provider, final, events: [...rows.values()] });
+});

@@ -368,6 +368,9 @@ export async function checkWorkspaceAllowance(
      * only when the allowance opts into `unbilledUsage: "list_price"`.
      */
     fundedWithoutCredits?: boolean;
+    /** Pending admitted work is pressure, never a settled debit or a grant. */
+    pendingWorkspaceMicros?: number;
+    pendingMemberMicros?: number;
   },
 ): Promise<AllowanceExhausted | null> {
   const raw = await command<RawUsage>(db, {
@@ -379,7 +382,10 @@ export async function checkWorkspaceAllowance(
   });
   if (input.fundedWithoutCredits && raw.config?.unbilledUsage !== "list_price") return null;
   const usage = projectUsage(raw, 1);
-  if (usage.workspace.status === "exhausted") {
+  for (const value of [input.pendingWorkspaceMicros, input.pendingMemberMicros]) {
+    if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new Error("Allowance pending pressure is invalid");
+  }
+  if (usage.workspace.status === "exhausted" || (usage.workspace.remaining !== null && usage.workspace.remaining <= (input.pendingWorkspaceMicros ?? 0))) {
     return {
       code: "allowance_exhausted",
       scope: "workspace",
@@ -390,7 +396,7 @@ export async function checkWorkspaceAllowance(
   const member = input.subjectId
     ? usage.members.find((row) => row.subjectId === input.subjectId)
     : null;
-  if (member?.status === "exhausted") {
+  if (member?.status === "exhausted" || (member?.remaining !== null && member?.remaining !== undefined && member.remaining <= (input.pendingMemberMicros ?? 0))) {
     return {
       code: "allowance_exhausted",
       scope: "member",

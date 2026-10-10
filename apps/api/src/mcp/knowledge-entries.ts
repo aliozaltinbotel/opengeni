@@ -10,7 +10,6 @@ import {
 } from "@opengeni/contracts";
 import {
   prepareKnowledgeFile,
-  prepareKnowledgeSave,
   retainKnowledgeMessage,
   searchKnowledgeEntries,
   requireLiveAgentAttemptAuthorization,
@@ -157,17 +156,12 @@ export function registerKnowledgeEntryTools(
         "Before saving useful lasting Knowledge, find related published entries and unapproved proposals, and fetch the full authorized collection map with descriptions and parent IDs in one read-only call. First choose the destination: future behavior belongs in instruction_policy_save for short always-on workspace rules or skill_save for applicable procedures and preferences, not Knowledge. Supply a concise subject and the proposed fact, decision, requirement or incident. Search spans all authorized collections. Reuse an existing entry when unchanged; read its current content before a correction, preserve evidence, or create only when distinct. Pending matches are unapproved. Choose collections from this map in your writable scope. A collection may have both published and pending versions. If collections.complete is false, continue with collectionCursors=collections.nextCursors; never mistake a partial catalog for the whole map. Long descriptions explicitly report truncation and can be read with knowledge_get. This call saves and approves nothing.",
       inputSchema: KnowledgeSavePreparationRequest.shape,
     },
-    (input) =>
-      run((context) =>
-        prepareKnowledgeSave(
-          deps.db,
-          context,
-          input,
-          () => deps.getDocumentServices().embedder,
-          undefined,
-          deps.settings,
-        ),
-      ),
+    (input, extra) => run(async context => {
+      if (!deps.workflowClient.prepareKnowledge) throw new Error("KNOWLEDGE_QUERY_WORKFLOW_UNAVAILABLE");
+      const operation = extra._meta?.opengeniOperationId;
+      return deps.workflowClient.prepareKnowledge({ context, request: KnowledgeSavePreparationRequest.parse(input),
+        operationId: typeof operation === "string" ? operation : crypto.randomUUID(), grant, externalContinuation: null });
+    }),
   );
   server.registerTool(
     "knowledge_search",
@@ -181,16 +175,17 @@ export function registerKnowledgeEntryTools(
         rootOnly: true,
       }).extend({ view: z.enum(["published", "needs_review"]).default("published") }).shape,
     },
-    (input) =>
-      run((context) =>
-        searchKnowledgeEntries(
-          deps.db,
-          context,
-          input,
-          () => deps.getDocumentServices().embedder,
-          deps.settings,
-        ),
-      ),
+    (input, extra) =>
+      run(async context => {
+        const request = KnowledgeEntryListRequest.parse(input);
+        if (!request.query || request.mode === "keyword") return searchKnowledgeEntries(deps.db, context, request, () => deps.getDocumentServices().embedder, deps.settings);
+        if (!deps.workflowClient.queryKnowledge) throw new Error("KNOWLEDGE_QUERY_WORKFLOW_UNAVAILABLE");
+        const operation = extra._meta?.["opengeniOperationId"];
+        // Native runtime supplies its exact trusted tool-operation identity.
+        // Unscoped RPC counters can repeat on reconnect; fresh calls stay fresh.
+        const operationId = typeof operation === "string" ? `knowledge_search:${operation}` : crypto.randomUUID();
+        return deps.workflowClient.queryKnowledge({ context, request, operationId, grant, externalContinuation: null });
+      }),
   );
   server.registerTool(
     "knowledge_browse",

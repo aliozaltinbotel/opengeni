@@ -49,6 +49,8 @@ import {
   requireAccessGrant,
   requireAccountAdminAuthorizationStamp,
   requireAccessGrantAuthorization,
+  externalActorContinuationForAuthorization,
+  nativeAccessContinuationForAuthorization,
   knowledgeContextForAccess,
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
@@ -812,6 +814,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return await withAccessGrantSessionRlsContext(deps, grant, async () => {
       const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true });
+      const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:search");
       const server = buildDocumentsMcpServer(
         db,
         grant.accountId,
@@ -820,10 +823,14 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         {
           knowledge: await knowledgeContextForAccess(
             deps,
-            await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:search"),
+            authorization,
             "documents:search",
           ),
           settings: deps.settings,
+          ...(deps.workflowClient.queryKnowledge ? { queryOwner: {
+            query: deps.workflowClient.queryKnowledge, grant: authorization.grant,
+            externalContinuation: externalActorContinuationForAuthorization(authorization), nativeContinuation: nativeAccessContinuationForAuthorization(authorization),
+          } } : {}),
         },
       );
       await server.connect(transport);

@@ -1,4 +1,4 @@
-import { searchKnowledgeEntries } from "@opengeni/core";
+import { searchKnowledgeEntries, type KnowledgeQueryWorkflowRequest, type SessionWorkflowClient } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import { KnowledgeEntryListRequest } from "@opengeni/contracts";
 import type { DocumentServices } from "@opengeni/documents";
@@ -18,7 +18,8 @@ export function buildDocumentsMcpServer(
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: { knowledge: KnowledgeContext; settings?: Settings },
+  options: { knowledge: KnowledgeContext; settings?: Settings;
+    queryOwner?: Pick<KnowledgeQueryWorkflowRequest, "grant" | "externalContinuation" | "nativeContinuation"> & { query: NonNullable<SessionWorkflowClient["queryKnowledge"]> } },
 ): McpServer {
   const context = options.knowledge;
   if (context.accountId !== accountId || context.workspaceId !== workspaceId)
@@ -35,18 +36,19 @@ export function buildDocumentsMcpServer(
         reviewBatchId: true,
       }).shape,
     },
-    async (input) => ({
+    async (input, extra) => ({
       content: [
         {
           type: "text",
           text: JSON.stringify(
-            await searchKnowledgeEntries(
-              db,
-              context,
-              input,
-              () => documentServices.embedder,
-              options.settings,
-            ),
+            await (async () => {
+              const request = KnowledgeEntryListRequest.parse(input);
+              if (!request.query || request.mode === "keyword") return searchKnowledgeEntries(db, context, request, () => documentServices.embedder, options.settings);
+              if (!options.queryOwner) throw new Error("KNOWLEDGE_QUERY_WORKFLOW_UNAVAILABLE");
+              const operation = extra._meta?.["opengeniOperationId"];
+              return options.queryOwner.query({ context, request, operationId: typeof operation === "string" ? `knowledge_search:${operation}` : crypto.randomUUID(),
+                grant: options.queryOwner.grant, externalContinuation: options.queryOwner.externalContinuation, nativeContinuation: options.queryOwner.nativeContinuation ?? null });
+            })(),
           ),
         },
       ],

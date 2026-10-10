@@ -6,7 +6,7 @@ export type ApiWebSocketConnection = Readonly<{
 
 export type ApiWebSocketLike = Readonly<{
   data: ApiWebSocketConnection;
-  send(data: Uint8Array, compress?: boolean): number;
+  send(data: string | Uint8Array, compress?: boolean): number;
   close(code?: number, reason?: string): void;
   readonly bufferedAmount?: number;
   getBufferedAmount?(): number;

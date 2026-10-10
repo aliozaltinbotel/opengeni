@@ -3611,9 +3611,9 @@ export async function getWorkspaceGrant(
   db: Database,
   subjectId: string,
   workspaceId: string,
-  provenance?: { principalKind?: AccessPrincipalKind },
+  provenance?: { principalKind?: AccessPrincipalKind; accountId?: string; lock?: "share" },
 ): Promise<AccessGrant | null> {
-  const [row] = await db
+  let query = db
     .select({
       membership: schema.workspaceMemberships,
       workspace: schema.workspaces,
@@ -3624,9 +3624,13 @@ export async function getWorkspaceGrant(
       and(
         eq(schema.workspaceMemberships.subjectId, subjectId),
         eq(schema.workspaceMemberships.workspaceId, workspaceId),
+        provenance?.accountId ? eq(schema.workspaceMemberships.accountId, provenance.accountId) : undefined,
+        provenance?.accountId ? eq(schema.workspaces.accountId, provenance.accountId) : undefined,
       ),
     )
-    .limit(1);
+    .limit(1).$dynamic();
+  if (provenance?.lock === "share") query = query.for("share");
+  const [row] = await query;
   return row
     ? {
         workspaceId: row.workspace.id,

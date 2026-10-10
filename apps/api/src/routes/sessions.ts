@@ -1,3 +1,4 @@
+import { createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
@@ -272,6 +273,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   getManagedAuthRequestActorEpoch,
   hasPermission,
+  authorizeKnowledgeQueryOwner,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireFreshAccessGrant,
@@ -1556,7 +1558,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/webrtc", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:control");
+    const grant = authorization.grant;
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -1676,6 +1679,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ).catch(() => undefined);
         return refused;
       }
+      const authority = await realtimeProxyAuthority(deps, authorization);
+      await realtimeVoiceBilling.recordProviderSessionDispatch({ accountId: grant.accountId, workspaceId, sessionId,
+        ownerId: crypto.randomUUID(), source: { connectionId: claim.connection.id,
+          connectionEpoch: claim.connection.connectionEpoch,
+          provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
+          providerSessionId: null, providerCredentialId: null, model: claim.mode.model, upstreamModel: null },
+        authorize: tx => authorizeKnowledgeQueryOwner(tx, authority, deps.catalogSourceSettings ?? settings, "sessions:control"),
+      });
       const broker = (
         claim.mode.model === AZURE_LIVE_MODEL_ID
           ? buildSessionAzureLiveBroker
@@ -1689,6 +1700,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             providerSessionId: source.providerSessionId, providerCredentialId: source.providerCredentialId,
             model: claim.mode.model, upstreamModel: source.upstreamModel,
           },
+        });
+        if (!deps.workflowClient.startRealtimeUsageObservation) throw new Error("REALTIME_USAGE_WORKFLOW_UNAVAILABLE");
+        await deps.workflowClient.startRealtimeUsageObservation({
+          accountId: grant.accountId, workspaceId, sessionId, connectionId: claim.connection.id,
         });
       });
       try {
@@ -1789,7 +1804,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/gateway", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:control");
+    const grant = authorization.grant;
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -1850,6 +1866,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         model: claim.mode.model,
         fetchImpl: deps.codexFetch ?? fetch,
       });
+      const proxy = await createRealtimeUsageProxyAttachment({ deps, authorization, request: c.req.raw,
+        sessionId, connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+        provider: "ai-gateway", model: claim.mode.model, secret });
       const claimed = claim;
       const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
         scopedDb.transaction(async (tx) =>
@@ -1860,7 +1879,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             connectionId: claimed.connection.id,
             operationId,
             connectionEpoch: claimed.connection.connectionEpoch,
-            sdpAnswer: "gateway-client-secret-minted",
+            sdpAnswer: "gateway-native-proxy-issued",
           }),
         ),
       );
@@ -1874,6 +1893,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
       return c.json({
         ...secret,
+        ...proxy,
         connectionId: completed.connection.id,
         connectionEpoch: completed.connection.connectionEpoch,
         startupFenceSequence: completed.connection.startupFenceSequence,
@@ -1925,7 +1945,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/supergrok", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:control");
+    const grant = authorization.grant;
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -1980,6 +2001,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         model: claim.mode.model,
         fetchImpl: deps.xaiFetch ?? fetch,
       });
+      const proxy = await createRealtimeUsageProxyAttachment({ deps, authorization, request: c.req.raw,
+        sessionId, connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+        provider: "xai-subscription", model: claim.mode.model, secret });
       const claimed = claim;
       const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
         scopedDb.transaction(async (tx) =>
@@ -1990,13 +2014,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             connectionId: claimed.connection.id,
             operationId,
             connectionEpoch: claimed.connection.connectionEpoch,
-            sdpAnswer: "supergrok-client-secret-minted",
+            sdpAnswer: "supergrok-native-proxy-issued",
           }),
         ),
       );
       connectionCompleted = true;
       return c.json({
         ...secret,
+        ...proxy,
         connectionId: completed.connection.id,
         connectionEpoch: completed.connection.connectionEpoch,
         startupFenceSequence: completed.connection.startupFenceSequence,

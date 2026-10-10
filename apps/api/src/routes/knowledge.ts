@@ -1,6 +1,7 @@
 import { retryWhileMissing } from "@opengeni/storage";
 import { allowedFirstPartyMcpToolsForSession } from "@opengeni/config";
 import {
+  OPENGENI_CORRELATION_HEADER,
   type FirstPartyMcpToolName,
   AgentLearningContext,
   AgentLearningOverridePatch,
@@ -16,8 +17,10 @@ import {
 } from "@opengeni/contracts";
 import {
   prepareKnowledgeFile,
-  prepareKnowledgeSave,
   searchKnowledgeEntries,
+  externalActorContinuationForAuthorization,
+  nativeAccessContinuationForAuthorization,
+  type AccessGrantAuthorization,
   KnowledgeVectorFundingError,
   KnowledgeVectorQueryRejectedError,
   hasPermission,
@@ -115,7 +118,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
   async function run<T>(
     c: Context,
     write: boolean,
-    fn: (context: Awaited<ReturnType<typeof knowledgeContextForAccess>>) => Promise<T>,
+    fn: (context: Awaited<ReturnType<typeof knowledgeContextForAccess>>, authorization: AccessGrantAuthorization) => Promise<T>,
     readPermission: "documents:search" | "workspace:read" = "documents:search",
   ) {
     try {
@@ -140,11 +143,19 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
       return await withAccessGrantSessionRlsContext(deps, access.grant, async () => {
         const context = await knowledgeContextForAccess(deps, access, permission);
         c.header("cache-control", "private, no-store");
-        return fn(context);
+        return fn(context, access);
       });
     } catch (error) {
       knowledgeHttpError(error);
     }
+  }
+  async function search(c: Context, context: Awaited<ReturnType<typeof knowledgeContextForAccess>>, authorization: AccessGrantAuthorization, request: KnowledgeEntryListRequest) {
+    const parsed = KnowledgeEntryListRequest.parse(request);
+    if (!parsed.query || parsed.mode === "keyword") return searchKnowledgeEntries(deps.db, context, parsed, () => deps.getDocumentServices().embedder, deps.settings);
+    if (!deps.workflowClient.queryKnowledge) throw new Error("KNOWLEDGE_QUERY_WORKFLOW_UNAVAILABLE");
+    return deps.workflowClient.queryKnowledge({ context, request: parsed,
+      operationId: c.req.header(OPENGENI_CORRELATION_HEADER) ?? crypto.randomUUID(),
+      grant: authorization.grant, externalContinuation: externalActorContinuationForAuthorization(authorization), nativeContinuation: nativeAccessContinuationForAuthorization(authorization) });
   }
   app.post("/v1/workspaces/:workspaceId/knowledge/files/:fileId/prepare", (c) =>
     run(c, false, async (context) => {
@@ -232,7 +243,7 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     }),
   );
   app.post(`${base}/prepare-save`, (c) =>
-    run(c, false, async (context) => {
+    run(c, false, async (context, authorization) => {
       if (context.actor.kind === "agent") {
         const access = await requireAccessGrantAuthorization(
           c,
@@ -253,29 +264,16 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
             message: "Knowledge preparation is unavailable for this task",
           });
       }
-      return c.json(
-        await prepareKnowledgeSave(
-          deps.db,
-          context,
-          await parseRequestJson(c, KnowledgeSavePreparationRequest),
-          () => deps.getDocumentServices().embedder,
-          undefined,
-          deps.settings,
-        ),
-      );
+      if (!deps.workflowClient.prepareKnowledge) throw new Error("KNOWLEDGE_QUERY_WORKFLOW_UNAVAILABLE");
+      return c.json(await deps.workflowClient.prepareKnowledge({ context,
+        request: await parseRequestJson(c, KnowledgeSavePreparationRequest),
+        operationId: c.req.header(OPENGENI_CORRELATION_HEADER) ?? crypto.randomUUID(),
+        grant: authorization.grant, externalContinuation: externalActorContinuationForAuthorization(authorization), nativeContinuation: nativeAccessContinuationForAuthorization(authorization) }));
     }),
   );
   app.post(`${base}/search`, (c) =>
-    run(c, false, async (context) =>
-      c.json(
-        await searchKnowledgeEntries(
-          deps.db,
-          context,
-          await parseRequestJson(c, KnowledgeEntryListRequest),
-          () => deps.getDocumentServices().embedder,
-          deps.settings,
-        ),
-      ),
+    run(c, false, async (context, authorization) =>
+      c.json(await search(c, context, authorization, await parseRequestJson(c, KnowledgeEntryListRequest))),
     ),
   );
   app.get("/v1/workspaces/:workspaceId/knowledge/review-groups", (c) =>
@@ -305,20 +303,11 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     ),
   );
   app.get(base, (c) =>
-    run(c, false, async (context) => {
+    run(c, false, async (context, authorization) => {
       const query = c.req.query();
-      return c.json(
-        await searchKnowledgeEntries(
-          deps.db,
-          context,
-          KnowledgeEntryListRequest.parse({
-            ...query,
-            ...(query.limit ? { limit: Number(query.limit) } : {}),
-          }),
-          () => deps.getDocumentServices().embedder,
-          deps.settings,
-        ),
-      );
+      return c.json(await search(c, context, authorization, KnowledgeEntryListRequest.parse({
+        ...query, ...(query.limit ? { limit: Number(query.limit) } : {}),
+      })));
     }),
   );
   app.post(base, (c) =>

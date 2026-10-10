@@ -27,8 +27,29 @@ import type {
   EditableArtifactDurableExportService,
   EditableArtifactOfficeImportPort,
 } from "./editable-artifacts";
+import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
+import type { KnowledgeContext } from "@opengeni/db";
+import type { NativeAccessContinuation } from "./access";
+
+/** Private authenticated execution input. Never a public query-schema field or
+ * a usage export: it carries the installed host's exact current-guard proof. */
+export type KnowledgeQueryWorkflowRequest = {
+  context: KnowledgeContext;
+  request: KnowledgeEntryListRequest;
+  operationId: string;
+  grant: AccessGrant;
+  externalContinuation: ExternalActorContinuation | null;
+  nativeContinuation?: NativeAccessContinuation | null;
+};
+export type KnowledgePreparationWorkflowRequest = Omit<KnowledgeQueryWorkflowRequest, "request"> & {
+  request: KnowledgeSavePreparationRequest;
+};
 
 export type SessionWorkflowClient = {
+  queryKnowledge?: (input: KnowledgeQueryWorkflowRequest) => Promise<KnowledgeEntryListResponse>;
+  prepareKnowledge?: (input: KnowledgePreparationWorkflowRequest) => Promise<KnowledgeSavePreparationResponse>;
+  startRealtimeUsageObservation?: (input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string }) => Promise<void>;
   triggerAutomationRun?: (input: {
     accountId: string;
     workspaceId: string;

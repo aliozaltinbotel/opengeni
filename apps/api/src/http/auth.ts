@@ -1,6 +1,6 @@
 import { resolveFirstPartyDelegationSecret, type Settings } from "@opengeni/config";
 import { verifyDelegatedAccessToken } from "@opengeni/contracts";
-import { verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
+import { recordConfiguredPerimeterRequest, verifiedDelegatedHumanAuthorizationForRequest } from "@opengeni/core";
 import type { Context, MiddlewareHandler } from "hono";
 import { ANALYTICS_CONSENT_PATH } from "../routes/analytics-consent";
 import { CLIENT_ERRORS_PATH } from "../routes/client-errors";
@@ -24,7 +24,12 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
     // host's own auth is the sole human gate and Opengeni is mounted behind it.
     // Standalone/separate deployments set `authRequired:true` to keep this ON as
     // the shared-deployment-key perimeter.
-    if (!settings.authRequired || isAuthExempt(c, settings)) {
+    if (!settings.authRequired) {
+      recordConfiguredPerimeterRequest(c.req.raw, settings);
+      await next();
+      return;
+    }
+    if (isAuthExempt(c, settings)) {
       await next();
       return;
     }
@@ -156,6 +161,7 @@ async function isAuthorized(c: Context, settings: Settings): Promise<boolean> {
   const expected = settings.accessKey;
   const explicit = c.req.header("x-opengeni-access-key");
   if (expected && constantTimeEqual(explicit, expected)) {
+    recordConfiguredPerimeterRequest(c.req.raw, settings);
     return true;
   }
   const authorization = c.req.header("authorization");
@@ -163,6 +169,7 @@ async function isAuthorized(c: Context, settings: Settings): Promise<boolean> {
     ? authorization.slice("Bearer ".length)
     : undefined;
   if (expected && constantTimeEqual(bearer, expected)) {
+    recordConfiguredPerimeterRequest(c.req.raw, settings);
     return true;
   }
 

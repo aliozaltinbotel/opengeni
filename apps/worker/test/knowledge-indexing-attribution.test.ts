@@ -27,6 +27,14 @@ let currentNextIndex = 0;
 let appendStatus = "running";
 let appendFails = false;
 let receiptFails = false;
+let indeterminateDispatch = false;
+let pendingMicros = 0;
+const producedIndexFacts: Array<{scenario: string; events: Parameters<typeof recordUsageEvent>[1][]}> = [];
+function retainIndexFacts(scenario: string, start: number) {
+  producedIndexFacts.push({scenario,events:structuredClone(usage.mock.calls.slice(start).map(call=>call[1]).filter(row=>
+    row.eventType==='knowledge.index.dispatched'||row.eventType==='knowledge.index.indeterminate'||row.eventType==='embedding.call'))});
+}
+
 const durableCalls = new Map<string, Parameters<typeof recordUsageEvent>[1]>();
 const usage = mock(async (db: unknown, input: Parameters<typeof recordUsageEvent>[1]) => {
   if (input.eventType === "embedding.call") {
@@ -53,7 +61,12 @@ const nativeDbExports = await import("@opengeni/db");
 mock.module("@opengeni/db", () => ({
   ...nativeDbExports,
   claimKnowledgeIndexJobs: async () => [{ ...claim, billingAttribution: attribution }],
+  hasIndeterminateKnowledgeIndexDispatch: async () => indeterminateDispatch,
   readKnowledgeIndexSource: async () => ({ billingWorkspaceId: "workspace", nextIndex: currentNextIndex, entry }),
+  pendingKnowledgeQueryPressure: async () => ({ bytes: 0, micros: pendingMicros, workspaceMicros: pendingMicros, memberMicros: pendingMicros, indexedChunks: 0, queryMicros: 0 }),
+  withKnowledgeQueryAccountLock: async (_db: unknown, _account: string, _workspace: string, fn: (db: unknown) => Promise<unknown>) => {
+    lockActive = true;try { return await fn(lockedDb); } finally { lockActive = false; }
+  },
   withWorkspaceUsageLock: async (
     _db: unknown,
     _workspace: string,
@@ -101,13 +114,19 @@ mock.module("@opengeni/db", () => ({
 }));
 const { paidDocumentEmbedding, documentEmbeddingCostMicros, embeddingCallUsageAttributes } =
   await import("../../../packages/core/src/billing/limits");
+const nativeCoreExports = await import("@opengeni/core");
 mock.module("@opengeni/core", () => ({
+  ...nativeCoreExports,
   paidDocumentEmbedding,
   documentEmbeddingCostMicros,
   embeddingCallUsageAttributes,
 }));
 const { createKnowledgeIndexingActivities } = await import("../src/activities/knowledge-indexing");
-afterAll(() => mock.restore());
+afterAll(async () => {
+  mock.restore();
+  const file=process.env.OPENGENI_TEST_NATIVE_INDEX_FIXTURE_FILE;
+  if(file)await Bun.write(file,JSON.stringify({producer:'actual native index activity provider-boundary writer',cases:producedIndexFacts},null,2)+'\n');
+});
 
 function worker(embedder?: DocumentServices["embedder"]) {
   return createKnowledgeIndexingActivities(
@@ -324,4 +343,59 @@ test("provider execution releases admission transaction; a changed checkpoint ca
     expect(debit.mock.calls.length).toBe(debits);
     expect(durableCalls.size).toBe(before + 1);
   } finally { currentNextIndex = 0; }
+});
+
+
+test("an unresolved index dispatch refuses a fresh physical provider call at the same checkpoint", async () => {
+  const providerCalls = embed.mock.calls.length;
+  indeterminateDispatch = true;
+  try {
+    expect((await worker().indexKnowledge()).deferred).toBe(1);
+    expect(embed.mock.calls.length).toBe(providerCalls);
+  } finally { indeterminateDispatch = false; }
+});
+
+test("index SDK completion is durable before return and uses the dispatch physical call ID", async () => {
+  const start=usage.mock.calls.length;
+  attribution = { kind: "service" };
+  const before = durableCalls.size;
+  const embedder: DocumentServices["embedder"] = {
+    model: claim.model, dimensions: claim.dimensions, embedQuery: async () => [1, 0, 0],
+    embedMany: async (inputs, completed, dispatch) => {
+      expect(lockActive).toBe(false);
+      expect(dispatch?.callId).toBeString();
+      await dispatch!.beforeDispatch!({ callId: dispatch!.callId!, provider: "openai", model: claim.model,
+        inputBytes: bytes, inputItems: inputs.length, dispatchedAt: new Date().toISOString() });
+      expect(lockActive).toBe(false);
+      await completed!({ callId: dispatch!.callId!, provider: "openai", model: claim.model,
+        inputBytes: bytes, inputItems: inputs.length, completedAt: new Date().toISOString() });
+      expect(durableCalls.size).toBe(before + 1);
+      expect([...durableCalls.keys()].at(-1)).toEndWith(`:${dispatch!.callId!}`);
+      return vectors;
+    },
+  };
+  expect((await worker(embedder).indexKnowledge()).completed).toBe(1);
+  retainIndexFacts('index_completed',start);
+});
+
+
+test("index lost response writes public unknown source while retaining the exact free final key",async()=>{
+  const start=usage.mock.calls.length;
+  const embedder: DocumentServices['embedder']={model:claim.model,dimensions:claim.dimensions,embedQuery:async()=>[],
+    embedMany:async()=>{throw new Error('transport lost');}};
+  expect((await worker(embedder).indexKnowledge()).deferred).toBe(1);
+  const events=usage.mock.calls.slice(start).map(call=>call[1]);
+  const source=events.find(row=>row.eventType==='knowledge.index.indeterminate')!;
+  expect(source.attributes!.providerReceipt).toMatchObject({outcome:'indeterminate',estimatedProviderCostMicros:null,inputTokens:null});
+  expect(events.some(row=>row.eventType==='embedding.call')).toBeFalse();
+  retainIndexFacts('index_lost_response',start);
+});
+
+test("index dispatch rechecks shared account funding pressure before the physical provider boundary",async()=>{
+  const providerCalls=embed.mock.calls.length;
+  pendingMicros=100;
+  try {
+    expect((await worker().indexKnowledge()).deferred).toBe(1);
+    expect(embed.mock.calls.length).toBe(providerCalls);
+  } finally {pendingMicros=0;}
 });

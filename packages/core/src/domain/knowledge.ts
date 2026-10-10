@@ -1,9 +1,49 @@
 import type { AccessGrant, KnowledgeEntryScope, Permission } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
-import { hasPermission, type AccessGrantAuthorization } from "../access";
+import { hasPermission, requireNativeAccessContinuationAuthority, type AccessGrantAuthorization } from "../access";
+import type { Settings } from "@opengeni/config";
 import { requireLiveAgentAttemptAuthorization } from "../session-authorization";
 import type { ApiRouteDeps } from "../dependencies";
 import { HTTPException } from "hono/http-exception";
+import { requireExternalContinuationAuthority } from "../application/external-continuation";
+import { findActiveWorkspaceApiKeyById, getWorkspaceGrant, lockExternalWorkspaceMembershipLifecycle, withWorkspaceSubjectRls, type Database } from "@opengeni/db";
+import type { KnowledgeQueryWorkflowRequest } from "../dependencies";
+
+/** Revalidate the installed principal's exact current authority in the short
+ * admission/settlement transaction. Frozen audit metadata is not a credential. */
+export async function authorizeKnowledgeQueryOwner(tx: Database, input: Pick<KnowledgeQueryWorkflowRequest, "context" | "grant" | "externalContinuation" | "nativeContinuation">, settings?: Settings, permission: Permission = "documents:search"): Promise<void> {
+  const { context, grant, externalContinuation, nativeContinuation } = input;
+  if (grant.accountId !== context.accountId || grant.workspaceId !== context.workspaceId || !hasPermission(grant.permissions, permission, grant.permissionMode))
+    throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+  if (context.actor.kind === "agent") {
+    const current = await requireLiveAgentAttemptAuthorization(tx, grant, context.actor.sessionId);
+    if (current.turnId !== context.actor.turnId || current.attemptId !== context.actor.attemptId || current.executionGeneration !== context.actor.executionGeneration)
+      throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+    return;
+  }
+  if (grant.subjectId !== context.actor.subjectId) throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+  if (externalContinuation) {
+    await requireExternalContinuationAuthority(tx, externalContinuation, { ...context, subjectId: grant.subjectId }, permission);
+    return;
+  }
+  const keyId = /^api_key:([0-9a-f-]{36})$/i.exec(grant.subjectId)?.[1];
+  if (keyId) {
+    const key = await findActiveWorkspaceApiKeyById(tx, { ...context, apiKeyId: keyId });
+    if (!key || !hasPermission(key.permissions, permission, key.permissionMode)) throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+    return;
+  }
+  if (grant.principalKind === "configured_key" || grant.principalKind === "service" || grant.metadata?.delegated === true) {
+    if (!nativeContinuation || !settings) throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+    await requireNativeAccessContinuationAuthority(tx, settings, nativeContinuation, grant, permission);
+    return;
+  }
+  if (context.actor.kind !== "human") throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+  await lockExternalWorkspaceMembershipLifecycle(tx, context.accountId);
+  const current = await withWorkspaceSubjectRls(tx, context.workspaceId, grant.subjectId,
+    scoped => getWorkspaceGrant(scoped, grant.subjectId, context.workspaceId, { accountId: context.accountId, lock: "share" }));
+  if (!current || current.accountId !== context.accountId || !hasPermission(current.permissions, permission, current.permissionMode))
+    throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+}
 
 /** A delegated MCP gateway can retrieve shared Knowledge. Its subject label
  * does not establish personal ownership or human review authority. */

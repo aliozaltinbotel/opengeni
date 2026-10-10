@@ -34,6 +34,7 @@ import {
   expandMcpAccountRoutes,
   hasPermission,
   externalActorContinuationForAuthorization,
+  nativeAccessContinuationForAuthorization,
   isVerifiedOrganizationServiceAuthorization,
   externalContinuationCommitAuthorizer,
   requireResolvedAccessGrantAuthorization,
@@ -41,6 +42,7 @@ import {
   resolveWorkspaceCatalogSettings,
   settingsWithEnabledCapabilityMcpServers,
   type AccessGrantAuthorization,
+  type KnowledgeQueryWorkflowRequest,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -199,6 +201,8 @@ export async function prepareWorkspaceToolGateway(
     grant,
     undefined,
     reauthorize,
+    external,
+    nativeAccessContinuationForAuthorization(authorization),
   );
   try {
     await reauthorize?.();
@@ -258,6 +262,8 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
   reauthorize?: () => Promise<void>,
+  externalContinuation: KnowledgeQueryWorkflowRequest["externalContinuation"] = null,
+  nativeContinuation: KnowledgeQueryWorkflowRequest["nativeContinuation"] = null,
 ): Promise<PreparedWorkspaceToolGateway> {
   const catalogSourceSettings = routeDeps.catalogSourceSettings ?? routeDeps.settings;
   const resolvedCatalog = await resolveWorkspaceCatalogSettings(
@@ -337,6 +343,9 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
               {
                 knowledge: await knowledgeContextForGateway(routeDeps, grant),
                 settings: gatewaySettings,
+                ...(routeDeps.workflowClient.queryKnowledge ? { queryOwner: {
+                  query: routeDeps.workflowClient.queryKnowledge, grant, externalContinuation, nativeContinuation,
+                } } : {}),
               },
             ),
           ),
