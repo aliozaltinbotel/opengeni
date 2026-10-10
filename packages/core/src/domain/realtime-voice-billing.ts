@@ -283,8 +283,9 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
     }): Promise<void> {
       if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
       const claimed = RealtimeSessionUsageSource.parse(input.source);
-      const source = await loadRealtimeSessionUsageSource(deps.db, { ...input, connectionId: claimed.connectionId });
-      if (!source || JSON.stringify(RealtimeSessionUsageSource.parse(source)) !== JSON.stringify(claimed)) throw new Error("REALTIME_PROVIDER_SOURCE_UNBOUND");
+      const observation = await loadRealtimeSessionUsageSource(deps.db, { ...input, connectionId: claimed.connectionId });
+      if (!observation || JSON.stringify(RealtimeSessionUsageSource.parse(observation.source)) !== JSON.stringify(claimed)) throw new Error("REALTIME_PROVIDER_SOURCE_UNBOUND");
+      const { source } = observation;
       const attributes = ModelCallUsageAttributes.parse({
         schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, callKind: "realtime_session", scope: "call",
         sourceKey: `realtime:${source.connectionId}`, provider: source.provider, providerApi: "realtime",
@@ -298,6 +299,7 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
         eventType: MODEL_CALL_USAGE_EVENT_TYPE, quantity: 1, unit: "call",
         sourceResourceType: "model_realtime_session", sourceResourceId: source.connectionId,
         idempotencyKey: `usage:${MODEL_CALL_USAGE_EVENT_TYPE}:realtime:${source.connectionId}`,
+        occurredAt: observation.occurredAt,
         attributes,
       });
     },

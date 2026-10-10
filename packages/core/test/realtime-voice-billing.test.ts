@@ -148,10 +148,11 @@ test("native occurrence is separate from immutable final accounting and remains 
       schema: "opengeni.realtime-session-source/v1", providerSessionId: source.providerSessionId, billingPath: "external",
     } });
     expect(rows.some(row => row.eventType === "model.call")).toBe(false);
-    sourceReader.mockResolvedValue({ ...source, schema: "opengeni.realtime-session-source/v1", billingPath: "external" });
+    const occurredAt = new Date("2026-10-09T23:59:00.000Z");
+    sourceReader.mockResolvedValue({ source: { ...source, schema: "opengeni.realtime-session-source/v1", billingPath: "external" }, occurredAt });
     await billing.recordProviderSessionFinal({ accountId: "account", workspaceId: "workspace", sessionId: "session",
       source: { ...source, schema: "opengeni.realtime-session-source/v1", billingPath: "external" }, outcome: "indeterminate" });
-    expect(rows[1]).toMatchObject({ eventType: "model.call", attributes: {
+    expect(rows[1]).toMatchObject({ eventType: "model.call", occurredAt, attributes: {
       schema: "opengeni.model-call-usage/v2", callKind: "realtime_session", outcome: "indeterminate",
       usageReported: false, totalTokens: null, estimatedProviderCostMicros: null, pricingSource: null,
     } });

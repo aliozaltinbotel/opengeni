@@ -1,6 +1,7 @@
 import type { DocumentServices } from "@opengeni/documents";
 import {
   resolveDocumentIndexAuthority,
+  isTransactionHandle,
   rlsContextForWorkspace,
   withSessionRlsActorContext,
   withWorkspaceUsageLock,
@@ -14,6 +15,7 @@ export function createDocumentActivities(
   return {
     indexDocument: async (input: IndexDocumentInput) => {
       const { db, objectStorage } = await services();
+      if (isTransactionHandle(db)) throw new Error("DOCUMENT_PREPARATION_REQUIRES_ROOT_DATABASE");
       if (!objectStorage) {
         throw new Error("object storage is not configured");
       }
@@ -28,7 +30,7 @@ export function createDocumentActivities(
       if (context.accountId !== input.accountId) {
         throw new Error("document account/workspace authority mismatch");
       }
-      return await withWorkspaceUsageLock(db, input.workspaceId, async (lockedDb) => {
+      const storedAuthority = await withWorkspaceUsageLock(db, input.workspaceId, async (lockedDb) => {
         const storedAuthority = await resolveDocumentIndexAuthority(lockedDb, input);
         if (!storedAuthority) {
           throw new Error("document authority was not found before indexing");
@@ -68,33 +70,40 @@ export function createDocumentActivities(
         ) {
           throw new Error("document authority changed before indexing");
         }
-        const document = await withSessionRlsActorContext(
-          {
-            subjectId: "service:document-preparation",
-            privateFileOwnerSubjectId:
-              storedAuthority.authorityKind === "personal"
-                ? storedAuthority.authoritySubjectId
-                : null,
-          },
-          () =>
-            indexDocumentNow(
-              lockedDb,
-              objectStorage,
-              input.workspaceId,
-              input.documentId,
-              documentServices,
-              { viewerSubjectId: storedAuthority.authoritySubjectId },
-            ),
-        );
-        if (
-          document.authorityKind !== storedAuthority.authorityKind ||
-          document.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId ||
-          document.authoritySubjectId !== storedAuthority.authoritySubjectId
-        ) {
-          throw new Error("document authority changed before indexing");
-        }
-        return document;
+        return storedAuthority;
       });
+      // The installed preparation claim/complete gates own their transactions.
+      // Object storage and parsing must not inherit this admission transaction.
+      const document = await withSessionRlsActorContext(
+        {
+          subjectId: "service:document-preparation",
+          privateFileOwnerSubjectId:
+            storedAuthority.authorityKind === "personal"
+              ? storedAuthority.authoritySubjectId
+              : null,
+        },
+        () => indexDocumentNow(
+          db,
+          objectStorage,
+          input.workspaceId,
+          input.documentId,
+          documentServices,
+          { viewerSubjectId: storedAuthority.authoritySubjectId },
+        ),
+      );
+      const currentAuthority = await resolveDocumentIndexAuthority(db, input);
+      if (
+        !currentAuthority ||
+        currentAuthority.authorityKind !== storedAuthority.authorityKind ||
+        currentAuthority.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId ||
+        currentAuthority.authoritySubjectId !== storedAuthority.authoritySubjectId ||
+        document.authorityKind !== storedAuthority.authorityKind ||
+        document.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId ||
+        document.authoritySubjectId !== storedAuthority.authoritySubjectId
+      ) {
+        throw new Error("document authority changed before indexing");
+      }
+      return document;
     },
   };
 }

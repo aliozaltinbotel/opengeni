@@ -7,6 +7,7 @@ import {
   OpenAIEmbeddingProvider,
   type EmbeddingProviderCompletionReceipt,
   HeuristicCurationProvider,
+  indexDocumentNow,
   RecursiveTextChunker,
   canViewDocument,
   chunkText,
@@ -24,6 +25,15 @@ import {
 } from "../src";
 
 describe("documents", () => {
+  test("document preparation rejects an outer transaction before storage or parsing", async () => {
+    let storageReads = 0;
+    await expect(indexDocumentNow(
+      { rollback() {} } as never,
+      { getObjectBytes: async () => { storageReads += 1; return null; } } as never,
+      crypto.randomUUID(), crypto.randomUUID(), {} as never,
+    )).rejects.toThrow("DOCUMENT_PREPARATION_REQUIRES_ROOT_DATABASE");
+    expect(storageReads).toBe(0);
+  });
   test("authorizes source bytes with the immutable initiating subject before add and index", async () => {
     const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
     const add = source.slice(

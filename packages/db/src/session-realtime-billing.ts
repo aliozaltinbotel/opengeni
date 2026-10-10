@@ -140,9 +140,9 @@ export async function existingUsageEventIdempotencyKeys(
 export async function loadRealtimeSessionUsageSource(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string },
-): Promise<RealtimeSessionUsageSource | null> {
+): Promise<{ source: RealtimeSessionUsageSource; occurredAt: Date } | null> {
   return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async scopedDb => {
-    const [row] = await scopedDb.select({ attributes: schema.usageEvents.attributes })
+    const [row] = await scopedDb.select({ attributes: schema.usageEvents.attributes, occurredAt: schema.usageEvents.occurredAt })
       .from(schema.usageEvents).where(and(
         eq(schema.usageEvents.accountId, input.accountId),
         eq(schema.usageEvents.workspaceId, input.workspaceId),
@@ -155,6 +155,6 @@ export async function loadRealtimeSessionUsageSource(
     if (!row) return null;
     const source = RealtimeSessionUsageSource.parse(row.attributes);
     if (source.connectionId !== input.connectionId) throw new Error("REALTIME_PROVIDER_SOURCE_IDENTITY_CONFLICT");
-    return source;
+    return { source, occurredAt: row.occurredAt };
   });
 }

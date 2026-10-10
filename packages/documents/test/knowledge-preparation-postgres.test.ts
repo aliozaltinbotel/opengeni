@@ -1,4 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
+import { createDocumentActivities } from "../../../apps/worker/src/activities/documents";
+import type { ControlActivityServices } from "../../../apps/worker/src/activities/types";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   createDb,
@@ -20,7 +23,7 @@ beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("document-canonical-preparation");
   if (!acquired) throw new Error("Document preparation verification requires PostgreSQL");
   shared = acquired;
-  client = createDb(shared.appUrl, { max: 6 });
+  client = createDb(shared.appUrl, { max: 1 });
 }, 900_000);
 afterAll(async () => {
   await client?.close();
@@ -72,7 +75,14 @@ test.each(["workspace", "personal"] as const)(
         },
       },
     } as unknown as DocumentServices;
-    const storage = { getObjectBytes: async () => ({ bytes }) } as unknown as ObjectStorage;
+    const storage = { getObjectBytes: async () => {
+      // A one-connection pool cannot complete this read if the actual worker
+      // still holds its outer transaction across object storage.
+      const state = await client.db.execute(sql`SELECT txid_current_if_assigned() AS txid`);
+      const rows = Array.isArray(state) ? state : (state as unknown as { rows: Array<{ txid: unknown }> }).rows;
+      expect((rows[0] as { txid: unknown }).txid).toBeNull();
+      return { bytes };
+    } } as unknown as ObjectStorage;
     if (privateOwner) {
       expect(await getDocumentForIndexing(client.db, workspaceId, documentId)).toBeNull();
       expect(
@@ -89,14 +99,8 @@ test.each(["workspace", "personal"] as const)(
       ).toBe(documentId);
     }
     // The worker's identity remains a service; the immutable stored subject supplies only the document/file scope.
-    const index = () =>
-      withSessionRlsActorContext(
-        { subjectId: "service:document-preparation", privateFileOwnerSubjectId: privateOwner },
-        () =>
-          indexDocumentNow(client.db, storage, workspaceId, documentId, services, {
-            viewerSubjectId: privateOwner,
-          }),
-      );
+    const worker = createDocumentActivities(async () => ({ db: client.db, objectStorage: storage }) as ControlActivityServices, async () => services);
+    const index = () => worker.indexDocument({ accountId, workspaceId, documentId });
     const document = await index();
     expect(document.status).toBe("ready");
     expect(document.curationStatus).toBe("none");

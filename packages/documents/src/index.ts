@@ -38,6 +38,7 @@ import {
 } from "@opengeni/contracts";
 import {
   claimKnowledgeDocumentPreparation,
+  isTransactionHandle,
   completeKnowledgeDocumentPreparation,
   currentCreditDebitAttribution,
   createPersonalDocumentAuthority,
@@ -2116,6 +2117,7 @@ export async function indexDocumentNow(
   services: DocumentServices = createDocumentServices(),
   access?: DocumentAccessFilter,
 ): Promise<Document> {
+  if (isTransactionHandle(db)) throw new Error("DOCUMENT_PREPARATION_REQUIRES_ROOT_DATABASE");
   const [loadedDocument] = await withDocumentRls(
     db,
     workspaceId,
