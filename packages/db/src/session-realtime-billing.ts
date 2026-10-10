@@ -1,6 +1,6 @@
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 
-import type { SessionRealtimeEndReason, SessionRealtimeModel } from "@opengeni/contracts";
+import { REALTIME_SESSION_SOURCE_EVENT_TYPE, RealtimeSessionUsageSource, type SessionRealtimeEndReason, type SessionRealtimeModel } from "@opengeni/contracts";
 import { withRlsContext, withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
 
@@ -133,4 +133,28 @@ export async function existingUsageEventIdempotencyKeys(
       return new Set(rows.map((row) => row.key));
     },
   );
+}
+
+/** Immutable server-created source for exactly this account/workspace/session.
+ * Browser negotiation state, credential mint and heartbeat are not evidence. */
+export async function loadRealtimeSessionUsageSource(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string },
+): Promise<RealtimeSessionUsageSource | null> {
+  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async scopedDb => {
+    const [row] = await scopedDb.select({ attributes: schema.usageEvents.attributes })
+      .from(schema.usageEvents).where(and(
+        eq(schema.usageEvents.accountId, input.accountId),
+        eq(schema.usageEvents.workspaceId, input.workspaceId),
+        eq(schema.usageEvents.sessionId, input.sessionId),
+        eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
+        eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
+        eq(schema.usageEvents.sourceResourceId, input.connectionId),
+        eq(schema.usageEvents.idempotencyKey, `usage:${REALTIME_SESSION_SOURCE_EVENT_TYPE}:${input.connectionId}`),
+      )).limit(1);
+    if (!row) return null;
+    const source = RealtimeSessionUsageSource.parse(row.attributes);
+    if (source.connectionId !== input.connectionId) throw new Error("REALTIME_PROVIDER_SOURCE_IDENTITY_CONFLICT");
+    return source;
+  });
 }

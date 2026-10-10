@@ -69,6 +69,11 @@ export type CodexRealtimeErrorCode =
   | "timeout"
   | "cancelled";
 
+/** Mandatory native occurrence refusal must not become a retryable network failure. */
+export class CodexRealtimeReceiptError extends Error {
+  constructor(cause: unknown) { super("CODEX_REALTIME_RECEIPT_REFUSED", { cause }); this.name = "CodexRealtimeReceiptError"; }
+}
+
 /** Safe provider failure: it contains no response body, credential, or account identity. */
 export class CodexRealtimeError extends Error {
   constructor(
@@ -85,6 +90,8 @@ export type CodexRealtimeCallOptions = {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
   providerConfig?: CodexRealtimeProviderConfig | undefined;
+  /** Trusted backend owner; awaited before returning the provider answer. */
+  onProviderSessionCreated?: ((source: { providerSessionId: string; upstreamModel: string }) => Promise<void>) | undefined;
 };
 
 export type CodexRealtimeProviderConfig = {
@@ -175,7 +182,7 @@ export async function fetchCodexRealtimeProviderConfig(
       : FALLBACK_REALTIME_PROVIDER_CONFIG.model;
     return { architecture, model, version: CODEX_REALTIME_VERSION };
   } catch (error) {
-    if (error instanceof CodexRealtimeError) throw error;
+    if (error instanceof CodexRealtimeError || error instanceof CodexRealtimeReceiptError) throw error;
     if (options.signal?.aborted) {
       throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
     }
@@ -299,6 +306,12 @@ export async function createCodexRealtimeCall(
         response.status,
       );
     }
+    try {
+      await options.onProviderSessionCreated?.({
+        providerSessionId: (location.split("?", 1)[0] ?? "").split("/").filter(Boolean).at(-1)!,
+        upstreamModel: providerConfig.model,
+      });
+    } catch (cause) { throw new CodexRealtimeReceiptError(cause); }
     const sdp = await readBoundedSdp(response);
     if (!isAudioSdp(sdp)) {
       throw new CodexRealtimeError(
@@ -319,7 +332,7 @@ export async function createCodexRealtimeCall(
     // fetch that ignores AbortSignal cannot produce a late unhandled rejection.
     return await Promise.race([request, cancellation, deadline]);
   } catch (error) {
-    if (error instanceof CodexRealtimeError) throw error;
+    if (error instanceof CodexRealtimeError || error instanceof CodexRealtimeReceiptError) throw error;
     if (options.signal?.aborted) {
       throw new CodexRealtimeError("cancelled", "Codex realtime request cancelled");
     }

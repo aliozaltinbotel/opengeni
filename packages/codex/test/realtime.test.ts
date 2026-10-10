@@ -3,6 +3,7 @@ import {
   CODEX_REALTIME_MODEL,
   CODEX_REALTIME_VERSION,
   CodexRealtimeError,
+  CodexRealtimeReceiptError,
   createCodexRealtimeCall,
   fetchCodexRealtimeProviderConfig,
   selectCodexCredentialId,
@@ -24,6 +25,20 @@ function providerResponse(body: BodyInit | null = answer, init: ResponseInit = {
 }
 
 describe("native Codex subscription realtime call", () => {
+  test("trusted native occurrence awaits exact provider Location; receipt refusal cannot retry provider creation", async () => {
+    let providerCalls = 0;
+    const sources: Array<{ providerSessionId: string; upstreamModel: string }> = [];
+    const options = { providerConfig: await fetchCodexRealtimeProviderConfig(auth, async () => new Response(null, { status: 503 })), onProviderSessionCreated: async (source: { providerSessionId: string; upstreamModel: string }) => { sources.push(source); } };
+    await createCodexRealtimeCall(auth, { sdp: offer, version: "v3", sessionId: crypto.randomUUID() },
+      async () => { providerCalls++; return providerResponse(); }, options);
+    expect(sources).toEqual([{ providerSessionId: "rtc_test_call", upstreamModel: options.providerConfig.model }]);
+    await expect(createCodexRealtimeCall(auth, { sdp: offer, version: "v3", sessionId: crypto.randomUUID() },
+      async () => { providerCalls++; return providerResponse(); },
+      { onProviderSessionCreated: async () => { throw new Error("writer unavailable"); } }))
+      .rejects.toBeInstanceOf(CodexRealtimeReceiptError);
+    expect(providerCalls).toBe(2);
+  });
+
   test("encodes the exact V3 backend request with server-only account binding", async () => {
     let captured: Request | null = null;
     const result = await createCodexRealtimeCall(
@@ -401,4 +416,13 @@ describe("Codex direct-call account selection", () => {
       }),
     ).toBeNull();
   });
+});
+
+test("provider-created identity is durable even when the subsequent SDP is invalid", async () => {
+  const observed: string[] = [];
+  await expect(createCodexRealtimeCall(auth, { sdp: offer, version: "v3", sessionId: crypto.randomUUID() }, async () => new Response("not audio SDP", {
+    headers: { location: "/v1/realtime/calls/rtc_created" },
+  }), { onProviderSessionCreated: async source => { observed.push(source.providerSessionId); } }))
+    .rejects.toMatchObject({ code: "invalid_response" });
+  expect(observed).toEqual(["rtc_created"]);
 });

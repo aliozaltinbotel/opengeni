@@ -51,3 +51,25 @@ test("provider rejection stays generic and is never retried", async () => {
   });
   expect(calls).toBe(1);
 });
+
+test("provider session identity is captured by the trusted backend owner before the SDP returns", async () => {
+  const observed: unknown[] = [];
+  await brokerAzureLive({ settings, request: { sdp: "offer" }, initialItems: [],
+    fetch: async () => Response.json({ session: { id: "sess_provider" }, transport: { sdp: "answer" } }),
+    onProviderSessionCreated: async source => { observed.push(source); },
+  });
+  expect(observed).toEqual([{ providerSessionId: "sess_provider", upstreamModel: settings.azureLiveDeployment, providerCredentialId: null }]);
+  await expect(brokerAzureLive({ settings, request: { sdp: "offer" }, initialItems: [],
+    fetch: async () => Response.json({ session: { id: "sess_provider" }, transport: { sdp: "answer" } }),
+    onProviderSessionCreated: async () => { throw new Error("writer unavailable"); },
+  })).rejects.toThrow("writer unavailable");
+});
+
+test("native occurrence survives an invalid provider SDP after session creation", async () => {
+  const observed: string[] = [];
+  await expect(brokerAzureLive({ settings, request: { sdp: "offer" }, initialItems: [],
+    fetch: async () => Response.json({ session: { id: "sess_created" }, transport: { sdp: null } }),
+    onProviderSessionCreated: async source => { observed.push(source.providerSessionId); },
+  })).rejects.toMatchObject({ reason: "invalid_provider_response" });
+  expect(observed).toEqual(["sess_created"]);
+});

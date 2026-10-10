@@ -20,6 +20,7 @@ export async function brokerAzureLive(input: {
   initialItems: Array<{ role: string; text: string }>;
   signal?: AbortSignal | undefined;
   fetch?: typeof fetch;
+  onProviderSessionCreated?: ((source: { providerSessionId: string; upstreamModel: string; providerCredentialId: null }) => Promise<void>) | undefined;
 }) {
   if (!azureLiveConfigured(input.settings))
     throw new CodexRealtimeBrokerError(
@@ -69,6 +70,13 @@ export async function brokerAzureLive(input: {
       response.status,
     );
   const body = await response.json().catch(() => null);
+  if (input.onProviderSessionCreated) {
+    const providerSessionId: unknown = body?.session?.id;
+    if (typeof providerSessionId !== "string" || !providerSessionId || providerSessionId.length > 512) {
+      throw new CodexRealtimeBrokerError("invalid_provider_response", "Hosted voice returned no provider session identity");
+    }
+    await input.onProviderSessionCreated({ providerSessionId, upstreamModel: input.settings.azureLiveDeployment, providerCredentialId: null });
+  }
   const sdp = body?.transport?.sdp;
   if (typeof sdp !== "string" || !sdp || sdp.length > 1_048_576)
     throw new CodexRealtimeBrokerError(
@@ -84,6 +92,7 @@ export function buildSessionAzureLiveBroker(
   workspaceId: string,
   sessionId: string,
   fetchImpl?: typeof fetch,
+  onProviderSessionCreated?: (source: { providerSessionId: string; upstreamModel: string; providerCredentialId: null }) => Promise<void>,
 ) {
   return async (input: {
     request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "instructions" | "voice">;
@@ -98,6 +107,7 @@ export function buildSessionAzureLiveBroker(
       ...input,
       initialItems: projectSessionRealtimeInitialItems(history, continuity),
       ...(fetchImpl ? { fetch: fetchImpl } : {}),
+      onProviderSessionCreated,
     });
   };
 }

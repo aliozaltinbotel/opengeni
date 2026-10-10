@@ -3,6 +3,7 @@ import type { CodexRealtimeWebrtcRequest, CodexRealtimeWebrtcResponse } from "@o
 import {
   CODEX_CLIENT_VERSION,
   CodexRealtimeError,
+  CodexRealtimeReceiptError,
   CodexReloginRequired,
   codexPlanKey,
   createCodexRealtimeCall,
@@ -279,9 +280,11 @@ export function buildSessionCodexRealtimeBroker(
   workspaceId: string,
   sessionId: string,
   fetchImpl: CodexFetch = fetch,
+  onProviderSessionCreated?: (source: { providerSessionId: string; upstreamModel: string; providerCredentialId: string }) => Promise<void>,
 ): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeProviderAnswer> {
-  return async (input) =>
-    await brokerSessionCodexRealtime(
+  return async (input) => {
+    let providerCredentialId: string | undefined;
+    return await brokerSessionCodexRealtime(
       {
         enabled: settings.codexSubscriptionEnabled,
         loadSelection: async () => {
@@ -316,18 +319,25 @@ export function buildSessionCodexRealtimeBroker(
           ]);
           return projectSessionRealtimeInitialItems(history, continuity);
         },
-        tokenResolver: (credentialId) =>
-          buildCodexTokenResolver(db, settings, workspaceId, credentialId),
+        tokenResolver: (credentialId) => {
+          providerCredentialId = credentialId;
+          return buildCodexTokenResolver(db, settings, workspaceId, credentialId);
+        },
         createCall: async (auth, callInput, options) => {
           const providerConfig = await fetchCodexRealtimeProviderConfig(auth, fetchImpl, options);
           return await createCodexRealtimeCall(auth, callInput, fetchImpl, {
             ...options,
             providerConfig,
+            onProviderSessionCreated: onProviderSessionCreated ? async source => {
+              if (!providerCredentialId) throw new Error("REALTIME_PROVIDER_CREDENTIAL_UNBOUND");
+              await onProviderSessionCreated({ ...source, providerCredentialId });
+            } : undefined,
           });
         },
       },
       { ...input, sessionId },
     );
+  };
 }
 
 function credentialError(error: unknown): CodexRealtimeBrokerError {
@@ -344,6 +354,7 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 }
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
+  if (error instanceof CodexRealtimeReceiptError) return new CodexRealtimeBrokerError("provider_error", "Native realtime occurrence receipt could not be recorded");
   if (!(error instanceof CodexRealtimeError)) {
     return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
   }

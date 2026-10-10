@@ -10,7 +10,9 @@ import {
   type RealtimeVoicePricing,
   type Settings,
 } from "@opengeni/config";
-import type { SessionRealtimeModel } from "@opengeni/contracts";
+import { REALTIME_SESSION_SOURCE_EVENT_TYPE, RealtimeSessionUsageSource,
+  MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, MODEL_CALL_USAGE_EVENT_TYPE, ModelCallUsageAttributes,
+  type SessionRealtimeModel, type ModelCallOutcome } from "@opengeni/contracts";
 import {
   applyCreditDebitAfterUse,
   checkWorkspaceAllowance,
@@ -18,7 +20,9 @@ import {
   existingUsageEventIdempotencyKeys,
   getSpendableCreditBalance,
   loadSessionRealtimeBillingFacts,
+  loadRealtimeSessionUsageSource,
   recordUsageEvent,
+  isTransactionHandle,
   sumUsageQuantity,
   VOICE_CREDIT_USAGE,
   withRlsContext,
@@ -248,6 +252,55 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
   }
 
   return {
+    /** Persist an independently authenticated provider-created native session.
+     * This non-billing occurrence remains open for later provider final usage.
+     * It is mandatory even when OpenGeni credit billing is inactive. */
+    async recordProviderSessionOccurrence(input: {
+      accountId: string; workspaceId: string; sessionId: string;
+      source: Omit<RealtimeSessionUsageSource, "schema" | "billingPath">;
+    }): Promise<void> {
+      if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
+      const source = RealtimeSessionUsageSource.parse({ ...input.source,
+        schema: "opengeni.realtime-session-source/v1",
+        billingPath: deploymentRealtimeVoice(deps.settings, input.source.model) && billingActive()
+          ? "opengeni_credits" : "external",
+      });
+      await recordUsageEvent(deps.db, {
+        accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId,
+        eventType: REALTIME_SESSION_SOURCE_EVENT_TYPE, quantity: 1, unit: "session",
+        sourceResourceType: "model_realtime_session", sourceResourceId: source.connectionId,
+        idempotencyKey: `usage:${REALTIME_SESSION_SOURCE_EVENT_TYPE}:${source.connectionId}`,
+        attributes: source,
+      });
+    },
+
+    /** A trusted provider close/readback settles final accounting, never a
+     * browser ACK or an observer's own transport disconnect. Unreported final
+     * token pools and provider price stay null, independent of minute debits. */
+    async recordProviderSessionFinal(input: {
+      accountId: string; workspaceId: string; sessionId: string;
+      source: RealtimeSessionUsageSource; outcome: ModelCallOutcome;
+    }): Promise<void> {
+      if (isTransactionHandle(deps.db)) throw new Error("REALTIME_USAGE_REQUIRES_ROOT_DATABASE");
+      const claimed = RealtimeSessionUsageSource.parse(input.source);
+      const source = await loadRealtimeSessionUsageSource(deps.db, { ...input, connectionId: claimed.connectionId });
+      if (!source || JSON.stringify(RealtimeSessionUsageSource.parse(source)) !== JSON.stringify(claimed)) throw new Error("REALTIME_PROVIDER_SOURCE_UNBOUND");
+      const attributes = ModelCallUsageAttributes.parse({
+        schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, callKind: "realtime_session", scope: "call",
+        sourceKey: `realtime:${source.connectionId}`, provider: source.provider, providerApi: "realtime",
+        upstreamProvider: null, model: source.upstreamModel ?? source.model, outcome: input.outcome, usageReported: false,
+        inputTokens: null, outputTokens: null, cachedTokens: null, cacheWriteTokens: null,
+        reasoningTokens: null, totalTokens: null, estimatedProviderCostMicros: null,
+        pricingSource: null, priceVersion: null, billingPath: source.billingPath,
+      });
+      await recordUsageEvent(deps.db, {
+        accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId,
+        eventType: MODEL_CALL_USAGE_EVENT_TYPE, quantity: 1, unit: "call",
+        sourceResourceType: "model_realtime_session", sourceResourceId: source.connectionId,
+        idempotencyKey: `usage:${MODEL_CALL_USAGE_EVENT_TYPE}:realtime:${source.connectionId}`,
+        attributes,
+      });
+    },
     /**
      * Throws RealtimeVoiceUnavailableError when the deployment cannot offer
      * the model and TranscriptionBillingRefusedError for a credit refusal.

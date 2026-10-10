@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import {
   parseRealtimeVoicePricingJson,
   parseRealtimeVoicePricingTableJson,
@@ -8,6 +8,7 @@ import {
 import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import {
+  createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
   realtimeVoiceOfferProblem,
   voiceCreditStanding,
@@ -127,4 +128,40 @@ test("signup credits are spendable for voice; other scoped grants are not", () =
       balanceMicros: spendableCreditMicros(couponOnly, VOICE_CREDIT_USAGE),
     }),
   ).toBe("promotional_only");
+});
+
+test("native occurrence is separate from immutable final accounting and remains mandatory with external billing", async () => {
+  const database = await import("@opengeni/db");
+  const rows: Array<Parameters<typeof database.recordUsageEvent>[1]> = [];
+  const writer = spyOn(database, "recordUsageEvent").mockImplementation(async (_db, input) => { rows.push(input); return undefined as never; });
+  const sourceReader = spyOn(database, "loadRealtimeSessionUsageSource");
+  try {
+    const source = {
+      connectionId: crypto.randomUUID(), connectionEpoch: 1, provider: "codex-subscription" as const,
+      providerSessionId: "rtc_exact_provider_session", providerCredentialId: crypto.randomUUID(),
+      model: "gpt-live-1-boulder-alpha", upstreamModel: "gpt-live-1-codex",
+    };
+    const billing = createRealtimeVoiceBilling({ db: {} as never, settings: testSettings({ billingMode: "disabled", usageLimitsMode: "none" }) });
+    await billing.recordProviderSessionOccurrence({ accountId: "account", workspaceId: "workspace", sessionId: "session", source });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ eventType: "model.realtime.session.observed", unit: "session", attributes: {
+      schema: "opengeni.realtime-session-source/v1", providerSessionId: source.providerSessionId, billingPath: "external",
+    } });
+    expect(rows.some(row => row.eventType === "model.call")).toBe(false);
+    sourceReader.mockResolvedValue({ ...source, schema: "opengeni.realtime-session-source/v1", billingPath: "external" });
+    await billing.recordProviderSessionFinal({ accountId: "account", workspaceId: "workspace", sessionId: "session",
+      source: { ...source, schema: "opengeni.realtime-session-source/v1", billingPath: "external" }, outcome: "indeterminate" });
+    expect(rows[1]).toMatchObject({ eventType: "model.call", attributes: {
+      schema: "opengeni.model-call-usage/v2", callKind: "realtime_session", outcome: "indeterminate",
+      usageReported: false, totalTokens: null, estimatedProviderCostMicros: null, pricingSource: null,
+    } });
+    sourceReader.mockResolvedValueOnce(null);
+    await expect(billing.recordProviderSessionFinal({ accountId: "account", workspaceId: "workspace", sessionId: "session",
+      source: { ...source, schema: "opengeni.realtime-session-source/v1", billingPath: "external" }, outcome: "completed" }))
+      .rejects.toThrow("REALTIME_PROVIDER_SOURCE_UNBOUND");
+    expect(rows).toHaveLength(2);
+    writer.mockImplementationOnce(async () => { throw new Error("receipt unavailable"); });
+    await expect(billing.recordProviderSessionOccurrence({ accountId: "account", workspaceId: "workspace", sessionId: "session", source }))
+      .rejects.toThrow("receipt unavailable");
+  } finally { writer.mockRestore(); sourceReader.mockRestore(); }
 });

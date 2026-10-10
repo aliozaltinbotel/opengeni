@@ -3898,9 +3898,30 @@ export const ModelCallUsageAttributes = z.object({
   ...ModelCallUsageAttributesV1Shape.shape,
   schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
   outcome: ModelCallOutcome,
+  callKind: z.enum(["response", "compaction", "session_title", "realtime_session"]),
+  provider: ModelCallUsageAttributesV1Shape.shape.provider.nullable(),
+  providerApi: ModelCallUsageAttributesV1Shape.shape.providerApi.nullable(),
+  model: ModelCallUsageAttributesV1Shape.shape.model.nullable(),
 }).strict().superRefine(refineModelCallUsage);
 export type ModelCallUsageAttributes = z.infer<typeof ModelCallUsageAttributes>;
 export const ReadModelCallUsageAttributes = z.union([ModelCallUsageAttributesV1, ModelCallUsageAttributes]);
+
+/** Trusted backend observation of native voice creation. It is an occurrence,
+ * not a final accounting receipt; credential mint and browser claims cannot
+ * produce it. Only opaque credential references are durable, never secrets. */
+export const REALTIME_SESSION_SOURCE_EVENT_TYPE = "model.realtime.session.observed" as const;
+export const RealtimeSessionUsageSource = z.object({
+  schema: z.literal("opengeni.realtime-session-source/v1"),
+  connectionId: z.string().uuid(),
+  connectionEpoch: z.number().int().positive(),
+  provider: z.enum(["codex-subscription", "azure-live", "ai-gateway", "xai-subscription"]),
+  providerSessionId: z.string().min(1).max(512),
+  providerCredentialId: z.string().uuid().nullable(),
+  model: z.string().min(1).max(512),
+  upstreamModel: z.string().min(1).max(512).nullable(),
+  billingPath: z.enum(["opengeni_credits", "external"]),
+}).strict();
+export type RealtimeSessionUsageSource = z.infer<typeof RealtimeSessionUsageSource>;
 
 /**
  * One embedding provider request. The embedder returns vectors only, so token

@@ -1680,7 +1680,17 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         claim.mode.model === AZURE_LIVE_MODEL_ID
           ? buildSessionAzureLiveBroker
           : buildSessionCodexRealtimeBroker
-      )(db, settings, workspaceId, sessionId, deps.codexFetch);
+      )(db, settings, workspaceId, sessionId, deps.codexFetch, async source => {
+        await realtimeVoiceBilling.recordProviderSessionOccurrence({
+          accountId: grant.accountId, workspaceId, sessionId,
+          source: {
+            connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+            provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
+            providerSessionId: source.providerSessionId, providerCredentialId: source.providerCredentialId,
+            model: claim.mode.model, upstreamModel: source.upstreamModel,
+          },
+        });
+      });
       try {
         const answer = await broker({
           request: providerRequest,

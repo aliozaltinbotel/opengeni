@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   CODEX_REALTIME_MODEL,
   CodexRealtimeError,
+  CodexRealtimeReceiptError,
   type CodexAuthHeaders,
   type CodexRealtimeCallInput,
 } from "@opengeni/codex";
@@ -372,4 +373,13 @@ describe("session Codex realtime broker", () => {
     );
     expect(signal).toBe(abort.signal);
   });
+});
+
+test("receipt refusal after native creation cannot become a replayable network failure", async () => {
+  let calls = 0;
+  await expect(brokerSessionCodexRealtime(dependencies({ createCall: async () => {
+    calls += 1;
+    throw new CodexRealtimeReceiptError(new Error("private writer diagnostic"));
+  }}), { sessionId: crypto.randomUUID(), request })).rejects.toMatchObject({ reason: "provider_error" });
+  expect(calls).toBe(1);
 });
