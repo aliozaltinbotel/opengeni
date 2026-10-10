@@ -161,12 +161,21 @@ export async function createTemporalWorkflowClient(
       await withRlsContext(db, input.context, async tx => {
         await authorizeKnowledgeQueryOwner(tx, input, settings);
         for (const view of ["published", "needs_review"] as const)
-          for (const entry of result.matches[view].entries)
-            if (!await getKnowledgeEntry(tx, input.context, entry.id, { revisionId: entry.revision.id, view }))
+          for (const entry of result.matches[view].entries) {
+            const current = await getKnowledgeEntry(tx, input.context, entry.id, { revisionId: entry.revision.id, view });
+            if (!current || JSON.stringify(current.revision.entry.groupIds) !== JSON.stringify(entry.revision.groupIds))
               throw new Error("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
-        for (const collection of result.collections.entries)
-          if (!await getKnowledgeEntry(tx, input.context, collection.id, { revisionId: collection.revisionId, view: collection.view }))
+          }
+        for (const collection of result.collections.entries) {
+          // A collection descriptor represents the current map, even when a
+          // reviewer can still read its retained historical revision.
+          const current = await getKnowledgeEntry(tx, input.context, collection.id, { view: collection.view });
+          if (!current || current.archived || current.revision.entry.kind !== "group" ||
+            current.revision.outcome !== (collection.view === "published" ? "published" : "pending") ||
+            current.revision.id !== collection.revisionId || current.version !== collection.version ||
+            JSON.stringify(current.revision.entry.groupIds) !== JSON.stringify(collection.parentIds))
             throw new Error("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+        }
       }, undefined, "none");
       return result;
     },
@@ -187,9 +196,11 @@ export async function createTemporalWorkflowClient(
       const result: Awaited<ReturnType<NonNullable<SessionWorkflowClient["queryKnowledge"]>>> = await handle.result();
       await withRlsContext(db, input.context, async tx => {
         await authorizeKnowledgeQueryOwner(tx, input, settings);
-        for (const entry of result.entries)
-          if (!await getKnowledgeEntry(tx, input.context, entry.id, { revisionId: entry.revision.id, view: input.request.view ?? "published" }))
+        for (const entry of result.entries) {
+          const current = await getKnowledgeEntry(tx, input.context, entry.id, { revisionId: entry.revision.id, view: input.request.view ?? "published" });
+          if (!current || JSON.stringify(current.revision.entry.groupIds) !== JSON.stringify(entry.revision.groupIds))
             throw new Error("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+        }
       }, undefined, "none");
       return result;
     },

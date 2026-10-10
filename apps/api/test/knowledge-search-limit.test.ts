@@ -133,12 +133,78 @@ test("retained preparation authenticates all matches and collection descriptors 
   expect(read.mock.calls.map(call => [call[2], call[3]])).toEqual([
     [published.record.id, { revisionId: published.record.revision.id, view: "published" }],
     [pending.record.id, { revisionId: pending.record.revision.id, view: "needs_review" }],
-    [collection.record.id, { revisionId: collection.record.revision.id, view: "published" }],
+    [collection.record.id, { view: "published" }],
   ]);
   for (const hidden of [published, pending, collection]) {
     read.mockImplementation(async (_db, _context, id) => id === hidden.record.id ? null
       : [published, pending, collection].find(value => value.record.id === id)!.record);
     await expect(prepare()).rejects.toThrow("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
   }
+  await owner.close();
+});
+
+
+test("retained search and preparation refuse parent links removed by the current reader", async () => {
+  const input = retainedInput(), published = retainedKnowledge(), pending = retainedKnowledge(), collection = retainedKnowledge();
+  const parentId = crypto.randomUUID();
+  published.summary.revision.groupIds = [parentId];
+  const { owner, read } = await knowledgeClient(input, { entries: [published.summary], nextCursor: null });
+  read.mockResolvedValue(published.record);
+  await expect(owner.client.queryKnowledge!(input)).rejects.toThrow("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+  await owner.close();
+  // Rebind the same named return boundary to a preparation result. The child
+  // remains readable; only the hidden parent's endpoint is filtered out.
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  published.summary.revision.groupIds = [];
+  pending.summary.revision.outcome = "pending";
+  pending.record.revision.outcome = "pending";
+  const retained = KnowledgeSavePreparationResponse.parse({ matches: {
+    published: { entries: [published.summary], nextCursor: null }, needs_review: { entries: [pending.summary], nextCursor: null } },
+    collections: { entries: [{ id: collection.record.id, revisionId: collection.record.revision.id, version: 1,
+      scope: "workspace", view: "published", title: collection.record.revision.entry.title,
+      description: collection.record.revision.entry.content, descriptionTruncated: false, parentIds: [] }],
+      complete: true, nextCursors: { published: null, needs_review: null } } });
+  const subjectId = "user:retained-reviewer";
+  input.context.actor = { kind: "human", principalKind: "human_session", subjectId,
+    writeScopes: ["workspace"], settingsScopes: [], review: true };
+  input.grant = { ...input.grant, principalKind: "human_session", subjectId, permissions: ["documents:search", "documents:manage"] };
+  input.request = { query: "retained" };
+  const preparation = await knowledgeClient(input, retained);
+  preparation.read.mockImplementation(async (_db, _context, id) => [published, pending, collection].find(value => value.record.id === id)!.record);
+  const prepare = () => preparation.owner.client.prepareKnowledge!({ ...input, request: { query: "retained" } });
+  for (const view of ["published", "needs_review"] as const) {
+    retained.matches[view].entries[0]!.revision.groupIds = [parentId];
+    await expect(prepare()).rejects.toThrow("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+    retained.matches[view].entries[0]!.revision.groupIds = [];
+  }
+  retained.collections.entries[0]!.parentIds = [parentId];
+  await expect(prepare()).rejects.toThrow("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+  await preparation.owner.close();
+});
+
+test("retained preparation refuses archived and historical collections in the current view", async () => {
+  const input = retainedInput(), { record } = retainedKnowledge();
+  const retained = KnowledgeSavePreparationResponse.parse({ matches: {
+    published: { entries: [], nextCursor: null }, needs_review: { entries: [], nextCursor: null } },
+    collections: { entries: [{ id: record.id, revisionId: record.revision.id, version: record.version,
+      scope: record.scope, view: "published", title: record.revision.entry.title,
+      description: record.revision.entry.content, descriptionTruncated: false, parentIds: [] }],
+      complete: true, nextCursors: { published: null, needs_review: null } } });
+  const subjectId = "user:retained-reviewer";
+  input.context.actor = { kind: "human", principalKind: "human_session", subjectId,
+    writeScopes: ["workspace"], settingsScopes: [], review: true };
+  input.grant = { ...input.grant, principalKind: "human_session", subjectId, permissions: ["documents:search", "documents:manage"] };
+  input.request = { query: "retained" };
+  const { owner, read } = await knowledgeClient(input, retained);
+  const prepare = () => owner.client.prepareKnowledge!({ ...input, request: { query: "retained" } });
+  read.mockResolvedValue({ ...record, archived: true });
+  await expect(prepare()).rejects.toThrow("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+  const revisionId = crypto.randomUUID();
+  const current = KnowledgeEntryRecord.parse({ ...record, version: record.version + 1,
+    publishedRevisionId: revisionId, latestRevisionId: revisionId,
+    revision: { ...record.revision, id: revisionId, number: record.revision.number + 1, previousRevisionId: record.revision.id } });
+  read.mockImplementation(async (_db, _context, _id, options) => options?.revisionId ? record : current);
+  await expect(prepare()).rejects.toThrow("KNOWLEDGE_QUERY_RESULT_UNAVAILABLE");
+  expect(read.mock.calls.at(-1)?.[3]).toEqual({ view: "published" });
   await owner.close();
 });
