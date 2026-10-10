@@ -139,13 +139,7 @@ export type ModelResponseEventState = {
   responseCount: number;
   contextSignal: { revision: number; totalTokens: number } | null;
   claimedSourceKeys: Set<string>;
-  /**
-   * Source keys of terminal responses that exposed no usage, in order. The
-   * stream settles them once it knows whether an aggregate fallback covers
-   * them (no per-response usage at all) or each must be recorded as an
-   * unknown call (some responses did report usage): see
-   * `recordUnreportedModelCalls`.
-   */
+  /** Source keys of terminal calls committed with unknown usage, in order. */
   unreportedSourceKeys: string[];
 };
 
@@ -297,14 +291,10 @@ export async function processModelResponseTerminalEvent(input: {
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
   }
-  input.state.claimedSourceKeys.add(sourceKey);
-  input.state.responseCount = responseOrdinal;
-
   const responseUsage = terminal.usage;
-  if (!responseUsage) {
-    // A provider call happened but reported nothing. It is settled with the
-    // stream (recordUnreportedModelCalls), never written as zero usage.
-    input.state.unreportedSourceKeys.push(sourceKey);
+  if (responseUsage) {
+    input.state.claimedSourceKeys.add(sourceKey);
+    input.state.responseCount = responseOrdinal;
   }
 
   const normalizedUsage = normalizeModelCallUsage(responseUsage?.usage);
@@ -313,15 +303,40 @@ export async function processModelResponseTerminalEvent(input: {
     priorSessionCredentialId: input.priorSessionCredentialId,
     isFirstCallOfTurn: responseOrdinal === 1,
   });
-  // A terminal response without usage still authoritatively replaces the
-  // attempt-owned context signal. There is simply no billing event to claim.
+  // Missing token usage does not erase the provider's terminal call fact.
   let authoritative = responseUsage === null;
   await recordCompletedModelCallBeforeOwnershipFences({
     renewLease: input.renewLease,
     leaseLost: input.leaseLost,
     leaseLostMessage: input.leaseLostMessage,
     recordUsage: async () => {
-      if (!responseUsage) return;
+      if (!responseUsage) {
+        await recordModelCallUsageEvent(input.db, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          turnAttemptId: input.turnAttemptId,
+          sourceKey,
+          callKind: "response",
+          scope: "call",
+          provider: input.provider,
+          providerApi: input.providerApi,
+          upstreamProvider: null,
+          model: input.model,
+          billingPath:
+            (input.chargesOpenGeniCredits ?? !input.externallyBilled)
+              ? "opengeni_credits"
+              : "external",
+          billing: null,
+        });
+        // Claim only after durability. A refused write remains retryable under
+        // the exact source key; it must not look settled to this consumer.
+        input.state.claimedSourceKeys.add(sourceKey);
+        input.state.responseCount = responseOrdinal;
+        input.state.unreportedSourceKeys.push(sourceKey);
+        return;
+      }
       const billing = await recordModelUsageAndDebitCredits(input.settings, input.db, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,

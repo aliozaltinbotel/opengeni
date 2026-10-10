@@ -153,7 +153,6 @@ import {
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
-  recordUnreportedModelCalls,
 } from "./model-usage";
 import {
   sessionTitleGenerationOptions,
@@ -682,7 +681,6 @@ export async function runTurnStreamAttempt(
     });
     const responseCreditPolicyRevisions = new Set<number | undefined>();
     const responseCountBeforeStream = modelResponseState.responseCount;
-    const unreportedBeforeStream = modelResponseState.unreportedSourceKeys.length;
     eventing.batcher = null;
     // The SDK emits every processed call item for one model response before
     // it emits any result for that response. Keep that response-local batch
@@ -1757,7 +1755,9 @@ export async function runTurnStreamAttempt(
               providerApi: aggregateProviderApi,
               callKind: "response",
               scope: "aggregate",
-              recordCall: aggregateReported,
+              // Exact terminal calls already have their own durable rows.
+              // An SDK aggregate cannot be assigned to one of those calls.
+              recordCall: aggregateReported && responsesInStream === 0,
               externallyBilled: billingState.isExternallyBilledTurn,
               chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
               countsTowardTokenCap: billingState.countsTowardTokenCap,
@@ -1768,24 +1768,6 @@ export async function runTurnStreamAttempt(
               observability,
               metricProvider: resolvedModel?.provider.id ?? settings.openaiProvider,
             });
-            if (!aggregateReported && responsesInStream > 0) {
-              await recordModelCallUsageEvent(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                turnAttemptId: input.attemptId,
-                sourceKey: aggregateSourceKey,
-                callKind: "response",
-                scope: "aggregate",
-                provider: aggregateProvider,
-                providerApi: aggregateProviderApi,
-                upstreamProvider: null,
-                model: turn.model,
-                billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
-                billing: null,
-              });
-            }
             aggregateAuthoritative = await emitModelCallUsage({
               observability,
               publish: eventing.publish,
@@ -1845,23 +1827,8 @@ export async function runTurnStreamAttempt(
         });
       }
     }
-    // MAINT-P09-430: a stream where some responses reported usage and others
-    // did not has no aggregate row; each unreported call is its own unknown row.
-    await recordUnreportedModelCalls(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: activeTurnId,
-      turnAttemptId: input.attemptId,
-      callKind: "response",
-      provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-      providerApi: resolvedModel?.provider.api ?? "responses",
-      upstreamProvider: null,
-      model: turn.model,
-      billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
-      sourceKeys: modelResponseState.unreportedSourceKeys.slice(unreportedBeforeStream),
-      coveredByAggregate: !streamSawPerResponseUsage,
-    });
+    // Every terminal response, including unreported usage, was committed by
+    // the sole response consumer before releasing the model admission barrier.
     const programmaticPending = (
       await listTurnCodemodeApprovals(db, {
         accountId: input.accountId,

@@ -64,6 +64,11 @@ Hosted tool-call `status` survives replay; other annotations are stripped
 
 ### 3.1 Postgres is durable truth; NATS is transport
 
+Each terminal model response commits its exact `model.call` usage row before
+producer admission releases the next request. Unreported pools and provider cost
+remain null. SDK stream aggregates do not emit another call row when exact
+terminal calls already exist; their aggregate cannot price one of those calls.
+
 Every new worker model request has an immutable native source receipt committed
 before provider dispatch. Its exact `sourceKey` binds ordered input digests,
 durable history owners and copy/import/summary ancestry; raw tool results retain

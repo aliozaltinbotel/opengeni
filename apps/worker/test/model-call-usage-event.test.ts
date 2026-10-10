@@ -346,7 +346,7 @@ describe("model.call usage row", () => {
     });
   });
 
-  test("a terminal response without usage is held for the stream's settlement, not written as a zero", async () => {
+  test("a terminal response without usage commits its unknown call before stream settlement", async () => {
     const { rows, spy } = captureUsageRows();
     restores.push(() => spy.mockRestore());
     const state = createModelResponseEventState();
@@ -355,7 +355,7 @@ describe("model.call usage row", () => {
       response: { id: "resp-no-usage", output: [] },
     } as never);
 
-    const result = await processModelResponseTerminalEvent({
+    const input: Parameters<typeof processModelResponseTerminalEvent>[0] = {
       event,
       state,
       dispatchId: "activity-no-usage",
@@ -380,10 +380,28 @@ describe("model.call usage row", () => {
       leaseLost: () => false,
       leaseLostMessage: "lease lost",
       setLastInputTokens: async () => undefined,
-    });
+    };
+    const result = await processModelResponseTerminalEvent(input);
 
     expect(result).toMatchObject({ status: "processed", usageReported: false });
-    expect(rows).toEqual([]);
+    expect(callRows(rows)).toHaveLength(1);
+    expect(ModelCallUsageAttributes.parse(callRows(rows)[0]?.attributes)).toMatchObject({
+      sourceKey: "resp-no-usage", scope: "call", outcome: "completed", usageReported: false,
+      inputTokens: null, outputTokens: null, totalTokens: null,
+      estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null,
+    });
     expect(state.unreportedSourceKeys).toEqual(["resp-no-usage"]);
+    expect(await processModelResponseTerminalEvent(input)).toEqual({
+      status: "duplicate", sourceKey: "resp-no-usage",
+    });
+    expect(callRows(rows)).toHaveLength(1);
+
+    const refusedInput = { ...input, state: createModelResponseEventState() };
+    spy.mockImplementationOnce(async () => { throw new Error("usage writer refused"); });
+    await expect(processModelResponseTerminalEvent(refusedInput)).rejects.toThrow("usage writer refused");
+    expect(refusedInput.state.responseCount).toBe(0);
+    expect(refusedInput.state.claimedSourceKeys.size).toBe(0);
+    expect(refusedInput.state.unreportedSourceKeys).toEqual([]);
+    expect(await processModelResponseTerminalEvent(refusedInput)).toMatchObject({ status: "processed" });
   });
 });
