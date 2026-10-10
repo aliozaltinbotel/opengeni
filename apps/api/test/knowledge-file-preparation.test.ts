@@ -31,17 +31,42 @@ import {
 } from "@opengeni/testing";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { registerKnowledgeRoutes } from "../src/routes/knowledge";
+import { createTemporalWorkflowClient } from "../src/index";
+import { NativeConnection, Worker } from "@temporalio/worker";
+import { createKnowledgeIndexingActivities } from "../../worker/src/activities/knowledge-indexing";
+import type { ControlActivityServices } from "../../worker/src/activities/types";
+import type { DocumentServices } from "@opengeni/documents";
 
 const SECRET = "knowledge-file-preparation-test";
 let shared: SharedTestDatabase;
 let client: ReturnType<typeof createDb>;
+const ownerSettings = testSettings({ productAccessMode: "managed", delegationSecret: SECRET,
+  temporalHost: process.env.OPENGENI_TEST_TEMPORAL_ADDRESS,
+  temporalNamespace: process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE ?? "default",
+  temporalTaskQueue: `knowledge-file-preparation-${crypto.randomUUID()}` });
+let temporalOwner: Awaited<ReturnType<typeof createTemporalWorkflowClient>>;
+let native: NativeConnection;
+let worker: Worker;
+let workerRun: Promise<void>;
 beforeAll(async () => {
+  if (!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS) throw new Error("Knowledge preparation requires the coordinated Temporal fixture");
   const database = await acquireSharedTestDatabase("knowledge-file-preparation");
   if (!database) throw new Error("Knowledge source verification requires PostgreSQL");
   shared = database;
   client = createDb(shared.appUrl, { max: 4 });
+  native = await NativeConnection.connect({ address: ownerSettings.temporalHost });
+  worker = await Worker.create({ connection: native, namespace: ownerSettings.temporalNamespace,
+    taskQueue: ownerSettings.temporalTaskQueue,
+    workflowBundle: { codePath: new URL("../../worker/dist/workflow-bundle.js", import.meta.url).pathname },
+    activities: createKnowledgeIndexingActivities(async () => ({ db: client.db, settings: ownerSettings,
+      observability: { warn: () => {} } }) as ControlActivityServices, async () => ({}) as DocumentServices),
+    maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
+  workerRun = worker.run(); void workerRun.catch(() => undefined);
+  temporalOwner = await createTemporalWorkflowClient(ownerSettings, client.db);
 }, 180_000);
 afterAll(async () => {
+  await temporalOwner?.close();
+  worker?.shutdown(); await workerRun; await native?.close();
   await client?.close();
   await shared?.release();
 }, 60_000);
@@ -149,7 +174,8 @@ async function fixture(
   let parserFails = false;
   const app = new Hono();
   const deps = {
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: ownerSettings,
+    workflowClient: temporalOwner.client,
     db: client.db,
     managedAuth: null,
     objectStorage: {

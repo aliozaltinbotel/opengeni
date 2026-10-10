@@ -5,29 +5,57 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
   knowledgeContextForGateway,
+  requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
   createDb,
+  createApiKey,
   createFileUpload,
   saveKnowledgeEntry,
   withSessionRlsActorContext,
   type KnowledgeContext,
 } from "@opengeni/db";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, testSettings, type SharedTestDatabase } from "@opengeni/testing";
+import { createHash } from "node:crypto";
+import { Hono } from "hono";
+import { createTemporalWorkflowClient } from "../src/index";
+import { NativeConnection, Worker } from "@temporalio/worker";
+import { createKnowledgeIndexingActivities } from "../../worker/src/activities/knowledge-indexing";
+import type { ControlActivityServices } from "../../worker/src/activities/types";
+import type { DocumentServices } from "@opengeni/documents";
 import { buildFilesMcpServer } from "../src/mcp/files";
 import { buildDocumentsMcpServer } from "../src/mcp/documents";
 
 let shared: SharedTestDatabase;
 let database: ReturnType<typeof createDb>;
+const ownerSettings = testSettings({ productAccessMode: "managed",
+  temporalHost: process.env.OPENGENI_TEST_TEMPORAL_ADDRESS,
+  temporalNamespace: process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE ?? "default",
+  temporalTaskQueue: `knowledge-gateways-${crypto.randomUUID()}` });
+let temporalOwner: Awaited<ReturnType<typeof createTemporalWorkflowClient>>;
+let native: NativeConnection;
+let worker: Worker;
+let workerRun: Promise<void>;
 beforeAll(async () => {
+  if (!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS) throw new Error("Knowledge gateway verification requires the coordinated Temporal fixture");
   const acquired = await acquireSharedTestDatabase("knowledge-gateways");
   if (!acquired) throw new Error("Knowledge gateway verification requires PostgreSQL");
   shared = acquired;
   database = createDb(shared.appUrl, { max: 6 });
+  native = await NativeConnection.connect({ address: ownerSettings.temporalHost });
+  worker = await Worker.create({ connection: native, namespace: ownerSettings.temporalNamespace,
+    taskQueue: ownerSettings.temporalTaskQueue,
+    workflowBundle: { codePath: new URL("../../worker/dist/workflow-bundle.js", import.meta.url).pathname },
+    activities: createKnowledgeIndexingActivities(async () => ({ db: database.db, settings: ownerSettings,
+      observability: { warn: () => {} } }) as ControlActivityServices, async () => ({}) as DocumentServices),
+    maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
+  workerRun = worker.run(); void workerRun.catch(() => undefined);
+  temporalOwner = await createTemporalWorkflowClient(ownerSettings, database.db);
 }, 900_000);
 afterAll(async () => {
+  await temporalOwner?.close(); worker?.shutdown(); await workerRun; await native?.close();
   await database?.close();
   await shared?.release();
 }, 180_000);
@@ -141,16 +169,25 @@ test("the delegated docs gateway exposes canonical Knowledge without private or 
         },
       }),
     );
-  const grant: AccessGrant = {
-    accountId,
-    workspaceId,
-    subjectId,
-    principalKind: "human_session",
-    permissions: ["documents:search"],
-  };
+  // A delegated shared-only gateway uses a real scoped credential and current
+  // canonical request authorization, never a human subject label as authority.
+  const key = `og_test_${crypto.randomUUID()}`;
+  await createApiKey(database.db, { accountId, workspaceId, name: "Knowledge gateway",
+    prefix: key.slice(0, 12), keyHash: createHash("sha256").update(key).digest("hex"), permissions: ["documents:search"] });
+  let authorization: AccessGrantAuthorization | undefined;
+  const accessApp = new Hono();
+  accessApp.get("/", async c => {
+    authorization = await requireAccessGrantAuthorization(c, { db: database.db, settings: ownerSettings }, workspaceId, "documents:search");
+    return c.json({ authorized: true });
+  });
+  expect((await accessApp.request("http://test/", { headers: { authorization: `Bearer ${key}` } })).status).toBe(200);
+  if (!authorization) throw new Error("Verified gateway authorization unavailable");
+  const grant = authorization.grant;
   const context = await knowledgeContextForGateway({ db: database.db }, grant);
   const server = buildDocumentsMcpServer(database.db, accountId, workspaceId, {} as never, {
     knowledge: context,
+    settings: ownerSettings,
+    queryOwner: { grant, externalContinuation: null, nativeContinuation: null, query: temporalOwner.client.queryKnowledge! },
   });
   await withClient(server, async (client) => {
     expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual([
@@ -179,6 +216,10 @@ test("the delegated docs gateway exposes canonical Knowledge without private or 
     )!.text!;
     const results = JSON.parse(fallbackText);
     expect(results.searchMode).toBe("keyword");
+    expect(results.fallbackReason).toBe("provider_unavailable");
+    const usage = await shared.admin`SELECT count(*)::int AS count FROM usage_events
+      WHERE account_id=${accountId} AND event_type='embedding.call'`;
+    expect(usage[0]?.count).toBe(0);
     expect(results.entries.map((entry: { id: string }) => entry.id)).toEqual([saved[0]!.entryId]);
     const retained = await client.callTool({
       name: "knowledge_get",

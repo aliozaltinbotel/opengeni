@@ -82,7 +82,7 @@ export async function loadSessionRealtimeBillingFacts(
         eq(schema.usageEvents.accountId, mode.accountId), eq(schema.usageEvents.workspaceId, mode.workspaceId),
         eq(schema.usageEvents.sessionId, mode.sessionId), eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
         eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
-        eq(schema.usageEvents.sourceResourceId, schema.sessionRealtimeConnections.id),
+        sql`${schema.usageEvents.sourceResourceId} = ${schema.sessionRealtimeConnections.id}::text`,
         sql`${schema.usageEvents.idempotencyKey} = 'usage:model.realtime.session.observed:' || ${schema.sessionRealtimeConnections.id}`,
       ))
       .where(

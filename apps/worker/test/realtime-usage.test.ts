@@ -4,6 +4,8 @@ import { REALTIME_SESSION_SOURCE_SCHEMA, RealtimeSessionUsageSource } from "@ope
 import { testSettings } from "@opengeni/testing";
 import { createRealtimeUsageActivities, observeRealtimeSession } from "../src/activities/realtime-usage";
 import type { ControlActivityServices } from "../src/activities/types";
+import * as workflowRuntime from "@temporalio/workflow";
+import { realtimeUsageWorkflow } from "../src/workflows/realtime-usage";
 
 const ref = { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(), connectionId: crypto.randomUUID() };
 const source = RealtimeSessionUsageSource.parse({ schema: REALTIME_SESSION_SOURCE_SCHEMA, connectionId: ref.connectionId,
@@ -40,7 +42,7 @@ test("uncertain close leaves final key free; a later trusted final preserves exa
     if (!finalObserved) await input.onAttached();
     return { action: "closed", outcome: finalObserved ? "completed" : "indeterminate" };
   } });
-  expect(await activity.observeRealtimeSessionUsage(ref)).toEqual({ action: "terminal" });
+  expect(await activity.observeRealtimeSessionUsage(ref)).toEqual({ action: "waiting", delayMs: 30_000 });
   expect(write).toHaveBeenCalledTimes(1);
   expect(write.mock.calls[0]![1].eventType).toBe("model.realtime.session.attached");
   finalObserved = true;
@@ -50,6 +52,31 @@ test("uncertain close leaves final key free; a later trusted final preserves exa
     idempotencyKey: `usage:model.call:realtime:${ref.connectionId}`,
     attributes: { outcome: "completed", usageReported: false, inputTokens: null, outputTokens: null,
       totalTokens: null, estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null } });
+});
+
+test("the actual workflow waits after uncertain accounting and observes a later final exactly once", async () => {
+  bindSource();
+  const write = spyOn(database, "recordUsageEvent").mockResolvedValue({} as never); spies.push(write);
+  let observations = 0;
+  const activity = createRealtimeUsageActivities(service(), { observe: async input => {
+    observations++;
+    if (observations === 1) await input.onAttached();
+    return { action: "closed", outcome: observations === 1 ? "indeterminate" : "completed" };
+  } });
+  spies.push(spyOn(workflowRuntime, "proxyActivities").mockReturnValue(activity));
+  const sleep = spyOn(workflowRuntime, "sleep").mockImplementation(async delay => {
+    expect(delay).toBe(30_000);
+    expect(observations).toBe(1);
+    expect(write.mock.calls.map(call => call[1].eventType)).toEqual(["model.realtime.session.attached"]);
+  }); spies.push(sleep);
+  const continuation = spyOn(workflowRuntime, "continueAsNew"); spies.push(continuation);
+  await realtimeUsageWorkflow({ ...ref, baseTaskQueue: "realtime-observer-test" });
+  expect(observations).toBe(2);
+  expect(sleep).toHaveBeenCalledTimes(1);
+  expect(continuation).not.toHaveBeenCalled();
+  expect(write.mock.calls.filter(call => call[1].eventType === "model.call")).toHaveLength(1);
+  expect(write.mock.calls[1]![1]).toMatchObject({ occurredAt,
+    idempotencyKey: `usage:model.call:realtime:${ref.connectionId}`, attributes: { outcome: "completed" } });
 });
 
 test("existing final receipt skips provider transport and missing source refuses it", async () => {

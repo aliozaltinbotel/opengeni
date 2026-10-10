@@ -103,7 +103,9 @@ export function createRealtimeUsageActivities(services: () => Promise<ControlAct
           sourceResourceType: "model_realtime_session", sourceResourceId: input.connectionId, idempotencyKey: attachedKey,
           attributes: source.source });
       } });
-    if (result.action === "waiting") return waiting;
+    // A physically closed connection without final accounting evidence leaves
+    // the final key free. Keep the durable observer alive for a later receipt.
+    if (result.action === "waiting" || result.outcome === "indeterminate") return waiting;
     await createRealtimeVoiceBilling({ db, settings }).recordProviderSessionFinal({ ...input, source: source.source, outcome: result.outcome });
     return { action: "terminal" };
   }

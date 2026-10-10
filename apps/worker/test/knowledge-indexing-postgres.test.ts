@@ -993,9 +993,26 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
   );
   let running: Promise<void> | undefined, worker: InstanceType<typeof Worker> | undefined;
   let runningFailure: Promise<never> | undefined;
+  // Exact installed SDK 1.22.0 custody: native polling precedes the public
+  // activation counter and workflow-thread requests. Record counts only.
+  type WorkerCustody = {
+    nativeWorker: { pollWorkflowActivation(): Promise<Buffer> };
+    workflowCreator: { workerThreadClients: Array<{ workerExited: boolean; activeWorkflowCount: number;
+      requestIdToCompletion: Map<unknown, unknown> }> };
+  };
+  let nativePolls = { started: 0, returned: 0, rejected: 0 };
   const startWorker = async () => {
     worker = await Worker.create({ connection: native, namespace, taskQueue, workflowBundle: { code },
       activities: activities(), maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
+    nativePolls = { started: 0, returned: 0, rejected: 0 };
+    const custody = worker as unknown as WorkerCustody;
+    const poll = custody.nativeWorker.pollWorkflowActivation.bind(custody.nativeWorker);
+    const counts = nativePolls;
+    custody.nativeWorker.pollWorkflowActivation = async () => {
+      counts.started++;
+      try { const activation = await poll(); counts.returned++; return activation; }
+      catch (error) { counts.rejected++; throw error; }
+    };
     running = worker.run();
     runningFailure = new Promise<never>((_resolve, reject) => {
       void running!.catch(error => {
@@ -1135,6 +1152,10 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
         activityPollerState: status.activityPollerState, hasOutstandingWorkflowPoll: status.hasOutstandingWorkflowPoll,
         numInFlightWorkflowActivations: status.numInFlightWorkflowActivations,
         numInFlightActivities: status.numInFlightActivities, numCachedWorkflows: status.numCachedWorkflows,
+        nativePolls,
+        workflowThreads: (worker as unknown as WorkerCustody).workflowCreator.workerThreadClients.map(thread => ({
+          exited: thread.workerExited, activeWorkflows: thread.activeWorkflowCount, pendingRequests: thread.requestIdToCompletion.size,
+        })),
       }));
     };
     observeWorker();

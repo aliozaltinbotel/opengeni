@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
+import type { ApiRouteDeps } from "@opengeni/core";
 import { createRealtimeVoiceBilling } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
 import {
@@ -24,6 +24,15 @@ import { Hono } from "hono";
 
 import { registerSessionRoutes } from "../src/routes/sessions";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { createTemporalWorkflowClient } from "../src/index";
+import { Client as TemporalClient, Connection } from "@temporalio/client";
+import { NativeConnection, Worker } from "@temporalio/worker";
+import { createRealtimeUsageActivities } from "../../worker/src/activities/realtime-usage";
+import type { ControlActivityServices } from "../../worker/src/activities/types";
+import { InteractionFrameProxyTransport } from "../src/interaction-frame-proxy";
+import { createRealtimeUsageProxyLifecycle } from "../src/realtime-usage-proxy";
+import type { ApiWebSocketConnection } from "../src/api-websocket";
+import * as gatewayProvider from "../src/gateway-realtime";
 
 const DELEGATION_SECRET = "realtime-voice-billing-secret-with-32-bytes";
 const AZURE_MODEL = "opengeni-azure/gpt-live-1";
@@ -41,26 +50,32 @@ const pricedSettings = testSettings({
   aiGatewayRealtimePricingJson: JSON.stringify({
     "openai/gpt-realtime-2.1": { microsPerMinute: 50_000, marginBps: 500 },
   }),
+  temporalHost: process.env.OPENGENI_TEST_TEMPORAL_ADDRESS,
+  temporalNamespace: process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE ?? "default",
+  temporalTaskQueue: `realtime-voice-billing-${crypto.randomUUID()}`,
 });
 
 let shared: SharedTestDatabase;
 let client: DbClient;
 let providerCalls = 0;
+let temporalOwner: Awaited<ReturnType<typeof createTemporalWorkflowClient>>;
+let temporalConnection: Connection;
+let temporal: TemporalClient;
+let native: NativeConnection;
+let worker: Worker;
+let workerRun: Promise<void>;
+const observedConnections = new Set<string>();
+const appDeps = new WeakMap<Hono, ApiRouteDeps>();
 
 setDefaultTimeout(60_000);
 
 function appFor(settings: Settings): Hono {
   const noop = async () => undefined;
-  const workflowClient = {
-    signalUserMessage: noop,
-    wakeSessionWorkflow: noop,
-    requestSessionWorkflowWakeDispatch: noop,
-    signalApprovalDecision: noop,
-    signalSessionControl: noop,
-    syncScheduledTask: noop,
-    deleteScheduledTaskSchedule: noop,
-    triggerScheduledTask: noop,
-  } as unknown as SessionWorkflowClient;
+  const workflowClient = { ...temporalOwner.client,
+    startRealtimeUsageObservation: async (input: Parameters<NonNullable<typeof temporalOwner.client.startRealtimeUsageObservation>>[0]) => {
+      await temporalOwner.client.startRealtimeUsageObservation!(input);
+      observedConnections.add(input.connectionId);
+    } };
   const deps = {
     settings,
     db: client.db,
@@ -90,17 +105,35 @@ function appFor(settings: Settings): Hono {
   const app = new Hono();
   registerSessionRoutes(app, deps);
   registerWorkspaceRoutes(app, deps);
+  appDeps.set(app, deps);
   return app;
 }
 
 beforeAll(async () => {
+  if (!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS) throw new Error("Realtime billing requires the coordinated Temporal fixture");
   const acquired = await acquireSharedTestDatabase("api-realtime-voice-billing");
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 8 });
+  native = await NativeConnection.connect({ address: pricedSettings.temporalHost });
+  worker = await Worker.create({ connection: native, namespace: pricedSettings.temporalNamespace,
+    taskQueue: pricedSettings.temporalTaskQueue,
+    workflowBundle: { codePath: new URL("../../worker/dist/workflow-bundle.js", import.meta.url).pathname },
+    activities: createRealtimeUsageActivities(async () => ({ db: client.db, settings: pricedSettings }) as ControlActivityServices),
+    maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
+  workerRun = worker.run(); void workerRun.catch(() => undefined);
+  temporalOwner = await createTemporalWorkflowClient(pricedSettings, client.db);
+  temporalConnection = await Connection.connect({ address: pricedSettings.temporalHost });
+  temporal = new TemporalClient({ connection: temporalConnection, namespace: pricedSettings.temporalNamespace });
 }, 180_000);
 
 afterAll(async () => {
+  for (const id of observedConnections) {
+    const handle = temporal.workflow.getHandle(`realtime-usage:${id}`);
+    await handle.cancel(); await handle.result().catch(() => undefined);
+  }
+  await temporalOwner?.close(); await temporalConnection?.close();
+  worker?.shutdown(); await workerRun; await native?.close();
   await client?.close();
   await shared?.release();
 }, 60_000);
@@ -421,58 +454,98 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       }
     ).mode;
     const proof = started.proof;
-    const minted = await app.request(`${value.base}/gateway`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify({
-        realtimeId: mode.id,
-        operationId: crypto.randomUUID(),
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-        expectedConnectionEpoch: mode.connectionEpoch,
-        rotate: false,
-      }),
-    });
-    expect(minted.status).toBe(200);
-    expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
+    // Override only the installed broker's upstream test transport. Its real
+    // mint, canonical request authority, sealed connection and relay stay live.
+    const originalBroker = gatewayProvider.createGatewayRealtimeConnectionSecret;
+    const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0,
+      fetch(request, server) { return server.upgrade(request, { headers: { "sec-websocket-protocol": "ai-gateway-realtime.v1" } })
+        ? undefined : new Response(null, { status: 400 }); },
+      websocket: { open(socket) { socket.send(JSON.stringify({ type: "session-started", sessionId: `gateway-session-${crypto.randomUUID()}` })); },
+        message() {} } });
+    const broker = spyOn(gatewayProvider, "createGatewayRealtimeConnectionSecret").mockImplementation(async input => ({
+      ...await originalBroker(input), url: upstream.url.toString().replace(/^http/, "ws"),
+    }));
+    let relay: ApiWebSocketConnection | undefined;
+    let providerObserved = false;
+    const closedReceipt = Promise.withResolvers<void>();
+    void closedReceipt.promise.catch(() => undefined);
+    try {
+      const minted = await app.request(`${value.base}/gateway`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          realtimeId: mode.id,
+          operationId: crypto.randomUUID(),
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+          expectedConnectionEpoch: mode.connectionEpoch,
+          rotate: false,
+        }),
+      });
+      expect(minted.status).toBe(200);
+      expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(MINUTE);
+      const attachment = await minted.json() as { url: string; token: string; connectionId: string };
+      const deps = appDeps.get(app)!;
+      const lifecycle = createRealtimeUsageProxyLifecycle(deps);
+      const transport = new InteractionFrameProxyTransport(DELEGATION_SECRET, Date.now, { ...lifecycle,
+        closed: async (...args) => { try { await lifecycle.closed(...args); closedReceipt.resolve(); }
+          catch (error) { closedReceipt.reject(error); throw error; } },
+      });
+      let deliver!: () => void, reject!: (error: Error) => void;
+      const delivered = new Promise<void>((resolve, fail) => { deliver = resolve; reject = fail; });
+      expect(transport.upgrade(new Request(attachment.url.replace(/^ws/, "http"), {
+        headers: { "sec-websocket-protocol": `opengeni-realtime.v1, opengeni-frame-proxy.${attachment.token}` },
+      }), { upgrade(_request, options) { relay = options.data; return true; } })).toBeUndefined();
+      if (!relay) throw new Error("Actual realtime relay was not admitted");
+      relay.attach({ data: relay, send(data) {
+        expect(typeof data).toBe("string");
+        expect(JSON.parse(String(data)).type).toBe("session-started"); providerObserved = true; deliver(); return Buffer.byteLength(String(data));
+      }, close(code) { reject(new Error(`Actual realtime relay closed before provider occurrence (${code})`)); } });
+      await delivered;
+      expect((await temporal.workflow.getHandle(`realtime-usage:${attachment.connectionId}`).describe()).status.name).toBe("RUNNING");
 
-    const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {
-      method: "PATCH",
-      headers: value.headers,
-      body: JSON.stringify({
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-      }),
-    });
-    expect(heartbeat.status).toBe(200);
-    const body = (await heartbeat.json()) as {
-      mode: { version: number; leaseExpiresAt: string; state: string };
-      stop?: { code: string; message: string };
-    };
-    expect(body.stop).toMatchObject({ code: "insufficient_credits" });
-    expect(body.mode.state).toBe("active");
-    expect(body.mode.version).toBe(mode.version);
-    expect(body.mode.leaseExpiresAt).toBe(mode.leaseExpiresAt);
+      const heartbeat = await app.request(`${value.base}/${mode.id}/heartbeat`, {
+        method: "PATCH",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+        }),
+      });
+      expect(heartbeat.status).toBe(200);
+      const body = (await heartbeat.json()) as {
+        mode: { version: number; leaseExpiresAt: string; state: string };
+        stop?: { code: string; message: string };
+      };
+      expect(body.stop).toMatchObject({ code: "insufficient_credits" });
+      expect(body.mode.state).toBe("active");
+      expect(body.mode.version).toBe(mode.version);
+      expect(body.mode.leaseExpiresAt).toBe(mode.leaseExpiresAt);
+      expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
 
-    const calls = providerCalls;
-    const rotated = await app.request(`${value.base}/gateway`, {
-      method: "POST",
-      headers: value.headers,
-      body: JSON.stringify({
-        realtimeId: mode.id,
-        operationId: crypto.randomUUID(),
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-        expectedConnectionEpoch: mode.connectionEpoch,
-        rotate: true,
-      }),
-    });
-    expect(rotated.status).toBe(402);
-    expect(await rotated.json()).toMatchObject({ code: "insufficient_credits" });
-    expect(providerCalls).toBe(calls);
+      const calls = providerCalls;
+      const rotated = await app.request(`${value.base}/gateway`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          realtimeId: mode.id,
+          operationId: crypto.randomUUID(),
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+          expectedConnectionEpoch: mode.connectionEpoch,
+          rotate: true,
+        }),
+      });
+      expect(rotated.status).toBe(402);
+      expect(await rotated.json()).toMatchObject({ code: "insufficient_credits" });
+      expect(providerCalls).toBe(calls);
+    } finally {
+      relay?.transportClosed(); broker.mockRestore(); upstream.stop(true);
+      if (providerObserved) await closedReceipt.promise;
+    }
 
     const ended = await app.request(`${value.base}/${mode.id}`, {
       method: "DELETE",
