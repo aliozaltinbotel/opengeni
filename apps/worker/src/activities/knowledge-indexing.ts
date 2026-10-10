@@ -149,13 +149,14 @@ export function createKnowledgeIndexingActivities(
       });
       for (const claim of claims) {
         let stage: KnowledgeIndexFailureStage = "processing";
+        let completedCall: Parameters<typeof recordUsageEvent>[1] | undefined;
         try {
           const source = await readKnowledgeIndexSource(db, claim);
           if (!source) {
             result.unavailable++;
             continue;
           }
-          // The checkpoint, usage and post-use debit commit together. A new
+          // The checkpoint, chunk/byte meters and post-use debit commit together. A new
           // generation requires funding once; committed batches may finish even
           // if their accumulated cost takes the balance below zero.
           await withWorkspaceUsageLock(db, source.billingWorkspaceId, async (lockedDb) => {
@@ -257,11 +258,38 @@ export function createKnowledgeIndexingActivities(
                 (sum, input) => sum + Buffer.byteLength(input, "utf8"),
                 0,
               );
+              // Every physical invocation has its own immutable identity. A
+              // retry of an unpublished batch is another provider call, even
+              // if its lease/checkpoint has not changed.
+              const callId = crypto.randomUUID();
+              const providerName = settings.documentEmbeddingProvider ?? "unspecified";
               stage = "embedding";
               const vectors = await embedder.embedMany(inputs);
+              stage = "processing";
+              // MAINT-P09-430: the completed provider call survives publication refusal
+              // and rollback. This fact grants no source/publication authority.
+              completedCall = {
+                accountId: claim.accountId,
+                workspaceId: current.billingWorkspaceId,
+                occurredAt: new Date(),
+                eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+                quantity: 1,
+                unit: "call",
+                sourceResourceType: "knowledge_revision",
+                sourceResourceId: claim.revisionId,
+                idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}:${callId}`,
+                attributes: embeddingCallUsageAttributes({
+                  callKind: "index",
+                  provider: providerName,
+                  model: claim.model,
+                  inputBytes: bytes,
+                  inputItems: chunks.length,
+                  rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
+                  billingPath: paid ? "opengeni_credits" : "external",
+                }),
+              };
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
-              stage = "processing";
               // A reviewer may have rejected this revision during the provider
               // call. The DB guard holds its publication row through settlement.
               if (paid) {
@@ -301,27 +329,6 @@ export function createKnowledgeIndexingActivities(
                 sourceResourceType: "knowledge_revision",
                 sourceResourceId: claim.revisionId,
                 idempotencyKey: `knowledge.embedding_bytes:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
-              });
-              // MAINT-P09-430: the batch's one provider request as its own
-              // per-call fact, priced at the generation's frozen byte rate.
-              await recordUsageEvent(lockedDb, {
-                accountId: claim.accountId,
-                workspaceId: current.billingWorkspaceId,
-                eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
-                quantity: 1,
-                unit: "call",
-                sourceResourceType: "knowledge_revision",
-                sourceResourceId: claim.revisionId,
-                idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}`,
-                attributes: embeddingCallUsageAttributes({
-                  callKind: "index",
-                  provider: settings.documentEmbeddingProvider ?? "unspecified",
-                  model: claim.model,
-                  inputBytes: bytes,
-                  inputItems: chunks.length,
-                  rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
-                  billingPath: paid ? "opengeni_credits" : "external",
-                }),
               });
               if (frozenPolicy.mode === "shadow" && frozenPolicy.rateMicrosPerMillionBytes > 0) {
                 const estimate = documentEmbeddingCostMicros(
@@ -402,6 +409,11 @@ export function createKnowledgeIndexingActivities(
             });
           });
           result.deferred++;
+        } finally {
+          // Preserve the exact completed provider fact after the usage lock has
+          // released, including rollback/refusal paths. Never consume another
+          // connection while holding that lock, and never soft-fail this write.
+          if (completedCall) await recordUsageEvent(db, completedCall);
         }
       }
       return result;

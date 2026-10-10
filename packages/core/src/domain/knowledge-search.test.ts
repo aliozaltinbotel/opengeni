@@ -1,6 +1,10 @@
 import { afterAll, expect, mock, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
-import type { KnowledgeContext } from "@opengeni/db";
+import type { KnowledgeContext, recordUsageEvent } from "@opengeni/db";
+const lockedDb = {} as never;
+let lockActive = false;
+const durableCalls: Parameters<typeof recordUsageEvent>[1][] = [];
+let failCallReceipt = false;
 const serviceContext: KnowledgeContext = {
   accountId: "account",
   workspaceId: "workspace",
@@ -35,9 +39,13 @@ const debits = mock(async (_db: unknown, input: { amountMicros: number }) => {
   balance -= input.amountMicros;
   return { balance: { balanceMicros: balance }, debitedMicros: input.amountMicros };
 });
-const usage = mock(
-  async (_db: unknown, _input: { quantity: number; eventType: string }) => undefined,
-);
+const usage = mock(async (db: unknown, input: Parameters<typeof recordUsageEvent>[1]) => {
+  if (input.eventType === "embedding.call") {
+    if (failCallReceipt) throw new Error("call receipt unavailable");
+    expect(lockActive).toBe(false);
+    if (db !== lockedDb) durableCalls.push(input);
+  }
+});
 mock.module("@opengeni/db", () => ({
   listKnowledgeEntries: list,
   getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
@@ -54,7 +62,14 @@ mock.module("@opengeni/db", () => ({
     _account: unknown,
     _workspace: unknown,
     fn: (db: unknown) => Promise<unknown>,
-  ) => fn(_db),
+  ) => {
+    lockActive = true;
+    try {
+      return await fn(lockedDb);
+    } finally {
+      lockActive = false;
+    }
+  },
   isCodexBilledTurn: async () => false,
   sumUsageQuantity: async (_db: unknown, input: { eventType: string }) =>
     input.eventType === "document.query_embedding_bytes"
@@ -197,8 +212,7 @@ test("shadow query usage meters bytes without checking or consuming credits", as
     quantity: 2,
     eventType: "document.query_embedding_bytes",
   });
-  // MAINT-P09-430: the query's one provider request as its own per-call fact, in the same
-  // transaction: the configured byte rate prices it, tokens are not observed (null).
+  // The call fact commits independently; its byte meter uses the same source id.
   expect(callRow).toMatchObject({
     eventType: "embedding.call",
     quantity: 1,
@@ -274,7 +288,9 @@ test("paid queries attribute exact turns or verified humans, never service/API-k
           ? { initiatingHumanSubjectId: actor.subjectId }
           : {}),
     });
-    const receipt = usage.mock.calls.at(-1)?.[1] as unknown as {
+    const receipt = usage.mock.calls
+      .filter((call) => call[1].eventType === "document.query_embedding_cost")
+      .at(-1)?.[1] as unknown as {
       eventType: string;
       sourceResourceId: string;
       initiatorContext: { creditDebitAttribution: Record<string, unknown> };
@@ -365,7 +381,9 @@ test("an unpriced query embedding records its call with an unknown cost, never 0
     settings,
   );
   expect(found.searchMode).toBe("vector");
-  expect(usage.mock.calls.at(-1)?.[1]).toMatchObject({
+  expect(
+    usage.mock.calls.filter((call) => call[1].eventType === "embedding.call").at(-1)?.[1],
+  ).toMatchObject({
     eventType: "embedding.call",
     attributes: {
       inputBytes: 3,
@@ -384,6 +402,7 @@ test("paid query does not debit when vector retrieval fails after embedding", as
   } as Settings;
   balance = 1;
   const debitsBefore = debits.mock.calls.length;
+  const callsBefore = durableCalls.length;
   failNextRetrieval = true;
   await expect(
     searchKnowledgeEntries(
@@ -395,6 +414,12 @@ test("paid query does not debit when vector retrieval fails after embedding", as
     ),
   ).rejects.toThrow("retrieval unavailable");
   expect(debits.mock.calls.length).toBe(debitsBefore);
+  expect(durableCalls.slice(callsBefore)).toHaveLength(1);
+  expect(durableCalls.at(-1)?.attributes).toMatchObject({
+    outcome: "completed",
+    estimatedProviderCostMicros: 4,
+    inputTokens: null,
+  });
 });
 
 test("query debit preserves initiating human when its caller context changes during provider work", async () => {
@@ -432,7 +457,11 @@ test("query debit preserves initiating human when its caller context changes dur
   expect(debits.mock.calls.at(-1)?.[1]).toMatchObject({
     metadata: { initiatingHumanSubjectId: "human:original" },
   });
-  expect(usage.mock.calls.at(-1)?.[1]).toMatchObject({
+  expect(
+    usage.mock.calls
+      .filter((call) => call[1].eventType === "document.query_embedding_cost")
+      .at(-1)?.[1],
+  ).toMatchObject({
     initiatorContext: {
       creditDebitAttribution: { kind: "human", initiatingHumanSubjectId: "human:original" },
     },
@@ -613,4 +642,56 @@ test("unpriced document source admission ignores zero credits but preserves the 
       quantity: 1,
     }),
   ).toMatchObject({ allowed: false, code: "max_document_indexed_chunks_per_workspace" });
+});
+
+test("query without settings records the completed provider call with truthful unknown pricing", async () => {
+  const before = durableCalls.length;
+  await searchKnowledgeEntries(
+    {} as never,
+    serviceContext,
+    { query: "abc", mode: "vector" },
+    () => ({ model: "test", dimensions: 3, embedQuery: async () => [1, 0, 0] }) as never,
+  );
+  expect(durableCalls.slice(before)).toHaveLength(1);
+  expect(durableCalls.at(-1)?.attributes).toMatchObject({
+    provider: "unspecified",
+    model: "test",
+    inputBytes: 3,
+    inputItems: 1,
+    inputTokens: null,
+    estimatedProviderCostMicros: null,
+    pricingSource: null,
+    rateMicrosPerMillionBytes: null,
+    outcome: "completed",
+  });
+});
+
+test("query call receipt failure surfaces after retrieval without a fallback", async () => {
+  const reads = list.mock.calls.length;
+  failCallReceipt = true;
+  try {
+    await expect(
+      searchKnowledgeEntries(
+        {} as never,
+        serviceContext,
+        { query: "abc" },
+        () => ({ model: "test", dimensions: 3, embedQuery: async () => [1, 0, 0] }) as never,
+      ),
+    ).rejects.toThrow("call receipt unavailable");
+    expect(list.mock.calls.length).toBe(reads + 1);
+  } finally {
+    failCallReceipt = false;
+  }
+});
+
+test("unusable completed query vectors still record the call before the keyword fallback returns", async () => {
+  const before = durableCalls.length;
+  const result = await searchKnowledgeEntries(
+    {} as never,
+    serviceContext,
+    { query: "abc" },
+    () => ({ model: "test", dimensions: 3, embedQuery: async () => [0, 0, 0] }) as never,
+  );
+  expect(result).toMatchObject({ searchMode: "keyword", fallbackReason: "provider_unavailable" });
+  expect(durableCalls.slice(before)).toHaveLength(1);
 });

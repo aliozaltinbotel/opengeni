@@ -64,6 +64,7 @@ export async function searchKnowledgeEntries(
   // Copy trusted actor fields before any provider/lock await. Request lifetime
   // mutation cannot replace the initiating identity between admission/debit.
   const billingActor = { ...context.actor };
+  const callOwner = { accountId: context.accountId, workspaceId: context.workspaceId };
   let paidAttribution: CreditDebitAttribution =
     billingActor.kind === "human"
       ? { kind: "human", initiatingHumanSubjectId: billingActor.subjectId }
@@ -118,28 +119,57 @@ export async function searchKnowledgeEntries(
       "query_limit",
     );
 
+  let completedCall: Parameters<typeof recordUsageEvent>[1] | undefined;
   const retrieveThenSettle = async (queryDb: Database) => {
+    const usageId = crypto.randomUUID();
+    const providerName = settings?.documentEmbeddingProvider ?? "unspecified";
+    const rate = settings?.documentEmbeddingRateMicrosPerMillionBytes ?? 0;
     let embedding: { model: string; values: number[] };
+    let dimensions: number;
     try {
       const provider = embedder();
+      const model = provider.model;
+      dimensions = provider.dimensions;
       const values = await provider.embedQuery(request.query!);
-      if (
-        values.length !== provider.dimensions ||
-        values.some((value) => !Number.isFinite(value)) ||
-        !values.some((value) => value !== 0)
-      )
-        throw new Error("Knowledge query embedding is unavailable");
-      embedding = { model: provider.model, values };
+      embedding = { model, values };
     } catch (error) {
-      // Only provider failure may fall back. Retrieval and settlement errors
-      // after use surface; they never masquerade as a successful keyword hit.
       return keywordFallback(queryDb, error, "provider_unavailable");
     }
-    // Read before billing, in the same transaction for the paid mode. Failure
-    // here leaves no customer charge and no vector result to return.
+    // Capture the completed provider request even if its vector is unusable
+    // or retrieval/settlement fails. The root writer settles after the lock exits.
+    completedCall = {
+      ...callOwner,
+      occurredAt: new Date(),
+      eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+      quantity: 1,
+      unit: "call",
+      sourceResourceType: "knowledge_query",
+      sourceResourceId: usageId,
+      idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:query:${usageId}`,
+      attributes: embeddingCallUsageAttributes({
+        callKind: "query",
+        provider: providerName,
+        model: embedding.model,
+        inputBytes: bytes,
+        inputItems: 1,
+        rateMicrosPerMillionBytes: rate,
+        billingPath: paidSettings ? "opengeni_credits" : "external",
+      }),
+    };
+    if (
+      embedding.values.length !== dimensions ||
+      embedding.values.some((value) => !Number.isFinite(value)) ||
+      !embedding.values.some((value) => value !== 0)
+    )
+      return keywordFallback(
+        queryDb,
+        new Error("Knowledge query embedding is unavailable"),
+        "provider_unavailable",
+      );
+    // Retrieval and customer settlement remain atomic in paid mode. A failed
+    // read leaves no customer debit while preserving the provider call fact.
     const found = await listKnowledgeEntries(queryDb, context, retrievalRequest, embedding);
     if (settings) {
-      const usageId = crypto.randomUUID();
       await recordUsageEvent(queryDb, {
         accountId: context.accountId,
         workspaceId: context.workspaceId,
@@ -149,27 +179,6 @@ export async function searchKnowledgeEntries(
         sourceResourceType: "knowledge_query",
         sourceResourceId: usageId,
         idempotencyKey: `knowledge.query_bytes:${usageId}`,
-      });
-      // MAINT-P09-430: the provider request's own per-call fact, in the same
-      // transaction as its byte meter.
-      await recordUsageEvent(queryDb, {
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
-        quantity: 1,
-        unit: "call",
-        sourceResourceType: "knowledge_query",
-        sourceResourceId: usageId,
-        idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:query:${usageId}`,
-        attributes: embeddingCallUsageAttributes({
-          callKind: "query",
-          provider: settings.documentEmbeddingProvider ?? "unspecified",
-          model: embedding.model,
-          inputBytes: bytes,
-          inputItems: 1,
-          rateMicrosPerMillionBytes: settings.documentEmbeddingRateMicrosPerMillionBytes ?? 0,
-          billingPath: paidSettings ? "opengeni_credits" : "external",
-        }),
       });
       if (paidSettings && cost > 0)
         await recordUsageEvent(queryDb, {
@@ -211,75 +220,85 @@ export async function searchKnowledgeEntries(
     }
     return { ...found, searchMode: request.mode };
   };
-  if (!paidSettings) return retrieveThenSettle(db);
-  // Serialize paid queries across all workspaces of the account before
-  // checking balance. This is an execution fence, not a credit reservation.
-  return withKnowledgeQueryAccountLock(
-    db,
-    context.accountId,
-    context.workspaceId,
-    async (lockedDb) => {
-      const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
-      if (balance.balanceMicros <= 0)
-        return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");
-      const attribution =
-        billingActor.kind === "agent"
-          ? await creditDebitAttributionForTurn(lockedDb, {
-              accountId: context.accountId,
-              workspaceId: context.workspaceId,
-              turnId: billingActor.turnId,
-            })
-          : null;
-      if (attribution) paidAttribution = attribution;
-      const refusal = await checkWorkspaceAllowance(lockedDb, {
-        accountId: context.accountId,
-        workspaceId: context.workspaceId,
-        subjectId:
-          billingActor.kind === "human"
-            ? billingActor.subjectId
-            : attribution?.kind === "turn"
-              ? attribution.initiatingHumanSubjectId
-              : null,
-      });
-      if (refusal)
-        return keywordFallback(
-          lockedDb,
-          Object.assign(new Error(refusal.message), refusal),
-          "quota",
-        );
-      const now = new Date();
-      const minuteBytes = await sumUsageQuantity(lockedDb, {
-        accountId: context.accountId,
-        eventType: "document.query_embedding_bytes",
-        since: new Date(now.getTime() - 60_000),
-      });
-      const monthBytes = await sumUsageQuantity(lockedDb, {
-        accountId: context.accountId,
-        eventType: "document.query_embedding_bytes",
-        since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
-      });
-      const minuteMicros = await sumUsageQuantity(lockedDb, {
-        accountId: context.accountId,
-        eventType: "document.query_embedding_cost",
-        since: new Date(now.getTime() - 60_000),
-      });
-      const monthMicros = await sumUsageQuantity(lockedDb, {
-        accountId: context.accountId,
-        eventType: "document.query_embedding_cost",
-        since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
-      });
-      if (
-        minuteBytes + bytes > MAX_PAID_QUERY_BYTES_PER_MINUTE ||
-        monthBytes + bytes > MAX_PAID_QUERY_BYTES_PER_MONTH ||
-        minuteMicros + cost > MAX_PAID_QUERY_MICROS_PER_MINUTE ||
-        monthMicros + cost > MAX_PAID_QUERY_MICROS_PER_MONTH
-      )
-        return keywordFallback(
-          lockedDb,
-          new KnowledgeVectorQueryRejectedError("quota", "Paid Knowledge query rate limit reached"),
-          "quota",
-        );
-      return retrieveThenSettle(lockedDb);
-    },
-  );
+  try {
+    if (!paidSettings) return await retrieveThenSettle(db);
+    // Serialize paid queries across all workspaces of the account before
+    // checking balance. This is an execution fence, not a credit reservation.
+    return await withKnowledgeQueryAccountLock(
+      db,
+      context.accountId,
+      context.workspaceId,
+      async (lockedDb) => {
+        const balance = await getSpendableCreditBalance(lockedDb, context.accountId);
+        if (balance.balanceMicros <= 0)
+          return keywordFallback(lockedDb, new KnowledgeVectorFundingError(), "awaiting_funding");
+        const attribution =
+          billingActor.kind === "agent"
+            ? await creditDebitAttributionForTurn(lockedDb, {
+                accountId: context.accountId,
+                workspaceId: context.workspaceId,
+                turnId: billingActor.turnId,
+              })
+            : null;
+        if (attribution) paidAttribution = attribution;
+        const refusal = await checkWorkspaceAllowance(lockedDb, {
+          accountId: context.accountId,
+          workspaceId: context.workspaceId,
+          subjectId:
+            billingActor.kind === "human"
+              ? billingActor.subjectId
+              : attribution?.kind === "turn"
+                ? attribution.initiatingHumanSubjectId
+                : null,
+        });
+        if (refusal)
+          return keywordFallback(
+            lockedDb,
+            Object.assign(new Error(refusal.message), refusal),
+            "quota",
+          );
+        const now = new Date();
+        const minuteBytes = await sumUsageQuantity(lockedDb, {
+          accountId: context.accountId,
+          eventType: "document.query_embedding_bytes",
+          since: new Date(now.getTime() - 60_000),
+        });
+        const monthBytes = await sumUsageQuantity(lockedDb, {
+          accountId: context.accountId,
+          eventType: "document.query_embedding_bytes",
+          since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+        });
+        const minuteMicros = await sumUsageQuantity(lockedDb, {
+          accountId: context.accountId,
+          eventType: "document.query_embedding_cost",
+          since: new Date(now.getTime() - 60_000),
+        });
+        const monthMicros = await sumUsageQuantity(lockedDb, {
+          accountId: context.accountId,
+          eventType: "document.query_embedding_cost",
+          since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+        });
+        if (
+          minuteBytes + bytes > MAX_PAID_QUERY_BYTES_PER_MINUTE ||
+          monthBytes + bytes > MAX_PAID_QUERY_BYTES_PER_MONTH ||
+          minuteMicros + cost > MAX_PAID_QUERY_MICROS_PER_MINUTE ||
+          monthMicros + cost > MAX_PAID_QUERY_MICROS_PER_MONTH
+        )
+          return keywordFallback(
+            lockedDb,
+            new KnowledgeVectorQueryRejectedError(
+              "quota",
+              "Paid Knowledge query rate limit reached",
+            ),
+            "quota",
+          );
+        return retrieveThenSettle(lockedDb);
+      },
+    );
+  } finally {
+    // Drain the original fact only after the usage transaction has committed or
+    // rolled back. This works on a single-connection pool and cannot be erased
+    // by retrieval/debit failure. A failed fact write is never a fallback.
+    if (completedCall) await recordUsageEvent(db, completedCall);
+  }
 }

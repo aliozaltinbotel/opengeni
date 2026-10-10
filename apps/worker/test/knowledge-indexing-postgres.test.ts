@@ -6,6 +6,7 @@ import {
   getBillingBalance,
   saveKnowledgeEntry,
   getKnowledgeEntry,
+  recordUsageEvent,
   type KnowledgeContext,
 } from "@opengeni/db";
 import { knowledgeIndexChunks, type DocumentServices } from "@opengeni/documents";
@@ -804,3 +805,117 @@ test("a queued Knowledge generation remains unpriced when paid mode starts later
   expect(job).toMatchObject({ billing_mode: "usage_only", billed_generation: 1 });
   expect((await getBillingBalance(client.db, accountId)).balanceMicros).toBe(0);
 });
+
+test("completed embedding facts survive rollback and concurrent settlement on a single-connection restricted pool", async () => {
+  const single = createDb(shared.appUrl, { max: 1 });
+  const accountId = crypto.randomUUID(),
+    workspaceId = crypto.randomUUID();
+  fixtureAccounts.push(accountId);
+  try {
+    await shared.admin`INSERT INTO managed_accounts(id,name) VALUES(${accountId},'Call fact rollback')`;
+    await shared.admin`INSERT INTO workspaces(id,account_id,name) VALUES(${workspaceId},${accountId},'Call fact workspace')`;
+    const context: KnowledgeContext = {
+      accountId,
+      workspaceId,
+      actor: {
+        kind: "human",
+        principalKind: "human_session",
+        subjectId: "user:call-fact-owner",
+        writeScopes: ["workspace"],
+        settingsScopes: ["workspace"],
+        review: true,
+      },
+    };
+    const settings = {
+      billingMode: "stripe",
+      usageLimitsMode: "managed",
+      staticUsageLimitsJson: "{}",
+      documentEmbeddingProvider: "openai",
+      documentEmbeddingBillingMode: "credits",
+      documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
+      documentEmbeddingRateMicrosPerMillionBytes: 1_000_000,
+    } as Settings;
+    const saved = await saveKnowledgeEntry(single.db, context, {
+      operationId: crypto.randomUUID(),
+      entryId: crypto.randomUUID(),
+      expectedVersion: 0,
+      scope: "workspace",
+      entry: { kind: "fact", title: "Call fact", content: "Retained terms" },
+    });
+    await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
+      VALUES(${accountId},'grant',10000,${`call-fact:${saved.revisionId}`})`;
+    let physicalCalls = 0,
+      incomplete = true;
+    const embedder: DocumentServices["embedder"] = {
+      model: "call-fact-rollback-test",
+      dimensions: 3,
+      embedQuery: async () => [1, 0, 0],
+      embedMany: async (inputs) => {
+        physicalCalls++;
+        // The provider returned a complete batch, but the released append
+        // validator refuses each vector's dimensions after the provider call.
+        return inputs.map(() => (incomplete ? [1, 0] : [1, 0, 0]));
+      },
+    };
+    const worker = createKnowledgeIndexingActivities(
+      async () =>
+        ({
+          db: single.db,
+          settings,
+          observability: { warn: () => undefined },
+        }) as unknown as ControlActivityServices,
+      async () => ({ embedder }) as DocumentServices,
+    );
+    expect((await worker.indexKnowledge()).deferred).toBe(1);
+    const [failed] =
+      await shared.admin`SELECT state,next_index FROM knowledge_index_jobs WHERE revision_id=${saved.revisionId}`;
+    expect(failed).toMatchObject({ state: "pending", next_index: 0 });
+    expect((await getBillingBalance(single.db, accountId)).balanceMicros).toBe(10000);
+    const first = await shared.admin<
+      Array<{ id: string; idempotencyKey: string; attributes: Record<string, unknown> }>
+    >`
+      SELECT id,idempotency_key AS "idempotencyKey",attributes FROM usage_events
+      WHERE event_type='embedding.call' AND source_resource_id=${saved.revisionId}`;
+    expect(first).toHaveLength(1);
+    expect(first[0]!.attributes).toMatchObject({ outcome: "completed", inputTokens: null });
+    // Replay the exact authoritative event through the restricted writer.
+    const replay = await recordUsageEvent(single.db, {
+      accountId,
+      workspaceId,
+      eventType: "embedding.call",
+      quantity: 1,
+      unit: "call",
+      sourceResourceType: "knowledge_revision",
+      sourceResourceId: saved.revisionId,
+      idempotencyKey: first[0]!.idempotencyKey,
+      attributes: first[0]!.attributes,
+    });
+    expect(replay.id).toBe(first[0]!.id);
+    incomplete = false;
+    await shared.admin`UPDATE knowledge_index_jobs SET next_attempt_at=now()-interval '1 second' WHERE revision_id=${saved.revisionId}`;
+    expect((await worker.indexKnowledge()).completed).toBe(1);
+    const calls = await shared.admin`SELECT id,attributes FROM usage_events
+      WHERE event_type='embedding.call' AND source_resource_id=${saved.revisionId}`;
+    expect(calls).toHaveLength(physicalCalls);
+    expect(new Set(calls.map((call) => call.id)).size).toBe(physicalCalls);
+    // All requests must release the single connection before their root fact
+    // writer runs; a writer waiting inside either lock would never complete.
+    const queries = await Promise.all(
+      ["retained", "terms"].map((query) =>
+        searchKnowledgeEntries(
+          single.db,
+          context,
+          { query, mode: "vector" },
+          () => embedder,
+          settings,
+        ),
+      ),
+    );
+    expect(queries.every((query) => query.searchMode === "vector")).toBe(true);
+    const [queryFacts] = await shared.admin`SELECT count(*)::int AS calls FROM usage_events
+      WHERE account_id=${accountId} AND event_type='embedding.call' AND source_resource_type='knowledge_query'`;
+    expect(queryFacts?.calls).toBe(queries.length);
+  } finally {
+    await single.close();
+  }
+}, 30_000);
