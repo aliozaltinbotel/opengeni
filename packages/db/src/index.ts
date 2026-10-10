@@ -1052,6 +1052,7 @@ import {
 } from "./database";
 export {
   createDb,
+  isTransactionHandle,
   databaseReconnectBackoffSeconds,
   registerDbBinding,
   retrySessionActivityRls,

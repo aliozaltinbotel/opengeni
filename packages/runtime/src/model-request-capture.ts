@@ -14,8 +14,17 @@ import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } 
  * committed source at each literal transport attempt, including HTTP retries. */
 export type BeforeModelCallSourceReceipt = ((request: ModelRequest) => Promise<string>) & {
   beforeProviderDispatch?: (sourceKey: string) => Promise<void>;
+  onDispatchFailure?: (sourceKey: string) => Promise<void>;
 };
 const modelSourceDispatch = new AsyncLocalStorage<{ sourceKey: string; authorize: (sourceKey: string) => Promise<void> } | undefined>();
+
+/** Mandatory receipt refusal is never an optional title/provider failure. */
+export class ModelCallFailureSettlementError extends Error {
+  constructor(cause: unknown) {
+    super("MODEL_CALL_FAILURE_RECEIPT_REFUSED", { cause });
+    this.name = "ModelCallFailureSettlementError";
+  }
+}
 
 export function withModelCallSourceDispatch<T>(
   producer: BeforeModelCallSourceReceipt | undefined,
@@ -24,7 +33,18 @@ export function withModelCallSourceDispatch<T>(
 ): T {
   if (!producer?.beforeProviderDispatch) return modelSourceDispatch.run(undefined, operation);
   if (!sourceKey) throw new Error("MODEL_SOURCE_RECEIPT_UNAVAILABLE");
-  return modelSourceDispatch.run({ sourceKey, authorize: producer.beforeProviderDispatch }, operation);
+  return modelSourceDispatch.run({ sourceKey, authorize: producer.beforeProviderDispatch }, () => {
+    const result = operation();
+    if (!(result instanceof Promise)) return result;
+    return result.catch(async (error: unknown) => {
+      try {
+        await producer.onDispatchFailure?.(sourceKey);
+      } catch (cause) {
+        throw new ModelCallFailureSettlementError(cause);
+      }
+      throw error;
+    }) as T;
+  });
 }
 
 /** Called only at the real provider transport boundary, before request bytes. */

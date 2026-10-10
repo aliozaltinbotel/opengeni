@@ -44,6 +44,7 @@ import {
   shouldRecoverCompactionProviderFailure,
 } from "./errors";
 import {
+  createModelCallUsageSourceHooks,
   createCompactionModelUsageEventState,
   processCompactionModelUsageEvent,
 } from "./model-usage";
@@ -241,6 +242,21 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
   };
 
   const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel) ? input.sessionId : undefined;
+  const usageSourceHooks = (callKind: "response" | "compaction" | "session_title") =>
+    createModelCallUsageSourceHooks(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      turnAttemptId: input.attemptId,
+      callKind,
+      scope: "call",
+      provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+      providerApi: resolvedModel?.provider.api ?? "responses",
+      upstreamProvider: null,
+      model: resolvedModel?.configured.id ?? turn.model,
+      billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
+    }, claimedModelUsageSourceKeys, beforeModelCallSourceReceipt.beforeProviderDispatch);
   const compactionUsageState = createCompactionModelUsageEventState(claimedModelUsageSourceKeys);
   let compactionCreditPolicyRevision: number | undefined;
   const recordCompactionUsage = async (usage: ModelResponseUsage | null,nativeSourceKey?:string, outcome?: import("@opengeni/contracts").ModelCallOutcome) => {
@@ -289,7 +305,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               model: turnExecutionPolicy.upstreamModelId,
               maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
               ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-              beforeModelCallSourceReceipt:Object.assign(async (request: import("@openai/agents").ModelRequest)=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
+              beforeModelCallSourceReceipt:Object.assign(async (request: import("@openai/agents").ModelRequest)=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")), usageSourceHooks("compaction")),
               onUsage: usage=>recordCompactionUsage(usage,sourceKey),
               onUnreportedUsage: outcome => recordCompactionUsage(null, sourceKey, outcome),
               ...(systemInstructions ? { systemInstructions } : {}),
@@ -308,7 +324,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
             model: turnExecutionPolicy.upstreamModelId,
             maxOutputTokens: compactionSummaryOutputTokens(s.contextWindowTokens),
             ...(cancellationSignal ? { signal: cancellationSignal } : {}),
-            beforeModelCallSourceReceipt:Object.assign(async (request: import("@openai/agents").ModelRequest)=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
+            beforeModelCallSourceReceipt:Object.assign(async (request: import("@openai/agents").ModelRequest)=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")), usageSourceHooks("compaction")),
             onUsage: usage=>recordCompactionUsage(usage,sourceKey),
             onUnreportedUsage: outcome => recordCompactionUsage(null, sourceKey, outcome),
             ...(systemInstructions ? { systemInstructions } : {}),
@@ -378,7 +394,7 @@ export async function prepareCompaction(deps: CompactionPrepDeps): Promise<Compa
               preparedRequest,
               captureAgent: remotePrefix.agent,
               signal: cancellationSignal,
-              beforeModelCallSourceReceipt:Object.assign(async (request: import("@openai/agents").ModelRequest)=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
+              beforeModelCallSourceReceipt:Object.assign(async (request: import("@openai/agents").ModelRequest)=>(sourceKey=await beforeModelCallSourceReceipt(request,"COMPACTION")), usageSourceHooks("compaction")),
               onUsage: usage=>recordCompactionUsage(usage,sourceKey),
               onUnreportedUsage: outcome => recordCompactionUsage(null, sourceKey, outcome),
             });

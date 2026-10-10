@@ -1,6 +1,7 @@
 import { hasPermission } from "@opengeni/core";
 import type { AttemptToolDefinition } from "@opengeni/codemode";
 import { isManagedOpenRouterFreeRoute, type ModelCapabilitiesV1 } from "@opengeni/config";
+import { ModelCallFailureSettlementError } from "@opengeni/runtime";
 import type {
   GeneratedSessionTitle,
   GenerateSessionTitleOptions,
@@ -161,6 +162,7 @@ export function startParallelSessionTitleGeneration(input: {
   const generation = input
     .generate(signal)
     .catch((error: unknown) => {
+      if (error instanceof ModelCallFailureSettlementError) throw error;
       if (!signal.aborted) input.onError?.(error);
       return null;
     })

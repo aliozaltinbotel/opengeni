@@ -3797,6 +3797,8 @@ export const UsageEventType = z.enum([
   // The authoritative per-call fact: provider, model, token pools and the
   // estimated provider cost live in `attributes` (ModelCallUsageAttributes).
   "model.call",
+  // Non-billing dispatch intent; never evidence of provider completion or cost.
+  "model.call.dispatch",
   // The same for one embedding provider request (EmbeddingCallUsageAttributes).
   "embedding.call",
 ]);
@@ -3804,6 +3806,7 @@ export type UsageEventType = z.infer<typeof UsageEventType>;
 
 /** Event type of the per-call model usage fact. */
 export const MODEL_CALL_USAGE_EVENT_TYPE = "model.call" as const;
+export const MODEL_CALL_DISPATCH_EVENT_TYPE = "model.call.dispatch" as const;
 /** Event type of the per-request embedding usage fact. */
 export const EMBEDDING_CALL_USAGE_EVENT_TYPE = "embedding.call" as const;
 export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.model-call-usage/v1" as const;

@@ -8,6 +8,10 @@ import type {
   StreamEvent,
 } from "@openai/agents";
 import {
+  withModelCallSourceDispatch,
+  authorizeModelSourceProviderDispatch,
+  ModelCallFailureSettlementError,
+  type BeforeModelCallSourceReceipt,
   ModelRequestCaptureModel,
   ModelRequestCaptureProvider,
   notifyModelRequestCapture,
@@ -54,6 +58,23 @@ function requestWith(systemInstructions: string, toolNames: string[]): ModelRequ
 }
 
 describe("model request capture", () => {
+  test("transport failure awaits its mandatory receipt and preserves the provider error", async () => {
+    const order: string[] = [];
+    const producer: BeforeModelCallSourceReceipt = Object.assign(async () => "native-1", {
+      beforeProviderDispatch: async (key: string) => { order.push(`dispatch:${key}`); },
+      onDispatchFailure: async (key: string) => { await Promise.resolve(); order.push(`receipt:${key}`); },
+    });
+    const error = new Error("network disconnected");
+    await expect(withModelCallSourceDispatch(producer, "native-1", async () => {
+      await authorizeModelSourceProviderDispatch();
+      throw error;
+    })).rejects.toBe(error);
+    expect(order).toEqual(["dispatch:native-1", "receipt:native-1"]);
+    producer.onDispatchFailure = async () => { throw new Error("ledger unavailable"); };
+    await expect(withModelCallSourceDispatch(producer, "native-1", async () => { throw error; }))
+      .rejects.toBeInstanceOf(ModelCallFailureSettlementError);
+  });
+
   test("captures the ModelRequest passed to getResponse, not a reconstruction", async () => {
     const inner = new InnerModel();
     const captured: ModelRequest[] = [];

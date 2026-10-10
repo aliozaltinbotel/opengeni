@@ -2,7 +2,9 @@ import { withEffectiveSessionPolicy } from "./session-execution-policy";
 import { and, asc, desc, eq, gt, gte, inArray, lt, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Database } from "./database";
-import { rlsContextForWorkspace, withRlsContext } from "./database";
+import { rlsContextForWorkspace, withRlsContext, isTransactionHandle } from "./database";
+import { recordUsageEvent } from "./index";
+import { MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, ModelCallUsageAttributes } from "@opengeni/contracts";
 import * as schema from "./schema";
 
 export const INSIGHTS_WARM_GROUP_UUID_RE =
@@ -1537,4 +1539,75 @@ export async function reconcileModelCallFacts(
 
 function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** Physically closed attempts cannot later produce a provider terminal fact.
+ * Settle only the exact transport intent they left, with wholly unknown usage.
+ * All pending intents are considered: an old crash is not lost to a lookback.
+ * No provider retry, inferred completion, or mutable second ledger is involved.
+ */
+export async function reconcileQuiescedModelCallReceipts(
+  db: Database,
+  input: { workspaceId: string; limit?: number },
+): Promise<{ settled: number; truncated: boolean }> {
+  if (isTransactionHandle(db)) throw new Error("MODEL_CALL_RECONCILE_REQUIRES_ROOT_DATABASE");
+  const limit = Math.max(1, Math.min(input.limit ?? 500, 1_000));
+  const context = await rlsContextForWorkspace(db, input.workspaceId);
+  return await withRlsContext(db, context, async scopedDb => {
+    const rows = await scopedDb.execute<{
+      account_id: string; session_id: string; turn_id: string; turn_attempt_id: string;
+      source_resource_id: string; source_key: string; occurred_at: Date;
+      attributes: Record<string, unknown>;
+    }>(sql`
+      select intent.account_id, intent.session_id, intent.turn_id, intent.turn_attempt_id,
+        intent.source_resource_id, source.source_key, intent.occurred_at, intent.attributes
+      from ${schema.usageEvents} intent
+      join ${schema.modelCallSourceReceipts} source
+        on source.account_id = intent.account_id and source.workspace_id = intent.workspace_id
+        and source.session_id = intent.session_id and source.turn_id = intent.turn_id
+        and source.attempt_id = intent.turn_attempt_id
+        and source.source_key = intent.attributes->>'sourceKey'
+      join ${schema.sessionTurnAttempts} attempt
+        on attempt.account_id = source.account_id and attempt.workspace_id = source.workspace_id
+        and attempt.session_id = source.session_id and attempt.turn_id = source.turn_id
+        and attempt.id = source.attempt_id and attempt.execution_generation = source.execution_generation
+      where intent.account_id = ${context.accountId}::uuid
+        and intent.workspace_id = ${input.workspaceId}::uuid
+        and intent.event_type = 'model.call.dispatch'
+        and intent.source_resource_type = 'model_dispatch'
+        and intent.source_resource_id = intent.turn_id::text || ':' || source.source_key
+        and intent.idempotency_key = 'usage:model.call.dispatch:' || intent.turn_id::text || ':' || source.source_key
+        and intent.attributes->>'schema' = ${MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA}
+        and attempt.state = 'closed' and attempt.quiesced_at is not null
+        and not exists (
+          select 1 from ${schema.usageEvents} terminal
+          where terminal.account_id = intent.account_id and terminal.workspace_id = intent.workspace_id
+            and terminal.idempotency_key = 'usage:model.call:' || intent.turn_id::text || ':' || source.source_key
+        )
+      order by intent.occurred_at, intent.id
+      limit ${limit + 1}
+      for share of attempt
+    `);
+    let settled = 0;
+    for (const row of [...rows].slice(0, limit)) {
+      const attributes = ModelCallUsageAttributes.parse(row.attributes);
+      // Dispatch metadata is an admission fact, never usage or provider completion.
+      if (attributes.outcome !== "indeterminate" || attributes.usageReported
+        || attributes.inputTokens !== null || attributes.outputTokens !== null || attributes.cachedTokens !== null
+        || attributes.cacheWriteTokens !== null || attributes.reasoningTokens !== null || attributes.totalTokens !== null
+        || attributes.estimatedProviderCostMicros !== null || attributes.pricingSource !== null || attributes.priceVersion !== null) {
+        throw new Error("MODEL_CALL_DISPATCH_FACT_INVALID");
+      }
+      await recordUsageEvent(scopedDb, {
+        accountId: row.account_id, workspaceId: input.workspaceId,
+        sessionId: row.session_id, turnId: row.turn_id, turnAttemptId: row.turn_attempt_id,
+        eventType: "model.call", quantity: 1, unit: "call", sourceResourceType: "model_response",
+        sourceResourceId: row.source_resource_id,
+        idempotencyKey: `usage:model.call:${row.turn_id}:${row.source_key}`,
+        occurredAt: row.occurred_at, attributes,
+      });
+      settled += 1;
+    }
+    return { settled, truncated: rows.length > limit };
+  });
 }

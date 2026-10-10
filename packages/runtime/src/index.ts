@@ -468,6 +468,7 @@ import {
   nextModelContextCaptureIndex,
 } from "./model-request-capture";
 export type { BeforeModelCallSourceReceipt } from "./model-request-capture";
+export { ModelCallFailureSettlementError } from "./model-request-capture";
 import { decodeValidatedViewImageDataUrl } from "./view-image-validation";
 export { beforeModelRequest as awaitModelCallAdmission } from "./model-request-capture";
 export {

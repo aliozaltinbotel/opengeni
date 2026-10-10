@@ -126,6 +126,7 @@ export async function existingUsageEventIdempotencyKeys(
         .where(
           and(
             eq(schema.usageEvents.accountId, input.accountId),
+            eq(schema.usageEvents.workspaceId, input.workspaceId),
             inArray(schema.usageEvents.idempotencyKey, [...input.keys]),
           ),
         );

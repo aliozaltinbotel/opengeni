@@ -2,6 +2,8 @@ import { canonicalizeConfiguredModelId } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import {
   applyCreditDebitUpToBalance,
+  existingUsageEventIdempotencyKeys,
+  isTransactionHandle,
   recordUsageEvent,
   recordModelCallFact,
   type AppendEventInput,
@@ -49,6 +51,7 @@ import {
 import {
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
   MODEL_CALL_USAGE_EVENT_TYPE,
+  MODEL_CALL_DISPATCH_EVENT_TYPE,
   ModelCallUsageAttributes,
   type LatencyMode,
   type ModelContextContributionSummary,
@@ -1258,6 +1261,7 @@ export async function recordModelCallUsageEvent(
     sourceKey: string;
     callKind: ModelCallUsageAttributes["callKind"];
     outcome?: ModelCallUsageAttributes["outcome"];
+    stage?: "dispatch" | "terminal";
     scope: ModelCallUsageAttributes["scope"];
     provider: string;
     providerApi: string;
@@ -1272,6 +1276,7 @@ export async function recordModelCallUsageEvent(
     } | null;
   },
 ): Promise<void> {
+  const eventType = input.stage === "dispatch" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE;
   const telemetry = input.billing?.normalizedUsage.telemetry ?? null;
   const attributes = ModelCallUsageAttributes.parse({
     schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
@@ -1298,17 +1303,52 @@ export async function recordModelCallUsageEvent(
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
-    eventType: MODEL_CALL_USAGE_EVENT_TYPE,
+    eventType,
     quantity: 1,
     unit: "call",
-    sourceResourceType: "model_response",
+    sourceResourceType: input.stage === "dispatch" ? "model_dispatch" : "model_response",
     sourceResourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,
     turnId: input.turnId,
     turnAttemptId: input.turnAttemptId,
-    idempotencyKey: `usage:${MODEL_CALL_USAGE_EVENT_TYPE}:${input.turnId}:${input.sourceKey}`,
+    idempotencyKey: `usage:${eventType}:${input.turnId}:${input.sourceKey}`,
     attributes,
   });
+}
+
+/** One installed usage producer for literal transport admission and failure.
+ * Intent is durable outside a transaction before bytes; it never bills.
+ * A failed transport has unknown provider effect, so its call is indeterminate.
+ */
+export function createModelCallUsageSourceHooks(
+  db: ActivityServices["db"],
+  call: Omit<Parameters<typeof recordModelCallUsageEvent>[1], "sourceKey" | "billing" | "outcome" | "stage">,
+  claimedSourceKeys: Set<string>,
+  authorize?: (sourceKey: string) => Promise<void>,
+): Pick<import("@opengeni/runtime").BeforeModelCallSourceReceipt, "beforeProviderDispatch" | "onDispatchFailure"> {
+  const assertRoot = () => { if (isTransactionHandle(db)) throw new Error("MODEL_CALL_DISPATCH_REQUIRES_ROOT_DATABASE"); };
+  return {
+    beforeProviderDispatch: async sourceKey => {
+      assertRoot();
+      await authorize?.(sourceKey);
+      await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "dispatch", outcome: "indeterminate", billing: null });
+      // Persistence may have waited: recheck the current source authority at
+      // the final literal boundary, outside the intent transaction.
+      await authorize?.(sourceKey);
+    },
+    onDispatchFailure: async sourceKey => {
+      assertRoot();
+      if (claimedSourceKeys.has(sourceKey)) return;
+      const dispatchKey = `usage:${MODEL_CALL_DISPATCH_EVENT_TYPE}:${call.turnId}:${sourceKey}`;
+      const terminalKey = `usage:${MODEL_CALL_USAGE_EVENT_TYPE}:${call.turnId}:${sourceKey}`;
+      const existing = await existingUsageEventIdempotencyKeys(db, {
+        accountId: call.accountId, workspaceId: call.workspaceId, keys: [dispatchKey, terminalKey],
+      });
+      if (!existing.has(dispatchKey) || existing.has(terminalKey)) return;
+      await recordModelCallUsageEvent(db, { ...call, sourceKey, outcome: "indeterminate", billing: null });
+      claimedSourceKeys.add(sourceKey);
+    },
+  };
 }
 
 /**

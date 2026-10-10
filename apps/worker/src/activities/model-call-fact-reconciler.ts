@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { listWorkspaceIdsAfter, reconcileModelCallFacts } from "@opengeni/db";
+import { listWorkspaceIdsAfter, reconcileModelCallFacts, reconcileQuiescedModelCallReceipts } from "@opengeni/db";
 import type { ControlActivityServices } from "./types";
 
 /** Recent charged calls are rechecked on every run; older gaps use the backfill script. */
@@ -12,6 +12,8 @@ const WORKSPACE_PAGE_SIZE = 200;
 
 export type ReconcileRecentModelCallFactsResult = {
   workspaces: number;
+  /** Null/indeterminate terminal receipts recovered from physically closed native attempts. */
+  unknownReceiptsSettled: number;
   missing: number;
   repaired: number;
   unrepaired: number;
@@ -26,6 +28,7 @@ export type ModelCallFactReconcilerOptions = {
   runBudgetMs?: number;
   startAfterWorkspaceId?: () => string;
   reconcile?: typeof reconcileModelCallFacts;
+  reconcileReceipts?: typeof reconcileQuiescedModelCallReceipts;
   listWorkspaces?: typeof listWorkspaceIdsAfter;
 };
 
@@ -43,6 +46,7 @@ export function createModelCallFactReconcilerActivities(
   const runBudgetMs = options.runBudgetMs ?? MODEL_CALL_FACT_RECONCILE_RUN_BUDGET_MS;
   const startAfterWorkspaceId = options.startAfterWorkspaceId ?? randomUUID;
   const reconcile = options.reconcile ?? reconcileModelCallFacts;
+  const reconcileReceipts = options.reconcileReceipts ?? reconcileQuiescedModelCallReceipts;
   const listWorkspaces = options.listWorkspaces ?? listWorkspaceIdsAfter;
 
   async function reconcileRecentModelCallFacts(): Promise<ReconcileRecentModelCallFactsResult> {
@@ -52,6 +56,7 @@ export function createModelCallFactReconcilerActivities(
     const since = new Date(until.getTime() - MODEL_CALL_FACT_RECONCILE_LOOKBACK_MS);
     const result: ReconcileRecentModelCallFactsResult = {
       workspaces: 0,
+      unknownReceiptsSettled: 0,
       missing: 0,
       repaired: 0,
       unrepaired: 0,
@@ -72,6 +77,8 @@ export function createModelCallFactReconcilerActivities(
         }
         result.workspaces += 1;
         try {
+          const receipts = await reconcileReceipts(db, { workspaceId, limit: MODEL_CALL_FACT_RECONCILE_WORKSPACE_LIMIT });
+          result.unknownReceiptsSettled += receipts.settled;
           const outcome = await reconcile(db, {
             workspaceId,
             since,
@@ -81,7 +88,7 @@ export function createModelCallFactReconcilerActivities(
           result.missing += outcome.missing;
           result.repaired += outcome.repaired;
           result.unrepaired += outcome.unrepaired;
-          if (outcome.truncated) result.truncatedWorkspaces += 1;
+          if (outcome.truncated || receipts.truncated) result.truncatedWorkspaces += 1;
         } catch (error) {
           result.failedWorkspaces += 1;
           observability.warn("model call fact reconciliation failed for a workspace", {
@@ -102,7 +109,7 @@ export function createModelCallFactReconcilerActivities(
     }
     if (result.failedWorkspaces > 0 || result.truncatedWorkspaces > 0 || result.budgetExhausted) {
       observability.warn("model call fact reconciliation incomplete", { ...result });
-    } else if (result.missing > 0) {
+    } else if (result.missing > 0 || result.unknownReceiptsSettled > 0) {
       observability.info("model call fact reconciliation", { ...result });
     }
     return result;

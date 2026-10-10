@@ -30,6 +30,7 @@ describe("model call fact reconciler", () => {
       now: () => now,
       startAfterWorkspaceId: () => WORKSPACES[300]!,
       listWorkspaces: listWorkspaces as never,
+      reconcileReceipts: async () => ({ settled: 0, truncated: false }),
       reconcile: async (_db, input) => {
         visited.push(input.workspaceId);
         expect(input.until.getTime()).toBe(now - MODEL_CALL_FACT_RECONCILE_SETTLE_MS);
@@ -53,6 +54,7 @@ describe("model call fact reconciler", () => {
     expect(visited.at(-1)).toBe(WORKSPACES[300]);
     expect(result).toEqual({
       workspaces: WORKSPACES.length,
+      unknownReceiptsSettled: 0,
       missing: 3,
       repaired: 2,
       unrepaired: 1,
@@ -67,6 +69,25 @@ describe("model call fact reconciler", () => {
     );
   });
 
+  test("installed bounded activity reports unknown receipt recovery separately from known Insights facts", async () => {
+    const receipts: string[] = [];
+    const info = mock(() => undefined);
+    const activity = createModelCallFactReconcilerActivities(services(info), {
+      now: () => 0, startAfterWorkspaceId: () => WORKSPACES[0]!,
+      listWorkspaces: listWorkspaces as never,
+      reconcileReceipts: async (_db, input) => {
+        receipts.push(input.workspaceId);
+        expect(input.limit).toBe(MODEL_CALL_FACT_RECONCILE_WORKSPACE_LIMIT);
+        return { settled: input.workspaceId === WORKSPACES[3] ? 1 : 0, truncated: false };
+      },
+      reconcile: async () => ({ missing: 0, repaired: 0, unrepaired: 0, truncated: false }),
+    });
+    const result = await activity.reconcileRecentModelCallFacts();
+    expect(new Set(receipts).size).toBe(WORKSPACES.length);
+    expect(result).toMatchObject({ unknownReceiptsSettled: 1, repaired: 0, missing: 0 });
+    expect(info).toHaveBeenCalledWith("model call fact reconciliation", expect.objectContaining({ unknownReceiptsSettled: 1 }));
+  });
+
   test("isolates a failing workspace and stops at the run budget", async () => {
     let clock = 0;
     const warn = mock(() => undefined);
@@ -75,6 +96,7 @@ describe("model call fact reconciler", () => {
       runBudgetMs: 10,
       startAfterWorkspaceId: () => "00000000-0000-4000-8000-ffffffffffff",
       listWorkspaces: listWorkspaces as never,
+      reconcileReceipts: async () => ({ settled: 0, truncated: false }),
       reconcile: async (_db, input) => {
         clock += 1;
         if (input.workspaceId === WORKSPACES[1]) throw new Error("transient");

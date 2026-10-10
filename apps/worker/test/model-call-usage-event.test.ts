@@ -9,6 +9,7 @@ import {
 import {
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
   MODEL_CALL_USAGE_EVENT_TYPE,
+  MODEL_CALL_DISPATCH_EVENT_TYPE,
   ModelCallUsageAttributes,
   ModelCallUsageAttributesV1,
   ReadModelCallUsageAttributes,
@@ -19,6 +20,7 @@ import type { Database } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 
 import {
+  createModelCallUsageSourceHooks,
   createModelResponseEventState,
   createCompactionModelUsageEventState,
   processCompactionModelUsageEvent,
@@ -83,6 +85,68 @@ describe("model.call usage row", () => {
   const restores: Array<() => void> = [];
   afterEach(() => {
     while (restores.length > 0) restores.pop()?.();
+  });
+
+  test("transport intent is durable between two current-authority checks; failure settles only that exact intent", async () => {
+    const order: string[] = [];
+    const { rows, spy } = captureUsageRows();
+    restores.push(() => spy.mockRestore());
+    const keys = spyOn(opengeniDb, "existingUsageEventIdempotencyKeys").mockImplementation(async (_db, input) => {
+      expect(input).toEqual({ accountId: ACCOUNT, workspaceId: WORKSPACE, keys: [
+        "usage:model.call.dispatch:turn-1:native-1", "usage:model.call:turn-1:native-1",
+      ] });
+      return new Set(rows.map(row => row.idempotencyKey as string));
+    });
+    restores.push(() => keys.mockRestore());
+    const claimed = new Set<string>();
+    const hooks = createModelCallUsageSourceHooks(db, {
+      accountId: ACCOUNT, workspaceId: WORKSPACE, sessionId: "sess-1", turnId: "turn-1",
+      turnAttemptId: "attempt-1", callKind: "response", scope: "call", provider: "gateway",
+      providerApi: "responses", upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external",
+    }, claimed, async () => { order.push(`authorize:${rows.length}`); });
+    await hooks.onDispatchFailure!("native-1");
+    expect(rows).toHaveLength(0);
+    await hooks.beforeProviderDispatch!("native-1");
+    expect(order).toEqual(["authorize:0", "authorize:1"]);
+    expect(rows[0]).toMatchObject({ eventType: MODEL_CALL_DISPATCH_EVENT_TYPE, sourceResourceType: "model_dispatch" });
+    await hooks.onDispatchFailure!("native-1");
+    await hooks.onDispatchFailure!("native-1");
+    expect(callRows(rows)).toHaveLength(1);
+    expect(callRows(rows)[0]!.attributes).toMatchObject({ outcome: "indeterminate", usageReported: false,
+      inputTokens: null, outputTokens: null, totalTokens: null, estimatedProviderCostMicros: null,
+      pricingSource: null, priceVersion: null });
+  });
+
+  test("transport dispatch refuses ambient transactions and rejected authority before a durable intent", async () => {
+    const { rows, spy } = captureUsageRows();
+    restores.push(() => spy.mockRestore());
+    const call = { accountId: ACCOUNT, workspaceId: WORKSPACE, sessionId: "sess-1", turnId: "turn-1",
+      turnAttemptId: "attempt-1", callKind: "response" as const, scope: "call" as const, provider: "gateway",
+      providerApi: "responses", upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external" as const };
+    const transactional = createModelCallUsageSourceHooks({ rollback() {} } as unknown as Database, call, new Set());
+    await expect(transactional.beforeProviderDispatch!("native-1")).rejects.toThrow("MODEL_CALL_DISPATCH_REQUIRES_ROOT_DATABASE");
+    const refused = createModelCallUsageSourceHooks(db, call, new Set(), async () => { throw new Error("authority withdrawn"); });
+    await expect(refused.beforeProviderDispatch!("native-1")).rejects.toThrow("authority withdrawn");
+    expect(rows).toHaveLength(0);
+  });
+
+  test("failure receipt refusal does not claim its native key or erase a future exact settlement", async () => {
+    const { rows, spy } = captureUsageRows();
+    restores.push(() => spy.mockRestore());
+    const keys = spyOn(opengeniDb, "existingUsageEventIdempotencyKeys").mockResolvedValue(new Set(["usage:model.call.dispatch:turn-1:native-1"]));
+    restores.push(() => keys.mockRestore());
+    const claimed = new Set<string>();
+    const hooks = createModelCallUsageSourceHooks(db, {
+      accountId: ACCOUNT, workspaceId: WORKSPACE, sessionId: "sess-1", turnId: "turn-1", turnAttemptId: "attempt-1",
+      callKind: "compaction", scope: "call", provider: "gateway", providerApi: "responses",
+      upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external",
+    }, claimed);
+    spy.mockImplementationOnce(async () => { throw new Error("writer unavailable"); });
+    await expect(hooks.onDispatchFailure!("native-1")).rejects.toThrow("writer unavailable");
+    expect(claimed.size).toBe(0);
+    await hooks.onDispatchFailure!("native-1");
+    expect(claimed.has("native-1")).toBe(true);
+    expect(callRows(rows)).toHaveLength(1);
   });
 
   test("external list-priced call: one idempotent row with the call's facts and the schedule identity", async () => {

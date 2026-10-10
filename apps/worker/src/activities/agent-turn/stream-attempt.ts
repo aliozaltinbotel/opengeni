@@ -142,6 +142,7 @@ import {
   modelUsageSourceKey,
   recordCompletedModelCallBeforeOwnershipFences,
   TurnEventPublisher,
+  createModelCallUsageSourceHooks,
   createModelResponseEventState,
   createSessionTitleModelUsageEventState,
   modelResponseContextSignal,
@@ -401,6 +402,21 @@ export async function runTurnStreamAttempt(
   if (!activeTurnId) {
     throw new Error("Turn id was not initialized");
   }
+  const usageSourceHooks = (callKind: "response" | "compaction" | "session_title") =>
+    createModelCallUsageSourceHooks(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: turn.id,
+      turnAttemptId: input.attemptId,
+      callKind,
+      scope: "call",
+      provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+      providerApi: resolvedModel?.provider.api ?? "responses",
+      upstreamProvider: null,
+      model: resolvedModel?.configured.id ?? turn.model,
+      billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
+    }, claimedModelUsageSourceKeys, beforeModelCallSourceReceipt.beforeProviderDispatch);
   const sessionTitleUsageState = createSessionTitleModelUsageEventState(
     claimedModelUsageSourceKeys,
   );
@@ -912,7 +928,7 @@ export async function runTurnStreamAttempt(
           beforeModelCallSourceReceipt: Object.assign(async (request: import("@openai/agents").ModelRequest) => {
             await checkpointBeforeProviderDispatch();
             return await beforeModelCallSourceReceipt(request,"AGENT");
-          }, beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {}),
+          }, usageSourceHooks("response")),
           onModelToolSource:async source=>historySink.recordModelToolSource(source),
           onModelCallSourceCompleted: (sourceKey,responseId,response,restoreHistorySources) => {
             historySink.recordModelSourceRestorer(restoreHistorySources);
@@ -2194,7 +2210,7 @@ export async function runTurnStreamAttempt(
               modelName: turnExecutionPolicy.upstreamModelId,
               serviceTier,
               signal,
-            }),beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), beforeModelCallSourceReceipt.beforeProviderDispatch ? { beforeProviderDispatch: beforeModelCallSourceReceipt.beforeProviderDispatch } : {})},
+            }),beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), usageSourceHooks("session_title"))},
           ),
         ),
       settle: async generated => {
