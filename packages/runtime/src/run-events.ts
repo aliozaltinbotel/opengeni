@@ -1,3 +1,4 @@
+import type { ModelCallOutcome } from "@opengeni/contracts";
 import {
   isOpenAIChatCompletionsRawModelStreamEvent,
   isOpenAIResponsesRawModelStreamEvent,
@@ -270,6 +271,7 @@ function assistantMessageText(rawItem: unknown): string | undefined {
 }
 
 export type ModelResponseUsage = {
+  outcome?: ModelCallOutcome;
   responseId?: string;
   serviceTier?: string;
   gatewayBilling?: {
@@ -299,6 +301,7 @@ export type ModelResponseUsage = {
 
 export type ModelTerminalResponse = {
   responseId?: string;
+  outcome: ModelCallOutcome;
   usage: ModelResponseUsage | null;
 };
 
@@ -679,8 +682,20 @@ export function modelTerminalResponseFromSdkEvent(
   const responseId = modelResponseIdFromResponse(response);
   return {
     ...(responseId ? { responseId } : {}),
+    outcome: modelResponseOutcome(response),
     usage: modelResponseUsageFromResponse(response),
   };
+}
+
+/** Read provider terminal state; local abort or a missing terminal is not completion. */
+export function modelResponseOutcome(response: unknown): ModelCallOutcome {
+  if (!response || typeof response !== "object") return "indeterminate";
+  const value = response as { status?: unknown; choices?: Array<{ finish_reason?: unknown }>; providerData?: { anthropic?: { stopReason?: unknown } } };
+  if (value.status === "failed" || value.status === "cancelled" || value.status === "incomplete") return value.status;
+  if (value.status === "in_progress" || value.status === "queued") return "indeterminate";
+  if (value.choices?.some(choice => choice.finish_reason === "length" || choice.finish_reason === "content_filter") || value.providerData?.anthropic?.stopReason === "max_tokens") return "incomplete";
+  // This function is called on the SDK/direct provider's terminal return only.
+  return "completed";
 }
 
 /** Normalize usage from either a Responses or Chat Completions result. */
@@ -696,6 +711,7 @@ export function modelResponseUsageFromResponse(response: unknown): ModelResponse
     ...(responseId ? { responseId } : {}),
     ...(serviceTier ? { serviceTier } : {}),
     ...(gatewayBilling ? { gatewayBilling } : {}),
+    ...(modelResponseOutcome(response) === "completed" ? {} : { outcome: modelResponseOutcome(response) }),
     usage,
   };
 }
@@ -790,7 +806,7 @@ export function modelResponseServiceTierFromSdkEvent(
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
     const raw = (event as any).data?.event;
-    if (raw?.type === "response.completed") {
+    if (["response.completed", "response.failed", "response.cancelled", "response.incomplete"].includes(raw?.type)) {
       return {
         source: "provider",
         serviceTier: modelResponseServiceTierFromResponse(raw.response),

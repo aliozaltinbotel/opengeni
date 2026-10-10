@@ -397,7 +397,7 @@ export class ModelRequestCaptureModel implements Model {
         const next = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => iterator.next());
         if (next.done) { finished = true; return; }
         const event = next.value;
-        const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && (event.event as Record<string,unknown>).type==="response.completed" ? (event.event as Record<string,unknown>).response : null;
+        const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && ["response.completed", "response.failed", "response.cancelled", "response.incomplete"].includes(String((event.event as Record<string,unknown>).type)) ? (event.event as Record<string,unknown>).response : null;
         if(sourceKey && candidate && typeof candidate==="object") {
           const response=candidate as Record<string,unknown>;
           bindOutputSourceKeys(capture,sourceKey,Array.isArray(response.output)?response.output:[],this.projectOutput);

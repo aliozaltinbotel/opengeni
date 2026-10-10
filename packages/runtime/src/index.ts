@@ -499,6 +499,7 @@ import {
 import {
   HUMAN_INPUT_TOOL_NAME,
   modelResponseUsageFromResponse,
+  modelResponseOutcome,
   serializeApprovals,
   serializeHumanInputRequests,
   serializeInteractionInterventionRequests,
@@ -1033,6 +1034,7 @@ export type ProductionRuntimeOverrides = {
 
 export type GeneratedSessionTitle = {
   sourceKey?:string;
+  outcome?: import("@opengeni/contracts").ModelCallOutcome;
   title: string | null;
   usage: ModelResponseUsage | null;
 };
@@ -1173,6 +1175,7 @@ export async function generateSessionTitle(
       extractResponseOutputText(response),
       responseStoppedAtOutputLimit(response),
     ),
+    outcome: modelResponseOutcome(response),
     usage: modelResponseUsageFromResponse(response),
   };
 }
@@ -1216,6 +1219,7 @@ async function generateChatSessionTitle(
       typeof content === "string" ? content : "",
       choice?.finish_reason === "length",
     ),
+    outcome: modelResponseOutcome(completion),
     usage: modelResponseUsageFromResponse(completion),
   };
 }
@@ -1298,7 +1302,7 @@ export async function summarizeForCompaction(
     signal?: AbortSignal;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
     /** Awaited terminal fact when the provider returned no usage pools. */
-    onUnreportedUsage?: () => void | Promise<void>;
+    onUnreportedUsage?: (outcome: import("@opengeni/contracts").ModelCallOutcome) => void | Promise<void>;
   } = {},
 ): Promise<string> {
   const client = options.client ?? buildOpenAIClientFromSettings(settings);
@@ -1339,7 +1343,7 @@ export async function summarizeForCompaction(
     if (usage) {
       await options.onUsage?.(usage);
     } else {
-      await options.onUnreportedUsage?.();
+      await options.onUnreportedUsage?.(modelResponseOutcome(completion));
     }
     const choice = (
       completion as {
@@ -1442,7 +1446,7 @@ export async function summarizeForCompaction(
   if (usage) {
     await options.onUsage?.(usage);
   } else {
-    await options.onUnreportedUsage?.();
+    await options.onUnreportedUsage?.(modelResponseOutcome(response));
   }
   if (
     (response as ModelResponse)?.providerData?.anthropic?.stopReason === "max_tokens" ||
@@ -1648,7 +1652,7 @@ export async function requestRemoteCompactionV2(
     captureAgent?: object;
     signal?: AbortSignal | undefined;
     onUsage?: (usage: ModelResponseUsage) => void | Promise<void>;
-    onUnreportedUsage?: () => void | Promise<void>;
+    onUnreportedUsage?: (outcome: import("@opengeni/contracts").ModelCallOutcome) => void | Promise<void>;
   },
 ): Promise<Record<string, unknown>> {
   const { signal: _priorSignal, ...prefix } = options.preparedRequest;
@@ -1691,7 +1695,7 @@ export async function requestRemoteCompactionV2(
   if (usage) {
     await options.onUsage?.(usage);
   } else {
-    await options.onUnreportedUsage?.();
+    await options.onUnreportedUsage?.(modelResponseOutcome(response));
   }
   if (isFailedCompactionProviderResponse(response)) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));

@@ -1,3 +1,4 @@
+import { modelSourceBindings } from "../src/model-request-capture";
 import { describe, expect, test } from "bun:test";
 
 import {
@@ -1025,6 +1026,7 @@ describe("runtime event normalization", () => {
     } as any;
 
     expect(modelTerminalResponseFromSdkEvent(event)).toEqual({
+      outcome: "completed",
       responseId: "resp-without-usage",
       usage: null,
     });
@@ -4941,13 +4943,16 @@ describe("runtime event normalization", () => {
         internalContext: "Continue the same inference after recovery.",
       },
     );
-    expect(prepared.input).toEqual([
+    expect(JSON.parse(JSON.stringify(prepared.input))).toEqual([
       {
         type: "message",
         role: "system",
         content: expect.stringContaining("Continue the same inference after recovery."),
       },
     ]);
+    expect(modelSourceBindings(prepared.input)).toMatchObject([{
+      ordinal: 0, kind: "INSTRUCTION", sourceRef: { owner: "native.runtime.artifact", id: "turn-operational-context" },
+    }]);
     expect(JSON.stringify(prepared.input)).not.toContain("opengeni_internal_resume");
   });
 

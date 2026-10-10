@@ -274,6 +274,7 @@ export async function processModelResponseTerminalEvent(input: {
   // Claiming that empty raw mirror would discard the SDK's billable response.
   if (
     !terminal.usage &&
+    terminal.outcome === "completed" &&
     input.event.type === "raw_model_stream_event" &&
     input.event.data.type !== "response_done"
   ) {
@@ -319,6 +320,7 @@ export async function processModelResponseTerminalEvent(input: {
           turnAttemptId: input.turnAttemptId,
           sourceKey,
           callKind: "response",
+          outcome: terminal.outcome,
           scope: "call",
           provider: input.provider,
           providerApi: input.providerApi,
@@ -348,6 +350,7 @@ export async function processModelResponseTerminalEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         callKind: "response",
+        outcome: terminal.outcome,
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -445,6 +448,7 @@ export async function processModelResponseTerminalEvent(input: {
  */
 export async function processCompactionModelUsageEvent(input: {
   usage: ModelResponseUsage | null;
+  outcome?: ModelCallUsageAttributes["outcome"];
   nativeSourceKey?:string;
   state: CompactionModelUsageEventState;
   sourceKind?: "compaction" | "session-title";
@@ -493,6 +497,7 @@ export async function processCompactionModelUsageEvent(input: {
           turnAttemptId: input.turnAttemptId,
           sourceKey,
           callKind: input.sourceKind === "session-title" ? "session_title" : "compaction",
+          outcome: input.outcome ?? "completed",
           scope: "call",
           provider: input.provider,
           providerApi: input.providerApi,
@@ -544,6 +549,7 @@ export async function processCompactionModelUsageEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         callKind: input.sourceKind === "session-title" ? "session_title" : "compaction",
+        outcome: usage.outcome ?? input.outcome ?? "completed",
         externallyBilled: input.externallyBilled,
         ...(input.chargesOpenGeniCredits !== undefined
           ? { chargesOpenGeniCredits: input.chargesOpenGeniCredits }
@@ -790,6 +796,7 @@ export async function recordModelUsageAndDebitCredits(
     providerApi?: ModelProviderApi;
     /** What made the call; a per-response turn call unless named. */
     callKind?: ModelCallUsageAttributes["callKind"];
+    outcome?: ModelCallUsageAttributes["outcome"];
     /** `aggregate` only for the stream fallback that stands for unreported calls. */
     scope?: ModelCallUsageAttributes["scope"];
     /**
@@ -951,6 +958,7 @@ export async function recordModelUsageAndDebitCredits(
       turnAttemptId: input.turnAttemptId,
       sourceKey: input.sourceKey,
       callKind: input.callKind ?? "response",
+      outcome: input.outcome ?? "completed",
       scope: input.scope ?? "call",
       provider: input.provider ?? resolvedCallProvider?.id ?? settings.openaiProvider ?? "openai",
       providerApi: input.providerApi ?? resolvedCallProvider?.api ?? "responses",
@@ -1249,6 +1257,7 @@ export async function recordModelCallUsageEvent(
     turnAttemptId: string;
     sourceKey: string;
     callKind: ModelCallUsageAttributes["callKind"];
+    outcome?: ModelCallUsageAttributes["outcome"];
     scope: ModelCallUsageAttributes["scope"];
     provider: string;
     providerApi: string;
@@ -1273,7 +1282,7 @@ export async function recordModelCallUsageEvent(
     providerApi: input.providerApi,
     upstreamProvider: input.upstreamProvider,
     model: input.model,
-    outcome: "completed",
+    outcome: input.outcome ?? "completed",
     usageReported: input.billing !== null,
     inputTokens: telemetry?.inputTokens ?? null,
     outputTokens: telemetry?.outputTokens ?? null,

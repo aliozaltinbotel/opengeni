@@ -2201,6 +2201,7 @@ export async function runTurnStreamAttempt(
         if (generated.usage || generated.sourceKey) {
           await processSessionTitleModelUsageEvent({
             usage: generated.usage,
+            ...(generated.outcome ? { outcome: generated.outcome } : {}),
             creditPolicyRevision: titleCreditPolicyRevision,
             ...(generated.sourceKey?{nativeSourceKey:generated.sourceKey}:{}),
             state: sessionTitleUsageState,

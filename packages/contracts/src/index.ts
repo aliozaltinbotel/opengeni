@@ -3806,7 +3806,8 @@ export type UsageEventType = z.infer<typeof UsageEventType>;
 export const MODEL_CALL_USAGE_EVENT_TYPE = "model.call" as const;
 /** Event type of the per-request embedding usage fact. */
 export const EMBEDDING_CALL_USAGE_EVENT_TYPE = "embedding.call" as const;
-export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.model-call-usage/v1" as const;
+export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.model-call-usage/v1" as const;
+export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.model-call-usage/v2" as const;
 export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.embedding-call-usage/v1" as const;
 /** The database bound on `usage_events.attributes` (UTF-8 bytes of its JSON text). */
 export const USAGE_EVENT_ATTRIBUTES_MAX_BYTES = 4096;
@@ -3825,9 +3826,9 @@ const UsageCallTokenCount = z.number().int().nonnegative().nullable();
  * fallback row a stream writes when no terminal response exposed per-call usage:
  * it may stand for several provider requests.
  */
-export const ModelCallUsageAttributes = z
+const ModelCallUsageAttributesV1Shape = z
   .object({
-    schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
+    schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1),
     callKind: z.enum(["response", "compaction", "session_title"]),
     scope: z.enum(["call", "aggregate"]),
     sourceKey: z.string().min(1).max(512),
@@ -3851,8 +3852,8 @@ export const ModelCallUsageAttributes = z
       .nullable(),
     billingPath: z.enum(["opengeni_credits", "external"]),
   })
-  .strict()
-  .superRefine((value, context) => {
+  .strict();
+function refineModelCallUsage(value: Pick<z.infer<typeof ModelCallUsageAttributesV1Shape>, "estimatedProviderCostMicros" | "pricingSource" | "priceVersion" | "usageReported" | "inputTokens" | "outputTokens" | "cachedTokens" | "cacheWriteTokens" | "reasoningTokens" | "totalTokens">, context: z.RefinementCtx): void {
     if ((value.estimatedProviderCostMicros === null) !== (value.pricingSource === null)) {
       context.addIssue({
         code: "custom",
@@ -3884,8 +3885,19 @@ export const ModelCallUsageAttributes = z
         message: "a call without reported usage carries no token count and no cost",
       });
     }
-  });
+}
+export const ModelCallUsageAttributesV1 = ModelCallUsageAttributesV1Shape.superRefine(refineModelCallUsage);
+/** Forward contract: a provider terminal and transport loss are distinct facts.
+ * Published v1 remains readable with its completed-only semantics. */
+export const ModelCallOutcome = z.enum(["completed", "failed", "cancelled", "incomplete", "indeterminate"]);
+export type ModelCallOutcome = z.infer<typeof ModelCallOutcome>;
+export const ModelCallUsageAttributes = z.object({
+  ...ModelCallUsageAttributesV1Shape.shape,
+  schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
+  outcome: ModelCallOutcome,
+}).strict().superRefine(refineModelCallUsage);
 export type ModelCallUsageAttributes = z.infer<typeof ModelCallUsageAttributes>;
+export const ReadModelCallUsageAttributes = z.union([ModelCallUsageAttributesV1, ModelCallUsageAttributes]);
 
 /**
  * One embedding provider request. The embedder returns vectors only, so token

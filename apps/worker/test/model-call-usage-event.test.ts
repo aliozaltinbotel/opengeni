@@ -10,6 +10,9 @@ import {
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
   MODEL_CALL_USAGE_EVENT_TYPE,
   ModelCallUsageAttributes,
+  ModelCallUsageAttributesV1,
+  ReadModelCallUsageAttributes,
+  MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1,
 } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
@@ -392,6 +395,10 @@ describe("model.call usage row", () => {
       inputTokens: null, outputTokens: null, totalTokens: null,
       estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null,
     });
+    const historic = { ...ModelCallUsageAttributes.parse(callRows(rows)[0]?.attributes), schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 };
+    expect(ReadModelCallUsageAttributes.parse(historic)).toEqual(ModelCallUsageAttributesV1.parse(historic));
+    expect(ModelCallUsageAttributesV1.safeParse({ ...historic, outcome: "failed" }).success).toBe(false);
+    expect(ModelCallUsageAttributes.safeParse(historic).success).toBe(false);
     expect(state.unreportedSourceKeys).toEqual(["resp-no-usage"]);
     expect(await processModelResponseTerminalEvent(input)).toEqual({
       status: "duplicate", sourceKey: "resp-no-usage",
@@ -405,6 +412,21 @@ describe("model.call usage row", () => {
     expect(refusedInput.state.claimedSourceKeys.size).toBe(0);
     expect(refusedInput.state.unreportedSourceKeys).toEqual([]);
     expect(await processModelResponseTerminalEvent(refusedInput)).toMatchObject({ status: "processed" });
+
+    for (const outcome of ModelCallUsageAttributes.shape.outcome.options.filter(value => value !== "completed")) {
+      const providerStatus = outcome === "indeterminate" ? "in_progress" : outcome;
+      await processModelResponseTerminalEvent({ ...input,
+        state: createModelResponseEventState(),
+        event: new RunRawModelStreamEvent({ type: "response_done", response: { id: `resp-${outcome}`, status: providerStatus, output: [] } } as never),
+      });
+      expect(ModelCallUsageAttributes.parse(callRows(rows).at(-1)?.attributes)).toMatchObject({
+        outcome, usageReported: false, estimatedProviderCostMicros: null, inputTokens: null,
+      });
+      await processCompactionModelUsageEvent({ ...input, usage: null, outcome,
+        nativeSourceKey: `compaction-${outcome}`, state: createCompactionModelUsageEventState(),
+      });
+      expect(ModelCallUsageAttributes.parse(callRows(rows).at(-1)?.attributes).outcome).toBe(outcome);
+    }
 
     for (const callKind of ModelCallUsageAttributes.shape.callKind.options.filter(kind => kind !== "response")) {
       const compactInput: Parameters<typeof processCompactionModelUsageEvent>[0] = {
