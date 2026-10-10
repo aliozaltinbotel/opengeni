@@ -1,4 +1,5 @@
 import { ToolPathPhaseTimer, toolPathPhaseMetricObserver } from "./tool-path-phase-timing";
+import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE } from "@openai/agents";
 import {
   agentToolCallOutcome,
   agentToolMetricFamily,
@@ -777,6 +778,46 @@ export async function runTurnStreamAttempt(
       });
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
+      const settleCapturedModelTerminal = (event: Parameters<typeof processModelResponseTerminalEvent>[0]["event"]) =>
+        processModelResponseTerminalEvent({
+            creditPolicyRevision,
+            event,
+            state: modelResponseState,
+            nativeSourceKey: (responseId,event)=>{
+              if(responseId) return sourceKeysByResponseId.get(responseId);
+              if(event.type!=="raw_model_stream_event") return undefined;
+              const data=event.data as Record<string,unknown>;
+              const response=data.type==="response_done"?data.response:(data.event as Record<string,unknown>|undefined)?.response;
+              return response && typeof response==="object" ? sourceKeysByResponse.get(response) : undefined;
+            },
+            dispatchId: modelUsageDispatchId,
+            settings,
+            db,
+            observability,
+            publish: eventing.publish,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: activeTurnId,
+            turnAttemptId: input.attemptId,
+            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+            providerApi: resolvedModel?.provider.api ?? "responses",
+            model: turn.model,
+            latencyMode: turnExecutionPolicy.latencyMode,
+            metricProvider: streamProvider,
+            externallyBilled: billingState.isExternallyBilledTurn,
+            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+            countsTowardTokenCap: billingState.countsTowardTokenCap,
+            servingCredentialId: providerTurn.effectiveCodexCredentialId,
+            priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+            emittedSourceKeys: emittedModelUsageSourceKeys,
+            renewLease: () => leases.renewServing("model_usage"),
+            leaseLost: leases.servingLost,
+            leaseLostMessage: "Provider credential lease expired during the active turn",
+            setLastInputTokens: setLastInputTokensFenced,
+            contextContributions: eventing.companyBrainContextContributions,
+          });
+
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       const eagerResolvedSandbox = sandboxState.resolvedSandbox;
       // Eager owned sessions must settle the exact platform-setup provider
@@ -930,10 +971,16 @@ export async function runTurnStreamAttempt(
             return await beforeModelCallSourceReceipt(request,"AGENT");
           }, usageSourceHooks("response")),
           onModelToolSource:async source=>historySink.recordModelToolSource(source),
-          onModelCallSourceCompleted: (sourceKey,responseId,response,restoreHistorySources) => {
+          onModelCallSourceCompleted: async (sourceKey,responseId,response,restoreHistorySources) => {
             historySink.recordModelSourceRestorer(restoreHistorySources);
             sourceKeysByResponse.set(response,sourceKey);
             if (responseId) sourceKeysByResponseId.set(responseId,sourceKey);
+            // The transport preserves a bounded failed terminal before the SDK
+            // throws. Account through the same awaited owner as ordinary finals.
+            if ((response as { status?: unknown }).status === "failed") {
+              await settleCapturedModelTerminal({ type: "raw_model_stream_event", source: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+                data: { type: "model", event: { type: "response.failed", response } } } as Parameters<typeof processModelResponseTerminalEvent>[0]["event"]);
+            }
 
           },
           onModelVisibleContext: async (snapshot) => {
@@ -1157,44 +1204,7 @@ export async function runTurnStreamAttempt(
           ? await media.retainNativeGeneratedImage(generatedImage)
           : null;
         const responseResult = await toolPathPhases.measureTerminal(() =>
-          processModelResponseTerminalEvent({
-            creditPolicyRevision,
-            event: next.value,
-            state: modelResponseState,
-            nativeSourceKey: (responseId,event)=>{
-              if(responseId) return sourceKeysByResponseId.get(responseId);
-              if(event.type!=="raw_model_stream_event") return undefined;
-              const data=event.data as Record<string,unknown>;
-              const response=data.type==="response_done"?data.response:(data.event as Record<string,unknown>|undefined)?.response;
-              return response && typeof response==="object" ? sourceKeysByResponse.get(response) : undefined;
-            },
-            dispatchId: modelUsageDispatchId,
-            settings,
-            db,
-            observability,
-            publish: eventing.publish,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            turnAttemptId: input.attemptId,
-            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-            providerApi: resolvedModel?.provider.api ?? "responses",
-            model: turn.model,
-            latencyMode: turnExecutionPolicy.latencyMode,
-            metricProvider: streamProvider,
-            externallyBilled: billingState.isExternallyBilledTurn,
-            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-            countsTowardTokenCap: billingState.countsTowardTokenCap,
-            servingCredentialId: providerTurn.effectiveCodexCredentialId,
-            priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-            emittedSourceKeys: emittedModelUsageSourceKeys,
-            renewLease: () => leases.renewServing("model_usage"),
-            leaseLost: leases.servingLost,
-            leaseLostMessage: "Provider credential lease expired during the active turn",
-            setLastInputTokens: setLastInputTokensFenced,
-            contextContributions: eventing.companyBrainContextContributions,
-          }),
+          settleCapturedModelTerminal(next.value),
         );
         // F-2: a declared token budget counts each terminal response the loop has processed (turn-budget.ts).
         if (responseResult.status === "processed") {
@@ -2198,22 +2208,7 @@ export async function runTurnStreamAttempt(
       turnExecutionPolicy.latencyMode,
     );
     titleCreditPolicyRevision = creditPolicyRevision;
-    parallelSessionTitle = startParallelSessionTitleGeneration({
-      signal: runtimeCancellationSignal,
-      generate: async (signal) =>
-        await withSessionTitleProviderRequestContext(() =>
-          runtime.generateSessionTitle!(
-            runSettings,
-            sessionTitlePrompt,
-            {...sessionTitleGenerationOptions({
-              resolvedModel,
-              modelName: turnExecutionPolicy.upstreamModelId,
-              serviceTier,
-              signal,
-            }),beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), usageSourceHooks("session_title"))},
-          ),
-        ),
-      settle: async generated => {
+    const settleSessionTitleUsage = async (generated: import("@opengeni/runtime").GeneratedSessionTitle) => {
         if (generated.usage || generated.sourceKey) {
           await processSessionTitleModelUsageEvent({
             usage: generated.usage,
@@ -2245,7 +2240,23 @@ export async function runTurnStreamAttempt(
             leaseLostMessage: "Provider credential lease expired during session title generation",
           });
         }
-      },
+      };
+    parallelSessionTitle = startParallelSessionTitleGeneration({
+      signal: runtimeCancellationSignal,
+      generate: async (signal) =>
+        await withSessionTitleProviderRequestContext(() =>
+          runtime.generateSessionTitle!(
+            runSettings,
+            sessionTitlePrompt,
+            {...sessionTitleGenerationOptions({
+              resolvedModel,
+              modelName: turnExecutionPolicy.upstreamModelId,
+              serviceTier,
+              signal,
+            }),onFailedTerminal:settleSessionTitleUsage,beforeModelCallSourceReceipt:Object.assign((request: import("@openai/agents").ModelRequest)=>beforeModelCallSourceReceipt(request,"TITLE"), usageSourceHooks("session_title"))},
+          ),
+        ),
+      settle: settleSessionTitleUsage,
       onError: (error) => {
         observability.warn("parallel session title generation failed", {
           ...safeErrorDiagnostic(error),

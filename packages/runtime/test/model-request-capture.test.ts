@@ -19,6 +19,8 @@ import {
   bindModelSourceInput,modelSourceBindings,modelSourceInputBinding,type ModelRequestCapture,
 } from "../src/model-request-capture";
 
+import { responsesStreamingTerminalError } from "../src/responses-terminal-error";
+
 class InnerModel implements Model {
   requests: ModelRequest[] = [];
 
@@ -58,6 +60,31 @@ function requestWith(systemInstructions: string, toolNames: string[]): ModelRequ
 }
 
 describe("model request capture", () => {
+  test("failed provider terminal preserves bounded actual usage before failure propagation", async () => {
+    const order: string[] = [];
+    const failure = responsesStreamingTerminalError({ type: "response.failed", response: {
+      id: "failed-provider-response", status: "failed", service_tier: "priority", usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6,
+        input_tokens_details: { cached_tokens: 1 }, privateMetadata: "not-accounting" },
+      output: [{ text: "private-content" }], error: { code: "server_error" },
+    } })!;
+    const producer: BeforeModelCallSourceReceipt = Object.assign(async () => "native-failed", {
+      beforeProviderDispatch: async () => {}, onDispatchFailure: async () => { order.push("unknown-observation"); },
+    });
+    const capture: ModelRequestCapture = Object.assign(() => {}, { beforeCall: producer,
+      callCompleted: async (key: string, id: string | null, response: object) => {
+        expect(key).toBe("native-failed"); expect(id).toBe("failed-provider-response");
+        expect(response).toEqual({ id: "failed-provider-response", status: "failed", service_tier: "priority", usage: {
+          input_tokens: 4, output_tokens: 2, total_tokens: 6, input_tokens_details: { cached_tokens: 1 } } });
+        order.push("authoritative-failed-terminal");
+      } });
+    const inner = new InnerModel();
+    inner.getStreamedResponse = async function* () { throw failure; };
+    await expect(withModelRequestCapture(capture, async () => {
+      for await (const _event of new ModelRequestCaptureModel(inner).getStreamedResponse(requestWith("Fixture instruction.", []))) {}
+    })).rejects.toBe(failure);
+    expect(order).toEqual(["authoritative-failed-terminal", "unknown-observation"]);
+  });
+
   test("transport failure awaits its mandatory receipt and preserves the provider error", async () => {
     const order: string[] = [];
     const producer: BeforeModelCallSourceReceipt = Object.assign(async () => "native-1", {

@@ -17,6 +17,7 @@ import {
   appendSessionEventsForTurnAttempt,
   appendSessionRealtimeOutboundInTransaction,
   applySessionTurnSettlement,
+  assertSessionRealtimeProviderDispatchInTransaction,
   beginSessionRealtimeInTransaction,
   bootstrapWorkspace,
   claimSessionRealtimeConnectionInTransaction,
@@ -395,6 +396,40 @@ async function freezeDelegatedHumanInput(
 }
 
 describe("session realtime ledger", () => {
+  test("provider dispatch rechecks the exact live owner, physical epoch and staged rotation", async () => {
+    const value = await fixture();
+    const first = await claimInitial(value);
+    const check = (connection: typeof first.claimed.connection, phase: "negotiation" | "attachment",
+      overrides: Partial<Parameters<typeof assertSessionRealtimeProviderDispatchInTransaction>[1]> = {}) =>
+      transaction(value.owner.workspaceId, tx => assertSessionRealtimeProviderDispatchInTransaction(tx, {
+        accountId: value.owner.accountId, workspaceId: value.owner.workspaceId, sessionId: value.session.id,
+        connectionId: connection.id, connectionEpoch: connection.connectionEpoch,
+        ownerSubjectId: value.owner.ownerSubjectId, model: value.owner.model, phase, ...overrides,
+      }));
+    await check(first.claimed.connection, "negotiation");
+    await expect(check(first.claimed.connection, "attachment")).rejects.toThrow("no longer current");
+    const active = await complete(value, first.claimed.connection);
+    await check(active.connection, "attachment");
+    for (const overrides of [{ connectionEpoch: active.connection.connectionEpoch + 1 },
+      { ownerSubjectId: "different-authenticated-owner" }, { model: "different-model" }]) {
+      await expect(check(active.connection, "attachment", overrides)).rejects.toThrow("changed");
+    }
+    const replacement = await transaction(value.owner.workspaceId, tx => claimSessionRealtimeConnectionInTransaction(tx, {
+      ...ownerProof(value, active.mode.version), operationId: crypto.randomUUID(),
+      expectedConnectionEpoch: active.connection.connectionEpoch, rotate: true, promotionMode: "staged",
+    }));
+    await check(replacement.connection, "negotiation");
+    await transaction(value.owner.workspaceId, tx => completeSessionRealtimeConnectionInTransaction(tx, {
+      workspaceId: value.owner.workspaceId, sessionId: value.session.id, realtimeId: value.started.mode.id,
+      connectionId: replacement.connection.id, operationId: replacement.connection.operationId,
+      connectionEpoch: replacement.connection.connectionEpoch, sdpAnswer: "v=0\r\na=answer:durable\r\n",
+    }));
+    await check(replacement.connection, "attachment");
+    await transaction(value.owner.workspaceId, tx => endSessionRealtimeInTransaction(tx, {
+      ...ownerProof(value, active.mode.version), reason: "user_stop",
+    }));
+    await expect(check(replacement.connection, "attachment")).rejects.toThrow();
+  });
   test("idempotently fails only the exact negotiating connection", async () => {
     const value = await fixture();
     const first = await claimInitial(value);

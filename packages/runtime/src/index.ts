@@ -1041,6 +1041,7 @@ export type GeneratedSessionTitle = {
 };
 
 export type GenerateSessionTitleOptions = {
+  onFailedTerminal?: (receipt: GeneratedSessionTitle) => Promise<void>;
   beforeModelCallSourceReceipt?: BeforeModelCallSourceReceipt;
   client?: OpenAI;
   provider?: ResolvedModelProvider;
@@ -1169,7 +1170,10 @@ export async function generateSessionTitle(
             binding.modelId,
             binding.provider,
           ).fetchResponse(request)
-        : options.model!.getResponse(request));
+        : options.model!.getResponse(request), async terminal => {
+      await options.onFailedTerminal?.({ ...(sourceKey ? { sourceKey } : {}), title: null,
+        outcome: "failed", usage: modelResponseUsageFromResponse(terminal) });
+    });
   return {
     ...(sourceKey?{sourceKey}:{}),
     title: normalizeGeneratedSessionTitle(
@@ -1439,7 +1443,11 @@ export async function summarizeForCompaction(
               ...(options.signal ? { signal: options.signal } : {}),
             }),
           )
-        : new CompactionResponsesModel(client, model, provider).fetchResponse(request));
+        : new CompactionResponsesModel(client, model, provider).fetchResponse(request), async terminal => {
+          const usage = modelResponseUsageFromResponse(terminal);
+          if (usage) await options.onUsage?.(usage);
+          else await options.onUnreportedUsage?.("failed");
+        });
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }
@@ -1688,7 +1696,11 @@ export async function requestRemoteCompactionV2(
           request,
         );
       },
-    ));
+    ), async terminal => {
+      const usage = modelResponseUsageFromResponse(terminal);
+      if (usage) await options.onUsage?.(usage);
+      else await options.onUnreportedUsage?.("failed");
+    });
   } catch (error) {
     throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
   }

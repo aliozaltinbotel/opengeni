@@ -1,6 +1,8 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, afterEach, describe, expect, spyOn, test } from "bun:test";
+import { responsesStreamingTerminalError } from "../../../packages/runtime/src/responses-terminal-error";
 import { createHash } from "node:crypto";
 import { RunRawModelStreamEvent } from "@openai/agents-core";
+import { OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE } from "@openai/agents";
 import {
   OPENGENI_GATEWAY_MODELS,
   configuredModelListPricingSchedules,
@@ -17,6 +19,7 @@ import {
 } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import type { Database } from "@opengeni/db";
+import { normalizeModelCallUsage } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 
 import {
@@ -37,6 +40,11 @@ import {
 const ACCOUNT = "acct-1";
 const WORKSPACE = "ws-1";
 const db = {} as Database;
+const producedFailedFacts: Array<Record<string, unknown>> = [];
+afterAll(async () => {
+  const file = process.env.OPENGENI_TEST_FAILED_MODEL_FIXTURE_FILE;
+  if (file) await Bun.write(file, JSON.stringify({ producer: "actual provider failure projection through native model terminal writer", events: producedFailedFacts }, null, 2) + "\n");
+});
 
 function billedSettings() {
   return testSettings({
@@ -87,7 +95,7 @@ describe("model.call usage row", () => {
     while (restores.length > 0) restores.pop()?.();
   });
 
-  test("transport intent is durable between two current-authority checks; failure settles only that exact intent", async () => {
+  test("transport loss preserves unknown dispatch and leaves authentic terminal accounting available", async () => {
     const order: string[] = [];
     const { rows, spy } = captureUsageRows();
     restores.push(() => spy.mockRestore());
@@ -111,8 +119,9 @@ describe("model.call usage row", () => {
     expect(rows[0]).toMatchObject({ eventType: MODEL_CALL_DISPATCH_EVENT_TYPE, sourceResourceType: "model_dispatch" });
     await hooks.onDispatchFailure!("native-1");
     await hooks.onDispatchFailure!("native-1");
-    expect(callRows(rows)).toHaveLength(1);
-    expect(callRows(rows)[0]!.attributes).toMatchObject({ outcome: "indeterminate", usageReported: false,
+    expect(callRows(rows)).toHaveLength(0);
+    expect(claimed.size).toBe(0);
+    expect(rows.at(-1)!.attributes).toMatchObject({ outcome: "indeterminate", usageReported: false,
       inputTokens: null, outputTokens: null, totalTokens: null, estimatedProviderCostMicros: null,
       pricingSource: null, priceVersion: null });
   });
@@ -145,8 +154,18 @@ describe("model.call usage row", () => {
     await expect(hooks.onDispatchFailure!("native-1")).rejects.toThrow("writer unavailable");
     expect(claimed.size).toBe(0);
     await hooks.onDispatchFailure!("native-1");
-    expect(claimed.has("native-1")).toBe(true);
+    expect(claimed.has("native-1")).toBe(false);
+    expect(callRows(rows)).toHaveLength(0);
+    await recordModelCallUsageEvent(db, {
+      accountId: ACCOUNT, workspaceId: WORKSPACE, sessionId: "sess-1", turnId: "turn-1", turnAttemptId: "attempt-1",
+      sourceKey: "native-1", callKind: "compaction", scope: "call", provider: "gateway", providerApi: "responses",
+      upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external", outcome: "failed",
+      billing: { normalizedUsage: normalizeModelCallUsage({ inputTokens: 2, outputTokens: 1, totalTokens: 3 }),
+        estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null },
+    });
     expect(callRows(rows)).toHaveLength(1);
+    expect(callRows(rows)[0]!.idempotencyKey).toBe("usage:model.call:turn-1:native-1");
+    expect(callRows(rows)[0]!.attributes).toMatchObject({ outcome: "failed", usageReported: true, inputTokens: 2, totalTokens: 3 });
   });
 
   test("external list-priced call: one idempotent row with the call's facts and the schedule identity", async () => {
@@ -483,16 +502,34 @@ describe("model.call usage row", () => {
         state: createModelResponseEventState(),
         event: new RunRawModelStreamEvent({ type: "response_done", response: { id: `resp-${outcome}`, status: providerStatus, output: [] } } as never),
       });
-      expect(ModelCallUsageAttributes.parse(callRows(rows).at(-1)?.attributes)).toMatchObject({
+      const outcomeRows = rows.filter(row => row.eventType === (outcome === "indeterminate" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE));
+      expect(ModelCallUsageAttributes.parse(outcomeRows.at(-1)?.attributes)).toMatchObject({
         outcome, usageReported: false, estimatedProviderCostMicros: null, inputTokens: null,
       });
       await processCompactionModelUsageEvent({ ...input, usage: null, outcome,
         nativeSourceKey: `compaction-${outcome}`, state: createCompactionModelUsageEventState(),
       });
-      expect(ModelCallUsageAttributes.parse(callRows(rows).at(-1)?.attributes).outcome).toBe(outcome);
+      expect(ModelCallUsageAttributes.parse(rows.filter(row => row.eventType === (outcome === "indeterminate" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE)).at(-1)?.attributes).outcome).toBe(outcome);
     }
 
-    for (const callKind of ModelCallUsageAttributes.shape.callKind.options.filter(kind => kind !== "response")) {
+    const failure = responsesStreamingTerminalError({ type: "response.failed", response: { id: "provider-failed-usage", status: "failed",
+      usage: { input_tokens: 4, output_tokens: 2, total_tokens: 6 }, error: { code: "server_error" } } })!;
+    const physical = { ...input, accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(),
+      turnId: crypto.randomUUID(), turnAttemptId: crypto.randomUUID(), state: createModelResponseEventState(),
+      nativeSourceKey: () => "native-known-failure" };
+    await processModelResponseTerminalEvent({ ...physical,
+      event: new RunRawModelStreamEvent({ type: "response_done", response: { id: "provider-failed-usage", status: "in_progress", output: [] } } as never) });
+    expect(physical.state.claimedSourceKeys.size).toBe(0);
+    await processModelResponseTerminalEvent({ ...physical,
+      event: { type: "raw_model_stream_event", source: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+        data: { type: "model", event: { type: "response.failed", response: failure.terminalResponse } } } as never });
+    const physicalRows = rows.filter(row => row.turnId === physical.turnId && [MODEL_CALL_DISPATCH_EVENT_TYPE, MODEL_CALL_USAGE_EVENT_TYPE].includes(row.eventType as string));
+    expect(physicalRows.map(row => row.eventType)).toEqual([MODEL_CALL_DISPATCH_EVENT_TYPE, MODEL_CALL_USAGE_EVENT_TYPE]);
+    expect(physicalRows[1]!.attributes).toMatchObject({ outcome: "failed", usageReported: true, inputTokens: 4, outputTokens: 2, totalTokens: 6 });
+    expect(physical.state.claimedSourceKeys.has("native-known-failure")).toBeTrue();
+    producedFailedFacts.push(...physicalRows);
+
+    for (const callKind of ModelCallUsageAttributes.shape.callKind.options.filter(kind => kind === "compaction" || kind === "session_title")) {
       const compactInput: Parameters<typeof processCompactionModelUsageEvent>[0] = {
         ...input, usage: null, nativeSourceKey: `source-${callKind}`,
         state: createCompactionModelUsageEventState(),

@@ -1,3 +1,4 @@
+import { modelResponseUsageFromResponse } from "./run-events";
 const DIAGNOSTIC_MAX_BYTES = 4 * 1024;
 const FIELD_MAX_BYTES = 256;
 const TRUNCATION_MARKER = "… [truncated]";
@@ -64,6 +65,10 @@ const UNAVAILABLE_CODES = new Set([
  * The exception message is structural so SDK logs/traces cannot expose detail.
  */
 export class ResponsesStreamingTerminalError extends Error {
+  /** Bounded provider accounting evidence only; no output, prompt or metadata. */
+  readonly terminalResponse: { id: string | null; status: "failed"; usage: Record<string, unknown> | null;
+    service_tier?: string;
+    provider_metadata?: { gateway: { routing: { finalProvider: string }; inferenceCost: string } } } | null;
   readonly code: string | undefined;
   readonly type: string | undefined;
   readonly detail: string;
@@ -75,9 +80,36 @@ export class ResponsesStreamingTerminalError extends Error {
     readonly eventType: "response.failed" | "response.error" | "error",
     source: unknown,
     headers?: Headers,
+    response?: unknown,
   ) {
     super(`Responses request terminated unsuccessfully (${eventType}).`);
     this.name = "ResponsesStreamingTerminalError";
+    const terminal = record(response);
+    const usage = record(terminal?.usage);
+    const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+    const pools = (value: unknown): Record<string, number> => {
+      const source = record(value), projected: Record<string, number> = {};
+      for (const name of ["cached_tokens", "cache_write_tokens", "cache_write_tokens_5m", "cache_write_tokens_1h", "reasoning_tokens", "audio_tokens", "text_tokens"]) {
+        const observed = count(source?.[name]); if (observed !== undefined) projected[name] = observed;
+      }
+      return projected;
+    };
+    const projected: Record<string, unknown> = {};
+    for (const name of ["input_tokens", "output_tokens", "total_tokens"]) {
+      const observed = count(usage?.[name]); if (observed !== undefined) projected[name] = observed;
+    }
+    for (const name of ["input_tokens_details", "output_tokens_details"]) {
+      const details = pools(usage?.[name]); if (Object.keys(details).length) projected[name] = details;
+    }
+    const normalizedUsage = modelResponseUsageFromResponse(terminal);
+    const billing = normalizedUsage?.gatewayBilling;
+    const serviceTier = normalizedUsage?.serviceTier;
+    this.terminalResponse = eventType === "response.failed" && terminal ? {
+      id: typeof terminal.id === "string" && new TextEncoder().encode(terminal.id).byteLength <= FIELD_MAX_BYTES ? terminal.id : null, status: "failed",
+      usage: usage && Object.keys(projected).length ? projected : null,
+      ...(serviceTier && new TextEncoder().encode(serviceTier).byteLength <= FIELD_MAX_BYTES ? { service_tier: serviceTier } : {}),
+      ...(billing ? { provider_metadata: { gateway: { routing: { finalProvider: billing.finalProvider }, inferenceCost: billing.inferenceCostUsd } } } : {}),
+    } : null;
     const error = record(source);
     this.code = boundedField(error?.code, FIELD_MAX_BYTES);
     this.type = boundedField(error?.type, FIELD_MAX_BYTES);
@@ -143,5 +175,6 @@ export function responsesStreamingTerminalError(
     value.type,
     value.error ?? record(value.response)?.error ?? value,
     headers,
+    value.response,
   );
 }

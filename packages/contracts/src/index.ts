@@ -3910,7 +3910,7 @@ export const ModelCallUsageAttributes = z.object({
   ...ModelCallUsageAttributesV1Shape.shape,
   schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
   outcome: ModelCallOutcome,
-  callKind: z.enum(["response", "compaction", "session_title", "realtime_session"]),
+  callKind: z.enum(["response", "compaction", "session_title", "realtime_session", "transcription"]),
   provider: ModelCallUsageAttributesV1Shape.shape.provider.nullable(),
   providerApi: ModelCallUsageAttributesV1Shape.shape.providerApi.nullable(),
   model: ModelCallUsageAttributesV1Shape.shape.model.nullable(),

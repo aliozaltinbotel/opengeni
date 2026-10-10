@@ -295,6 +295,12 @@ export async function processModelResponseTerminalEvent(input: {
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
   }
+  if (terminal.outcome === "indeterminate") {
+    await recordModelCallUsageEvent(input.db, { ...input, sourceKey, callKind: "response", scope: "call",
+      outcome: "indeterminate", stage: "dispatch", upstreamProvider: null, billing: null,
+      billingPath: (input.chargesOpenGeniCredits ?? !input.externallyBilled) ? "opengeni_credits" : "external" });
+    return { status: "processed", sourceKey, authoritative: false, usageReported: false };
+  }
   const responseUsage = terminal.usage;
   if (responseUsage) {
     input.state.claimedSourceKeys.add(sourceKey);
@@ -483,6 +489,15 @@ export async function processCompactionModelUsageEvent(input: {
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
 > {
+  if ((input.usage?.outcome ?? input.outcome) === "indeterminate") {
+    const sourceKey = input.nativeSourceKey;
+    if (!sourceKey) throw new Error("MODEL_SOURCE_RESPONSE_UNBOUND");
+    await recordModelCallUsageEvent(input.db, { ...input, sourceKey,
+      callKind: input.sourceKind === "session-title" ? "session_title" : "compaction", scope: "call",
+      outcome: "indeterminate", stage: "dispatch", upstreamProvider: null, billing: null,
+      billingPath: (input.chargesOpenGeniCredits ?? !input.externallyBilled) ? "opengeni_credits" : "external" });
+    return { status: "processed", sourceKey, authoritative: false };
+  }
   if (input.usage === null) {
     const sourceKey = input.nativeSourceKey;
     if (!sourceKey) throw new Error("MODEL_SOURCE_RESPONSE_UNBOUND");
@@ -1276,7 +1291,8 @@ export async function recordModelCallUsageEvent(
     } | null;
   },
 ): Promise<void> {
-  const eventType = input.stage === "dispatch" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE;
+  const eventType = input.stage === "dispatch" || input.outcome === "indeterminate" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE;
+  if (eventType === MODEL_CALL_DISPATCH_EVENT_TYPE) input = { ...input, billing: null, outcome: "indeterminate" };
   const telemetry = input.billing?.normalizedUsage.telemetry ?? null;
   const attributes = ModelCallUsageAttributes.parse({
     schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
@@ -1306,7 +1322,7 @@ export async function recordModelCallUsageEvent(
     eventType,
     quantity: 1,
     unit: "call",
-    sourceResourceType: input.stage === "dispatch" ? "model_dispatch" : "model_response",
+    sourceResourceType: eventType === MODEL_CALL_DISPATCH_EVENT_TYPE ? "model_dispatch" : "model_response",
     sourceResourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,
     turnId: input.turnId,
@@ -1345,8 +1361,10 @@ export function createModelCallUsageSourceHooks(
         accountId: call.accountId, workspaceId: call.workspaceId, keys: [dispatchKey, terminalKey],
       });
       if (!existing.has(dispatchKey) || existing.has(terminalKey)) return;
-      await recordModelCallUsageEvent(db, { ...call, sourceKey, outcome: "indeterminate", billing: null });
-      claimedSourceKeys.add(sourceKey);
+      // Transport loss supplies no provider terminal. Preserve the existing
+      // unknown dispatch SOURCE_FACT without claiming the final accounting key
+      // or suppressing a later authenticated provider terminal.
+      await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "dispatch", outcome: "indeterminate", billing: null });
     },
   };
 }

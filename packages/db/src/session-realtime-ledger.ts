@@ -25,6 +25,7 @@ import {
 } from "./session-realtime";
 import {
   lockSessionEventWriteRows,
+  evaluateSessionControl,
   lockWorkspaceInferenceControlForAdmission,
 } from "./session-control";
 import { submitHumanPromptInTransaction } from "./session-queue-commands";
@@ -64,6 +65,41 @@ export type SessionRealtimeConnection = {
   createdAt: string;
   updatedAt: string;
 };
+
+/** Fresh physical connection admission under the installed session/control
+ * fence. A sealed attachment proves mint provenance, never current epoch. */
+export async function assertSessionRealtimeProviderDispatchInTransaction(db: Database, input: {
+  accountId: string; workspaceId: string; sessionId: string; connectionId: string;
+  connectionEpoch: number; ownerSubjectId: string; model: string;
+  phase: "negotiation" | "attachment";
+}): Promise<void> {
+  const locks = await lockSessionEventWriteRows(db, { workspaceId: input.workspaceId, controlLock: "share", sessionIds: [input.sessionId] });
+  const session = locks.sessions[0];
+  if (!session || session.accountId !== input.accountId || session.status === "cancelled")
+    throw new SessionRealtimeConflictError("SESSION_CANCELLED", "Realtime session is unavailable");
+  const control = await evaluateSessionControl(db, input.workspaceId, input.sessionId, { workspaceControl: locks.control ?? undefined });
+  if (control.state !== "active") throw new SessionRealtimeConflictError("CONTROL_NOT_ACTIVE", "Realtime session control is inactive");
+  const [connection] = await db.select().from(schema.sessionRealtimeConnections).where(and(
+    eq(schema.sessionRealtimeConnections.accountId, input.accountId),
+    eq(schema.sessionRealtimeConnections.workspaceId, input.workspaceId),
+    eq(schema.sessionRealtimeConnections.sessionId, input.sessionId),
+    eq(schema.sessionRealtimeConnections.id, input.connectionId),
+  )).limit(1);
+  if (!connection || connection.connectionEpoch !== input.connectionEpoch ||
+    !(input.phase === "negotiation" ? connection.state === "negotiating" : ["ready", "active"].includes(connection.state)))
+    throw new SessionRealtimeConflictError("REALTIME_CONNECTION_CHANGED", "Realtime physical connection is no longer current");
+  const [mode] = await db.select().from(schema.sessionRealtimeModes).where(and(
+    eq(schema.sessionRealtimeModes.accountId, input.accountId),
+    eq(schema.sessionRealtimeModes.workspaceId, input.workspaceId),
+    eq(schema.sessionRealtimeModes.sessionId, input.sessionId),
+    eq(schema.sessionRealtimeModes.id, connection.realtimeId),
+  )).for("update").limit(1);
+  if (!mode || mode.state !== "active" || mode.endedAt !== null || mode.leaseExpiresAt <= new Date() ||
+    (connection.state === "active" ? mode.connectionEpoch !== input.connectionEpoch :
+      connection.promotionMode === "staged" ? mode.connectionEpoch > input.connectionEpoch : mode.connectionEpoch !== input.connectionEpoch) ||
+    mode.model !== input.model || mode.ownerSubjectId !== input.ownerSubjectId)
+    throw new SessionRealtimeConflictError("REALTIME_CONNECTION_CHANGED", "Realtime mode or authenticated owner changed");
+}
 
 export type ClaimSessionRealtimeConnectionInput = AssertSessionRealtimeOwnerInput & {
   operationId: string;

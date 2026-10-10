@@ -842,7 +842,7 @@ function modelResponseFromSdkEvent(event: RunStreamEvent): any {
   }
   if (isOpenAIResponsesRawModelStreamEvent(event)) {
     const raw = (event as any).data?.event;
-    if (raw?.type === "response.completed") {
+    if (raw?.type === "response.completed" || raw?.type === "response.failed" || raw?.type === "response.cancelled" || raw?.type === "response.incomplete") {
       return raw.response;
     }
   }

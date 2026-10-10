@@ -38,6 +38,11 @@ export async function authorizeKnowledgeQueryOwner(tx: Database, input: Pick<Kno
     return;
   }
   if (context.actor.kind !== "human") throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+  if (nativeContinuation?.kind === "managed_human") {
+    if (!settings) throw new Error("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
+    await requireNativeAccessContinuationAuthority(tx, settings, nativeContinuation, grant, permission);
+    return;
+  }
   await lockExternalWorkspaceMembershipLifecycle(tx, context.accountId);
   const current = await withWorkspaceSubjectRls(tx, context.workspaceId, grant.subjectId,
     scoped => getWorkspaceGrant(scoped, grant.subjectId, context.workspaceId, { accountId: context.accountId, lock: "share" }));

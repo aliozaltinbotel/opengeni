@@ -8,6 +8,7 @@ import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { ResponsesStreamingTerminalError } from "./responses-terminal-error";
 import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
 /** One exact source producer; the optional dispatch callback rechecks that same
@@ -30,6 +31,7 @@ export function withModelCallSourceDispatch<T>(
   producer: BeforeModelCallSourceReceipt | undefined,
   sourceKey: string | undefined,
   operation: () => T,
+  observeTerminalFailure?: (response: NonNullable<ResponsesStreamingTerminalError["terminalResponse"]>) => Promise<void>,
 ): T {
   if (!producer?.beforeProviderDispatch) return modelSourceDispatch.run(undefined, operation);
   if (!sourceKey) throw new Error("MODEL_SOURCE_RECEIPT_UNAVAILABLE");
@@ -38,6 +40,8 @@ export function withModelCallSourceDispatch<T>(
     if (!(result instanceof Promise)) return result;
     return result.catch(async (error: unknown) => {
       try {
+        if (error instanceof ResponsesStreamingTerminalError && error.terminalResponse)
+          await observeTerminalFailure?.(error.terminalResponse);
         await producer.onDispatchFailure?.(sourceKey);
       } catch (cause) {
         throw new ModelCallFailureSettlementError(cause);
@@ -391,7 +395,10 @@ export class ModelRequestCaptureModel implements Model {
     rememberPreparedModelRequest(request);
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
-    const response = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => this.inner.getResponse(request));
+    const observeFailure = async (response: NonNullable<ResponsesStreamingTerminalError["terminalResponse"]>) => {
+      if (capture && sourceKey) await capture.callCompleted?.(sourceKey, response.id, response, sourceState(capture).restoreHistorySources);
+    };
+    const response = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => this.inner.getResponse(request), observeFailure);
     if (sourceKey) {
       bindOutputSourceKeys(capture,sourceKey,response.output,this.projectOutput);
       await capture?.callCompleted?.(sourceKey,response.responseId ?? null,response,sourceState(capture!).restoreHistorySources);
@@ -414,7 +421,9 @@ export class ModelRequestCaptureModel implements Model {
     let finished = false;
     try {
       while (true) {
-        const next = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => iterator.next());
+        const next = await withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () => iterator.next(), async response => {
+          if (capture && sourceKey) await capture.callCompleted?.(sourceKey, response.id, response, sourceState(capture).restoreHistorySources);
+        });
         if (next.done) { finished = true; return; }
         const event = next.value;
         const candidate=event.type==="response_done" ? event.response : event.type==="model" && event.event && typeof event.event==="object" && ["response.completed", "response.failed", "response.cancelled", "response.incomplete"].includes(String((event.event as Record<string,unknown>).type)) ? (event.event as Record<string,unknown>).response : null;

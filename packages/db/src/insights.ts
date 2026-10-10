@@ -1541,8 +1541,9 @@ function numberOrNull(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** Physically closed attempts cannot later produce a provider terminal fact.
- * Settle only the exact transport intent they left, with wholly unknown usage.
+/** Physically closed attempts permit observing the exact unknown intent.
+ * Quiescence supplies no final provider accounting evidence: keep its final
+ * key free for independently recovered provider usage.
  * All pending intents are considered: an old crash is not lost to a lookback.
  * No provider retry, inferred completion, or mutable second ledger is involved.
  */
@@ -1583,12 +1584,12 @@ export async function reconcileQuiescedModelCallReceipts(
           select 1 from ${schema.usageEvents} terminal
           where terminal.account_id = intent.account_id and terminal.workspace_id = intent.workspace_id
             and terminal.idempotency_key = 'usage:model.call:' || intent.turn_id::text || ':' || source.source_key
+            and terminal.attributes->>'outcome' <> 'indeterminate'
         )
       order by intent.occurred_at, intent.id
       limit ${limit + 1}
       for share of attempt
     `);
-    let settled = 0;
     for (const row of [...rows].slice(0, limit)) {
       const attributes = ModelCallUsageAttributes.parse(row.attributes);
       // Dispatch metadata is an admission fact, never usage or provider completion.
@@ -1601,13 +1602,13 @@ export async function reconcileQuiescedModelCallReceipts(
       await recordUsageEvent(scopedDb, {
         accountId: row.account_id, workspaceId: input.workspaceId,
         sessionId: row.session_id, turnId: row.turn_id, turnAttemptId: row.turn_attempt_id,
-        eventType: "model.call", quantity: 1, unit: "call", sourceResourceType: "model_response",
+        eventType: "model.call.dispatch", quantity: 1, unit: "call", sourceResourceType: "model_dispatch",
         sourceResourceId: row.source_resource_id,
-        idempotencyKey: `usage:model.call:${row.turn_id}:${row.source_key}`,
+        idempotencyKey: `usage:model.call.dispatch:${row.turn_id}:${row.source_key}`,
         occurredAt: row.occurred_at, attributes,
       });
-      settled += 1;
     }
-    return { settled, truncated: rows.length > limit };
+    // Reobserving unknown source facts never settles provider accounting.
+    return { settled: 0, truncated: rows.length > limit };
   });
 }

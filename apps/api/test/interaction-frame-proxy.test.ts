@@ -3,7 +3,7 @@ import * as database from "@opengeni/db";
 import { ReadRealtimeSessionUsageSource, type AccessGrant } from "@opengeni/contracts";
 import { testSettings } from "@opengeni/testing";
 import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengeni/core";
-import { createRealtimeUsageProxyAttachment, createRealtimeUsageProxyLifecycle } from "../src/realtime-usage-proxy";
+import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, createRealtimeUsageProxyLifecycle } from "../src/realtime-usage-proxy";
 import type {
   ApiWebSocketConnection,
   ApiWebSocketLike,
@@ -30,6 +30,29 @@ afterAll(async () => {
 afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
   for (const spy of relaySpies.splice(0)) spy.mockRestore();
+});
+
+test.each(["ended-or-rotated", "privacy-revoked"])("native relay refuses current %s authority before dispatch", async reason => {
+  const accountId = crypto.randomUUID(), workspaceId = crypto.randomUUID(), sessionId = crypto.randomUUID();
+  const keyId = crypto.randomUUID();
+  const grant: AccessGrant = { accountId, workspaceId, subjectId: `api_key:${keyId}`, principalKind: "api_key", permissions: ["sessions:control"] };
+  relaySpies.push(spyOn(database, "findActiveWorkspaceApiKeyById").mockResolvedValue({ permissions: grant.permissions, permissionMode: "explicit" } as never));
+  const physical = spyOn(database, "assertSessionRealtimeProviderDispatchInTransaction").mockImplementation(async () => {
+    if (reason === "ended-or-rotated") throw new Error("REALTIME_CONNECTION_CHANGED");
+  });
+  relaySpies.push(physical);
+  relaySpies.push(spyOn(database, "getSlackInteractionSessionAccessForSession").mockResolvedValue(null));
+  relaySpies.push(spyOn(database, "getSessionAuthorityProjection").mockResolvedValue({ visibility: "user_private", ownerSubjectId: "user:other" } as never));
+  relaySpies.push(spyOn(database, "getSessionAuthorizationTargetProjection").mockResolvedValue({ id: sessionId, accountId, rootSessionId: sessionId } as never));
+  const dispatch = spyOn(database, "recordUsageEvent").mockResolvedValue({} as never); relaySpies.push(dispatch);
+  const settings = testSettings({ productAccessMode: "configured", billingMode: "disabled", usageLimitsMode: "none" });
+  await expect(authorizeRealtimeProviderDispatch({ settings } as ApiRouteDeps, {} as database.Database, {
+    authority: { context: { accountId, workspaceId, actor: { kind: "service", principalKind: "api_key", subjectId: grant.subjectId,
+      writeScopes: ["workspace"], review: false, settingsScopes: [] } }, grant, externalContinuation: null, nativeContinuation: null },
+    sessionId, source: { connectionId: crypto.randomUUID(), connectionEpoch: 1, provider: "ai-gateway", model: "actual-model",
+      upstreamModel: "actual-upstream", providerSessionId: null, providerCredentialId: null },
+  }, "attachment")).rejects.toThrow(reason === "ended-or-rotated" ? "REALTIME_CONNECTION_CHANGED" : "Session not found or access denied");
+  expect(physical).toHaveBeenCalledTimes(1); expect(dispatch).not.toHaveBeenCalled();
 });
 
 describe("interaction frame proxy", () => {
@@ -282,6 +305,9 @@ test.each([
   let providerConnections = 0, inTransaction = false;
   relaySpies.push(spyOn(database, "withRlsContext").mockImplementation(async (_db, _scope, fn) => { inTransaction = true; try { return await fn(tx); } finally { inTransaction = false; } }));
   relaySpies.push(spyOn(database, "findActiveWorkspaceApiKeyById").mockResolvedValue({ permissions: ["sessions:control"], permissionMode: "explicit" } as never));
+  relaySpies.push(spyOn(database, "assertSessionRealtimeProviderDispatchInTransaction").mockResolvedValue());
+  relaySpies.push(spyOn(database, "getSlackInteractionSessionAccessForSession").mockResolvedValue(null));
+  relaySpies.push(spyOn(database, "getSessionAuthorityProjection").mockResolvedValue({ visibility: "workspace_shared" } as never));
   relaySpies.push(spyOn(database, "recordUsageEvent").mockImplementation(async (db, row) => {
     if (row.eventType === "model.realtime.session.dispatched") { expect(db).toBe(tx); if (!rows.has(row.idempotencyKey)) expect(providerConnections).toBe(0); }
     else expect(db).toBe(root);
@@ -322,17 +348,14 @@ test.each([
   // A browser claiming a final event remains just outbound data.
   connection!.receive(JSON.stringify({ type: "session-closed", usage: { seconds: 100000 } }));
   try { await eventually(() => socket.messages.length === 2); } catch { throw new Error(JSON.stringify({ providerConnections, rowTypes: [...rows.values()].map(row => row.eventType), received: socket.messages.length, closes: socket.closes })); }
-  expect(rows.has(`usage:model.call:realtime:${connectionId}`)).toBe(final);
-  if (final) {
-    const receipt = rows.get(`usage:model.call:realtime:${connectionId}`)!;
-    expect(receipt.occurredAt).toEqual(new Date("2026-10-10T00:00:00Z"));
-    expect(receipt.attributes).toMatchObject({ outcome: "indeterminate", usageReported: false, totalTokens: null, estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null });
-  }
+  // Gateway close lacks provider-final accounting evidence. Its occurrence and
+  // physically closed SOURCE_FACTs keep UNKNOWN; a late final key remains free.
+  expect(rows.has(`usage:model.call:realtime:${connectionId}`)).toBeFalse();
   const occurrence = rows.get(`usage:model.realtime.session.observed:${connectionId}`)!;
   expect(occurrence.attributes).toMatchObject({ providerSessionId: provider === "ai-gateway" ? "provider-session-fixture" : null, schema: "opengeni.realtime-session-source/v2" });
   connection!.transportClosed();
   await eventually(() => rows.has(`usage:model.realtime.session.connection_closed:${connectionId}`));
-  expect(rows.has(`usage:model.call:realtime:${connectionId}`)).toBe(final);
+  expect(rows.has(`usage:model.call:realtime:${connectionId}`)).toBeFalse();
   expect(rows.get(`usage:model.realtime.session.dispatched:${connectionId}`)!.attributes).toMatchObject({ providerSessionId: null, outcome: "indeterminate", totalTokens: null, estimatedProviderCostMicros: null });
   const replaySocket = { upgrade(_request: Request, options: { data: ApiWebSocketConnection }) { const duplicate = options.data; duplicate.attach(new NativeTextSocket(duplicate)); return true; } };
   transport.upgrade(proxyRequest(attachment, publicOrigin), replaySocket as ApiWebSocketUpgradeServer);

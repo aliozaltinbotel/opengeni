@@ -1,4 +1,4 @@
-import { createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
+import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
 import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
@@ -1685,7 +1685,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           connectionEpoch: claim.connection.connectionEpoch,
           provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
           providerSessionId: null, providerCredentialId: null, model: claim.mode.model, upstreamModel: null },
-        authorize: tx => authorizeKnowledgeQueryOwner(tx, authority, deps.catalogSourceSettings ?? settings, "sessions:control"),
+        authorize: tx => authorizeRealtimeProviderDispatch(deps, tx, { authority, sessionId,
+          source: { connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+            provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
+            providerSessionId: null, providerCredentialId: null, model: claim.mode.model, upstreamModel: null } }, "negotiation"),
       });
       const broker = (
         claim.mode.model === AZURE_LIVE_MODEL_ID

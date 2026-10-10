@@ -2,7 +2,8 @@ import { resolveFirstPartyDelegationSecret } from "@opengeni/config";
 import { authorizeKnowledgeQueryOwner, createRealtimeVoiceBilling,
   externalActorContinuationForAuthorization, nativeAccessContinuationForAuthorization,
   knowledgeContextForAccess, type AccessGrantAuthorization, type ApiRouteDeps } from "@opengeni/core";
-import { loadRealtimeSessionUsageSource } from "@opengeni/db";
+import { requireSessionAuthorization } from "@opengeni/core";
+import { assertSessionRealtimeProviderDispatchInTransaction, loadRealtimeSessionUsageSource, type Database } from "@opengeni/db";
 import { createInteractionFrameProxyAttachment, INTERACTION_FRAME_PROXY_PROTOCOL_PREFIX,
   type RealtimeProxyLifecycle, type RealtimeProxySource } from "./interaction-frame-proxy";
 
@@ -16,6 +17,20 @@ export async function realtimeProxyAuthority(deps: ApiRouteDeps, authorization: 
   return { context: await knowledgeContextForAccess(deps, authorization, "sessions:control"), grant: authorization.grant,
     externalContinuation: externalActorContinuationForAuthorization(authorization),
     nativeContinuation: nativeAccessContinuationForAuthorization(authorization) };
+}
+
+export async function authorizeRealtimeProviderDispatch(deps: ApiRouteDeps, tx: Database, value: RealtimeProxySource,
+  phase: "negotiation" | "attachment"): Promise<void> {
+  await authorizeKnowledgeQueryOwner(tx, value.authority, deps.catalogSourceSettings ?? deps.settings, "sessions:control");
+  await assertSessionRealtimeProviderDispatchInTransaction(tx, {
+    accountId: value.authority.grant.accountId, workspaceId: value.authority.grant.workspaceId,
+    sessionId: value.sessionId, connectionId: value.source.connectionId, connectionEpoch: value.source.connectionEpoch,
+    ownerSubjectId: value.authority.grant.subjectId, model: value.source.model, phase,
+  });
+  // The named connection door owns the session fence through this live ACL
+  // read and the dispatch write. Privacy/end/rotation cannot race admission.
+  await requireSessionAuthorization({ db: tx, ...(deps.sessionAuthorization !== undefined ? { sessionAuthorization: deps.sessionAuthorization } : {}) }, value.authority.grant,
+    { sessionId: value.sessionId, operation: "session.realtime.start", surface: "http" });
 }
 
 export async function createRealtimeUsageProxyAttachment(input: {
@@ -56,8 +71,7 @@ export function createRealtimeUsageProxyLifecycle(deps: ApiRouteDeps): RealtimeP
   return {
     beforeDispatch: async (value, ownerId) => {
       await createRealtimeVoiceBilling(deps).recordProviderSessionDispatch({ ...scope(value), ownerId, source: value.source,
-        authorize: tx => authorizeKnowledgeQueryOwner(tx, value.authority,
-          deps.catalogSourceSettings ?? deps.settings, "sessions:control") });
+        authorize: tx => authorizeRealtimeProviderDispatch(deps, tx, value, "attachment") });
     },
     observe: async (value, message) => {
       const billing = createRealtimeVoiceBilling(deps);

@@ -3,7 +3,8 @@ import { Context } from "@temporalio/activity";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as database from "@opengeni/db";
 import { KnowledgeEntryListRequest, KnowledgeSavePreparationRequest, signDelegatedAccessToken, EmbeddingCallUsageAttributes, EmbeddingCallUsageAttributesV1, EmbeddingCallUsageSource } from "@opengeni/contracts";
-import { knowledgeQueryOperationId, nativeAccessContinuationForAuthorization, requireAccessGrantAuthorization, type KnowledgeQueryWorkflowRequest } from "@opengeni/core";
+import { authorizeKnowledgeQueryOwner, knowledgeContextForAccess, accessGrantAuthorizationFromContext, knowledgeQueryOperationId, nativeAccessContinuationForAuthorization, requireAccessGrantAuthorization, type KnowledgeQueryWorkflowRequest } from "@opengeni/core";
+import * as managedSession from "../../../packages/core/src/managed-session";
 import { testSettings } from "@opengeni/testing";
 import { createKnowledgeIndexingActivities } from "../src/activities/knowledge-indexing";
 import type { ControlActivityServices } from "../src/activities/types";
@@ -230,4 +231,36 @@ test("actual worker entry rechecks its current deployment issuer at settlement w
   expect(facts.has(`usage:knowledge.query.closed:query:${operation.callId}`)).toBeFalse();
   expect(database.findActiveWorkspaceApiKeyById).not.toHaveBeenCalled();
   expect(database.getWorkspaceGrant).not.toHaveBeenCalled();
+});
+
+
+test("verified managed human continuation uses current Personal authority, not a membership join or caller flag", async () => {
+  const humanGrant: KnowledgeQueryWorkflowRequest["grant"] = { accountId, workspaceId, subjectId: "user:personal-owner",
+    principalKind: "human_session", permissions: ["documents:search"] };
+  const managedSettings = testSettings({ productAccessMode: "managed", betterAuthSecret: "managed-continuation-fixture-issuer" });
+  const liveContext = { mode: "managed" as const, subjectId: humanGrant.subjectId,
+    accountGrants: [{ accountId, subjectId: humanGrant.subjectId, permissions: ["account:read" as const] }],
+    workspaceGrants: [humanGrant], defaultAccountId: accountId, defaultWorkspaceId: workspaceId };
+  spies.push(spyOn(managedSession, "getManagedSession").mockResolvedValue({ user: { id: "personal-owner", email: "owner@example.test", name: "Owner", emailVerified: true },
+    session: { id: "managed-session", expiresAt: new Date(Date.now() + 60_000) } } as never));
+  spies.push(spyOn(database, "ensureManagedAccessForUser").mockResolvedValue(liveContext));
+  const canonical = spyOn(database, "validateCanonicalHumanSession").mockResolvedValue(true); spies.push(canonical);
+  const personal = spyOn(database, "resolveNamedManagedPersonalWorkspaceGrant").mockResolvedValue(humanGrant); spies.push(personal);
+  (database.getWorkspaceGrant as ReturnType<typeof spyOn>).mockResolvedValue(null);
+  const request = new Request("http://localhost/knowledge");
+  const authorization = await requireAccessGrantAuthorization({ req: { raw: request, header: (name: string) => request.headers.get(name) ?? undefined } } as never,
+    { db: root, settings: managedSettings, managedAuth: {} as never }, workspaceId, "documents:search");
+  expect(authorization.canonicalManagedHumanSession).toBeTrue();
+  const nativeContinuation = nativeAccessContinuationForAuthorization(authorization)!;
+  expect(nativeContinuation.kind).toBe("managed_human");
+  const humanContext = await knowledgeContextForAccess({ db: root }, authorization, "documents:search");
+  await authorizeKnowledgeQueryOwner(transaction, { context: humanContext, grant: authorization.grant, externalContinuation: null, nativeContinuation }, managedSettings);
+  expect(personal).toHaveBeenCalled(); expect(database.getWorkspaceGrant).not.toHaveBeenCalled();
+  canonical.mockResolvedValue(false);
+  await expect(authorizeKnowledgeQueryOwner(transaction, { context: humanContext, grant: authorization.grant, externalContinuation: null, nativeContinuation }, managedSettings))
+    .rejects.toThrow("NATIVE_ACCESS_CONTINUATION_UNAVAILABLE");
+  const forged = accessGrantAuthorizationFromContext(structuredClone(liveContext), structuredClone(humanGrant));
+  expect(nativeAccessContinuationForAuthorization(forged)).toBeNull();
+  await expect(authorizeKnowledgeQueryOwner(transaction, { context: humanContext, grant: humanGrant, externalContinuation: null }, managedSettings))
+    .rejects.toThrow("KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE");
 });

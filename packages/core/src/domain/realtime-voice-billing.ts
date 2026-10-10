@@ -333,6 +333,10 @@ export function createRealtimeVoiceBilling(deps: { db: Database; settings: Setti
       const observation = await loadRealtimeSessionUsageSource(deps.db, { ...input, connectionId: claimed.connectionId });
       if (!observation || JSON.stringify(ReadRealtimeSessionUsageSource.parse(observation.source)) !== JSON.stringify(claimed)) throw new Error("REALTIME_PROVIDER_SOURCE_UNBOUND");
       const { source } = observation;
+      // Missing/uncertain provider-final evidence remains represented by the
+      // occurrence/physical-owner SOURCE_FACTs. Never reserve model.call here:
+      // an independently observed authentic final may still arrive later.
+      if (input.outcome === "indeterminate") return;
       const attributes = ModelCallUsageAttributes.parse({
         schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, callKind: "realtime_session", scope: "call",
         sourceKey: `realtime:${source.connectionId}`, provider: source.provider, providerApi: "realtime",

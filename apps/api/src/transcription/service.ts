@@ -7,6 +7,7 @@ import { VOICE_INPUT_ACCEPTED_MIME_TYPES } from "@opengeni/contracts";
 import { voiceTranscriptionSettlementKeys } from "@opengeni/db";
 import {
   createVoiceInputBilling,
+  recordTranscriptionModelCall,
   filenameForMimeType,
   isAcceptedMimeType,
   normalizeMimeType,
@@ -297,8 +298,16 @@ export function createTranscriptionService(input: {
         });
       }
       const deadline = createProviderRequestDeadline(request.signal, remainingMilliseconds);
+      const callId = crypto.randomUUID();
+      const receipt = { accountId: request.accountId, workspaceId: request.workspaceId, callId,
+        providerId: provider.id, model: provider.deploymentFunded?.model ?? null,
+        pricing: provider.deploymentFunded?.pricing ?? null,
+        billingPath: chargeable(provider) ? "opengeni_credits" as const : "external" as const };
       let result: Awaited<ReturnType<TranscriptionProvider["transcribe"]>>;
       try {
+        // Durable possible-effect fact before calling the installed provider.
+        // A transport failure retains UNKNOWN and leaves the final key free.
+        await recordTranscriptionModelCall(input.db, { ...receipt, stage: "dispatch", usage: null });
         result = await provider.transcribe({
           audio,
           mimeType: providerMimeType,
@@ -309,6 +318,9 @@ export function createTranscriptionService(input: {
           requestId: request.requestId,
           signal: deadline.signal,
         });
+        // Required accounting precedes timeout/fallback/optional credit debit.
+        // A receipt refusal propagates and cannot become a successful response.
+        await recordTranscriptionModelCall(input.db, { ...receipt, stage: "terminal", usage: result.usage ?? null });
         if (deadline.timedOut && !request.signal?.aborted) {
           throw new TranscriptionServiceError({
             code: "timeout",

@@ -21,7 +21,10 @@ import {
   VOICE_CREDIT_USAGE,
   type CreditDebitAttribution,
   type Database,
+  isTransactionHandle,
 } from "@opengeni/db";
+import { createHash } from "node:crypto";
+import { MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, ModelCallUsageAttributes } from "@opengeni/contracts";
 import {
   TranscriptionBillingRefusedError,
   TranscriptionServiceError,
@@ -33,6 +36,39 @@ import { voiceCreditStanding, voiceInsufficientCreditsMessage } from "./realtime
 /** Credit debit type and usage source for deployment-funded voice input. */
 export const VOICE_INPUT_DEBIT_TYPE = VOICE_TRANSCRIPTION_DEBIT_TYPE;
 export const VOICE_INPUT_SOURCE_TYPE = VOICE_TRANSCRIPTION_SOURCE_TYPE;
+
+/** The actual transcription owner writes accounting facts independently of
+ * optional credit settlement. No synthetic turn/session or client duration. */
+export async function recordTranscriptionModelCall(db: Database, input: {
+  accountId: string; workspaceId: string; callId: string; providerId: string;
+  model: string | null; pricing: VoiceInputPricing | null;
+  billingPath: "opengeni_credits" | "external";
+  stage: "dispatch" | "terminal"; usage: VoiceInputUsage | null;
+}): Promise<void> {
+  if (isTransactionHandle(db)) throw new Error("TRANSCRIPTION_RECEIPT_REQUIRES_ROOT_DATABASE");
+  const sourceKey = `transcription:${input.callId}`;
+  const eventType = input.stage === "dispatch" ? "model.call.dispatch" : "model.call";
+  const usage = input.stage === "terminal" ? input.usage : null;
+  const tokens = usage?.kind === "tokens" ? usage : null;
+  const pricing = input.pricing;
+  const priced = usage !== null && pricing !== null && (usage.kind === "duration" || voiceInputPricingHasTokenRates(pricing));
+  const providerCost = priced ? calculateVoiceInputCost(pricing!, usage!).providerCostMicros : null;
+  const rates = pricing ? Object.fromEntries(Object.entries(pricing).filter(([name]) => name !== "marginBps").sort(([a], [b]) => a.localeCompare(b))) : null;
+  const attributes = ModelCallUsageAttributes.parse({
+    schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA, callKind: "transcription", scope: "call", sourceKey,
+    provider: input.providerId, providerApi: "audio_transcriptions", upstreamProvider: null, model: input.model,
+    outcome: input.stage === "dispatch" ? "indeterminate" : "completed", usageReported: usage !== null,
+    inputTokens: tokens?.inputTokens ?? null, outputTokens: tokens?.outputTokens ?? null,
+    cachedTokens: null, cacheWriteTokens: null, reasoningTokens: null,
+    totalTokens: tokens ? tokens.inputTokens + tokens.outputTokens : null,
+    estimatedProviderCostMicros: providerCost, pricingSource: providerCost === null ? null : "configured_list_price",
+    priceVersion: providerCost === null ? null : `schedule-sha256:${createHash("sha256").update(JSON.stringify(rates)).digest("hex")}`,
+    billingPath: input.billingPath,
+  });
+  await recordUsageEvent(db, { accountId: input.accountId, workspaceId: input.workspaceId,
+    eventType, quantity: 1, unit: "call", sourceResourceType: input.stage === "dispatch" ? "model_dispatch" : "model_response",
+    sourceResourceId: sourceKey, idempotencyKey: `usage:${eventType}:${sourceKey}`, attributes });
+}
 
 /** How the billed quantity was measured; recorded on the ledger entry. */
 export type VoiceInputBillingBasis =

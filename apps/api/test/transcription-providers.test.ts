@@ -1,4 +1,4 @@
-import { describe, expect, spyOn, test } from "bun:test";
+import { beforeEach, afterEach, afterAll, describe, expect, spyOn, test } from "bun:test";
 import * as dbModule from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import {
@@ -7,9 +7,49 @@ import {
   remainingTranscriptionProviderRequestMilliseconds,
 } from "../src/transcription/service";
 
+let callReceipts: Array<Parameters<typeof dbModule.recordUsageEvent>[1]> = [];
+let receiptSpy: { mockRestore(): void };
+const producedTranscriptionFacts: Array<{ scenario: string; events: typeof callReceipts }> = [];
+afterAll(async () => {
+  const file = process.env.OPENGENI_TEST_TRANSCRIPTION_FIXTURE_FILE;
+  if (file) await Bun.write(file, JSON.stringify({ producer: "actual API transcription service and native core receipt writer", cases: producedTranscriptionFacts }, null, 2) + "\n");
+});
+beforeEach(() => {
+  callReceipts = [];
+  receiptSpy = spyOn(dbModule, "recordUsageEvent").mockImplementation(async (_db, fact) => {
+    callReceipts.push(fact); return {} as never;
+  });
+});
+afterEach(() => receiptSpy.mockRestore());
+
 const audio = new Uint8Array([1, 2, 3]);
 
 describe("transcription providers", () => {
+  test.each(["disabled", "stripe"] as const)("actual provider cost excludes credit margin with billing %s", async billingMode => {
+    const service = createTranscriptionService({ settings: testSettings({ billingMode, voiceInputProviderOrder: "openai",
+      voiceInputOpenaiModel: "gpt-transcribe", voiceInputOpenaiPricingJson: JSON.stringify({ microsPerMinute: 6000, marginBps: 5000 }) }),
+      billing: { admit: async () => {}, settle: async () => ({ creditCostMicros: 9000 }) },
+      db: {} as never, fetch: async () => Response.json({ text: "fixture", usage: { type: "duration", seconds: 60 } }) });
+    const result = await service.transcribe({ accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), subjectId: "user:fixture", requestId: "request", audio, mimeType: "audio/webm",
+      billing: { sourceId: crypto.randomUUID(), trustedDurationSeconds: 60, attribution: { kind: "service" } } });
+    expect(callReceipts[1]!.attributes).toMatchObject({ usageReported: true, totalTokens: null,
+      estimatedProviderCostMicros: 6000, pricingSource: "configured_list_price", billingPath: billingMode === "stripe" ? "opengeni_credits" : "external" });
+    expect(result.creditCostMicros).toBe(billingMode === "stripe" ? 9000 : 0);
+    expect(callReceipts[1]!.attributes!.priceVersion).toMatch(/^schedule-sha256:[0-9a-f]{64}$/);
+    producedTranscriptionFacts.push({ scenario: `billing-${billingMode}-known-provider-duration-and-cost`, events: [...callReceipts] });
+  });
+  test("required terminal receipt refusal propagates after actual provider return", async () => {
+    let requests = 0;
+    const service = createTranscriptionService({ settings: testSettings({ voiceInputProviderOrder: "openai" }), db: {} as never,
+      fetch: async () => { requests++; return Response.json({ text: "fixture" }); } });
+    (dbModule.recordUsageEvent as ReturnType<typeof spyOn>).mockImplementation(async (_db: unknown, row: Parameters<typeof dbModule.recordUsageEvent>[1]) => {
+      callReceipts.push(row); if (row.eventType === "model.call") throw new Error("required terminal receipt refused"); return {} as never;
+    });
+    await expect(service.transcribe({ accountId: "account", workspaceId: "workspace", subjectId: "user:fixture", requestId: "request", audio, mimeType: "audio/webm" }))
+      .rejects.toThrow("required terminal receipt refused");
+    expect(requests).toBe(1);
+  });
+
   test("posts OpenAI multipart request with the configured model", async () => {
     let request: Request | undefined;
     const service = createTranscriptionService({
@@ -24,13 +64,20 @@ describe("transcription providers", () => {
       },
     });
     const result = await service.transcribe({
-      workspaceId: "workspace",
-      accountId: "account",
+      workspaceId: crypto.randomUUID(),
+      accountId: crypto.randomUUID(),
       audio,
       mimeType: "audio/webm",
       requestId: "request",
     });
     expect(result.text).toBe("hello");
+    expect(callReceipts.map(row => row.eventType)).toEqual(["model.call.dispatch", "model.call"]);
+    const terminal = callReceipts[1]!;
+    expect(terminal.turnId).toBeUndefined(); expect(terminal.sessionId).toBeUndefined();
+    expect(terminal.attributes).toMatchObject({ callKind: "transcription", provider: "openai", model: "gpt-transcribe",
+      outcome: "completed", usageReported: false, estimatedProviderCostMicros: null, totalTokens: null, billingPath: "external" });
+    expect(terminal.idempotencyKey).toBe(`usage:model.call:${terminal.attributes!.sourceKey}`);
+    producedTranscriptionFacts.push({ scenario: "billing-off-provider-returned-unknown-usage", events: [...callReceipts] });
     expect(result.languages).toEqual(["en"]);
     expect(request?.url).toBe("https://api.openai.com/v1/audio/transcriptions");
     expect(request?.headers.get("authorization")).toBe("Bearer test-openai-key");

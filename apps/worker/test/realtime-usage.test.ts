@@ -32,18 +32,23 @@ test("observer transport failure retains open accounting and never invents zero 
   expect(write).not.toHaveBeenCalled();
 });
 
-test("trusted final close preserves occurrence time, null provider totals and single final key", async () => {
+test("uncertain close leaves final key free; a later trusted final preserves exact occurrence time", async () => {
   bindSource();
   const write = spyOn(database, "recordUsageEvent").mockResolvedValue({} as never); spies.push(write);
+  let finalObserved = false;
   const activity = createRealtimeUsageActivities(service(), { observe: async input => {
-    await input.onAttached();
-    return { action: "closed", outcome: "indeterminate" };
+    if (!finalObserved) await input.onAttached();
+    return { action: "closed", outcome: finalObserved ? "completed" : "indeterminate" };
   } });
+  expect(await activity.observeRealtimeSessionUsage(ref)).toEqual({ action: "terminal" });
+  expect(write).toHaveBeenCalledTimes(1);
+  expect(write.mock.calls[0]![1].eventType).toBe("model.realtime.session.attached");
+  finalObserved = true;
   expect(await activity.observeRealtimeSessionUsage(ref)).toEqual({ action: "terminal" });
   expect(write).toHaveBeenCalledTimes(2);
   expect(write.mock.calls[1]![1]).toMatchObject({ occurredAt,
     idempotencyKey: `usage:model.call:realtime:${ref.connectionId}`,
-    attributes: { outcome: "indeterminate", usageReported: false, inputTokens: null, outputTokens: null,
+    attributes: { outcome: "completed", usageReported: false, inputTokens: null, outputTokens: null,
       totalTokens: null, estimatedProviderCostMicros: null, pricingSource: null, priceVersion: null } });
 });
 

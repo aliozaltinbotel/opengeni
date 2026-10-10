@@ -38,6 +38,7 @@ import {
   getWorkspaceGrant,
   requireWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
+  validateCanonicalHumanSession,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
@@ -60,11 +61,12 @@ const developerSetupApiKeyContexts = new WeakSet<AccessContext>();
 const developerSetupAuthorizations = new WeakMap<AccessGrantAuthorization, AccessGrant>();
 const developerSetupGrants = new WeakSet<AccessGrant>();
 type NativeContinuationOrigin = {
-  kind: "configured" | "delegated";
+  kind: "configured" | "delegated" | "managed_human";
   mode: Settings["productAccessMode"];
   authRequired: boolean;
   expiresAt: number | null;
   secret: string | null;
+  authSessionId?: string;
 };
 const configuredPerimeterRequests = new WeakMap<Request, NativeContinuationOrigin>();
 const nativeContinuationContexts = new WeakMap<AccessContext, NativeContinuationOrigin>();
@@ -91,6 +93,7 @@ export type NativeAccessContinuation = {
   expiresAt: number | null;
   grant: AccessGrant;
   proof: string | null;
+  authSessionId?: string;
 };
 function continuationBody(value: Omit<NativeAccessContinuation, "proof">): string {
   const ordered = (input: unknown): unknown => {
@@ -111,6 +114,7 @@ export function nativeAccessContinuationForAuthorization(authorization: AccessGr
   const body: Omit<NativeAccessContinuation, "proof"> = {
     version: 1, kind: origin.kind, mode: origin.mode, authRequired: origin.authRequired,
     expiresAt: origin.expiresAt, grant: structuredClone(authorization.grant),
+    ...(origin.authSessionId ? { authSessionId: origin.authSessionId } : {}),
   };
   return { ...body, proof: origin.secret ? continuationProof(origin.secret, continuationBody(body)) : null };
 }
@@ -127,12 +131,28 @@ export async function requireNativeAccessContinuationAuthority(
     continuation.authRequired !== settings.authRequired ||
     !hasPermission(grant.permissions, permission, grant.permissionMode) ||
     continuationBody({ ...body, grant }) !== continuationBody(body)) refuse();
-  const secret = continuation.kind === "delegated" ? resolveFirstPartyDelegationSecret(settings) : settings.accessKey;
+  const secret = continuation.kind === "managed_human" ? settings.betterAuthSecret
+    : continuation.kind === "delegated" ? resolveFirstPartyDelegationSecret(settings) : settings.accessKey;
   if (secret) {
     const expected = continuationProof(secret, continuationBody(body));
     if (typeof proof !== "string" || !/^[0-9a-f]{64}$/.test(proof) ||
       !timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(expected, "hex"))) refuse();
   } else if (continuation.kind !== "configured" || settings.authRequired || proof !== null) refuse();
+  if (continuation.kind === "managed_human") {
+    if (settings.productAccessMode !== "managed" || grant.principalKind !== "human_session" ||
+      !grant.subjectId.startsWith("user:") || grant.metadata?.delegated === true ||
+      !continuation.authSessionId || typeof continuation.expiresAt !== "number" || !Number.isSafeInteger(continuation.expiresAt) ||
+      continuation.expiresAt <= Math.floor(Date.now() / 1000)) refuse();
+    await lockExternalWorkspaceMembershipLifecycle(db, grant.accountId);
+    if (!await validateCanonicalHumanSession(db, {
+      authSessionId: continuation.authSessionId!, authUserId: grant.subjectId.slice("user:".length),
+    })) refuse();
+    const current = await resolveNamedManagedPersonalWorkspaceGrant(db, grant) ??
+      await withWorkspaceSubjectRls(db, grant.workspaceId, grant.subjectId,
+        scoped => getWorkspaceGrant(scoped, grant.subjectId, grant.workspaceId, { accountId: grant.accountId, lock: "share" }));
+    if (!current || current.accountId !== grant.accountId || !hasPermission(current.permissions, permission, current.permissionMode)) refuse();
+    return;
+  }
   if (continuation.kind === "delegated") {
     if (typeof continuation.expiresAt !== "number" || !Number.isInteger(continuation.expiresAt) ||
       continuation.expiresAt < Math.floor(Date.now() / 1000) || grant.metadata?.delegated !== true) refuse();
@@ -1483,6 +1503,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      nativeContinuationContexts.set(context, { kind: "managed_human", mode: deps.settings.productAccessMode,
+        authRequired: deps.settings.authRequired, secret: deps.settings.betterAuthSecret ?? null,
+        authSessionId: session.session.id, expiresAt: Math.floor(new Date(session.session.expiresAt as string | number | Date).getTime() / 1000) });
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }
@@ -1516,6 +1539,9 @@ async function resolveAccessContext(c: Context, deps: AccessDeps): Promise<Acces
         bindPendingInvitations: false,
       });
       canonicalManagedCookieContexts.add(context);
+      nativeContinuationContexts.set(context, { kind: "managed_human", mode: deps.settings.productAccessMode,
+        authRequired: deps.settings.authRequired, secret: deps.settings.betterAuthSecret ?? null,
+        authSessionId: session.session.id, expiresAt: Math.floor(new Date(session.session.expiresAt as string | number | Date).getTime() / 1000) });
       recordUserPresence(c, deps, context.subjectId);
       return context;
     }

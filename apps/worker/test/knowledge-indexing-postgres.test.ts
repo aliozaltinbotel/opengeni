@@ -992,10 +992,19 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     } }) as DocumentServices,
   );
   let running: Promise<void> | undefined, worker: InstanceType<typeof Worker> | undefined;
+  let runningFailure: Promise<never> | undefined;
   const startWorker = async () => {
     worker = await Worker.create({ connection: native, namespace, taskQueue, workflowBundle: { code },
       activities: activities(), maxConcurrentActivityTaskExecutions: 2, maxConcurrentWorkflowTaskExecutions: 2 });
     running = worker.run();
+    runningFailure = new Promise<never>((_resolve, reject) => {
+      void running!.catch(error => {
+        const category = error instanceof Error ? error.name.replace(/[^A-Za-z0-9_]/g, "").slice(0, 80) : "UnknownError";
+        console.error("KNOWLEDGE_HOSTED_WORKER_RUN_FAILED", category);
+        reject(new Error(`KNOWLEDGE_HOSTED_WORKER_RUN_FAILED:${category}`));
+      });
+    });
+    void runningFailure.catch(() => undefined);
   };
   const stopWorker = async () => { worker?.shutdown(); await running; worker = undefined; running = undefined; };
   const start = async (input: KnowledgeQueryWorkflowRequest | KnowledgePreparationWorkflowRequest, preparation = false) => {
@@ -1117,7 +1126,21 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     }
     // The production start-to-close timeout is unchanged. Its timer schedules
     // only recovery; it never proves provider completion or releases pressure.
-    await expect(crashed.result()).rejects.toThrow();
+    let observations = 0;
+    const observeWorker = () => {
+      if (!worker || observations++ >= 16) return;
+      const status = worker.getStatus();
+      console.error("KNOWLEDGE_HOSTED_RECOVERY_WORKER_STATUS", JSON.stringify({
+        runState: status.runState, workflowPollerState: status.workflowPollerState,
+        activityPollerState: status.activityPollerState, hasOutstandingWorkflowPoll: status.hasOutstandingWorkflowPoll,
+        numInFlightWorkflowActivations: status.numInFlightWorkflowActivations,
+        numInFlightActivities: status.numInFlightActivities, numCachedWorkflows: status.numCachedWorkflows,
+      }));
+    };
+    observeWorker();
+    const statusTimer = setInterval(observeWorker, 10_000);
+    try { await expect(Promise.race([crashed.result(), runningFailure!])).rejects.toThrow(); }
+    finally { clearInterval(statusTimer); observeWorker(); }
     const crashedCallId = knowledgeQueryOperationId(context, crashedInput.operationId);
     const crashFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
       WHERE account_id=${grant.accountId} AND source_resource_id=${crashedCallId}`;
