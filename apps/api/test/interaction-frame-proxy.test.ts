@@ -4,6 +4,7 @@ import { ReadRealtimeSessionUsageSource, type AccessGrant } from "@opengeni/cont
 import { testSettings } from "@opengeni/testing";
 import { accessGrantAuthorizationFromContext, type ApiRouteDeps } from "@opengeni/core";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, createRealtimeUsageProxyLifecycle } from "../src/realtime-usage-proxy";
+import { createGatewayRealtimeConnectionSecret } from "../src/gateway-realtime";
 import type {
   ApiWebSocketConnection,
   ApiWebSocketLike,
@@ -30,6 +31,36 @@ afterAll(async () => {
 afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
   for (const spy of relaySpies.splice(0)) spy.mockRestore();
+});
+
+test("Gateway broker converts provider expiry seconds for native proxy grants", async () => {
+  relaySpies.push(spyOn(database, "getActiveSessionHistoryItems").mockResolvedValue([]));
+  relaySpies.push(spyOn(database, "getSessionRealtimeContinuityEntries").mockResolvedValue([]));
+  const expiresAtSeconds = Math.floor(Date.now() / 1_000) + 120;
+  const settings = testSettings({ vercelAiGatewayApiKey: "synthetic-gateway-key" });
+  const mint = (expiry: unknown) => createGatewayRealtimeConnectionSecret({ db: {} as database.Database,
+    settings, workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(),
+    model: "opengeni-gateway/openai/gpt-realtime-2.1",
+    fetchImpl: (async () => ({ ok: true, status: 200,
+      json: async () => ({ token: "vcst_synthetic_fixture", expiresAt: expiry }) }) as Response) as typeof fetch });
+  const secret = await mint(expiresAtSeconds);
+  expect(secret.expiresAt).toBe(expiresAtSeconds * 1_000);
+  const now = Date.now();
+  const attachment = createInteractionFrameProxyAttachment({ requestUrl: publicOrigin, rootSecret,
+    upstreamUrl: secret.url, upstreamProtocols: ["ai-gateway-realtime.v1", `ai-gateway-auth.${secret.token}`],
+    origin: publicOrigin, expiresAt: new Date(Math.min(secret.expiresAt!, now + 60_000)).toISOString() });
+  let upgrades = 0;
+  const server: ApiWebSocketUpgradeServer = { upgrade() { upgrades++; return true; } };
+  expect(new InteractionFrameProxyTransport(rootSecret, () => now).upgrade(proxyRequest(attachment, publicOrigin), server)).toBeUndefined();
+  expect(upgrades).toBe(1);
+  const expired = new InteractionFrameProxyTransport(rootSecret, () => now + 60_000).upgrade(proxyRequest(attachment, publicOrigin), server);
+  expect(expired?.status).toBe(401);
+  expect(await expired?.text()).toBe("WebSocket proxy grant expired");
+  expect(upgrades).toBe(1);
+  expect((await mint(null)).expiresAt).toBeNull();
+  for (const invalid of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER, "2000000000"]) {
+    await expect(mint(invalid)).rejects.toThrow("AI Gateway returned an invalid realtime token");
+  }
 });
 
 test.each(["ended-or-rotated", "privacy-revoked"])("native relay refuses current %s authority before dispatch", async reason => {

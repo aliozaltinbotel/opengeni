@@ -34,6 +34,7 @@ export type GatewayRealtimeConnectionSecret = {
   token: string;
   url: string;
   upstreamModelId: string;
+  /** Epoch milliseconds, normalized at the provider boundary. */
   expiresAt: number | null;
   initialItems: GatewayRealtimeInitialItem[];
   instructions: string;
@@ -129,7 +130,9 @@ async function mintGatewayClientSecret(input: {
   if (
     typeof token !== "string" ||
     token.length === 0 ||
-    (expiresAt !== undefined && expiresAt !== null && typeof expiresAt !== "number")
+    (expiresAt !== undefined && expiresAt !== null &&
+      (typeof expiresAt !== "number" || !Number.isFinite(expiresAt) || expiresAt <= 0 ||
+        !Number.isSafeInteger(expiresAt * 1_000)))
   ) {
     throw new GatewayRealtimeBrokerError(
       "invalid_provider_response",
@@ -142,6 +145,8 @@ async function mintGatewayClientSecret(input: {
   return {
     token,
     url: url.toString(),
-    expiresAt: typeof expiresAt === "number" ? expiresAt : null,
+    // The Gateway client-secrets response uses epoch seconds. Native proxy
+    // grants and the existing xAI broker use epoch milliseconds.
+    expiresAt: typeof expiresAt === "number" ? expiresAt * 1_000 : null,
   };
 }
