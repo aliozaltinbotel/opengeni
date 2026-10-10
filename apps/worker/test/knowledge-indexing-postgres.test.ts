@@ -1,5 +1,7 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
+import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { Settings } from "@opengeni/config";
 import { EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA } from "@opengeni/contracts";
 import { knowledgeQueryOperationId, searchKnowledgeEntries, type KnowledgeQueryWorkflowRequest, type KnowledgePreparationWorkflowRequest } from "@opengeni/core";
@@ -1050,8 +1052,9 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     const observedCrashDispatch = new Promise<void>(resolve => { crashProviderEntered = resolve; });
     const heldCrashResponse = new Promise<Response>(resolve => { releaseCrashProvider = resolve; });
     let crashProviderCalls = 0;
+    let crashDispatchObserved = false;
     const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
-      crashProviderCalls++; crashProviderEntered(); return heldCrashResponse;
+      crashProviderCalls++; crashDispatchObserved = true; crashProviderEntered(); return heldCrashResponse;
     } });
     const childCode = `
       import { NativeConnection, Worker } from '@temporalio/worker';
@@ -1076,15 +1079,39 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
       env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "", OPENGENI_TEST_TEMPORAL_ADDRESS: address,
         OPENGENI_TEST_TEMPORAL_NAMESPACE: namespace, OPENGENI_RECEIPT_TEST_DB_URL: shared.appUrl,
         OPENGENI_RECEIPT_TEST_SETTINGS: JSON.stringify(settings), OPENGENI_RECEIPT_TEST_TASK_QUEUE: taskQueue,
-        OPENGENI_RECEIPT_TEST_PROVIDER_URL: provider.url.toString() }, stdout: "ignore", stderr: "ignore",
+        OPENGENI_RECEIPT_TEST_PROVIDER_URL: provider.url.toString() }, stdout: "ignore", stderr: "pipe",
     });
+
+    // Drain immediately so startup cannot block on a full pipe. Retain at most
+    // 16 KiB privately; raw SDK/DB errors never become assertion/log contents.
+    const childDiagnostics = (async () => {
+      const reader = child.stderr.getReader();
+      const chunks: Uint8Array[] = []; let retained = 0;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read(); if (done) break;
+          const take = Math.min(value.length, 16 * 1024 - retained);
+          if (take > 0) { chunks.push(value.slice(0, take)); retained += take; }
+        }
+      } finally { reader.releaseLock(); }
+      return Buffer.concat(chunks);
+    })();
     const crashedInput = { ...paidInput, operationId: `crashed:${suffix}`, request: { ...paidInput.request, query: "crash" } };
     const crashed = await start(crashedInput);
     try {
-      await Promise.race([observedCrashDispatch, child.exited.then(() => { throw new Error("Activity process exited before physical dispatch"); })]);
+      await Promise.race([observedCrashDispatch, child.exited.then(async exitCode => {
+        if (crashDispatchObserved) return;
+        const diagnostic = await childDiagnostics;
+        const path = process.env.OPENGENI_TEST_NATIVE_CHILD_DIAGNOSTIC_FILE
+          ?? new URL(`../../../.local/knowledge-query-child-${suffix}.stderr.private`, import.meta.url).pathname;
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(path, diagnostic, { mode: 0o600 }); await chmod(path, 0o600);
+        throw new Error(`Activity process exited before physical dispatch (exit ${exitCode}; private diagnostic ${path}; ${diagnostic.length} bytes)`);
+      })]);
       child.kill("SIGKILL"); await child.exited;
     } finally {
       if (child.exitCode === null) { child.kill("SIGKILL"); await child.exited; }
+      await childDiagnostics;
       releaseCrashProvider(Response.json({ vector: [1, 0, 0] })); provider.stop(true);
       await startWorker();
     }
@@ -1137,7 +1164,7 @@ test("paid concurrent query admission includes account ceilings and workspace/me
     const access = await bootstrapWorkspace(client.db, {
       accountExternalSource: "query-pressure", accountExternalId: suffix, accountName: "Query pressure",
       workspaceExternalSource: "query-pressure", workspaceExternalId: suffix, workspaceName: "Query pressure",
-      subjectId: `query-pressure:${suffix}`,
+      subjectId: `user:query-pressure:${suffix}`,
     });
     const grant = access.workspaceGrants[0]!;
     const accountId = grant.accountId, workspaceId = grant.workspaceId!;
