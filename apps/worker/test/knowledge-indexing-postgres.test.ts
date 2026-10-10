@@ -1155,6 +1155,13 @@ test("paid concurrent query admission includes account ceilings and workspace/me
       eventType: "document.query_embedding_bytes", quantity: minuteBytes - bytes, unit: "byte",
       idempotencyKey: `query-pressure:prior-bytes:${suffix}` });
     if (boundary === "workspace" || boundary === "member") {
+      // Same upstream organization-owner fixture as the installed allowance
+      // PG gate; workspace bootstrap alone does not grant organization admin.
+      const personalWorkspaceId = crypto.randomUUID();
+      await shared.admin`INSERT INTO workspaces(id,account_id,name)
+        VALUES(${personalWorkspaceId},${accountId},'Allowance owner personal')`;
+      await shared.admin`INSERT INTO organization_memberships(account_id,subject_id,role,status,personal_workspace_id)
+        VALUES(${accountId},${grant.subjectId},'owner','active',${personalWorkspaceId})`;
       await setWorkspaceAllowance(client.db, { accountId, workspaceId, actorSubjectId: grant.subjectId,
         includedCredits: boundary === "workspace" ? 1 : available, period: "none", expectedVersion: 0 });
       if (boundary === "member") await setMemberAllowance(client.db, { accountId, workspaceId,

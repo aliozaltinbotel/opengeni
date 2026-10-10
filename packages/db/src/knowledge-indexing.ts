@@ -84,12 +84,15 @@ export async function readKnowledgeQueryUsageFact(db: Database, input: {
   eventType: "knowledge.query.admitted" | "knowledge.query.dispatched" | "knowledge.query.indeterminate" | "knowledge.query.closed" | "embedding.call";
 }): Promise<{ attributes: Record<string, unknown>; occurredAt: Date } | null> {
   return withRlsContext(db, input, async tx => {
-    const [row] = await rawRows<{ attributes: Record<string, unknown>; occurredAt: Date }>(tx,
+    const [row] = await rawRows<{ attributes: Record<string, unknown>; occurredAt: unknown }>(tx,
       sql`SELECT attributes, occurred_at AS "occurredAt" FROM usage_events
         WHERE account_id=${input.accountId}::uuid AND workspace_id=${input.workspaceId}::uuid
           AND source_resource_type='knowledge_query' AND source_resource_id=${input.callId}
           AND event_type=${input.eventType} AND idempotency_key=${`usage:${input.eventType}:query:${input.callId}`}`);
-    return row ?? null;
+    // Raw execute does not apply Drizzle column decoders: postgres-js can
+    // return timestamptz as text. Normalize at this existing reader boundary
+    // before an immutable recovery fact reaches the Date-only insert encoder.
+    return row ? { attributes: row.attributes, occurredAt: z.coerce.date().parse(row.occurredAt) } : null;
   });
 }
 
