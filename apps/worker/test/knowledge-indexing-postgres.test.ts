@@ -946,7 +946,8 @@ test("completed embedding facts survive rollback and concurrent settlement on a 
 
 // This proof needs the coordinated native Temporal allocation as well as the
 // restricted PostgreSQL fixture. Ordinary PG runs explicitly report it skipped.
-test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge workflows replay and restart without repeating an unknown provider call", async () => {
+for (const scenario of ["settled-and-lost-response", "process-loss-and-authority"] as const) {
+test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)(`released knowledge workflows replay and restart without repeating an unknown provider call: ${scenario}`, async () => {
   const { Client, Connection, WorkflowExecutionAlreadyStartedError, WorkflowFailedError } = await import("@temporalio/client");
   const { NativeConnection, Worker } = await import("@temporalio/worker");
   const { createHash } = await import("node:crypto");
@@ -977,7 +978,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     documentEmbeddingCreditsActivatedAt: "2026-01-01T00:00:00Z",
     documentEmbeddingRateMicrosPerMillionBytes: 1_000_000 } as Settings;
   await shared.admin`INSERT INTO credit_ledger_entries(account_id,type,amount_micros,idempotency_key)
-    VALUES(${grant.accountId},'grant',1,${`temporal-receipts:${suffix}`})`;
+    VALUES(${grant.accountId},'grant',${scenario === "settled-and-lost-response" ? 1 : 100},${`temporal-receipts:${suffix}`})`;
   let physicalCalls = 0, loseResponse = false, revokeOnReturn = false;
   const activities = () => createKnowledgeIndexingActivities(
     async () => ({ db: client.db, settings, observability: { warn: () => undefined } }) as ControlActivityServices,
@@ -1045,10 +1046,11 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     });
     handles.push(handle); return handle;
   };
+  const paidInput: KnowledgeQueryWorkflowRequest = { context, grant, externalContinuation: null,
+    operationId: `paid:${suffix}`, request: { query: "abcd", mode: "vector", limit: 20 } as KnowledgeQueryWorkflowRequest["request"] };
   try {
+    if (scenario === "settled-and-lost-response") {
     await startWorker();
-    const paidInput: KnowledgeQueryWorkflowRequest = { context, grant, externalContinuation: null,
-      operationId: `paid:${suffix}`, request: { query: "abcd", mode: "vector", limit: 20 } as KnowledgeQueryWorkflowRequest["request"] };
     const paid = await start(paidInput);
     expect((await paid.result() as { searchMode: string }).searchMode).toBe("vector");
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(-3);
@@ -1083,16 +1085,25 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     const pressure = await pendingKnowledgeQueryPressure(client.db, { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId });
     expect(pressure.bytes).toBe(4); expect(pressure.micros).toBe(4);
     await Worker.runReplayHistory({ workflowBundle: { code } }, await lost.fetchHistory(), lost.workflowId);
-    // Kill the actual activity process only after an independent loopback
-    // provider has observed the physical request. No finally/catch can run.
-    await stopWorker();
+    return;
+    }
+    // This independent account has no dependency on the normal scenario's
+    // UNKNOWN rows. The same physical child provider creates its own prefill.
+    // Kill only after the held crash request is independently observed.
     let crashProviderEntered!: () => void, releaseCrashProvider!: (response: Response) => void;
     const observedCrashDispatch = new Promise<void>(resolve => { crashProviderEntered = resolve; });
     const heldCrashResponse = new Promise<Response>(resolve => { releaseCrashProvider = resolve; });
-    let crashProviderCalls = 0;
-    let crashDispatchObserved = false, recovering = false;
+    let crashProviderCalls = 0, prefillProviderCalls = 0;
+    let crashDispatchObserved = false;
+    let providerPhase: "prefill" | "crash" | "recovery" = "prefill";
     const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
-      if (!recovering) {
+      if (providerPhase === "prefill") {
+        prefillProviderCalls++;
+        // A real physical request loses its usable response. The actual child
+        // response reader fails; no provider completion/usage is fabricated.
+        return new Response("synthetic lost provider response", { headers: { "content-type": "application/json" } });
+      }
+      if (providerPhase === "crash") {
         crashProviderCalls++; crashDispatchObserved = true; crashProviderEntered(); return heldCrashResponse;
       }
       // Later legitimate calls exercise the same live membership revocation
@@ -1153,6 +1164,25 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     };
     const crashOwner = launchChild("crash");
     const child = crashOwner.process, childDiagnostics = crashOwner.diagnostics;
+    recoveryChild = crashOwner;
+    const prefillInput = { ...paidInput, operationId: `prefill:${suffix}`, request: { ...paidInput.request, query: "lost" } };
+    stage("prefill-start:start");
+    const prefill = await start(prefillInput);
+    stage("prefill-start:complete");
+    stage("prefill-result:start");
+    await expect(prefill.result()).rejects.toThrow();
+    stage("prefill-result:complete");
+    expect((await prefill.describe()).status.name).toBe("FAILED");
+    expect(prefillProviderCalls).toBe(1);
+    const prefillCallId = knowledgeQueryOperationId(context, prefillInput.operationId);
+    const prefillFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
+      WHERE account_id=${grant.accountId} AND source_resource_id=${prefillCallId}`;
+    expect(prefillFacts.some(row => row.event_type === "knowledge.query.indeterminate" && row.attributes.providerReceipt.estimatedProviderCostMicros === null)).toBeTrue();
+    expect(prefillFacts.some(row => row.event_type === "embedding.call" || row.event_type === "knowledge.query.closed")).toBeFalse();
+    const prefillPressure = await pendingKnowledgeQueryPressure(client.db, { accountId: grant.accountId, workspaceId: grant.workspaceId!, subjectId: grant.subjectId });
+    expect(prefillPressure.bytes).toBe(Buffer.byteLength(prefillInput.request.query!, "utf8"));
+    expect(prefillPressure.micros).toBe(prefillPressure.bytes);
+    providerPhase = "crash";
     const callsBeforeRecovery = physicalCalls;
     const crashedInput = { ...paidInput, operationId: `crashed:${suffix}`, request: { ...paidInput.request, query: "crash" } };
     const crashed = await start(crashedInput);
@@ -1171,7 +1201,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
       if (child.exitCode === null) { child.kill("SIGKILL"); await child.exited; }
       await childDiagnostics;
       releaseCrashProvider(Response.json({ vector: [1, 0, 0] }));
-      recovering = true;
+      providerPhase = "recovery";
       // Production restarts in a new process. Reuse the actual crash worker
       // entry, SDK, queue and activities instead of a third Worker in this
       // test process after prior Worker/replay lifecycles.
@@ -1299,6 +1329,7 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     stage("test-callback:complete");
   }
 }, 240_000);
+}
 
 test("paid concurrent query admission includes account ceilings and workspace/member pending pressure", async () => {
   const source = await Bun.file(new URL("../../../packages/core/src/domain/knowledge-search.ts", import.meta.url)).text();
