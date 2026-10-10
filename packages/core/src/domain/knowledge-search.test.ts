@@ -1,4 +1,4 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterAll, expect, mock, spyOn, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import type { KnowledgeContext, recordUsageEvent } from "@opengeni/db";
 const lockedDb = {} as never;
@@ -46,7 +46,9 @@ const usage = mock(async (db: unknown, input: Parameters<typeof recordUsageEvent
     if (db !== lockedDb) durableCalls.push(input);
   }
 });
+const nativeDbExports = await import("@opengeni/db");
 mock.module("@opengeni/db", () => ({
+  ...nativeDbExports,
   listKnowledgeEntries: list,
   getSpendableCreditBalance: async () => ({ balanceMicros: balance }),
   applyCreditDebitAfterUse: debits,
@@ -694,4 +696,77 @@ test("unusable completed query vectors still record the call before the keyword 
   );
   expect(result).toMatchObject({ searchMode: "keyword", fallbackReason: "provider_unavailable" });
   expect(durableCalls.slice(before)).toHaveLength(1);
+});
+
+test("real OpenAI query validation failure still settles its provider-completion receipt", async () => {
+  const { OpenAIEmbeddingProvider } = await import("@opengeni/documents");
+  let data: {
+    object: "embedding";
+    index: number;
+    embedding: Awaited<ReturnType<import("@opengeni/documents").DocumentEmbedder["embedQuery"]>>;
+  }[] = [{ object: "embedding", index: 0, embedding: [1, 0] }];
+  const preconnect = globalThis.fetch.preconnect;
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(
+      async () => {
+        // The SDK envelope is checked by the real adapter regression; the vector
+        // payload derives from the public embedder contract, without a core SDK dependency.
+        const response = {
+          object: "list",
+          model: "fixture-embedding",
+          data,
+          usage: { prompt_tokens: 0, total_tokens: 0 },
+        };
+        return new Response(JSON.stringify(response), {
+          headers: { "content-type": "application/json" },
+        });
+      },
+      { preconnect },
+    ),
+  );
+  const provider = new OpenAIEmbeddingProvider({
+    apiKey: "fixture-not-a-credential",
+    baseURL: "https://embedding-fixture.invalid/v1",
+    model: "fixture-embedding",
+    dimensions: 3,
+  });
+  const before = durableCalls.length,
+    debitCount = debits.mock.calls.length;
+  try {
+    await expect(
+      searchKnowledgeEntries(
+        {} as never,
+        serviceContext,
+        { query: "é", mode: "vector" },
+        () => provider,
+      ),
+    ).rejects.toThrow("dimensions");
+    data = [];
+    const fallback = await searchKnowledgeEntries(
+      {} as never,
+      serviceContext,
+      { query: "query" },
+      () => provider,
+    );
+    expect(fallback).toMatchObject({
+      searchMode: "keyword",
+      fallbackReason: "provider_unavailable",
+    });
+    expect(durableCalls.slice(before)).toHaveLength(2);
+    for (const call of durableCalls.slice(before))
+      expect(call.attributes).toMatchObject({
+        provider: "openai",
+        model: provider.model,
+        outcome: "completed",
+        inputItems: 1,
+        inputTokens: null,
+        estimatedProviderCostMicros: null,
+        pricingSource: null,
+        rateMicrosPerMillionBytes: null,
+        billingPath: "external",
+      });
+    expect(debits.mock.calls.length).toBe(debitCount);
+  } finally {
+    fetch.mockRestore();
+  }
 });

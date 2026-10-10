@@ -1,9 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { LiteParse } from "@llamaindex/liteparse";
 import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import {
   DeterministicEmbeddingProvider,
+  OpenAIEmbeddingProvider,
+  type EmbeddingProviderCompletionReceipt,
   HeuristicCurationProvider,
   RecursiveTextChunker,
   canViewDocument,
@@ -574,4 +576,63 @@ describe("document curation", () => {
     expect(() => parseCurationOutcome("[]", bases)).toThrow();
     expect(() => parseCurationOutcome("null", bases)).toThrow("non-object");
   });
+});
+
+test("OpenAI adapter retains immutable completed-response receipts before dimension and empty-query validation", async () => {
+  let data: import("openai").default.CreateEmbeddingResponse["data"] = [
+    { object: "embedding", index: 0, embedding: [1, 0] },
+  ];
+  const response = (): import("openai").default.CreateEmbeddingResponse => ({
+    object: "list",
+    model: "fixture-embedding",
+    data,
+    usage: { prompt_tokens: 0, total_tokens: 0 },
+  });
+  const preconnect = globalThis.fetch.preconnect;
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(
+      async () =>
+        new Response(JSON.stringify(response()), {
+          headers: { "content-type": "application/json" },
+        }),
+      { preconnect },
+    ),
+  );
+  const provider = new OpenAIEmbeddingProvider({
+    apiKey: "fixture-not-a-credential",
+    baseURL: "https://embedding-fixture.invalid/v1",
+    model: "fixture-embedding",
+    dimensions: 3,
+  });
+  const receipts: EmbeddingProviderCompletionReceipt[] = [];
+  try {
+    await expect(provider.embedMany(["é"], (receipt) => receipts.push(receipt))).rejects.toThrow(
+      "dimensions",
+    );
+    data = [];
+    await expect(provider.embedQuery("query", (receipt) => receipts.push(receipt))).rejects.toThrow(
+      "no query embedding",
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(receipts).toHaveLength(2);
+    expect(receipts[0]).toMatchObject({
+      provider: "openai",
+      model: provider.model,
+      inputBytes: 2,
+      inputItems: 1,
+    });
+    expect(receipts[1]).toMatchObject({
+      provider: "openai",
+      model: provider.model,
+      inputBytes: 5,
+      inputItems: 1,
+    });
+    expect(receipts[0]!.callId).not.toBe(receipts[1]!.callId);
+    for (const receipt of receipts) {
+      expect(Object.isFrozen(receipt)).toBe(true);
+      expect(Number.isFinite(Date.parse(receipt.completedAt))).toBe(true);
+    }
+  } finally {
+    fetch.mockRestore();
+  }
 });

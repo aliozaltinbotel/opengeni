@@ -17,7 +17,7 @@ import {
   type KnowledgeContext,
   type CreditDebitAttribution,
 } from "@opengeni/db";
-import type { DocumentEmbedder } from "@opengeni/documents";
+import type { DocumentEmbedder, EmbeddingProviderCompletionReceipt } from "@opengeni/documents";
 import type { z } from "zod";
 import {
   documentEmbeddingCostMicros,
@@ -119,43 +119,57 @@ export async function searchKnowledgeEntries(
       "query_limit",
     );
 
-  let completedCall: Parameters<typeof recordUsageEvent>[1] | undefined;
+  const completedCalls: Parameters<typeof recordUsageEvent>[1][] = [];
   const retrieveThenSettle = async (queryDb: Database) => {
-    const usageId = crypto.randomUUID();
+    let usageId: string = crypto.randomUUID();
     const providerName = settings?.documentEmbeddingProvider ?? "unspecified";
     const rate = settings?.documentEmbeddingRateMicrosPerMillionBytes ?? 0;
+    const captureCompleted = (receipt: EmbeddingProviderCompletionReceipt) => {
+      // Capture the completed provider request even if its vector is unusable
+      // or retrieval/settlement fails. The root writer settles after the lock exits.
+      usageId = receipt.callId;
+      completedCalls.push({
+        ...callOwner,
+        occurredAt: new Date(receipt.completedAt),
+        eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+        quantity: 1,
+        unit: "call",
+        sourceResourceType: "knowledge_query",
+        sourceResourceId: receipt.callId,
+        idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:query:${receipt.callId}`,
+        attributes: embeddingCallUsageAttributes({
+          callKind: "query",
+          provider: receipt.provider,
+          model: receipt.model,
+          inputBytes: receipt.inputBytes,
+          inputItems: receipt.inputItems,
+          rateMicrosPerMillionBytes: rate,
+          billingPath: paidSettings ? "opengeni_credits" : "external",
+        }),
+      });
+    };
     let embedding: { model: string; values: number[] };
     let dimensions: number;
     try {
       const provider = embedder();
       const model = provider.model;
       dimensions = provider.dimensions;
-      const values = await provider.embedQuery(request.query!);
+      const values = await provider.embedQuery(request.query!, captureCompleted);
       embedding = { model, values };
     } catch (error) {
       return keywordFallback(queryDb, error, "provider_unavailable");
     }
-    // Capture the completed provider request even if its vector is unusable
-    // or retrieval/settlement fails. The root writer settles after the lock exits.
-    completedCall = {
-      ...callOwner,
-      occurredAt: new Date(),
-      eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
-      quantity: 1,
-      unit: "call",
-      sourceResourceType: "knowledge_query",
-      sourceResourceId: usageId,
-      idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:query:${usageId}`,
-      attributes: embeddingCallUsageAttributes({
-        callKind: "query",
+    // Older/local embedders expose vectors only. Their successful return is
+    // still the completion fact; observer-aware adapters already captured it.
+    if (completedCalls.length === 0)
+      captureCompleted({
+        callId: usageId,
         provider: providerName,
         model: embedding.model,
         inputBytes: bytes,
         inputItems: 1,
-        rateMicrosPerMillionBytes: rate,
-        billingPath: paidSettings ? "opengeni_credits" : "external",
-      }),
-    };
+        completedAt: new Date().toISOString(),
+      });
     if (
       embedding.values.length !== dimensions ||
       embedding.values.some((value) => !Number.isFinite(value)) ||
@@ -299,6 +313,6 @@ export async function searchKnowledgeEntries(
     // Drain the original fact only after the usage transaction has committed or
     // rolled back. This works on a single-connection pool and cannot be erased
     // by retrieval/debit failure. A failed fact write is never a fallback.
-    if (completedCall) await recordUsageEvent(db, completedCall);
+    for (const completedCall of completedCalls) await recordUsageEvent(db, completedCall);
   }
 }

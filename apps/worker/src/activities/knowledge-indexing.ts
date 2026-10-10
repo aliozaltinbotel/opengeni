@@ -24,7 +24,7 @@ import {
   withWorkspaceUsageLock,
   waitKnowledgeIndexForFunding,
 } from "@opengeni/db";
-import type { DocumentServices } from "@opengeni/documents";
+import type { DocumentServices, EmbeddingProviderCompletionReceipt } from "@opengeni/documents";
 import type { ControlActivityServices } from "./types";
 
 /** The configured monthly indexed-chunk limit, not a provider failure. */
@@ -149,7 +149,7 @@ export function createKnowledgeIndexingActivities(
       });
       for (const claim of claims) {
         let stage: KnowledgeIndexFailureStage = "processing";
-        let completedCall: Parameters<typeof recordUsageEvent>[1] | undefined;
+        const completedCalls: Parameters<typeof recordUsageEvent>[1][] = [];
         try {
           const source = await readKnowledgeIndexSource(db, claim);
           if (!source) {
@@ -263,31 +263,42 @@ export function createKnowledgeIndexingActivities(
               // if its lease/checkpoint has not changed.
               const callId = crypto.randomUUID();
               const providerName = settings.documentEmbeddingProvider ?? "unspecified";
+              const captureCompleted = (receipt: EmbeddingProviderCompletionReceipt) => {
+                // MAINT-P09-430: the completed provider call survives publication refusal
+                // and rollback. This fact grants no source/publication authority.
+                completedCalls.push({
+                  accountId: claim.accountId,
+                  workspaceId: current.billingWorkspaceId,
+                  occurredAt: new Date(receipt.completedAt),
+                  eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+                  quantity: 1,
+                  unit: "call",
+                  sourceResourceType: "knowledge_revision",
+                  sourceResourceId: claim.revisionId,
+                  idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}:${receipt.callId}`,
+                  attributes: embeddingCallUsageAttributes({
+                    callKind: "index",
+                    provider: receipt.provider,
+                    model: receipt.model,
+                    inputBytes: receipt.inputBytes,
+                    inputItems: receipt.inputItems,
+                    rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
+                    billingPath: paid ? "opengeni_credits" : "external",
+                  }),
+                });
+              };
               stage = "embedding";
-              const vectors = await embedder.embedMany(inputs);
+              const vectors = await embedder.embedMany(inputs, captureCompleted);
               stage = "processing";
-              // MAINT-P09-430: the completed provider call survives publication refusal
-              // and rollback. This fact grants no source/publication authority.
-              completedCall = {
-                accountId: claim.accountId,
-                workspaceId: current.billingWorkspaceId,
-                occurredAt: new Date(),
-                eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
-                quantity: 1,
-                unit: "call",
-                sourceResourceType: "knowledge_revision",
-                sourceResourceId: claim.revisionId,
-                idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}:${callId}`,
-                attributes: embeddingCallUsageAttributes({
-                  callKind: "index",
+              if (completedCalls.length === 0)
+                captureCompleted({
+                  callId,
                   provider: providerName,
                   model: claim.model,
                   inputBytes: bytes,
                   inputItems: chunks.length,
-                  rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
-                  billingPath: paid ? "opengeni_credits" : "external",
-                }),
-              };
+                  completedAt: new Date().toISOString(),
+                });
               if (vectors.length !== chunks.length)
                 throw new Error("Incomplete Knowledge embeddings");
               // A reviewer may have rejected this revision during the provider
@@ -413,7 +424,7 @@ export function createKnowledgeIndexingActivities(
           // Preserve the exact completed provider fact after the usage lock has
           // released, including rollback/refusal paths. Never consume another
           // connection while holding that lock, and never soft-fail this write.
-          if (completedCall) await recordUsageEvent(db, completedCall);
+          for (const completedCall of completedCalls) await recordUsageEvent(db, completedCall);
         }
       }
       return result;

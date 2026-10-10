@@ -109,11 +109,29 @@ export type DocumentChunker = {
   chunk: (parsed: ParsedDocument, file: FileAsset) => DocumentChunk[];
 };
 
+/** Content-free fact of one completed provider request, before vector validation. */
+export type EmbeddingProviderCompletionReceipt = Readonly<{
+  callId: string;
+  provider: string;
+  model: string;
+  inputBytes: number;
+  inputItems: number;
+  completedAt: string;
+}>;
+
 export type DocumentEmbedder = {
   model: string;
   dimensions: number;
-  embedMany: (texts: string[]) => Promise<number[][]>;
-  embedQuery: (text: string) => Promise<number[]>;
+  // Optional synchronous observers retain completed calls even if validation
+  // then throws. They capture facts only; persistence belongs to the caller.
+  embedMany: (
+    texts: string[],
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+  ) => Promise<number[][]>;
+  embedQuery: (
+    text: string,
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+  ) => Promise<number[]>;
 };
 
 export type DocumentCurationCandidateBase = {
@@ -399,7 +417,10 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
   private readonly defaultHeaders: Record<string, string> | undefined;
   private readonly defaultQuery: Record<string, string> | undefined;
 
-  async embedMany(texts: string[]): Promise<number[][]> {
+  async embedMany(
+    texts: string[],
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+  ): Promise<number[][]> {
     if (texts.length === 0) return [];
     const out: number[][] = [];
     for (let start = 0; start < texts.length; start += 64) {
@@ -411,6 +432,16 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
         input: batch,
         dimensions: this.dimensions,
       });
+      completed?.(
+        Object.freeze({
+          callId: randomUUID(),
+          provider: "openai",
+          model: this.model,
+          inputBytes: batch.reduce((sum, text) => sum + Buffer.byteLength(text, "utf8"), 0),
+          inputItems: batch.length,
+          completedAt: new Date().toISOString(),
+        }),
+      );
       for (const item of response.data) {
         out.push(validateEmbedding(item.embedding, this.dimensions, this.model));
       }
@@ -418,8 +449,11 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
     return out;
   }
 
-  async embedQuery(text: string): Promise<number[]> {
-    const [embedding] = await this.embedMany([text]);
+  async embedQuery(
+    text: string,
+    completed?: (receipt: EmbeddingProviderCompletionReceipt) => void,
+  ): Promise<number[]> {
+    const [embedding] = await this.embedMany([text], completed);
     if (!embedding) {
       throw new Error("Embedding provider returned no query embedding");
     }

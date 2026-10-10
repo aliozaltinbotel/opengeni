@@ -1,4 +1,4 @@
-import { afterAll, expect, mock, test } from "bun:test";
+import { afterAll, expect, mock, spyOn, test } from "bun:test";
 import { StoredKnowledgeEntryContent } from "@opengeni/contracts";
 import type { CreditDebitAttribution, KnowledgeIndexClaim, recordUsageEvent } from "@opengeni/db";
 import { knowledgeIndexChunks } from "../../../packages/documents/src/knowledge-index";
@@ -38,6 +38,7 @@ const append = mock(async () => {
   if (appendFails) throw new Error("append unavailable");
   return { status: appendStatus };
 });
+import type { DocumentServices } from "@opengeni/documents";
 import type { ControlActivityServices } from "../src/activities/types";
 
 let attribution: CreditDebitAttribution = { kind: "service" };
@@ -47,8 +48,9 @@ const preflight = mock(async (_db: unknown, _input: unknown) => refusal);
 const defer = mock(async () => undefined);
 let vectors = [[1, 0, 0]];
 const embed = mock(async () => vectors);
-mock.module("@opengeni/documents", () => ({ knowledgeIndexChunks }));
+const nativeDbExports = await import("@opengeni/db");
 mock.module("@opengeni/db", () => ({
+  ...nativeDbExports,
   claimKnowledgeIndexJobs: async () => [{ ...claim, billingAttribution: attribution }],
   readKnowledgeIndexSource: async () => ({ billingWorkspaceId: "workspace", nextIndex: 0, entry }),
   withWorkspaceUsageLock: async (
@@ -106,7 +108,7 @@ mock.module("@opengeni/core", () => ({
 const { createKnowledgeIndexingActivities } = await import("../src/activities/knowledge-indexing");
 afterAll(() => mock.restore());
 
-function worker() {
+function worker(embedder?: DocumentServices["embedder"]) {
   return createKnowledgeIndexingActivities(
     async () =>
       ({
@@ -120,7 +122,8 @@ function worker() {
         },
         observability: { warn: () => undefined },
       }) as unknown as ControlActivityServices,
-    async () => ({ embedder: { model: "embedding", dimensions: 3, embedMany: embed } }) as never,
+    async () =>
+      ({ embedder: embedder ?? { model: "embedding", dimensions: 3, embedMany: embed } }) as never,
   );
 }
 
@@ -242,5 +245,56 @@ test("incomplete returned index vectors preserve the completed call without publ
     expect(debit.mock.calls.length).toBe(debits);
   } finally {
     vectors = [[1, 0, 0]];
+  }
+});
+
+test("real OpenAI index adapter validation failure preserves the completed response without publication or debit", async () => {
+  const { OpenAIEmbeddingProvider } = await import("@opengeni/documents");
+  const preconnect = globalThis.fetch.preconnect;
+  const fetch = spyOn(globalThis, "fetch").mockImplementation(
+    Object.assign(
+      async () => {
+        const response: import("openai").default.CreateEmbeddingResponse = {
+          object: "list",
+          model: claim.model,
+          data: [{ object: "embedding", index: 0, embedding: [1, 0] }],
+          usage: { prompt_tokens: 0, total_tokens: 0 },
+        };
+        return new Response(JSON.stringify(response), {
+          headers: { "content-type": "application/json" },
+        });
+      },
+      { preconnect },
+    ),
+  );
+  const provider = new OpenAIEmbeddingProvider({
+    apiKey: "fixture-not-a-credential",
+    baseURL: "https://embedding-fixture.invalid/v1",
+    model: claim.model,
+    dimensions: claim.dimensions,
+  });
+  attribution = { kind: "service" };
+  const before = durableCalls.size,
+    writes = append.mock.calls.length,
+    debits = debit.mock.calls.length;
+  try {
+    expect((await worker(provider).indexKnowledge()).deferred).toBe(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(durableCalls.size).toBe(before + 1);
+    expect([...durableCalls.values()].at(-1)?.attributes).toMatchObject({
+      provider: "openai",
+      model: provider.model,
+      outcome: "completed",
+      inputBytes: bytes,
+      inputItems: chunks.length,
+      inputTokens: null,
+      estimatedProviderCostMicros: bytes,
+      pricingSource: "configured_byte_rate",
+      rateMicrosPerMillionBytes: 1_000_000,
+    });
+    expect(append.mock.calls.length).toBe(writes);
+    expect(debit.mock.calls.length).toBe(debits);
+  } finally {
+    fetch.mockRestore();
   }
 });
