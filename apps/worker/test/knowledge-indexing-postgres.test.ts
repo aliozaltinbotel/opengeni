@@ -947,7 +947,7 @@ test("completed embedding facts survive rollback and concurrent settlement on a 
 // This proof needs the coordinated native Temporal allocation as well as the
 // restricted PostgreSQL fixture. Ordinary PG runs explicitly report it skipped.
 test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge workflows replay and restart without repeating an unknown provider call", async () => {
-  const { Client, Connection, WorkflowExecutionAlreadyStartedError } = await import("@temporalio/client");
+  const { Client, Connection, WorkflowExecutionAlreadyStartedError, WorkflowFailedError } = await import("@temporalio/client");
   const { NativeConnection, Worker } = await import("@temporalio/worker");
   const { createHash } = await import("node:crypto");
   const address = process.env.OPENGENI_TEST_TEMPORAL_ADDRESS!;
@@ -1031,6 +1031,9 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     console.error("KNOWLEDGE_HOSTED_WORKER_INSTANCE_STOPPED", workerIdentity);
     worker = undefined; running = undefined;
   };
+  let recoveryChild: { process: ReturnType<typeof Bun.spawn>; diagnostics: Promise<Buffer> } | undefined;
+  let stoppingRecovery = false;
+  let hostedProvider: ReturnType<typeof Bun.serve> | undefined;
   const start = async (input: KnowledgeQueryWorkflowRequest | KnowledgePreparationWorkflowRequest, preparation = false) => {
     const callId = knowledgeQueryOperationId(context, input.operationId, preparation ? "preparation" : "query");
     const bindingDigest = createHash("sha256").update(JSON.stringify({ context, request: input.request })).digest("hex");
@@ -1085,10 +1088,19 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     const observedCrashDispatch = new Promise<void>(resolve => { crashProviderEntered = resolve; });
     const heldCrashResponse = new Promise<Response>(resolve => { releaseCrashProvider = resolve; });
     let crashProviderCalls = 0;
-    let crashDispatchObserved = false;
+    let crashDispatchObserved = false, recovering = false;
     const provider = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async () => {
-      crashProviderCalls++; crashDispatchObserved = true; crashProviderEntered(); return heldCrashResponse;
+      if (!recovering) {
+        crashProviderCalls++; crashDispatchObserved = true; crashProviderEntered(); return heldCrashResponse;
+      }
+      // Later legitimate calls exercise the same live membership revocation
+      // after provider return; recovery itself must never reach this provider.
+      physicalCalls++;
+      if (revokeOnReturn) await shared.admin`UPDATE workspace_memberships SET permissions='[]'::jsonb
+        WHERE account_id=${grant.accountId} AND workspace_id=${grant.workspaceId!} AND subject_id=${grant.subjectId}`;
+      return Response.json({ vector: [1, 0, 0] });
     } });
+    hostedProvider = provider;
     const childCode = `
       import { NativeConnection, Worker } from '@temporalio/worker';
       import { createDb } from '@opengeni/db';
@@ -1104,32 +1116,42 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
             const response=await fetch(process.env.OPENGENI_RECEIPT_TEST_PROVIDER_URL);await response.json();return [1,0,0];}}}));
       const worker=await Worker.create({connection:native,namespace:process.env.OPENGENI_TEST_TEMPORAL_NAMESPACE,
         taskQueue:process.env.OPENGENI_RECEIPT_TEST_TASK_QUEUE,workflowBundle:{codePath:'./apps/worker/dist/workflow-bundle.js'},activities,
-        identity:'maint430-hosted-child:'+process.pid,
+        identity:'maint430-hosted-child:'+process.pid+':'+process.env.OPENGENI_RECEIPT_TEST_WORKER_ROLE,
         maxConcurrentActivityTaskExecutions:1,maxConcurrentWorkflowTaskExecutions:2});
-      await worker.run();
+      process.once('SIGTERM',()=>worker.shutdown());
+      console.log('KNOWLEDGE_HOSTED_CHILD_CREATED',process.env.OPENGENI_RECEIPT_TEST_WORKER_ROLE,process.pid);
+      try { await worker.run(); }
+      finally { await native.close(); await db.close(); }
     `;
-    const child = Bun.spawn([process.execPath, "--no-install", "--no-env-file", "-e", childCode], {
-      cwd: new URL("../../../", import.meta.url).pathname,
-      env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "", OPENGENI_TEST_TEMPORAL_ADDRESS: address,
-        OPENGENI_TEST_TEMPORAL_NAMESPACE: namespace, OPENGENI_RECEIPT_TEST_DB_URL: shared.appUrl,
-        OPENGENI_RECEIPT_TEST_SETTINGS: JSON.stringify(settings), OPENGENI_RECEIPT_TEST_TASK_QUEUE: taskQueue,
-        OPENGENI_RECEIPT_TEST_PROVIDER_URL: provider.url.toString() }, stdout: "ignore", stderr: "pipe",
-    });
+    const launchChild = (role: "crash" | "recovery") => {
+      const child = Bun.spawn([process.execPath, "--no-install", "--no-env-file", "-e", childCode], {
+        cwd: new URL("../../../", import.meta.url).pathname,
+        env: { ...process.env, BUN_RUNTIME_TRANSPILER_CACHE_PATH: "", OPENGENI_TEST_TEMPORAL_ADDRESS: address,
+          OPENGENI_TEST_TEMPORAL_NAMESPACE: namespace, OPENGENI_RECEIPT_TEST_DB_URL: shared.appUrl,
+          OPENGENI_RECEIPT_TEST_SETTINGS: JSON.stringify(settings), OPENGENI_RECEIPT_TEST_TASK_QUEUE: taskQueue,
+          OPENGENI_RECEIPT_TEST_PROVIDER_URL: provider.url.toString(), OPENGENI_RECEIPT_TEST_WORKER_ROLE: role },
+        stdout: "inherit", stderr: "pipe",
+      });
 
-    // Drain immediately so startup cannot block on a full pipe. Retain at most
-    // 16 KiB privately; raw SDK/DB errors never become assertion/log contents.
-    const childDiagnostics = (async () => {
-      const reader = child.stderr.getReader();
-      const chunks: Uint8Array[] = []; let retained = 0;
-      try {
-        for (;;) {
-          const { done, value } = await reader.read(); if (done) break;
-          const take = Math.min(value.length, 16 * 1024 - retained);
-          if (take > 0) { chunks.push(value.slice(0, take)); retained += take; }
-        }
-      } finally { reader.releaseLock(); }
-      return Buffer.concat(chunks);
-    })();
+      // Drain immediately so startup cannot block on a full pipe. Retain at most
+      // 16 KiB privately; raw SDK/DB errors never become assertion/log contents.
+      const childDiagnostics = (async () => {
+        const reader = child.stderr.getReader();
+        const chunks: Uint8Array[] = []; let retained = 0;
+        try {
+          for (;;) {
+            const { done, value } = await reader.read(); if (done) break;
+            const take = Math.min(value.length, 16 * 1024 - retained);
+            if (take > 0) { chunks.push(value.slice(0, take)); retained += take; }
+          }
+        } finally { reader.releaseLock(); }
+        return Buffer.concat(chunks);
+      })();
+      return { process: child, diagnostics: childDiagnostics };
+    };
+    const crashOwner = launchChild("crash");
+    const child = crashOwner.process, childDiagnostics = crashOwner.diagnostics;
+    const callsBeforeRecovery = physicalCalls;
     const crashedInput = { ...paidInput, operationId: `crashed:${suffix}`, request: { ...paidInput.request, query: "crash" } };
     const crashed = await start(crashedInput);
     try {
@@ -1146,31 +1168,31 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     } finally {
       if (child.exitCode === null) { child.kill("SIGKILL"); await child.exited; }
       await childDiagnostics;
-      releaseCrashProvider(Response.json({ vector: [1, 0, 0] })); provider.stop(true);
-      await startWorker();
+      releaseCrashProvider(Response.json({ vector: [1, 0, 0] }));
+      recovering = true;
+      // Production restarts in a new process. Reuse the actual crash worker
+      // entry, SDK, queue and activities instead of a third Worker in this
+      // test process after prior Worker/replay lifecycles.
+      recoveryChild = launchChild("recovery");
     }
     // The production start-to-close timeout is unchanged. Its timer schedules
     // only recovery; it never proves provider completion or releases pressure.
-    let observations = 0;
-    const observeWorker = () => {
-      if (!worker || observations++ >= 16) return;
-      const status = worker.getStatus();
-      console.error("KNOWLEDGE_HOSTED_RECOVERY_WORKER_STATUS", JSON.stringify({
-        workerIdentity,
-        runState: status.runState, workflowPollerState: status.workflowPollerState,
-        activityPollerState: status.activityPollerState, hasOutstandingWorkflowPoll: status.hasOutstandingWorkflowPoll,
-        numInFlightWorkflowActivations: status.numInFlightWorkflowActivations,
-        numInFlightActivities: status.numInFlightActivities, numCachedWorkflows: status.numCachedWorkflows,
-        nativePolls,
-        workflowThreads: (worker as unknown as WorkerCustody).workflowCreator.workerThreadClients.map(thread => ({
-          exited: thread.workerExited, activeWorkflows: thread.activeWorkflowCount, pendingRequests: thread.requestIdToCompletion.size,
-        })),
-      }));
-    };
-    observeWorker();
-    const statusTimer = setInterval(observeWorker, 10_000);
-    try { await expect(Promise.race([crashed.result(), runningFailure!])).rejects.toThrow(); }
-    finally { clearInterval(statusTimer); observeWorker(); }
+    const recoveryExited = recoveryChild!.process.exited.then(async exitCode => {
+      if (stoppingRecovery) return new Promise<never>(() => undefined);
+      const diagnostic = await recoveryChild!.diagnostics;
+      const path = new URL(`../../../.local/knowledge-query-recovery-${suffix}.stderr.private`, import.meta.url).pathname;
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, diagnostic, { mode: 0o600 }); await chmod(path, 0o600);
+      throw new Error(`Recovery process exited while hosted owner active (exit ${exitCode}; private diagnostic ${path}; ${diagnostic.length} bytes)`);
+    });
+    void recoveryExited.catch(() => undefined);
+    const crashFailure = await Promise.race([crashed.result().then(() => {
+      throw new Error("Unknown provider call unexpectedly completed");
+    }, error => error), recoveryExited]);
+    expect(crashFailure).toBeInstanceOf(WorkflowFailedError);
+    expect(crashFailure.cause).toMatchObject({ type: "KNOWLEDGE_QUERY_OUTCOME_UNKNOWN", nonRetryable: true });
+    expect((await crashed.describe()).status.name).toBe("FAILED");
+    expect(physicalCalls).toBe(callsBeforeRecovery);
     const crashedCallId = knowledgeQueryOperationId(context, crashedInput.operationId);
     const crashFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
       WHERE account_id=${grant.accountId} AND source_resource_id=${crashedCallId}`;
@@ -1186,7 +1208,8 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     const beforeRevocation = (await getBillingBalance(client.db, grant.accountId)).balanceMicros;
     const revokedInput = { ...paidInput, operationId: `revoked:${suffix}` };
     const revoked = await start(revokedInput);
-    await expect(revoked.result()).rejects.toThrow();
+    await expect(Promise.race([revoked.result(), recoveryExited])).rejects.toThrow();
+    expect((await revoked.describe()).status.name).toBe("FAILED");
     const revokedCallId = knowledgeQueryOperationId(context, revokedInput.operationId);
     const revokedFacts = await shared.admin`SELECT event_type,attributes FROM usage_events
       WHERE account_id=${grant.accountId} AND source_resource_id=${revokedCallId}`;
@@ -1195,7 +1218,8 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
     expect((await getBillingBalance(client.db, grant.accountId)).balanceMicros).toBe(beforeRevocation);
     const beforeRefusal = physicalCalls;
     const refused = await start({ ...paidInput, operationId: `refused:${suffix}` });
-    await expect(refused.result()).rejects.toThrow();
+    await expect(Promise.race([refused.result(), recoveryExited])).rejects.toThrow();
+    expect((await refused.describe()).status.name).toBe("FAILED");
     expect(physicalCalls).toBe(beforeRefusal);
   } finally {
     for (const handle of handles) {
@@ -1203,6 +1227,12 @@ test.skipIf(!process.env.OPENGENI_TEST_TEMPORAL_ADDRESS)("released knowledge wor
         await handle.cancel(); await handle.result().catch(() => undefined);
       }
     }
+    if (recoveryChild) {
+      stoppingRecovery = true;
+      if (recoveryChild.process.exitCode === null) recoveryChild.process.kill("SIGTERM");
+      expect(await recoveryChild.process.exited).toBe(0); await recoveryChild.diagnostics;
+    }
+    hostedProvider?.stop(true);
     await stopWorker(); await native.close(); await connection.close();
   }
 }, 240_000);
