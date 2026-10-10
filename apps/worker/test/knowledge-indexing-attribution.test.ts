@@ -23,6 +23,7 @@ const rootDb = {} as never,
   lockedDb = {} as never;
 let lockActive = false;
 let publication = "published";
+let currentNextIndex = 0;
 let appendStatus = "running";
 let appendFails = false;
 let receiptFails = false;
@@ -47,12 +48,12 @@ const debit = mock(async (_db: unknown, _input: unknown) => undefined);
 const preflight = mock(async (_db: unknown, _input: unknown) => refusal);
 const defer = mock(async () => undefined);
 let vectors = [[1, 0, 0]];
-const embed = mock(async () => vectors);
+const embed = mock(async () => { expect(lockActive).toBe(false); return vectors; });
 const nativeDbExports = await import("@opengeni/db");
 mock.module("@opengeni/db", () => ({
   ...nativeDbExports,
   claimKnowledgeIndexJobs: async () => [{ ...claim, billingAttribution: attribution }],
-  readKnowledgeIndexSource: async () => ({ billingWorkspaceId: "workspace", nextIndex: 0, entry }),
+  readKnowledgeIndexSource: async () => ({ billingWorkspaceId: "workspace", nextIndex: currentNextIndex, entry }),
   withWorkspaceUsageLock: async (
     _db: unknown,
     _workspace: string,
@@ -303,4 +304,24 @@ test("real OpenAI index adapter validation failure preserves the completed respo
   } finally {
     fetch.mockRestore();
   }
+});
+
+test("provider execution releases admission transaction; a changed checkpoint cannot publish or debit stale vectors", async () => {
+  attribution = { kind: "service" };
+  const before = durableCalls.size, writes = append.mock.calls.length, debits = debit.mock.calls.length;
+  try {
+    const result = await worker({
+      model: claim.model, dimensions: claim.dimensions,
+      embedQuery: async () => [1, 0, 0],
+      embedMany: async () => {
+        expect(lockActive).toBe(false);
+        currentNextIndex = chunks.length;
+        return chunks.map(() => [1, 0, 0]);
+      },
+    }).indexKnowledge();
+    expect(result.unavailable).toBe(1);
+    expect(append.mock.calls.length).toBe(writes);
+    expect(debit.mock.calls.length).toBe(debits);
+    expect(durableCalls.size).toBe(before + 1);
+  } finally { currentNextIndex = 0; }
 });

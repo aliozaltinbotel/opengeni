@@ -19,6 +19,7 @@ import {
   guardPaidKnowledgeIndexPublication,
   knowledgeIndexBillingActivationTime,
   readKnowledgeIndexSource,
+  isTransactionHandle,
   recordUsageEvent,
   sumUsageQuantity,
   withWorkspaceUsageLock,
@@ -128,6 +129,7 @@ export function createKnowledgeIndexingActivities(
       const result = { completed: 0, advanced: 0, deferred: 0, unavailable: 0 };
       if (!resolveDocumentServices) return result;
       const { db, settings, observability } = await services();
+      if (isTransactionHandle(db)) throw new Error("KNOWLEDGE_EMBEDDING_REQUIRES_ROOT_DATABASE");
       let policyActivatedAt: Date;
       if (paidDocumentEmbedding(settings)) {
         if (!settings.documentEmbeddingCreditsActivatedAt)
@@ -159,7 +161,7 @@ export function createKnowledgeIndexingActivities(
           // The checkpoint, chunk/byte meters and post-use debit commit together. A new
           // generation requires funding once; committed batches may finish even
           // if their accumulated cost takes the balance below zero.
-          await withWorkspaceUsageLock(db, source.billingWorkspaceId, async (lockedDb) => {
+          const prepared = await withWorkspaceUsageLock(db, source.billingWorkspaceId, async (lockedDb) => {
             const current = await readKnowledgeIndexSource(lockedDb, claim);
             if (!current) {
               result.unavailable++;
@@ -253,54 +255,98 @@ export function createKnowledgeIndexingActivities(
                   if (used + chunks.length > limit) throw new KnowledgeIndexUsageLimitError();
                 }
               }
-              const inputs = chunks.map((chunk) => chunk.embeddingInput);
-              const bytes = inputs.reduce(
-                (sum, input) => sum + Buffer.byteLength(input, "utf8"),
-                0,
-              );
-              // Every physical invocation has its own immutable identity. A
-              // retry of an unpublished batch is another provider call, even
-              // if its lease/checkpoint has not changed.
-              const callId = crypto.randomUUID();
-              const providerName = settings.documentEmbeddingProvider ?? "unspecified";
-              const captureCompleted = (receipt: EmbeddingProviderCompletionReceipt) => {
-                // MAINT-P09-430: the completed provider call survives publication refusal
-                // and rollback. This fact grants no source/publication authority.
-                completedCalls.push({
-                  accountId: claim.accountId,
-                  workspaceId: current.billingWorkspaceId,
-                  occurredAt: new Date(receipt.completedAt),
-                  eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
-                  quantity: 1,
-                  unit: "call",
-                  sourceResourceType: "knowledge_revision",
-                  sourceResourceId: claim.revisionId,
-                  idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}:${receipt.callId}`,
-                  attributes: embeddingCallUsageAttributes({
-                    callKind: "index",
-                    provider: receipt.provider,
-                    model: receipt.model,
-                    inputBytes: receipt.inputBytes,
-                    inputItems: receipt.inputItems,
-                    rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
-                    billingPath: paid ? "opengeni_credits" : "external",
-                  }),
+              return { current, chunks, more, frozenPolicy, paid };
+            }
+            return { current, chunks, more, frozenPolicy: null, paid: false };
+          });
+          if (!prepared) continue;
+          const { current, chunks, more, frozenPolicy, paid } = prepared;
+          let vectors: number[][] = [];
+          if (chunks.length) {
+            if (!frozenPolicy) throw new Error("KNOWLEDGE_INDEX_POLICY_UNAVAILABLE");
+            const inputs = chunks.map((chunk) => chunk.embeddingInput);
+            const bytes = inputs.reduce(
+              (sum, input) => sum + Buffer.byteLength(input, "utf8"),
+              0,
+            );
+            // Every physical invocation has its own immutable identity. A
+            // retry of an unpublished batch is another provider call, even
+            // if its lease/checkpoint has not changed.
+            const callId = crypto.randomUUID();
+            const providerName = settings.documentEmbeddingProvider ?? "unspecified";
+            const captureCompleted = (receipt: EmbeddingProviderCompletionReceipt) => {
+              // MAINT-P09-430: the completed provider call survives publication refusal
+              // and rollback. This fact grants no source/publication authority.
+              completedCalls.push({
+                accountId: claim.accountId,
+                workspaceId: current.billingWorkspaceId,
+                occurredAt: new Date(receipt.completedAt),
+                eventType: EMBEDDING_CALL_USAGE_EVENT_TYPE,
+                quantity: 1,
+                unit: "call",
+                sourceResourceType: "knowledge_revision",
+                sourceResourceId: claim.revisionId,
+                idempotencyKey: `usage:${EMBEDDING_CALL_USAGE_EVENT_TYPE}:index:${claim.revisionId}:${claim.generation}:${current.nextIndex}:${receipt.callId}`,
+                attributes: embeddingCallUsageAttributes({
+                  callKind: "index",
+                  provider: receipt.provider,
+                  model: receipt.model,
+                  inputBytes: receipt.inputBytes,
+                  inputItems: receipt.inputItems,
+                  rateMicrosPerMillionBytes: frozenPolicy.rateMicrosPerMillionBytes,
+                  billingPath: paid ? "opengeni_credits" : "external",
+                }),
+              });
+            };
+            stage = "embedding";
+            vectors = await embedder.embedMany(inputs, captureCompleted);
+            stage = "processing";
+            if (completedCalls.length === 0)
+              captureCompleted({
+                callId,
+                provider: providerName,
+                model: claim.model,
+                inputBytes: bytes,
+                inputItems: chunks.length,
+                completedAt: new Date().toISOString(),
+              });
+            if (vectors.length !== chunks.length) throw new Error("Incomplete Knowledge embeddings");
+          }
+          // Re-enter only to settle the exact prepared lease/generation/checkpoint.
+          // The provider never runs while a DB transaction or usage lock is held.
+          await withWorkspaceUsageLock(db, current.billingWorkspaceId, async lockedDb => {
+            const latest = await readKnowledgeIndexSource(lockedDb, claim);
+            if (!latest || latest.nextIndex !== current.nextIndex || latest.billingWorkspaceId !== current.billingWorkspaceId) {
+              result.unavailable++;
+              return;
+            }
+            if (chunks.length) {
+              if (!frozenPolicy) throw new Error("KNOWLEDGE_INDEX_POLICY_UNAVAILABLE");
+              if (paid) {
+                const refusal = await checkWorkspaceAllowance(lockedDb, {
+                  accountId: claim.accountId, workspaceId: current.billingWorkspaceId,
+                  subjectId: claim.billingAttribution.kind === "turn" || claim.billingAttribution.kind === "human"
+                    ? claim.billingAttribution.initiatingHumanSubjectId : null,
                 });
-              };
-              stage = "embedding";
-              const vectors = await embedder.embedMany(inputs, captureCompleted);
-              stage = "processing";
-              if (completedCalls.length === 0)
-                captureCompleted({
-                  callId,
-                  provider: providerName,
-                  model: claim.model,
-                  inputBytes: bytes,
-                  inputItems: chunks.length,
-                  completedAt: new Date().toISOString(),
-                });
-              if (vectors.length !== chunks.length)
-                throw new Error("Incomplete Knowledge embeddings");
+                if (refusal) {
+                  await deferKnowledgeIndexJob(lockedDb, claim);
+                  result.deferred++;
+                  return;
+                }
+              }
+              if (settings.usageLimitsMode === "static" || settings.usageLimitsMode === "managed") {
+                const limit = configuredStaticUsageLimits(settings).maxDocumentIndexedChunksPerWorkspace;
+                if (limit) {
+                  const now = new Date();
+                  const used = await sumUsageQuantity(lockedDb, {
+                    workspaceId: current.billingWorkspaceId, eventType: "document.indexed",
+                    since: new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+                  });
+                  if (used + chunks.length > limit) throw new KnowledgeIndexUsageLimitError();
+                }
+              }
+              const inputs = chunks.map(chunk => chunk.embeddingInput);
+              const bytes = inputs.reduce((sum, input) => sum + Buffer.byteLength(input, "utf8"), 0);
               // A reviewer may have rejected this revision during the provider
               // call. The DB guard holds its publication row through settlement.
               if (paid) {

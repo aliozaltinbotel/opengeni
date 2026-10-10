@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
+import { sql } from "drizzle-orm";
 import type { Settings } from "@opengeni/config";
 import { searchKnowledgeEntries } from "@opengeni/core";
 import {
@@ -849,9 +850,15 @@ test("completed embedding facts survive rollback and concurrent settlement on a 
     const embedder: DocumentServices["embedder"] = {
       model: "call-fact-rollback-test",
       dimensions: 3,
-      embedQuery: async () => [1, 0, 0],
+      embedQuery: async () => {
+        const rows = await single.db.execute<{ transaction_id: string | null }>(sql`SELECT txid_current_if_assigned()::text AS transaction_id`);
+        expect(rows[0]?.transaction_id).toBeNull();
+        return [1, 0, 0];
+      },
       embedMany: async (inputs) => {
         physicalCalls++;
+        const rows = await single.db.execute<{ transaction_id: string | null }>(sql`SELECT txid_current_if_assigned()::text AS transaction_id`);
+        expect(rows[0]?.transaction_id).toBeNull();
         // The provider returned a complete batch, but the released append
         // validator refuses each vector's dimensions after the provider call.
         return inputs.map(() => (incomplete ? [1, 0] : [1, 0, 0]));
