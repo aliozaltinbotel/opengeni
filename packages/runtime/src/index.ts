@@ -459,6 +459,7 @@ import {
   type BeforeModelCallSourceReceipt,
   nativeModelSourceKeyForToolCall,
   recordModelToolProjection,
+  recordModelToolErrorSource,
   bindModelSourceInput,
   modelSourceBindings,
   modelSourceInputBinding,
@@ -2901,8 +2902,11 @@ function toolErrorIsFinal(error: unknown): boolean {
 // SDK types the return as `string`; the runtime actually stores the raw return
 // as the tool output, so we return the MCP-shaped error object and cast — this
 // is the only way to attach an `isError` flag to a failed MCP tool call's output.
-const mcpToolErrorFunction: MCPToolErrorFunction = ({ error }) =>
-  mcpToolErrorOutput(error) as unknown as string;
+const mcpToolErrorFunction: MCPToolErrorFunction = async ({ error }) => {
+  const output = mcpToolErrorOutput(error);
+  await recordModelToolErrorSource(modelMcpCallIdentity.getStore()?.callId, output);
+  return output as unknown as string;
+};
 
 const ARTIFACT_RUNTIME_MANIFEST_ENV = "OPENGENI_ARTIFACT_RUNTIME_MANIFEST";
 const ARTIFACT_TOOL_ENTRY_ENV = "OPENGENI_ARTIFACT_TOOL_ENTRY";

@@ -2278,13 +2278,13 @@ describe("runtime event normalization", () => {
       expect(mcpToolErrorOutput(hostile).content[0]?.text).toContain("Please try again");
     });
 
-    test("the agent's MCP errorFunction carries a final refusal without retry advice", () => {
+    test("the agent's MCP errorFunction carries a final refusal without retry advice", async () => {
       const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), []);
       const errorFunction = (agent as any).mcpConfig?.errorFunction as (args: {
         context: unknown;
         error: unknown;
-      }) => { isError?: boolean; content?: Array<{ text?: string }> };
-      const produced = errorFunction({
+      }) => Promise<{ isError?: boolean; content?: Array<{ text?: string }> }>;
+      const produced = await errorFunction({
         context: {},
         error: Object.assign(new Error("Applicable execution budget is exhausted."), {
           retryable: false,
@@ -2336,8 +2336,8 @@ describe("runtime event normalization", () => {
       const errorFunction = (agent as any).mcpConfig.errorFunction as (args: {
         context: unknown;
         error: unknown;
-      }) => ReturnType<typeof mcpToolErrorOutput>;
-      const out = errorFunction({ context: {}, error: rejected });
+      }) => Promise<ReturnType<typeof mcpToolErrorOutput>>;
+      const out = await errorFunction({ context: {}, error: rejected });
       expect(out).toEqual(mcpToolErrorOutput(rejected));
       expect(out.isError).toBe(true);
       const text = out.content[0]?.text ?? "";

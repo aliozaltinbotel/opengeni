@@ -152,6 +152,20 @@ function bindOutputSourceKeys(capture:ModelRequestCapture|undefined, sourceKey:s
   }
 }
 
+/** The SDK error handler owns this exact failure output for an actual model call.
+ * It is evidence of a refusal/failure, never evidence that the tool executed.
+ * No serialized next-input value can establish this ownership. */
+export async function recordModelToolErrorSource(callId:string|undefined,output:unknown):Promise<void> {
+  const capture=modelRequestCapture.getStore();
+  const sourceKey=callId?capture?.toolSourceKeys?.get(callId):undefined;
+  if(!capture?.beforeCall || !callId || !sourceKey)return;
+  // Never replace a successfully recorded tool result with a fallback result.
+  if(sourceState(capture).tools.has(callId))throw new Error("MODEL_TOOL_ERROR_SOURCE_COLLISION");
+  const sha256=inputDigest(output);
+  await recordModelToolSource({sourceCallId:callId,nativeModelSourceKey:sourceKey,
+    rawSourceRef:{owner:"native.tool.result",id:`tool-error:${sourceKey}:${callId}:${sha256}`,sha256},retainedSources:[]},output);
+}
+
 /** Observe the final SDK function return, after its actual MCP projection. */
 export function recordModelToolProjection(callId:string|undefined,modelName:string,output:unknown):void {
   const capture=modelRequestCapture.getStore();

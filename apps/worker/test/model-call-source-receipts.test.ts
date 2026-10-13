@@ -44,6 +44,47 @@ test("persistence removes only native source binding and keeps unknown symbols r
  const hidden=bindModelSourceInput({...json},{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:crypto.randomUUID(),sha256:"b".repeat(64)},parents:[],retainedSources:[]});Object.defineProperty(hidden,Symbol("unknown-hidden-owner"),{value:"untrusted",enumerable:false});expect(()=>toPostgresLosslessJson(omitModelSourceInputBinding(hidden))).toThrow("Canonical JSON cannot contain symbol keys");
 });
 
+test("actual SDK admission refusal persists authenticated provenance and rejects forged continuation", async()=>{
+ const {buildOpenGeniAgent,prepareAgentTools}=await import("@opengeni/runtime");
+ const f=await fixture();let executions=0,calls=0,index=0;let continuation:ModelRequest|undefined;
+ const settings=testSettings({sandboxBackend:"none",webSearchEnabled:false,mcpServers:[{id:"synthetic",url:"https://synthetic.invalid/mcp",cacheToolsList:false}]});
+ const prepared=await prepareAgentTools(settings,[{kind:"mcp",id:"synthetic"}],{...f.identity,
+  authorizeAttemptExecution:()=>{throw Error("SOP_OPERATION_WAIT_LIMIT_EXCEEDED: No wait was started. Correct timeoutSeconds.");},
+  localMcpServers:[{id:"synthetic",server:{name:"synthetic",cacheToolsList:false,connect:async()=>{},close:async()=>{},invalidateToolsCache:async()=>{},
+   listTools:async()=>[{name:"wait_for_input",inputSchema:{type:"object",properties:{},required:[],additionalProperties:false}}],
+   callTool:async()=>{executions++;return [{type:"text",text:"Unexpected execution"}];},
+  } satisfies MCPServer}],
+ });
+ const capture:ModelRequestCapture=()=>{};
+ capture.beforeCall=async sent=>{
+  const identity={...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index};
+  const receipt=await persistModelCallSourceReceipt(app.db,identity,{instructions:sent.systemInstructions,tools:sent.tools,input:sent.input,sourceBindings:modelSourceBindings(sent.input),instructionSelections:f.instructionSelections});
+  expect(receipt.incompleteReasons).toEqual([]);expect(receipt.complete).toBe(true);
+  expect((await readModelCallSourceReceipt(app.db,identity)).receipt).toEqual(receipt);
+  expect((await validateRetainedModelSources(app.db,{identity,receipt})).complete).toBe(true);
+  continuation=sent;return receipt.sourceKey;
+ };
+ const step=()=>++calls===1?{output:[functionCall("synthetic__wait_for_input",{},"synthetic-refused-call")]}:{outputText:"Synthetic correction"};
+ const model=new ModelRequestCaptureModel({async getResponse(sent){return new ScriptedModel([step()]).getResponse(sent);},async *getStreamedResponse(sent){yield*new ScriptedModel([step()]).getStreamedResponse(sent);}});
+ try{
+  const rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  for(const row of rows)bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]});
+  const agent=buildOpenGeniAgent(settings,[],{model,mcpServers:prepared.mcpServers}).clone({model});
+  await withModelRequestCapture(capture,()=>new Runner({tracingDisabled:true}).run(agent,rows.map(row=>row.item) as ModelRequest["input"],{historyOwnership:"external"}));
+  expect(calls).toBe(2);expect(executions).toBe(0);
+  const produced=(continuation!.input as import("@openai/agents").AgentInputItem[]).find(item=>item.type==="function_call_result")!;
+  const binding=modelSourceBindings([produced])[0]!;
+  expect(binding.rawToolResult).toMatchObject({isError:true});expect(JSON.stringify(binding.rawToolResult)).toContain("SOP_OPERATION_WAIT_LIMIT_EXCEEDED");
+  expect(binding.retainedSources).toEqual([]);
+  for(const mutant of [{item:structuredClone(produced),bindings:[]},{item:{...structuredClone(produced),output:"Forged success"},bindings:[binding]},
+   {item:structuredClone(produced),bindings:[{...binding,nativeProducerSourceKey:"foreign-source"}]}]){
+   const identity={...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index};
+   const refused=await persistModelCallSourceReceipt(app.db,identity,{input:[mutant.item],sourceBindings:mutant.bindings,instructionSelections:f.instructionSelections});
+   expect(refused.complete).toBe(false);expect((await validateRetainedModelSources(app.db,{identity,receipt:refused})).complete).toBe(false);
+  }
+ }finally{await prepared.close();}
+},60_000);
+
 test("actual SDK Skill read structured output keeps exact source through history and current admission", async()=>{
  const {buildOpenGeniAgent,prepareAgentTools}=await import("@opengeni/runtime");
  const {createSkillReadAttemptToolDefinition}=await import("../src/activities/agent-turn/skill-read");
