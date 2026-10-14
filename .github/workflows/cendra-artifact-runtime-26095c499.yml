@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for 26095c499
+
+# Build-only caller; every target checks out the qualified source, not this caller commit.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-26095c499
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 26095c4994ece7aee644f32632b1ddc2038678cc
