@@ -402,6 +402,19 @@ frozen catalog—including admitted first-party tools—through the same executo
 It cannot widen the catalog, attach servers, mint authority, or survive a
 successor attempt.
 
+Trusted embedded hosts may set `PrepareToolsOptions.attemptToolDescription` to
+adapt tool guidance to an admitted attempt's constraints. Its frozen input
+contains only `{ identity, modelName, description }`; returning `undefined`
+preserves the native description. A replacement must be nonempty text of at
+most 16,384 characters, without control characters other than tabs and line
+breaks. This callback is not user configuration or an authorization hook. It
+cannot change tool identities, schemas, permissions, lifecycle hooks, executors,
+or retained source references. It runs once per canonical definition before
+catalog hashing, and both model MCP listings and Codemode use that description.
+Exact attempt scope is required. With this hook, preparation completes the
+catalog before publishing tools, even when deferred preparation was requested;
+without it, the existing preparation behavior is unchanged.
+
 ### Unified workspace tool gateway
 
 Canonical sources: `@opengeni/tool-gateway`,

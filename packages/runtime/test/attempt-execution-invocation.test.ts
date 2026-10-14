@@ -2,6 +2,8 @@ import { expect, test } from "bun:test";
 import type { AttemptToolAuthorization, AttemptToolDefinition } from "@opengeni/codemode";
 import { testSettings } from "@opengeni/testing";
 import { prepareAgentTools, type PrepareToolsOptions } from "../src/index";
+import { digestAttemptToolCatalog } from "@opengeni/codemode";
+import type { MCPServer } from "@openai/agents";
 
 type Invocation = Parameters<AttemptToolAuthorization>[0];
 
@@ -23,6 +25,84 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+test("attempt descriptions are frozen before publication across local MCP, remote MCP and Codemode", async () => {
+  const events: string[] = [];
+  let descriptionCalls = 0;
+  const inputSchema = { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false };
+  const definition: AttemptToolDefinition = {
+    identity: { serverId: "fixture", toolName: "local" }, modelName: "fixture__local",
+    description: "Original local description", inputSchema, source: "interaction", approval: "none",
+    lifecycle: { prepare: async () => ({ begin: async () => { events.push("begin"); } }) },
+    modelSourceRefs: () => { events.push("source-refs"); return []; },
+    execute: async () => { events.push("local"); return { content: [{ type: "text", text: "local result" }] }; },
+  };
+  const remote: MCPServer = {
+    name: "fixture-remote", cacheToolsList: false,
+    async connect() {}, async close() {}, async invalidateToolsCache() {},
+    async listTools() { return [{ name: "read", description: "Original remote description", inputSchema: { ...inputSchema, type: "object" as const } }]; },
+    async callTool() { events.push("remote"); return [{ type: "text", text: "remote result" }]; },
+  };
+  const settings = testSettings({ sandboxBackend: "none", mcpServers: [{ id: "fixture_remote", name: "Fixture", url: "https://fixture.invalid/mcp", cacheToolsList: false }] });
+  const options: PrepareToolsOptions = {
+    ...scope(), firstPartyPermissions: [], attemptToolDefinitions: [definition],
+    localMcpServers: [{ id: "fixture_remote", server: remote }],
+    // Even this optimization must not publish descriptions before catalog shaping.
+    deferNonEagerUntilToolDemand: true,
+    authorizeAttemptExecution: async () => { events.push("authorize"); },
+    attemptToolDescription: (input) => {
+      descriptionCalls++;
+      expect(Object.keys(input).sort()).toEqual(["description", "identity", "modelName"]);
+      expect(Object.isFrozen(input)).toBe(true);
+      expect(Object.isFrozen(input.identity)).toBe(true);
+      expect(Reflect.set(input.identity, "toolName", "substituted")).toBe(false);
+      return `Confined ${input.modelName}: ${input.description}`;
+    },
+  };
+  const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "fixture_remote" }], options);
+  try {
+    const environment = prepared.attemptToolEnvironment!;
+    expect(environment).not.toBeNull();
+    const catalog = environment.catalog;
+    expect(catalog.firstPartyMcpPermissions).toEqual([]);
+    const listed = (await Promise.all(prepared.mcpServers.map(server => server.listTools()))).flat();
+    expect(listed).toHaveLength(2);
+    for (const entry of catalog.entries) {
+      expect(entry.description).toStartWith(`Confined ${entry.modelName}: Original`);
+      expect(listed.find(tool => tool.name === entry.modelName)?.description).toBe(entry.description);
+      expect(entry.inputSchema).toEqual(inputSchema);
+      expect(entry.approval).toBe("none");
+    }
+    const { digest, ...unsigned } = catalog;
+    expect(digest).toBe(digestAttemptToolCatalog(unsigned));
+    expect(digest).not.toBe(digestAttemptToolCatalog({ ...unsigned, entries: unsigned.entries.map(entry => ({ ...entry, description: entry.description!.replace(`Confined ${entry.modelName}: `, "") })) }));
+    expect(definition.description).toBe("Original local description");
+    expect(definition.identity.toolName).toBe("local");
+    await environment.callModel({ modelName: definition.modelName, arguments: { value: "model" }, subjectId: "test", sourceCallId: "fixture-source-call" });
+    await environment.call({ operationId: crypto.randomUUID(), catalogDigest: digest, identity: { serverId: "fixture_remote", toolName: "read" }, arguments: { value: "code" }, caller: { kind: "codemode", subjectId: "test" } });
+    expect(events).toEqual(["authorize", "begin", "local", "source-refs", "authorize", "remote"]);
+    expect(environment.catalog.digest).toBe(digest);
+    expect((await prepared.mcpServers[0]!.listTools())[0]!.description).toBe(listed[0]!.description);
+    expect(descriptionCalls).toBe(catalog.entries.length);
+  } finally { await prepared.close(); }
+});
+
+test("attempt description hook rejects invalid presentation and requires exact attempt scope", async () => {
+  const definition: AttemptToolDefinition = {
+    identity: { serverId: "fixture", toolName: "local" }, modelName: "fixture__local",
+    description: "Original", inputSchema: { type: "object", properties: {} }, source: "interaction", approval: "none",
+    execute: async () => { throw new Error("must not execute"); },
+  };
+  await expect(prepareAgentTools(testSettings(), [], { attemptToolDescription: () => "Changed" })).rejects.toThrow("exact attempt scope");
+  for (const value of ["", "  ", "bad\u0000description", "x".repeat(16_385)]) {
+    await expect(prepareAgentTools(testSettings(), [], { ...scope(), attemptToolDefinitions: [definition], attemptToolDescription: () => value })).rejects.toThrow("attempt tool description");
+  }
+  const unchanged = await prepareAgentTools(testSettings(), [], { ...scope(), attemptToolDefinitions: [definition], attemptToolDescription: () => undefined });
+  try {
+    expect(unchanged.attemptToolCatalog!.entries[0]!.description).toBe("Original");
+    expect((await unchanged.mcpServers[0]!.listTools())[0]!.description).toBe("Original");
+  } finally { await unchanged.close(); }
+});
 
 test("execution fences receive each prepared invocation and await before its prior begin", async () => {
   const preparedInvocations = new Map<string, Invocation>();
@@ -150,6 +230,7 @@ test("refused execution cannot begin a connector action, consume approval, or ex
   const operationId = crypto.randomUUID();
   const prepared = await prepareAgentTools(testSettings(), [], {
     ...scope(),
+    attemptToolDescription: () => "Use this tool only within the admitted attempt deadline.",
     authorizeAttemptExecution: async (invocation?: Invocation) => {
       if (!invocation) throw new Error("Execution invocation missing");
       expect(invocation.call.operationId).toBe(operationId);

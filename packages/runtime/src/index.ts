@@ -4625,6 +4625,15 @@ export type PrepareToolsOptions = {
    * and exact attempt catalog; this is not a second tool registry.
    */
   attemptToolDefinitions?: readonly AttemptToolDefinition[];
+  /** Trusted host presentation only, applied once before hashing the exact attempt
+   * catalog. Undefined preserves the native description. Requires exact attempt
+   * scope and completes catalog preparation before publishing MCP tools, even
+   * when deferred preparation is requested. Cannot change schema or authority. */
+  attemptToolDescription?: (input: Readonly<{
+    identity: Readonly<AttemptToolDefinition["identity"]>;
+    modelName: string;
+    description: string | undefined;
+  }>) => string | undefined;
   /** Host authorization applied after catalog/input validation and before execution. */
   attemptToolAuthorize?: AttemptToolAuthorization;
   /** Live accepted-attempt fence, evaluated at execution rather than catalog
@@ -4939,6 +4948,9 @@ export async function prepareAgentTools(
   if (options.attemptToolDefinitions?.length && !attemptToolScope(options)) {
     throw new Error("in-process attempt tools require exact attempt scope");
   }
+  if (options.attemptToolDescription && !attemptToolScope(options)) {
+    throw new Error("attempt tool descriptions require exact attempt scope");
+  }
   const attemptToolDefinitions = wrapAttemptToolDefinitions(
     options.attemptToolDefinitions ?? [],
     options.spillOversizedModelToolResult,
@@ -5247,7 +5259,7 @@ export async function prepareAgentTools(
         };
       }),
   );
-  const deferNonEager = options.deferNonEagerUntilToolDemand === true;
+  const deferNonEager = options.deferNonEagerUntilToolDemand === true && !options.attemptToolDescription;
   // Optional/best-effort integrations are never a first-token dependency. An
   // explicit eager hint may make them available sooner, but when progressive
   // disclosure is active their connect/list work joins the same shared
@@ -5398,7 +5410,7 @@ export async function prepareAgentTools(
         execution,
       );
       if (attemptToolEnvironment && localToolServer) {
-        localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment);
+        localToolServer.bindAttemptToolEnvironment(attemptToolEnvironment, !!options.attemptToolDescription);
       }
       if (attemptToolEnvironment) {
         await measureToolPreparationPhase(
@@ -5736,14 +5748,29 @@ async function prepareAttemptToolEnvironment(
       ...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
     ],
     generation: options.attemptToolCatalogGeneration ?? 1,
-    definitions: guardedDefinitions,
+    definitions: options.attemptToolDescription
+      ? guardedDefinitions.map((definition) => {
+          const description = options.attemptToolDescription!(Object.freeze({
+            identity: Object.freeze({ ...definition.identity }),
+            modelName: definition.modelName,
+            description: definition.description,
+          }));
+          if (description === undefined) return definition;
+          if (typeof description !== "string" || !description.trim() || description.length > 16_384 ||
+              /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(description)) {
+            throw new Error("invalid attempt tool description: expected nonempty text of at most 16384 characters without control characters");
+          }
+          return { ...definition, description };
+        })
+      : guardedDefinitions,
     confirmModelApproval: ({ modelName, subjectId: callerSubjectId }) =>
       callerSubjectId === subjectId &&
       activeModelToolInvocation(modelName)?.approvalConfirmed === true,
     ...(options.attemptToolAuthorize ? { authorize: options.attemptToolAuthorize } : {}),
   });
   for (const { server } of prepared.servers) {
-    server.bindAttemptToolEnvironment(environment, subjectId);
+    server.bindAttemptToolEnvironment(environment, subjectId, !!options.attemptToolDescription);
+    if (options.attemptToolDescription) await server.freezeTools();
   }
   return environment;
 }
@@ -7960,6 +7987,17 @@ function logPublicMcpLifecycleFailure(error: Error): void {
   });
 }
 
+/** Project only already-hashed presentation; never rewrite the catalog after publication. */
+function projectAttemptToolDescriptions(tools: readonly RuntimeMcpTool[], catalog: AttemptToolCatalog): RuntimeMcpTool[] {
+  const entries = new Map(catalog.entries.map(entry => [entry.modelName, entry]));
+  return tools.map(tool => {
+    const entry = entries.get(tool.name);
+    if (!entry) throw new Error("model tool is absent from its attempt catalog");
+    const { description: _description, ...rest } = tool;
+    return { ...rest, ...(entry.description === undefined ? {} : { description: entry.description }) };
+  });
+}
+
 /**
  * Model-facing MCP projection for canonical in-process definitions. The
  * definitions themselves are compiled into AttemptToolEnvironment; this class
@@ -7975,7 +8013,7 @@ class AttemptDefinitionMcpServer implements MCPServer {
   readonly customDataExtractor = this.resultCustomDataBridge.customDataExtractor;
   readonly toolMetaResolver = this.resultCustomDataBridge.toolMetaResolver;
   readonly name = "opengeni-attempt-local-tools";
-  private readonly tools: RuntimeMcpTool[];
+  private tools: RuntimeMcpTool[];
   private readonly catalogIdentities = new Map<string, ToolCallCatalogIdentity>();
   private environment: AttemptToolEnvironment | null = null;
   private environmentProvider: (() => Promise<AttemptToolEnvironment>) | null = null;
@@ -8014,11 +8052,15 @@ class AttemptDefinitionMcpServer implements MCPServer {
     return this.catalogIdentities.get(modelName);
   }
 
-  bindAttemptToolEnvironment(environment: AttemptToolEnvironment): void {
+  bindAttemptToolEnvironment(environment: AttemptToolEnvironment, projectDescriptions = false): void {
     if (this.environment && this.environment !== environment) {
       throw new Error("local model tool server is already bound to another attempt catalog");
     }
     this.environment = environment;
+    if (projectDescriptions) {
+      this.tools = this.aggregateToolBudget.replace(this.name,
+        projectAttemptToolDescriptions(this.tools, environment.catalog)) as RuntimeMcpTool[];
+    }
   }
 
   bindAttemptToolEnvironmentProvider(provider: () => Promise<AttemptToolEnvironment>): void {
@@ -8292,12 +8334,22 @@ export class PrefixedMcpServer implements MCPServer {
     return this.listTools();
   }
 
-  bindAttemptToolEnvironment(environment: AttemptToolEnvironment, subjectId: string): void {
+  bindAttemptToolEnvironment(environment: AttemptToolEnvironment, subjectId: string, projectDescriptions = false): void {
     if (this.attemptToolEnvironment && this.attemptToolEnvironment !== environment) {
       throw new Error(`MCP server ${this.registryId} is already bound to another attempt catalog`);
     }
     this.attemptToolEnvironment = environment;
     this.attemptToolSubjectId = subjectId;
+    if (projectDescriptions) {
+      const prior = this.frozenTools ?? this.loadAndFreezeTools();
+      this.frozenTools = prior.then(tools => {
+        const projected = projectAttemptToolDescriptions(tools, environment.catalog);
+        const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, projected) ??
+          assertMcpToolListWithinBounds(projected)) as RuntimeMcpTool[];
+        this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
+        return bounded;
+      });
+    }
   }
 
   unprefixedToolName(toolName: string): string {
