@@ -1,4 +1,5 @@
-import { OrganizationMember } from "@opengeni/contracts";
+import { normalizeWorkspaceMembershipPermissions } from "./workspace-membership-permissions";
+import { OrganizationMember, type Permission } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import { rawRows, type Database } from "./database";
 
@@ -61,7 +62,7 @@ import { rawRows, type Database } from "./database";
  */
 export async function subjectHasLiveWorkspaceAuthorityInScope(
   scopedDb: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string },
+  input: { accountId: string; workspaceId: string; subjectId: string; requiredPermission?: Permission },
 ): Promise<boolean> {
   // CONSISTENCY CHECK, NOT AN AUTHORIZATION. This function deliberately does not
   // set `opengeni.subject_id`, so it cannot be handed a scope of its own — that
@@ -76,13 +77,19 @@ export async function subjectHasLiveWorkspaceAuthorityInScope(
       "subjectHasLiveWorkspaceAuthorityInScope: subject does not match the applied RLS scope",
     );
   }
-  const [membershipRow] = await rawRows<{ present: number }>(
+  const [membershipRow] = await rawRows<{ present: number; permissions: unknown }>(
     scopedDb,
-    sql`select 1 as present from workspace_memberships
+    sql`select 1 as present, permissions from workspace_memberships
       where subject_id = ${input.subjectId}
         and workspace_id = ${input.workspaceId}
       limit 1`,
   );
+  // Reuse the native membership permission semantics; the personal-owner branch
+  // below has no membership row and retains its canonical owner permissions.
+  if (membershipRow && input.requiredPermission) {
+    const permissions = normalizeWorkspaceMembershipPermissions(membershipRow.permissions);
+    if (!permissions.includes(input.requiredPermission) && !permissions.includes("workspace:admin")) return false;
+  }
   if (!input.subjectId.startsWith("user:") && !input.subjectId.startsWith("external_user:")) {
     return Boolean(membershipRow);
   }

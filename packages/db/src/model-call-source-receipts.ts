@@ -72,6 +72,9 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       if (catalog !== null && catalog.split("\n").some(line => line.startsWith("- {"))) return true;
       const value = item as { type?: string; callId?: string; call_id?: string; name?: string };
       if (value?.type !== "function_call_result") return false;
+      // Current native Skill tools attach exact installed-revision refs; the retained
+      // validator rechecks availability and visibility before every later model call.
+      if (basis?.retainedSources?.some(ref => ref.owner === "native.skill.selection")) return false;
       if (value.name === "skill_read") return true;
       const callId = value.callId ?? value.call_id;
       if (!callId) return false;

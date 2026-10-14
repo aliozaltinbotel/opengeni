@@ -1,3 +1,5 @@
+import {knowledgeSelectionSourceIsCurrent} from "./knowledge-entries";
+import {listSkillDescriptors, skillSelectionSourceRef} from "./skills";
 import { and, eq, sql } from "drizzle-orm";
 import {
   canonicalModelSourceJson,
@@ -273,6 +275,27 @@ export async function validateRetainedModelSourcesWithFence(
             status: "HOST_AUTHORITY_REQUIRED",
             reason: "HOST_AUTHORITY_REQUIRED",
           });
+          continue;
+        }
+        if (ref.owner === "native.knowledge.selection.v2" || ref.owner === "native.skill.selection") {
+          let available = false;
+          if (/^[a-f0-9-]{36}$/.test(ref.id)) {
+            if (ref.owner === "native.skill.selection") {
+              const descriptors = await listSkillDescriptors(tx, {...input.identity, subjectId: human});
+              const selected = descriptors.find(entry => entry.id === ref.id && entry.activationMode === "workspace_managed");
+              available = selected !== undefined && key(skillSelectionSourceRef(selected)) === key(ref);
+            } else {
+              const permitted = await subjectHasLiveWorkspaceAuthorityInScope(tx, {
+                accountId: receipt.accountId, workspaceId: receipt.workspaceId, subjectId: human, requiredPermission: "documents:search",
+              });
+              const [session] = await tx.select({permissions: schema.sessions.firstPartyMcpPermissions}).from(schema.sessions)
+                .where(and(eq(schema.sessions.accountId, receipt.accountId), eq(schema.sessions.workspaceId, receipt.workspaceId), eq(schema.sessions.id, receipt.sessionId))).limit(1);
+              // A frozen explicit session ceiling cannot be widened by the member's admin grant.
+              const selected = session !== undefined && (session.permissions === null || session.permissions.includes("documents:search"));
+              available = permitted && selected && await knowledgeSelectionSourceIsCurrent(tx, {...input.identity, actor: {kind: "agent", ...input.identity}}, ref);
+            }
+          }
+          sources.push({sourceRef: ref, status: available ? "AVAILABLE" : "REFUSED", reason: available ? null : "NATIVE_SOURCE_UNAVAILABLE_OR_INEXACT"});
           continue;
         }
         if (ref.owner === selectionOwner) {

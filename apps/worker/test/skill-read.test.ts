@@ -856,3 +856,14 @@ describe("skill_read use telemetry", () => {
     expect(observedAtCap).toEqual(plainAtCap);
   });
 });
+
+
+test("Skill file reads carry their exact current native source", async () => {
+  const ref = {owner: "native.skill.selection", id: scope.sessionId, version: "revision", sha256: "a".repeat(64)};
+  const definition = createSkillReadAttemptToolDefinition({authorize: async () => {}, load: async () => ({
+    skillId: scope.sessionId, revisionId: scope.turnId, scopeVersion: 1, modelSourceRef: ref,
+    files: [{path: "SKILL.md", content: "Synthetic conditional guidance"}]})});
+  const result = await definition.execute({skill: scope.sessionId}, {operationId: scope.attemptId, caller: {kind: "model", subjectId: "worker:test"}});
+  expect(definition.modelSourceRefs!(result)).toEqual([ref]);
+  expect(JSON.stringify(result)).not.toContain("modelSourceRef");
+});

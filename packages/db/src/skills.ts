@@ -178,10 +178,17 @@ export type SkillDescriptor = {
   title: string;
   description: string;
   revisionId: string;
+  contentHash: string;
   scopeVersion: number;
   installationVersion: number | null;
   activationMode: "workspace_managed" | "session_selected";
 };
+
+/** Current native Skill identity. A descriptor grants no business or execution authority. */
+export function skillSelectionSourceRef(entry: Pick<SkillDescriptor, "id" | "revisionId" | "contentHash" | "scopeVersion" | "installationVersion">): import("@opengeni/contracts").ModelSourceRef {
+  return {owner: "native.skill.selection", id: entry.id,
+    version: JSON.stringify([entry.revisionId, entry.scopeVersion, entry.installationVersion]), sha256: entry.contentHash};
+}
 
 /** Active metadata only: building an index must not transfer every Skill folder. */
 export async function listSkillDescriptors(
@@ -193,7 +200,7 @@ export async function listSkillDescriptors(
       tx,
       sql`
     SELECT h.id, h.stable_key AS "stableKey", r.title, r.description,
-      r.id AS "revisionId", h.scope_version AS "scopeVersion", pi.version AS "installationVersion",
+      r.id AS "revisionId", r.content_hash AS "contentHash", h.scope_version AS "scopeVersion", pi.version AS "installationVersion",
       coalesce(r.skill_activation_mode,'workspace_managed') AS "activationMode"
     FROM preference_registry_preferences h
     JOIN preference_registry_revisions r ON r.id=h.active_revision_id AND r.preference_id=h.id

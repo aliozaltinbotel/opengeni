@@ -471,6 +471,18 @@ export async function getKnowledgeEntry(
   return (await withIndexStatus(db, context, [record], request.view ?? "published"))[0]!;
 }
 
+/** Exact current native source behind a full read or discovery summary. Ranking and index progress are not semantic material. */
+export async function knowledgeSelectionSourceIsCurrent(db: Database, context: KnowledgeContext, ref: import("@opengeni/contracts").ModelSourceRef): Promise<boolean> {
+  let version: unknown;
+  try { version = JSON.parse(ref.version ?? "null"); } catch { return false; }
+  if (!Array.isArray(version) || version.length !== 4 || !["published", "pending"].includes(version[2]) || !["full", "summary"].includes(version[3])) return false;
+  const rows = await read(db, context, {operation: "get", entryId: ref.id, view: version[2] === "pending" ? "needs_review" : "published", limit: 1});
+  if (!rows[0]) return false;
+  const selected = version[3] === "full" ? decodeProjection(rows[0], true) : decodeProjection(rows[0], false);
+  return !selected.archived && ref.version === JSON.stringify([selected.revision.id, selected.version, selected.revision.outcome, version[3]])
+    && ref.sha256 === createHash("sha256").update(JSON.stringify(selected.revision)).digest("hex");
+}
+
 const Cursor = z
   .object({
     v: z.literal(2),

@@ -8,6 +8,7 @@ import {
   installPortableSkill,
   replayPortableSkillInstall,
   listSkillDescriptors,
+  skillSelectionSourceRef,
   type Database,
   type InstallPortableSkillInput,
 } from "@opengeni/db";
@@ -114,10 +115,13 @@ export function createWorkspaceSkillTools(input: {
       !record ||
       record.status !== "active" ||
       !record.activeRevisionId ||
-      record.revisionId !== record.activeRevisionId
+      record.revisionId !== record.activeRevisionId ||
+      record.revisionId !== match.revisionId ||
+      record.contentHash === null || record.contentHash !== match.contentHash
     )
       throw new Error("Skill is no longer active. Search again for current Skills.");
     return {
+      modelSourceRef: skillSelectionSourceRef({...match, contentHash: record.contentHash}),
       skillId: record.id,
       revisionId: record.activeRevisionId,
       scopeVersion: record.scopeVersion,
@@ -190,6 +194,7 @@ export function createWorkspaceSkillTools(input: {
       authorize,
       listWorkspace: async () => [
         ...(await list()).map((entry) => ({
+          modelSourceRef: skillSelectionSourceRef(entry),
           id: entry.id,
           name: entry.title,
           description: entry.description,

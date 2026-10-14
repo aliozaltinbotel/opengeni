@@ -138,5 +138,5 @@ function nativeKnowledgeSources(result:AttemptToolResultValue,identity?:AttemptT
   }
   const list=KnowledgeEntryListResponse.safeParse(value);const entry=KnowledgeEntryRecord.safeParse(value);const prepared=KnowledgeSavePreparationResponse.safeParse(value);
   const selections=list.success?list.data.entries:entry.success?[entry.data]:prepared.success?[...prepared.data.matches.published.entries,...prepared.data.matches.needs_review.entries]:[];
-  return selections.map(selection=>({owner:"native.knowledge.selection",id:selection.revision.id,version:String(selection.version),sha256:createHash("sha256").update(JSON.stringify(selection.revision)).digest("hex")}));
+  return selections.map(selection=>({owner:"native.knowledge.selection.v2",id:selection.id,version:JSON.stringify([selection.revision.id,selection.version,selection.revision.outcome,"entry" in selection.revision ? "full" : "summary"]),sha256:createHash("sha256").update(JSON.stringify(selection.revision)).digest("hex")}));
 }

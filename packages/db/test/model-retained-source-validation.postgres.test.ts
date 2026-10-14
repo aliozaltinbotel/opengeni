@@ -32,6 +32,15 @@ import {
   mutateSessionControlInTransaction,
   persistModelCallSourceReceipt,
   validateRetainedModelSources,
+  saveKnowledgeEntry,
+  getKnowledgeEntry,
+  listKnowledgeEntries,
+  reviewKnowledgeEntry,
+  saveAgentLearningSettings,
+  archiveKnowledgeEntry,
+  applySkillLifecycle,
+  listSkillDescriptors,
+  skillSelectionSourceRef,
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
   type ModelCallSourceIdentity,
@@ -68,10 +77,10 @@ afterAll(async () => {
   else await admin?.end({ timeout: 5 });
 }, 60_000);
 
-async function fixture(managed = false) {
+async function fixture(managed = false, existing?: {accountId: string; workspaceId: string; subjectId: string}, learningMode?: "automatic" | "review_first" | "off") {
   const unique = crypto.randomUUID();
-  const suffix = managed ? `user:retained-${unique}` : unique;
-  const access = managed
+  const suffix = existing?.subjectId ?? (managed ? `user:retained-${unique}` : unique);
+  const access = existing ? {workspaceGrants: [existing]} : managed
     ? await ensureManagedAccessForUser(app.db, {
         userId: `retained-${unique}`,
         email: `retained-${unique}@example.test`,
@@ -87,6 +96,9 @@ async function fixture(managed = false) {
         subjectId: suffix,
       });
   const { accountId, workspaceId } = access.workspaceGrants[0]!;
+  if (learningMode !== undefined) await saveAgentLearningSettings(app.db, {accountId, workspaceId,
+    actor: {kind: "human", principalKind: "human_session", subjectId: suffix, writeScopes: ["workspace"], settingsScopes: ["workspace"], review: true}},
+    {scope: "workspace", operationId: crypto.randomUUID(), expectedVersion: 0, settings: {knowledge: learningMode, skills: learningMode, instructions: "review_first"}});
   const session = await createSession(app.db, {
     accountId,
     workspaceId,
@@ -185,10 +197,26 @@ async function settle(f: Awaited<ReturnType<typeof fixture>>) {
   expect(result.action).toBe("settled");
 }
 
-test.each([false,true])("lawful historical selections survive COMPACTION, SUMMARY and installed COPIED history; host Skills %s", async (includeSkills) => {
+test.each([false,true,"native"] as const)("lawful historical selections survive COMPACTION, SUMMARY and installed COPIED history; Skills %s", async (includeSkills) => {
   const f = await fixture(true);
-  const skillRef = {owner:"cendra.skill.reviewed_release",id:crypto.randomUUID(),sha256:modelSourceContentDigest("Synthetic reviewed Skill body"),version:"1"};
-  if(includeSkills) {
+  let skillRef: ModelSourceRef = {owner:"cendra.skill.reviewed_release",id:crypto.randomUUID(),sha256:modelSourceContentDigest("Synthetic reviewed Skill body"),version:"1"};
+  if (includeSkills === "native") {
+    const skillId = crypto.randomUUID();
+    await applySkillLifecycle(app.db, {...f.identity, actor: {kind: "human", subjectId: f.suffix, principalKind: "human_session"}}, {
+      operation: "save", operationId: crypto.randomUUID(), skillId, expectedRevisionId: null, expectedScopeVersion: 1,
+      stableKey: `continuity-${skillId}`, files: [{path: "SKILL.md", content: "---\nname: continuity\ndescription: Synthetic continuity practice\n---\nCheck current records before the handoff."}], reason: "Synthetic compaction source"});
+    const descriptor = (await listSkillDescriptors(app.db, {...f.identity, subjectId: f.suffix})).find(entry => entry.id === skillId)!;
+    skillRef = skillSelectionSourceRef(descriptor);
+    const callId = crypto.randomUUID(), raw = {content: [{type: "text", text: "Synthetic installed Skill content"}]};
+    const rawSourceRef = {owner: "native.tool.result", id: callId, sha256: modelSourceContentDigest(raw)};
+    const position = Math.max(...f.rows.map(row => row.position));
+    await appendSessionHistoryItems(app.db, {...f.identity, expectedAttemptId: f.identity.attemptId, expectedExecutionGeneration: f.identity.executionGeneration, items: [
+      {position: position + 1, item: {type: "function_call", callId, name: "skill_read", arguments: JSON.stringify({skill: skillId})}},
+      {position: position + 2, item: {type: "function_call_result", callId, output: JSON.stringify(raw)}, sourceBasis: {kind: "TOOL_RESULT", parents: [rawSourceRef], retainedSources: [skillRef], rawToolSource: {sourceCallId: callId, nativeModelSourceKey: f.receipt.sourceKey, rawSourceRef, retainedSources: [skillRef]}}},
+    ]});
+    f.rows = await getActiveSessionHistoryItemsPaged(app.db, f.identity.workspaceId, f.identity.sessionId);
+  }
+  if(includeSkills === true) {
     await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,
       catalog:'## Skills\n- {"id":"synthetic-skill","name":"Synthetic","description":"Scoped instructions"}',retainedSources:[skillRef]});
     f.rows=await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
@@ -203,6 +231,7 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
       instructionSelections: f.instructionSelections,
     },
   );
+  expect(compaction.incompleteReasons).toEqual([]);
   const write = {
     ...f.identity,
     expectedAttemptId: f.identity.attemptId,
@@ -210,8 +239,8 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
   };
   await applyContextCompaction(app.db, {
     ...write,
-    replacementItems: includeSkills ? f.rows.filter(row=>readSkillCatalogContext(row.item)!==null).map(row=>row.item) : [],
-    replacementSourceIds: includeSkills ? f.rows.filter(row=>readSkillCatalogContext(row.item)!==null).map(row=>row.id) : [],
+    replacementItems: includeSkills === true ? f.rows.filter(row=>readSkillCatalogContext(row.item)!==null).map(row=>row.item) : [],
+    replacementSourceIds: includeSkills === true ? f.rows.filter(row=>readSkillCatalogContext(row.item)!==null).map(row=>row.id) : [],
     summaryItem: buildSummaryItem("Synthetic historical summary"),
     summarySourceIds: f.rows.map((row) => row.id),
     summaryModelSourceKey: compaction.sourceKey,
@@ -225,6 +254,7 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
   const summarized = await persistModelCallSourceReceipt(app.db, summarizedIdentity, {
     input: rows.map((row) => row.item),
   });
+  expect(summarized.incompleteReasons).toEqual([]);
   expect(summarized.complete).toBe(true);
   expect(
     (
@@ -233,7 +263,7 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
         receipt: summarized,
       })
     ).complete,
-  ).toBe(!includeSkills);
+  ).toBe(includeSkills !== true);
   const policy = await createWorkspaceInstructionPolicyDraft(app.db, {
     ...f.identity,
     kind: "charter",
@@ -300,8 +330,8 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
   });
   expect(copied.complete).toBe(true);
   const result = await validateRetainedModelSources(app.db, { identity, receipt: copied });
-  expect(result.complete).toBe(!includeSkills);
-  if(includeSkills)expect(result.sources).toContainEqual({sourceRef:skillRef,status:"HOST_AUTHORITY_REQUIRED",reason:"HOST_AUTHORITY_REQUIRED"});
+  expect(result.complete).toBe(includeSkills !== true);
+  if(includeSkills === true)expect(result.sources).toContainEqual({sourceRef:skillRef,status:"HOST_AUTHORITY_REQUIRED",reason:"HOST_AUTHORITY_REQUIRED"});
   for (const ref of compaction.inputs.flatMap((item) => item.retainedSources))
     expect(result.sources).toContainEqual({ sourceRef: ref, status: ref.owner === "cendra.skill.reviewed_release" ? "HOST_AUTHORITY_REQUIRED" : "AVAILABLE", reason: ref.owner === "cendra.skill.reviewed_release" ? "HOST_AUTHORITY_REQUIRED" : null });
   expect(identity.attemptId).not.toBe(compaction.attemptId);
@@ -332,7 +362,7 @@ test.each([false,true])("lawful historical selections survive COMPACTION, SUMMAR
         receipt: currentReceipt,
       })
     ).complete,
-  ).toBe(!includeSkills);
+  ).toBe(includeSkills !== true);
   // Missing-origin fault injection on this disposable database. The current copied receipt remains
   // byte-exact; no guard/constraint is disabled and no receipt is rewritten or rehashed.
   await admin`delete from model_call_source_receipts where id=${compaction.id}`;
@@ -517,4 +547,96 @@ test("legacy native Skill catalog and tool result origins are refused without re
   expect(receipt.complete).toBe(false);expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
   expect(await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId)).toEqual(before);
  }
+});
+
+
+test("native Knowledge memory revalidates revision, visibility and tenant", async () => {
+  const f = await fixture();
+  const human = {...f.identity, actor: {kind: "human" as const, subjectId: f.suffix, principalKind: "human_session" as const,
+    writeScopes: ["workspace" as const], settingsScopes: ["workspace" as const], review: true}};
+  const saved = await saveKnowledgeEntry(app.db, human, {operationId: crypto.randomUUID(), entryId: crypto.randomUUID(),
+    expectedVersion: 0, scope: "workspace", entry: {kind: "source", title: "Synthetic handoff observation", content: "Cobalt handoff observation.",
+      source: {kind: "manual"}, evidence: [], groupIds: [], relationships: []}});
+  const record = (await getKnowledgeEntry(app.db, human, saved.entryId))!;
+  const ref = {owner: "native.knowledge.selection.v2", id: record.id,
+    version: JSON.stringify([record.revision.id, record.version, record.revision.outcome, "full"]),
+    sha256: createHash("sha256").update(JSON.stringify(record.revision)).digest("hex")};
+  const exact = await retainedReceipt(f, [ref]);
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(true);
+  const summary = (await listKnowledgeEntries(app.db, human, {query: "handoff"})).entries.find(entry => entry.id === record.id)!;
+  const summaryRef = {...ref, version: JSON.stringify([summary.revision.id, summary.version, summary.revision.outcome, "summary"]),
+    sha256: createHash("sha256").update(JSON.stringify(summary.revision)).digest("hex")};
+  expect((await validateRetainedModelSources(app.db, await retainedReceipt(f, [summaryRef]))).complete).toBe(true);
+  const foreign = await fixture();
+  expect((await validateRetainedModelSources(app.db, await retainedReceipt(foreign, [ref]))).complete).toBe(false);
+  // Keep the exact live member and attempt; revoke only the native Knowledge permission.
+  await admin`update workspace_memberships set permissions='["documents:search","goals:manage"]'::jsonb where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and subject_id=${f.suffix}`;
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(true);
+  await admin`update workspace_memberships set permissions='["goals:manage"]'::jsonb where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and subject_id=${f.suffix}`;
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+  await admin`update workspace_memberships set permissions='["documents:search","goals:manage"]'::jsonb where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and subject_id=${f.suffix}`;
+  const corrected = await saveKnowledgeEntry(app.db, human, {operationId: crypto.randomUUID(), entryId: record.id,
+    expectedVersion: record.version, scope: "workspace", entry: {...record.revision.entry, content: "Corrected synthetic handoff observation."}});
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+  await archiveKnowledgeEntry(app.db, human, {operationId: crypto.randomUUID(), entryId: record.id, expectedVersion: corrected.version});
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+});
+
+test("native Skill source refuses changed, removed and foreign active revisions", async () => {
+  const f = await fixture();
+  const skillId = crypto.randomUUID();
+  const saved = await applySkillLifecycle(app.db, {...f.identity,
+    actor: {kind: "human", subjectId: f.suffix, principalKind: "human_session"}}, {
+    operation: "save", operationId: crypto.randomUUID(), skillId, expectedRevisionId: null, expectedScopeVersion: 1,
+    stableKey: `retained-${skillId}`, files: [{path: "SKILL.md", content: "---\nname: handoff\ndescription: Synthetic handoff guidance\n---\nRead the current task before preparing the handoff."}], reason: "Synthetic source qualification"});
+  const descriptor = (await listSkillDescriptors(app.db, {...f.identity, subjectId: f.suffix})).find(item => item.id === skillId)!;
+  expect(descriptor).toBeDefined();
+  const ref = {owner: "native.skill.selection", id: skillId,
+    version: JSON.stringify([saved.revisionId, descriptor.scopeVersion, descriptor.installationVersion]), sha256: descriptor.contentHash};
+  const exact = await retainedReceipt(f, [ref]);
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(true);
+  const foreign = await fixture();
+  expect((await validateRetainedModelSources(app.db, await retainedReceipt(foreign, [ref]))).complete).toBe(false);
+  const correction = await applySkillLifecycle(app.db, {...f.identity, actor: {kind: "human", subjectId: f.suffix, principalKind: "human_session"}}, {
+    operation: "save", operationId: crypto.randomUUID(), skillId, expectedRevisionId: saved.revisionId, expectedScopeVersion: descriptor.scopeVersion,
+    files: [{path: "SKILL.md", content: "---\nname: handoff\ndescription: Corrected synthetic handoff guidance\n---\nCheck current records and the current owner before a handoff."}], reason: "Synthetic correction"});
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+  const current = (await listSkillDescriptors(app.db, {...f.identity, subjectId: f.suffix})).find(item => item.id === skillId)!;
+  const correctedReceipt = await retainedReceipt(f, [skillSelectionSourceRef(current)]);
+  expect((await validateRetainedModelSources(app.db, correctedReceipt)).complete).toBe(true);
+  await applySkillLifecycle(app.db, {...f.identity, actor: {kind: "human", subjectId: f.suffix, principalKind: "human_session"}}, {
+    operation: "remove", operationId: crypto.randomUUID(), skillId, expectedRevisionId: correction.revisionId,
+    expectedScopeVersion: current.scopeVersion, reason: "Synthetic removal"});
+  expect((await validateRetainedModelSources(app.db, correctedReceipt)).complete).toBe(false);
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+});
+
+
+test.each(["automatic", "review_first", "off"] as const)("native learning %s governs publication and separate-run source reuse", async mode => {
+  const f = await fixture(false, undefined, mode);
+  const context = {...f.identity, actor: {kind: "agent" as const, ...f.identity}};
+  const command = {operationId: crypto.randomUUID(), entryId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace" as const,
+    entry: {kind: "source" as const, title: "Synthetic continuity", content: "A confirmed synthetic handoff observation.", source: {kind: "manual" as const}, evidence: [], groupIds: [], relationships: []}};
+  if (mode === "off") {
+    await expect(saveKnowledgeEntry(app.db, context, command)).rejects.toThrow();
+    return;
+  }
+  const saved = await saveKnowledgeEntry(app.db, context, command);
+  expect(saved.outcome).toBe(mode === "automatic" ? "published" : "pending");
+  const second = await fixture(false, {...f.identity, subjectId: f.suffix});
+  const secondContext = {...second.identity, actor: {kind: "agent" as const, ...second.identity}};
+  if(mode === "automatic") expect(await getKnowledgeEntry(app.db, secondContext, saved.entryId)).not.toBeNull();
+  else expect(await getKnowledgeEntry(app.db, secondContext, saved.entryId)).toBeNull();
+  const record = (await getKnowledgeEntry(app.db, secondContext, saved.entryId, {view: mode === "automatic" ? "published" : "needs_review"}))!;
+  const ref = {owner: "native.knowledge.selection.v2", id: record.id,
+    version: JSON.stringify([record.revision.id, record.version, record.revision.outcome, "full"]),
+    sha256: createHash("sha256").update(JSON.stringify(record.revision)).digest("hex")};
+  const exact = await retainedReceipt(second, [ref]);
+  expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(true);
+  if (mode === "review_first") {
+    await reviewKnowledgeEntry(app.db, {...f.identity, actor: {kind: "human", principalKind: "human_session", subjectId: f.suffix,
+      writeScopes: ["workspace"], settingsScopes: ["workspace"], review: true}}, {operationId: crypto.randomUUID(), entryId: record.id,
+      revisionId: record.revision.id, expectedVersion: record.version, decision: "reject"});
+    expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+  }
 });

@@ -32,6 +32,7 @@ export type SkillReadOrigin = Readonly<{
 }>;
 
 export type SkillReadContent = Readonly<{
+  modelSourceRef?: import("@opengeni/contracts").ModelSourceRef;
   files: readonly SkillTextFile[];
   skillId: string;
   revisionId: string;
@@ -179,7 +180,9 @@ export function createSkillReadAttemptToolDefinition(input: {
   activeHistory?: SkillReadActiveHistory;
   telemetry?: SkillReadTelemetry;
 }): AttemptToolDefinition {
+  const sources = new WeakMap<object, readonly import("@opengeni/contracts").ModelSourceRef[]>();
   return {
+    modelSourceRefs: result => sources.get(result) ?? [],
     identity: { serverId: "opengeni", toolName: SKILL_READ_TOOL_NAME },
     modelName: SKILL_READ_TOOL_NAME,
     codemodePath: ["opengeni", SKILL_READ_TOOL_NAME],
@@ -228,11 +231,13 @@ export function createSkillReadAttemptToolDefinition(input: {
       const skill = args.skill;
       let origin: SkillReadOrigin | undefined;
       let identity: SkillReadIdentity = {};
+      let sourceRef: import("@opengeni/contracts").ModelSourceRef | undefined;
       let read: { kind: Exclude<SkillReadKind, "refused">; result: AttemptToolResult };
       try {
         const loaded = await input.load(skill);
         const content = "files" in loaded ? loaded : { files: loaded };
         origin = "origin" in content ? content.origin : undefined;
+        if ("modelSourceRef" in content) sourceRef = content.modelSourceRef;
         if ("skillId" in content) {
           identity = {
             skillId: content.skillId,
@@ -255,9 +260,11 @@ export function createSkillReadAttemptToolDefinition(input: {
         throw error;
       }
       observe(input.telemetry, { caller: context.caller.kind, kind: read.kind, origin, skill });
-      return context.caller.kind === "model" && origin && input.telemetry
+      const result = context.caller.kind === "model" && origin && input.telemetry
         ? withSkillUse(read, origin, identity, input.telemetry)
         : read.result;
+      if (sourceRef) sources.set(result, [sourceRef]);
+      return result;
     },
   };
 }

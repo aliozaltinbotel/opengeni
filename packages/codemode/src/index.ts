@@ -651,7 +651,7 @@ export function createAttemptToolEnvironment(
   const createdAt = (input.createdAt ?? new Date()).toISOString();
   const prepared = prepareToolGatewayDefinitions(
     input.definitions.map(
-      (definition): ToolGatewayDefinition => ({
+      ({modelSourceRefs: _sources, ...definition}): ToolGatewayDefinition => ({
         ...definition,
         execute: async (argumentsValue, context) =>
           await definition.execute(argumentsValue, {

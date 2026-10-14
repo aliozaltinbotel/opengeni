@@ -116,3 +116,14 @@ describe("skill_search gateway definition", () => {
     });
   });
 });
+
+
+test("installed Skill discovery carries native source identity without exposing provenance as model content", async () => {
+  const ref = {owner: "native.skill.selection", id: scope.sessionId, version: "revision", sha256: "a".repeat(64)};
+  const definition = createSkillSearchAttemptToolDefinition({authorize: async () => {},
+    listWorkspace: async () => [{id: scope.sessionId, name: "handoff", description: "Handoff practice", modelSourceRef: ref}],
+    publicSearch: {search: async () => {throw Error("PUBLIC_SEARCH_MUST_NOT_RUN");}}});
+  const result = await definition.execute({query: "handoff", scope: "installed"}, {operationId: scope.attemptId, caller: {kind: "model", subjectId: "worker:test"}});
+  expect(definition.modelSourceRefs!(result)).toEqual([ref]);
+  expect(JSON.stringify(result)).not.toContain("modelSourceRef");
+});

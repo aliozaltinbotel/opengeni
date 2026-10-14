@@ -2,6 +2,7 @@ import type { AttemptToolDefinition } from "@opengeni/codemode";
 import { PublicSkillSearchError, type PublicSkillSearchClient } from "@opengeni/core";
 
 export type WorkspaceSkillSearchEntry = Readonly<{
+  modelSourceRef?: import("@opengeni/contracts").ModelSourceRef;
   id: string;
   name: string;
   description: string;
@@ -18,7 +19,9 @@ export function createSkillSearchAttemptToolDefinition(input: {
   /** Ids of the readable Skills a search returned, for read telemetry only. */
   onWorkspaceHits?: (ids: readonly string[]) => void;
 }): AttemptToolDefinition {
+  const sources = new WeakMap<object, readonly import("@opengeni/contracts").ModelSourceRef[]>();
   return {
+    modelSourceRefs: result => sources.get(result) ?? [],
     identity: { serverId: "opengeni", toolName: "skill_search" },
     modelName: "skill_search",
     codemodePath: ["opengeni", "skill_search"],
@@ -87,7 +90,7 @@ export function createSkillSearchAttemptToolDefinition(input: {
         }
       }
       const output = {
-        workspace: workspaceHits,
+        workspace: workspaceHits.map(({modelSourceRef: _source, ...entry}) => entry),
         library: [], // Retained response field for older clients.
         public: publicResult?.items.map((entry) => ({ ...entry })) ?? [],
         // A provider outage is not an empty search. Keep local results useful
@@ -95,11 +98,13 @@ export function createSkillSearchAttemptToolDefinition(input: {
         partial: publicError !== null,
         errors: publicError ? [publicError] : [],
       };
-      return {
+      const result = {
         isError: false,
-        content: [{ type: "text", text: JSON.stringify(output) }],
+        content: [{ type: "text" as const, text: JSON.stringify(output) }],
         structuredContent: output,
       };
+      sources.set(result, workspaceHits.flatMap(entry => entry.modelSourceRef ? [entry.modelSourceRef] : []));
+      return result;
     },
   };
 }
