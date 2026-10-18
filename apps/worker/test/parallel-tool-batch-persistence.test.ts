@@ -16,8 +16,12 @@ import { runTurnStreamAttempt } from "../src/activities/agent-turn/stream-attemp
 
 const CALLS = ["call_a", "call_b", "call_c", "call_d"] as const;
 
-function harness(calls: readonly string[] = CALLS) {
+function harness(
+  calls: readonly string[] = CALLS,
+  options: { stream?: unknown; appendDelayMs?: number } = {},
+) {
   const order: string[] = [];
+  const appended: Array<{ type: string; id: string | undefined; occurredAt: unknown; appendedAt: number }> = [];
   const publishes: Array<string[]> = [];
   const finalizations: Array<readonly string[] | undefined> = [];
   const registrationTransactions: string[][] = [];
@@ -65,7 +69,7 @@ function harness(calls: readonly string[] = CALLS) {
     );
   }
   const metric = { record() {}, observe() {}, add() {}, inc() {}, set() {} };
-  const stream = {
+  const stream = options.stream ?? {
     completed: Promise.resolve(),
     error: null,
     toStream: () => ({
@@ -113,9 +117,13 @@ function harness(calls: readonly string[] = CALLS) {
         modelRunSettings: settings,
         toolCancellationFenceRef: { current: null },
         firstModelRequestPreparationRecorded: true,
-        publish: async (events: Array<{ type: string; payload?: { id?: string } }>) => {
+        publish: async (events: Array<{ type: string; payload?: { id?: string }; occurredAt?: unknown }>) => {
           const tools = events.filter((event) => event.type.startsWith("agent.toolCall."));
           if (tools.length === 0) return;
+          if (options.appendDelayMs) await new Promise((resolve) => setTimeout(resolve, options.appendDelayMs));
+          for (const event of tools) {
+            appended.push({ type: event.type, id: event.payload?.id, occurredAt: event.occurredAt, appendedAt: Date.now() });
+          }
           publishes.push(tools.map((event) => `${event.type.slice("agent.toolCall.".length)}:${event.payload?.id}`));
           order.push(`publish:${tools.map((event) => `${event.type.slice("agent.toolCall.".length)}:${event.payload?.id}`).join(",")}`);
         },
@@ -152,7 +160,7 @@ function harness(calls: readonly string[] = CALLS) {
         finalizations.push(callIds);
       },
     } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
-  return { order, publishes, finalizations, registrationTransactions, stopped, run, restore: () => spies.forEach((spy) => spy.mockRestore()) };
+  return { appended, order, publishes, finalizations, registrationTransactions, stopped, run, restore: () => spies.forEach((spy) => spy.mockRestore()) };
 }
 
 test("a parallel tool batch is registered in one transaction and published in one append per phase", async () => {
@@ -198,6 +206,76 @@ test("a single call keeps one registration, one created append and one output ap
     expect(h.registrationTransactions).toEqual([["call_only"]]);
     expect(h.publishes).toEqual([["created:call_only"], ["output:call_only"]]);
     expect(h.finalizations).toEqual([["call_only"]]);
+  } finally {
+    h.restore();
+  }
+});
+
+/** An SDK-shaped run result: items reach the consumer only through `_addItem`. */
+function sdkRunResult() {
+  let controller!: ReadableStreamDefaultController<unknown>;
+  const readable = new ReadableStream<unknown>({ start: (c) => { controller = c; } });
+  return {
+    completed: Promise.resolve(),
+    error: null,
+    _addItem(item: unknown) { controller.enqueue(item); },
+    _raiseError(error: unknown) { controller.error(error); },
+    toStream: () => readable,
+  };
+}
+
+test("created/output occurredAt bracket the SDK's own execution of the batch, not the slow appends", async () => {
+  const sdk = sdkRunResult();
+  const h = harness(CALLS, { stream: sdk, appendDelayMs: 40 });
+  const execution = { startedBefore: 0, startedAfter: 0, endedBefore: 0, endedAfter: 0 };
+  try {
+    const running = h.run();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // The SDK streams the batch's calls and immediately executes them.
+    execution.startedBefore = Date.now();
+    for (const callId of CALLS) {
+      sdk._addItem({ type: "run_item_stream_event", item: { type: "tool_call_item", rawItem: { type: "function_call", callId, name: "command", arguments: "{}" } } });
+    }
+    execution.startedAfter = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 120)); // real execution
+    execution.endedBefore = Date.now();
+    for (const callId of CALLS) {
+      sdk._addItem({
+        type: "run_item_stream_event",
+        item: { type: "tool_call_output_item", rawItem: { type: "function_call_result", callId, output: { type: "text", text: `result ${callId}` } }, output: { type: "text", text: `result ${callId}` } },
+      });
+    }
+    execution.endedAfter = Date.now();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    sdk._raiseError(h.stopped);
+    await expect(running).rejects.toBe(h.stopped);
+    expect(h.appended).toHaveLength(CALLS.length * 2);
+    for (const id of CALLS) {
+      const created = h.appended.find((event) => event.type === "agent.toolCall.created" && event.id === id)!;
+      const output = h.appended.find((event) => event.type === "agent.toolCall.output" && event.id === id)!;
+      expect(created.occurredAt).toBeInstanceOf(Date);
+      expect(output.occurredAt).toBeInstanceOf(Date);
+      const createdAt = (created.occurredAt as Date).getTime();
+      const outputAt = (output.occurredAt as Date).getTime();
+      expect(createdAt).toBeGreaterThanOrEqual(execution.startedBefore);
+      expect(createdAt).toBeLessThanOrEqual(execution.startedAfter);
+      expect(outputAt).toBeGreaterThanOrEqual(execution.endedBefore);
+      expect(outputAt).toBeLessThanOrEqual(execution.endedAfter);
+      // Created never follows its output, and both precede their (slower) append.
+      expect(createdAt).toBeLessThanOrEqual(outputAt);
+      expect(createdAt).toBeLessThan(created.appendedAt);
+      expect(outputAt).toBeLessThan(output.appendedAt);
+    }
+  } finally {
+    h.restore();
+  }
+});
+
+test("events the SDK did not emit through _addItem keep the append time (no explicit occurredAt)", async () => {
+  const h = harness(["call_only"]);
+  try {
+    await expect(h.run()).rejects.toBe(h.stopped);
+    expect(h.appended.map((event) => event.occurredAt)).toEqual([undefined, undefined]);
   } finally {
     h.restore();
   }

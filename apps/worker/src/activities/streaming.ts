@@ -69,13 +69,18 @@ export function createRuntimeBatcher(
      * push before treating it as durable.
      */
     push: async (
-      event: { type: SessionEventType; payload: unknown },
+      event: { type: SessionEventType; payload: unknown; occurredAt?: Date },
       pushOptions: { defer?: boolean } = {},
     ) => {
       throwIfFlushFailed();
       // Append BEFORE the structural check so a structural event's flush always
       // carries any pending deltas in order (same flush, order preserved).
-      pending.push({ type: event.type, payload: event.payload });
+      // An explicit occurrence time is kept; otherwise storage stamps the append.
+      pending.push({
+        type: event.type,
+        payload: event.payload,
+        ...(event.occurredAt ? { occurredAt: event.occurredAt } : {}),
+      });
       if (pushOptions.defer) {
         if (activeBatchSize + pending.length >= MAX_BUFFERED_EVENTS) await flush();
         return;
@@ -203,6 +208,28 @@ export function startActivityHeartbeat(
     timer.unref();
   }
   return timer;
+}
+
+/**
+ * Record when the Agents SDK emits each stream event, by wrapping the run
+ * result's `_addItem` (the one funnel through which the SDK enqueues every
+ * event). The SDK streams a batch's `tool_called` items immediately before it
+ * executes the batch and its outputs immediately after, so these times are the
+ * batch's own execution start and end, independent of how far the consumer lags
+ * behind. A result without that funnel yields no times (callers then keep the
+ * append time).
+ */
+export function observeStreamEmissionTimes(stream: unknown): (event: unknown) => Date | undefined {
+  const emitted = new WeakMap<object, Date>();
+  const result = stream as { _addItem?: unknown } | null;
+  if (result && typeof result._addItem === "function") {
+    const add = (result._addItem as (item: unknown) => void).bind(result);
+    result._addItem = (item: unknown) => {
+      if (item && typeof item === "object") emitted.set(item, new Date());
+      add(item);
+    };
+  }
+  return (event) => (event && typeof event === "object" ? emitted.get(event) : undefined);
 }
 
 /**

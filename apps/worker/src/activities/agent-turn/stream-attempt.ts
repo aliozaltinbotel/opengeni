@@ -61,7 +61,12 @@ import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import { turnInput } from "../run-input";
-import { createRuntimeBatcher, createStreamLookahead, currentActivityContext } from "../streaming";
+import {
+  createRuntimeBatcher,
+  createStreamLookahead,
+  currentActivityContext,
+  observeStreamEmissionTimes,
+} from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -1181,6 +1186,11 @@ export async function runTurnStreamAttempt(
     // streams the batch's `tool_called` items adjacently (before it executes the
     // batch) and its outputs adjacently (after). Persistence order is unchanged.
     const streamReader = createStreamLookahead(eventing.stream.toStream(), activityContext);
+    // A tool event's occurredAt is when the SDK emitted it (its execution start
+    // or end), not when this consumer appended it; storage keeps created_at as
+    // the append time. An output never precedes its own call.
+    const emittedAt = observeStreamEmissionTimes(eventing.stream);
+    const toolCallCreatedAt = new Map<string, Date>();
     // Calls already registered with the rest of their batch; consumed once each.
     const batchRegisteredToolCallIds = new Set<string>();
     // Post-durability work of tool events whose append was deferred to the
@@ -1570,6 +1580,14 @@ export async function runTurnStreamAttempt(
           streamTiming.onEvent(event.type);
           if (event.type === "agent.toolCall.output") {
             const batcher = eventing.batcher;
+            const emitted = emittedAt(next.value);
+            if (emitted) {
+              const id = (event.payload as { id?: unknown }).id;
+              const created = typeof id === "string" ? toolCallCreatedAt.get(id) : undefined;
+              if (typeof id === "string") toolCallCreatedAt.delete(id);
+              (event as { occurredAt?: Date }).occurredAt =
+                created && created.getTime() > emitted.getTime() ? created : emitted;
+            }
             // An output whose batch sibling is already streamed joins that
             // sibling's append. The batch's last output (which settles the
             // stable batch) flushes every deferred output in order.
@@ -1581,6 +1599,12 @@ export async function runTurnStreamAttempt(
               ),
             );
           } else if (event.type === "agent.toolCall.created") {
+            const emitted = emittedAt(next.value);
+            if (emitted) {
+              (event as { occurredAt?: Date }).occurredAt = emitted;
+              const id = (event.payload as { id?: unknown }).id;
+              if (typeof id === "string") toolCallCreatedAt.set(id, emitted);
+            }
             // Every call of the batch is registered; its `created` events share one append.
             const defer = isToolCalledSdkEvent(streamReader.peek());
             deferredToolEventAppend ||= defer;

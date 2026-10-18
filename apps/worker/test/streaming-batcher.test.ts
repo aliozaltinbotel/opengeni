@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEventType } from "@opengeni/contracts";
 import type { AppendEventInput } from "@opengeni/db";
 import type { Context } from "@temporalio/activity";
-import { createRuntimeBatcher, createStreamLookahead, nextStreamEvent } from "../src/activities/streaming";
+import { createRuntimeBatcher, createStreamLookahead, nextStreamEvent, observeStreamEmissionTimes } from "../src/activities/streaming";
 
 // Lever A: token deltas coalesce through the batcher (one appendSessionEvents
 // txn + one publish per flush) instead of one DB round-trip per token. These
@@ -427,3 +427,31 @@ describe("createStreamLookahead over a ReadableStream", () => {
   });
 });
 
+
+describe("tool event occurrence time", () => {
+  test("the batcher keeps an explicit occurredAt through its flush and omits it otherwise", async () => {
+    const flushed: AppendEventInput[][] = [];
+    const batcher = createRuntimeBatcher(async (events) => { flushed.push(events); });
+    const at = new Date(1_790_000_000_000);
+    await batcher.push({ type: TOOLCALL, payload: { n: 1 }, occurredAt: at }, { defer: true });
+    await batcher.push({ type: TOOLCALL, payload: { n: 2 } });
+    expect(flushed).toEqual([[{ type: TOOLCALL, payload: { n: 1 }, occurredAt: at }, { type: TOOLCALL, payload: { n: 2 } }]]);
+  });
+
+  test("emission times come from the SDK's _addItem, not from when the consumer reads", async () => {
+    const enqueued: unknown[] = [];
+    const result = { _addItem(item: unknown) { enqueued.push(item); } };
+    const emittedAt = observeStreamEmissionTimes(result);
+    const item = { type: "run_item_stream_event" };
+    const before = Date.now();
+    result._addItem(item);
+    const after = Date.now();
+    await sleep(20);
+    expect(enqueued).toEqual([item]);
+    const at = emittedAt(item)!.getTime();
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(after);
+    expect(emittedAt({ type: "never-emitted" })).toBeUndefined();
+    expect(observeStreamEmissionTimes({})(item)).toBeUndefined();
+  });
+});

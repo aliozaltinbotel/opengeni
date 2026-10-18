@@ -5,6 +5,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { DatabaseTransactionError } from "../src/persistence-errors";
 import {
   applySessionTurnSettlement,
+  appendSessionEventsForTurnAttempt,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
@@ -569,5 +570,28 @@ describe("parallel batch registration", () => {
     const batch = batchOf(input, 2).map((call) => ({ ...call, executionGeneration: call.executionGeneration + 1 }));
     expect(await registerPendingSessionToolCalls(client.db, batch)).toEqual({ accepted: false, registeredCallIds: [] });
     expect(await receipts(input)).toHaveLength(0);
+  });
+});
+
+describe("tool event occurrence time", () => {
+  test("an explicit occurredAt is stored as given while created_at stays the append time, in sequence order", async () => {
+    const { input } = await fixture();
+    const executionStarted = new Date(Date.now() - 5_000);
+    const executionEnded = new Date(Date.now() - 4_000);
+    const appendStarted = Date.now();
+    const appended = await appendSessionEventsForTurnAttempt(
+      client.db, input.workspaceId, input.sessionId, input.turnId, input.executionGeneration, input.attemptId,
+      [
+        { type: "agent.toolCall.created", payload: { id: input.callId, name: "read" }, turnId: input.turnId, occurredAt: executionStarted },
+        { type: "agent.toolCall.output", payload: { id: input.callId, output: "done" }, turnId: input.turnId, occurredAt: executionEnded },
+      ],
+    );
+    expect(appended.accepted).toBe(true);
+    const rows = await shared.admin`SELECT type, sequence, occurred_at, created_at FROM session_events
+      WHERE session_id = ${input.sessionId} AND type IN ('agent.toolCall.created', 'agent.toolCall.output') ORDER BY sequence`;
+    expect(rows.map((row) => row.type)).toEqual(["agent.toolCall.created", "agent.toolCall.output"]);
+    expect(new Date(rows[0]!.occurred_at).getTime()).toBe(executionStarted.getTime());
+    expect(new Date(rows[1]!.occurred_at).getTime()).toBe(executionEnded.getTime());
+    for (const row of rows) expect(new Date(row.created_at).getTime()).toBeGreaterThanOrEqual(appendStarted - 1_000);
   });
 });

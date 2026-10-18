@@ -326,7 +326,7 @@ See [`goals.md`](goals.md).
 | Store | Owns | Must not become |
 | --- | --- | --- |
 | `session_history_items` | Model conversation truth preserving protocol | Audit projections/mutable UI caches |
-| `session_pending_tool_calls` | In-flight call/result receipts and resumable open suffix; a streamed parallel batch registers in one transaction before its `created` events share one append | Conversation history |
+| `session_pending_tool_calls` | In-flight call/result receipts and resumable open suffix; a streamed parallel batch registers in one transaction before its `created` events share one append; tool `created`/`output` events carry the SDK's emission time (execution start/end) as `occurred_at`, while `created_at` stays the append time | Conversation history |
 | `agent_run_states` | Control snapshots/open-suffix sentinel | Model memory |
 | `session_events` | Append-only human/audit timeline, SSE replay | Model input |
 | `session_system_updates` | Durable machine inputs: child results/schedules | Synthetic human messages |
