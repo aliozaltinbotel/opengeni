@@ -8504,6 +8504,7 @@ export const KNOWN_USAGE_EVENT_TYPES = [
   "model.call",
   "embedding.call",
   "model.call.dispatch",
+  "model.call.dispatch.refused",
   "model.realtime.session.observed",
   "model.realtime.session.attached",
   "model.realtime.session.dispatched",

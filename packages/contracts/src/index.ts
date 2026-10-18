@@ -3799,6 +3799,9 @@ export const UsageEventType = z.enum([
   "model.call",
   // Non-billing dispatch intent; never evidence of provider completion or cost.
   "model.call.dispatch",
+  // Non-billing terminal of an intent whose dispatch was refused before any
+  // request bytes (admission revoked before consumption): outcome "cancelled".
+  "model.call.dispatch.refused",
   // Non-billing provider occurrence/attachment and exact query-owner pressure.
   "model.realtime.session.observed",
   "model.realtime.session.attached",
@@ -3818,6 +3821,7 @@ export type UsageEventType = z.infer<typeof UsageEventType>;
 /** Event type of the per-call model usage fact. */
 export const MODEL_CALL_USAGE_EVENT_TYPE = "model.call" as const;
 export const MODEL_CALL_DISPATCH_EVENT_TYPE = "model.call.dispatch" as const;
+export const MODEL_CALL_DISPATCH_REFUSED_EVENT_TYPE = "model.call.dispatch.refused" as const;
 /** Event type of the per-request embedding usage fact. */
 export const EMBEDDING_CALL_USAGE_EVENT_TYPE = "embedding.call" as const;
 export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.model-call-usage/v1" as const;
