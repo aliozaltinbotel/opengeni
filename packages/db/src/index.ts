@@ -44142,40 +44142,91 @@ export async function registerPendingSessionToolCall(
   db: Database,
   input: PendingSessionToolCallInput,
 ): Promise<{ accepted: boolean; registered: boolean }> {
+  const result = await registerPendingSessionToolCallsOnce(db, [input]);
+  return { accepted: result.accepted, registered: result.registeredCallIds.length === 1 };
+}
+
+/**
+ * Register every call of one parallel SDK batch in ONE transaction: one RLS
+ * scope, one exact-attempt fence lock and one multi-row insert. Each call keeps
+ * the singular registration's exact semantics (duplicate delivery converges,
+ * a conflicting duplicate is refused, the output policy must match). Every
+ * input must belong to the same attempt.
+ */
+export async function registerPendingSessionToolCalls(
+  db: Database,
+  inputs: readonly PendingSessionToolCallInput[],
+): Promise<{ accepted: boolean; registeredCallIds: string[] }> {
+  if (inputs.length === 0) return { accepted: true, registeredCallIds: [] };
+  return await registerPendingSessionToolCallsOnce(db, inputs);
+}
+
+async function registerPendingSessionToolCallsOnce(
+  db: Database,
+  inputs: readonly PendingSessionToolCallInput[],
+): Promise<{ accepted: boolean; registeredCallIds: string[] }> {
+  const first = inputs[0]!;
+  const calls = new Map<string, PendingSessionToolCallInput>();
+  for (const input of inputs) {
+    if (
+      input.accountId !== first.accountId ||
+      input.workspaceId !== first.workspaceId ||
+      input.sessionId !== first.sessionId ||
+      input.turnId !== first.turnId ||
+      input.executionGeneration !== first.executionGeneration ||
+      input.attemptId !== first.attemptId
+    ) {
+      throw new Error("Pending tool calls of one registration must share one attempt");
+    }
+    const prior = calls.get(input.callId);
+    if (!prior) {
+      calls.set(input.callId, input);
+      continue;
+    }
+    if (
+      prior.callType !== input.callType ||
+      !pendingToolCallItemsEqual(prior.callItem, input.callItem) ||
+      prior.modelToolOutputTruncationTokens !== input.modelToolOutputTruncationTokens
+    ) {
+      throw new Error("Pending tool receipt conflicts with the registered call");
+    }
+  }
   const correlationId = crypto.randomUUID();
   const registerOnce = async (attempt: number) => {
     try {
       return await withRlsContext(
         db,
-        { accountId: input.accountId, workspaceId: input.workspaceId },
+        { accountId: first.accountId, workspaceId: first.workspaceId },
         async (scopedDb) =>
           await scopedDb.transaction(async (tx) => {
             const fence = await lockTurnAttemptWriteFenceTx(tx, {
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: input.turnId,
-              executionGeneration: input.executionGeneration,
-              attemptId: input.attemptId,
+              workspaceId: first.workspaceId,
+              sessionId: first.sessionId,
+              turnId: first.turnId,
+              executionGeneration: first.executionGeneration,
+              attemptId: first.attemptId,
             });
-            if (!fence.allowed) return { accepted: false, registered: false };
+            if (!fence.allowed) return { accepted: false, registeredCallIds: [] as string[] };
             const inserted = await tx
               .insert(schema.sessionPendingToolCalls)
               .values(
-                withLosslessContentWriteVersion(
-                  {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: input.turnId,
-                    executionGeneration: input.executionGeneration,
-                    attemptId: input.attemptId,
-                    callId: input.callId,
-                    callType: input.callType,
-                    callItem: input.callItem,
-                    modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
-                  },
-                  "callItem",
-                  "callItemCodecVersion",
+                [...calls.values()].map((input) =>
+                  withLosslessContentWriteVersion(
+                    {
+                      accountId: input.accountId,
+                      workspaceId: input.workspaceId,
+                      sessionId: input.sessionId,
+                      turnId: input.turnId,
+                      executionGeneration: input.executionGeneration,
+                      attemptId: input.attemptId,
+                      callId: input.callId,
+                      callType: input.callType,
+                      callItem: input.callItem,
+                      modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+                    },
+                    "callItem",
+                    "callItemCodecVersion",
+                  ),
                 ),
               )
               .onConflictDoNothing({
@@ -44185,8 +44236,11 @@ export async function registerPendingSessionToolCall(
                   schema.sessionPendingToolCalls.callId,
                 ],
               })
-              .returning({ id: schema.sessionPendingToolCalls.id });
-            if (inserted.length === 0) {
+              .returning({ callId: schema.sessionPendingToolCalls.callId });
+            const registeredCallIds = inserted.map((row) => row.callId);
+            const registered = new Set(registeredCallIds);
+            for (const input of calls.values()) {
+              if (registered.has(input.callId)) continue;
               const [pending] = await tx
                 .select({
                   id: schema.sessionPendingToolCalls.id,
@@ -44238,7 +44292,7 @@ export async function registerPendingSessionToolCall(
                   .where(eq(schema.sessionPendingToolCalls.id, pending.id));
               }
             }
-            return { accepted: true, registered: inserted.length === 1 };
+            return { accepted: true, registeredCallIds };
           }),
       );
     } catch (error) {
