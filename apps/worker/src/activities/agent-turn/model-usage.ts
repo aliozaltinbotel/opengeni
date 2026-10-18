@@ -1335,6 +1335,10 @@ export async function recordModelCallUsageEvent(
 /** One installed usage producer for literal transport admission and failure.
  * Intent is durable outside a transaction before bytes; it never bills.
  * A failed transport has unknown provider effect, so its call is indeterminate.
+ * Source authority is checked once per literal dispatch, after the intent: the
+ * receipt-persistence check has just run, so a check before the intent would
+ * only repeat it. A refusal here throws before bytes and the runtime settles the
+ * intent through `onDispatchFailure` (indeterminate, never billed).
  */
 export function createModelCallUsageSourceHooks(
   db: ActivityServices["db"],
@@ -1346,10 +1350,9 @@ export function createModelCallUsageSourceHooks(
   return {
     beforeProviderDispatch: async sourceKey => {
       assertRoot();
-      await authorize?.(sourceKey);
       await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "dispatch", outcome: "indeterminate", billing: null });
-      // Persistence may have waited: recheck the current source authority at
-      // the final literal boundary, outside the intent transaction.
+      // The one live check at the final literal boundary, outside the intent
+      // transaction: persistence may have waited, so it runs after the intent.
       await authorize?.(sourceKey);
     },
     onDispatchFailure: async sourceKey => {

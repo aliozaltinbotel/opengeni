@@ -115,7 +115,9 @@ describe("model.call usage row", () => {
     await hooks.onDispatchFailure!("native-1");
     expect(rows).toHaveLength(0);
     await hooks.beforeProviderDispatch!("native-1");
-    expect(order).toEqual(["authorize:0", "authorize:1"]);
+    // One live source check per literal dispatch, after the durable intent:
+    // the receipt-persistence check already ran just before this boundary.
+    expect(order).toEqual(["authorize:1"]);
     expect(rows[0]).toMatchObject({ eventType: MODEL_CALL_DISPATCH_EVENT_TYPE, sourceResourceType: "model_dispatch" });
     await hooks.onDispatchFailure!("native-1");
     await hooks.onDispatchFailure!("native-1");
@@ -134,9 +136,48 @@ describe("model.call usage row", () => {
       providerApi: "responses", upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external" as const };
     const transactional = createModelCallUsageSourceHooks({ rollback() {} } as unknown as Database, call, new Set());
     await expect(transactional.beforeProviderDispatch!("native-1")).rejects.toThrow("MODEL_CALL_DISPATCH_REQUIRES_ROOT_DATABASE");
-    const refused = createModelCallUsageSourceHooks(db, call, new Set(), async () => { throw new Error("authority withdrawn"); });
-    await expect(refused.beforeProviderDispatch!("native-1")).rejects.toThrow("authority withdrawn");
     expect(rows).toHaveLength(0);
+  });
+
+  test("literal dispatch checks source authority exactly once, after the durable intent", async () => {
+    const { rows, spy } = captureUsageRows();
+    restores.push(() => spy.mockRestore());
+    const call = { accountId: ACCOUNT, workspaceId: WORKSPACE, sessionId: "sess-1", turnId: "turn-1",
+      turnAttemptId: "attempt-1", callKind: "response" as const, scope: "call" as const, provider: "gateway",
+      providerApi: "responses", upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external" as const };
+    const checks: Array<{ sourceKey: string; intentRows: number }> = [];
+    const hooks = createModelCallUsageSourceHooks(db, call, new Set(), async (sourceKey) => {
+      checks.push({ sourceKey, intentRows: rows.length });
+    });
+    await hooks.beforeProviderDispatch!("native-1");
+    // Each HTTP retry is its own literal dispatch and is checked again.
+    await hooks.beforeProviderDispatch!("native-1");
+    expect(checks).toEqual([
+      { sourceKey: "native-1", intentRows: 1 },
+      { sourceKey: "native-1", intentRows: 2 },
+    ]);
+  });
+
+  test("withdrawn source authority at the literal boundary refuses bytes and leaves only an indeterminate intent", async () => {
+    const { rows, spy } = captureUsageRows();
+    restores.push(() => spy.mockRestore());
+    const keys = spyOn(opengeniDb, "existingUsageEventIdempotencyKeys").mockImplementation(async () =>
+      new Set(rows.map(row => row.idempotencyKey as string)));
+    restores.push(() => keys.mockRestore());
+    const call = { accountId: ACCOUNT, workspaceId: WORKSPACE, sessionId: "sess-1", turnId: "turn-1",
+      turnAttemptId: "attempt-1", callKind: "response" as const, scope: "call" as const, provider: "gateway",
+      providerApi: "responses", upstreamProvider: null, model: "gpt-5.6-sol", billingPath: "external" as const };
+    const claimed = new Set<string>();
+    const refused = createModelCallUsageSourceHooks(db, call, claimed, async () => { throw new Error("authority withdrawn"); });
+    await expect(refused.beforeProviderDispatch!("native-1")).rejects.toThrow("authority withdrawn");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ eventType: MODEL_CALL_DISPATCH_EVENT_TYPE, sourceResourceType: "model_dispatch" });
+    // The runtime settles the refused dispatch through the same failure hook;
+    // it never claims the call's terminal key or bills.
+    await refused.onDispatchFailure!("native-1");
+    expect(callRows(rows)).toHaveLength(0);
+    expect(claimed.size).toBe(0);
+    expect(rows.every(row => (row.attributes as { outcome?: unknown }).outcome === "indeterminate")).toBe(true);
   });
 
   test("failure receipt refusal does not claim its native key or erase a future exact settlement", async () => {
