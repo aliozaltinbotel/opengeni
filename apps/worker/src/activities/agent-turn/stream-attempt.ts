@@ -19,7 +19,7 @@ import {
   getWorkspace,
   listTurnCodemodeApprovals,
   recordUsageEvent,
-  registerPendingSessionToolCall,
+  registerPendingSessionToolCalls,
   recordPendingSessionToolCallResult,
   attachOpenSuffixToPendingToolCalls,
   clearDurablePendingSessionToolCalls,
@@ -61,7 +61,7 @@ import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import { type MintedRunGitCredentials } from "../environment";
 import { withFirstPartyTools } from "../goals";
 import { turnInput } from "../run-input";
-import { createRuntimeBatcher, currentActivityContext, nextStreamEvent } from "../streaming";
+import { createRuntimeBatcher, createStreamLookahead, currentActivityContext } from "../streaming";
 import type {
   TurnActivityServices as ActivityServices,
   RunAgentTurnInput,
@@ -1177,12 +1177,21 @@ export async function runTurnStreamAttempt(
         },
       ]);
     };
-    const iterator = eventing.stream.toStream()[Symbol.asyncIterator]();
+    // The lookahead lets one parallel tool batch be persisted as a unit: the SDK
+    // streams the batch's `tool_called` items adjacently (before it executes the
+    // batch) and its outputs adjacently (after). Persistence order is unchanged.
+    const streamReader = createStreamLookahead(eventing.stream.toStream(), activityContext);
+    // Calls already registered with the rest of their batch; consumed once each.
+    const batchRegisteredToolCallIds = new Set<string>();
+    // Post-durability work of tool events whose append was deferred to the
+    // batch's flushing append. Runs only after that append returns.
+    let deferredToolEventReleases: Array<Parameters<typeof releaseMcpResultCustomDataFromSdkEvent>[0]> = [];
+    let deferredDurableToolCallIds: string[] = [];
     const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();
     let streamDone = false;
     try {
       while (true) {
-        const next = await nextStreamEvent(iterator, activityContext);
+        const next = await streamReader.next();
         recordStreamBootstrap();
         if (next.done) {
           streamDone = true;
@@ -1194,6 +1203,7 @@ export async function runTurnStreamAttempt(
         let completedCurrentToolBatch = false;
         let retainedScreenshotMetadata: RetainedArtifactMetadata | null = null;
         let normalizedSdkEvents: ReturnType<typeof normalizeSdkEvent> | null = null;
+        let deferredToolEventAppend = false;
         const generatedImage = generatedImageFromSdkEvent(next.value);
         if (isCompletedGeneratedImageSdkEvent(next.value) && !generatedImage) {
           throw new Error(
@@ -1281,27 +1291,40 @@ export async function runTurnStreamAttempt(
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
         const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
-        if (pendingToolCall) {
+        if (pendingToolCall && !batchRegisteredToolCallIds.delete(pendingToolCall.callId)) {
+          // Register this call with every adjacent call of its batch that the
+          // SDK has already streamed: one transaction, before any of the
+          // batch's `created` events is published.
+          const batch = [
+            pendingToolCall,
+            ...adjacentPendingToolCalls(await streamReader.drainReady()),
+          ];
           const registered = await toolPathPhases.measure("pending_tool_registration", () =>
-            registerPendingSessionToolCall(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: activeTurnId,
-              executionGeneration: attempt.executionGeneration,
-              attemptId: input.attemptId,
-              modelToolOutputTruncationTokens:
-                eventing.modelRunSettings.modelToolOutputTruncationTokens,
-              callId: pendingToolCall.callId,
-              callType: pendingToolCall.callType,
-              callItem: pendingToolCall.callItem as Record<string, unknown>,
-            }),
+            registerPendingSessionToolCalls(
+              db,
+              batch.map((call) => ({
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration: attempt.executionGeneration,
+                attemptId: input.attemptId,
+                modelToolOutputTruncationTokens:
+                  eventing.modelRunSettings.modelToolOutputTruncationTokens,
+                callId: call.callId,
+                callType: call.callType,
+                callItem: call.callItem as Record<string, unknown>,
+              })),
+            ),
           );
           if (!registered.accepted) {
             throw new TurnAttemptFencedError(
               "turn attempt ended while recording an in-flight tool call",
             );
           }
+          for (const call of batch.slice(1)) batchRegisteredToolCallIds.add(call.callId);
+        }
+        if (pendingToolCall) {
           currentToolBatchCallIds.add(pendingToolCall.callId);
           if (toolCallProducesRetainableSessionImage(pendingToolCall.callName)) {
             media.retainedSessionImageCallIds.add(pendingToolCall.callId);
@@ -1315,6 +1338,9 @@ export async function runTurnStreamAttempt(
         }
         const completedToolCall = completedToolCallFromSdkEvent(durableSdkEvent);
         if (completedToolCall) {
+          // Take the batch's other already-streamed outputs so their appends
+          // can share one flush (see the publication loop below).
+          await streamReader.drainReady();
           toolsExecuted = true;
           retainedScreenshotMetadata =
             media.retainedScreenshotReceiptsByCallId.get(completedToolCall.callId) ?? null;
@@ -1544,13 +1570,21 @@ export async function runTurnStreamAttempt(
           streamTiming.onEvent(event.type);
           if (event.type === "agent.toolCall.output") {
             const batcher = eventing.batcher;
+            // An output whose batch sibling is already streamed joins that
+            // sibling's append. The batch's last output (which settles the
+            // stable batch) flushes every deferred output in order.
+            const defer = !stableToolCallIdsToClear && isToolOutputSdkEvent(streamReader.peek());
+            deferredToolEventAppend ||= defer;
             await withMcpCallIdentity((event.payload as { id: string }).id, () =>
               measureMcpPhase("event_persistence", () =>
-                toolPathPhases.measureStructuralPublication(() => batcher.push(event)),
+                toolPathPhases.measureStructuralPublication(() => batcher.push(event, { defer })),
               ),
             );
           } else if (event.type === "agent.toolCall.created") {
-            await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event));
+            // Every call of the batch is registered; its `created` events share one append.
+            const defer = isToolCalledSdkEvent(streamReader.peek());
+            deferredToolEventAppend ||= defer;
+            await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event, { defer }));
           } else {
             await eventing.batcher.push(event);
           }
@@ -1560,10 +1594,24 @@ export async function runTurnStreamAttempt(
             latestAssistantMessageText = latestStreamedAssistantText;
           }
         }
+        if (deferredToolEventAppend) {
+          // Not durable yet: release and foreground finalization wait for the
+          // batch's flushing append.
+          deferredToolEventReleases.push(durableSdkEvent);
+          if (newlyDurableToolCallId) deferredDurableToolCallIds.push(newlyDurableToolCallId);
+          continue;
+        }
+        if (deferredToolEventReleases.length > 0) {
+          // Normally this iteration's push already flushed the deferred
+          // appends (then this is a no-op); never treat them as durable unseen.
+          await eventing.batcher.flush();
+        }
         // Structural tool-output events await their durable append before
         // push returns. The complete result is now retained in the event
         // row and pending-call recovery receipt, so release only our
         // duplicate live SDK marker before a long turn accumulates it.
+        for (const released of deferredToolEventReleases) releaseMcpResultCustomDataFromSdkEvent(released);
+        deferredToolEventReleases = [];
         releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
         if (stableToolCallIdsToClear) {
           const cleared = await clearDurablePendingSessionToolCalls(db, {
@@ -1589,13 +1637,17 @@ export async function runTurnStreamAttempt(
             media.retainedSessionImageKindsByCallId.delete(callId);
           }
         }
-        if (newlyDurableToolCallId) {
-          // The exact call/result receipt and structural output event are now
+        const durableToolCallIds = newlyDurableToolCallId
+          ? [...deferredDurableToolCallIds, newlyDurableToolCallId]
+          : deferredDurableToolCallIds;
+        deferredDurableToolCallIds = [];
+        if (durableToolCallIds.length > 0) {
+          // The exact call/result receipts and structural output events are now
           // durable even when parallel SDK history is still non-monotonic.
-          // Release only this result owner's completed foreground ops. A
+          // Release only these result owners' completed foreground ops. A
           // missing/duplicate receipt cannot license new output collection;
           // the complete-turn hook remains its later durability boundary.
-          await finalizeTurnOpStreamOps([newlyDurableToolCallId]);
+          await finalizeTurnOpStreamOps(durableToolCallIds);
         }
       }
     } catch (error) {
@@ -1666,7 +1718,7 @@ export async function runTurnStreamAttempt(
         // rejected. Start cancellation and detach only its cleanup wait;
         // the SDK abort signal stops the producer and the durable attempt
         // fence remains the authority for every callback that arrives late.
-        void iterator.return?.().catch(() => undefined);
+        void streamReader.cancel().catch(() => undefined);
       }
     }
     await assertSuccessfulAgentStreamCompletion({
@@ -2452,4 +2504,30 @@ export async function runTurnStreamAttempt(
   } finally {
     await cancelParallelSessionTitle();
   }
+}
+
+/** An SDK item of a model-requested tool call, persisted exactly as streamed. */
+function isToolCalledSdkEvent(event: unknown): boolean {
+  return (
+    event !== undefined &&
+    pendingToolCallFromSdkEvent(event) !== null &&
+    generatedImageFromSdkEvent(event) === null &&
+    !isCompletedGeneratedImageSdkEvent(event)
+  );
+}
+
+function isToolOutputSdkEvent(event: unknown): boolean {
+  return event !== undefined && completedToolCallFromSdkEvent(event) !== null;
+}
+
+/** The calls of the already-streamed `tool_called` items that directly follow. */
+function adjacentPendingToolCalls(
+  ahead: readonly unknown[],
+): Array<NonNullable<ReturnType<typeof pendingToolCallFromSdkEvent>>> {
+  const calls: Array<NonNullable<ReturnType<typeof pendingToolCallFromSdkEvent>>> = [];
+  for (const event of ahead) {
+    if (!isToolCalledSdkEvent(event)) break;
+    calls.push(pendingToolCallFromSdkEvent(event)!);
+  }
+  return calls;
 }

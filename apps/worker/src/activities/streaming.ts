@@ -61,11 +61,25 @@ export function createRuntimeBatcher(
     "turn.cancelled",
   ]);
   return {
-    push: async (event: { type: SessionEventType; payload: unknown }) => {
+    /**
+     * `defer` queues an event for the NEXT structural flush (or explicit flush)
+     * without starting a drain or timer, so the adjacent structural events of
+     * one parallel tool batch reach storage in one ordered append. A deferred
+     * event is not durable when `push` returns; the caller awaits the flushing
+     * push before treating it as durable.
+     */
+    push: async (
+      event: { type: SessionEventType; payload: unknown },
+      pushOptions: { defer?: boolean } = {},
+    ) => {
       throwIfFlushFailed();
       // Append BEFORE the structural check so a structural event's flush always
       // carries any pending deltas in order (same flush, order preserved).
       pending.push({ type: event.type, payload: event.payload });
+      if (pushOptions.defer) {
+        if (activeBatchSize + pending.length >= MAX_BUFFERED_EVENTS) await flush();
+        return;
+      }
       const elapsed = Date.now() - lastFlush;
       if (structural.has(event.type)) {
         await flush();
@@ -189,6 +203,83 @@ export function startActivityHeartbeat(
     timer.unref();
   }
   return timer;
+}
+
+/**
+ * A stream reader that can take, without waiting, the events the producer has
+ * already queued. The SDK streams a parallel tool batch's N items adjacently
+ * (its `tool_called` items before it executes the batch, its outputs after),
+ * so the consumer can persist the batch as a unit. Draining never waits for the
+ * producer: a read that is not already settled when the event loop next turns
+ * is kept and becomes the reader's next read, never a second read on top of it.
+ *
+ * A ReadableStream is read through its own reader, so `cancel()` cancels the
+ * producer at once even while such a read is pending (an async iterator's
+ * `return()` would wait behind that read).
+ */
+export function createStreamLookahead<T>(source: ReadableStream<T> | AsyncIterable<T>, context: Context | null) {
+  const reader =
+    typeof (source as ReadableStream<T>).getReader === "function"
+      ? (source as ReadableStream<T>).getReader()
+      : null;
+  const iterator = reader ? null : (source as AsyncIterable<T>)[Symbol.asyncIterator]();
+  const read = (): Promise<IteratorResult<T>> =>
+    reader
+      ? (reader.read() as Promise<IteratorResult<T>>)
+      : Promise.resolve(iterator!.next());
+  const source$ = { next: read };
+  const buffered: T[] = [];
+  let pendingRead: Promise<IteratorResult<T>> | null = null;
+  const notReady: unique symbol = Symbol("not-ready");
+  return {
+    async next(): Promise<IteratorResult<T>> {
+      if (buffered.length > 0) {
+        const signal = context?.cancellationSignal;
+        if (signal?.aborted) throw signal.reason;
+        return { done: false, value: buffered.shift()! };
+      }
+      if (pendingRead) {
+        const kept = pendingRead;
+        pendingRead = null;
+        return await nextStreamEvent({ next: () => kept }, context);
+      }
+      return await nextStreamEvent(source$, context);
+    },
+    /** The next already-taken event, if any, without consuming it. */
+    peek(): T | undefined {
+      return buffered[0];
+    },
+    /** Take every already-queued event into the buffer; returns the buffer (read-only). */
+    async drainReady(limit = 256): Promise<readonly T[]> {
+      while (!pendingRead && buffered.length < limit) {
+        let attempt: Promise<IteratorResult<T>>;
+        try {
+          attempt = read();
+        } catch (error) {
+          attempt = Promise.reject(error);
+        }
+        const settled = await Promise.race([
+          attempt.then(
+            (result) => result,
+            () => notReady,
+          ),
+          new Promise<typeof notReady>((resolve) => setImmediate(() => resolve(notReady))),
+        ]);
+        if (typeof settled === "symbol" || settled.done) {
+          // Not yet produced, finished or failed: the reader's next read settles it in order.
+          pendingRead = attempt;
+          break;
+        }
+        buffered.push(settled.value);
+      }
+      return buffered;
+    },
+    /** Cancel the producer; never waits behind a pending lookahead read. */
+    async cancel(): Promise<void> {
+      if (reader) await reader.cancel();
+      else await iterator!.return?.();
+    },
+  };
 }
 
 export async function nextStreamEvent<T>(

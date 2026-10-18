@@ -89,7 +89,11 @@ Embedded workers may install the public `activityDependencies.authorizeModelCall
 callback. The shared native producer awaits it after committing the exact receipt
 and before every AGENT, COMPACTION or TITLE provider call; rejection or cancellation
 prevents dispatch. Its exact-source callback is rechecked at each literal
-transport attempt, including SDK HTTP retries, inside a per-request async scope.
+transport attempt, including SDK HTTP retries, inside a per-request async scope:
+once, after the durable dispatch intent (a refusal there settles that intent as
+indeterminate). The worker passes the receipt its own attempt just committed
+instead of reading it back; that attempt-scoped memory never holds the
+callback's answer.
 The hook receives the stored call identity and cancellation
 signal, never a latest-attempt snapshot, and owns no native business rules. A host
 that requires admission installs the callback in trusted process composition.
@@ -322,7 +326,7 @@ See [`goals.md`](goals.md).
 | Store | Owns | Must not become |
 | --- | --- | --- |
 | `session_history_items` | Model conversation truth preserving protocol | Audit projections/mutable UI caches |
-| `session_pending_tool_calls` | In-flight call/result receipts and resumable open suffix | Conversation history |
+| `session_pending_tool_calls` | In-flight call/result receipts and resumable open suffix; a streamed parallel batch registers in one transaction before its `created` events share one append | Conversation history |
 | `agent_run_states` | Control snapshots/open-suffix sentinel | Model memory |
 | `session_events` | Append-only human/audit timeline, SSE replay | Model input |
 | `session_system_updates` | Durable machine inputs: child results/schedules | Synthetic human messages |

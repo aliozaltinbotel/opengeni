@@ -1,0 +1,204 @@
+import { expect, spyOn, test } from "bun:test";
+import * as db from "@opengeni/db";
+import { testSettings } from "@opengeni/testing";
+import * as runInput from "../src/activities/run-input";
+import * as openSuffix from "../src/activities/open-suffix-resume";
+import * as admission from "../src/activities/agent-turn/admission";
+import { runTurnStreamAttempt } from "../src/activities/agent-turn/stream-attempt";
+
+// A parallel tool batch reaches the consumer as N adjacent `tool_called` items
+// (the SDK streams them before it executes the batch) and, after execution, N
+// adjacent `tool_output` items. The consumer persists the batch, not each event:
+// one pending-call registration transaction and one `created` append before any
+// of the batch's events are published, and one `output` append after every
+// result receipt. Each receipt still precedes its event, and foreground release
+// still follows the durable output event.
+
+const CALLS = ["call_a", "call_b", "call_c", "call_d"] as const;
+
+function harness(calls: readonly string[] = CALLS) {
+  const order: string[] = [];
+  const publishes: Array<string[]> = [];
+  const finalizations: Array<readonly string[] | undefined> = [];
+  const registrationTransactions: string[][] = [];
+  const stopped = new Error("stream ended by the fixture");
+  const settings = testSettings({ sandboxBackend: "none", billingMode: "disabled", usageLimitsMode: "none" });
+  const checkpoint = [{ type: "message", role: "user", content: "Run four parallel reads" }];
+  const spies: Array<{ mockRestore(): void }> = [
+    spyOn(runInput, "turnInput").mockResolvedValue({
+      input: { input: checkpoint },
+      persistedHistoryCount: checkpoint.length,
+      providerArtifactCandidates: { knownHistoryItemIds: [], historyItemIds: [] },
+    } as Awaited<ReturnType<typeof runInput.turnInput>>),
+    spyOn(openSuffix, "settleOpenSuffixResumeIfNeeded").mockResolvedValue({
+      action: "continue",
+    } as Awaited<ReturnType<typeof openSuffix.settleOpenSuffixResumeIfNeeded>>),
+    spyOn(admission, "ensureRunAllowedBetweenModelCalls").mockResolvedValue(),
+    spyOn(db, "nextSessionHistoryPosition").mockResolvedValue(2),
+    spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
+    spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
+    spyOn(db, "registerPendingSessionToolCall").mockImplementation(async (_db, input) => {
+      registrationTransactions.push([input.callId]);
+      order.push(`register:${input.callId}`);
+      return { accepted: true, registered: true };
+    }),
+    spyOn(db, "recordPendingSessionToolCallResult").mockImplementation(async (_db, input) => {
+      order.push(`receipt:${input.callId}`);
+      return { accepted: true, recorded: true };
+    }),
+    spyOn(db, "clearDurablePendingSessionToolCalls").mockImplementation(async (_db, input) => {
+      order.push(`clear:${[...input.callIds].join(",")}`);
+      return { accepted: true } as Awaited<ReturnType<typeof db.clearDurablePendingSessionToolCalls>>;
+    }),
+  ];
+  const pluralName = "registerPendingSessionToolCalls";
+  if (pluralName in db) {
+    spies.push(
+      spyOn(db as unknown as Record<string, (...args: unknown[]) => Promise<unknown>>, pluralName).mockImplementation(
+        async (_db: unknown, inputs: unknown) => {
+          const ids = (inputs as Array<{ callId: string }>).map((input) => input.callId);
+          registrationTransactions.push(ids);
+          for (const id of ids) order.push(`register:${id}`);
+          return { accepted: true, registeredCallIds: ids };
+        },
+      ),
+    );
+  }
+  const metric = { record() {}, observe() {}, add() {}, inc() {}, set() {} };
+  const stream = {
+    completed: Promise.resolve(),
+    error: null,
+    toStream: () => ({
+      async *[Symbol.asyncIterator]() {
+        for (const callId of calls) {
+          yield {
+            type: "run_item_stream_event",
+            item: { type: "tool_call_item", rawItem: { type: "function_call", callId, name: "command", arguments: "{}" } },
+          };
+        }
+        for (const callId of calls) {
+          yield {
+            type: "run_item_stream_event",
+            item: {
+              type: "tool_call_output_item",
+              rawItem: { type: "function_call_result", callId, output: { type: "text", text: `result ${callId}` } },
+              output: { type: "text", text: `result ${callId}` },
+            },
+          };
+        }
+        throw stopped;
+      },
+    }),
+  };
+  const run = () =>
+    runTurnStreamAttempt({
+      input: { accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(), attemptId: crypto.randomUUID() },
+      settings,
+      runSettings: settings,
+      db: {} as db.Database,
+      runtime: { runStream: async () => stream },
+      observability: {
+        metrics: { histogram: () => metric, counter: () => metric, gauge: () => metric },
+        observeHistogram() {},
+        incrementCounter() {},
+        info() {},
+        warn() {},
+        debug() {},
+      },
+      attempt: { turnId: crypto.randomUUID(), executionGeneration: 1 },
+      turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "scripted-model" },
+      turnExecutionPolicy: { providerId: "openai" },
+      trigger: { type: "user.message" },
+      eventing: {
+        modelRunSettings: settings,
+        toolCancellationFenceRef: { current: null },
+        firstModelRequestPreparationRecorded: true,
+        publish: async (events: Array<{ type: string; payload?: { id?: string } }>) => {
+          const tools = events.filter((event) => event.type.startsWith("agent.toolCall."));
+          if (tools.length === 0) return;
+          publishes.push(tools.map((event) => `${event.type.slice("agent.toolCall.".length)}:${event.payload?.id}`));
+          order.push(`publish:${tools.map((event) => `${event.type.slice("agent.toolCall.".length)}:${event.payload?.id}`).join(",")}`);
+        },
+      },
+      historySink: {
+        seedHistory() {},
+        reconcileConversationTruth: async () => { order.push("history"); },
+      },
+      billingState: { isCodexTurn: false },
+      providerTurn: {},
+      sandboxState: {},
+      leases: { codex: { lost: false }, xai: { lost: false } },
+      media: {
+        retainedScreenshotReceiptsByCallId: new Map(),
+        retainedSessionImageCallIds: new Set(),
+        retainedSessionImageKindsByCallId: new Map(),
+      },
+      videoGenerationAcceptancesByCallId: new Map(),
+      generatedImageHistoryProjector: async (items: unknown) => items,
+      claimedModelUsageSourceKeys: new Set(),
+      runtimeCancellationSignal: new AbortController().signal,
+      activityContext: null,
+      workerPreparationStartedAt: performance.now(),
+      groupBoxBackend: "none",
+      agent: {},
+      turnTools: [],
+      throwIfWorkerShuttingDown() {},
+      throwIfTurnCancelled() {},
+      recordCompanyBrainContributionReceiptOnce() {},
+      withProviderRequestContext: async (operation: () => Promise<unknown>) => operation(),
+      beforeModelCallSourceReceipt: async () => "source-key",
+      finalizeTurnOpStreamOps: async (callIds?: readonly string[]) => {
+        order.push(`finalize:${[...(callIds ?? [])].join(",")}`);
+        finalizations.push(callIds);
+      },
+    } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
+  return { order, publishes, finalizations, registrationTransactions, stopped, run, restore: () => spies.forEach((spy) => spy.mockRestore()) };
+}
+
+test("a parallel tool batch is registered in one transaction and published in one append per phase", async () => {
+  const h = harness();
+  try {
+    await expect(h.run()).rejects.toBe(h.stopped);
+    expect(h.registrationTransactions).toEqual([[...CALLS]]);
+    expect(h.publishes).toEqual([
+      CALLS.map((id) => `created:${id}`),
+      CALLS.map((id) => `output:${id}`),
+    ]);
+  } finally {
+    h.restore();
+  }
+});
+
+test("every call is registered before any created event, every receipt precedes the output append, and release follows it", async () => {
+  const h = harness();
+  try {
+    await expect(h.run()).rejects.toBe(h.stopped);
+    const createdAt = h.order.findIndex((entry) => entry.startsWith("publish:created"));
+    const outputAt = h.order.findIndex((entry) => entry.startsWith("publish:output"));
+    for (const id of CALLS) {
+      expect(h.order.indexOf(`register:${id}`)).toBeGreaterThan(-1);
+      expect(h.order.indexOf(`register:${id}`)).toBeLessThan(createdAt);
+      expect(h.order.indexOf(`receipt:${id}`)).toBeGreaterThan(createdAt);
+      expect(h.order.indexOf(`receipt:${id}`)).toBeLessThan(outputAt);
+    }
+    // The stable batch is reconciled before its outputs are published, and the
+    // receipts are cleared and foreground ops released only once they are durable.
+    expect(h.order.lastIndexOf("history")).toBeLessThan(outputAt);
+    expect(h.order.slice(outputAt + 1)).toEqual([`clear:${CALLS.join(",")}`, `finalize:${CALLS.join(",")}`]);
+    expect(h.finalizations).toEqual([[...CALLS]]);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a single call keeps one registration, one created append and one output append", async () => {
+  const h = harness(["call_only"]);
+  try {
+    await expect(h.run()).rejects.toBe(h.stopped);
+    expect(h.registrationTransactions).toEqual([["call_only"]]);
+    expect(h.publishes).toEqual([["created:call_only"], ["output:call_only"]]);
+    expect(h.finalizations).toEqual([["call_only"]]);
+  } finally {
+    h.restore();
+  }
+});

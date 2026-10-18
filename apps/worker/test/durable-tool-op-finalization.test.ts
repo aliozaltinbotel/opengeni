@@ -33,9 +33,10 @@ for (const scenario of ["committed", "missing", "fenced", "event_failed"] as con
       // This fixture has no stored programmatic operations to recover.
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
-      spyOn(db, "registerPendingSessionToolCall").mockResolvedValue({
-        accepted: true,
-        registered: true,
+      // Both parallel calls are registered together, before either is published.
+      spyOn(db, "registerPendingSessionToolCalls").mockImplementation(async (_db, inputs) => {
+        expect(inputs.map((input) => input.callId)).toEqual(["call_first", "call_sibling"]);
+        return { accepted: true, registeredCallIds: inputs.map((input) => input.callId) };
       }),
       spyOn(db, "recordPendingSessionToolCallResult").mockImplementation(async (_db, input) => {
         expect(input.callId).toBe("call_first");
