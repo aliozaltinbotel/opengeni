@@ -7120,6 +7120,12 @@ export const UpdateSessionGoalRequest = z.union([
   z.object({
     status: z.enum(["paused", "active"]),
     rationale: SessionGoalRationaleWrite.optional(),
+    /** Optional atomic guard; stale identity/version/pause owner returns 409. */
+    expectedGoal: z.object({
+      id: z.string().uuid(),
+      version: z.number().int().positive(),
+      pausedReason: z.string().nullable(),
+    }).optional(),
   }),
   z.object({
     text: SessionGoalTextWrite,

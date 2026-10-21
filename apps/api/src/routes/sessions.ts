@@ -3096,72 +3096,81 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw error;
       }
     }
-    if (existing.status === "completed") {
-      throw new HTTPException(409, {
-        message: "session goal is completed; set a new goal instead",
-      });
-    }
-    if (payload.status === "paused") {
-      const { goal, events } = await setSessionGoalStatusWithEvent(db, workspaceId, sessionId, {
-        status: "paused",
-        ...(payload.rationale ? { rationale: payload.rationale } : {}),
-        pausedReason: "api",
-        event: {
-          type: "goal.paused",
-          actor: "api",
-          reason: "api",
-          ...(payload.rationale ? { rationale: payload.rationale } : {}),
-        },
-      });
-      if (events.length > 0) {
-        await bus.publish(workspaceId, sessionId, events);
-      }
-      return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
-    }
-    // Resume: only valid from paused; resets counters and re-arms the loop.
-    if (existing.status !== "paused") {
-      throw new HTTPException(409, {
-        message: `session goal is ${existing.status}; only paused goals can be resumed`,
-      });
-    }
-    const { goal, changed, workflowWakeRevision, events } = await setSessionGoalStatusWithEvent(
-      db,
-      workspaceId,
-      sessionId,
-      {
-        status: "active",
-        beforeResume: (tx, session, causalTurn) =>
-          assertGoalResumeAllowed({ ...deps, db: tx }, session, causalTurn).catch(
-            (error: unknown) => {
-              if (error instanceof GoalResumeBlockedError) {
-                throw new HTTPException(422, { message: error.message, cause: error });
-              }
-              throw error;
-            },
-          ),
-        event: { type: "goal.resumed", actor: "api" },
-      },
-    );
-    // `changed` guards the racing-PATCH case: both requests can pass the
-    // status pre-check, but only the transition winner emits and wakes.
-    if (changed) {
-      if (events.length > 0) {
-        await bus.publish(workspaceId, sessionId, events);
-      }
-      // signalWithStart restarts an eligible idle workflow so the durable goal
-      // revision is evaluated. A closed workspace/session gate keeps the
-      // revision inert until that gate's own Resume mutation commits its wake.
-      if (workflowWakeRevision !== null) {
-        await workflowClient.wakeSessionWorkflow({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          workflowId: workflowIdForSession(sessionId),
-          wakeRevision: workflowWakeRevision,
+    try {
+      if (existing.status === "completed") {
+        throw new HTTPException(409, {
+          message: "session goal is completed; set a new goal instead",
         });
       }
+      if (payload.status === "paused") {
+        const { goal, events } = await setSessionGoalStatusWithEvent(db, workspaceId, sessionId, {
+          status: "paused",
+          ...(payload.expectedGoal ? { expectedGoal: payload.expectedGoal } : {}),
+          ...(payload.rationale ? { rationale: payload.rationale } : {}),
+          pausedReason: "api",
+          event: {
+            type: "goal.paused",
+            actor: "api",
+            reason: "api",
+            ...(payload.rationale ? { rationale: payload.rationale } : {}),
+          },
+        });
+        if (events.length > 0) {
+          await bus.publish(workspaceId, sessionId, events);
+        }
+        return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
+      }
+      // Resume: only valid from paused; resets counters and re-arms the loop.
+      if (existing.status !== "paused") {
+        throw new HTTPException(409, {
+          message: `session goal is ${existing.status}; only paused goals can be resumed`,
+        });
+      }
+      const { goal, changed, workflowWakeRevision, events } = await setSessionGoalStatusWithEvent(
+        db,
+        workspaceId,
+        sessionId,
+        {
+          status: "active",
+          ...(payload.expectedGoal ? { expectedGoal: payload.expectedGoal } : {}),
+          beforeResume: (tx, session, causalTurn) =>
+            assertGoalResumeAllowed({ ...deps, db: tx }, session, causalTurn).catch(
+              (error: unknown) => {
+                if (error instanceof GoalResumeBlockedError) {
+                  throw new HTTPException(422, { message: error.message, cause: error });
+                }
+                throw error;
+              },
+            ),
+          event: { type: "goal.resumed", actor: "api" },
+        },
+      );
+      // `changed` guards the racing-PATCH case: both requests can pass the
+      // status pre-check, but only the transition winner emits and wakes.
+      if (changed) {
+        if (events.length > 0) {
+          await bus.publish(workspaceId, sessionId, events);
+        }
+        // signalWithStart restarts an eligible idle workflow so the durable goal
+        // revision is evaluated. A closed workspace/session gate keeps the
+        // revision inert until that gate's own Resume mutation commits its wake.
+        if (workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: workflowWakeRevision,
+          });
+        }
+      }
+      return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
+    } catch (error) {
+      if (error instanceof SessionControlConflictError) {
+        throw new HTTPException(409, { message: error.message, cause: error });
+      }
+      throw error;
     }
-    return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
   });
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {

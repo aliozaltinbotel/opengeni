@@ -1072,7 +1072,9 @@ other failure classes keep their existing budgets and capacity semantics.
 
 All producers use the ordinary session/turn runtime:
 
-- an active **goal** creates a durable continuation obligation;
+- an active **goal** creates a durable continuation obligation; conditional
+  host status transitions compare goal identity, version and pause owner under
+  its canonical row lock, so a newer operator Pause cannot be overwritten;
 - a **scheduled task** freezes one accepted occurrence and its execution
   authority before dispatch;
 - an **automation** authenticates an external event, freezes the matching

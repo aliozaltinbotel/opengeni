@@ -7,6 +7,9 @@ import {
 } from "@opengeni/contracts";
 import {
   persistModelCallSourceReceipt,
+  upsertSessionGoalWithEvent,
+  setSessionGoalStatusWithEvent,
+  getSessionGoal,
   bootstrapWorkspace,
   acquireLease,
   claimSessionWorkForAttempt,
@@ -2525,4 +2528,56 @@ test("model source basis public GET reads exact persisted receipt and enforces h
  expect((await api.request(path,{headers})).status).toBe(400);expect((await api.request(path,{method:"POST",headers})).status).not.toBe(200);expect((await api.request(`${path}?sourceKey=${identity.sourceKey}`)).status).not.toBe(200);
  const denying:SessionAuthorizationPort={authorizeSession:async()=>({allowed:false,reason:"not_found"}),resolveListScope:async()=>({kind:"all"})};const hidden=await appWith(denying).request(`${path}?sourceKey=${identity.sourceKey}`,{headers});expect(hidden.status).toBe(404);
  const [count]=await shared!.admin`select count(*)::int as n from model_call_source_receipts where session_id=${identity.sessionId}`;expect(count!.n).toBe(1);
+});
+
+test("conditional goal resume refuses a newer operator pause with HTTP 409 and no wake", async () => {
+  if (!available) throw new Error("PostgreSQL is required for conditional goal resume");
+  const value = await fixture();
+  await upsertSessionGoalWithEvent(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.root.id,
+    text: "Complete the governed host task",
+    createdBy: "api",
+    actor: "api",
+  });
+  const paused = await setSessionGoalStatusWithEvent(
+    client.db,
+    value.grant.workspaceId,
+    value.root.id,
+    {
+      status: "paused",
+      pausedReason: "agent",
+      event: { type: "goal.paused", actor: "agent", reason: "agent" },
+    },
+  );
+  const app = appWith();
+  const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/goal`;
+  const headers = { authorization: value.authorization, "content-type": "application/json" };
+  const takeover = await app.request(path, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ status: "paused" }),
+  });
+  expect(takeover.status).toBe(200);
+  const before = await getSessionGoal(client.db, value.grant.workspaceId, value.root.id);
+  expect(before).toMatchObject({
+    status: "paused",
+    pausedReason: "api",
+    version: paused.goal.version + 1,
+  });
+  const events = await listSessionEvents(client.db, value.grant.workspaceId, value.root.id);
+  const response = await app.request(path, {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({
+      status: "active",
+      expectedGoal: { id: paused.goal.id, version: paused.goal.version, pausedReason: "agent" },
+    }),
+  });
+  expect(response.status).toBe(409);
+  expect(await getSessionGoal(client.db, value.grant.workspaceId, value.root.id)).toEqual(before);
+  expect(await listSessionEvents(client.db, value.grant.workspaceId, value.root.id)).toEqual(
+    events,
+  );
 });

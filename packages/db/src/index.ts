@@ -69656,6 +69656,7 @@ export async function setSessionGoalStatus(
   sessionId: string,
   input: {
     status: SessionGoalStatus;
+    expectedGoal?: { id: string; version: number; pausedReason: string | null };
     evidence?: string;
     rationale?: string;
     pausedReason?: string;
@@ -69703,7 +69704,17 @@ export async function setSessionGoalStatus(
     if (!existing) {
       throw new Error(`Session goal not found: ${sessionId}`);
     }
-    if (existing.status === input.status) {
+    // Compare under the canonical goal lock, before callbacks, events or wakes.
+    if (input.expectedGoal && (existing.id !== input.expectedGoal.id
+      || existing.version !== input.expectedGoal.version
+      || existing.pausedReason !== input.expectedGoal.pausedReason)) {
+      throw new SessionControlConflictError("session goal status guard is stale");
+    }
+    // An explicit operator Pause claims an agent/system pause. Repeating that
+    // operator Pause is unchanged; an agent cannot steal it back.
+    const operatorPauseClaim = input.status === "paused" && existing.status === "paused"
+      && input.pausedReason === "api" && existing.pausedReason !== "api";
+    if (existing.status === input.status && !operatorPauseClaim) {
       return {
         goal: mapSessionGoal(existing),
         changed: false,
@@ -69845,6 +69856,7 @@ export async function setSessionGoalStatusWithEvent(
   sessionId: string,
   input: {
     status: SessionGoalStatus;
+    expectedGoal?: { id: string; version: number; pausedReason: string | null };
     evidence?: string;
     rationale?: string;
     pausedReason?: string;
@@ -69880,6 +69892,7 @@ export async function setSessionGoalStatusWithEvent(
       }
       const result = await setSessionGoalStatus(tx, workspaceId, sessionId, {
         status: input.status,
+        ...(input.expectedGoal ? { expectedGoal: input.expectedGoal } : {}),
         ...(input.reportDeliveries !== undefined
           ? { reportDeliveries: input.reportDeliveries }
           : {}),

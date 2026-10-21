@@ -14,6 +14,8 @@ import {
   recoverSessionDispatch,
   rejectSessionGoalRevisionWithEvent,
   setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
+  listSessionEvents,
   updateSessionGoalWithEvent,
   upsertSessionGoalWithEvent,
   dbSql,
@@ -523,4 +525,100 @@ describe("goal revision decisions", () => {
       }),
     ).rejects.toBeInstanceOf(SessionControlConflictError);
   }, 20_000);
+});
+
+describe("conditional host goal handoff", () => {
+  async function pausedFixture() {
+    const ctx = await fixture();
+    const paused = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        status: "paused",
+        pausedReason: "agent",
+        event: { type: "goal.paused", actor: "agent", reason: "agent" },
+      },
+    );
+    return { ...ctx, paused: paused.goal };
+  }
+  test("an operator claims an already agent-paused goal before a stale host resume", async () => {
+    const ctx = await pausedFixture();
+    const expectedGoal = { id: ctx.paused.id, version: ctx.paused.version, pausedReason: "agent" };
+    const human = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId,
+      ctx.session.id,
+      {
+        status: "paused",
+        pausedReason: "api",
+        event: { type: "goal.paused", actor: "api", reason: "api" },
+      },
+    );
+    expect(human.changed).toBe(true);
+    expect(human.goal.version).toBe(ctx.paused.version + 1);
+    expect(human.goal.pausedReason).toBe("api");
+    for (const pausedReason of ["api", "agent"]) {
+      const repeated = await setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+        status: "paused", pausedReason,
+        event: { type: "goal.paused", actor: pausedReason === "api" ? "api" : "agent", reason: pausedReason },
+      });
+      expect(repeated.changed).toBe(false);
+      expect(repeated.goal).toEqual(human.goal);
+      expect(repeated.events).toEqual([]);
+    }
+    const before = await listSessionEvents(client.db, ctx.grant.workspaceId, ctx.session.id);
+    await expect(
+      setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+        status: "active",
+        expectedGoal,
+        event: { type: "goal.resumed", actor: "api" },
+      }),
+    ).rejects.toBeInstanceOf(SessionControlConflictError);
+    expect(await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id)).toEqual(
+      human.goal,
+    );
+    expect(await listSessionEvents(client.db, ctx.grant.workspaceId, ctx.session.id)).toEqual(
+      before,
+    );
+  });
+  test("same-version concurrent resumes admit one transition and stale retries never wake", async () => {
+    const ctx = await pausedFixture();
+    const expectedGoal = { id: ctx.paused.id, version: ctx.paused.version, pausedReason: "agent" };
+    const resume = () =>
+      setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+        status: "active",
+        expectedGoal,
+        event: { type: "goal.resumed", actor: "api" },
+      });
+    const outcomes = await Promise.allSettled([resume(), resume()]);
+    expect(outcomes.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(outcomes.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const current = await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id);
+    expect(current).toMatchObject({ status: "active", version: ctx.paused.version + 1 });
+    await expect(resume()).rejects.toBeInstanceOf(SessionControlConflictError);
+    expect(await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id)).toEqual(current);
+  });
+  test("identity and pause-owner mismatches refuse before admission or mutation", async () => {
+    const ctx = await pausedFixture();
+    let admissions = 0;
+    for (const expectedGoal of [
+      { id: crypto.randomUUID(), version: ctx.paused.version, pausedReason: "agent" },
+      { id: ctx.paused.id, version: ctx.paused.version, pausedReason: "api" },
+    ])
+      await expect(
+        setSessionGoalStatusWithEvent(client.db, ctx.grant.workspaceId, ctx.session.id, {
+          status: "active",
+          expectedGoal,
+          beforeResume: async () => {
+            admissions++;
+          },
+          event: { type: "goal.resumed", actor: "api" },
+        }),
+      ).rejects.toBeInstanceOf(SessionControlConflictError);
+    expect(admissions).toBe(0);
+    expect(await getSessionGoal(client.db, ctx.grant.workspaceId, ctx.session.id)).toEqual(
+      ctx.paused,
+    );
+  });
 });

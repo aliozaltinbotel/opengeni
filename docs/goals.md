@@ -473,8 +473,15 @@ deny for reasons other than credits, so Opengeni does not invent a balance diagn
   (`scheduled` / `backoff_pending`, `nextAttemptAt` at the pacing deadline),
   and a missing obligation are distinct truthful states.
 - `PATCH /v1/workspaces/:id/sessions/:sessionId/goal` with
-  `{ status: "paused" | "active", rationale? }` is the operator override
-  (`sessions:control`). Pausing emits `goal.paused` (`actor: "api"`). Resuming
+  `{ status: "paused" | "active", rationale?, expectedGoal?: { id, version, pausedReason } }` is the operator override
+  (`sessions:control`). The optional `expectedGoal` compares the exact goal ID,
+  version and nullable pause owner under the canonical goal lock. A stale guard
+  returns 409 before admission callbacks, mutation, events or workflow wakes;
+  callers reconcile a lost acknowledgement by reading the current goal rather
+  than replaying a stale conditional write. An operator Pause claims an existing
+  agent/system pause with a new version and `pausedReason: "api"`; repeating the
+  same operator Pause is unchanged. An agent cannot claim that operator pause.
+  Pausing emits `goal.paused` (`actor: "api"`). Resuming
   is only valid from `paused`: model and funding admission are checked under
   the control/session/goal locks first, using the effective model and exact
   active causal human, or the latest-finished causal human when idle. A rejected
