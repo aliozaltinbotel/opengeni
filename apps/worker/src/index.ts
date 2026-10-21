@@ -574,13 +574,21 @@ export async function createWorkerWorkflowSignaler(
       }
       return starts[0].status === "fulfilled" ? "started" : "already_running";
     },
-    startRealtimeUsageWorkflow: async (input) => {
+    startRealtimeUsageWorkflow: async (input, lifetime) => {
       try {
-        await temporal.workflow.start("realtimeUsageWorkflow", {
-          taskQueue: settings.temporalTaskQueue, workflowId: `realtime-usage:${input.connectionId}`,
-          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
-          args: [{ ...input, baseTaskQueue: settings.temporalTaskQueue }],
-        });
+        const start = () =>
+          temporal.workflow.start("realtimeUsageWorkflow", {
+            taskQueue: settings.temporalTaskQueue,
+            workflowId: `realtime-usage:${input.connectionId}`,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+            args: [{ ...input, baseTaskQueue: settings.temporalTaskQueue }],
+          });
+        if (lifetime) {
+          lifetime.signal.throwIfAborted();
+          await connection.withAbortSignal(lifetime.signal, () =>
+            connection.withDeadline(lifetime.deadlineAtMs, start),
+          );
+        } else await start();
         return "started";
       } catch (error) {
         if (error instanceof WorkflowExecutionAlreadyStartedError) return "already_running";
@@ -843,7 +851,9 @@ export async function createOpenGeniWorkerService(
     const startSandboxReaperWorkflow =
       options.activityDependencies.startSandboxReaperWorkflow ??
       signaler?.startSandboxReaperWorkflow;
-    const startRealtimeUsageWorkflow = options.activityDependencies.startRealtimeUsageWorkflow ?? signaler?.startRealtimeUsageWorkflow;
+    const startRealtimeUsageWorkflow =
+      options.activityDependencies.startRealtimeUsageWorkflow ??
+      signaler?.startRealtimeUsageWorkflow;
     const startVideoGenerationWorkflow =
       options.activityDependencies.startVideoGenerationWorkflow ??
       signaler?.startVideoGenerationWorkflow;

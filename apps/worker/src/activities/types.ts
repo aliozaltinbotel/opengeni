@@ -57,8 +57,16 @@ export type SignalCodexCapacityWorkflow = (input: {
 export type StartSandboxReaperWorkflow = () => Promise<"started" | "already_running">;
 
 /** Start-or-observe the one durable reconciler for a paid video operation. */
-export type RealtimeUsageInput = { accountId: string; workspaceId: string; sessionId: string; connectionId: string };
-export type StartRealtimeUsageWorkflow = (input: RealtimeUsageInput) => Promise<"started" | "already_running">;
+export type RealtimeUsageInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  connectionId: string;
+};
+export type StartRealtimeUsageWorkflow = (
+  input: RealtimeUsageInput,
+  lifetime?: { signal: AbortSignal; deadlineAtMs: number },
+) => Promise<"started" | "already_running">;
 
 export type StartVideoGenerationWorkflow = (input: {
   accountId: string;

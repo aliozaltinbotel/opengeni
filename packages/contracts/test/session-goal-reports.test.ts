@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   GoalSpec,
+  GoalContinuationInputAttribution,
   UpdateSessionGoalRequest,
   SessionGoalReportRequirements,
   SessionGoalReportDeliveries,
@@ -87,4 +88,42 @@ test("conditional goal status requests preserve complete observed pause identity
     expect(
       UpdateSessionGoalRequest.safeParse({ status: "active", expectedGoal: invalid }).success,
     ).toBe(false);
+});
+
+test("canonical continuation requires exact agent pause and immutable bounded input", () => {
+  const expectedGoal = { id: delivery.inspectionReceiptId, version: 7, pausedReason: "agent" };
+  const continuationInput = {
+    operationKey: "approved-proposal-1",
+    text: "Continue canonical approved work",
+  };
+  expect(
+    UpdateSessionGoalRequest.parse({ status: "active", expectedGoal, continuationInput }),
+  ).toEqual({ status: "active", expectedGoal, continuationInput });
+  for (const request of [
+    { status: "active", continuationInput },
+    { status: "paused", expectedGoal, continuationInput },
+    ...[null, "api", "limits"].map((pausedReason) => ({
+      status: "active",
+      expectedGoal: { ...expectedGoal, pausedReason },
+      continuationInput,
+    })),
+    ...[
+      { ...continuationInput, text: " " },
+      { ...continuationInput, operationKey: "" },
+      { ...continuationInput, text: "x".repeat(32769) },
+      { ...continuationInput, extra: true },
+    ].map((input) => ({ status: "active", expectedGoal, continuationInput: input })),
+  ])
+    expect(UpdateSessionGoalRequest.safeParse(request).success).toBe(false);
+});
+
+
+test("canonical Goal event attribution is bounded identity without payload or actor data", () => {
+  const identity = { operationKey: "canonical-input:1", updateId: delivery.inspectionReceiptId };
+  expect(GoalContinuationInputAttribution.parse(identity)).toEqual(identity);
+  for (const invalid of [{ ...identity, updateId: "invalid" }, { ...identity, operationKey: "" },
+    { ...identity, operationKey: "x".repeat(257) }, { ...identity, text: "continuation payload" },
+    { ...identity, subjectId: "synthetic-actor" }]) {
+    expect(GoalContinuationInputAttribution.safeParse(invalid).success).toBe(false);
+  }
 });

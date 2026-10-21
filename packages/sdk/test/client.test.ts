@@ -1572,6 +1572,7 @@ describe("OpenGeniClient", () => {
             "X-OpenGeni-Covered-Last": "42",
             "X-OpenGeni-Next-After": "42",
             "X-OpenGeni-Forensic-Exact": "true",
+            "X-OpenGeni-Conversation-Filter": "2",
           },
         }),
     );
@@ -1604,9 +1605,24 @@ describe("OpenGeniClient", () => {
       nextAfter: 42,
       nextBefore: null,
       forensicExact: true,
+      conversationFilter: 2,
     });
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure`,
+    );
+  });
+
+  test("listEventPage asks for tool-output previews only when requested", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      includeTypes: ["agent.toolCall.output"],
+      payloadMode: "full",
+      toolOutputs: "preview",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=full&includeTypes=agent.toolCall.output&toolOutputs=preview`,
     );
   });
 
@@ -2922,4 +2938,19 @@ test("bodiless browser-guarded mutations still send JSON", async () => {
     expect(request.headers["content-type"]).toBe("application/json");
     expect(request.body).toBe("{}");
   }
+});
+
+
+test("canonical Goal continuation uses its dedicated fail-closed route while ordinary status uses PATCH", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({}));
+  const request = { status: "active" as const,
+    expectedGoal: { id: SESSION_ID, version: 7, pausedReason: "agent" as const },
+    continuationInput: { operationKey: "approved-input:1", text: "Continue approved input" } };
+  await client.updateGoal(WORKSPACE_ID, SESSION_ID, request);
+  await client.updateGoal(WORKSPACE_ID, SESSION_ID, { status: "paused" });
+  expect(requests[0]?.method).toBe("POST");
+  expect(requests[0]?.url).toEndWith(`/sessions/${SESSION_ID}/goal/continuation-input`);
+  expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+  expect(requests[1]?.method).toBe("PATCH");
+  expect(requests[1]?.url).toEndWith(`/sessions/${SESSION_ID}/goal`);
 });

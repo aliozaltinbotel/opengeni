@@ -5,6 +5,7 @@ import {
 } from "@opengeni/contracts";
 import {
   getKnowledgeEntry,
+  getKnowledgeEntries,
   listKnowledgeEntries,
   withRlsContext,
   isTransactionHandle,
@@ -14,8 +15,21 @@ import {
 import type { DocumentEmbedder } from "@opengeni/documents";
 import type { Settings } from "@opengeni/config";
 import { paidDocumentEmbedding } from "../billing/limits";
-import { searchKnowledgeEntries, knowledgeQueryRetrievalRequest, type KnowledgeQueryExecution } from "./knowledge-search";
+import {
+  searchKnowledgeEntries,
+  knowledgeQueryRetrievalRequest,
+  type KnowledgeQueryExecution,
+} from "./knowledge-search";
 
+const defaults = {
+  get: getKnowledgeEntry,
+  getMany: getKnowledgeEntries,
+  list: listKnowledgeEntries,
+  search: searchKnowledgeEntries,
+};
+type PreparationServices = Omit<typeof defaults, "getMany"> & {
+  getMany?: typeof getKnowledgeEntries;
+};
 // Normal workspaces return the whole map in one call. Larger maps explicitly
 // continue at a complete page boundary, never silently omit collections.
 const CATALOG_PAGE_SIZE = 25;
@@ -28,7 +42,7 @@ export async function prepareKnowledgeSave(
   context: KnowledgeContext,
   input: KnowledgeSavePreparationRequest,
   embedder: () => DocumentEmbedder,
-  services = { get: getKnowledgeEntry, list: listKnowledgeEntries, search: searchKnowledgeEntries },
+  services: PreparationServices = defaults,
   settings?: Settings,
   execution?: KnowledgeQueryExecution,
 ): Promise<KnowledgeSavePreparationResponse> {
@@ -49,7 +63,8 @@ export async function prepareKnowledgeSave(
       model: current.model,
       dimensions: current.dimensions,
       embedMany: (texts, completed, dispatch) => current.embedMany(texts, completed, dispatch),
-      embedQuery: (query, completed, dispatch) => (queryEmbedding ??= current.embedQuery(query, completed, dispatch)),
+      embedQuery: (query, completed, dispatch) =>
+        (queryEmbedding ??= current.embedQuery(query, completed, dispatch)),
     };
   };
   const collections: KnowledgeSavePreparationResponse["collections"] = {
@@ -64,71 +79,131 @@ export async function prepareKnowledgeSave(
   // failure would leave no deliverable preparation result. Paid mode uses
   // keyword discovery until a single-operation settlement seam exists.
   const paid = settings != null && paidDocumentEmbedding(settings);
-  const authorizedRead = <T>(read: (scoped: Database) => Promise<T>): Promise<T> => execution
-    ? withRlsContext(db, context, async scoped => { await execution.authorize(scoped); return read(scoped); }, undefined, "none")
-    : read(db);
-  const publishedSearch = (searchDb: Database) => services.search(
-    searchDb,
-    context,
-    {
-      query: request.query,
-      limit: request.limit,
-      view: "published",
-      ...(paid ? { mode: "keyword" as const } : {}),
-    },
-    sharedEmbedder,
-    paid ? undefined : settings,
-    execution,
-  );
+  const authorizedRead = <T>(read: (scoped: Database) => Promise<T>): Promise<T> =>
+    execution
+      ? withRlsContext(
+          db,
+          context,
+          async (scoped) => {
+            await execution.authorize(scoped);
+            return read(scoped);
+          },
+          undefined,
+          "none",
+        )
+      : read(db);
+  const publishedSearch = (searchDb: Database) =>
+    services.search(
+      searchDb,
+      context,
+      {
+        query: request.query,
+        limit: request.limit,
+        view: "published",
+        ...(paid ? { mode: "keyword" as const } : {}),
+      },
+      sharedEmbedder,
+      paid ? undefined : settings,
+      execution,
+    );
   // Semantic search owns its short admission/settlement transactions. Keyword
   // reads can stay in the current-authority transaction without provider I/O.
-  const published = paid && execution ? await authorizedRead(scoped => services.list(scoped, context, {
-    query: request.query, limit: request.limit, view: "published", mode: "keyword",
-  })).then(found => ({ ...found, searchMode: "keyword" as const })) : await publishedSearch(db);
-  const cachedValues = queryEmbedding && published.searchMode !== "keyword" ? await queryEmbedding : null;
+  const published =
+    paid && execution
+      ? await authorizedRead((scoped) =>
+          services.list(scoped, context, {
+            query: request.query,
+            limit: request.limit,
+            view: "published",
+            mode: "keyword",
+          }),
+        ).then((found) => ({ ...found, searchMode: "keyword" as const }))
+      : await publishedSearch(db);
+  const cachedValues =
+    queryEmbedding && published.searchMode !== "keyword" ? await queryEmbedding : null;
   // One provider occurrence serves both views. Reuse its vector through the
   // installed reader rather than inventing another completed provider call.
-  const needsReview = published.searchMode !== "keyword" && queryEmbedding && provider
-    ? { ...await authorizedRead(scoped => services.list(scoped, context,
-        knowledgeQueryRetrievalRequest(KnowledgeEntryListRequest.parse({ query: request.query, limit: request.limit, view: "needs_review", mode: published.searchMode })),
-        { model: provider!.model, values: cachedValues! })), searchMode: published.searchMode }
-    : execution ? { ...await authorizedRead(scoped => services.list(scoped, context, {
-        query: request.query, limit: request.limit, view: "needs_review", mode: "keyword",
-      })), searchMode: "keyword" as const }
-    : await services.search(
-    db,
-    context,
-    {
-      query: request.query,
-      limit: request.limit,
-      view: "needs_review",
-      ...(published.searchMode === "keyword" ? { mode: "keyword" as const } : {}),
-    },
-    sharedEmbedder,
-    undefined,
-    execution,
-  );
+  const needsReview =
+    published.searchMode !== "keyword" && queryEmbedding && provider
+      ? {
+          ...(await authorizedRead((scoped) =>
+            services.list(
+              scoped,
+              context,
+              knowledgeQueryRetrievalRequest(
+                KnowledgeEntryListRequest.parse({
+                  query: request.query,
+                  limit: request.limit,
+                  view: "needs_review",
+                  mode: published.searchMode,
+                }),
+              ),
+              { model: provider!.model, values: cachedValues! },
+            ),
+          )),
+          searchMode: published.searchMode,
+        }
+      : execution
+        ? {
+            ...(await authorizedRead((scoped) =>
+              services.list(scoped, context, {
+                query: request.query,
+                limit: request.limit,
+                view: "needs_review",
+                mode: "keyword",
+              }),
+            )),
+            searchMode: "keyword" as const,
+          }
+        : await services.search(
+            db,
+            context,
+            {
+              query: request.query,
+              limit: request.limit,
+              view: "needs_review",
+              ...(published.searchMode === "keyword" ? { mode: "keyword" as const } : {}),
+            },
+            sharedEmbedder,
+            undefined,
+            execution,
+          );
   const matches = { published, needs_review: needsReview };
   for (const view of ["published", "needs_review"] as const) {
     if (request.collectionCursors && request.collectionCursors[view] === null) continue;
     let cursor = request.collectionCursors?.[view] ?? undefined;
     let bytes = 0;
     for (let pageNumber = 0; pageNumber < CATALOG_PAGE_BUDGET; pageNumber++) {
-      const page = await authorizedRead(scoped => services.list(scoped, context, {
-        kind: "group",
-        view,
-        limit: CATALOG_PAGE_SIZE,
-        ...(cursor ? { cursor } : {}),
-      }));
-      const records: Array<Awaited<ReturnType<typeof getKnowledgeEntry>>> = [];
-      for (let offset = 0; offset < page.entries.length; offset += 4) {
-        records.push(
-          ...(await Promise.all(
-            page.entries
-              .slice(offset, offset + 4)
-              .map((summary) => authorizedRead(scoped => services.get(scoped, context, summary.id, { view }))),
-          )),
-        );
+      const page = await authorizedRead((scoped) =>
+        services.list(scoped, context, {
+          kind: "group",
+          view,
+          limit: CATALOG_PAGE_SIZE,
+          ...(cursor ? { cursor } : {}),
+        }),
+      );
+      const records: Array<Awaited<ReturnType<typeof getKnowledgeEntry>>> = services.getMany
+        ? await authorizedRead((scoped) =>
+            services.getMany!(
+              scoped,
+              context,
+              page.entries.map((summary) => summary.id),
+              { view },
+            ),
+          )
+        : [];
+      if (!services.getMany) {
+        for (let offset = 0; offset < page.entries.length; offset += 4) {
+          records.push(
+            ...(await Promise.all(
+              page.entries
+                .slice(offset, offset + 4)
+                .map((summary) =>
+                  authorizedRead((scoped) => services.get(scoped, context, summary.id, { view })),
+                ),
+            )),
+          );
+        }
       }
       for (const record of records) {
         // Re-read the current view: an exact historical revision may remain

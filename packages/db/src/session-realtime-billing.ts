@@ -1,7 +1,17 @@
 import { and, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
 
-import { REALTIME_SESSION_SOURCE_EVENT_TYPE, ReadRealtimeSessionUsageSource, type SessionRealtimeEndReason, type SessionRealtimeModel } from "@opengeni/contracts";
-import { withRlsContext, withWorkspaceRls, type Database } from "./database";
+import {
+  REALTIME_SESSION_SOURCE_EVENT_TYPE,
+  ReadRealtimeSessionUsageSource,
+  type SessionRealtimeEndReason,
+  type SessionRealtimeModel,
+} from "@opengeni/contracts";
+import {
+  withRlsContext,
+  withWorkspaceRls,
+  withDatabaseMaintenanceLifetime,
+  type Database,
+} from "./database";
 import * as schema from "./schema";
 
 /** One provider connection of a live-voice mode, bounded by server observation. */
@@ -78,21 +88,28 @@ export async function loadSessionRealtimeBillingFacts(
         providerObservedAt: schema.usageEvents.occurredAt,
       })
       .from(schema.sessionRealtimeConnections)
-      .leftJoin(schema.usageEvents, and(
-        eq(schema.usageEvents.accountId, mode.accountId), eq(schema.usageEvents.workspaceId, mode.workspaceId),
-        eq(schema.usageEvents.sessionId, mode.sessionId), eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
-        eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
-        sql`${schema.usageEvents.sourceResourceId} = ${schema.sessionRealtimeConnections.id}::text`,
-        sql`${schema.usageEvents.idempotencyKey} = 'usage:model.realtime.session.observed:' || ${schema.sessionRealtimeConnections.id}`,
-      ))
+      .leftJoin(
+        schema.usageEvents,
+        and(
+          eq(schema.usageEvents.accountId, mode.accountId),
+          eq(schema.usageEvents.workspaceId, mode.workspaceId),
+          eq(schema.usageEvents.sessionId, mode.sessionId),
+          eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
+          eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
+          sql`${schema.usageEvents.sourceResourceId} = ${schema.sessionRealtimeConnections.id}::text`,
+          sql`${schema.usageEvents.idempotencyKey} = 'usage:model.realtime.session.observed:' || ${schema.sessionRealtimeConnections.id}`,
+        ),
+      )
       .where(
         and(
           eq(schema.sessionRealtimeConnections.realtimeId, mode.id),
           isNotNull(schema.sessionRealtimeConnections.sdpAnswer),
           // New native proxy issuance is negotiation, never provider execution.
           // Previously recorded connection markers keep their history semantics.
-          or(sql`${schema.sessionRealtimeConnections.sdpAnswer} NOT IN ('gateway-native-proxy-issued', 'supergrok-native-proxy-issued')`,
-            isNotNull(schema.usageEvents.occurredAt)),
+          or(
+            sql`${schema.sessionRealtimeConnections.sdpAnswer} NOT IN ('gateway-native-proxy-issued', 'supergrok-native-proxy-issued')`,
+            isNotNull(schema.usageEvents.occurredAt),
+          ),
         ),
       );
     return {
@@ -153,22 +170,38 @@ export async function loadRealtimeSessionUsageSource(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string },
 ): Promise<{ source: ReadRealtimeSessionUsageSource; occurredAt: Date } | null> {
-  return await withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async scopedDb => {
-    const [row] = await scopedDb.select({ attributes: schema.usageEvents.attributes, occurredAt: schema.usageEvents.occurredAt })
-      .from(schema.usageEvents).where(and(
-        eq(schema.usageEvents.accountId, input.accountId),
-        eq(schema.usageEvents.workspaceId, input.workspaceId),
-        eq(schema.usageEvents.sessionId, input.sessionId),
-        eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
-        eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
-        eq(schema.usageEvents.sourceResourceId, input.connectionId),
-        eq(schema.usageEvents.idempotencyKey, `usage:${REALTIME_SESSION_SOURCE_EVENT_TYPE}:${input.connectionId}`),
-      )).limit(1);
-    if (!row) return null;
-    const source = ReadRealtimeSessionUsageSource.parse(row.attributes);
-    if (source.connectionId !== input.connectionId) throw new Error("REALTIME_PROVIDER_SOURCE_IDENTITY_CONFLICT");
-    return { source, occurredAt: row.occurredAt };
-  });
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({
+          attributes: schema.usageEvents.attributes,
+          occurredAt: schema.usageEvents.occurredAt,
+        })
+        .from(schema.usageEvents)
+        .where(
+          and(
+            eq(schema.usageEvents.accountId, input.accountId),
+            eq(schema.usageEvents.workspaceId, input.workspaceId),
+            eq(schema.usageEvents.sessionId, input.sessionId),
+            eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
+            eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
+            eq(schema.usageEvents.sourceResourceId, input.connectionId),
+            eq(
+              schema.usageEvents.idempotencyKey,
+              `usage:${REALTIME_SESSION_SOURCE_EVENT_TYPE}:${input.connectionId}`,
+            ),
+          ),
+        )
+        .limit(1);
+      if (!row) return null;
+      const source = ReadRealtimeSessionUsageSource.parse(row.attributes);
+      if (source.connectionId !== input.connectionId)
+        throw new Error("REALTIME_PROVIDER_SOURCE_IDENTITY_CONFLICT");
+      return { source, occurredAt: row.occurredAt };
+    },
+  );
 }
 
 /** Dispatch is not occurrence. This named reader binds a physical relay close
@@ -177,37 +210,89 @@ export async function loadRealtimeSessionDispatch(
   db: Database,
   input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string },
 ): Promise<{ attributes: Record<string, unknown>; occurredAt: Date } | null> {
-  return withRlsContext(db, { accountId: input.accountId, workspaceId: input.workspaceId }, async scopedDb => {
-    const [row] = await scopedDb.select({ attributes: schema.usageEvents.attributes, occurredAt: schema.usageEvents.occurredAt })
-      .from(schema.usageEvents).where(and(
-        eq(schema.usageEvents.accountId, input.accountId), eq(schema.usageEvents.workspaceId, input.workspaceId),
-        eq(schema.usageEvents.sessionId, input.sessionId), eq(schema.usageEvents.eventType, "model.realtime.session.dispatched"),
-        eq(schema.usageEvents.sourceResourceType, "model_realtime_session"), eq(schema.usageEvents.sourceResourceId, input.connectionId),
-        eq(schema.usageEvents.idempotencyKey, `usage:model.realtime.session.dispatched:${input.connectionId}`),
-      )).limit(1);
-    if (!row?.attributes) return null;
-    return { attributes: row.attributes, occurredAt: row.occurredAt };
-  });
+  return withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select({
+          attributes: schema.usageEvents.attributes,
+          occurredAt: schema.usageEvents.occurredAt,
+        })
+        .from(schema.usageEvents)
+        .where(
+          and(
+            eq(schema.usageEvents.accountId, input.accountId),
+            eq(schema.usageEvents.workspaceId, input.workspaceId),
+            eq(schema.usageEvents.sessionId, input.sessionId),
+            eq(schema.usageEvents.eventType, "model.realtime.session.dispatched"),
+            eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
+            eq(schema.usageEvents.sourceResourceId, input.connectionId),
+            eq(
+              schema.usageEvents.idempotencyKey,
+              `usage:model.realtime.session.dispatched:${input.connectionId}`,
+            ),
+          ),
+        )
+        .limit(1);
+      if (!row?.attributes) return null;
+      return { attributes: row.attributes, occurredAt: row.occurredAt };
+    },
+  );
 }
 
 /** Recovery reads immutable provider occurrences, never browser leases. There
  * is no age cutoff: a lost Temporal start acknowledgement remains recoverable. */
 export async function listPendingRealtimeSessionUsageSources(
-  db: Database, input: { workspaceId: string; limit: number },
-): Promise<Array<{ accountId: string; workspaceId: string; sessionId: string; connectionId: string }>> {
-  return await withWorkspaceRls(db, input.workspaceId, async scopedDb => {
-    const rows = await scopedDb.select({ accountId: schema.usageEvents.accountId,
-      sessionId: schema.usageEvents.sessionId, connectionId: schema.usageEvents.sourceResourceId })
-      .from(schema.usageEvents).where(and(
-        eq(schema.usageEvents.workspaceId, input.workspaceId),
-        eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
-        eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
-        sql`NOT EXISTS (SELECT 1 FROM ${schema.usageEvents} terminal WHERE terminal.account_id = ${schema.usageEvents.accountId}
+  db: Database,
+  input: { workspaceId: string; limit: number; signal?: AbortSignal; deadlineAtMs?: number },
+): Promise<
+  Array<{ accountId: string; workspaceId: string; sessionId: string; connectionId: string }>
+> {
+  if (input.signal)
+    return withDatabaseMaintenanceLifetime(
+      db,
+      {
+        signal: input.signal,
+        ...(input.deadlineAtMs === undefined ? {} : { deadlineAtMs: input.deadlineAtMs }),
+      },
+      (scoped) =>
+        listPendingRealtimeSessionUsageSources(scoped, {
+          workspaceId: input.workspaceId,
+          limit: input.limit,
+        }),
+    );
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        accountId: schema.usageEvents.accountId,
+        sessionId: schema.usageEvents.sessionId,
+        connectionId: schema.usageEvents.sourceResourceId,
+      })
+      .from(schema.usageEvents)
+      .where(
+        and(
+          eq(schema.usageEvents.workspaceId, input.workspaceId),
+          eq(schema.usageEvents.eventType, REALTIME_SESSION_SOURCE_EVENT_TYPE),
+          eq(schema.usageEvents.sourceResourceType, "model_realtime_session"),
+          sql`NOT EXISTS (SELECT 1 FROM ${schema.usageEvents} terminal WHERE terminal.account_id = ${schema.usageEvents.accountId}
           AND terminal.workspace_id = ${schema.usageEvents.workspaceId} AND terminal.session_id = ${schema.usageEvents.sessionId}
           AND terminal.event_type = 'model.call' AND terminal.idempotency_key = 'usage:model.call:realtime:' || ${schema.usageEvents.sourceResourceId})`,
-      )).orderBy(schema.usageEvents.occurredAt, schema.usageEvents.id).limit(input.limit);
-    return rows.flatMap(row => row.sessionId && row.connectionId
-      ? [{ accountId: row.accountId, workspaceId: input.workspaceId, sessionId: row.sessionId, connectionId: row.connectionId }]
-      : []);
+        ),
+      )
+      .orderBy(schema.usageEvents.occurredAt, schema.usageEvents.id)
+      .limit(input.limit);
+    return rows.flatMap((row) =>
+      row.sessionId && row.connectionId
+        ? [
+            {
+              accountId: row.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: row.sessionId,
+              connectionId: row.connectionId,
+            },
+          ]
+        : [],
+    );
   });
 }

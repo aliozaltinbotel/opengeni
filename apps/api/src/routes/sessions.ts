@@ -1,3 +1,4 @@
+import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import {
   legacyVariableSetFields,
@@ -7,8 +8,8 @@ import {
 } from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
-import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
-import { UnsupportedLatencyModeError } from "@opengeni/config";
+import { assertGoalResumeAllowed, resolveGoalModelAdmission, GoalResumeBlockedError } from "@opengeni/core";
+import { UnsupportedLatencyModeError, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
@@ -99,6 +100,9 @@ import {
   SessionControlRequest,
   SessionRetryRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_BOOKKEEPING_STEP_TYPES,
+  SESSION_EVENT_CONVERSATION_FILTER_HEADER,
+  SESSION_EVENT_CONVERSATION_FILTER_VERSION,
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
@@ -187,6 +191,7 @@ import {
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
+  listSessionEventConversationBookkeeping,
   listSessionEventPage,
   listSessionHumanInputRequests,
   listSessionGoalRevisionPage,
@@ -219,6 +224,7 @@ import {
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatusWithEvent,
+  resumeSessionGoalWithInput,
   upsertSessionGoalWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
@@ -3151,12 +3157,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     },
   );
 
-  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  const updateSessionGoal = async (c: Context): Promise<Response> => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    const sessionId = c.req.param("sessionId");
+    const sessionId = c.req.param("sessionId")!;
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
+    const canonicalInputRoute = c.req.path.endsWith("/goal/continuation-input");
+    if (canonicalInputRoute !== ("status" in payload && payload.continuationInput !== undefined)) {
+      throw new HTTPException(400, { message: "Canonical Goal input requires its dedicated continuation-input route" });
+    }
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });
@@ -3208,6 +3218,61 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     try {
+      if (payload.continuationInput && payload.expectedGoal?.pausedReason === "agent") {
+        const result = await resumeSessionGoalWithInput(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          workflowId: workflowIdForSession(sessionId),
+          expectedGoal: { ...payload.expectedGoal, pausedReason: "agent" },
+          continuationInput: payload.continuationInput,
+          defaultMaxAutoContinuations: deps.settings.goalMaxAutoContinuations ?? null,
+          policy: async (tx) => {
+            const session = await getSession(tx, workspaceId, sessionId);
+            if (!session) throw new HTTPException(404, { message: "session not found" });
+            const decision = await resolveGoalModelAdmission(
+              tx,
+              deps.catalogSourceSettings ?? deps.settings,
+              session,
+            );
+            if (decision.blocked) throw new HTTPException(422, { message: decision.blocked });
+            return {
+              model: decision.model,
+              reasoningEffort: session.reasoningEffort,
+              latencyMode: session.latencyMode,
+              turnExecutionPolicy: resolveTurnExecutionPolicyV1(decision.settings, {
+                modelId: decision.model,
+                requestedModelId: null,
+                modelSource: "continuation",
+                reasoningEffort: session.reasoningEffort,
+                reasoningSource: "continuation",
+                latencyMode: session.latencyMode,
+                latencyModeSource: "continuation",
+              }),
+              tools: decision.settings.mcpServers.some((server) => server.id === "opengeni")
+                ? mergeToolRefs(session.tools, [{ kind: "mcp", id: "opengeni" }])
+                : session.tools,
+              sandboxBackend: session.sandboxBackend,
+            };
+          },
+          beforeResume: (tx, currentSession, causalTurn) =>
+            assertGoalResumeAllowed({ ...deps, db: tx }, currentSession, causalTurn),
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+        if (result.workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: result.workflowWakeRevision,
+          });
+        }
+        return c.json(
+          (await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? result.goal,
+        );
+      }
       if (existing.status === "completed") {
         throw new HTTPException(409, {
           message: "session goal is completed; set a new goal instead",
@@ -3280,9 +3345,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       if (error instanceof SessionControlConflictError) {
         throw new HTTPException(409, { message: error.message, cause: error });
       }
+      if (error instanceof GoalResumeBlockedError) {
+        throw new HTTPException(422, { message: error.message, cause: error });
+      }
       throw error;
     }
-  });
+  };
+  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", updateSessionGoal);
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input", updateSessionGoal);
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -3466,10 +3536,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       "excludeClasses",
     );
     // Conversation-first readers exclude step events but keep presented tool
-    // calls (images, published files, Skill changes) and turnless rows such as
-    // PTY output, which no per-turn step read finds. Unknown values are ignored
+    // calls (images, published files, Skill changes). Turnless step rows (PTY
+    // and background command output) stay excluded; the sandbox dock reads
+    // them with includeTypes when it opens. Unknown values are ignored
     // so older and newer clients degrade to the plain type filter.
     const retainPresentedToolCalls = c.req.query("presentedToolCalls") === "include";
+    // Step readers ask for large tool outputs as bounded previews and read one
+    // row's exact output when the reader needs it. Full payload pages only;
+    // older servers ignore the option and return exact outputs.
+    const toolOutputPreview =
+      c.req.query("toolOutputs") === "preview" &&
+      payloadMode === "full" &&
+      resultMode !== "compact";
     const limit = latestClass
       ? 1
       : eventListLimit(
@@ -3489,10 +3567,31 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(retainPresentedToolCalls && !latestClass ? { retainPresentedToolCalls: true } : {}),
+      ...(toolOutputPreview && !latestClass ? { toolOutputPreview: true } : {}),
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
       ...(latestClass ? { authoritativeLatest: true } : {}),
     });
-    const events = dbPage.events;
+    const retainsPresented =
+      retainPresentedToolCalls &&
+      !latestClass &&
+      !!excludeTypes?.includes("agent.toolCall.created");
+    // A conversation read that also excludes turn bookkeeping keeps the rows
+    // its startup phases draw and those of turns without other steps.
+    const bookkeeping =
+      retainsPresented &&
+      !includeTypes?.length &&
+      !includeClasses?.length &&
+      !excludeClasses?.length &&
+      SESSION_EVENT_BOOKKEEPING_STEP_TYPES.every((type) => excludeTypes!.includes(type))
+        ? await conversationBookkeeping(db, workspaceId, sessionId, dbPage, {
+            after,
+            before,
+            direction,
+            payloadMode: dbPayloadMode,
+          })
+        : [];
+    const events =
+      bookkeeping.length > 0 ? mergeBySequence(dbPage.events, bookkeeping) : dbPage.events;
     if (resultMode === "compact") {
       const event = events[0];
       c.header("X-OpenGeni-Event-Result-Mode", "compact");
@@ -3535,7 +3634,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     c.header("X-OpenGeni-Event-Mode", mode);
     c.header("X-OpenGeni-Event-Direction", direction);
     c.header("X-OpenGeni-Payload-Mode", payloadMode);
+    if (toolOutputPreview && !latestClass) c.header("X-OpenGeni-Tool-Outputs", "preview");
     c.header("X-OpenGeni-Forensic-Exact", String(forensicExact));
+    // Tells a conversation-first reader this server applies presentedToolCalls
+    // (an older one ignores it and drops presented tool calls).
+    if (retainPresentedToolCalls && !latestClass) {
+      c.header(
+        SESSION_EVENT_CONVERSATION_FILTER_HEADER,
+        String(SESSION_EVENT_CONVERSATION_FILTER_VERSION),
+      );
+    }
     const coveredFirst = page.events[0]?.sequence;
     const coveredLastEvent = page.events.at(-1);
     const coveredLast =
@@ -5667,6 +5775,7 @@ export function sessionAuthorizationOperationForHttp(
         ? "session.goal.write"
         : null;
   }
+  if (suffix === "/goal/continuation-input" && verb === "POST") return "session.goal.write";
   if (suffix === "/goal/revisions" && verb === "GET") return "session.goal.read";
   if (suffix === "/goal/revisions/page" && verb === "GET") return "session.goal.read";
   if (/^\/goal\/revisions\/[^/]+\/apply$/.test(suffix) && verb === "POST") {
@@ -6475,6 +6584,56 @@ function eventSequence(raw: string | undefined, fallback: number): number {
     return fallback;
   }
   return Math.floor(sequence);
+}
+
+type SessionEventDbPage = Awaited<ReturnType<typeof listSessionEventPage>>;
+type SessionHistoryEvent = SessionEventDbPage["events"][number];
+
+/**
+ * The bookkeeping rows a conversation page keeps (see
+ * listSessionEventConversationBookkeeping), limited to the sequences this page
+ * covers: when more rows remain, beyond the page's last row in its reading
+ * direction belongs to the next page.
+ */
+async function conversationBookkeeping(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  page: SessionEventDbPage,
+  options: {
+    after: number;
+    before: number | undefined;
+    direction: "before" | "after";
+    payloadMode: SessionEventPayloadMode;
+  },
+): Promise<SessionHistoryEvent[]> {
+  const first = page.events[0];
+  const last = page.events.at(-1);
+  const turns = new Map<string, number | null>();
+  for (const event of page.events) {
+    if (!event.turnId) continue;
+    const started = turns.get(event.turnId) ?? null;
+    if (started === null && event.type === "turn.started") turns.set(event.turnId, event.sequence);
+    else if (!turns.has(event.turnId)) turns.set(event.turnId, null);
+  }
+  return await listSessionEventConversationBookkeeping(db, workspaceId, sessionId, {
+    turns: [...turns].map(([turnId, started]) => ({ turnId, started })),
+    // An empty page covers the whole requested range (the turn running at its
+    // start may still have startup rows there).
+    after: first && page.hasMore && options.direction === "before" ? first.sequence : options.after,
+    before: last && page.hasMore && options.direction === "after" ? last.sequence : options.before,
+    payloadMode: options.payloadMode,
+  });
+}
+
+function mergeBySequence(
+  events: readonly SessionHistoryEvent[],
+  extra: readonly SessionHistoryEvent[],
+): SessionHistoryEvent[] {
+  const ids = new Set(events.map((event) => event.id));
+  return [...events, ...extra.filter((event) => !ids.has(event.id))].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
 }
 
 function optionalEventSequence(raw: string | undefined): number | undefined {

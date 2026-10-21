@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import type postgres from "postgres";
 import assert from "node:assert/strict";
 import { acquireSharedTestDatabase, MemoryEventBus, testSettings } from "@opengeni/testing";
 import * as database from "@opengeni/db";
@@ -13,7 +14,7 @@ import {
 import { DEFAULT_OPENROUTER_MODEL_ID } from "@opengeni/config";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
 import { createApp } from "../src/app";
-import { applyConnectedModelToNewSessionDraft } from "../../web/src/lib/model-access-onboarding";
+import { applyConnectedModelToNewSessionDraft } from "../../../packages/react/src/app/lib/model-access-onboarding";
 import { ensureRunAllowedBetweenModelCalls } from "../../worker/src/activities/agent-turn/admission";
 import {
   processModelResponseTerminalEvent,
@@ -32,6 +33,13 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
     return;
   }
   const client = createDb(shared.appUrl);
+  const directMetadataQueries: string[] = [];
+  const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
+  driver.options.debug = (_id, query) => {
+    if (query.includes('from "connections"') && query.includes("direct_azure_openai")) {
+      directMetadataQueries.push(query);
+    }
+  };
   const fakeStripe = new Stripe("sk_test_example");
   const restores: { mockRestore(): void }[] = [];
   try {
@@ -172,7 +180,9 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
       readBalance,
     );
     restores.push(catalogBalanceReads);
+    directMetadataQueries.length = 0;
     const zero = await json(`${base}/model-catalog`);
+    assert.equal(directMetadataQueries.length, 0, "public connection metadata is read once");
     assert.equal(catalogBalanceReads.mock.calls.length, 1, "one request-local funding snapshot");
     catalogBalanceReads.mockClear();
     assert.equal(zero.defaultSelection.model, DEFAULT_OPENROUTER_MODEL_ID);

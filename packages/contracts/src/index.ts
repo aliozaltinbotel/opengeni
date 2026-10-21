@@ -428,7 +428,12 @@ export type CapabilityDescriptor = {
   };
   portExposure: { kind: PortExposureKind; supportsOnDemandPorts: boolean }; // runloop=false; blaxel only true
   workspaceRoot: string; // os-overridable; per-backend default (providers owns; os defers)
-  nativeBucketMount: boolean; // modal true -> mount/signed-download branch
+  /**
+   * How file resources in object storage can reach the box: the provider's own
+   * bucket mount (modal), an in-box rclone FUSE mount, or not at all. A "none"
+   * backend always receives files as pre-signed downloads.
+   */
+  bucketMount: "native" | "in-container" | "none";
   persistable: boolean;
   supportsRunAs: boolean;
 };
@@ -471,7 +476,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-fs", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // pre-declare 6080
     workspaceRoot: "/workspace",
-    nativeBucketMount: true,
+    bucketMount: "native",
     persistable: true,
     supportsRunAs: true,
   },
@@ -496,7 +501,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -521,7 +526,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false }, // CR9: pre-declare 6080
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -546,7 +551,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-snapshot-id", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/home/user",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -571,7 +576,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true }, // only on-demand backend
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -596,7 +601,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -622,7 +627,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "preview-url", supportsOnDemandPorts: false },
     workspaceRoot: "/vercel/sandbox",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -647,7 +652,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-dir", hasTarFallback: true },
     portExposure: { kind: "local-port", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: true,
   },
@@ -674,7 +679,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "native-dir", hasTarFallback: true },
     portExposure: { kind: "local-port", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: false,
     supportsRunAs: false,
   },
@@ -699,7 +704,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "none", supportsOnDemandPorts: false },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: false,
     supportsRunAs: false,
   },
@@ -746,7 +751,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "none", hasTarFallback: false },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/", // agent-reported machine root (the whole machine is the sandbox)
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: false,
     supportsRunAs: false,
   },
@@ -776,7 +781,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "in-container",
     persistable: true,
     supportsRunAs: false,
   },
@@ -810,7 +815,7 @@ export const CAPABILITY_DESCRIPTORS: Record<SandboxBackend, CapabilityDescriptor
     snapshot: { kind: "tar-only", hasTarFallback: true },
     portExposure: { kind: "provider-tunnel", supportsOnDemandPorts: true },
     workspaceRoot: "/workspace",
-    nativeBucketMount: false,
+    bucketMount: "none",
     persistable: true,
     // The box agent runs as root on Linux; each request still gates on the
     // live agent's Hello `run_as` capability.
@@ -8332,13 +8337,46 @@ export const GoalSpec = /* @__PURE__ */ defineSchema(() =>
 );
 export type GoalSpec = z.infer<typeof GoalSpec>;
 
+/** Opaque request identity and its native Goal update; never continuation text or actor identity. */
+export const GoalContinuationInputAttribution = /* @__PURE__ */ defineSchema(() =>
+  z.object({ operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS), updateId: z.string().uuid() }).strict(),
+);
+export type GoalContinuationInputAttribution = z.infer<typeof GoalContinuationInputAttribution>;
+
 export const UpdateSessionGoalRequest = /* @__PURE__ */ defineSchema(() =>
   z.union([
-    z.object({
-      status: z.enum(["paused", "active"]),
-      expectedGoal: z.object({ id: z.string().uuid(), version: z.number().int().positive(), pausedReason: z.string().nullable() }).optional(),
-      rationale: SessionGoalRationaleWrite.optional(),
-    }),
+    z
+      .object({
+        status: z.enum(["paused", "active"]),
+        expectedGoal: z
+          .object({
+            id: z.string().uuid(),
+            version: z.number().int().positive(),
+            pausedReason: z.string().nullable(),
+          })
+          .optional(),
+        rationale: SessionGoalRationaleWrite.optional(),
+        continuationInput: z
+          .object({
+            operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
+            text: z.string().trim().min(1).max(32768),
+          })
+          .strict()
+          .optional(),
+      })
+      .superRefine((value, ctx) => {
+        if (
+          value.continuationInput &&
+          (value.status !== "active" ||
+            !value.expectedGoal ||
+            value.expectedGoal.pausedReason !== "agent")
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            message: "Canonical continuation requires an exact agent-paused goal resume",
+          });
+        }
+      }),
     z.object({
       text: SessionGoalTextWrite,
       successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),
@@ -16421,6 +16459,8 @@ export const SessionListTotals = /* @__PURE__ */ defineSkillContractSchema(() =>
         queued: z.number().int().nonnegative(),
         unread: z.number().int().nonnegative(),
         activeWork: z.number().int().nonnegative(),
+        /** Idle sessions parked on their own wake-up; already included in `active`. */
+        waiting: z.number().int().nonnegative().optional(),
       }),
     ),
   }),

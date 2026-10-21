@@ -82,10 +82,11 @@ function appWith(
   port?: SessionAuthorizationPort,
   database: Database = client.db,
   settingsOverrides: Parameters<typeof testSettings>[0] = {},
+  register: typeof registerSessionRoutes = registerSessionRoutes,
 ): Hono {
   const noop = async () => undefined;
   const app = new Hono();
-  registerSessionRoutes(app, {
+  register(app, {
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: SECRET,
@@ -193,7 +194,7 @@ async function callMcpTool<T>(
   return JSON.parse(text) as T;
 }
 
-async function fixture() {
+async function fixture(model = "test-model") {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "session-authorization-test",
@@ -211,7 +212,7 @@ async function fixture() {
     initialMessage: "private root",
     resources: [],
     metadata: {},
-    model: "test-model",
+    model,
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "modal",
@@ -226,7 +227,7 @@ async function fixture() {
     initialModelContext: "host-only selected-record context",
     resources: [],
     metadata: {},
-    model: "test-model",
+    model,
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "modal",
@@ -239,7 +240,7 @@ async function fixture() {
     initialMessage: "hidden sibling",
     resources: [],
     metadata: {},
-    model: "test-model",
+    model,
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "modal",
@@ -2144,3 +2145,67 @@ test("conditional goal resume refuses a newer operator pause with HTTP 409 and n
     events,
   );
 });
+
+
+test("atomic goal input public route freezes canonical goal work and replays after a newer pause", async () => {
+  if (!available) throw new Error("PostgreSQL required for atomic goal input");
+  const value = await fixture("scripted-model");
+  await initializeSessionStartAtomically(client.db, { accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId, sessionId: value.root.id,
+    reasoningEffortFallback: "medium", createdEventPayload: {}, goal: { text: "Finish canonical proposal" } });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.root.id, workflowId: `session-${value.root.id}`, workflowRunId: crypto.randomUUID(),
+    attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("initial turn not claimed");
+  await applySessionTurnSettlement(client.db, value.grant.workspaceId, {
+    sessionId: value.root.id, turnId: claim.turn.id, triggerEventId: claim.turn.triggerEventId,
+    attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null,
+    events: [{ type: "turn.completed", payload: {} }],
+  });
+  const paused = await setSessionGoalStatusWithEvent(client.db, value.grant.workspaceId, value.root.id, {
+    status: "paused", pausedReason: "agent", event: { type: "goal.paused", actor: "agent", reason: "agent" },
+  });
+  const app = appWith();
+  const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/goal`;
+  const headers = { authorization: value.authorization, "content-type": "application/json" };
+  const request = { status: "active", expectedGoal: { id: paused.goal.id, version: paused.goal.version, pausedReason: "agent" },
+    continuationInput: { operationKey: crypto.randomUUID(), text: "Canonical public continuation input" } };
+  const send = (body: unknown) => app.request(path + ("continuationInput" in (body as object) ? "/continuation-input" : ""), { method: "continuationInput" in (body as object) ? "POST" : "PATCH", headers, body: JSON.stringify(body) });
+  const accepted = await send(request);
+  expect(accepted.status, await accepted.clone().text()).toBe(200);
+  expect(await accepted.json()).toMatchObject({ status: "active" });
+  expect((await send({ status: "paused" })).status).toBe(200);
+  const events = await listSessionEvents(client.db, value.grant.workspaceId, value.root.id);
+  const replay = await send(request);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ status: "paused", pausedReason: "api" });
+  expect(await listSessionEvents(client.db, value.grant.workspaceId, value.root.id)).toEqual(events);
+  expect((await send({ ...request, continuationInput: { ...request.continuationInput, text: "changed" } })).status).toBe(409);
+}, 180_000);
+
+
+test.skipIf(!process.env.OPENGENI_LEGACY_SOURCE_ROOT)("atomic input refuses actual legacy API without touching its ordinary Goal PATCH", async () => {
+  const legacyRoot = process.env.OPENGENI_LEGACY_SOURCE_ROOT!;
+  const { pathToFileURL } = await import("node:url");
+  const legacy = await import(pathToFileURL(`${legacyRoot}/apps/api/src/routes/sessions.ts`).href);
+  const value = await fixture("scripted-model");
+  await upsertSessionGoalWithEvent(client.db, { accountId: value.grant.accountId, workspaceId: value.grant.workspaceId,
+    sessionId: value.root.id, text: "Legacy Goal must remain paused", createdBy: "api", actor: "api" });
+  const paused = await setSessionGoalStatusWithEvent(client.db, value.grant.workspaceId, value.root.id, {
+    status: "paused", pausedReason: "agent", event: { type: "goal.paused", actor: "agent", reason: "agent" },
+  });
+  const before = await listSessionEvents(client.db, value.grant.workspaceId, value.root.id);
+  const oldApi = appWith(undefined, client.db, {}, legacy.registerSessionRoutes);
+  const response = await oldApi.request(`/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/goal/continuation-input`, {
+    method: "POST", headers: { authorization: value.authorization, "content-type": "application/json" },
+    body: JSON.stringify({ status: "active", expectedGoal: { id: paused.goal.id, version: paused.goal.version, pausedReason: "agent" },
+      continuationInput: { operationKey: "mixed-roll:input", text: "Canonical input cannot be lost" } }),
+  });
+  // Exact 5b fails closed at session authorization for an unclassified route, before handler dispatch.
+  expect(response.status).toBe(503);
+  expect(oldApi.routes.some((route) => route.method === "POST" && route.path.endsWith("/goal/continuation-input"))).toBe(false);
+  expect(await getSessionGoal(client.db, value.grant.workspaceId, value.root.id)).toMatchObject({ status: "paused", version: paused.goal.version });
+  expect(await listSessionEvents(client.db, value.grant.workspaceId, value.root.id)).toEqual(before);
+}, 180_000);

@@ -20,6 +20,7 @@ import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
   createDb,
+  defaultDatabasePreparedStatements,
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   getKnowledgeEntry,
@@ -453,6 +454,12 @@ export async function startApi(options: StartApiOptions = {}) {
   const searchPath = dbSearchPath(settings);
   const dbClient = createDb(settings.databaseUrl, {
     max: settings.apiDatabasePoolMax,
+    ...(settings.databaseNotificationUrl
+      ? { notificationDatabaseUrl: settings.databaseNotificationUrl }
+      : settings.databasePreparedStatements !== false &&
+          defaultDatabasePreparedStatements(settings.databaseUrl)
+        ? { notificationDatabaseUrl: settings.databaseUrl }
+        : {}),
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
     ...(settings.databasePreparedStatements === undefined

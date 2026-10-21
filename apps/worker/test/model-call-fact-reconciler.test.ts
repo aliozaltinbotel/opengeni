@@ -21,6 +21,80 @@ const listWorkspaces = async (_db: unknown, input: { afterId: string | null; lim
   WORKSPACES.filter((id) => input.afterId === null || id > input.afterId).slice(0, input.limit);
 
 describe("model call fact reconciler", () => {
+  test("joins an in-flight page at the existing run deadline without starting another", async () => {
+    const visited: string[] = [];
+    let settled = false;
+    const activity = createModelCallFactReconcilerActivities(services(), {
+      reconcileReceipts: async () => ({ settled: 0, observed: 0, truncated: false }),
+      runBudgetMs: 200,
+      startAfterWorkspaceId: () => WORKSPACES[0]!,
+      listWorkspaces: listWorkspaces as never,
+      reconcile: async (_db, input) => {
+        visited.push(input.workspaceId);
+        await new Promise<void>((resolve) =>
+          input.signal!.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        await Bun.sleep(10); // Simulated cancellation acknowledgement and rollback.
+        settled = true;
+        input.signal!.throwIfAborted();
+        throw new Error("unreachable");
+      },
+    });
+    const result = await activity.reconcileRecentModelCallFacts();
+    expect(settled).toBe(true);
+    expect(visited).toHaveLength(1);
+    expect(result).toMatchObject({
+      budgetExhausted: true,
+      failedWorkspaces: 0,
+      truncatedWorkspaces: 1,
+    });
+  });
+
+  test("propagates caller cancellation only after the executing page settles", async () => {
+    const abort = new AbortController();
+    const reason = new Error("activity cancelled");
+    let settled = false;
+    const activity = createModelCallFactReconcilerActivities(services(), {
+      reconcileReceipts: async () => ({ settled: 0, observed: 0, truncated: false }),
+      signal: abort.signal,
+      startAfterWorkspaceId: () => WORKSPACES[0]!,
+      listWorkspaces: listWorkspaces as never,
+      reconcile: async (_db, input) => {
+        abort.abort(reason);
+        await Bun.sleep(10);
+        settled = true;
+        input.signal!.throwIfAborted();
+        throw new Error("unreachable");
+      },
+    });
+    await expect(activity.reconcileRecentModelCallFacts()).rejects.toThrow("activity cancelled");
+    expect(settled).toBe(true);
+  });
+
+  test("the run deadline cancels workspace enumeration as well as repair pages", async () => {
+    let settled = false;
+    const activity = createModelCallFactReconcilerActivities(services(), {
+      reconcileReceipts: async () => ({ settled: 0, observed: 0, truncated: false }),
+      runBudgetMs: 200,
+      listWorkspaces: async (_db, input) => {
+        await new Promise<void>((resolve) =>
+          input.signal!.addEventListener("abort", () => resolve(), { once: true }),
+        );
+        settled = true;
+        input.signal!.throwIfAborted();
+        return [];
+      },
+      reconcile: async () => {
+        throw new Error("must not start a page");
+      },
+    });
+    expect(await activity.reconcileRecentModelCallFacts()).toMatchObject({
+      budgetExhausted: true,
+      workspaces: 0,
+    });
+    expect(settled).toBe(true);
+  });
+
   test("visits every workspace once from a random start and reports exact totals", async () => {
     const visited: string[] = [];
     const now = Date.parse("2026-09-25T12:00:00.000Z");
@@ -43,49 +117,92 @@ describe("model call fact reconciler", () => {
           missing,
           repaired: missing ? 2 : 0,
           unrepaired: missing ? 1 : 0,
-          truncated: input.workspaceId === WORKSPACES[7],
+          truncated:
+            input.workspaceId === WORKSPACES[7] &&
+            visited.filter((id) => id === input.workspaceId).length === 1,
         };
       },
     });
     const result = await activity.reconcileRecentModelCallFacts();
     expect(new Set(visited).size).toBe(WORKSPACES.length);
-    expect(visited).toHaveLength(WORKSPACES.length);
+    expect(visited).toHaveLength(WORKSPACES.length + 1);
     expect(visited[0]).toBe(WORKSPACES[301]);
-    expect(visited.at(-1)).toBe(WORKSPACES[300]);
+    expect(visited[WORKSPACES.length - 1]).toBe(WORKSPACES[300]);
+    expect(visited.at(-1)).toBe(WORKSPACES[7]);
     expect(result).toEqual({
       workspaces: WORKSPACES.length,
       unknownReceiptsSettled: 0,
       missing: 3,
       repaired: 2,
       unrepaired: 1,
-      truncatedWorkspaces: 1,
+      truncatedWorkspaces: 0,
       failedWorkspaces: 0,
       budgetExhausted: false,
     });
-    expect(info).not.toHaveBeenCalled();
-    expect(warn).toHaveBeenCalledWith(
-      "model call fact reconciliation incomplete",
-      expect.objectContaining({ truncatedWorkspaces: 1 }),
-    );
+    expect(info).toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 
   test("installed bounded activity reports unknown receipt recovery separately from known Insights facts", async () => {
     const receipts: string[] = [];
     const info = mock(() => undefined);
     const activity = createModelCallFactReconcilerActivities(services(info), {
-      now: () => 0, startAfterWorkspaceId: () => WORKSPACES[0]!,
+      now: () => 0,
+      startAfterWorkspaceId: () => WORKSPACES[0]!,
       listWorkspaces: listWorkspaces as never,
       reconcileReceipts: async (_db, input) => {
         receipts.push(input.workspaceId);
         expect(input.limit).toBe(MODEL_CALL_FACT_RECONCILE_WORKSPACE_LIMIT);
-        return { settled: input.workspaceId === WORKSPACES[3] ? 1 : 0, truncated: false };
+        return {
+          settled: input.workspaceId === WORKSPACES[3] ? 1 : 0,
+          observed: 1,
+          truncated: false,
+        };
       },
       reconcile: async () => ({ missing: 0, repaired: 0, unrepaired: 0, truncated: false }),
     });
     const result = await activity.reconcileRecentModelCallFacts();
     expect(new Set(receipts).size).toBe(WORKSPACES.length);
     expect(result).toMatchObject({ unknownReceiptsSettled: 1, repaired: 0, missing: 0 });
-    expect(info).toHaveBeenCalledWith("model call fact reconciliation", expect.objectContaining({ unknownReceiptsSettled: 1 }));
+    expect(info).toHaveBeenCalledWith(
+      "model call fact reconciliation",
+      expect.objectContaining({ unknownReceiptsSettled: 1 }),
+    );
+  });
+
+  test("receipt truncation is reported without repeating a non-advancing receipt page", async () => {
+    const receipts = mock(
+      async (
+        _db: unknown,
+        _input: Parameters<
+          NonNullable<
+            import("../src/activities/model-call-fact-reconciler").ModelCallFactReconcilerOptions["reconcileReceipts"]
+          >
+        >[1],
+      ) => ({ settled: 0, observed: 1, truncated: true }),
+    );
+    let factPages = 0;
+    const activity = createModelCallFactReconcilerActivities(services(), {
+      startAfterWorkspaceId: () => WORKSPACES[0]!,
+      listWorkspaces: async (_db, input) => (input.afterId === null ? [WORKSPACES[0]!] : []),
+      reconcileReceipts: receipts,
+      reconcile: async () => ({
+        missing: 0,
+        repaired: 0,
+        unrepaired: 0,
+        truncated: ++factPages === 1,
+      }),
+    });
+    expect(await activity.reconcileRecentModelCallFacts()).toMatchObject({
+      truncatedWorkspaces: 1,
+      budgetExhausted: false,
+    });
+    expect(receipts).toHaveBeenCalledTimes(1);
+    expect(factPages).toBe(2);
+    expect(receipts.mock.calls[0]?.[1]).toMatchObject({
+      signal: expect.any(AbortSignal),
+      deadlineAtMs: expect.any(Number),
+    });
   });
 
   test("isolates a failing workspace and stops at the run budget", async () => {
