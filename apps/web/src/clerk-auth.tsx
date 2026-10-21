@@ -1,7 +1,7 @@
 import { ClerkProvider, SignIn, useAuth } from "@clerk/react";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { registerExternalAccessTokenSource, registerExternalSignOut } from "./api";
-import { LoadingPanel } from "./components/common";
+import { LoadingPanel } from "@opengeni/react/app/components/common";
 
 /** The existing console mounts only after its authenticated request source is ready. */
 function ClerkSessionBridge({ children }: { children: ReactNode }) {

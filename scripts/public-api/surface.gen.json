@@ -24902,6 +24902,7 @@
         "$.groups[].queued": "integer!",
         "$.groups[].total": "integer!",
         "$.groups[].unread": "integer!",
+        "$.groups[].waiting": "integer?",
         "$.needsYouCount": "integer!"
       }
     },
@@ -31715,6 +31716,7 @@
       "isRawModelLabel": "value",
       "isReservedOpenGeniLink": "value",
       "isRetryableStreamError": "value",
+      "isSessionModelResponsePhase": "value",
       "isSessionRealtimeModel": "value",
       "isSiteCatalogStaleError": "value",
       "KnowledgeEntryBatchReviewRequest": "type",
@@ -32242,6 +32244,11 @@
       "ServiceTurnInitiator": "type",
       "ServiceTurnInitiatorContext": "type",
       "Session": "type",
+      "SESSION_EVENT_BOOKKEEPING_STEP_TYPES": "value",
+      "SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES": "value",
+      "SESSION_EVENT_CONTENT_STEP_TYPES": "value",
+      "SESSION_EVENT_CONVERSATION_FILTER_HEADER": "value",
+      "SESSION_EVENT_CONVERSATION_FILTER_VERSION": "value",
       "SESSION_EVENT_PRESENTED_TOOL_LEAVES": "value",
       "SESSION_EVENT_STEP_TYPES": "value",
       "SESSION_EVENT_TYPES": "value",
@@ -32277,6 +32284,7 @@
       "sessionEventsToSseStream": "value",
       "sessionEventStreamCoveredThrough": "value",
       "SessionEventStreamTransport": "type",
+      "SessionEventToolOutputPreview": "type",
       "SessionEventType": "type",
       "SessionGoal": "type",
       "SessionGoalCreatedBy": "type",
@@ -32815,6 +32823,7 @@
       "WorkspaceRevisionDegradedPayload": "type",
       "WorkspaceSandboxImages": "type",
       "WorkspaceSessionDefaults": "type",
+      "WorkspaceSessionListEvent": "type",
       "WorkspaceSettings": "type",
       "WorkspaceSlackReactionSummonSettings": "type",
       "WorkspaceStateAttemptGovernance": "type",
@@ -34576,6 +34585,7 @@
       "ToolActionReviewDetails": "value",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
+      "ToolOutputPreview": "type",
       "ToolRegistry": "type",
       "ToolRegistryEntry": "type",
       "ToolRenderer": "type",
@@ -34842,6 +34852,9 @@
       "useBrowserAccountTransitionBlocker": "value",
       "useOptionalBrowserAccounts": "value",
       "useOptionalBrowserAccountTransitionBlocker": "value"
+    },
+    "@opengeni/react/app.css": {
+      "default": "value"
     },
     "@opengeni/react/artifacts": {
       "ArtifactBadge": "value",
@@ -35636,6 +35649,7 @@
       "TimelineItem": "type",
       "ToolCallItem": "type",
       "toolDisplayName": "value",
+      "ToolOutputPreview": "type",
       "TurnEndItem": "type",
       "TurnOutcome": "type",
       "TurnStepsItem": "type",
@@ -35684,6 +35698,19 @@
       "sessionAgentsSignal": "value",
       "SessionAgentsSignal": "type",
       "sessionGoalStateLabel": "value"
+    },
+    "@opengeni/react/session-app": {
+      "EditableArtifactSurfaceProps": "type",
+      "MessageContextInput": "type",
+      "MessageContextItem": "type",
+      "PdfPreviewProps": "type",
+      "SESSION_UI_PRESETS": "value",
+      "SessionApp": "value",
+      "SessionAppProps": "type",
+      "SessionAppSurfaces": "type",
+      "SessionShellSlots": "type",
+      "SessionUiFeatures": "type",
+      "SessionUiPreset": "type"
     },
     "@opengeni/react/session-attention-model": {
       "readAcknowledgementFrontier": "value",
@@ -35989,6 +36016,7 @@
       "plainToolRow": "value",
       "presentedToolKind": "value",
       "PresentedToolKind": "type",
+      "presentsToolOutputPreview": "value",
       "QUESTION_NAV_HIDDEN_PX": "value",
       "QUESTION_NAV_MARGIN_PX": "value",
       "QuestionNavPrompt": "type",
@@ -36471,6 +36499,11 @@
       "PageHeaderVariant": "type",
       "usePageHeaderStyle": "value"
     },
+    "@opengeni/react/ui/portal-container": {
+      "containedPortal": "value",
+      "PortalContainerProvider": "value",
+      "usePortalContainer": "value"
+    },
     "@opengeni/react/ui/relative-time": {
       "DateInput": "type",
       "formatAbsoluteTime": "value",
@@ -36732,6 +36765,9 @@
       "useUsage": "value",
       "UseUsageOptions": "type",
       "UseUsageResult": "type"
+    },
+    "@opengeni/react/workbench": {
+      "enableWorkbench": "value"
     }
   },
   "sdkMembers": {

@@ -5,6 +5,7 @@ import {
   SESSION_SEQUENCE_HEADER,
 } from "./session-sequence";
 import type { ComputerNativeCallRequest, ComputerNativeReceipt } from "@opengeni/contracts";
+import { SESSION_EVENT_CONVERSATION_FILTER_HEADER } from "@opengeni/contracts/session-history";
 import type { WorkspaceBackgroundCommandListResponse } from "./types";
 import type {
   InsightsSiteUsageQuery,
@@ -2915,6 +2916,7 @@ export class OpenGeniClient {
           ? { excludeClasses: listOptions.excludeClasses.join(",") }
           : {}),
         ...(listOptions?.presentedToolCalls === "include" ? { presentedToolCalls: "include" } : {}),
+        ...(listOptions?.toolOutputs === "preview" ? { toolOutputs: "preview" } : {}),
         ...(options.latest ? { latest: options.latest } : {}),
       }),
       {
@@ -2975,6 +2977,7 @@ export class OpenGeniClient {
       nextAfter: integerHeader("X-OpenGeni-Next-After"),
       nextBefore: integerHeader("X-OpenGeni-Next-Before"),
       forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
+      conversationFilter: integerHeader(SESSION_EVENT_CONVERSATION_FILTER_HEADER),
     };
   }
 

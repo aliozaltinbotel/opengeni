@@ -646,6 +646,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
     });
+    const workspaceConnectionsRead =
+      typeof deps.db.transaction === "function" &&
+      typeof (deps.db as typeof deps.db & { rollback?: unknown }).rollback !== "function"
+        ? listConnectionsMetadata(deps.db, workspaceId, null)
+        : undefined;
+    // The original promise remains in the catalog batch. On failure the
+    // restrictions keep their standalone read rather than mask its error.
+    const restrictionMetadata = workspaceConnectionsRead?.catch(() => undefined);
     const [
       currentConnectionModelRestrictions,
       policy,
@@ -666,6 +674,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           grant.subjectId,
           undefined,
           core?.restrictions,
+          restrictionMetadata,
         ),
       ),
       getWorkspaceModelPolicy(deps.db, workspaceId),
@@ -697,7 +706,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             core,
           ),
       ),
-      listConnectionsMetadata(deps.db, workspaceId, null),
+      workspaceConnectionsRead ?? listConnectionsMetadata(deps.db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,
         workspaceId,

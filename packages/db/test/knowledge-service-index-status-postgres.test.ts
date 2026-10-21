@@ -7,6 +7,7 @@ import {
   completeKnowledgeIndexJob,
   createDb,
   getKnowledgeEntry,
+  getKnowledgeEntries,
   listKnowledgeEntries,
   saveKnowledgeEntry,
   type KnowledgeContext,
@@ -219,6 +220,26 @@ describe("a service principal reads published Knowledge whose page holds several
       });
     });
   }
+
+  test("batch reads preserve service authorization for every item and exclude personal/foreign entries", async () => {
+    const requested = [
+      ids.parkingRules.entryId,
+      ids.personalParking.entryId,
+      ids.parkingGuide.entryId,
+      ids.otherWorkspace.entryId,
+    ];
+    const found = await getKnowledgeEntries(client.db, service("api_key"), requested);
+    expect(found.map((record) => record?.id ?? null)).toEqual([
+      requested[0]!,
+      null,
+      requested[2]!,
+      null,
+    ]);
+    expect(found.filter((record) => record !== null).map((record) => record.indexStatus)).toEqual([
+      "indexed",
+      "indexed",
+    ]);
+  });
 
   test("a search whose hits hold one source answers it, indexed", async () => {
     const found = await listKnowledgeEntries(client.db, service("api_key"), {

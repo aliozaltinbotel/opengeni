@@ -38,6 +38,8 @@ async function serverFixture(
   connectionOptions: Omit<ConnectionOptions, "address"> = {},
   systemInfoHandler = (_call: any, reply: (error: unknown, response?: unknown) => void) =>
     reply(null, {}),
+  startWorkflowHandler = (_call: any, reply: (error: unknown, response?: unknown) => void) =>
+    reply(null, { runId: crypto.randomUUID() }),
 ) {
   const server = new grpc.Server();
   server.addService(
@@ -51,6 +53,17 @@ async function serverFixture(
         responseSerialize: (value: unknown) => Buffer.from(response.encode(value).finish()),
         responseDeserialize: (value: Buffer) => response.decode(value),
       },
+      startWorkflowExecution: {
+        path: "/temporal.api.workflowservice.v1.WorkflowService/StartWorkflowExecution",
+        requestStream: false,
+        responseStream: false,
+        requestSerialize: (value: unknown) =>
+          Buffer.from(proto.StartWorkflowExecutionRequest.encode(value).finish()),
+        requestDeserialize: (value: Buffer) => proto.StartWorkflowExecutionRequest.decode(value),
+        responseSerialize: (value: unknown) =>
+          Buffer.from(proto.StartWorkflowExecutionResponse.encode(value).finish()),
+        responseDeserialize: (value: Buffer) => proto.StartWorkflowExecutionResponse.decode(value),
+      },
       getSystemInfo: {
         path: "/temporal.api.workflowservice.v1.WorkflowService/GetSystemInfo",
         requestStream: false,
@@ -62,7 +75,11 @@ async function serverFixture(
         responseDeserialize: (value: Buffer) => systemInfoResponse.decode(value),
       },
     },
-    { describeTaskQueue: handler, getSystemInfo: systemInfoHandler },
+    {
+      describeTaskQueue: handler,
+      getSystemInfo: systemInfoHandler,
+      startWorkflowExecution: startWorkflowHandler,
+    },
   );
   const port = await new Promise<number>((resolve, reject) => {
     server.bindAsync(
@@ -332,6 +349,46 @@ describe("pinned SDK native task-queue RPC bounds", () => {
     } finally {
       await signaler.close();
       lazy.mockRestore();
+      await f.close();
+    }
+  });
+
+  test("realtime recovery workflow start bounds its actual pending RPC by caller cancellation", async () => {
+    const received = deferred<void>();
+    const cancelled = deferred<void>();
+    const f = await serverFixture(
+      (_call, reply) => reply(null, {}),
+      {},
+      undefined,
+      (call) => {
+        call.on("cancelled", () => cancelled.resolve());
+        received.resolve();
+      },
+    );
+    const signaler = await createWorkerWorkflowSignaler(
+      testSettings({ temporalHost: f.address }),
+      {} as never,
+    );
+    const stop = new AbortController();
+    try {
+      const outcome = signaler
+        .startRealtimeUsageWorkflow(
+          {
+            accountId: crypto.randomUUID(),
+            workspaceId: crypto.randomUUID(),
+            sessionId: crypto.randomUUID(),
+            connectionId: crypto.randomUUID(),
+          },
+          { signal: stop.signal, deadlineAtMs: Date.now() + 10_000 },
+        )
+        .catch((error) => error);
+      await received.promise;
+      stop.abort();
+      expect(isGrpcCancelledError(await outcome)).toBe(true);
+      await cancelled.promise;
+    } finally {
+      stop.abort();
+      await signaler.close();
       await f.close();
     }
   });
