@@ -207,7 +207,8 @@ and switches single capabilities: `{ from: "none", webSearch: true }`.
 | `knowledge` | search and save workspace Knowledge, task notes and instructions |
 | `workspaceFiles` | read files uploaded to the workspace |
 | `workspaceConnectors` | use the workspace's connected apps and integrations |
-| `workspaceAdmin` | manage variable sets, projects, rigs, machines and connector setup |
+| `secrets` | use saved secrets by `{{secret:…}}` reference, save new ones and ask for them with a secure card |
+| `workspaceAdmin` | manage projects, rigs, machines and connector setup |
 
 Tools the session attaches itself (its `mcpServers` and named `tools`), sandbox
 tools and runtime mechanics are not capabilities and are never toggled. A
@@ -415,6 +416,11 @@ ceilings, not reservations or organization-credit purchases. Keep budget
 configuration/grants in organization-authorized backend flows and use the
 session proxy's own-usage route for a browser meter.
 
+To stop one task (a root session and its child agents) at an API-equivalent
+model-usage amount, set `usageLimitMicros` from your server on create or with
+`setSessionUsageLimit`; see [task usage limits](session-usage-limits.md). The
+browser proxy never accepts a limit from an end user.
+
 ```text
 product browser / mobile client
              |
@@ -594,7 +600,7 @@ type OrganizationAccessPolicy = {
 
 | Preset | Permission selection |
 | --- | --- |
-| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, except the secret-value reads `secrets:read` and `variable-sets:read` |
+| `read_only` | Every canonical permission ending in `:read`, `:list`, `:view`, or `:search`, except the secret-value read `secrets:read` |
 | `full` | Every canonical, non-deprecated `Permission`, including explicit administration and plaintext-secret permissions |
 | `custom` | Exactly the permissions chosen, including an empty list; no implicit permissions or workspace scopes |
 
@@ -793,7 +799,7 @@ on the backend and use `client.asService(name, context?)`. It returns a new
 client of the same class without changing the original. Attribution is not
 permission: the API still checks the key's authority, and service work cannot
 impersonate a human or borrow their Personal workspace, personal Connections,
-Knowledge, or Variable Sets. Do not use a synthetic `asUser` identity for a job.
+Knowledge, or Only me vaults. Do not use a synthetic `asUser` identity for a job.
 
 The helper sends `x-opengeni-service-initiator` (a name matching
 `^[a-z0-9][a-z0-9:._-]{0,63}$`) and, when supplied,
@@ -802,7 +808,7 @@ boolean values, at most 2 KiB of serialized header bytes). Context is non-secret
 attribution, not credentials or a permissions request. `asService` and
 `asUser` / `asLinkedUser` are mutually exclusive; start each lane from the
 unscoped client. Reapplying `asService` replaces its name and context.
-The server rejects mixed user/service headers with 422. OpenGeni-owned
+The server rejects mixed user/service headers with 422. Opengeni-owned
 provenance fields such as `via` and `label` are reserved context keys.
 Session create, Send, and Steer freeze this service principal with no initiating
 human; a scheduled task created in this lane freezes it for its occurrences.
@@ -862,7 +868,7 @@ The old `opengeni-product-integration` Pack is not needed or restored.
 
 Control Opengeni's bundled guidance separately from your product Skills with
 `CreateSessionRequest.bundledSkillIds`. Omit it for the default bundles; pass
-`[]` for none, or explicit IDs such as `"builtin:opengeni-documents"`. An agent
+`[]` for none, or explicit IDs such as `"builtin:documents"`. An agent
 that starts from `capabilities: "none"` has no default bundles: create freezes
 an omitted selection as `[]`, and only an explicit list opts in. Selection
 only narrows each bundle's normal inclusion conditions and grants no tool
@@ -875,7 +881,7 @@ This does not disable workspace-authored/installed Skills or your inline
 `skill_read` tool remains available even with no bundled guidance. Bundle
 selection does not wait for lazy tool discovery or sandbox startup.
 
-`builtin:opengeni-schedules` provides schedule-creation guidance when
+`builtin:schedules` provides schedule-creation guidance when
 `scheduled_tasks_create` is configured. Like other bundles, it can be excluded
 by an explicit selection and does not grant tool permissions.
 
@@ -885,7 +891,7 @@ already omits the bundled guides; for any other agent, put
 `create: { bundledSkillIds: [] }` in the chat facade's resolved options. Select
 only the product's own inline Skills and intended tools, and use a workspace
 whose shared Skills match that product. For example, a documents-capable bot
-can select only `builtin:opengeni-documents`. Removing bundled guides does not
+can select only `builtin:documents`. Removing bundled guides does not
 remove mandatory runtime rules or independently authorized Skill/tool surfaces.
 
 The external backend owns its reusable Skills. Store and version them with the
@@ -969,7 +975,12 @@ const { user, tenant } = await verifyToolRequest(request); // throws ToolRequest
 On every session the `createSession` hook creates, the proxy attaches the
 server as a per-session `mcpServers` entry with an HS256 bearer token for the
 user `resolve` authenticated (plus an eager `tools` ref when the hook returns an
-explicit list). It rotates that token through `mcpCredentialUpdates` on every
+explicit list). Name the everyday tools the agent should have from its first
+model request with `toolServer.eager` (for example
+`eager: ["search_posts", "get_post"]`): the agent can call them without a
+`tool_search` round trip, while the rest of the server's tools stay searchable.
+Keep that list short and stable, since every listed schema is part of each
+request; `eager: true` puts every tool on it. It rotates that token through `mcpCredentialUpdates` on every
 send, steer, composer submit, approval decision, and human-input answer, only
 for sessions that carry this exact server, and only when the chat's creator acts
 (tools act as the creator, also in shared chats). Tokens last 24 hours by default.
@@ -1073,7 +1084,7 @@ Opengeni credits, then the deployment default. `GET
 availability are live deployment facts; do not hard-code a remembered catalog.
 
 Opengeni credits are held at the organization account. All of that
-organization's workspaces using the OpenGeni-credits model path draw from the
+organization's workspaces using the Opengeni-credits model path draw from the
 same account balance; creating one workspace per user or chat does not create
 separate wallets. Connected subscriptions and workspace-owned provider
 credentials can use their separately reported external billing path. Retain
@@ -1192,6 +1203,15 @@ its `/v1/config/client` response with `artifactViewerCapability({ client:
 og.asUser(user, { source }), workspaceId, source })` from `@opengeni/sdk`, and
 forwards the same artifact routes under its own authorization.
 
+A page that belongs to the workspace rather than to one chat (for example a
+dashboard several sessions keep current) has no single source session. To show
+it with `SiteList` or `SiteDetail` from `@opengeni/react/sites`, opt in with
+`sites: true`: requests that do not send `x-opengeni-session-id` may then list
+Sites and read Site detail, content, and versioned HTML under Opengeni's own
+read authorization for the resolved user (`artifacts:read`). It is read-only:
+rollback and status changes stay closed, so pass `canPublish={false}` to
+`SiteDetail`. Requests that name a session keep the session-scoped checks above.
+
 When an older API lacks the effective-grant endpoint, the proxy omits artifact
 capability from config but still boots the conversation. Artifact requests fail
 closed; a subsequent config read can discover upgraded API support.
@@ -1214,6 +1234,17 @@ and its resolver also applies to `Markdown` rendered by a custom
 `renderMessageText`. `OpenGeniLinkProvider` sets a resolver for a whole
 subtree. An unresolved target renders as text marked unavailable, never as a
 broken link, and the Site tool row hides its Open action.
+
+Your product's own links are separate from Opengeni objects. When your
+instructions or tools teach the agent to link your records and pages, for
+example `[order 42](myapp:order/42)` or an in-app path, pass `renderLink` to
+`Markdown` or `OpenGeniLinkProvider` to draw and open them yourself, such as a
+chip that navigates in place. It receives the exact authored `href`, the
+rendered link text, and `standalone: true` when the link is the only content of
+its paragraph or list item, which lets you draw a card. That paragraph then
+renders as a block. Return `undefined` to keep the default: web links open in
+a new tab and unknown schemes show as unavailable. The `href` is not sanitized,
+so check it before navigating. Opengeni object links never reach `renderLink`.
 
 A non-React frontend applies the same rule with `parseOpenGeniLink(href)` from
 `@opengeni/sdk`, which classifies an agent href into `file`, `sandbox-file`,
@@ -1261,8 +1292,11 @@ default path end to end: explicit external-member onboarding, server-side
 session creation with an explicit tool selection and stable idempotency key,
 `createSessionProxyHandler`, `<OpenGeniProvider>` + `<SessionConversation>`,
 and an authenticated product MCP server. It uses one preselected workspace and
-a fixed demo operator; use the organization-key `ensureWorkspace` flow above
-and your own authentication for production tenants.
+a fixed demo operator, and separates anonymous browsers with a signed visitor
+cookie checked in `authorizeSession`, a per-visitor copy of its product data,
+and a server-set signed visitor header on each session's MCP server; use the
+organization-key `ensureWorkspace` flow above and your own authentication for
+production tenants.
 
 The product controls whether it renders final answers only, assistant progress,
 selected tool calls, or a full operational timeline. Presentation filtering

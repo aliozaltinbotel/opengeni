@@ -30,7 +30,7 @@ describe("model call fact reconciler", () => {
       now: () => now,
       startAfterWorkspaceId: () => WORKSPACES[300]!,
       listWorkspaces: listWorkspaces as never,
-      reconcileReceipts: async () => ({ settled: 0, truncated: false }),
+      reconcileReceipts: async () => ({ settled: 0, observed: 0, truncated: false }),
       reconcile: async (_db, input) => {
         visited.push(input.workspaceId);
         expect(input.until.getTime()).toBe(now - MODEL_CALL_FACT_RECONCILE_SETTLE_MS);
@@ -96,7 +96,7 @@ describe("model call fact reconciler", () => {
       runBudgetMs: 10,
       startAfterWorkspaceId: () => "00000000-0000-4000-8000-ffffffffffff",
       listWorkspaces: listWorkspaces as never,
-      reconcileReceipts: async () => ({ settled: 0, truncated: false }),
+      reconcileReceipts: async () => ({ settled: 0, observed: 0, truncated: false }),
       reconcile: async (_db, input) => {
         clock += 1;
         if (input.workspaceId === WORKSPACES[1]) throw new Error("transient");

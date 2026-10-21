@@ -12,10 +12,20 @@ import {
   readlink,
   realpath,
   rm,
+  stat as fileStatus,
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { resolvePinnedAgentBrowserBinary, type ResolvedAgentBrowserBinary } from "./binary";
+import {
+  BROWSER_SHARED_NETWORK_NOTICE,
+  browserNetworkIsolationScript,
+  freeLoopbackPort,
+  hostNamespaceResolvConf,
+  isolatedChromeLaunch,
+  linuxBrowserNetworkIsolation,
+  type BrowserNetworkIsolationTools,
+} from "./browser-network-isolation";
 import {
   readLinuxManagedBrowserIdentity,
   type LinuxManagedBrowserIdentity,
@@ -30,7 +40,41 @@ const MAX_ARGUMENT_BYTES = 4 * 1024 * 1024;
 const DAEMON_STOP_TIMEOUT_MS = 3_000;
 const PROCESS_QUERY_TIMEOUT_MS = 2_000;
 const MAX_PROCESS_QUERY_BYTES = 8 * 1024;
+/** A whole-host process listing (every process with its command line) is far
+ * larger than a single-process query and may take longer on a busy host. */
+const PROCESS_INVENTORY_LIMITS = { maxBytes: 32 * 1024 * 1024, timeoutMs: 10_000 } as const;
+/** One process's command line plus its environment. */
+const PROCESS_ENVIRONMENT_LIMITS = { maxBytes: 1024 * 1024, timeoutMs: 2_000 } as const;
+/** An agent-browser daemon without a browser child that is younger than this
+ * may still be starting its browser, so startup reconciliation leaves it. */
+const ORPHANED_DAEMON_MIN_AGE_MS = 120_000;
 const CHROME_STDERR_DIAGNOSTIC_BYTES = 64 * 1024;
+
+/** Chromium features every managed browser turns off. Chromium honors only
+ * the last `--disable-features` switch, agent-browser sends its own, and its
+ * launch-argument list splits on commas, so the launch wrapper appends this
+ * one complete switch after every other argument. */
+const MANAGED_CHROME_DISABLED_FEATURES = [
+  // agent-browser's own default, which any later switch would re-enable.
+  "Translate",
+  // Component-update suppression does not stop Chromium's on-demand local
+  // model downloads. Managed profiles must not each fetch gigabytes of AI
+  // weights; Opengeni's model provider is independent of Chrome's local AI.
+  "OptimizationGuideOnDeviceModel",
+  // The address-bar suggestion popups are WebUI pages that Chrome preloads
+  // into two dedicated renderers (about 200 MB) for the browser's lifetime.
+  // Nothing types into a managed browser's address bar, and Chrome falls back
+  // to its native popup. Pages cannot observe the difference.
+  "WebUIOmniboxPopup",
+  "WebUIOmniboxAimPopup",
+  // History search embeddings: every new profile downloads a 37 MB text
+  // embedding model and embeds visited pages in the background. Nothing in a
+  // managed browser searches its history, and pages cannot observe it (the
+  // built-in AI web APIs use other models and stay available).
+  "PassageEmbedder",
+] as const;
+
+export const MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT = `--disable-features=${MANAGED_CHROME_DISABLED_FEATURES.join(",")}`;
 
 export type AgentBrowserEnvelope<T = unknown> = {
   success: boolean;
@@ -72,6 +116,13 @@ export type AgentBrowserRunnerOptions = {
   downloadDirectory: string;
   screenshotDirectory: string;
   headed: boolean;
+  /** Run a headed managed browser without any native window. On a person's
+   * own desktop a windowed managed browser shows up in front of them, takes
+   * focus and joins the Dock; an offscreen browser is the same real browser
+   * and profile in Chrome's new headless mode, presenting the host display's
+   * geometry and an ordinary User-Agent. Supported on macOS, and on Linux
+   * hosts without a graphical display, where no window can open. */
+  offscreen?: boolean;
   browserExecutablePath?: string;
   /** macOS lifecycle-preserving background launcher. Defaults to the packaged
    * native helper discovered by browserd's parent agent. */
@@ -94,6 +145,14 @@ export type AgentBrowserRunnerOptions = {
   /** Private completed launch receipt, checked again before attaching/launching. */
   recoverOwnedProcess?: OwnedManagedBrowserProcess;
   allowOwnedProcessLaunch?: boolean;
+  /** Launch a managed Linux browser in its own transient systemd user scope
+   * when a user service manager is reachable. Defaults to on; tests disable it
+   * to exercise the plain launch. */
+  systemdScope?: boolean;
+  /** Launch a managed Linux browser in its own network namespace when the
+   * machine supports it. Defaults to on; tests disable it to exercise the
+   * plain launch. */
+  networkIsolation?: boolean;
 };
 
 export type OwnedManagedBrowserProcess = {
@@ -133,6 +192,10 @@ export class AgentBrowserJsonRunner {
   private readonly profileDirectory: string;
   private readonly managedBrowserExecutable: string | null;
   private readonly chromeStderrDrainPaths: readonly string[];
+  private readonly browserScope: LinuxBrowserScope | null;
+  /** Set when this managed browser shares the machine's network because
+   * isolating it is unavailable here; shown once to the agent at launch. */
+  readonly networkNotice: string | null;
   private readonly recoveredProcess: OwnedManagedBrowserProcess | null;
   private readonly headlessManaged: boolean;
   private readonly daemonRunDirectory: string;
@@ -167,8 +230,10 @@ export class AgentBrowserJsonRunner {
         ? (browserLaunch.actualExecutablePath ?? null)
         : (options.browserExecutablePath ?? null));
     this.chromeStderrDrainPaths = browserLaunch?.cleanupPaths ?? [];
+    this.browserScope = browserLaunch?.scope ?? null;
+    this.networkNotice = browserLaunch?.networkNotice ?? null;
     this.recoveredProcess = options.recoverOwnedProcess ?? null;
-    this.headlessManaged = !options.headed && !options.provider;
+    this.headlessManaged = !windowedBrowser(options) && !options.provider;
     this.daemonRunDirectory = dirname(this.daemonPidFile);
   }
 
@@ -181,14 +246,22 @@ export class AgentBrowserJsonRunner {
       if (state === "live") {
         const binary = options.binary ?? (await resolvePinnedAgentBrowserBinary());
         const runner = new AgentBrowserJsonRunner(binary, options);
-        if (!runner.headlessManaged) throw daemonLineageUnavailable();
-        runner.predecessorDaemon = await runner.headlessDaemonIdentity(options.recoverOwnedProcess);
+        if (options.provider) throw daemonLineageUnavailable();
+        runner.predecessorDaemon = await runner.predecessorDaemonIdentity(
+          options.recoverOwnedProcess,
+        );
         return runner;
       }
       // A positively exited process permits a new launch only in this exact
       // directory. No missing-memory/PID-file inference or pre-launch kill.
       if (state !== "exited" || options.allowOwnedProcessLaunch !== true)
         throw new AgentBrowserCommandError("process_failed", "owned browser outcome is unknown");
+      // The browser is proven gone and no process runs its profile, but the
+      // agent-browser daemon that launched it does not exit with its browser:
+      // after its controller died it keeps running with nothing to serve.
+      // Stop every daemon identified, from its own environment, as started
+      // for this exact profile or socket directory before checking records.
+      await stopOrphanedAgentBrowserDaemons(options.profileDirectory, options.socketDirectory);
       await assertNoLiveDaemonRecords(options.socketDirectory, options.namespace);
     }
     for (const directory of [
@@ -373,7 +446,7 @@ export class AgentBrowserJsonRunner {
   async daemonPid(): Promise<number | null> {
     if (this.recoveredProcess) {
       const daemon = this.predecessorDaemon;
-      if (!daemon) throw daemonLineageUnavailable();
+      if (!daemon) return null;
       return (await assertDaemonIdentity(daemon)) ? daemon.pid : null;
     }
     const pid = await readDaemonPid(this.daemonPidFile);
@@ -390,12 +463,36 @@ export class AgentBrowserJsonRunner {
   async terminate(expectedPid?: number | null): Promise<void> {
     if (this.recoveredProcess) {
       const daemon = this.predecessorDaemon;
-      if (!daemon || (expectedPid != null && expectedPid !== daemon.pid))
-        throw daemonLineageUnavailable();
+      if (expectedPid != null && expectedPid !== daemon?.pid) throw daemonLineageUnavailable();
+      if (!daemon) {
+        // The launcher exited before this controller adopted the browser.
+        // The browser's own receipt identity is the whole proof.
+        if (!this.recoveredBrowserClosed) {
+          await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
+          this.recoveredBrowserClosed = true;
+        }
+        await this.cleanupChromeStderrDrain();
+        return;
+      }
       const daemonLive = await assertDaemonIdentity(daemon);
       if (!this.recoveredBrowserClosed) {
-        if (daemonLive && (await processParentPid(this.recoveredProcess.pid)) !== daemon.pid)
-          throw daemonLineageUnavailable();
+        if (daemonLive) {
+          // A browser that already shut down, for example at the controller's
+          // own close request, has no lineage left to prove; its receipt
+          // alone shows that it exited.
+          let parent: number | null = null;
+          let lineageError: unknown = null;
+          try {
+            parent = await processParentPid(this.recoveredProcess.pid);
+          } catch (error) {
+            lineageError = error;
+          }
+          if (
+            parent !== daemon.pid &&
+            (await inspectOwnedManagedBrowserProcess(this.recoveredProcess)) !== "exited"
+          )
+            throw lineageError ?? daemonLineageUnavailable();
+        }
         await terminateOwnedManagedBrowserProcess(this.recoveredProcess);
         // Preserve a proved stop for the same cleanup retry; a missing macOS
         // PID still cannot authorize a fresh exact-directory launch.
@@ -495,7 +592,48 @@ export class AgentBrowserJsonRunner {
     };
     if ((await inspectOwnedManagedBrowserProcess(receipt)) !== "live") return null;
     if (needsHeadlessWitness) await this.headlessDaemonIdentity(receipt, this.daemonPidFile);
+    if (this.browserScope) await collectBrowserIntoScope(this.browserScope, pid);
     return receipt;
+  }
+
+  /** Adopt a live browser launched by an earlier controller, possibly an
+   * earlier release, headed or headless. The browser itself was already proven
+   * from its receipt: PID birth, exact executable, exact private profile and
+   * CDP endpoint. Its profile lock must still name it. When its launcher daemon
+   * is still running it must be the browser's direct parent and the only live
+   * record in this private namespace, and it is retired with the browser. A
+   * launcher that already exited (for example, stopped with its old service)
+   * leaves the proven browser adoptable on its own. */
+  private async predecessorDaemonIdentity(
+    browser: OwnedManagedBrowserProcess,
+  ): Promise<OwnedAgentBrowserDaemon | null> {
+    if ((await readProfileBrowserPid(this.profileDirectory)) !== browser.pid)
+      throw daemonLineageUnavailable();
+    const live: { pid: number; path: string }[] = [];
+    for (const path of await daemonPidRecords(this.daemonRunDirectory)) {
+      const pid = await readDaemonPid(path);
+      if (pid !== null && (await processRunning(pid))) live.push({ pid, path });
+    }
+    if (live.length === 0) return null;
+    const parentPid = await processParentPid(browser.pid);
+    if (live.length !== 1 || live[0]!.pid !== parentPid) throw daemonLineageUnavailable();
+    const pidFile = live[0]!.path;
+    const metadata = await lstat(pidFile);
+    const daemon = {
+      pid: parentPid,
+      birth: await processBirth(parentPid),
+      executablePath: await processExecutableIdentity(parentPid),
+      pidFile,
+      pidFileIdentity: { device: metadata.dev, inode: metadata.ino },
+    };
+    await assertDaemonIdentity(daemon);
+    if (
+      (await processBirth(browser.pid)) !== browser.birth ||
+      (await processParentPid(browser.pid)) !== daemon.pid ||
+      (await readProfileBrowserPid(this.profileDirectory)) !== browser.pid
+    )
+      throw daemonLineageUnavailable();
+    return daemon;
   }
 
   private async headlessDaemonIdentity(
@@ -546,7 +684,9 @@ export class AgentBrowserJsonRunner {
 
   private async cleanupChromeStderrDrain(): Promise<void> {
     await Promise.all(
-      this.chromeStderrDrainPaths.map(async (path) => await rm(path, { force: true })),
+      this.chromeStderrDrainPaths.map(
+        async (path) => await rm(path, { force: true, recursive: true }),
+      ),
     );
   }
 }
@@ -557,6 +697,7 @@ export class AgentBrowserJsonRunner {
 export async function reapManagedBrowserProcesses(
   rootDirectory: string,
   preserveSession?: (sessionDirectory: string) => Promise<boolean>,
+  options: { readProcessCommandLines?: () => Promise<LinuxProcessCommandLines> } = {},
 ): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
   const sessionsDirectory = join(resolve(rootDirectory), "sessions");
@@ -567,6 +708,11 @@ export async function reapManagedBrowserProcesses(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
+  // One procfs inventory serves the whole pass. Scanning every process once
+  // per stale session directory made startup cost sessions x processes.
+  let inventory: Promise<LinuxProcessCommandLines> | undefined;
+  const processCommandLines = () =>
+    (inventory ??= (options.readProcessCommandLines ?? readLinuxProcessCommandLines)());
   for (const entry of entries) {
     if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/iu.test(entry.name)) continue;
     const sessionDirectory = join(sessionsDirectory, entry.name);
@@ -576,6 +722,7 @@ export async function reapManagedBrowserProcesses(
       profileDirectory: join(sessionDirectory, "profile"),
       executablePath: null,
       discoverByProfile: true,
+      processCommandLines,
     });
     await cleanupStaleChromeLaunchers(join(sessionDirectory, "chrome-launch"));
   }
@@ -590,8 +737,8 @@ async function cleanupStaleChromeLaunchers(directory: string): Promise<void> {
     throw error;
   }
   for (const name of names) {
-    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo)$/iu.test(name)) {
-      await rm(join(directory, name), { force: true });
+    if (/^[0-9a-f-]{36}\.(?:sh|stderr\.fifo|d|resolv\.conf)$/iu.test(name)) {
+      await rm(join(directory, name), { force: true, recursive: true });
     }
   }
 }
@@ -607,7 +754,44 @@ type ManagedBrowserLaunch = {
   actualExecutablePath?: string | null;
   backgroundBrowserExecutable?: string;
   cleanupPaths?: readonly string[];
+  scope?: LinuxBrowserScope | null;
+  networkNotice?: string | null;
 };
+
+/** One transient systemd user scope per managed Linux browser launch. All
+ * scopes share one slice that sets no resource limits; it only keeps browsers
+ * out of the agent service, so stopping or replacing the agent never takes
+ * running browsers with it, and makes their usage visible per browser. */
+type LinuxBrowserScope = { unit: string; busctl: string };
+
+const BROWSER_SCOPE_SLICE = "opengeni-browsers.slice";
+const BROWSER_SCOPE_MARKER = "OPENGENI_BROWSER_SCOPE";
+const SYSTEMD_PROBE_TIMEOUT_MS = 2_000;
+const SCOPE_BUS_VARIABLES = ["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"] as const;
+
+/** Shell prologue that re-executes the wrapper inside the browser's transient
+ * scope. `systemd-run` talks to the user manager over the probed bus; the
+ * launch's own bus variables (a linked computer session's private desktop bus,
+ * for example) are carried across the re-exec and restored for Chrome. */
+export function browserScopeEntry(
+  launcher: LinuxUserScopeLauncher,
+  unit: string,
+  wrapper: string,
+): string {
+  const saved = SCOPE_BUS_VARIABLES.map(
+    (name) =>
+      `${BROWSER_SCOPE_MARKER}_${name}="\${${name}-}" ${BROWSER_SCOPE_MARKER}_${name}_SET="\${${name}+1}"`,
+  ).join(" ");
+  const manager = SCOPE_BUS_VARIABLES.flatMap((name) => {
+    const value = launcher.managerEnvironment[name];
+    return value === undefined ? [] : [`${name}=${shellQuote(value)}`];
+  }).join(" ");
+  const restore = SCOPE_BUS_VARIABLES.map(
+    (name) =>
+      `if [ -n "\${${BROWSER_SCOPE_MARKER}_${name}_SET:-}" ]; then ${name}="\${${BROWSER_SCOPE_MARKER}_${name}}"; export ${name}; else unset ${name}; fi\nunset ${BROWSER_SCOPE_MARKER}_${name} ${BROWSER_SCOPE_MARKER}_${name}_SET\n`,
+  ).join("");
+  return `if [ "\${${BROWSER_SCOPE_MARKER}:-}" != ${shellQuote(unit)} ]; then\n  ${saved} ${BROWSER_SCOPE_MARKER}=${shellQuote(unit)} ${manager} exec ${shellQuote(launcher.systemdRun)} --user --scope --quiet --collect --property=Delegate=yes --slice=${BROWSER_SCOPE_SLICE} --unit=${shellQuote(unit)} -- ${shellQuote(wrapper)} "$@"\nfi\nunset ${BROWSER_SCOPE_MARKER}\n${restore}`;
+}
 
 async function managedBrowserLaunch(
   options: AgentBrowserRunnerOptions,
@@ -618,8 +802,34 @@ async function managedBrowserLaunch(
   if (process.platform === "linux" && !options.provider) {
     const executable = configured ?? (await linuxChromeExecutable());
     if (executable) {
-      return await linuxChromeStderrDrainWrapper(options.profileDirectory, executable);
+      const [scopeLauncher, isolation, fixedArguments] = await Promise.all([
+        options.systemdScope === false ? null : linuxUserScopeLauncher(),
+        options.networkIsolation === false ? null : linuxBrowserNetworkIsolation(),
+        windowedBrowser(options) ? [] : linuxHeadlessChromeArguments(executable),
+      ]);
+      const launch = await chromeStderrDrainWrapper(
+        options.profileDirectory,
+        executable,
+        scopeLauncher,
+        fixedArguments,
+        isolation?.kind === "isolated" ? isolation.tools : null,
+      );
+      return isolation?.kind === "unavailable"
+        ? { ...launch, networkNotice: BROWSER_SHARED_NETWORK_NOTICE }
+        : launch;
     }
+  }
+  // Offscreen and headless are the same new-headless Chrome on macOS; both
+  // present the host display and an ordinary User-Agent.
+  if (process.platform === "darwin" && !windowedBrowser(options) && !options.provider) {
+    const executable = configured ?? (await firstExecutable(MACOS_BROWSER_EXECUTABLES));
+    if (!executable) return undefined;
+    return await chromeStderrDrainWrapper(
+      options.profileDirectory,
+      executable,
+      null,
+      await macosOffscreenChromeArguments(executable),
+    );
   }
   if (process.platform !== "darwin" || !options.headed || options.provider) {
     return configured ? { executablePath: configured } : undefined;
@@ -647,10 +857,25 @@ async function managedBrowserLaunch(
  * DevToolsActivePort appears but does not consume it. A noisy managed Chrome
  * fills that pipe and then stops answering even browser-level CDP requests.
  * Keep Chrome's PID/process group unchanged with shell exec, while a private
- * reader consumes stderr and retains only the last bounded diagnostic bytes. */
-async function linuxChromeStderrDrainWrapper(
+ * reader consumes stderr and retains only the last bounded diagnostic bytes.
+ *
+ * Fixed Chrome arguments that agent-browser cannot carry (its argument list
+ * is comma-separated, and a User-Agent contains commas) are added here too,
+ * and so is the managed browser's complete disabled-feature list.
+ *
+ * With a reachable systemd user manager the wrapper first re-executes itself
+ * through `systemd-run --scope`, which execs in place: the PID agent-browser
+ * spawned stays Chrome's PID, and the stderr reader plus every Chrome child
+ * start inside the browser's own scope.
+ *
+ * Where the machine supports it, the wrapper then moves Chrome into its own
+ * network namespace (see browser-network-isolation.ts), again in place. */
+async function chromeStderrDrainWrapper(
   profileDirectory: string,
   executable: string,
+  scopeLauncher: LinuxUserScopeLauncher | null,
+  fixedArguments: readonly string[] = [],
+  isolation: BrowserNetworkIsolationTools | null = null,
 ): Promise<ManagedBrowserLaunch> {
   await access(executable, constants.X_OK);
   const actualExecutablePath = (await isScriptExecutable(executable)) ? null : executable;
@@ -660,7 +885,7 @@ async function linuxChromeStderrDrainWrapper(
   const tail =
     (await firstExecutableInPath(["tail"])) ??
     (await firstExecutable(["/usr/bin/tail", "/bin/tail"]));
-  if (!mkfifo || !tail) throw new Error("managed Linux Chrome requires mkfifo and tail");
+  if (!mkfifo || !tail) throw new Error("managed Chrome requires mkfifo and tail");
   const directory = join(dirname(resolve(profileDirectory)), "chrome-launch");
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await chmod(directory, 0o700);
@@ -668,22 +893,333 @@ async function linuxChromeStderrDrainWrapper(
   const fifo = join(directory, `${id}.stderr.fifo`);
   const log = join(directory, "chrome-stderr.log");
   const wrapper = join(directory, `${id}.sh`);
+  const scope = scopeLauncher
+    ? { unit: `opengeni-browser-${id}.scope`, busctl: scopeLauncher.busctl }
+    : null;
+  const scopeEntry =
+    scope && scopeLauncher ? browserScopeEntry(scopeLauncher, scope.unit, wrapper) : "";
+  const fixed = fixedArguments.map((argument) => ` ${shellQuote(argument)}`).join("");
+  const trailing = ` ${shellQuote(MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT)}`;
+  const state = join(directory, `${id}.d`);
+  const resolvOverride = join(directory, `${id}.resolv.conf`);
+  const cleanupPaths = isolation ? [wrapper, fifo, state, resolvOverride] : [wrapper, fifo];
   try {
     await runProcess(mkfifo, ["-m", "600", fifo]);
-    await writeFile(
-      wrapper,
-      `#!/bin/sh\numask 077\n${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)} "$@" 2>${shellQuote(fifo)}\n`,
-      { mode: 0o700, flag: "wx" },
-    );
+    let script = `#!/bin/sh\numask 077\n${scopeEntry}${shellQuote(tail)} -c ${CHROME_STDERR_DIAGNOSTIC_BYTES} ${shellQuote(fifo)} > ${shellQuote(log)} 2>/dev/null &\nexec ${shellQuote(executable)}${fixed} "$@"${trailing} 2>${shellQuote(fifo)}\n`;
+    if (isolation) {
+      await mkdir(state, { mode: 0o700 });
+      const resolv = await hostNamespaceResolvConf();
+      if (resolv !== null) await writeFile(resolvOverride, resolv, { mode: 0o600, flag: "wx" });
+      const cdpPort = await freeLoopbackPort();
+      script = browserNetworkIsolationScript({
+        tools: isolation,
+        wrapper,
+        stateDirectory: state,
+        cdpPort,
+        resolvOverride: resolv === null ? null : resolvOverride,
+        prologue: scopeEntry,
+        launch: isolatedChromeLaunch({
+          tools: isolation,
+          cdpPort,
+          executable,
+          fixedArguments,
+          trailingArguments: [MANAGED_CHROME_DISABLED_FEATURES_ARGUMENT],
+          stderrFifo: fifo,
+          stderrLog: log,
+          tail,
+          stderrBytes: CHROME_STDERR_DIAGNOSTIC_BYTES,
+        }),
+      });
+    }
+    await writeFile(wrapper, script, { mode: 0o700, flag: "wx" });
     await chmod(wrapper, 0o700);
     return {
       executablePath: wrapper,
       actualExecutablePath,
-      cleanupPaths: [wrapper, fifo],
+      cleanupPaths,
+      scope,
     };
   } catch (error) {
-    await Promise.allSettled([rm(wrapper, { force: true }), rm(fifo, { force: true })]);
+    await Promise.allSettled(
+      cleanupPaths.map(async (path) => await rm(path, { force: true, recursive: true })),
+    );
     throw error;
+  }
+}
+
+/** Arguments that make an offscreen (new headless) real Chrome on macOS
+ * present like the person's ordinary windowed Chrome. Headless Chrome names
+ * itself HeadlessChrome in every User-Agent, including workers', and reports
+ * an 800x600 screen with no work area; sites treat both as bot signals. The
+ * User-Agent switch reaches every scope, workers and the HTTP header included,
+ * and keeps Chrome's own brand list. It also empties the high-entropy Client
+ * Hints; the driver presents this machine's real values in their place. As on
+ * Linux, a browser whose version cannot be read still launches with its own
+ * User-Agent rather than one naming a guessed version. */
+export async function macosOffscreenChromeArguments(
+  executable: string,
+  probes: {
+    chromeMajorVersion?: (executable: string) => Promise<number>;
+    mainDisplay?: () => Promise<MacosDisplayGeometry>;
+  } = {},
+): Promise<string[]> {
+  const [major, display] = await Promise.all([
+    (probes.chromeMajorVersion ?? chromeMajorVersion)(executable).catch(() => null),
+    (probes.mainDisplay ?? macosMainDisplay)(),
+  ]);
+  // --screen-info sizes are device pixels; Chrome divides them by
+  // devicePixelRatio. The display is measured in points, so a Retina screen
+  // passed as-is would present half its real size (smaller than the window).
+  const pixels = (points: number) => Math.round(points * display.scale);
+  const screen = `--screen-info={${pixels(display.width)}x${pixels(display.height)} devicePixelRatio=${display.scale} workAreaLeft=${pixels(display.insets.left)} workAreaRight=${pixels(display.insets.right)} workAreaTop=${pixels(display.insets.top)} workAreaBottom=${pixels(display.insets.bottom)}}`;
+  if (major === null) return [screen];
+  return [
+    `--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+    screen,
+  ];
+}
+
+/** A common Linux desktop: a 1080p monitor under a GNOME-style top bar. A
+ * headless browser has no display to measure, and Chrome's own 800x600
+ * screen with no work area is a well-known headless signal. */
+const LINUX_HEADLESS_SCREEN = "{1920x1080 devicePixelRatio=1 workAreaTop=32}";
+
+/** Arguments that make a headless managed Chrome on Linux present like an
+ * ordinary desktop Chrome: the reduced User-Agent every desktop Linux Chrome
+ * sends (always "X11; Linux x86_64"), instead of one naming HeadlessChrome,
+ * and a desktop screen. Same reasoning as the macOS offscreen arguments. A
+ * browser whose version cannot be read still launches, keeping its own
+ * User-Agent rather than one naming a guessed version. */
+export async function linuxHeadlessChromeArguments(
+  executable: string,
+  probes: { chromeMajorVersion?: (executable: string) => Promise<number> } = {},
+): Promise<string[]> {
+  const major = await (probes.chromeMajorVersion ?? chromeMajorVersion)(executable).catch(
+    () => null,
+  );
+  const screen = `--screen-info=${LINUX_HEADLESS_SCREEN}`;
+  if (major === null) return [screen];
+  return [
+    `--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${major}.0.0.0 Safari/537.36`,
+    screen,
+  ];
+}
+
+export type MacosDisplayGeometry = {
+  width: number;
+  height: number;
+  scale: number;
+  insets: { left: number; right: number; top: number; bottom: number };
+};
+
+/** A common built-in MacBook display, used only when the window server
+ * cannot be queried (for example, no logged-in GUI session). */
+const FALLBACK_MACOS_DISPLAY: MacosDisplayGeometry = {
+  width: 1512,
+  height: 982,
+  scale: 2,
+  insets: { left: 0, right: 0, top: 38, bottom: 0 },
+};
+
+const MACOS_DISPLAY_SCRIPT =
+  "ObjC.import('AppKit');var s=$.NSScreen.screens.objectAtIndex(0);var f=s.frame;var v=s.visibleFrame;" +
+  "JSON.stringify({w:f.size.width,h:f.size.height,x:v.origin.x-f.origin.x,y:v.origin.y-f.origin.y," +
+  "vw:v.size.width,vh:v.size.height,scale:s.backingScaleFactor})";
+
+/** The primary display (the one with the menu bar) in points, with its Dock
+ * and menu-bar insets. Cocoa's visible frame is measured from the bottom. */
+async function macosMainDisplay(): Promise<MacosDisplayGeometry> {
+  const output = await boundedProcessOutput("/usr/bin/osascript", [
+    "-l",
+    "JavaScript",
+    "-e",
+    MACOS_DISPLAY_SCRIPT,
+  ]);
+  return parseMacosDisplayGeometry(output) ?? FALLBACK_MACOS_DISPLAY;
+}
+
+export function parseMacosDisplayGeometry(output: string): MacosDisplayGeometry | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(output.trim());
+  } catch {
+    return null;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const number = (key: string) => {
+    const entry = record[key];
+    return typeof entry === "number" && Number.isFinite(entry) ? Math.round(entry) : null;
+  };
+  const width = number("w");
+  const height = number("h");
+  const x = number("x");
+  const y = number("y");
+  const visibleWidth = number("vw");
+  const visibleHeight = number("vh");
+  const scale = record.scale;
+  if (
+    width === null ||
+    height === null ||
+    x === null ||
+    y === null ||
+    visibleWidth === null ||
+    visibleHeight === null ||
+    typeof scale !== "number" ||
+    !(scale >= 1 && scale <= 4) ||
+    width < 320 ||
+    height < 240 ||
+    width > 16_384 ||
+    height > 16_384
+  )
+    return null;
+  const insets = {
+    left: x,
+    right: width - x - visibleWidth,
+    top: height - y - visibleHeight,
+    bottom: y,
+  };
+  if (Object.values(insets).some((inset) => inset < 0 || inset > Math.min(width, height) / 2))
+    return null;
+  return { width, height, scale, insets };
+}
+
+/** Major versions keyed by executable path and modification time, so each
+ * launch does not start the browser again just to read its version, and an
+ * upgraded browser is read afresh. */
+const chromeMajorVersions = new Map<string, number>();
+
+async function chromeMajorVersion(executable: string): Promise<number> {
+  const key = `${executable}\0${(await fileStatus(executable)).mtimeMs}`;
+  const cached = chromeMajorVersions.get(key);
+  if (cached !== undefined) return cached;
+  const major = await readChromeMajorVersion(executable);
+  chromeMajorVersions.set(key, major);
+  return major;
+}
+
+async function readChromeMajorVersion(executable: string): Promise<number> {
+  // An application bundle records its version without starting the browser.
+  const bundleInfo = join(dirname(dirname(executable)), "Info.plist");
+  try {
+    const match = /<key>CFBundleShortVersionString<\/key>\s*<string>(\d+)\./u.exec(
+      await readFile(bundleInfo, "utf8"),
+    );
+    if (match) return Number(match[1]);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const match = /(?:^|\s)(\d+)\.\d+\.\d+\.\d+/u.exec(
+    await boundedProcessOutput(executable, ["--version"]),
+  );
+  if (!match) throw new Error("managed browser version is unavailable");
+  return Number(match[1]);
+}
+
+/** `managerEnvironment` is the bus environment the probe reached the user
+ * manager with. A browser linked to a computer session launches with that
+ * desktop's private D-Bus and runtime directory, where no systemd manager
+ * answers, so the scope request always uses the probed manager instead. */
+export type LinuxUserScopeLauncher = {
+  systemdRun: string;
+  busctl: string;
+  managerEnvironment: { DBUS_SESSION_BUS_ADDRESS: string; XDG_RUNTIME_DIR?: string };
+};
+
+/** A transient scope is used only when this process can create one. The probe
+ * performs exactly the launch's own operation (a throwaway `systemd-run
+ * --scope`), because a reachable manager is not enough: from another PID
+ * namespace, a container for example, the manager answers bus calls but
+ * cannot place the caller's PID. Otherwise the browser launches as before. */
+async function linuxUserScopeLauncher(): Promise<LinuxUserScopeLauncher | null> {
+  if (!process.env.XDG_RUNTIME_DIR && !process.env.DBUS_SESSION_BUS_ADDRESS) return null;
+  const systemdRun = await firstExecutableInPath(["systemd-run"]);
+  const busctl = await firstExecutableInPath(["busctl"]);
+  const shell = await firstExecutable(["/bin/sh"]);
+  if (!systemdRun || !busctl || !shell) return null;
+  const scopeCreated = await processSucceeds(
+    systemdRun,
+    [
+      "--user",
+      "--scope",
+      "--quiet",
+      "--collect",
+      "--property=Delegate=yes",
+      `--slice=${BROWSER_SCOPE_SLICE}`,
+      `--unit=opengeni-browser-probe-${randomUUID()}.scope`,
+      "--",
+      shell,
+      "-c",
+      "exit 0",
+    ],
+    SYSTEMD_PROBE_TIMEOUT_MS,
+  );
+  if (!scopeCreated) return null;
+  const runtimeDirectory = process.env.XDG_RUNTIME_DIR;
+  return {
+    systemdRun,
+    busctl,
+    managerEnvironment: {
+      DBUS_SESSION_BUS_ADDRESS:
+        process.env.DBUS_SESSION_BUS_ADDRESS ?? `unix:path=${runtimeDirectory}/bus`,
+      ...(runtimeDirectory ? { XDG_RUNTIME_DIR: runtimeDirectory } : {}),
+    },
+  };
+}
+
+/** Chromium moves its own browser process into an `app-<id>-<pid>.scope` at
+ * startup for desktop-portal identification, leaving only its children in the
+ * launch scope. Once the launch is proven, bring the browser process back so
+ * the browser's whole process tree is one unit. Best effort: the browser is
+ * already outside the agent service either way. */
+async function collectBrowserIntoScope(scope: LinuxBrowserScope, pid: number): Promise<void> {
+  if (await processInScope(pid, scope.unit)) return;
+  await processSucceeds(
+    scope.busctl,
+    [
+      "--user",
+      "call",
+      "org.freedesktop.systemd1",
+      "/org/freedesktop/systemd1",
+      "org.freedesktop.systemd1.Manager",
+      "AttachProcessesToUnit",
+      "ssau",
+      scope.unit,
+      "/",
+      "1",
+      String(pid),
+    ],
+    SYSTEMD_PROBE_TIMEOUT_MS,
+  );
+}
+
+async function processInScope(pid: number, unit: string): Promise<boolean> {
+  try {
+    const cgroup = await readFile(`/proc/${pid}/cgroup`, "utf8");
+    return cgroup
+      .split("\n")
+      .some((line) => line.startsWith("0::") && line.split("/").includes(unit));
+  } catch {
+    return false;
+  }
+}
+
+async function processSucceeds(
+  command: string,
+  args: readonly string[],
+  timeoutMs: number,
+): Promise<boolean> {
+  const child = spawn(command, args, { stdio: "ignore", windowsHide: true });
+  const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+  timer.unref?.();
+  try {
+    const code = await new Promise<number | null>((resolveExit) => {
+      child.once("error", () => resolveExit(null));
+      child.once("close", resolveExit);
+    });
+    return code === 0;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -838,6 +1374,7 @@ async function terminateManagedBrowser(input: {
   profileDirectory: string;
   executablePath: string | null;
   discoverByProfile?: boolean;
+  processCommandLines?: () => Promise<LinuxProcessCommandLines>;
 }): Promise<void> {
   if (process.platform !== "darwin" && process.platform !== "linux") return;
   const recordedPid = await readManagedBrowserPid(input.pidFile);
@@ -845,7 +1382,12 @@ async function terminateManagedBrowser(input: {
     recordedPid === null &&
     process.platform === "linux" &&
     (input.executablePath !== null || input.discoverByProfile === true)
-      ? await findLinuxManagedBrowserProcess(input.profileDirectory, input.executablePath)
+      ? await findLinuxManagedBrowserProcess(
+          input.profileDirectory,
+          input.executablePath,
+          false,
+          await input.processCommandLines?.(),
+        )
       : null;
   const pid = recordedPid ?? discovered?.pid ?? null;
   if (pid === null) return;
@@ -860,6 +1402,7 @@ async function terminateManagedBrowser(input: {
     executablePath,
     discovered?.startTime,
   );
+  const daemon = await launchingAgentBrowserDaemon(pid);
   signalProcess(pid, "SIGTERM");
   if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
     await assertManagedBrowserIdentity(pid, input.profileDirectory, executablePath, startTime);
@@ -868,6 +1411,7 @@ async function terminateManagedBrowser(input: {
       throw new AgentBrowserCommandError("process_failed", "managed browser did not terminate");
     }
   }
+  await stopLaunchingAgentBrowserDaemon(daemon);
   await rm(input.pidFile, { force: true });
 }
 
@@ -923,21 +1467,52 @@ async function assertManagedBrowserIdentity(
   }
 }
 
+export type LinuxProcessCommandLines = ReadonlyArray<{ pid: number; commandLine: Uint8Array }>;
+
+/** A point-in-time procfs command-line inventory used only to preselect
+ * candidates; every candidate is still fully identity-checked. */
+async function readLinuxProcessCommandLines(): Promise<LinuxProcessCommandLines> {
+  const inventory: { pid: number; commandLine: Uint8Array }[] = [];
+  for (const entry of await readdir("/proc", { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    try {
+      inventory.push({ pid, commandLine: await readFile(`/proc/${pid}/cmdline`) });
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code ?? "";
+      if (["EACCES", "EINVAL", "ENOENT", "EPERM", "ESRCH"].includes(code)) continue;
+      throw error;
+    }
+  }
+  return inventory;
+}
+
 async function findLinuxManagedBrowserProcess(
   profileDirectory: string,
   executablePath: string | null,
   requireCompleteInventory = false,
+  inventory?: LinuxProcessCommandLines,
 ): Promise<LinuxManagedBrowserIdentity | null> {
-  const procEntries = await readdir("/proc", { withFileTypes: true });
   const matches: LinuxManagedBrowserIdentity[] = [];
   const profileArgument = Buffer.from(`--user-data-dir=${resolve(profileDirectory)}`);
-  for (const entry of procEntries) {
-    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
-    const pid = Number(entry.name);
+  // Both the argv and the rewritten-title representations contain the exact
+  // profile switch bytes, so the inventory can only exclude non-matches.
+  const pids =
+    inventory !== undefined && !requireCompleteInventory
+      ? inventory
+          .filter((entry) => Buffer.from(entry.commandLine).includes(profileArgument))
+          .map((entry) => entry.pid)
+      : (await readdir("/proc", { withFileTypes: true }))
+          .filter((entry) => entry.isDirectory() && /^[1-9][0-9]*$/u.test(entry.name))
+          .map((entry) => Number(entry.name));
+  for (const pid of pids) {
     if (requireCompleteInventory) {
       try {
+        // Only the command line is evidence here. The executable link of
+        // another user's (or root's) process is unreadable to an unprivileged
+        // agent, and it says nothing about which profile the process uses, so
+        // requiring it made absence unprovable on any real Linux host.
         const commandLine = await readFile(`/proc/${pid}/cmdline`);
-        await realpath(await readlink(`/proc/${pid}/exe`));
         // This is refusal evidence only. Even an unverified or rewritten
         // profile mention prevents a new exact-directory launch.
         if (commandLine.includes(profileArgument)) {
@@ -1020,7 +1595,14 @@ async function waitForProcessStop(pid: number, timeoutMs: number): Promise<boole
   return !(await processRunning(pid));
 }
 
-async function boundedProcessOutput(command: string, args: readonly string[]): Promise<string> {
+async function boundedProcessOutput(
+  command: string,
+  args: readonly string[],
+  limits: { maxBytes: number; timeoutMs: number } = {
+    maxBytes: MAX_PROCESS_QUERY_BYTES,
+    timeoutMs: PROCESS_QUERY_TIMEOUT_MS,
+  },
+): Promise<string> {
   const child = spawn(command, args, {
     stdio: ["ignore", "pipe", "ignore"],
     windowsHide: true,
@@ -1030,13 +1612,13 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
   let overflow = false;
   child.stdout.on("data", (chunk: Buffer) => {
     bytes += chunk.byteLength;
-    if (bytes <= MAX_PROCESS_QUERY_BYTES) chunks.push(chunk);
+    if (bytes <= limits.maxBytes) chunks.push(chunk);
     else {
       overflow = true;
       child.kill("SIGKILL");
     }
   });
-  const timer = setTimeout(() => child.kill("SIGKILL"), PROCESS_QUERY_TIMEOUT_MS);
+  const timer = setTimeout(() => child.kill("SIGKILL"), limits.timeoutMs);
   timer.unref?.();
   const code = await new Promise<number | null>((resolveExit, reject) => {
     child.once("error", reject);
@@ -1044,6 +1626,11 @@ async function boundedProcessOutput(command: string, args: readonly string[]): P
   }).finally(() => clearTimeout(timer));
   if (overflow || code !== 0) return "";
   return Buffer.concat(chunks).toString("utf8");
+}
+
+/** Whether this managed browser opens a native window. */
+function windowedBrowser(options: AgentBrowserRunnerOptions): boolean {
+  return options.headed && options.offscreen !== true;
 }
 
 function isolatedEnvironment(
@@ -1077,11 +1664,11 @@ function isolatedEnvironment(
     AGENT_BROWSER_DOWNLOAD_PATH: resolve(options.downloadDirectory),
     AGENT_BROWSER_SCREENSHOT_DIR: resolve(options.screenshotDirectory),
     AGENT_BROWSER_IDLE_TIMEOUT_MS: "0",
-    AGENT_BROWSER_HEADED: options.headed ? "1" : "0",
+    AGENT_BROWSER_HEADED: windowedBrowser(options) ? "1" : "0",
     AGENT_BROWSER_ARGS: browserLaunchArguments(
       process.platform,
       options.launchArguments,
-      options.headed,
+      windowedBrowser(options),
     ),
     NO_COLOR: "1",
   });
@@ -1237,18 +1824,30 @@ export function browserLaunchArguments(
     "--disable-field-trial-config",
     "--disable-background-timer-throttling",
     "--disable-renderer-backgrounding",
-    // Component-update suppression does not stop Chromium's on-demand local
-    // model downloads. Managed profiles must not each fetch gigabytes of AI
-    // weights; Opengeni's model provider is independent of Chrome's local AI.
+    // Chromium's on-demand local AI model downloads (see
+    // MANAGED_CHROME_DISABLED_FEATURES). Launches through the stderr wrapper
+    // replace this switch with the complete list; the rest keep this one.
     "--disable-features=OptimizationGuideOnDeviceModel",
     // Chromium's free-disk-derived default can retain gigabytes per actor.
     // Bound disposable HTTP caching without limiting cookies or site storage.
     "--disk-cache-size=67108864",
+    // Chromium reports navigator.webdriver=true whenever it is remotely
+    // debugged. Managed browsers act for a signed-in person, and sites treat
+    // that flag as a bot signal (rate-limited or refused logins).
+    "--disable-blink-features=AutomationControlled",
     // Chromium's presentation-fenced screenshot path can wait indefinitely for
     // hidden headed tabs. Copy a freshly repainted surface without raising the
     // browser or changing the shared desktop's active tab.
     platform === "linux" && headed ? "--enable-features=CDPScreenshotNewSurface" : null,
     platform === "linux" ? "--test-type" : null,
+    // Linux machines that run managed browsers rarely have a GPU, and Chromium
+    // turns WebGL off entirely on software rendering. Sites that need WebGL
+    // (maps, editors, many bot challenges) then break, and a browser with no
+    // WebGL context is itself a strong bot signal. Allow the host's software
+    // OpenGL (Mesa llvmpipe) when the display provides GLX, and otherwise fall
+    // back to Chromium's bundled SwiftShader. A real GPU is still preferred.
+    platform === "linux" ? "--ignore-gpu-blocklist" : null,
+    platform === "linux" ? "--enable-unsafe-swiftshader" : null,
     profileCryptoArgument,
     ...validatedAdditional,
   ]
@@ -1375,20 +1974,9 @@ export async function inspectOwnedManagedBrowserProcess(
   }
   validateOwnedCdpEndpoint(receipt.cdpEndpoint);
   if (!(await processRunning(receipt.pid))) {
-    if (process.platform !== "linux") {
-      // macOS has no existing exhaustive profile-process inventory. Never
-      // infer absence of a successor from a missing pid alone.
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "exact directory launch absence is unproven",
-      );
-    }
-    if (await findLinuxManagedBrowserProcess(receipt.profileDirectory, null, true)) {
-      throw new AgentBrowserCommandError(
-        "process_failed",
-        "another process owns the exact profile",
-      );
-    }
+    // Never infer absence of a successor from a missing pid alone: a complete
+    // process inventory must show that nothing else runs the exact profile.
+    await assertManagedBrowserProfileUnused(receipt.profileDirectory);
     return "exited";
   }
   if ((await processBirth(receipt.pid)) !== receipt.birth) {
@@ -1509,11 +2097,62 @@ async function processExecutablePath(pid: number): Promise<string> {
   return await realpath(path);
 }
 
+/** The executable a running process was started from, as recorded for later
+ * exact comparison. On Linux this is the kernel's own link text, which stays
+ * stable (with a " (deleted)" suffix) after an upgrade removes the old runtime.
+ * On macOS it is the path ps reports, kept as reported: an agent upgrade
+ * removes the old runtime while its daemon still runs, so the path can no
+ * longer be resolved. */
+async function processExecutableIdentity(pid: number): Promise<string> {
+  if (process.platform === "linux") {
+    const link = await readlink(`/proc/${pid}/exe`);
+    if (!link.startsWith("/")) throw daemonLineageUnavailable();
+    return link;
+  }
+  if (process.platform === "darwin") {
+    const path = await darwinProcessCommand(pid);
+    if (!path.startsWith("/")) throw daemonLineageUnavailable();
+    return path;
+  }
+  return await processExecutablePath(pid);
+}
+
+async function darwinProcessCommand(pid: number): Promise<string> {
+  return (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
+}
+
+async function executableMatches(pid: number, recorded: string): Promise<boolean> {
+  if (process.platform === "linux") {
+    try {
+      if ((await readlink(`/proc/${pid}/exe`)) === recorded) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+  if (process.platform === "darwin" && (await darwinProcessCommand(pid)) === recorded) return true;
+  try {
+    return await sameExecutable(pid, recorded);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function daemonPidRecords(directory: string): Promise<string[]> {
   const namespace = dirname(directory);
   const namespaces = dirname(namespace);
   for (const path of [dirname(namespaces), namespaces, namespace, directory]) {
-    const metadata = await lstat(path);
+    let metadata: Awaited<ReturnType<typeof lstat>>;
+    try {
+      metadata = await lstat(path);
+    } catch (error) {
+      // A removed record directory (a temp-directory cleanup, for example)
+      // holds no records, exactly like an empty one. Its daemon, if any, has
+      // also lost its socket and cannot be reached by another controller.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) throw daemonLineageUnavailable();
   }
   const entries = await readdir(directory, { withFileTypes: true });
@@ -1560,7 +2199,7 @@ async function assertDaemonIdentity(daemon: OwnedAgentBrowserDaemon): Promise<bo
         "process_failed",
         "owned agent-browser daemon birth changed",
       );
-    if (!(await sameExecutable(daemon.pid, daemon.executablePath)))
+    if (!(await executableMatches(daemon.pid, daemon.executablePath)))
       throw daemonLineageUnavailable();
   }
   const pid = await readDaemonPid(daemon.pidFile);
@@ -1608,5 +2247,401 @@ async function terminateOwnedManagedBrowserProcess(
     if (!(await waitForProcessStop(receipt.pid, DAEMON_STOP_TIMEOUT_MS))) {
       throw new AgentBrowserCommandError("process_failed", "owned browser did not terminate");
     }
+  }
+}
+
+/** Stop whatever browser an explicitly ended session left running after its
+ * controller lost track of it, so the session's private profile can be
+ * removed. The recorded process is signalled only while its PID birth and
+ * exact profile still identify it, so a reused PID is never touched. On Linux
+ * any other browser still running that exact private profile is found the
+ * same way and stopped too. */
+export async function stopEndedManagedBrowserProcess(
+  profileDirectory: string,
+  recorded: OwnedManagedBrowserProcess | null,
+): Promise<void> {
+  if (recorded && (await processRunning(recorded.pid))) {
+    let birth: string | null = null;
+    try {
+      birth = await processBirth(recorded.pid);
+    } catch {
+      birth = null;
+    }
+    if (birth === recorded.birth) {
+      await assertManagedBrowserIdentity(
+        recorded.pid,
+        recorded.profileDirectory,
+        recorded.executablePath,
+      );
+      const daemon = await launchingAgentBrowserDaemon(recorded.pid);
+      await stopIdentifiedProcess(recorded.pid);
+      await stopLaunchingAgentBrowserDaemon(daemon);
+    }
+  }
+  if (process.platform === "linux") {
+    let stopped = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const survivor = await findLinuxManagedBrowserProcess(profileDirectory, null);
+      if (!survivor) {
+        stopped = true;
+        break;
+      }
+      const daemon = await launchingAgentBrowserDaemon(survivor.pid);
+      await stopIdentifiedProcess(survivor.pid);
+      await stopLaunchingAgentBrowserDaemon(daemon);
+    }
+    if (!stopped)
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "a browser kept running the ended session's private profile",
+      );
+  }
+  // A browser that had already exited leaves its launching daemon behind
+  // with no parent to find it through; find it by the profile it serves.
+  // The end itself never depends on this: the browser is already stopped.
+  await stopOrphanedAgentBrowserDaemons(profileDirectory).catch(() => undefined);
+}
+
+/** The pinned agent-browser executable as installed (agent-browser) or as
+ * shipped per platform (agent-browser-darwin-arm64 and so on). */
+const AGENT_BROWSER_EXECUTABLE_NAME = /^agent-browser(?:-[a-z0-9-]+)?(?:\.exe)?$/u;
+
+type LaunchingAgentBrowserDaemon = { pid: number; birth: string };
+
+/** The agent-browser daemon that launched an identified managed browser: the
+ * browser's parent, while that parent runs an agent-browser executable. A
+ * daemon has no idle timeout and does not exit when its browser does, so a
+ * controller that lost track of a session (for example after an agent update
+ * replaced the runtime) must stop it with the browser, or it runs forever. */
+async function launchingAgentBrowserDaemon(
+  browserPid: number,
+): Promise<LaunchingAgentBrowserDaemon | null> {
+  try {
+    const pid = await processParentPid(browserPid);
+    if (pid === process.pid) return null;
+    const birth = await processBirth(pid);
+    if (!AGENT_BROWSER_EXECUTABLE_NAME.test(await processExecutableName(pid))) return null;
+    if ((await processParentPid(browserPid)) !== pid) return null;
+    return { pid, birth };
+  } catch {
+    return null;
+  }
+}
+
+/** Stop a launching daemon found before its browser was stopped, only while
+ * its PID birth still identifies it, so a reused PID is never signalled. */
+async function stopLaunchingAgentBrowserDaemon(
+  daemon: LaunchingAgentBrowserDaemon | null,
+): Promise<void> {
+  if (!daemon || !(await processRunning(daemon.pid))) return;
+  try {
+    if ((await processBirth(daemon.pid)) !== daemon.birth) return;
+  } catch {
+    return;
+  }
+  await stopIdentifiedProcess(daemon.pid);
+}
+
+/** The file name of a process's executable, including one an upgrade has
+ * since removed (Linux reports it with a " (deleted)" suffix). */
+async function processExecutableName(pid: number): Promise<string> {
+  const path =
+    process.platform === "linux"
+      ? (await readlink(`/proc/${pid}/exe`)).replace(/ \(deleted\)$/u, "")
+      : (await boundedProcessOutput("/bin/ps", ["-p", String(pid), "-o", "comm="])).trim();
+  return basename(path);
+}
+
+/** Read-only proof that no process is running a browser on this exact private
+ * profile, with the same standard as an exact-directory relaunch: a complete
+ * process inventory on Linux and macOS; elsewhere absence is unproven and
+ * refused. */
+export async function assertManagedBrowserProfileUnused(profileDirectory: string): Promise<void> {
+  if (process.platform === "linux") {
+    if (await findLinuxManagedBrowserProcess(profileDirectory, null, true)) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "another process owns the exact profile",
+      );
+    }
+    return;
+  }
+  if (process.platform === "darwin") {
+    await assertNoDarwinProcessNamesProfile(profileDirectory);
+    return;
+  }
+  throw new AgentBrowserCommandError("process_failed", "exact profile absence is unproven");
+}
+
+/** The macOS counterpart of the Linux procfs inventory: one listing of every
+ * process with its full command line. Any mention of the exact profile switch
+ * refuses, as on Linux. A process whose arguments the system withholds is
+ * shown as "(name)"; that happens only for another user's process, which
+ * cannot open a profile that is private to this user, so it is accepted only
+ * while the profile is owned by this user and closed to everyone else. */
+async function assertNoDarwinProcessNamesProfile(profileDirectory: string): Promise<void> {
+  const profile = resolve(profileDirectory);
+  const listing = await boundedProcessOutput(
+    "/bin/ps",
+    ["-axww", "-o", "pid=,uid=,command="],
+    PROCESS_INVENTORY_LIMITS,
+  );
+  if (!listing.trim()) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "exact profile process inventory is incomplete",
+    );
+  }
+  const profileArgument = `--user-data-dir=${profile}`;
+  const uid = process.getuid?.();
+  let withheld = false;
+  for (const line of listing.split("\n")) {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s(.*)$/u.exec(line);
+    if (!match) continue;
+    const command = match[3]!.trim();
+    if (command.includes(profileArgument)) {
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "exact directory launch absence is unproven",
+      );
+    }
+    if (/^\(.*\)$/u.test(command) && Number(match[2]) !== uid) withheld = true;
+  }
+  if (!withheld) return;
+  const metadata = await lstat(profile);
+  if (metadata.uid !== uid || (metadata.mode & 0o077) !== 0) {
+    throw new AgentBrowserCommandError(
+      "process_failed",
+      "exact profile process inventory is incomplete",
+    );
+  }
+}
+
+type AgentBrowserDaemonProcess = {
+  pid: number;
+  birth: string;
+  profileDirectory: string | null;
+  socketDirectory: string | null;
+  ageMs: number | null;
+  hasLiveChildren: boolean;
+};
+
+/** Every agent-browser daemon this user runs, identified from the live
+ * process itself: an agent-browser executable started with the daemon
+ * environment agent-browser gives it, including the exact profile and socket
+ * directory it serves. A PID record can outlive its daemon or name a reused
+ * PID; a process's own environment cannot. */
+async function agentBrowserDaemonProcesses(): Promise<AgentBrowserDaemonProcess[]> {
+  if (process.platform === "linux") return await linuxAgentBrowserDaemonProcesses();
+  if (process.platform === "darwin") return await darwinAgentBrowserDaemonProcesses();
+  return [];
+}
+
+async function linuxAgentBrowserDaemonProcesses(): Promise<AgentBrowserDaemonProcess[]> {
+  const liveChildren = new Set<number>();
+  const candidates: { pid: number; startTicks: number }[] = [];
+  for (const entry of await readdir("/proc", { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^[1-9][0-9]*$/u.test(entry.name)) continue;
+    const pid = Number(entry.name);
+    let fields: string[];
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      fields = stat
+        .slice(stat.lastIndexOf(")") + 2)
+        .trim()
+        .split(/\s+/u);
+    } catch {
+      continue;
+    }
+    if (fields[0] !== "Z") liveChildren.add(Number(fields[1]));
+    let executable: string;
+    try {
+      // Another user's executable link is unreadable; such a process is
+      // never one of this user's daemons.
+      executable = await readlink(`/proc/${pid}/exe`);
+    } catch {
+      continue;
+    }
+    if (!AGENT_BROWSER_EXECUTABLE_NAME.test(basename(executable.replace(/ \(deleted\)$/u, ""))))
+      continue;
+    candidates.push({ pid, startTicks: Number(fields[19]) });
+  }
+  if (candidates.length === 0) return [];
+  const uptimeSeconds = Number((await readFile("/proc/uptime", "utf8")).split(/\s+/u)[0]);
+  const daemons: AgentBrowserDaemonProcess[] = [];
+  for (const candidate of candidates) {
+    let environment: Map<string, string>;
+    let birth: string;
+    try {
+      environment = new Map(
+        (await readFile(`/proc/${candidate.pid}/environ`, "utf8")).split("\0").map((entry) => {
+          const separator = entry.indexOf("=");
+          return [entry.slice(0, separator), entry.slice(separator + 1)] as [string, string];
+        }),
+      );
+      birth = await processBirth(candidate.pid);
+    } catch {
+      continue;
+    }
+    if (environment.get("AGENT_BROWSER_DAEMON") !== "1") continue;
+    // Linux reports process start in clock ticks of USER_HZ, which is 100 on
+    // every supported architecture.
+    const ageMs =
+      Number.isFinite(uptimeSeconds) && Number.isFinite(candidate.startTicks)
+        ? Math.round((uptimeSeconds - candidate.startTicks / 100) * 1000)
+        : null;
+    daemons.push({
+      pid: candidate.pid,
+      birth,
+      profileDirectory: environment.get("AGENT_BROWSER_PROFILE") ?? null,
+      socketDirectory: environment.get("AGENT_BROWSER_SOCKET_DIR") ?? null,
+      ageMs,
+      hasLiveChildren: liveChildren.has(candidate.pid),
+    });
+  }
+  return daemons;
+}
+
+async function darwinAgentBrowserDaemonProcesses(): Promise<AgentBrowserDaemonProcess[]> {
+  const listing = await boundedProcessOutput(
+    "/bin/ps",
+    ["-axww", "-o", "pid=,ppid=,uid=,stat=,etime=,comm="],
+    PROCESS_INVENTORY_LIMITS,
+  );
+  if (!listing.trim()) {
+    throw new AgentBrowserCommandError("process_failed", "process inventory is unavailable");
+  }
+  const uid = process.getuid?.();
+  const liveChildren = new Set<number>();
+  const candidates: { pid: number; ageMs: number | null }[] = [];
+  for (const line of listing.split("\n")) {
+    const match = /^\s*([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+(\S+)\s+(\S+)\s(.*)$/u.exec(line);
+    if (!match) continue;
+    if (!match[4]!.startsWith("Z")) liveChildren.add(Number(match[2]));
+    if (Number(match[3]) !== uid) continue;
+    if (!AGENT_BROWSER_EXECUTABLE_NAME.test(basename(match[6]!.trim()))) continue;
+    candidates.push({ pid: Number(match[1]), ageMs: darwinElapsedMs(match[5]!) });
+  }
+  const daemons: AgentBrowserDaemonProcess[] = [];
+  for (const candidate of candidates) {
+    // `ps -E` appends the process environment to its command line. A daemon
+    // is started without arguments, so every later word is NAME=value.
+    const described = (
+      await boundedProcessOutput(
+        "/bin/ps",
+        ["-E", "-ww", "-o", "command=", "-p", String(candidate.pid)],
+        PROCESS_ENVIRONMENT_LIMITS,
+      )
+    ).trim();
+    if (!/(?:^| )AGENT_BROWSER_DAEMON=1(?: |$)/u.test(described)) continue;
+    let birth: string;
+    try {
+      birth = await processBirth(candidate.pid);
+    } catch {
+      continue;
+    }
+    daemons.push({
+      pid: candidate.pid,
+      birth,
+      profileDirectory: darwinEnvironmentValue(described, "AGENT_BROWSER_PROFILE"),
+      socketDirectory: darwinEnvironmentValue(described, "AGENT_BROWSER_SOCKET_DIR"),
+      ageMs: candidate.ageMs,
+      hasLiveChildren: liveChildren.has(candidate.pid),
+    });
+  }
+  return daemons;
+}
+
+function darwinEnvironmentValue(described: string, name: string): string | null {
+  const match = new RegExp(`(?:^| )${name}=(.*?)(?= [A-Za-z_][A-Za-z0-9_]*=|$)`, "u").exec(
+    described,
+  );
+  return match?.[1] || null;
+}
+
+/** `ps` elapsed time, formatted [[dd-]hh:]mm:ss. */
+function darwinElapsedMs(value: string): number | null {
+  const match = /^(?:(?:([0-9]+)-)?([0-9]+):)?([0-9]+):([0-9]+)$/u.exec(value);
+  if (!match) return null;
+  const [days, hours, minutes, seconds] = match.slice(1).map((part) => Number(part ?? 0));
+  return (((days! * 24 + hours!) * 60 + minutes!) * 60 + seconds!) * 1000;
+}
+
+/** Stop an identified daemon only while its PID birth still identifies it, so
+ * a reused PID is never signalled. */
+async function stopAgentBrowserDaemon(daemon: AgentBrowserDaemonProcess): Promise<void> {
+  if (!(await processRunning(daemon.pid))) return;
+  try {
+    if ((await processBirth(daemon.pid)) !== daemon.birth) return;
+  } catch {
+    return;
+  }
+  await stopIdentifiedProcess(daemon.pid);
+}
+
+/** Stop every agent-browser daemon started for this exact private profile (or
+ * socket directory). Called only once no process runs the profile, so each
+ * one's browser is gone and it has nothing left to serve. A daemon that still
+ * has a running child is refused rather than stopped. */
+async function stopOrphanedAgentBrowserDaemons(
+  profileDirectory: string,
+  socketDirectory?: string,
+): Promise<void> {
+  const profile = resolve(profileDirectory);
+  const socket = socketDirectory === undefined ? null : resolve(socketDirectory);
+  for (const daemon of await agentBrowserDaemonProcesses()) {
+    if (
+      daemon.profileDirectory !== profile &&
+      (socket === null || daemon.socketDirectory !== socket)
+    )
+      continue;
+    if (daemon.hasLiveChildren)
+      throw new AgentBrowserCommandError(
+        "process_failed",
+        "an agent-browser daemon for this profile still runs a child process",
+      );
+    await stopAgentBrowserDaemon(daemon);
+  }
+}
+
+/** Startup reconciliation for agent-browser daemons whose browser is gone.
+ * A daemon does not exit with its browser, so one whose controller died or
+ * lost track of it (a crash, or an agent update that replaced the runtime)
+ * would otherwise run forever. Only daemons started for a profile under this
+ * controller's own sessions directory, with no child process and old enough
+ * to have finished starting a browser, are stopped. A daemon whose browser
+ * still runs is left for recovery or an explicit end. Returns how many were
+ * stopped. */
+export async function reapOrphanedAgentBrowserDaemons(
+  rootDirectory: string,
+  options: { minAgeMs?: number } = {},
+): Promise<number> {
+  const minAgeMs = options.minAgeMs ?? ORPHANED_DAEMON_MIN_AGE_MS;
+  const sessions = `${join(resolve(rootDirectory), "sessions")}/`;
+  let stopped = 0;
+  for (const daemon of await agentBrowserDaemonProcesses()) {
+    if (
+      !daemon.profileDirectory?.startsWith(sessions) ||
+      daemon.hasLiveChildren ||
+      daemon.ageMs === null ||
+      daemon.ageMs < minAgeMs
+    )
+      continue;
+    try {
+      await stopAgentBrowserDaemon(daemon);
+      stopped += 1;
+    } catch {
+      // One daemon that cannot be stopped must not keep the others running.
+    }
+  }
+  return stopped;
+}
+
+async function stopIdentifiedProcess(pid: number): Promise<void> {
+  signalProcess(pid, "SIGTERM");
+  if (await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS)) return;
+  signalProcess(pid, "SIGKILL");
+  if (!(await waitForProcessStop(pid, DAEMON_STOP_TIMEOUT_MS))) {
+    throw new AgentBrowserCommandError("process_failed", "owned browser did not terminate");
   }
 }

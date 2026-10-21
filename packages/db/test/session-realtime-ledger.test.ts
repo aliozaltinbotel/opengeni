@@ -7,7 +7,7 @@ import {
 import { resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { testSettings } from "@opengeni/testing";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import {
   acceptSessionHumanInputResponse,
@@ -42,7 +42,6 @@ import {
   resolveCompanyBrainContextSelection,
   SessionControlInvariantError,
   SessionRealtimeConflictError,
-  settleCodexCredentialLeaseLoss,
   settleSessionAttemptInterruptions,
   submitHumanPromptInTransaction,
   syncSessionRealtimeLedgerInTransaction,
@@ -52,6 +51,7 @@ import {
   withWorkspaceSessionActivityRls as withWorkspaceRls,
   type SessionActivityDatabase,
 } from "../src/index";
+import { settleCodexCredentialLeaseLoss } from "./fixtures/legacy-codex";
 import * as schema from "../src/schema";
 import { realtimeConnectionFixture } from "./realtime-connection-fixture";
 
@@ -896,6 +896,7 @@ describe("session realtime ledger", () => {
     const base = delegationSyncInput(value, first.claimed.connection);
     const input = {
       ...base,
+      ownerSubjectLabel: "voice.owner@example.com",
       entries: [{ ...base.entries[0]!, modelContext: `  ${modelContext}  ` }],
     };
 
@@ -967,7 +968,11 @@ describe("session realtime ledger", () => {
       role: "user",
       content: [
         { type: "input_text", text: `${MODEL_CONTEXT_LABEL}\n${modelContext}` },
-        { type: "input_text", text: renderMessageSentAtForModel(claim.turn.createdAt) },
+        // A voice request names the person on the call, not the voice channel.
+        {
+          type: "input_text",
+          text: renderMessageSentAtForModel(claim.turn.createdAt, "voice.owner@example.com"),
+        },
         { type: "input_text", text: input.entries[0]!.text },
       ],
     });
@@ -1362,7 +1367,23 @@ describe("session realtime ledger", () => {
     expect(admitted.accepted).toHaveLength(1);
     expect(admitted.accepted[0]).toMatchObject({ replay: false });
     expect(admitted.accepted[0]!.entry.turnId).toBeString();
-    expect(admitted.eventIds).toHaveLength(2);
+    // user.message + turn.queued, plus the idle shell's move to queued (#4330:
+    // creation reserves an idle shell rather than a queued projection).
+    expect(admitted.eventIds).toHaveLength(3);
+    const statusEvents = await transaction(value.owner.workspaceId, async (tx) =>
+      tx
+        .select({ type: schema.sessionEvents.type, payload: schema.sessionEvents.payload })
+        .from(schema.sessionEvents)
+        .where(inArray(schema.sessionEvents.id, admitted.eventIds)),
+    );
+    expect(statusEvents.map((event) => event.type).sort()).toEqual([
+      "session.status.changed",
+      "turn.queued",
+      "user.message",
+    ]);
+    expect(
+      statusEvents.find((event) => event.type === "session.status.changed")?.payload,
+    ).toMatchObject({ status: "queued" });
     expect(admitted.workflowWakeRevision).toBeGreaterThan(0);
     expect(replay.accepted[0]).toMatchObject({
       replay: true,
@@ -1678,7 +1699,7 @@ describe("session realtime ledger", () => {
     });
   });
 
-  test("delegation uses canonical Steer against an already-running ordinary turn", async () => {
+  test("delegation uses canonical Steer against an already-running ordinary turn, read at its next model step", async () => {
     const value = await fixture();
     const connection = await claimInitial(value);
     await complete(value, connection.claimed.connection);
@@ -1744,10 +1765,13 @@ describe("session realtime ledger", () => {
         delivery: "steer",
         replacedTurnId: foreground.turnId,
         replacedAttemptId: attemptId,
-        interruptionCount: 1,
+        interruptionCount: 0,
+        deferredUntilModelStep: true,
       },
     });
-    expect(facts.interruption).toMatchObject({ attemptId, kind: "steer", state: "pending" });
+    // Like every Steer, the running turn reads it at its next model step
+    // instead of being interrupted.
+    expect(facts.interruption).toBeUndefined();
     expect(facts.session?.activeTurnId).toBe(foreground.turnId);
   });
 

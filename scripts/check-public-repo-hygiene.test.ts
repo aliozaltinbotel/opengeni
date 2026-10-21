@@ -74,10 +74,13 @@ describe("public repository hygiene", () => {
     }
   });
 
-  test("bounds upstream random-label exemptions to exact paths and bytes", () => {
+  test("bounds upstream label exemptions to exact paths and bytes", () => {
     for (const file of [
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt",
       "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_100000.txt",
+      "packages/contracts/src/cua-desktop-tools.gen.json",
+      "packages/contracts/src/cua-desktop-tools.linux.gen.json",
+      "packages/contracts/src/cua-desktop-tools.windows.gen.json",
     ]) {
       const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
       expect(auditPublicText(file, source)).toEqual([]);
@@ -174,6 +177,15 @@ describe("public repository hygiene", () => {
     ).toEqual([]);
   });
 
+  test("treats dot segments as no account, but not names that merely start with dots", () => {
+    expect(auditPublicText("fixture.rs", 'let invalid = ["/Users/..", "/home/."];')).toEqual([]);
+    expect(
+      auditPublicText("fixture.rs", ['let hidden = "/Users/', '..owner";'].join("")).map(
+        (f) => f.reason,
+      ),
+    ).toEqual(["non-generic home path"]);
+  });
+
   test("does not mistake repository URL path segments for local home directories", () => {
     expect(
       auditPublicText(
@@ -254,6 +266,36 @@ describe("public repository hygiene", () => {
         `-- historical source: ${privatePlan}`,
       ),
     ).toEqual([]);
+  });
+
+  test("pins the released disconnect migration exception to its exact bytes and issue offset", () => {
+    const file = "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql";
+    const source = readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
+    expect(auditPublicText(file, source)).toEqual([]);
+    for (const [path, text] of [
+      ["packages/db/drizzle/9999_new_migration.sql", source],
+      [file, `${source} `],
+      [file, source.replace("SET LOCAL", "set local")],
+      [file, source.replaceAll("\n", "\r\n")],
+    ]) {
+      expect(
+        auditPublicText(path!, text!).some(
+          (finding) => finding.reason === "internal issue reference",
+        ),
+      ).toBe(true);
+    }
+    for (const [metadata, reason] of [
+      [["private-user@", "gmail.com"].join(""), "personal email address"],
+      [["/home/", "private-owner/repo"].join(""), "non-generic home path"],
+      [[".agent/", "private-plan.md"].join(""), "private .agent document reference"],
+      [["OPE", "-999"].join(""), "internal issue reference"],
+    ]) {
+      expect(auditPublicText(file, `${source}\n${metadata}`)).toContainEqual({
+        file,
+        line: source.split("\n").length + 1,
+        reason,
+      });
+    }
   });
 
   test("does not exempt newly added migrations", () => {

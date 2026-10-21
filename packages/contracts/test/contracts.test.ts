@@ -36,8 +36,11 @@ import {
   KnowledgeMemorySearchRequest,
   KnowledgeSearchResponse,
   mergeToolRefs,
+  SessionMcpServerInput,
+  ToolRef,
   MODEL_CONTEXT_LABEL,
   SESSION_GOAL_CONTEXT_LABEL,
+  SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE,
   SCHEDULED_OCCURRENCE_TASK_LABEL,
   ModelContextContributionSummaries,
   McpServerConnectionRef,
@@ -70,6 +73,7 @@ import {
   renderTimelineAnnotationsForModel,
   renderSessionGoalContext,
   renderSessionSystemUpdateBatch,
+  renderMessageSentAtForModel,
   renderUserMessageContentForModel,
   formatModelContextTimestamp,
   sessionSystemUpdateBatchHistoryItem,
@@ -355,7 +359,7 @@ describe("contracts", () => {
         error: {
           status: 503,
           code: "upstream_unavailable",
-          message: "Opengeni is temporarily unavailable — retry.",
+          message: "The workspace is temporarily unavailable — retry.",
           retryable: true,
           outcomeUnknown: true,
           requestId: "edge-503-safe",
@@ -365,7 +369,7 @@ describe("contracts", () => {
       error: {
         status: 503,
         code: "upstream_unavailable",
-        message: "Opengeni is temporarily unavailable — retry.",
+        message: "The workspace is temporarily unavailable — retry.",
         retryable: true,
         outcomeUnknown: true,
         requestId: "edge-503-safe",
@@ -379,7 +383,7 @@ describe("contracts", () => {
         error: {
           status: 402,
           code: "payment_required",
-          message: "insufficient Opengeni credits",
+          message: "insufficient workspace credits",
           retryable: false,
         },
       }),
@@ -387,7 +391,7 @@ describe("contracts", () => {
       error: {
         status: 402,
         code: "payment_required",
-        message: "insufficient Opengeni credits",
+        message: "insufficient workspace credits",
         retryable: false,
       },
     });
@@ -1773,8 +1777,31 @@ describe("contracts", () => {
     );
     expect(scheduled.content).toContain("Earlier completed goals");
     expect(scheduled.content).toContain("query that state during this occurrence");
+    // A blocked occurrence tells the owner once under the schedule's notice key and
+    // pauses the schedule when no later occurrence can succeed.
+    expect(scheduled.content).toContain(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE);
+    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("schedule-<scheduled task ID>");
+    expect(SCHEDULED_OCCURRENCE_BLOCKER_GUIDANCE).toContain("pause this schedule");
     expect(scheduled.content).not.toContain("[Opengeni internal updates]");
     expect(scheduled.content).not.toContain("They are not human prompts");
+    expect(scheduled.content).not.toContain("Unavailable in this occurrence");
+
+    const degraded = sessionSystemUpdateBatchHistoryItem(
+      [
+        {
+          ...updates[0]!,
+          payload: { ...updates[0]!.payload, unavailableConnectors: ["mail", "tracker"] },
+        },
+      ],
+      completedGoal,
+      { promoteScheduledOccurrenceToUser: true },
+    );
+    const unavailableLine = degraded.content.indexOf(
+      "Unavailable in this occurrence: mail, tracker.",
+    );
+    expect(unavailableLine).toBeGreaterThan(-1);
+    expect(unavailableLine).toBeLessThan(degraded.content.indexOf("Instructions:"));
+    expect(degraded.content).toContain("Do not reach them another way");
   });
 
   test("formats model-visible times as minute-precision UTC with the weekday", () => {
@@ -1812,6 +1839,39 @@ describe("contracts", () => {
     ]);
     // Legacy callers without a durable time render unchanged.
     expect(renderUserMessageContentForModel("Visible request", [], null)).toBe("Visible request");
+  });
+
+  test("names the person who sent a message so members can be told apart", () => {
+    const sentAt = new Date("2026-09-26T07:51:30Z");
+    expect(
+      renderUserMessageContentForModel(
+        "Ship it",
+        [],
+        null,
+        undefined,
+        sentAt,
+        "second.member@example.com",
+      ),
+    ).toEqual([
+      {
+        type: "input_text",
+        text: "[Message sent Saturday 2026-09-26 07:51 UTC by second.member@example.com]",
+      },
+      { type: "input_text", text: "Ship it" },
+    ]);
+    // The one-line part stays one line with no early closing bracket.
+    expect(renderMessageSentAtForModel(sentAt, " Ada]\n[Lovelace ")).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC by Ada Lovelace]",
+    );
+    expect(renderMessageSentAtForModel(sentAt, "x".repeat(500))).toHaveLength(
+      "[Message sent Saturday 2026-09-26 07:51 UTC by ]".length + 200,
+    );
+    expect(renderMessageSentAtForModel(sentAt, " ][ ")).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC]",
+    );
+    expect(renderMessageSentAtForModel(sentAt, null)).toBe(
+      "[Message sent Saturday 2026-09-26 07:51 UTC]",
+    );
   });
 
   test("states delivery and creation times on machine-input batches", () => {
@@ -2537,6 +2597,32 @@ describe("contracts", () => {
     expect(SubmittedTimelineAnnotations.safeParse([annotation, annotation]).success).toBe(false);
   });
 
+  test("accepts any number of annotations within the total size bound", () => {
+    const annotation = (index: number) => ({
+      id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+      source: {
+        kind: "user_message" as const,
+        eventId: "00000000-0000-4000-8000-000000000212",
+        eventType: "user.message" as const,
+        sequence: 1,
+        turnId: null,
+        startOffset: 0,
+        endOffset: 2,
+        contextBefore: "",
+        contextAfter: "",
+      },
+      quote: "hi",
+      note: `note ${index}`,
+    });
+    const many = Array.from({ length: 200 }, (_, index) => annotation(index + 1));
+    expect(SubmittedTimelineAnnotations.safeParse(many).success).toBe(true);
+    const oversized = Array.from({ length: 80 }, (_, index) => ({
+      ...annotation(index + 1),
+      quote: "q".repeat(16 * 1024),
+    }));
+    expect(SubmittedTimelineAnnotations.safeParse(oversized).success).toBe(false);
+  });
+
   test("accepts null skill review for ordinary questions without accepting malformed review references", () => {
     const question = {
       id: "choice",
@@ -2978,6 +3064,46 @@ describe("contracts", () => {
       ),
     ).toEqual([{ kind: "mcp", id: "cap-notebook", eager: true }]);
   });
+
+  test("mergeToolRefs: eager tool lists unite in first-seen order and true wins", () => {
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search", "get"] }],
+        [{ kind: "mcp", id: "app", eager: ["get", "list"] }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: ["search", "get", "list"] }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search"] }],
+        [{ kind: "mcp", id: "app", eager: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: true }]);
+    expect(
+      mergeToolRefs(
+        [{ kind: "mcp", id: "app", eager: ["search"] }],
+        [{ kind: "mcp", id: "app", optional: true }],
+      ),
+    ).toEqual([{ kind: "mcp", id: "app", eager: ["search"] }]);
+    expect(
+      mergeToolRefs([{ kind: "mcp", id: "app", eager: [] }], [{ kind: "mcp", id: "app" }]),
+    ).toEqual([{ kind: "mcp", id: "app" }]);
+  });
+
+  test("ToolRef and session MCP attachments accept an exact eager tool list", () => {
+    expect(
+      ToolRef.parse({ kind: "mcp", id: "app", eager: ["search_records", "get_record"] }),
+    ).toEqual({ kind: "mcp", id: "app", eager: ["search_records", "get_record"] });
+    expect(ToolRef.parse({ kind: "mcp", id: "app", eager: true }).eager).toBe(true);
+    expect(ToolRef.safeParse({ kind: "mcp", id: "app", eager: [""] }).success).toBe(false);
+    expect(ToolRef.safeParse({ kind: "mcp", id: "app", eager: "search" }).success).toBe(false);
+    expect(
+      SessionMcpServerInput.parse({
+        id: "app",
+        url: "https://app.example.test/mcp",
+        eager: ["search_records"],
+      }).eager,
+    ).toEqual(["search_records"]);
+  });
 });
 
 describe("cleared run-state sentinel", () => {
@@ -3041,6 +3167,7 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(null, {
         providerId: "azure",
         modelId: "gpt-5.6-sol",
+        chargesCredits: true,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3049,7 +3176,7 @@ describe("evaluateWorkspaceModelPolicy", () => {
     expect(
       evaluateWorkspaceModelPolicy(
         { allowedProviders: null, allowedModels: null },
-        { providerId: "azure", modelId: "gpt-5.6-sol" },
+        { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
       ),
     ).toEqual({ allowed: true });
   });
@@ -3063,12 +3190,14 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "azure",
         modelId: "gpt-5.6-sol",
+        chargesCredits: true,
       }),
     ).toEqual({ allowed: false, reason: "provider" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3082,12 +3211,14 @@ describe("evaluateWorkspaceModelPolicy", () => {
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-luna",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: false, reason: "model" });
     expect(
       evaluateWorkspaceModelPolicy(policy, {
         providerId: "codex-subscription",
         modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
       }),
     ).toEqual({ allowed: true });
   });
@@ -3096,8 +3227,55 @@ describe("evaluateWorkspaceModelPolicy", () => {
     expect(
       evaluateWorkspaceModelPolicy(
         { allowedProviders: [], allowedModels: null },
-        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol" },
+        { providerId: "codex-subscription", modelId: "codex/gpt-5.6-sol", chargesCredits: false },
       ),
     ).toEqual({ allowed: false, reason: "provider" });
+  });
+  test("the credit switch blocks every credit-billed model, whatever the allowlists say", () => {
+    const policy = { allowedProviders: null, allowedModels: null, allowCreditModels: false };
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "azure",
+        modelId: "gpt-5.6-sol",
+        chargesCredits: true,
+      }),
+    ).toEqual({ allowed: false, reason: "credits" });
+    // A credit model added to the catalog later is blocked without an edit.
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "opper",
+        modelId: "opper/aws/claude-opus-5-5",
+        chargesCredits: true,
+      }),
+    ).toEqual({ allowed: false, reason: "credits" });
+    expect(
+      evaluateWorkspaceModelPolicy(policy, {
+        providerId: "codex-subscription",
+        modelId: "codex/gpt-5.6-sol",
+        chargesCredits: false,
+      }),
+    ).toEqual({ allowed: true });
+    // An explicit allowlist entry does not override the switch.
+    expect(
+      evaluateWorkspaceModelPolicy(
+        { allowedProviders: null, allowedModels: ["gpt-5.6-sol"], allowCreditModels: false },
+        { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
+      ),
+    ).toEqual({ allowed: false, reason: "credits" });
+  });
+
+  test("an omitted or true credit switch leaves credit models to the allowlists", () => {
+    for (const allowCreditModels of [undefined, true]) {
+      expect(
+        evaluateWorkspaceModelPolicy(
+          {
+            allowedProviders: null,
+            allowedModels: null,
+            ...(allowCreditModels === undefined ? {} : { allowCreditModels }),
+          },
+          { providerId: "azure", modelId: "gpt-5.6-sol", chargesCredits: true },
+        ),
+      ).toEqual({ allowed: true });
+    }
   });
 });

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/contracts",
-  "version": "1.4.4",
+  "version": "4.2.0",
   "description": "Shared zod schemas and wire-contract types for the Opengeni API.",
   "license": "Apache-2.0",
   "repository": {
@@ -34,9 +34,21 @@
       "types": "./src/allowance-refusal.ts",
       "default": "./src/allowance-refusal.ts"
     },
+    "./learning-refusal": {
+      "types": "./src/learning-refusal.ts",
+      "default": "./src/learning-refusal.ts"
+    },
     "./usage-allowances": {
       "types": "./src/usage-allowances.ts",
       "default": "./src/usage-allowances.ts"
+    },
+    "./session-usage-limits": {
+      "types": "./src/session-usage-limits.ts",
+      "default": "./src/session-usage-limits.ts"
+    },
+    "./session-usage-limit-refusal": {
+      "types": "./src/session-usage-limit-refusal.ts",
+      "default": "./src/session-usage-limit-refusal.ts"
     },
     "./browser-storage": {
       "types": "./src/browser-storage.ts",
@@ -154,6 +166,10 @@
       "types": "./src/session-final-reply.ts",
       "default": "./src/session-final-reply.ts"
     },
+    "./session-history": {
+      "types": "./src/session-history.ts",
+      "default": "./src/session-history.ts"
+    },
     "./managed-auth-session-sets": {
       "types": "./src/managed-auth-session-sets.ts",
       "default": "./src/managed-auth-session-sets.ts"
@@ -189,6 +205,10 @@
     "./workspace-integration-wire": {
       "types": "./src/workspace-integration-wire.ts",
       "default": "./src/workspace-integration-wire.ts"
+    },
+    "./vault-provider-wire": {
+      "types": "./src/vault-provider-wire.ts",
+      "default": "./src/vault-provider-wire.ts"
     },
     "./code-search": {
       "types": "./src/code-search.ts",

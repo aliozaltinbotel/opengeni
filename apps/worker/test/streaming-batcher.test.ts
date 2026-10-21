@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import type { SessionEventType } from "@opengeni/contracts";
 import type { AppendEventInput } from "@opengeni/db";
 import type { Context } from "@temporalio/activity";
-import { createRuntimeBatcher, nextStreamEvent } from "../src/activities/streaming";
+import {
+  createRuntimeBatcher, createStreamLookahead, observeStreamEmissionTimes,
+  mergeAdjacentTextDeltas,
+  nextStreamEvent,
+  TRAILING_FLUSH_MS,
+} from "../src/activities/streaming";
 
 // Lever A: token deltas coalesce through the batcher (one appendSessionEvents
 // txn + one publish per flush) instead of one DB round-trip per token. These
@@ -16,6 +21,40 @@ const DELTA: SessionEventType = "agent.message.delta";
 const REASONING: SessionEventType = "agent.reasoning.delta";
 const PTY: SessionEventType = "terminal.pty.output.delta"; // stays structural
 const TOOLCALL: SessionEventType = "agent.toolCall.created"; // structural
+
+describe("atomic structural checkpoints", () => {
+  test("keeps each mutation with its structural event across the batch-size boundary", async () => {
+    const batches: Array<{ events: number[]; mutations: number[] }> = [];
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const batcher = createRuntimeBatcher<number>(async (events, mutations = []) => {
+      batches.push({ events: events.map((e) => (e.payload as { n: number }).n), mutations });
+      if (batches.length === 1) await held;
+    });
+    await batcher.push(delta(0));
+    for (let i = 1; i < 75; i++) await batcher.push(delta(i));
+    const checkpoint = batcher.push(delta(75, TOOLCALL), 75);
+    release();
+    await checkpoint;
+    expect(batches.flatMap((batch) => batch.events)).toEqual(
+      Array.from({ length: 76 }, (_, i) => i),
+    );
+    expect(batches.filter((batch) => batch.mutations.length > 0)).toEqual([
+      { events: Array.from({ length: 25 }, (_, i) => i + 51), mutations: [75] },
+    ]);
+  });
+
+  test("checkpoint persistence failure is awaited and retained", async () => {
+    const failure = new Error("checkpoint rolled back");
+    const batcher = createRuntimeBatcher<string>(async (_events, mutations) => {
+      if (mutations?.length) throw failure;
+    });
+    await expect(batcher.push(delta(1, TOOLCALL), "receipt")).rejects.toBe(failure);
+    await expect(batcher.flush()).rejects.toBe(failure);
+  });
+});
 
 function sleep(ms: number): Promise<void> {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -34,30 +73,168 @@ function delta(n: number, type: SessionEventType = DELTA) {
   return { type, payload: { n } };
 }
 
+/** The first fragment is sent at once; open the window so later ones batch. */
+async function openWindow(
+  batcher: ReturnType<typeof createRuntimeBatcher>,
+  flushes: number[][],
+): Promise<void> {
+  await batcher.push(delta(-1));
+  await batcher.flush();
+  expect(flushes).toEqual([[-1]]);
+  flushes.length = 0;
+}
+
+describe("mergeAdjacentTextDeltas", () => {
+  const text = (
+    t: string,
+    extra: Record<string, unknown> = {},
+    type: SessionEventType = DELTA,
+  ) => ({
+    type,
+    payload: { text: t, ...extra },
+  });
+
+  test("stores adjacent fragments of one stream as one delta with the exact text", () => {
+    // A surrogate pair split across provider fragments rejoins exactly.
+    const merged = mergeAdjacentTextDeltas([
+      text("Hel", { messageId: "m1", phase: "final_answer" }),
+      text("lo \ud83d", { messageId: "m1", phase: "final_answer" }),
+      text("\ude00!", { messageId: "m1", phase: "final_answer" }),
+    ]);
+    expect(merged).toEqual([
+      {
+        type: DELTA,
+        payload: { text: "Hello \u{1F600}!", messageId: "m1", phase: "final_answer" },
+      },
+    ]);
+  });
+
+  test("never merges across another event, type, message or phase, and keeps order", () => {
+    const toolCall = { type: TOOLCALL, payload: { id: "c1" } };
+    const merged = mergeAdjacentTextDeltas([
+      text("a", {}, REASONING),
+      text("b", {}, REASONING),
+      text("c"),
+      toolCall,
+      text("d"),
+      text("e", { messageId: "m2" }),
+      text("f", { messageId: "m2", phase: "commentary" }),
+    ]);
+    expect(merged).toEqual([
+      { type: REASONING, payload: { text: "ab" } },
+      text("c"),
+      toolCall,
+      text("d"),
+      text("e", { messageId: "m2" }),
+      text("f", { messageId: "m2", phase: "commentary" }),
+    ]);
+  });
+
+  test("leaves any other payload shape, and lone fragments, exactly as they were", () => {
+    const shaped = text("x", { coalescedUntil: 9 });
+    const notText = { type: DELTA, payload: { n: 1 } };
+    const identified = {
+      type: DELTA,
+      payload: { text: "y" },
+      clientEventId: "c",
+    } as AppendEventInput;
+    const lone = text("z");
+    const input = [shaped, text("1"), notText, identified, lone];
+    const merged = mergeAdjacentTextDeltas(input);
+    expect(merged).toHaveLength(5);
+    merged.forEach((event, index) => expect(event).toBe(input[index]!));
+  });
+
+  test("starts a new row at the live stream's 48 KiB text bound", () => {
+    const chunk = "x".repeat(20 * 1024);
+    const merged = mergeAdjacentTextDeltas([text(chunk), text(chunk), text(chunk)]);
+    expect(merged.map((event) => (event.payload as { text: string }).text.length)).toEqual([
+      40 * 1024,
+      20 * 1024,
+    ]);
+  });
+
+  test("joins reasoning summary parts with the readers' paragraph separator", () => {
+    const merged = mergeAdjacentTextDeltas([
+      text("**One**", {}, REASONING),
+      text("**Two**", {}, REASONING),
+      text(" detail", {}, REASONING),
+      text("**Three**", {}, REASONING),
+    ]);
+    expect(merged).toEqual([
+      { type: REASONING, payload: { text: "**One**\n\n**Two** detail**Three**" } },
+    ]);
+  });
+
+  test("after the leading fragment, a flushed burst reaches storage as one row", async () => {
+    const stored: AppendEventInput[][] = [];
+    const batcher = createRuntimeBatcher(async (events) => {
+      stored.push(events);
+    });
+    for (const part of ["The ", "quick ", "brown ", "fox"]) await batcher.push(text(part));
+    await batcher.flush();
+    expect(stored).toEqual([
+      [{ type: DELTA, payload: { text: "The " } }],
+      [{ type: DELTA, payload: { text: "quick brown fox" } }],
+    ]);
+  });
+});
+
 describe("createRuntimeBatcher", () => {
+  test("the first fragment, and the first after a structural event, are sent at once", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(0));
+    expect(flushes).toEqual([[0]]); // time to first token is not delayed by the window
+    await batcher.push(delta(1));
+    await batcher.push(delta(2));
+    expect(flushes).toEqual([[0]]); // later fragments batch
+    await batcher.push(delta(3, TOOLCALL));
+    expect(flushes).toEqual([[0], [1, 2, 3]]);
+    await batcher.push(delta(4));
+    expect(flushes).toEqual([[0], [1, 2, 3], [4]]); // the next item starts at once too
+    await batcher.push(delta(5));
+    expect(flushes).toHaveLength(3);
+    await batcher.flush();
+    expect(flushes).toEqual([[0], [1, 2, 3], [4], [5]]);
+  });
+
+  test("a non-text event does not use up the first text fragment's leading edge", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(0, "agent.updated" as SessionEventType)); // handoff marker
+    await batcher.push(delta(1)); // first text still goes at once
+    await sleep(10); // the serialized drain, far shorter than one window
+    expect(flushes.flat()).toEqual([0, 1]);
+    await batcher.push(delta(2));
+    expect(flushes.flat()).toEqual([0, 1]); // later fragments batch
+    await batcher.flush();
+  });
+
   test("coalesces a delta burst into ONE flush, order preserved (trailing timer)", async () => {
     const { batcher, flushes } = recordingBatcher();
-    // 10 deltas pushed fast (< 50 count, < 33ms) => no immediate flush.
+    await openWindow(batcher, flushes);
+    // 10 deltas pushed fast (< 50 count, < one window) => no immediate flush.
     for (let n = 0; n < 10; n++) {
       await batcher.push(delta(n));
     }
     expect(flushes.length).toBe(0); // still pending — nothing flushed yet
-    await sleep(60); // trailing timer (~33ms) fires
+    await sleep(TRAILING_FLUSH_MS * 2); // trailing timer fires
     expect(flushes.length).toBe(1);
     expect(flushes[0]).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
   test("trailing timer flushes whatever accumulated on silence", async () => {
     const { batcher, flushes } = recordingBatcher();
+    await openWindow(batcher, flushes);
     await batcher.push(delta(1, REASONING));
     await batcher.push(delta(2, REASONING));
     expect(flushes.length).toBe(0);
-    await sleep(60);
+    await sleep(TRAILING_FLUSH_MS * 2);
     expect(flushes).toEqual([[1, 2]]);
   });
 
   test("a structural event flushes immediately and CARRIES pending deltas in order", async () => {
     const { batcher, flushes } = recordingBatcher();
+    await openWindow(batcher, flushes);
     await batcher.push(delta(0));
     await batcher.push(delta(1));
     await batcher.push(delta(2));
@@ -66,7 +243,7 @@ describe("createRuntimeBatcher", () => {
     expect(flushes.length).toBe(1);
     expect(flushes[0]).toEqual([0, 1, 2, 3]); // deltas ride the structural flush, in order
     // Timer must have been cleared: nothing more flushes on silence.
-    await sleep(60);
+    await sleep(TRAILING_FLUSH_MS * 2);
     expect(flushes.length).toBe(1);
   });
 
@@ -114,19 +291,23 @@ describe("createRuntimeBatcher", () => {
       await new Promise<void>((resolve) => gates.push(resolve));
     });
 
-    // The 50th delta starts a flush. The next 50 pushes must still resolve while
-    // that slow append is blocked; this is the production regression where each
-    // model delta previously waited ~0.75s for its own DB transaction.
+    // The leading delta starts a flush at once. The next 99 pushes must still
+    // resolve while that slow append is blocked; this is the production
+    // regression where each model delta previously waited ~0.75s for its own
+    // DB transaction.
     for (let n = 0; n < 100; n += 1) {
       await batcher.push(delta(n));
     }
-    expect(starts).toEqual([Array.from({ length: 50 }, (_, index) => index)]);
+    expect(starts).toEqual([[0]]);
 
     const drained = batcher.flush();
     gates[0]!();
     await sleep(10);
-    expect(starts[1]).toEqual(Array.from({ length: 50 }, (_, index) => index + 50));
+    expect(starts[1]).toEqual(Array.from({ length: 50 }, (_, index) => index + 1));
     gates[1]!();
+    await sleep(10);
+    expect(starts[2]).toEqual(Array.from({ length: 49 }, (_, index) => index + 51));
+    gates[2]!();
     await drained;
   });
 
@@ -136,7 +317,7 @@ describe("createRuntimeBatcher", () => {
     });
 
     await batcher.push(delta(1));
-    await sleep(60);
+    await sleep(TRAILING_FLUSH_MS * 2);
     await expect(batcher.push(delta(2))).rejects.toThrow("durable append failed");
     await expect(batcher.flush()).rejects.toThrow("durable append failed");
   });
@@ -174,7 +355,7 @@ describe("createRuntimeBatcher", () => {
 
   test("1000-delta turn: flush count collapses vs the per-delta (structural) path", async () => {
     // Freeze time so the count is purely coalescing-policy driven (removes the
-    // 33ms elapsed variable), making the before/after numbers deterministic.
+    // trailing-window elapsed variable), making the before/after numbers deterministic.
     const realNow = Date.now;
     Date.now = () => 1_000_000;
     try {
@@ -192,7 +373,8 @@ describe("createRuntimeBatcher", () => {
       }
       await after.batcher.flush(); // turn-end drain
       expect(after.flushes.length).toBeLessThanOrEqual(35);
-      expect(after.flushes.length).toBe(20); // 1000 / 50-event batches
+      // The leading delta goes at once, then 999 deltas in 50-event batches.
+      expect(after.flushes.length).toBe(21);
       // Order + completeness preserved across all batches.
       expect(after.flushes.flat()).toEqual(Array.from({ length: 1000 }, (_, i) => i));
     } finally {
@@ -225,19 +407,21 @@ describe("createRuntimeBatcher", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual({ events: 1, durationSeconds: 0.005 });
 
-    // Three coalesced deltas ride out on the next structural flush → size 4.
+    // The first delta after it goes at once; two more ride out on the next
+    // structural flush → size 3.
     await batcher.push(delta(1));
     await batcher.push(delta(2));
     await batcher.push(delta(3));
     await batcher.push(delta(4, TOOLCALL));
-    expect(seen).toHaveLength(2);
-    expect(seen[1]!.events).toBe(4);
+    expect(seen).toHaveLength(3);
+    expect(seen[1]!.events).toBe(1);
+    expect(seen[2]!.events).toBe(3);
 
     // A FAILED flush still reports its shape (onFlush runs in the finally).
     fail = true;
     await expect(batcher.push(delta(5, TOOLCALL))).rejects.toThrow("append failed");
-    expect(seen).toHaveLength(3);
-    expect(seen[2]!.events).toBe(1); // the single structural delta(5) that failed to flush
+    expect(seen).toHaveLength(4);
+    expect(seen[3]!.events).toBe(1); // the single structural delta(5) that failed to flush
   });
 });
 
@@ -308,4 +492,162 @@ describe("nextStreamEvent", () => {
 
     await expect(pending).rejects.toBe(reason);
   });
+});
+
+describe("deferred structural events", () => {
+  test("a parallel tool batch's structural events share the next structural flush, in order", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(1, TOOLCALL), undefined, { defer: true });
+    await sleep(60); // past the trailing window: a deferred event starts no drain or timer
+    await batcher.push(delta(2, TOOLCALL), undefined, { defer: true });
+    expect(flushes).toEqual([]);
+    await batcher.push(delta(3, TOOLCALL));
+    expect(flushes).toEqual([[1, 2, 3]]);
+  });
+
+  test("an explicit flush carries deferred events", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(1, TOOLCALL), undefined, { defer: true });
+    await batcher.flush();
+    expect(flushes).toEqual([[1]]);
+  });
+
+  test("a failed flush of deferred events is rethrown at the flushing push", async () => {
+    const failure = new Error("append failed");
+    const batcher = createRuntimeBatcher(async () => {
+      throw failure;
+    });
+    await batcher.push(delta(1, TOOLCALL), undefined, { defer: true });
+    await expect(batcher.push(delta(2, TOOLCALL))).rejects.toBe(failure);
+  });
+});
+
+describe("createStreamLookahead", () => {
+  function counted<T>(inner: AsyncIterator<T>) {
+    let reads = 0;
+    const iterator = { next: () => { reads += 1; return inner.next(); } } as AsyncIterator<T>;
+    return {
+      iterator: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<T>,
+      reads: () => reads,
+    };
+  }
+
+  test("drains only the events the producer has already queued, then keeps the pending read", async () => {
+    let controller!: ReadableStreamDefaultController<number>;
+    const stream = new ReadableStream<number>({ start: (c) => { controller = c; } });
+    const { iterator, reads } = counted(stream[Symbol.asyncIterator]());
+    const reader = createStreamLookahead(iterator, null);
+    controller.enqueue(1);
+    controller.enqueue(2);
+    controller.enqueue(3);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2, 3]);
+    expect(reads()).toBe(4); // three values plus one read still waiting for the producer
+    expect(await reader.next()).toEqual({ done: false, value: 2 });
+    expect(await reader.next()).toEqual({ done: false, value: 3 });
+    setTimeout(() => controller.enqueue(4), 10);
+    expect(await reader.next()).toEqual({ done: false, value: 4 });
+    expect(reads()).toBe(4); // the waiting read was reused, never a second read on top of it
+    controller.close();
+    expect((await reader.next()).done).toBe(true);
+  });
+
+  test("a producer failure after queued events surfaces only after those events", async () => {
+    const failure = new Error("stream failed");
+    const iterator = (async function* () {
+      yield 1;
+      yield 2;
+      throw failure;
+    })();
+    const reader = createStreamLookahead({ [Symbol.asyncIterator]: () => iterator }, null);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2]);
+    expect(await reader.next()).toEqual({ done: false, value: 2 });
+    await expect(reader.next()).rejects.toBe(failure);
+  });
+
+  test("an aborted activity refuses buffered events with its cancellation reason", async () => {
+    const controller = new AbortController();
+    const context = { cancelled: new Promise<never>(() => undefined), cancellationSignal: controller.signal } as Context;
+    const iterator = (async function* () {
+      yield 1;
+      yield 2;
+    })();
+    const reader = createStreamLookahead({ [Symbol.asyncIterator]: () => iterator }, context);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2]);
+    const reason = new Error("activity cancelled");
+    controller.abort(reason);
+    await expect(reader.next()).rejects.toBe(reason);
+  });
+});
+
+describe("createStreamLookahead over a ReadableStream", () => {
+  test("drains queued events and keeps the producer's order", async () => {
+    let controller!: ReadableStreamDefaultController<number>;
+    const stream = new ReadableStream<number>({ start: (c) => { controller = c; } });
+    const reader = createStreamLookahead(stream, null);
+    controller.enqueue(1);
+    controller.enqueue(2);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2]);
+    expect(reader.peek()).toBe(2);
+    setTimeout(() => { controller.enqueue(3); controller.close(); }, 10);
+    expect(await reader.next()).toEqual({ done: false, value: 2 });
+    expect(await reader.next()).toEqual({ done: false, value: 3 });
+    expect((await reader.next()).done).toBe(true);
+  });
+
+  test("cancel trips the producer at once while a lookahead read is pending", async () => {
+    let cancelled = false;
+    let controller!: ReadableStreamDefaultController<number>;
+    const stream = new ReadableStream<number>({ start: (c) => { controller = c; }, cancel: () => { cancelled = true; } });
+    const reader = createStreamLookahead(stream, null);
+    controller.enqueue(1);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([]);
+    void reader.cancel();
+    expect(cancelled).toBe(true);
+  });
+});
+
+
+describe("tool event occurrence time", () => {
+  test("the batcher keeps an explicit occurredAt through its flush and omits it otherwise", async () => {
+    const flushed: AppendEventInput[][] = [];
+    const batcher = createRuntimeBatcher(async (events) => { flushed.push(events); });
+    const at = new Date(1_790_000_000_000);
+    await batcher.push({ type: TOOLCALL, payload: { n: 1 }, occurredAt: at }, undefined, { defer: true });
+    await batcher.push({ type: TOOLCALL, payload: { n: 2 } });
+    expect(flushed).toEqual([[{ type: TOOLCALL, payload: { n: 1 }, occurredAt: at }, { type: TOOLCALL, payload: { n: 2 } }]]);
+  });
+
+  test("emission times come from the SDK's _addItem, not from when the consumer reads", async () => {
+    const enqueued: unknown[] = [];
+    const result = { _addItem(item: unknown) { enqueued.push(item); } };
+    const emittedAt = observeStreamEmissionTimes(result);
+    const item = { type: "run_item_stream_event" };
+    const before = Date.now();
+    result._addItem(item);
+    const after = Date.now();
+    await sleep(20);
+    expect(enqueued).toEqual([item]);
+    const at = emittedAt(item)!.getTime();
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(after);
+    expect(emittedAt({ type: "never-emitted" })).toBeUndefined();
+    expect(observeStreamEmissionTimes({})(item)).toBeUndefined();
+  });
+});
+
+test("deferred checkpoints retain every receipt in the same flushing append", async () => {
+  const committed: Array<{ ids: number[]; mutations: number[] }> = [];
+  const batcher = createRuntimeBatcher<number>(async (events, mutations = []) => {
+    committed.push({ ids: events.map(e => (e.payload as { n: number }).n), mutations });
+  });
+  await batcher.push(delta(1, TOOLCALL), 1, { defer: true });
+  await batcher.push(delta(2, TOOLCALL), 2, { defer: true });
+  expect(committed).toEqual([]);
+  await batcher.push(delta(3, TOOLCALL), 3);
+  expect(committed).toEqual([{ ids: [1, 2, 3], mutations: [1, 2, 3] }]);
 });

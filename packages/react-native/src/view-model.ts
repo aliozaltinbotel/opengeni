@@ -1,12 +1,14 @@
-import type { HumanInputAnswer, HumanInputQuestion, SessionStatus } from "@opengeni/sdk";
+import type { HumanInputAnswer, HumanInputQuestion } from "@opengeni/sdk";
+import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { ActivityItem, TimelineItem } from "@opengeni/react/session";
-import { DEFAULT_OPENGENI_NATIVE_LABELS, type OpenGeniNativeLabels } from "./presentation";
+import type { OpenGeniNativeLabels } from "./presentation";
+import { humanInputAnswerLines } from "./timeline/secret-field-model";
 
 export function nativeKnowledgeOutcomeLabel(
   item: Extract<TimelineItem, { kind: "knowledge" }>,
   labels: OpenGeniNativeLabels,
 ): string {
-  return (labels.knowledgeOutcome ?? DEFAULT_OPENGENI_NATIVE_LABELS.knowledgeOutcome)[item.outcome];
+  return labels.knowledgeOutcome[item.outcome];
 }
 
 export type NativeSessionStatusTone = "neutral" | "working" | "attention" | "failed" | "complete";
@@ -20,7 +22,9 @@ export interface NativeActivityPresentation {
   tone: "neutral" | "running" | "failed";
 }
 
-export function nativeSessionStatusTone(status: SessionStatus | null): NativeSessionStatusTone {
+export function nativeSessionStatusTone(
+  status: SessionDisplayStatus | null,
+): NativeSessionStatusTone {
   switch (status) {
     case "queued":
     case "running":
@@ -29,6 +33,7 @@ export function nativeSessionStatusTone(status: SessionStatus | null): NativeSes
       return "working";
     case "requires_action":
       return "attention";
+    case "blocked":
     case "failed":
       return "failed";
     case "cancelled":
@@ -77,10 +82,13 @@ function recordPreview(value: object): string {
   return keys.length > 0 ? keys.slice(0, 4).join(", ") : "";
 }
 
-export function inspectableValuePreview(value: unknown): string {
+export function inspectableValuePreview(
+  value: unknown,
+  labels: Pick<OpenGeniNativeLabels, "itemCount">,
+): string {
   if (typeof value === "string") return normalizedPreview(value);
   if (typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return value.length === 1 ? "1 item" : `${value.length} items`;
+  if (Array.isArray(value)) return labels.itemCount(value.length);
   if (value && typeof value === "object") return recordPreview(value);
   return "";
 }
@@ -134,8 +142,8 @@ export function nativeActivityPresentation(
         tone: item.streaming ? "running" : "neutral",
       };
     case "tool-call": {
-      const outputPreview = inspectableValuePreview(item.output);
-      const argumentPreview = inspectableValuePreview(item.arguments);
+      const outputPreview = inspectableValuePreview(item.output, labels);
+      const argumentPreview = inspectableValuePreview(item.arguments, labels);
       const status = activityStatus(item, labels);
       return {
         title: nativeToolDisplayName(item.name),
@@ -169,8 +177,8 @@ export function nativeActivityPresentation(
       return {
         title: nativeToolDisplayName(item.name || labels.sandbox),
         preview:
-          inspectableValuePreview(item.output) ||
-          inspectableValuePreview(item.command) ||
+          inspectableValuePreview(item.output, labels) ||
+          inspectableValuePreview(item.command, labels) ||
           status.fallbackStatus,
         detail: boundedJson({
           ...(item.command ? { command: item.command } : {}),
@@ -313,10 +321,10 @@ export function nativeHumanInputSummary(
     .map((question) => (question.label ? `${question.label}: ${question.prompt}` : question.prompt))
     .join("\n");
   const outcome = labels.humanInputOutcome[item.response.outcome];
-  const answers = item.answers
+  const answers = humanInputAnswerLines(item.answers, item.response, labels.secretSaved, false)
     .map(
-      (answer) =>
-        `${answer.label}: ${answer.values.join(", ") || labels.humanInputOutcome.answered}`,
+      (line, index) =>
+        `${item.answers[index]!.label}: ${line.text || labels.humanInputOutcome.answered}`,
     )
     .join("\n");
 
@@ -390,7 +398,7 @@ export function timelineAccessibilityLabel(
     case "startup-phase":
       return `${labels.activity}, ${nativeTimelineStatusLabel(item.status, labels)}`;
     case "session-status":
-      return nativeSessionStatusLabel(item.status, labels);
+      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
     case "goal":
       return `${nativeGoalActionLabel(item.action, labels)}${item.text ? `: ${item.text}` : ""}`;
     case "notice":
@@ -411,11 +419,13 @@ export function timelineAccessibilityLabel(
       return `${labels.turn}, ${nativeTimelineStatusLabel(item.outcome, labels)}`;
     case "worker-completion":
       return item.text;
+    case "turn-steps":
+      return labels.activity;
   }
 }
 
 export function nativeSessionStatusLabel(
-  status: SessionStatus,
+  status: SessionDisplayStatus,
   labels: OpenGeniNativeLabels,
 ): string {
   switch (status) {
@@ -431,6 +441,8 @@ export function nativeSessionStatusLabel(
       return labels.statusIdle;
     case "requires_action":
       return labels.statusRequiresAction;
+    case "blocked":
+      return labels.statusBlocked;
     case "failed":
       return labels.statusFailed;
     case "cancelled":

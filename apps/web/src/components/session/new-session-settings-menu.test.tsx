@@ -17,7 +17,7 @@ const {
   runsOnAttention,
   runsOnSummary,
 } = await import("./new-session-settings-menu");
-const { DropdownMenu, DropdownMenuContent } = await import("@/components/ui/dropdown-menu");
+const { DropdownMenu, DropdownMenuContent } = await import("@opengeni/react/ui/dropdown-menu");
 const { emptySessionDraft } = await import("@/lib/session-create");
 
 afterAll(() => GlobalRegistrator.unregister());
@@ -97,6 +97,51 @@ test("the row value names the environment or the machine", () => {
     compute: { kind: "machine", sandboxId: "sandbox-build-01", folder: { kind: "root" } },
   };
   expect(runsOnSummary(choices({ draft: onMachine }))).toBe("build-01");
+});
+
+test("without a managed sandbox backend, the non-machine choice is chat only and environments do not apply", async () => {
+  const none = choices({ noManagedSandbox: true });
+  expect(runsOnSummary(none)).toBe("No computer");
+  expect(hasRunsOnChoices(choices({ noManagedSandbox: true, machines: [] }))).toBe(false);
+  await act(async () =>
+    root.render(
+      <RunsOnMenuBody
+        {...none}
+        presentation="dialog"
+        disabled={false}
+        onChange={() => {}}
+        onComputeChange={() => {}}
+        onRetryMachines={() => {}}
+      />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("No computer");
+  expect(text).toContain("Chat only");
+  expect(text).toContain("build-01");
+  expect(text).not.toContain("Managed sandbox");
+  expect(text).not.toContain("Set up for you");
+  expect(text).not.toContain("Sandbox environment");
+  expect(text).not.toContain("Node 22");
+});
+
+test("with a managed sandbox backend, the managed sandbox and its environments stay offered", async () => {
+  await act(async () =>
+    root.render(
+      <RunsOnMenuBody
+        {...choices()}
+        presentation="dialog"
+        disabled={false}
+        onChange={() => {}}
+        onComputeChange={() => {}}
+        onRetryMachines={() => {}}
+      />,
+    ),
+  );
+  const text = container.textContent ?? "";
+  expect(text).toContain("Managed sandbox");
+  expect(text).toContain("Sandbox environment");
+  expect(text).not.toContain("No computer");
 });
 
 test("picking a machine goes through the explicit compute path; offline ones can't be picked", async () => {
@@ -365,4 +410,22 @@ test("Send waiting on Runs on is explained under the composer", async () => {
   );
   expect(container.textContent).toContain("Connect one to send.");
   expect(container.querySelector("a")?.textContent).toBe("Connect a machine");
+});
+
+test("a removed or offline machine stays visible and requires replacement", async () => {
+  const draft = {
+    ...emptySessionDraft(),
+    compute: { kind: "machine" as const, sandboxId: "removed", folder: { kind: "root" as const } },
+  };
+  const state = choices({ draft, machines: [], rigs: [] });
+  expect(hasRunsOnChoices(state)).toBe(true);
+  expect(runsOnSummary(state)).toBe("Machine unavailable");
+  expect(runsOnAttention({ ...state, fleetLoading: false })).toBe("machine-unavailable");
+  await act(async () =>
+    root.render(
+      <RunsOnNotice attention="machine-unavailable" machines={[]} onRetryMachines={() => {}} />,
+    ),
+  );
+  expect(container.textContent).toContain("Machine unavailable");
+  expect(container.textContent).toContain("choose another");
 });

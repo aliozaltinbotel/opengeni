@@ -55,11 +55,26 @@ let refusal: { message: string } | null = null;
 const debit = mock(async (_db: unknown, _input: unknown) => undefined);
 const preflight = mock(async (_db: unknown, _input: unknown) => refusal);
 const defer = mock(async () => undefined);
+// mock.module is process-wide and survives mock.restore(). Each replacement
+// below is active only while this file runs; afterwards, later files in the
+// same worker process call the real implementation again.
+let active = true;
+type AnyFunction = (...args: unknown[]) => unknown;
+function scoped(real: Record<string, unknown>, fakes: Record<string, unknown>) {
+  const replacements: Record<string, unknown> = {};
+  for (const [name, fake] of Object.entries(fakes)) {
+    const original = real[name];
+    replacements[name] = (...args: unknown[]) =>
+      active || typeof original !== "function"
+        ? (fake as AnyFunction)(...args)
+        : (original as AnyFunction)(...args);
+  }
+  return replacements;
+}
 let vectors = [[1, 0, 0]];
 const embed = mock(async () => { expect(lockActive).toBe(false); return vectors; });
 const nativeDbExports = await import("@opengeni/db");
-mock.module("@opengeni/db", () => ({
-  ...nativeDbExports,
+mock.module("@opengeni/db", () => scoped(nativeDbExports, {
   claimKnowledgeIndexJobs: async () => [{ ...claim, billingAttribution: attribution }],
   hasIndeterminateKnowledgeIndexDispatch: async () => indeterminateDispatch,
   readKnowledgeIndexSource: async () => ({ billingWorkspaceId: "workspace", nextIndex: currentNextIndex, entry }),
@@ -115,14 +130,15 @@ mock.module("@opengeni/db", () => ({
 const { paidDocumentEmbedding, documentEmbeddingCostMicros, embeddingCallUsageAttributes } =
   await import("../../../packages/core/src/billing/limits");
 const nativeCoreExports = await import("@opengeni/core");
-mock.module("@opengeni/core", () => ({
-  ...nativeCoreExports,
+mock.module("@opengeni/core", () => scoped(nativeCoreExports, {
+  workspaceCreditsDisabled: async () => false,
   paidDocumentEmbedding,
   documentEmbeddingCostMicros,
   embeddingCallUsageAttributes,
 }));
 const { createKnowledgeIndexingActivities } = await import("../src/activities/knowledge-indexing");
 afterAll(async () => {
+  active = false;
   mock.restore();
   const file=process.env.OPENGENI_TEST_NATIVE_INDEX_FIXTURE_FILE;
   if(file)await Bun.write(file,JSON.stringify({producer:'actual native index activity provider-boundary writer',cases:producedIndexFacts},null,2)+'\n');

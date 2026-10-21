@@ -14,6 +14,7 @@ import { Collapsible } from "radix-ui";
 import { CopyButton } from "../components/copy-button";
 import { cn } from "../lib/cn";
 import { MOTION_INSPECT_SCALE } from "../lib/motion-inspect";
+import { presentTurnFailureText } from "./compaction-copy";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useTimelineSearchReveal } from "../components/timeline-search";
 import { useEntranceAnimation } from "./entrance";
@@ -24,10 +25,12 @@ import {
   formatElapsed,
   resolveTurnSummaryFacets,
   selectTurnSummaryFacets,
+  turnSummaryFallbackLabel,
   type TurnSummaryFacetConfiguration,
   type TurnSummaryStatus,
 } from "./turn-summary-model";
 import type { ActivityItem, TurnOutcome } from "./types";
+import { useOpenGeniText, type OpenGeniText } from "../messages/runtime";
 
 export { BUILT_IN_TURN_SUMMARY_FACET_IDS, formatElapsed };
 export type {
@@ -126,6 +129,13 @@ export type TurnSummaryProps = {
    * marker and the duration facet; a settled `worked` row reads as a separator.
    */
   status?: TurnSummaryStatus | undefined;
+  /**
+   * False when the fold has nothing to reveal: the row renders without a
+   * chevron and is not a disclosure control. Defaults to true.
+   */
+  expandable?: boolean | undefined;
+  /** The turn has steps that are not loaded yet (opening the row reads them). */
+  unloadedSteps?: boolean | undefined;
   /** The rendered activity rail revealed on expand. */
   children: ReactNode;
 };
@@ -151,9 +161,12 @@ export function TurnSummary({
   copyText,
   contextCompactionCount,
   status,
+  expandable = true,
+  unloadedSteps,
   onOpenStateChange,
   children,
 }: TurnSummaryProps) {
+  const t = useOpenGeniText();
   // An explicit `defaultOpen` always wins; otherwise an ancestor may seed it
   // (screenshot instrumentation); otherwise the turn starts folded.
   const forcedDefaultOpen = useForcedDefaultOpen();
@@ -172,7 +185,9 @@ export function TurnSummary({
         : (defaultOpen ?? forcedDefaultOpen ?? false);
   const initialSettle = Boolean(settleFold) && !restingOpen && remembered === undefined;
   const [settling, setSettling] = useState(initialSettle);
-  const [open, setOpen] = useState(initialSettle ? true : restingOpen);
+  const [openState, setOpen] = useState(initialSettle ? true : restingOpen);
+  // A fold with nothing to reveal never reads as open.
+  const open = expandable && openState;
   const reportOpen = useRef(onOpenStateChange);
   reportOpen.current = onOpenStateChange;
   // Before paint: a listener may need to start motion in the same frame.
@@ -338,13 +353,14 @@ export function TurnSummary({
   const context = useMemo(
     () =>
       createTurnSummaryContext(
+        t,
         items,
         outcome,
         failureText,
         settling || settlePhase ? undefined : durationMs,
         contextCompactionCount ?? 0,
       ),
-    [items, outcome, failureText, durationMs, settling, settlePhase, contextCompactionCount],
+    [items, outcome, failureText, durationMs, settling, settlePhase, contextCompactionCount, t],
   );
   const facetDefinitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -355,6 +371,8 @@ export function TurnSummary({
     () => selectTurnSummaryFacets(facetDefinitions, context, statusKind),
     [context, facetDefinitions, statusKind],
   );
+  // The chip names the failure; recorded technical text stays a hover title.
+  const failure = outcome === "failed" ? presentTurnFailureText(t, failureText) : null;
 
   // Live open shell: keep the chip in-flow (so settle never inserts layout)
   // and quieter until there is an outcome or a settle beat — but still
@@ -366,12 +384,131 @@ export function TurnSummary({
   // Nested chips stay force-open for this window (stable height).
   const settleChrome = settling || settlePhase || nestSuppressLatch;
 
-  const statusLine = status ? turnSummaryStatusLine(status) : null;
+  const statusLine = status ? turnSummaryStatusLine(t, status) : null;
 
   // Copy only on the collapsed chip — when open, per-message copy is enough
   // and a second control on the summary row felt crowded / off.
   const copyable = Boolean(
     copyText && copyText.trim().length > 0 && !bare && !liveShell && !open && !settlePhase,
+  );
+
+  const headerClassName = cn(
+    // The section, not the viewport, bounds this sticky row. Content
+    // is a sibling: its disclosure overflow never traps the header.
+    // Nested rail folds must never stack additional sticky headers.
+    !bare && open && "sticky top-[var(--og-work-header-top,0px)] z-10 bg-og-bg",
+    settling && expandable && "animate-og-settle-chip",
+    // Top-level turn fold and (when used) nested cluster folds render as
+    // FLAT rail rows — chevron + glyph + facets on the page background, no
+    // border, no fill. Only a hover tint hints the row is expandable, so a
+    // collapsed turn never reads as a boxed card. The top-level row is a
+    // touch larger (base text, size-5 glyph, wider gap) so it still reads
+    // as a turn landmark above any nested cluster rows it groups.
+    "group flex w-full items-center rounded-og-sm text-left transition-colors",
+    // A folded turn is a touch target on coarse pointers: grow the row so it
+    // clears the 44px minimum without disturbing the calm desktop rhythm.
+    expandable && "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
+    bare
+      ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
+      : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
+    // A failed fold keeps its red accent (glyph + inline reason below) and a
+    // faint red hover wash so attention still lands there; every other
+    // outcome gets the neutral surface hover. A row with nothing to reveal
+    // is not a control and gets no hover.
+    !expandable
+      ? undefined
+      : outcome === "failed"
+        ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
+        : "hover:bg-og-surface-1 hover:text-og-fg",
+    liveShell && "text-og-fg-subtle",
+    // Phones hide the hint, so keep the copy control clear of the separator.
+    status && copyable && "max-sm:pr-10",
+  );
+  const headerContent = (
+    <>
+      {/* Disclosure grammar matches the rows: chevron leads (far left), then any
+      exceptional or active state, then the facets — one expand affordance
+      side everywhere. A row with nothing to reveal keeps the chevron's space
+      so its text stays aligned with neighbouring rows. */}
+      {expandable ? (
+        <ChevronRightIcon
+          className={cn(
+            "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
+            settlePhase
+              ? "duration-[var(--_og-duration-disclose-settle)]"
+              : "duration-[var(--_og-duration-disclose)]",
+          )}
+        />
+      ) : (
+        <span aria-hidden className="size-3.5 shrink-0" />
+      )}
+      {/* Completion is the quiet default and needs no repeated glyph. Failed,
+      cancelled, and still-running folds retain a visible state marker. */}
+      {status || outcome === "complete" || (!outcome && (liveHeader || context.settled)) ? null : (
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center justify-center",
+            bare ? "size-3.5" : "size-5",
+            outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
+          )}
+        >
+          {outcome === "failed" ? (
+            <TriangleAlertIcon className="size-3" />
+          ) : outcome === "cancelled" ? (
+            <CircleSlashIcon className="size-3" />
+          ) : (
+            <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
+          )}
+        </span>
+      )}
+      <span
+        className={cn(
+          "min-w-0 truncate",
+          status?.kind === "worked" ? "shrink" : "flex-1",
+          bare ? "text-og-sm" : "text-og-fg-muted",
+        )}
+      >
+        {statusLine}
+        {liveHeader && !open && !status
+          ? liveHeader
+          : !statusLine && facets.length === 0 && !failure && outcome !== "cancelled"
+            ? turnSummaryFallbackLabel(t, context.items, unloadedSteps)
+            : facets.map(({ facet, result }, index) => (
+                <FacetRenderBoundary key={facet.id}>
+                  <>
+                    {index > 0 || statusLine ? " · " : null}
+                    <span aria-label={result.ariaLabel} title={result.title}>
+                      {result.icon ? (
+                        <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
+                          {result.icon}
+                        </span>
+                      ) : null}
+                      {result.content}
+                    </span>
+                  </>
+                </FacetRenderBoundary>
+              ))}
+        {failure ? (
+          <span className="text-og-status-failed" title={failure.detail}>
+            {" "}
+            · {failure.summary}
+          </span>
+        ) : null}
+        {outcome === "cancelled" ? (
+          <span className="text-og-fg-subtle"> {t("timeline.turnSummary.interrupted")}</span>
+        ) : null}
+      </span>
+      {/* A settled exchange reads as a separator above its answer. */}
+      {status?.kind === "worked" ? (
+        <span aria-hidden className="ml-1 h-px min-w-0 flex-1 bg-og-border" />
+      ) : null}
+      {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
+        <ShrinkIcon
+          className="size-3.5 shrink-0"
+          aria-label={t("timeline.turnSummary.contextCompactedExpandForDetails")}
+        />
+      ) : null}
+    </>
   );
 
   return (
@@ -385,145 +522,66 @@ export function TurnSummary({
           // allowEnterAnimation. Settle uses animate-og-settle-chip on the trigger.
           className={allowEnterAnimation && !liveShell ? "animate-og-enter" : undefined}
         >
-          <Collapsible.Trigger
-            data-og-work-header={bare ? "nested" : "outer"}
-            className={cn(
-              // The section, not the viewport, bounds this sticky row. Content
-              // is a sibling: its disclosure overflow never traps the header.
-              // Nested rail folds must never stack additional sticky headers.
-              !bare && open && "sticky top-[var(--og-work-header-top,0px)] z-10 bg-og-bg",
-              settling && "animate-og-settle-chip",
-              // Top-level turn fold and (when used) nested cluster folds render as
-              // FLAT rail rows — chevron + glyph + facets on the page background, no
-              // border, no fill. Only a hover tint hints the row is expandable, so a
-              // collapsed turn never reads as a boxed card. The top-level row is a
-              // touch larger (base text, size-5 glyph, wider gap) so it still reads
-              // as a turn landmark above any nested cluster rows it groups.
-              "group flex w-full items-center rounded-og-sm text-left transition-colors",
-              // A folded turn is a touch target on coarse pointers: grow the row so it
-              // clears the 44px minimum without disturbing the calm desktop rhythm.
-              "pointer-coarse:min-h-11 pointer-coarse:py-2.5",
-              bare
-                ? "gap-2 px-1.5 py-1.5 text-og-sm text-og-fg-muted"
-                : "-mx-2 gap-2.5 px-2 py-1.5 text-og-base text-og-fg-muted",
-              // A failed fold keeps its red accent (glyph + inline reason below) and a
-              // faint red hover wash so attention still lands there; every other
-              // outcome gets the neutral surface hover.
-              outcome === "failed"
-                ? "hover:bg-og-status-failed/[0.06] hover:text-og-fg"
-                : "hover:bg-og-surface-1 hover:text-og-fg",
-              liveShell && "text-og-fg-subtle",
-              // Phones hide the hint, so keep the copy control clear of the separator.
-              status && copyable && "max-sm:pr-10",
-            )}
-          >
-            {/* Disclosure grammar matches the rows: chevron leads (far left), then any
-            exceptional or active state, then the facets — one expand affordance
-            side everywhere. */}
-            <ChevronRightIcon
-              className={cn(
-                "size-3.5 shrink-0 text-og-fg-subtle transition-transform ease-og-in-out group-data-[state=open]:rotate-90",
-                settlePhase
-                  ? "duration-[var(--_og-duration-disclose-settle)]"
-                  : "duration-[var(--_og-duration-disclose)]",
-              )}
-            />
-            {/* Completion is the quiet default and needs no repeated glyph. Failed,
-            cancelled, and still-running folds retain a visible state marker. */}
-            {status ||
-            outcome === "complete" ||
-            (!outcome && (liveHeader || context.settled)) ? null : (
-              <span
-                className={cn(
-                  "inline-flex shrink-0 items-center justify-center",
-                  bare ? "size-3.5" : "size-5",
-                  outcome === "failed" ? "text-og-status-failed" : "text-og-fg-subtle",
-                )}
-              >
-                {outcome === "failed" ? (
-                  <TriangleAlertIcon className="size-3" />
-                ) : outcome === "cancelled" ? (
-                  <CircleSlashIcon className="size-3" />
-                ) : (
-                  <span className="size-1.5 animate-og-pulse rounded-full bg-og-fg-subtle" />
-                )}
-              </span>
-            )}
-            <span
-              className={cn(
-                "min-w-0 truncate",
-                status?.kind === "worked" ? "shrink" : "flex-1",
-                bare ? "text-og-sm" : "text-og-fg-muted",
-              )}
+          {expandable ? (
+            <Collapsible.Trigger
+              data-og-work-header={bare ? "nested" : "outer"}
+              className={headerClassName}
             >
-              {statusLine}
-              {liveHeader && !open && !status
-                ? liveHeader
-                : facets.map(({ facet, result }, index) => (
-                    <FacetRenderBoundary key={facet.id}>
-                      <>
-                        {index > 0 || statusLine ? " · " : null}
-                        <span aria-label={result.ariaLabel} title={result.title}>
-                          {result.icon ? (
-                            <span aria-hidden className="mr-1 inline-flex align-[-0.125em]">
-                              {result.icon}
-                            </span>
-                          ) : null}
-                          {result.content}
-                        </span>
-                      </>
-                    </FacetRenderBoundary>
-                  ))}
-              {outcome === "failed" && failureText ? (
-                <span className="text-og-status-failed"> · {failureText}</span>
-              ) : null}
-              {outcome === "cancelled" ? (
-                <span className="text-og-fg-subtle"> · interrupted</span>
-              ) : null}
-            </span>
-            {/* A settled exchange reads as a separator above its answer. */}
-            {status?.kind === "worked" ? (
-              <span aria-hidden className="ml-1 h-px min-w-0 flex-1 bg-og-border" />
-            ) : null}
-            {status && status.kind !== "worked" && (contextCompactionCount ?? 0) > 0 ? (
-              <ShrinkIcon
-                className="size-3.5 shrink-0"
-                aria-label="Context compacted; expand for details"
-              />
-            ) : null}
-          </Collapsible.Trigger>
+              {headerContent}
+            </Collapsible.Trigger>
+          ) : (
+            // Nothing to reveal: a plain status row, not a disclosure control.
+            <div data-og-work-header={bare ? "nested" : "outer"} className={headerClassName}>
+              {headerContent}
+            </div>
+          )}
+          {status?.guidance ? (
+            // Guidance the reader needs stays visible in both fold states.
+            <div data-og-exchange-guidance="" className="min-w-0 pb-1 pl-6">
+              {status.guidance}
+            </div>
+          ) : null}
           {status && !open && status.preview ? (
             // Readable progress under the status line; the line above stays
             // the one disclosure control, so a click here is a mouse shortcut.
             <div
               data-og-exchange-preview=""
-              className="flex min-w-0 cursor-pointer flex-col gap-0.5 pb-1 pl-6"
-              onClick={() => onOpenChange(true)}
+              className={cn(
+                "flex min-w-0 flex-col gap-0.5 pb-1 pl-6",
+                expandable && "cursor-pointer",
+              )}
+              onClick={expandable ? () => onOpenChange(true) : undefined}
             >
               {status.preview ? <div className="min-w-0">{status.preview}</div> : null}
             </div>
           ) : null}
-          <Collapsible.Content
-            {...(nestSuppressLatch ? { forceMount: true as const } : {})}
-            data-og-fold-content=""
-            className={cn(
-              "overflow-hidden",
-              expandReady && "data-[state=open]:animate-og-expand",
-              // Auto-close: slow settle. Manual close (settlePhase cleared): fast.
-              settlePhase
-                ? "data-[state=closed]:animate-og-settle-collapse"
-                : "data-[state=closed]:animate-og-collapse",
-            )}
-          >
-            {/* A nested node indents its revealed rows under the glyph (thread nesting
+          {expandable ? (
+            <Collapsible.Content
+              {...(nestSuppressLatch ? { forceMount: true as const } : {})}
+              data-og-fold-content=""
+              className={cn(
+                "overflow-hidden",
+                expandReady && "data-[state=open]:animate-og-expand",
+                // Auto-close: slow settle. Manual close (settlePhase cleared): fast.
+                settlePhase
+                  ? "data-[state=closed]:animate-og-settle-collapse"
+                  : "data-[state=closed]:animate-og-collapse",
+              )}
+            >
+              {/* A nested node indents its revealed rows under the glyph (thread nesting
             off the parent rail); the top-level turn body owns its own rail. */}
-            <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
-          </Collapsible.Content>
+              <div className={bare ? "pt-1 pl-5" : "pt-2"}>{children}</div>
+            </Collapsible.Content>
+          ) : null}
         </Collapsible.Root>
         {copyable ? (
           <div className="pointer-events-none absolute top-1.5 right-0 z-10">
             <div className="pointer-events-auto">
-              <CopyButton text={copyText!} label="Copy turn" reveal="group-hover" />
+              <CopyButton
+                text={copyText!}
+                label={t("timeline.turnSummary.copyTurn")}
+                reveal="group-hover"
+              />
             </div>
           </div>
         ) : null}
@@ -536,17 +594,21 @@ export function TurnSummary({
  * "Working · 2m 14s", "Waiting for 2 agents · 3m 5s", or "Worked for 4m 10s";
  * null when a settled span is too short to state.
  */
-function turnSummaryStatusLine(status: TurnSummaryStatus): ReactNode {
+function turnSummaryStatusLine(t: OpenGeniText, status: TurnSummaryStatus): ReactNode {
   if (status.kind === "worked") {
     return status.durationMs !== undefined &&
       Number.isFinite(status.durationMs) &&
       status.durationMs >= 1000 ? (
       <span data-og-exchange-status="worked">
-        {status.label ?? "Worked for"} {formatElapsed(status.durationMs)}
+        {status.label ?? t("timeline.turnSummary.workedFor")} {formatElapsed(t, status.durationMs)}
       </span>
     ) : null;
   }
-  const label = status.label ?? (status.kind === "working" ? "Working" : "Waiting");
+  const label =
+    status.label ??
+    (status.kind === "working"
+      ? t("timeline.turnSummary.working")
+      : t("timeline.turnSummary.waiting"));
   return (
     <span data-og-exchange-status={status.kind}>
       <span className={status.kind === "working" ? "og-shimmer-text" : undefined}>{label}</span>
@@ -557,6 +619,7 @@ function turnSummaryStatusLine(status: TurnSummaryStatus): ReactNode {
 
 /** A second-resolution clock; unmounts with the live row. */
 function LiveElapsed({ since }: { since: string }) {
+  const t = useOpenGeniText();
   const startedAt = Date.parse(since);
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -565,7 +628,7 @@ function LiveElapsed({ since }: { since: string }) {
   }, []);
   if (!Number.isFinite(startedAt)) return null;
   return (
-    <span className="tabular-nums">{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</span>
+    <span className="tabular-nums">{` · ${formatElapsed(t, Math.max(0, now - startedAt))}`}</span>
   );
 }
 

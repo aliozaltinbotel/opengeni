@@ -34,9 +34,19 @@ export const subscriptionConnections = pgTable(
     refreshGeneration: bigint("refresh_generation", { mode: "number" }).notNull().default(1),
     version: integer("version").notNull().default(1),
     status: text("status").notNull().default("active"),
+    /** Irreversible local secret removal; retained rows are nonsecret history. */
+    disconnectedAt: timestamp("disconnected_at", { withTimezone: true }),
     lastError: text("last_error"),
+    /** When a time-bound health quarantine (status error) ends. */
+    healthRetryAt: timestamp("health_retry_at", { withTimezone: true }),
+    extraCreditsEnabled: boolean("extra_credits_enabled").notNull().default(false),
+    extraCreditsVersion: integer("extra_credits_version").notNull().default(1),
+    extraCreditsUpdatedBySubjectId: text("extra_credits_updated_by_subject_id"),
+    extraCreditsUpdatedAt: timestamp("extra_credits_updated_at", { withTimezone: true }),
     allocatorEnabled: boolean("allocator_enabled").notNull().default(true),
     allocatorVersion: integer("allocator_version").notNull().default(1),
+    /** Optimistic-concurrency version of the models and workspaces it serves. */
+    accessVersion: integer("access_version").notNull().default(1),
     excludedModels: text("excluded_models").array().notNull().default([]),
     allowedModelIds: text("allowed_model_ids").array(),
     ownership: text("ownership").notNull().default("shared"),
@@ -50,6 +60,8 @@ export const subscriptionConnections = pgTable(
     allowPersonalWorkspaces: boolean("allow_personal_workspaces").notNull().default(true),
     managedByWorkspaceId: uuid("managed_by_workspace_id"),
     providerState: jsonb("provider_state").notNull().default({}),
+    /** The signed-in person within the upstream account (M3 PR 3b, 0688). */
+    providerSubjectId: text("provider_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -59,6 +71,7 @@ export const subscriptionConnections = pgTable(
         table.accountId,
         table.provider,
         table.providerAccountId,
+        sql`coalesce(${table.providerSubjectId}, '')`,
         sql`coalesce(${table.ownerOrganizationMembershipId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
       )
       .where(sql`${table.providerAccountId} is not null`),
@@ -85,6 +98,12 @@ export const subscriptionConnections = pgTable(
     providerValid: check(
       "subscription_connections_provider_chk",
       sql`${table.provider} in ('codex', 'claude', 'xai')`,
+    ),
+    disconnectedSecret: check(
+      "subscription_disconnected_secret_chk",
+      sql`${table.disconnectedAt} is null or (${table.status} = 'disabled'
+        and ${table.credentialEncrypted} = '' and ${table.providerAccountId} is null
+        and not ${table.allocatorEnabled})`,
     ),
   }),
 );
@@ -187,6 +206,10 @@ export const subscriptionConnectionQuota = pgTable("subscription_connection_quot
   selectionCount: bigint("selection_count", { mode: "number" }).notNull().default(0),
   lastSelectedAt: timestamp("last_selected_at", { withTimezone: true }),
   observedRefreshGeneration: bigint("observed_refresh_generation", { mode: "number" }),
+  modelCatalogSlugs: text("model_catalog_slugs").array(),
+  modelCatalogRefreshGeneration: bigint("model_catalog_refresh_generation", { mode: "number" }),
+  modelCatalogObservedAt: timestamp("model_catalog_observed_at", { withTimezone: true }),
+  modelCatalogExpiresAt: timestamp("model_catalog_expires_at", { withTimezone: true }),
   revision: bigint("revision", { mode: "number" }).notNull().default(1),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
@@ -251,7 +274,13 @@ export const subscriptionSessionBindings = pgTable(
     version: bigint("version", { mode: "number" }).notNull().default(1),
   },
   (table) => ({
-    identity: primaryKey({ columns: [table.workspaceId, table.sessionId] }),
+    // One binding per session and provider (0733, D-32).
+    identity: primaryKey({ columns: [table.workspaceId, table.sessionId, table.provider] }),
+    // Rolling window of 0733 only; the next drained provider cutover drops it.
+    rollingSession: uniqueIndex("subscription_session_bindings_rolling_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+    ),
     placement: index("subscription_session_bindings_connection_idx").on(
       table.accountId,
       table.provider,
@@ -292,6 +321,11 @@ export const subscriptionOperationLeases = pgTable(
     operationId: uuid("operation_id").notNull(),
     attemptId: uuid("attempt_id").notNull(),
     operationKind: text("operation_kind").notNull(),
+    requestId: text("request_id"),
+    transportAttempt: integer("transport_attempt"),
+    requestReservedAt: timestamp("request_reserved_at", { withTimezone: true }),
+    requestOutcome: text("request_outcome"),
+    requestObservedAt: timestamp("request_observed_at", { withTimezone: true }),
     sessionId: uuid("session_id"),
     turnId: uuid("turn_id"),
     provider: text("provider").notNull(),
@@ -316,12 +350,27 @@ export const subscriptionOperationLeases = pgTable(
       .where(sql`${table.sessionId} is not null`),
     operationKindValid: check(
       "subscription_operation_leases_kind_chk",
-      sql`${table.operationKind} in ('image', 'realtime', 'transcription')`,
+      sql`${table.operationKind} in ('image', 'video', 'realtime', 'transcription', 'model', 'credential_request', 'apps', 'completion')
+        and (${table.operationKind} not in ('apps', 'completion') or ${table.provider} = 'codex')`,
+    ),
+    requestIdentity: uniqueIndex("subscription_operation_request_identity_uq")
+      .on(table.accountId, table.requestId, table.transportAttempt)
+      .where(sql`${table.requestId} is not null`),
+    requestShape: check(
+      "subscription_operation_request_shape_chk",
+      sql`(${table.requestId} is null and ${table.transportAttempt} is null
+        and ${table.requestReservedAt} is null and ${table.requestOutcome} is null
+        and ${table.requestObservedAt} is null)
+        or (${table.requestId} is not null and ${table.transportAttempt} is not null
+          and ${table.requestOutcome} is not null and length(${table.requestId}) between 1 and 512
+          and ${table.transportAttempt} > 0 and ${table.requestReservedAt} is not null
+          and ${table.requestOutcome} in ('reserved', 'response_received', 'refused', 'unknown'))`,
     ),
     referenceShape: check(
       "subscription_operation_leases_reference_chk",
       sql`(${table.turnId} is null or ${table.sessionId} is not null)
-        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} = 'transcription'))`,
+        and (${table.sessionId} is not null or (${table.turnId} is null and ${table.operationKind} in ('transcription', 'credential_request', 'apps', 'completion')))
+        and (${table.operationKind} <> 'model' or ${table.turnId} is not null)`,
     ),
   }),
 );
@@ -335,6 +384,8 @@ export const subscriptionCapacityWaiters = pgTable(
     sessionId: uuid("session_id").notNull(),
     turnId: uuid("turn_id").notNull(),
     provider: text("provider").notNull(),
+    /** NULL is home-only; even an empty failover-aware set needs bounded refresh. */
+    candidateProviders: text("candidate_providers").array(),
     waitReason: text("wait_reason").notNull(),
     policyHash: text("policy_hash"),
     resetKind: text("reset_kind"),
@@ -346,6 +397,10 @@ export const subscriptionCapacityWaiters = pgTable(
     observedWakeRevision: bigint("observed_wake_revision", { mode: "number" }).notNull().default(0),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }),
     blockedTurnGeneration: bigint("blocked_turn_generation", { mode: "number" }),
+    /** Goal fence for a waiting goal continuation; both or neither. */
+    goalId: uuid("goal_id"),
+    goalVersion: bigint("goal_version", { mode: "number" }),
+    lastWakeReason: text("last_wake_reason"),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -358,6 +413,16 @@ export const subscriptionCapacityWaiters = pgTable(
       table.provider,
       table.earliestResetAt,
       table.wakeRevision,
+    ),
+    candidates: index("subscription_capacity_waiters_candidates_idx").using(
+      "gin",
+      table.candidateProviders,
+    ),
+    homeScope: index("subscription_capacity_waiters_home_scope_idx").on(
+      table.accountId,
+      table.workspaceId,
+      table.provider,
+      table.sessionId,
     ),
   }),
 );

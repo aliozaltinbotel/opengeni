@@ -1,4 +1,5 @@
 import type {
+  InboxSettings,
   ListInboxResponse,
   NativePushDevice,
   NativePushRule,
@@ -10,6 +11,7 @@ import { router, usePathname } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, Linking, Platform } from "react-native";
 import { useAccount } from "@/account";
+import { appSessionPath } from "@/app-links";
 import type { SettingsSection } from "@/settings-model";
 
 /** The rules a person can turn on, in the order Settings shows them. */
@@ -39,6 +41,10 @@ export interface PushData {
 }
 
 function sessionPath(data: PushData): string {
+  // The push names its session's workspace, so the screen does not depend on
+  // the workspace switch below having landed first.
+  if (data.sessionId && data.workspaceId)
+    return appSessionPath(data.sessionId, data.workspaceId, data.sequence ?? null);
   return data.sequence
     ? `/session/${data.sessionId}?at=${data.sequence}`
     : `/session/${data.sessionId}`;
@@ -109,6 +115,9 @@ async function actOnNotification(
   );
   const question = request.questions[0];
   if (request.status !== "pending" || request.questions.length !== 1 || !question) return false;
+  // A secret is never typed into a notification: the inline reply is plain
+  // text, so the reply is dropped and the session opens on the secure card.
+  if (question.kind === "secret") return false;
   if (question.kind === "text") {
     await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
       outcome: "answered",
@@ -135,7 +144,13 @@ export async function syncInboxBadge(inbox: ListInboxResponse): Promise<void> {
   const awake = inbox.items.filter(
     (item) => item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= now,
   );
-  const count = awake.filter((item) => item.kind !== "notification" || item.unread).length;
+  const count = awake.filter(
+    (item) =>
+      item.kind === "question" ||
+      item.kind === "approval" ||
+      item.kind === "goal_paused" ||
+      item.unread,
+  ).length;
   await Notifications.setBadgeCountAsync(count).catch(() => undefined);
   const presented = await Notifications.getPresentedNotificationsAsync().catch(() => []);
   for (const notification of presented) {
@@ -178,7 +193,7 @@ async function devicePushToken(): Promise<string> {
  * registers this device with its own credential, so every account's pushes
  * arrive and sign-out stops them.
  */
-export function useNotificationSettingsSection(): SettingsSection | null {
+export function useNotificationSettingsSection(inbox: InboxSettingsState): SettingsSection | null {
   const { account, client, status } = useAccount();
   const [device, setDevice] = useState<NativePushDevice | null | undefined>(undefined);
   const [permission, setPermission] = useState<Notifications.PermissionStatus | null>(null);
@@ -270,19 +285,40 @@ export function useNotificationSettingsSection(): SettingsSection | null {
     title: "Notifications",
     footer:
       problem ??
+      inbox.problem ??
       (device
         ? "Sent to this device for sessions you start. Tap one to open the session."
         : "Get a push when a session you started needs you."),
     rows: device
-      ? NOTIFICATION_RULES.map(({ rule, title, subtitle }) => ({
-          kind: "toggle" as const,
-          id: rule,
-          title,
-          subtitle,
-          value: rules.includes(rule),
-          onChange: (on: boolean) =>
-            void save(on ? [...rules, rule] : rules.filter((each) => each !== rule)),
-        }))
+      ? NOTIFICATION_RULES.flatMap(({ rule, title, subtitle }) => [
+          {
+            kind: "toggle" as const,
+            id: rule,
+            title,
+            subtitle,
+            value: rules.includes(rule),
+            onChange: (on: boolean) =>
+              void save(on ? [...rules, rule] : rules.filter((each) => each !== rule)),
+          },
+          // Right under "Needs you": let questions and approvals break through
+          // Focus. A person-wide server setting; only iPhone has Focus levels,
+          // and a server that doesn't keep it leaves it out.
+          ...(rule === "needs_input" &&
+          rules.includes("needs_input") &&
+          Platform.OS === "ios" &&
+          typeof inbox.settings?.timeSensitiveNeedsYou === "boolean"
+            ? [
+                {
+                  kind: "toggle" as const,
+                  id: "time-sensitive-needs-you",
+                  title: "Time-sensitive",
+                  subtitle: "Questions and approvals break through Focus",
+                  value: inbox.settings.timeSensitiveNeedsYou,
+                  onChange: (on: boolean) => void inbox.change({ timeSensitiveNeedsYou: on }),
+                },
+              ]
+            : []),
+        ])
       : [
           {
             kind: "action" as const,
@@ -297,6 +333,16 @@ export function useNotificationSettingsSection(): SettingsSection | null {
 
 /** The session the person is looking at, so its own pushes stay quiet. */
 let visibleSessionId: string | null = null;
+
+// Tapped notifications are handled once for the app's life. Switching account
+// remounts everything under the account's environment, this router included,
+// so this memory lives outside it: otherwise each remount replays the last
+// tapped notification, opening an unrelated session and switching back to the
+// account that notification belonged to.
+const handledResponses = new Set<string>();
+let launchResponseHandled = false;
+/** A tapped notification waiting for its account to finish switching in. */
+let pendingOpen: { accountId: string; data: PushData } | null = null;
 
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
@@ -319,7 +365,6 @@ Notifications.setNotificationHandler({
 export function NotificationRouting() {
   const { accounts, account, status, switchAccount, setWorkspaceId, client } = useAccount();
   const pathname = usePathname();
-  const pending = useRef<{ accountId: string; data: PushData } | null>(null);
   visibleSessionId = pathname.startsWith("/session/") ? pathname.slice("/session/".length) : null;
 
   const open = useCallback(
@@ -329,7 +374,7 @@ export function NotificationRouting() {
         ? accounts.find((each) => each.subjectId === data.subjectId && !each.signedOut)
         : account;
       if (owner && owner.id !== account?.id) {
-        pending.current = { accountId: owner.id, data };
+        pendingOpen = { accountId: owner.id, data };
         switchAccount(owner.id);
         return;
       }
@@ -341,28 +386,28 @@ export function NotificationRouting() {
 
   // After an account switch for a tapped notification, finish opening it.
   useEffect(() => {
-    const target = pending.current;
+    const target = pendingOpen;
     if (!target || status !== "ready" || account?.id !== target.accountId) return;
-    pending.current = null;
+    pendingOpen = null;
     const data = target.data;
     if (data.workspaceId) setWorkspaceId(data.workspaceId);
     router.push(sessionPath(data));
   }, [account?.id, setWorkspaceId, status]);
 
-  // Each tapped notification opens once: one subscription for the app's life
-  // (a new subscription can replay the last response), reading the latest
-  // account state through a ref.
+  // Each tapped notification opens once (a new subscription can replay the
+  // last response), reading the latest account state through a ref.
   const openRef = useRef(open);
   openRef.current = open;
   const clientRef = useRef(client);
   clientRef.current = client;
-  const handled = useRef(new Set<string>());
   const respond = useCallback((response: Notifications.NotificationResponse) => {
     const id = response.notification.request.identifier;
     const action = response.actionIdentifier;
     const key = `${id}:${action}`;
-    if (handled.current.has(key)) return;
-    handled.current.add(key);
+    if (handledResponses.has(key)) return;
+    handledResponses.add(key);
+    // Nothing should open this tap again: not a later launch, not a remount.
+    Notifications.clearLastNotificationResponse();
     const data = response.notification.request.content.data as PushData;
     if (action === APPROVE_ACTION || action === DENY_ACTION || action === REPLY_ACTION) {
       // Settled from the notification: confirm quietly, or open the session when
@@ -387,10 +432,9 @@ export function NotificationRouting() {
     return () => subscription.remove();
   }, [respond]);
 
-  const handledLaunch = useRef(false);
   useEffect(() => {
-    if (handledLaunch.current || status !== "ready") return;
-    handledLaunch.current = true;
+    if (launchResponseHandled || status !== "ready") return;
+    launchResponseHandled = true;
     void Notifications.getLastNotificationResponseAsync().then((response) => {
       if (response) respond(response);
     });
@@ -439,4 +483,207 @@ export function NotificationRouting() {
   }, [client, status]);
 
   return null;
+}
+
+/** The active account's inbox settings, shared by the Notifications and Inbox sections. */
+export interface InboxSettingsState {
+  settings: InboxSettings | null;
+  /** Why the last change couldn't be saved. */
+  problem: string | null;
+  change: (next: Partial<InboxSettings>) => Promise<void>;
+}
+
+/** Loads the active account's inbox settings and saves changes to them. */
+export function useInboxSettings(): InboxSettingsState {
+  const { account, client, status } = useAccount();
+  const [settings, setSettings] = useState<InboxSettings | null>(null);
+  const [problem, setProblem] = useState<string | null>(null);
+  useEffect(() => {
+    if (status !== "ready") return;
+    let live = true;
+    client
+      .getInboxSettings()
+      .then((next) => {
+        if (live) setSettings(next);
+      })
+      .catch(() => {
+        if (live) setSettings(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [client, status, account?.id]);
+  const change = useCallback(
+    async (next: Partial<InboxSettings>) => {
+      if (!settings) return;
+      const previous = settings;
+      const wanted = { ...settings, ...next };
+      setSettings(wanted);
+      setProblem(null);
+      try {
+        setSettings(await client.updateInboxSettings(wanted));
+      } catch {
+        setSettings(previous);
+        setProblem("That setting couldn't be saved. Try again.");
+      }
+    },
+    [client, settings],
+  );
+  return { settings: status === "ready" ? settings : null, problem, change };
+}
+
+/**
+ * The Inbox sections of Settings: what besides questions, approvals and agents'
+ * notes the active account's inbox keeps, and what agents may do there. The
+ * same settings as the web Inbox page.
+ */
+export function inboxSettingsSections({
+  settings,
+  problem,
+  change,
+}: InboxSettingsState): SettingsSection[] {
+  // A server that doesn't know these settings yet leaves them out: show only what it keeps.
+  const supportsReplies = typeof settings?.replies === "boolean";
+  const supportsPausedGoals = typeof settings?.pausedGoals === "boolean";
+  if (!settings) return [];
+  const agentAccess: { id: InboxSettings["tidyPolicy"]; title: string; subtitle: string }[] = [
+    {
+      id: "own_sessions",
+      title: "Clear their own notes",
+      subtitle: "Or notes from agents they started",
+    },
+    { id: "any_agent", title: "Tidy any agent's notes", subtitle: "Clear notes that are done" },
+    {
+      id: "full_access",
+      title: "Full access",
+      subtitle: "See everything, snooze and clear it",
+    },
+  ];
+  const agents: SettingsSection = {
+    id: "inbox-agents",
+    title: "What agents can do in your inbox",
+    footer:
+      problem ??
+      "Agents never answer or approve for you. With full access, ask any agent to catch you up on your inbox and clear what's done.",
+    rows: agentAccess.map((each) => ({
+      kind: "choice" as const,
+      id: `inbox-agents-${each.id}`,
+      title: each.title,
+      subtitle: each.subtitle,
+      selected: settings.tidyPolicy === each.id,
+      onPress: () => void change({ tidyPolicy: each.id }),
+    })),
+  };
+  if (!supportsReplies && !supportsPausedGoals) return [agents];
+  const inbox: SettingsSection = {
+    id: "inbox",
+    title: "Inbox",
+    footer:
+      "Questions, approvals and agents' notes always reach your inbox. Replies stay until you swipe them away.",
+    rows: [
+      ...(supportsReplies
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "replies",
+              title: "Replies",
+              subtitle: "Each session's latest reply",
+              value: settings.replies ?? false,
+              onChange: (on: boolean) => void change({ replies: on }),
+            },
+          ]
+        : []),
+      ...(supportsPausedGoals
+        ? [
+            {
+              kind: "toggle" as const,
+              id: "paused-goals",
+              title: "Paused goals",
+              subtitle: "When an agent pauses a goal",
+              value: settings.pausedGoals ?? false,
+              onChange: (on: boolean) => void change({ pausedGoals: on }),
+            },
+          ]
+        : []),
+    ],
+  };
+  // A save problem shows under the last section, just below what was changed.
+  return [inbox, agents];
+}
+
+/**
+ * Looking at a session reads its replies and agent notes in the inbox (they
+ * stay there until cleared). Needs-you items are untouched: those leave only
+ * when answered.
+ */
+export async function markSessionInboxRead(
+  client: OpenGeniClient,
+  sessionId: string,
+): Promise<void> {
+  const inbox = await client.listInbox().catch(() => null);
+  if (!inbox) return;
+  const unread = inbox.items.filter(
+    (item) =>
+      item.sessionId === sessionId &&
+      item.unread &&
+      (item.kind === "reply" || item.kind === "notification"),
+  );
+  if (unread.length === 0) return;
+  await Promise.all(
+    unread.map((item) => client.updateInboxItem(item.id, { seen: true }).catch(() => undefined)),
+  );
+  await syncInboxBadge({
+    ...inbox,
+    items: inbox.items.map((item) =>
+      unread.some((each) => each.id === item.id) ? { ...item, unread: false } : item,
+    ),
+  });
+}
+
+/**
+ * The person's mute on a top-level session's replies: muted, its replies stop
+ * reaching the inbox and the phone, while its notifications, questions and
+ * approvals still arrive. Null where it doesn't apply or the server can't say,
+ * so the menu only offers it where it works.
+ */
+export function useSessionRepliesMute(
+  client: OpenGeniClient,
+  workspaceId: string,
+  sessionId: string,
+  topLevel: boolean,
+): { muted: boolean; toggle: () => Promise<boolean | null> } | null {
+  const [muted, setMuted] = useState<boolean | null>(null);
+  const busy = useRef(false);
+  useEffect(() => {
+    setMuted(null);
+    if (!topLevel) return;
+    let current = true;
+    client
+      .getSessionInboxMute(workspaceId, sessionId)
+      .then((value) => {
+        if (current) setMuted(value.repliesMuted);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [client, sessionId, topLevel, workspaceId]);
+  const toggle = useCallback(async () => {
+    if (muted === null || busy.current) return null;
+    busy.current = true;
+    try {
+      const value = await client.setSessionInboxMute(workspaceId, sessionId, {
+        repliesMuted: !muted,
+      });
+      setMuted(value.repliesMuted);
+      const inbox = await client.listInbox().catch(() => null);
+      if (inbox) await syncInboxBadge(inbox);
+      return value.repliesMuted;
+    } catch {
+      return null;
+    } finally {
+      busy.current = false;
+    }
+  }, [client, muted, sessionId, workspaceId]);
+  return topLevel && muted !== null ? { muted, toggle } : null;
 }

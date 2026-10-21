@@ -1,4 +1,4 @@
-import { isAnalyticsAction, type AnalyticsAction } from "./analytics-actions";
+import { isAnalyticsAction, type AnalyticsAction } from "@opengeni/react/ui/analytics-actions";
 
 /** Content-free product facts. Never derive a label from user text or request bodies. */
 export type JourneyProperties = Record<string, string | number | boolean>;
@@ -22,11 +22,13 @@ const PAGES = new Set([
   "machines",
   "files",
   "agents",
+  "secrets",
   "variable-sets",
   "environments",
   "rigs",
   "playground",
   "read-only-chats",
+  "inbox",
 ]);
 // Top-level routes outside a workspace, by exact path shape. A concrete id in
 // the path is never reported for these; everything unlisted is "other".
@@ -39,6 +41,7 @@ const TOP_LEVEL_PAGES: ReadonlyArray<readonly [RegExp, string]> = [
   [/^\/device$/, "device"],
   [/^\/connect-agent$/, "connect-agent"],
   [/^\/native-sign-in$/, "native-sign-in"],
+  [/^\/site-auth\/authorize$/, "site-auth"],
   [/^\/reset-password$/, "reset-password"],
   [/^\/setup-account$/, "setup-account"],
   [/^\/account-auth$/, "account-auth"],
@@ -72,6 +75,7 @@ const SECTIONS = new Set([
   "people",
   "recovery",
   "developer",
+  "agents",
   "files",
   "access",
   "identity",

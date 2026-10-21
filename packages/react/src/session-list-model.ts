@@ -13,6 +13,8 @@ import {
 } from "@opengeni/sdk";
 import { modelDisplayName } from "@opengeni/sdk/model-display";
 import { findPickerRow, type PickerModelRow } from "./model-policy";
+import { sessionDisplayStatus, type SessionDisplayStatus } from "./session-status-model";
+import { type OpenGeniText } from "./messages/runtime";
 
 /** A list row may be a compact page entry or a complete session response. */
 export type SessionListRow = Session | SessionListEntry;
@@ -62,12 +64,12 @@ export function resolveRenameSubmission(
 
 export type SessionRecencyGroup = "today" | "yesterday" | "previous7" | "older";
 
-export const SESSION_GROUP_LABELS: Record<SessionRecencyGroup, string> = {
-  today: "Today",
-  yesterday: "Yesterday",
-  previous7: "Previous 7 days",
-  older: "Older",
-};
+export const SESSION_GROUP_LABELS = (t: OpenGeniText): Record<SessionRecencyGroup, string> => ({
+  today: t("sessionListModel.today"),
+  yesterday: t("sessionListModel.yesterday"),
+  previous7: t("sessionListModel.previous7Days"),
+  older: t("sessionListModel.older"),
+});
 
 /** The render order of recency groups, top → bottom. */
 export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
@@ -150,6 +152,54 @@ export function partitionPinnedSessions<T extends SessionListRow>(
   return { pinned: pinned.sort(compareSessionPins), ordinary };
 }
 
+/** A pin-aware list as the session page returns it: the person's pins, then ordinary rows. */
+export type PinnedSessionLists<T extends SessionListRow> = {
+  pinned: T[];
+  sessions: T[];
+};
+
+/** The personal pin fields a pin change or a newer read carries. */
+export type SessionPinProjection = Pick<Session, "id"> &
+  Partial<Pick<Session, "pinned" | "pinnedAt" | "pinVersion">>;
+
+/**
+ * Apply one session's pin state to a pin-aware list: the row moves between the
+ * pinned section (newest pin first) and the ordinary rows (newest activity
+ * first). Pin revisions are monotonic, so a projection older than the row
+ * already shown (a slow response after a newer change) leaves the lists as
+ * they are, unless it is `authoritative` (a fresh read after a failed change,
+ * which replaces an optimistic revision). A session in neither list is left out.
+ */
+export function applySessionPinToLists<T extends SessionListRow>(
+  lists: PinnedSessionLists<T>,
+  projection: SessionPinProjection,
+  options: { authoritative?: boolean } = {},
+): PinnedSessionLists<T> {
+  const current =
+    lists.pinned.find((row) => row.id === projection.id) ??
+    lists.sessions.find((row) => row.id === projection.id);
+  if (!current) return lists;
+  const pinVersion = projection.pinVersion ?? current.pinVersion ?? 0;
+  if (!options.authoritative && pinVersion < (current.pinVersion ?? 0)) return lists;
+  const pinned = Boolean(projection.pinned);
+  const next = {
+    ...current,
+    pinned,
+    pinnedAt: pinned ? (projection.pinnedAt ?? current.pinnedAt ?? null) : null,
+    pinVersion,
+  } as T;
+  const others = (rows: T[]) => rows.filter((row) => row.id !== projection.id);
+  return pinned
+    ? {
+        pinned: [...others(lists.pinned), next].sort(compareSessionPins),
+        sessions: others(lists.sessions),
+      }
+    : {
+        pinned: others(lists.pinned),
+        sessions: [...others(lists.sessions), next].sort(compareSessionActivity),
+      };
+}
+
 /**
  * Which recency bucket a timestamp falls into, relative to `now`. "Today" and
  * "Yesterday" are calendar-local; "Previous 7 days" is the rest of the trailing
@@ -191,6 +241,7 @@ export type GroupedSessions<T extends SessionListRow = SessionListRow> = {
  * within each bucket. Empty groups are dropped.
  */
 export function groupSessionsForRail<T extends SessionListRow>(
+  t: OpenGeniText,
   sessions: T[],
   now: Date = new Date(),
 ): GroupedSessions<T> {
@@ -213,7 +264,7 @@ export function groupSessionsForRail<T extends SessionListRow>(
     if (list && list.length > 0) {
       grouped.push({
         group,
-        label: SESSION_GROUP_LABELS[group],
+        label: SESSION_GROUP_LABELS(t)[group],
         sessions: list,
       });
     }
@@ -221,7 +272,7 @@ export function groupSessionsForRail<T extends SessionListRow>(
   return { running, grouped };
 }
 
-export function relativeTimeLabel(value: string, now: Date = new Date()): string {
+export function relativeTimeLabel(t: OpenGeniText, value: string, now: Date = new Date()): string {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) {
     return "";
@@ -242,7 +293,7 @@ export function relativeTimeLabel(value: string, now: Date = new Date()): string
   if (days < 7) {
     return `${days}d`;
   }
-  return new Date(timestamp).toLocaleDateString(undefined, {
+  return new Date(timestamp).toLocaleDateString(t.locale, {
     month: "short",
     day: "numeric",
   });
@@ -255,12 +306,13 @@ export function isCodexProductModel(modelId: string): boolean {
 
 export type SessionStatusTone = "queued" | "running" | "waiting" | "idle" | "failed" | "cancelled";
 
-export const SESSION_STATUS_TONE: Record<SessionStatus, SessionStatusTone> = {
+export const SESSION_STATUS_TONE: Record<SessionDisplayStatus, SessionStatusTone> = {
   queued: "queued",
   running: "running",
   recovering: "running",
   waiting_capacity: "waiting",
   requires_action: "waiting",
+  blocked: "failed",
   idle: "idle",
   failed: "failed",
   cancelled: "cancelled",
@@ -268,11 +320,11 @@ export const SESSION_STATUS_TONE: Record<SessionStatus, SessionStatusTone> = {
 
 /** The status dot of a recent-session row: a background command reads as running. */
 export function recentSessionStatus(
-  session: Pick<SessionListRow, "status" | "backgroundCommandActivity">,
+  session: Pick<SessionListRow, "status" | "backgroundCommandActivity" | "admissionBlock">,
 ): { tone: SessionStatusTone; pulse: boolean } {
   const hasBackgroundCommand = session.backgroundCommandActivity !== undefined;
   return {
-    tone: hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[session.status],
+    tone: hasBackgroundCommand ? "running" : SESSION_STATUS_TONE[sessionDisplayStatus(session)],
     pulse: hasBackgroundCommand || session.status === "running",
   };
 }
@@ -314,6 +366,7 @@ export function recentSessionModelPresentation<TCatalog extends ClientModel>(
  * its pins are removed before recombining the explicit pinned section.
  */
 export function recentSessionsForHome<T extends SessionListRow>(
+  t: OpenGeniText,
   sessions: T[],
   pinned: T[],
   limit = 6,
@@ -323,7 +376,7 @@ export function recentSessionsForHome<T extends SessionListRow>(
   // many sub-agents they would otherwise take every slot (they run often) and
   // push the person's own conversations out of the list.
   const ordinary = sessions.filter((session) => !session.pinned && !session.parentSessionId);
-  const { running, grouped } = groupSessionsForRail(ordinary, now);
+  const { running, grouped } = groupSessionsForRail(t, ordinary, now);
   const topLevelPinned = pinned.filter((session) => !session.parentSessionId);
   return [...topLevelPinned, ...running, ...grouped.flatMap((bucket) => bucket.sessions)].slice(
     0,

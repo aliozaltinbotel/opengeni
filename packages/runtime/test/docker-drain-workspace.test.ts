@@ -8,6 +8,7 @@ import {
   mkdirSync,
   chmodSync,
   symlinkSync,
+  existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -180,6 +181,43 @@ test("protected receipt captures preserved workspace after exact container disap
   expect(nativeCalls.some((x) => ["run", "exec", "network", "rm"].includes(x[0]!))).toBe(false);
 });
 
+test("ownership of a container live across an image upgrade is proved against its own image", async () => {
+  // Like the SDK, the reuse check falls back to the client's configured image
+  // and ports, which the upgrade changed.
+  const proofs: unknown[] = [];
+  const upgraded = {
+    async canReusePreservedOwnedSession(
+      candidate: { image: string; configuredExposedPorts?: number[] },
+      options?: { clientOptions?: { image?: string; exposedPorts?: number[] } },
+    ) {
+      proofs.push(options?.clientOptions);
+      return (
+        (options?.clientOptions?.image ?? "upgraded-image") === candidate.image &&
+        JSON.stringify(options?.clientOptions?.exposedPorts ?? [8080]) ===
+          JSON.stringify(candidate.configuredExposedPorts ?? [])
+      );
+    },
+  };
+  const live = state();
+  rememberOwnedDockerSdkState(live as never);
+  expect(await serializeDockerOwnership(upgraded as never, live as never, probe)).toHaveProperty(
+    "opengeniDockerWorkspaceOwnership",
+  );
+  const legacy = state();
+  const handle = await attachDockerWorkspaceForDrain(
+    upgraded as never,
+    legacy as never,
+    captureFence,
+    probe,
+  );
+  expect(handle.state.workspaceRootPath).toBe(root);
+  expect(proofs).toEqual([
+    { image: "fixture-image", exposedPorts: [] },
+    { image: "fixture-image", exposedPorts: [] },
+    { image: "fixture-image", exposedPorts: [] },
+  ]);
+});
+
 test.each(["daemon", "foreign", "inode", "mode", "symlink"])(
   "protected receipt rejects %s drift before content capture",
   async (kind) => {
@@ -239,22 +277,119 @@ test("descriptor codec checks exact uid/gid/inode before inventory and survives 
   }
 });
 
-test("teardown vetoes unpublished capture and preserves workspace after published exact removal", async () => {
+test("teardown vetoes unpublished capture and releases the workspace after published exact removal", async () => {
   const { restored } = await recordedState();
-  let published = false;
-  const handle = await attachDockerWorkspaceForDrain(
+  // The Go toolchain writes its module cache read-only (0555 directories).
+  const modules = join(root, "go", "pkg", "mod", "example.com", "mod@v1.0.0");
+  mkdirSync(modules, { recursive: true });
+  writeFileSync(join(modules, "go.mod"), "module example.com/mod");
+  for (const directory of [modules, join(root, "go", "pkg", "mod"), join(root, "go")])
+    chmodSync(directory, 0o555);
+  // A link inside the workspace is removed as a link, never followed.
+  const outside = mkdtempSync(join(tmpdir(), "opengeni-docker-drain-outside-"));
+  writeFileSync(join(outside, "keep.txt"), "outside bytes");
+  symlinkSync(outside, join(root, "outside-link"));
+  try {
+    let published = false;
+    const handle = await attachDockerWorkspaceForDrain(
+      client as never,
+      restored as never,
+      async () => ({ archivePublished: published }),
+      probe,
+    );
+    await expect(handle.delete()).rejects.toThrow("not durably published");
+    expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
+    expect(handle.hostWorkspaceRelease).toBeNull();
+    expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
+    published = true;
+    await handle.delete();
+    expect(nativeCalls.filter((x) => x[0] === "rm")).toEqual([["rm", "-f", cid]]);
+    expect(handle.hostWorkspaceRelease).toEqual({ status: "released" });
+    expect(existsSync(root)).toBe(false);
+    expect(readFileSync(join(outside, "keep.txt"), "utf8")).toBe("outside bytes");
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("a retry of the same published drain after release completes without recapture", async () => {
+  const { restored, original, serialized } = await recordedState();
+  const fence = async () => ({ archivePublished: true });
+  const first = await attachDockerWorkspaceForDrain(
     client as never,
     restored as never,
-    async () => ({ archivePublished: published }),
+    fence,
     probe,
   );
-  await expect(handle.delete()).rejects.toThrow("not durably published");
-  expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
-  published = true;
+  await first.delete();
+  expect(existsSync(root)).toBe(false);
+  // The worker died before the cold commit; the retry deserializes the same
+  // protected envelope again.
+  const retried = { ...original };
+  rememberSerializedDockerOwnership(retried as never, { ...original, ...serialized });
+  nativeCalls.length = 0;
+  const handle = await attachDockerWorkspaceForDrain(
+    client as never,
+    retried as never,
+    fence,
+    probe,
+  );
+  await expect(handle.persistWorkspace()).rejects.toThrow("already released");
+  await expect(handle.assertWorkspaceCaptureAuthority()).rejects.toThrow("already released");
   await handle.delete();
-  expect(nativeCalls.filter((x) => x[0] === "rm")).toEqual([["rm", "-f", cid]]);
-  expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
+  expect(handle.hostWorkspaceRelease).toEqual({ status: "already_released" });
+  expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
 });
+
+test.each(["unpublished", "container"])(
+  "a missing root is never treated as released (%s)",
+  async (mode) => {
+    const { restored } = await recordedState();
+    rmSync(root, { recursive: true, force: true });
+    present = mode === "container";
+    const fence = async () => ({ archivePublished: mode !== "unpublished" });
+    await expect(
+      attachDockerWorkspaceForDrain(client as never, restored as never, fence, probe),
+    ).rejects.toThrow(
+      mode === "unpublished" ? "missing before durable publication" : "exact container exists",
+    );
+  },
+);
+
+test.each(["container", "daemon", "inode", "unpublished"])(
+  "release re-proves its fence after teardown and retains the workspace on drift (%s)",
+  async (mode) => {
+    const { restored } = await recordedState();
+    let published = true;
+    const saved = root + "-original";
+    const driftingProbe = async (args: readonly string[]) => {
+      const result = await probe(args);
+      if (args[0] !== "rm") return result;
+      if (mode === "container") present = true;
+      if (mode === "daemon") daemonId = "other-daemon";
+      if (mode === "unpublished") published = false;
+      if (mode === "inode") {
+        renameSync(root, saved);
+        mkdirSync(root);
+      }
+      return result;
+    };
+    try {
+      const handle = await attachDockerWorkspaceForDrain(
+        client as never,
+        restored as never,
+        async () => ({ archivePublished: published }),
+        driftingProbe,
+      );
+      await handle.delete();
+      expect(handle.hostWorkspaceRelease).toMatchObject({ status: "retained" });
+      const kept = join(mode === "inode" ? saved : root, "preserved.txt");
+      expect(readFileSync(kept, "utf8")).toBe("actual retained bytes");
+    } finally {
+      rmSync(saved, { recursive: true, force: true });
+    }
+  },
+);
 
 test("actual reaper two EDQUOT captures create zero siblings and retain lease/data", async () => {
   const { original, serialized } = await recordedState();
@@ -352,7 +487,10 @@ test("actual reaper two EDQUOT captures create zero siblings and retain lease/da
     ).rejects.toThrow("EDQUOT");
   expect(capture).toHaveBeenCalledTimes(2);
   expect(published).toBe(0);
-  expect(stopped).toBe(0);
+  // Each attempt records the stop before it reads: a drain capture runs on a
+  // stopped container. The container is already gone here, so nothing is
+  // removed, and the workspace and lease survive both failures.
+  expect(stopped).toBe(2);
   expect(lease.instanceId).toBe(cid);
   expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
   expect(nativeCalls.some((x) => ["run", "exec", "network", "rm"].includes(x[0]!))).toBe(false);
@@ -400,10 +538,17 @@ test.each(["epoch", "capture", "writer"])(
   },
 );
 
-test.each(["success", "cas_miss", "published"])(
+test.each(["success", "cas_miss", "published", "released_retry"])(
   "actual reaper JSON/fingerprint/publication/teardown lifecycle (%s)",
   async (mode) => {
     const { original, serialized } = await recordedState();
+    if (mode === "released_retry") {
+      // A previous attempt removed the container and released the workspace,
+      // then died before the cold commit.
+      present = false;
+      rmSync(root, { recursive: true, force: true });
+    }
+    const alreadyPublished = mode === "published" || mode === "released_retry";
     const lease = {
       id: "lease",
       sandboxGroupId: uuid,
@@ -414,12 +559,12 @@ test.each(["success", "cas_miss", "published"])(
       backend: "docker",
       resumeBackendId: "docker",
       workspaceGeneration: 3,
-      archiveComplete: mode === "published",
+      archiveComplete: alreadyPublished,
       archiveCapture: {
         id: "capture",
         providerRequestId: uuid,
         workspaceGeneration: 3,
-        publishedAt: mode === "published" ? new Date() : null,
+        publishedAt: alreadyPublished ? new Date() : null,
       },
       resumeState: {
         backendId: "docker",
@@ -466,13 +611,19 @@ test.each(["success", "cas_miss", "published"])(
           readWorkspaceArchiveCapturePreflight: (async () => ({ workspaceGeneration: 3 })) as never,
         },
       );
+    const counters: Array<{ name: string; labels: Record<string, string> }> = [];
+    const observability = {
+      info() {},
+      warn() {},
+      incrementCounter: (counter: (typeof counters)[number]) => counters.push(counter),
+    };
     const result = await terminateProviderBox(
       testSettings({ sandboxBackend: "docker", sandboxOwnershipEnabled: true }),
       lease as never,
-      { info() {}, warn() {} } as never,
+      observability as never,
       async (archive, metadata) => {
         publications++;
-        if (mode === "published") throw new Error("already-published recapture forbidden");
+        if (alreadyPublished) throw new Error("already-published recapture forbidden");
         expect(archive && typeof archive === "object" && archive.kind).toBe("host_spool");
         if (!archive || typeof archive !== "object") throw new Error("wrong archive");
         const chunks: Uint8Array[] = [];
@@ -489,7 +640,7 @@ test.each(["success", "cas_miss", "published"])(
       (() => provider) as never,
       undefined,
       uuid,
-      mode === "published" ? "archive_published" : "capture_required",
+      alreadyPublished ? "archive_published" : "capture_required",
       undefined,
       true,
       undefined,
@@ -500,12 +651,26 @@ test.each(["success", "cas_miss", "published"])(
       fence,
     );
     expect(result.terminated).toBe(mode !== "cas_miss");
-    expect(publications).toBe(mode === "published" ? 0 : 1);
-    expect(stops).toBe(mode === "cas_miss" ? 0 : 1);
-    expect(capture).toHaveBeenCalledTimes(mode === "published" ? 0 : 1);
-    expect(nativeCalls.filter((x) => x[0] === "rm")).toHaveLength(mode === "cas_miss" ? 0 : 1);
+    expect(publications).toBe(alreadyPublished ? 0 : 1);
+    // A fresh capture first stops the exact container (recorded as the stop),
+    // then reads the workspace; teardown records the same idempotent stop.
+    expect(stops).toBe(mode === "success" ? 2 : 1);
+    expect(capture).toHaveBeenCalledTimes(alreadyPublished ? 0 : 1);
+    const removals = mode === "released_retry" ? 0 : 1;
+    expect(nativeCalls.filter((x) => x[0] === "rm")).toHaveLength(removals);
     expect(nativeCalls.some((x) => ["run", "exec", "network"].includes(x[0]!))).toBe(false);
-    expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
+    if (mode === "cas_miss") {
+      // A successor owns the drain: the container was already stopped for
+      // the capture, but its workspace is untouched for that successor.
+      expect(readFileSync(join(root, "preserved.txt"), "utf8")).toBe("actual retained bytes");
+      expect(counters).toEqual([]);
+    } else {
+      expect(existsSync(root)).toBe(false);
+      const status = mode === "released_retry" ? "already_released" : "released";
+      expect(counters).toMatchObject([
+        { name: "opengeni_sandbox_docker_workspace_release_total", labels: { status } },
+      ]);
+    }
   },
 );
 
@@ -703,4 +868,94 @@ test("Docker adapter forwards the exact accepted archive override to its restric
   } finally {
     attached.mockRestore();
   }
+});
+
+test("a drain stops the exact container before reading, and a retry reads the stopped workspace", async () => {
+  const { original, restored, serialized } = await recordedState();
+  const handle = await attachDockerWorkspaceForDrain(
+    client as never,
+    restored as never,
+    captureFence,
+    probe,
+  );
+  await handle.stopForCapture();
+  expect(nativeCalls.filter((x) => x[0] === "rm")).toEqual([["rm", "-f", cid]]);
+  expect(present).toBe(false);
+  // The capture fails after the stop. The next drain attempt deserializes the
+  // same durable envelope and re-attaches to the host workspace.
+  const retried = { ...original };
+  rememberSerializedDockerOwnership(retried as never, { ...original, ...serialized });
+  nativeCalls.length = 0;
+  const again = await attachDockerWorkspaceForDrain(
+    client as never,
+    retried as never,
+    captureFence,
+    probe,
+  );
+  await again.stopForCapture();
+  expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
+  const archive = await captureWorkspaceArchiveForStorage(
+    again,
+    Date.now(),
+    { requestId: uuid },
+    true,
+  );
+  try {
+    if (archive.kind !== "host_spool") throw new Error("wrong archive transport");
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of archive.spool.open()) chunks.push(chunk);
+    expect(JSON.parse(Buffer.concat(chunks).toString()).files).toEqual([
+      { path: "preserved.txt", data: Buffer.from("actual retained bytes").toString("base64") },
+    ]);
+  } finally {
+    await disposeWorkspaceArchive(archive);
+  }
+});
+
+test("only a durable ownership receipt lets a drain stop the container before reading", async () => {
+  const original = state();
+  rememberOwnedDockerSdkState(original as never);
+  // Minted in this process only: a retry after the stop could not re-attach.
+  const handle = await attachDockerWorkspaceForDrain(
+    client as never,
+    original as never,
+    captureFence,
+    probe,
+  );
+  await expect(handle.stopForCapture()).rejects.toThrow("durable ownership receipt");
+  expect(nativeCalls.some((x) => x[0] === "rm")).toBe(false);
+  expect(present).toBe(true);
+});
+
+test("drain capture is point-in-time for Modal snapshots and receipt-bearing Docker envelopes", async () => {
+  const { providerDrainCaptureIsPointInTime, providerWorkspaceCaptureIsPointInTime } =
+    await import("../src/sandbox/providers");
+  const { original, serialized } = await recordedState();
+  const docker = (providerState: Record<string, unknown>) => ({
+    backendId: "docker",
+    sessionState: { providerState },
+  });
+  expect(providerDrainCaptureIsPointInTime("docker", docker({ ...original, ...serialized }))).toBe(
+    true,
+  );
+  // A legacy envelope without the receipt keeps a running-box capture.
+  expect(providerDrainCaptureIsPointInTime("docker", docker({ ...original }))).toBe(false);
+  // Warm captures keep the container running, so they stay non-point-in-time.
+  expect(
+    providerWorkspaceCaptureIsPointInTime("docker", docker({ ...original, ...serialized })),
+  ).toBe(false);
+  const modal = (workspacePersistence?: string) => ({
+    backendId: "modal",
+    sessionState: {
+      providerState: {
+        sandboxId: "sb-1",
+        ...(workspacePersistence ? { workspacePersistence } : {}),
+      },
+    },
+  });
+  expect(providerDrainCaptureIsPointInTime("modal", modal("snapshot_directory"))).toBe(true);
+  expect(providerDrainCaptureIsPointInTime("modal", modal())).toBe(false);
+  expect(providerDrainCaptureIsPointInTime("e2b", docker({ ...original, ...serialized }))).toBe(
+    false,
+  );
 });

@@ -2,11 +2,14 @@
 
 Opengeni exposes a workspace-level Capabilities control-plane read model for external MCP/API integrations, Skills, and Plugins. Capability is a UI and discovery umbrella, not one runtime type or one generic enable/disable lifecycle.
 
-Capability, Plugin, Skill, API Integration, and Integration Facet mutations
+Capability, Plugin, API Integration, and Integration Facet mutations
 require the narrow `capabilities:manage` permission. Shared-workspace admins
 satisfy it through the existing admin wildcard; a managed human receives it
 directly for their private personal workspace without receiving the broader
 member-management or API-key-delegation powers of `workspace:admin`.
+Workspace Skill authoring, review, install, import and removal instead require
+`documents:manage`, which ordinary Members hold: workspace Skills are shared
+team content.
 
 The catalog merges:
 
@@ -19,6 +22,13 @@ The catalog merges:
 Native Opengeni product surfaces are deliberately absent from the installable catalog. The internal `opengeni`, `files`, and `docs` MCP carriers, Documents, Scheduled Tasks, GitHub repository resources, Sandbox Environments, and Sandboxes remain available through their owning runtime and product surfaces; they are never manufactured as enabled catalog rows. Agent discovery may return a separate native connection recommendation, such as GitHub owner consent, without adding that recommendation to the workspace catalog.
 
 Every catalog item includes a typed `lifecycle` projection and a bounded list of supported `actions` (`install`, `connect`, `configure`, `update`, `repair`, `disconnect`, `uninstall`, or `inspect`). The legacy `enabled` fields remain a compatibility projection while clients migrate; provenance such as `built_in` never implies lifecycle state. External configured MCPs are reported as deployment-managed and inspect-only.
+
+1Password is a built-in connection, not an imported registry row. It appears in
+the default Connections list and agent search even before an account is connected.
+Its catalog and chat setup actions open Secrets, where a person enters a service
+account token, selects ownership, and chooses vaults and their access modes.
+Chat setup opens in a new tab to preserve the conversation. It never uses generic
+MCP enablement; catalog imports and production data repairs are not required.
 
 ## Runtime Behavior
 
@@ -91,7 +101,7 @@ curl -X POST "http://127.0.0.1:8000/v1/workspaces/$WORKSPACE_ID/capabilities/mcp
   -d '{"headers":{"Authorization":"Bearer <token>"}}'
 ```
 
-The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like workspace variable set values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
+The probe runs with those headers, and on success the values are stored encrypted (AES-256-GCM under `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY`, like hosted vault values) on the installation. At runtime the worker decrypts them and sends them only to that MCP server. The API never returns header values - installation responses expose the stored header names only. Re-enabling without a `headers` field reuses the stored credentials; passing `headers` replaces them.
 
 Registry entries that declare required headers are tagged `requires-credentials` and cannot be enabled until the declared headers are supplied.
 
@@ -440,7 +450,7 @@ Uninstalled entries are not advertised in Skill search: `skill_search` returns n
 - `id` is stable (`skill:azure-verified-modules` in the catalog).
 - `metadata.libraryId`, `metadata.version`, `metadata.contentSha256`, `metadata.sourceCommit`, `metadata.sourceUrl`, `metadata.provenance`, `metadata.license`, `metadata.documentationUrl`, `metadata.compatibility`, and `metadata.upgrade` make provenance inspectable. `contentSha256` is a canonical whole-artifact digest over sorted normalized relative paths and the exact bytes of every recursively materialized regular file, not only `SKILL.md`.
 - Entries are immutable. A changed artifact is a new version and hash. The human install endpoint requires the exact reviewed version and whole-artifact hash and returns `409` if the reviewed artifact changed; the agent `library:<id>` source installs the entry's current reviewed version.
-- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach a Variable Set, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The installed Skill joins the workspace Skill index like any other workspace Skill and is read server-side through `skill_read`.
+- Installing a library Skill stores the exact files plus canonical version/hash/provenance in the normalized Plugin/Skill-Facet ledger. It does not attach vault items, credentials, MCP servers, tools, cloud permissions, tenant access, or model routing. The installed Skill joins the workspace Skill index like any other workspace Skill and is read server-side through `skill_read`.
 - Installation loads the library artifact and verifies its whole-artifact hash; a missing entry, unavailable artifact, or hash mismatch fails closed and never substitutes a different version. Turns then read the installed revision's exact files from the Skill ledger, not from the runtime library.
 
 Install the exact reviewed catalog version and hash:
@@ -741,7 +751,14 @@ Ordinary new sessions include two first-party Opengeni tools:
   Capabilities page. It returns bounded, secret-free descriptors and a live
   setup state; it never returns credential instructions, tokens, or raw catalog
   metadata. Search is deterministic, excludes untrusted registry rows, and
-  prefers exact, enabled, verified, and built-in matches. Agents should search
+  prefers exact, enabled, verified, and built-in matches. It tolerates near
+  spellings with a bounded edit-distance tier on names, provider domains, and
+  tags (ranked below exact, prefix, and substring hits and flagged
+  `approximate`), and matches workspace or operator entries without a provider
+  domain by their endpoint's registrable domain. A miss never returns a bare
+  empty result while the catalog has entries: `suggestions` lists the closest
+  names so the agent checks them before saying an integration does not exist.
+  Agents should search
   by the outcome they need (for example, `GitHub repositories`, `product
   analytics`, or `Slack notifications`) rather than guessing an MCP endpoint.
 - `capability_authorization_request` posts one `tool.auth_needed`-style card to

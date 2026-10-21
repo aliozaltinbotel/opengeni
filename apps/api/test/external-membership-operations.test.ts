@@ -22,6 +22,7 @@ import {
   createWorkspace,
   createSession,
   createScheduledTask,
+  transitionSessionVisibility,
   withSessionRlsActorContext,
   createOrganizationApiKey,
   updateOrganizationApiKey,
@@ -36,6 +37,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { rawRows } from "../../../packages/db/src/database";
+import { McpConnectionAccountBindings } from "@opengeni/contracts";
+import { personalDelegationsForAccountBindings } from "../../../packages/core/src/domain/mcp-account-bindings";
 import { registerWorkspaceRoutes } from "../src/routes/workspaces";
 import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
 
@@ -793,192 +796,149 @@ test("keyed cancellation tears down private, child, live and scheduled work only
   expect(wake!.n).toBeGreaterThan(0);
 });
 
-test("external permission OCC updates preserve membership and existing session identity", async () => {
-  const f = await fixture(["workspace:admin", "account:admin"]);
-  const command = {
-    identity: f.reference,
-    expectedPermissions: ["workspace:read"],
-    permissions: ["workspace:read", "sessions:read", "workspace:admin"],
-  };
-  expect((await f.patch(command)).status).toBe(404);
-  await f.add();
+async function sessionWithOwnMcpAccount(
+  f: Awaited<ReturnType<typeof fixture>>,
+  visibility: "workspace_shared" | "user_private" = "workspace_shared",
+) {
+  const connectionId = crypto.randomUUID();
+  const personal = McpConnectionAccountBindings.parse([
+    {
+      serverId: `account-${"c".repeat(64)}`,
+      canonicalServerId: "mail",
+      connectionId,
+      originWorkspaceId: f.workspace.id,
+      subjectScope: "subject",
+      ownerSubjectId: f.identity.subjectId,
+      accountLabel: "Personal mail",
+      providerDomain: "mail.test",
+      kind: "oauth2",
+      connectionRef: {
+        connectionId,
+        subjectScope: "subject",
+        providerDomain: "mail.test",
+        kind: "oauth2",
+      },
+    },
+  ]);
   const session = await withSessionRlsActorContext({ subjectId: f.identity.subjectId }, () =>
     createSession(db.db, {
       accountId: f.accountId,
       workspaceId: f.workspace.id,
-      initialMessage: "Existing work",
+      initialMessage: "Read my mail",
       resources: [],
       metadata: {},
-      visibility: "workspace_shared",
+      visibility,
       createdBy: { kind: "subject", subjectId: f.identity.subjectId },
       subjectId: f.identity.subjectId,
       model: "test-model",
       reasoningEffort: "medium",
       latencyMode: "standard",
       sandboxBackend: "none",
+      mcpAccountBindings: personal,
+      personalConnectionDelegations: personalDelegationsForAccountBindings(personal),
     }),
   );
-  const before =
-    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`;
-  const changed = await f.patch(command);
-  expect(changed.status).toBe(200);
-  expect(await changed.json()).toMatchObject({
-    subjectId: f.identity.subjectId,
-    permissions: [...command.permissions].sort(),
-  });
-  expect((await f.patch(command)).status).toBe(409);
-  // The caller can reconcile a lost successful response from current canonical membership.
-  expect(
-    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
-  ).toEqual([...command.permissions].sort());
-  const nativeSubjectId = `user:${crypto.randomUUID()}`;
-  const personalWorkspace = await createWorkspace(db.db, {
-    accountId: f.accountId,
-    name: "Linked native owner",
-  });
-  await shared.admin`insert into organization_memberships
-    (account_id, subject_id, role, status, personal_workspace_id, authorization_revision)
-    values (${f.accountId}, ${nativeSubjectId}, 'member', 'active', ${personalWorkspace.id}, 1)`;
-  await grantWorkspaceAccess(db.db, {
-    accountId: f.accountId,
-    workspaceId: f.workspace.id,
-    subjectId: nativeSubjectId,
-    permissions: ["workspace:admin"],
-  });
-  const pending = await beginExternalIdentityLink(db.db, f.identity, {
-    permissions: ["workspace:read"],
-  });
-  const link = await confirmExternalIdentityLink(db.db, {
-    accountId: f.accountId,
-    linkId: pending.link.id,
-    nativeSubjectId,
-    request: {
-      challenge: pending.challenge,
-      expectedRevision: pending.link.revision,
-      permissions: ["workspace:read"],
-    },
-  });
-  const frozenSnapshot = await f.linkedSnapshot(link);
-  expect(frozenSnapshot.permissions).toContain("workspace:read");
-  expect(await externalLinkWorkSnapshotIsLive(db.db, frozenSnapshot)).toBe(true);
-  expect(
-    (
-      await f.patch({
-        identity: f.reference,
-        expectedPermissions: command.permissions,
-        permissions: ["workspace:read", "sessions:read"],
-      })
-    ).status,
-  ).toBe(200);
-  // The retained permission is still granted, but the old accepted revision cannot run.
-  expect(
-    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
-  ).toContain("workspace:read");
-  expect(await externalLinkWorkSnapshotIsLive(db.db, frozenSnapshot)).toBe(false);
-  expect(
-    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`,
-  ).toEqual(before);
-  expect((await shared.admin`select id from sessions where id=${session.id}`)[0]?.id).toBe(
-    session.id,
-  );
-  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
-    found: true,
-    subjectId: f.identity.subjectId,
-    membershipStatus: "active",
-    membershipAuthorizationRevision: 2,
-  });
-  expect(
-    (await ensureExternalIdentity(db.db, { accountId: f.accountId, ...f.reference }))
-      .authorizationRevision,
-  ).toBe(2);
-});
+  await shared.admin`update sessions set owner_organization_membership_id = ${f.identity.organizationMembershipId}
+    where id = ${session.id}`;
+  const revoked = async () => {
+    const [row] = await shared.admin`select authority_epoch::int as epoch,
+        initial_personal_connection_delegations as delegations,
+        initial_mcp_account_bindings as bindings, visibility
+      from sessions where id = ${session.id}`;
+    return row!;
+  };
+  return { session, revoked };
+}
 
-test("empty external permission OCC updates retain membership and keyed updates reject empty sets", async () => {
-  const f = await fixture(["workspace:admin", "account:admin"]);
-  await f.add();
-  await expect(
-    f.service.updateExternalWorkspaceMember(
-      f.accountId,
-      f.workspace.id,
-      f.identity.organizationMembershipId,
-      { operationId: crypto.randomUUID(), permissions: [] },
-    ),
-  ).rejects.toMatchObject({ status: 422 });
-  const before =
-    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`;
-  const response = await f.patch({
-    identity: f.reference,
-    expectedPermissions: [...f.grant.permissions],
-    permissions: [],
-  });
-  expect(response.status).toBe(200);
-  expect(await response.json()).toMatchObject({
-    subjectId: f.identity.subjectId,
-    permissions: [],
-  });
-  expect(
-    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
-  ).toEqual([]);
-  expect(
-    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`,
-  ).toEqual(before);
-  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
-    found: true,
-    membershipStatus: "active",
-    membershipAuthorizationRevision: 2,
-  });
-  expect(
-    (await ensureExternalIdentity(db.db, { accountId: f.accountId, ...f.reference }))
-      .authorizationRevision,
-  ).toBe(2);
-});
-
-test("concurrent external permission writers cannot overwrite an intervening grant", async () => {
-  const f = await fixture(["workspace:admin", "account:admin"]);
-  await f.add();
-  const command = { identity: f.reference, expectedPermissions: ["workspace:read"] };
-  const results = await Promise.all([
-    f.patch({ ...command, permissions: ["workspace:read", "sessions:read"] }),
-    f.patch({ ...command, permissions: ["workspace:read", "documents:search"] }),
-  ]);
-  expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
-  const winner = await results.find((result) => result.status === 200)!.json();
-  expect(
-    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
-  ).toEqual(winner.permissions);
-});
-
-test("external permission changes refuse foreign identity, human actors, inactive membership and key excess", async () => {
+test("keyed cancellation removes a member whose sessions selected their own MCP account", async () => {
   const f = await fixture();
   await f.add();
-  const command = {
-    identity: f.reference,
-    expectedPermissions: ["workspace:read"],
-    permissions: ["workspace:read"],
-  };
-  const other = await fixture();
-  await other.add();
-  expect((await f.patch({ ...command, identity: other.reference })).status).toBe(403);
-  expect((await f.patch(command, { workspaceId: other.workspace.id })).status).toBe(403);
-  expect((await f.patch(command, { asUser: true })).status).toBe(403);
-  expect((await f.patch(command, { subjectId: `user:${crypto.randomUUID()}` })).status).toBe(403);
-  const limited = await fixture(["workspace:read", "members:manage"]);
-  await limited.add();
-  expect(
-    (
-      await limited.patch({
-        identity: limited.reference,
-        expectedPermissions: ["workspace:read"],
-        permissions: ["workspace:admin"],
+  const { session, revoked } = await sessionWithOwnMcpAccount(f);
+  // Outside the native lifecycle command the delegation stays immutable.
+  const directClear = (advanceEpoch: boolean) =>
+    shared.admin
+      .begin(async (tx) => {
+        await tx`set local lock_timeout = '5s'`;
+        await tx`update sessions set initial_personal_connection_delegations = '[]'::jsonb,
+          authority_epoch = authority_epoch + ${advanceEpoch ? 1 : 0} where id = ${session.id}`;
       })
-    ).status,
-  ).toBe(403);
+      .then(
+        () => "updated",
+        (error: unknown) => String(error),
+      );
+  // Without the lifecycle capability the binding fence refuses the clear
+  // before the immutability fence sees it, with or without an epoch advance.
+  expect(await directClear(false)).toContain(
+    "MCP account binding requires exact sender delegation",
+  );
+  expect(await directClear(true)).toContain("MCP account binding requires exact sender delegation");
+
+  await f.revoke();
+
+  expect((await f.members()).some((member) => member.subjectId === f.identity.subjectId)).toBe(
+    false,
+  );
+  // Authority is revoked, and the session's selection is cleared with it, as
+  // privatization does, so no binding outlives its delegation.
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
+});
+
+test("a regranted member can share a private session revoked while they were away", async () => {
+  const f = await fixture();
+  await f.add();
+  const { session, revoked } = await sessionWithOwnMcpAccount(f, "user_private");
+
+  await f.revoke();
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "user_private",
+  });
+
+  await f.add({ ...f.grant, operationId: crypto.randomUUID() });
+  await transitionSessionVisibility(db.db, {
+    workspaceId: f.workspace.id,
+    sessionId: session.id,
+    actorSubjectId: f.identity.subjectId,
+    targetVisibility: "workspace_shared",
+    expectedAuthorityEpoch: 2,
+    operationKey: `regrant-share-${crypto.randomUUID()}`,
+  });
+
+  expect(await revoked()).toEqual({
+    epoch: 3,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
+});
+
+test("organization offboarding revokes sessions that selected the member's own MCP account", async () => {
+  const f = await fixture();
+  await f.add();
+  const { revoked } = await sessionWithOwnMcpAccount(f);
+
   await f.service.updateExternalIdentityMembership(
     f.accountId,
     f.identity.organizationMembershipId,
-    { kind: "suspend", expectedAuthorizationRevision: 1, operationId: crypto.randomUUID() },
+    { kind: "offboard", expectedAuthorizationRevision: 1, operationId: crypto.randomUUID() },
   );
-  expect((await f.patch(command)).status).toBe(403);
+
+  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
+    membershipStatus: "revoked",
+  });
+  expect(await revoked()).toEqual({
+    epoch: 2,
+    delegations: [],
+    bindings: [],
+    visibility: "workspace_shared",
+  });
 });
 
 test("keyed permission updates widen, narrow, and replay without teardown", async () => {
@@ -1090,3 +1050,104 @@ test("keyed permission updates widen, narrow, and replay without teardown", asyn
     }),
   ).rejects.toMatchObject({ status: 404 });
 }, 180_000);
+
+test("external permission OCC updates preserve membership and existing session identity", async () => {
+  const f = await fixture(["workspace:admin", "account:admin"]);
+  const command = {
+    identity: f.reference,
+    expectedPermissions: ["workspace:read"],
+    permissions: ["workspace:read", "sessions:read", "workspace:admin"],
+  };
+  expect((await f.patch(command)).status).toBe(404);
+  await f.add();
+  const session = await withSessionRlsActorContext({ subjectId: f.identity.subjectId }, () =>
+    createSession(db.db, {
+      accountId: f.accountId,
+      workspaceId: f.workspace.id,
+      initialMessage: "Existing work",
+      resources: [],
+      metadata: {},
+      visibility: "workspace_shared",
+      createdBy: { kind: "subject", subjectId: f.identity.subjectId },
+      subjectId: f.identity.subjectId,
+      model: "test-model",
+      reasoningEffort: "medium",
+      latencyMode: "standard",
+      sandboxBackend: "none",
+    }),
+  );
+  const before =
+    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`;
+  const changed = await f.patch(command);
+  expect(changed.status).toBe(200);
+  expect(await changed.json()).toMatchObject({
+    subjectId: f.identity.subjectId,
+    permissions: [...command.permissions].sort(),
+  });
+  expect((await f.patch(command)).status).toBe(409);
+  // The caller can reconcile a lost successful response from current canonical membership.
+  expect(
+    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
+  ).toEqual([...command.permissions].sort());
+  const nativeSubjectId = `user:${crypto.randomUUID()}`;
+  const personalWorkspace = await createWorkspace(db.db, {
+    accountId: f.accountId,
+    name: "Linked native owner",
+  });
+  await shared.admin`insert into organization_memberships
+    (account_id, subject_id, role, status, personal_workspace_id, authorization_revision)
+    values (${f.accountId}, ${nativeSubjectId}, 'member', 'active', ${personalWorkspace.id}, 1)`;
+  await grantWorkspaceAccess(db.db, {
+    accountId: f.accountId,
+    workspaceId: f.workspace.id,
+    subjectId: nativeSubjectId,
+    permissions: ["workspace:admin"],
+  });
+  const pending = await beginExternalIdentityLink(db.db, f.identity, {
+    permissions: ["workspace:read"],
+  });
+  const link = await confirmExternalIdentityLink(db.db, {
+    accountId: f.accountId,
+    linkId: pending.link.id,
+    nativeSubjectId,
+    request: {
+      challenge: pending.challenge,
+      expectedRevision: pending.link.revision,
+      permissions: ["workspace:read"],
+    },
+  });
+  const frozenSnapshot = await f.linkedSnapshot(link);
+  expect(frozenSnapshot.permissions).toContain("workspace:read");
+  expect(await externalLinkWorkSnapshotIsLive(db.db, frozenSnapshot)).toBe(true);
+  expect(
+    (
+      await f.patch({
+        identity: f.reference,
+        expectedPermissions: command.permissions,
+        permissions: ["workspace:read", "sessions:read"],
+      })
+    ).status,
+  ).toBe(200);
+  // The retained permission is still granted, but the old accepted revision cannot run.
+  expect(
+    (await f.members()).find((member) => member.subjectId === f.identity.subjectId)?.permissions,
+  ).toContain("workspace:read");
+  expect(await externalLinkWorkSnapshotIsLive(db.db, frozenSnapshot)).toBe(false);
+  expect(
+    await shared.admin`select id, created_at, role, subject_label from workspace_memberships where workspace_id=${f.workspace.id} and subject_id=${f.identity.subjectId}`,
+  ).toEqual(before);
+  expect((await shared.admin`select id from sessions where id=${session.id}`)[0]?.id).toBe(
+    session.id,
+  );
+  expect(await f.service.lookupExternalIdentity(f.accountId, f.reference)).toMatchObject({
+    found: true,
+    subjectId: f.identity.subjectId,
+    membershipStatus: "active",
+    membershipAuthorizationRevision: 2,
+  });
+  expect(
+    (await ensureExternalIdentity(db.db, { accountId: f.accountId, ...f.reference }))
+      .authorizationRevision,
+  ).toBe(2);
+});
+

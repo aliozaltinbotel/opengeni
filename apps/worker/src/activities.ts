@@ -98,6 +98,7 @@ export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
 export const observeRealtimeSessionUsage = defaultControlActivities.observeRealtimeSessionUsage;
+export const reconcileSessionTitleOperation = defaultTurnActivities.reconcileSessionTitleOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const indexKnowledge = defaultControlActivities.indexKnowledge;
 export const executeKnowledgeQuery = defaultControlActivities.executeKnowledgeQuery;
@@ -133,6 +134,8 @@ export const listDueBrowserCheckpoints = defaultControlActivities.listDueBrowser
 export const checkpointBrowserBeforeDeadline =
   defaultControlActivities.checkpointBrowserBeforeDeadline;
 export const drainSandboxLease = defaultControlActivities.drainSandboxLease;
+export const listIdleSandboxCheckpoints = defaultControlActivities.listIdleSandboxCheckpoints;
+export const checkpointIdleSandboxLease = defaultControlActivities.checkpointIdleSandboxLease;
 export const maintainSandboxLeaseSweep = defaultControlActivities.maintainSandboxLeaseSweep;
 export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
 export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
@@ -140,6 +143,7 @@ export const maintainSessionStorage = defaultControlActivities.maintainSessionSt
 export const archiveIdleSessions = defaultControlActivities.archiveIdleSessions;
 export const recoverVideoGenerationWorkflows =
   defaultControlActivities.recoverVideoGenerationWorkflows;
+export const recoverSessionTitleWorkflows = defaultControlActivities.recoverSessionTitleWorkflows;
 export const maintainRetainedScreenshots = defaultControlActivities.maintainRetainedScreenshots;
 export const maintainBrowserStateArtifacts = defaultControlActivities.maintainBrowserStateArtifacts;
 export const reconcileRecentModelCallFacts = defaultControlActivities.reconcileRecentModelCallFacts;

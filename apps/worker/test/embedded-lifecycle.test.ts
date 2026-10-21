@@ -485,7 +485,13 @@ describe("embedded worker lifecycle contract", () => {
         },
       ],
       [{ present: true }],
+      // Migration 0751: no retired subscription object remains.
+      [],
       [{ present: true }],
+      // Migration 0712: the cutover receipt reader exists and every provider holds
+      // its receipt.
+      [{ present: true }],
+      [{ provider: "claude" }, { provider: "codex" }, { provider: "xai" }],
       [],
       [
         { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
@@ -638,6 +644,14 @@ describe("embedded worker lifecycle contract", () => {
           can_delete: false,
         },
         {
+          name: "subscription_plan_catalog_revisions",
+          owner: "opengeni_migrator",
+          can_select: true,
+          can_insert: false,
+          can_update: false,
+          can_delete: false,
+        },
+        {
           name: "personal_resource_delegation_capabilities",
           owner: "opengeni_migrator",
           can_select: false,
@@ -741,7 +755,61 @@ describe("embedded worker lifecycle contract", () => {
           public_execute: false,
           security_definer: true,
         },
+        // Migration 0730: the Knowledge claim's read-only work check.
+        {
+          name: "knowledge_index_due_v1(text, integer)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+          configuration: ["search_path=pg_catalog"],
+        },
+        ...[
+          "authorize_subscription_ownerless_session_access(uuid, uuid, uuid, uuid)",
+          "authorize_subscription_personal_placement_access(uuid, uuid, uuid, uuid, text, uuid, bigint, text, text)",
+          "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)",
+          "resolve_subscription_codex_apps_designation(uuid, uuid)",
+          "read_subscription_codex_apps_credential(uuid, uuid, uuid)",
+          "begin_subscription_codex_apps_refresh(uuid, uuid, uuid)",
+          "persist_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text, timestamp with time zone, timestamp with time zone)",
+          "fail_subscription_codex_apps_refresh(uuid, uuid, uuid, bigint, text)",
+          "subscription_codex_reset_authority(uuid, uuid, uuid, text)",
+          "subscription_codex_reset_credit_fence(uuid, uuid, uuid, text, text, uuid)",
+          "subscription_codex_owner_capability_held(uuid, text[], text, uuid, boolean)",
+          "subscription_codex_owner_membership_held(uuid, uuid)",
+          ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_PRIVATE_ROUTINES,
+          ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_PRIVATE_ROUTINES,
+        ].map((name) => ({
+          name,
+          owner: "opengeni_migrator",
+          can_execute: true,
+          public_execute: false,
+          security_definer: true,
+          configuration: [
+            name === "subscription_codex_refresh_write_allowed(uuid, uuid, uuid)" ||
+            name === "subscription_core_refresh_write_allowed(text, uuid, uuid, uuid)"
+              ? "search_path=pg_catalog, opengeni_private, pg_temp"
+              : "search_path=pg_catalog, public, opengeni_private, pg_temp",
+          ],
+        })),
       ],
+      [
+        "grant_subscription_codex_owner_capability(text, uuid, uuid, text, uuid)",
+        "drop_subscription_codex_owner_capabilities(uuid)",
+        "derive_scheduled_revision_subscription_authority()",
+        ...opengeniDb.SUBSCRIPTION_CORE_NEUTRAL_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_CORE_PRECURSOR_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_COMPAT_OWNER_ROUTINES,
+        ...opengeniDb.SUBSCRIPTION_AUTHORITY_FENCE_OWNER_ROUTINES,
+      ].map((name) => ({
+        name,
+        owner: "opengeni_migrator",
+        execute: false,
+        publicExecute: false,
+        securityDefiner: true,
+        configuration: ["search_path=pg_catalog, public, opengeni_private, pg_temp"],
+      })),
     ];
     const db = {
       execute: async () => {
@@ -798,7 +866,7 @@ describe("embedded worker lifecycle contract", () => {
         "session_tenancy_additional_organization_activation_evidence",
       ],
     })();
-    expect((catalogResults[9] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
+    expect((catalogResults[12] as Array<{ name: string }>).map((routine) => routine.name)).toEqual([
       ...RUNTIME_TARGET_SCHEMA_CAPABILITY_ROUTINES,
       ...RUNTIME_TARGET_SCHEMA_FORBIDDEN_ROUTINES,
     ]);
@@ -812,7 +880,11 @@ describe("embedded worker lifecycle contract", () => {
   test("embedded readiness enforces runtime receipts without a session-tenancy activation interlock", async () => {
     // Migration 0611 retired the activation startup interlock: the embedded
     // probe no longer queries session-tenancy activation at all.
-    const embeddedDb = (variableSetCutoverPresent = true, claudePoolActivationPresent = true) => {
+    const embeddedDb = (
+      variableSetCutoverPresent = true,
+      retiredSubscriptionObjects: string[] = [],
+      codexCutoverActivationPresent = true,
+    ) => {
       const results: unknown[] = [
         [
           {
@@ -832,7 +904,10 @@ describe("embedded worker lifecycle contract", () => {
           },
         ],
         [{ present: variableSetCutoverPresent }],
-        [{ present: claudePoolActivationPresent }],
+        retiredSubscriptionObjects.map((object) => ({ object })),
+        [{ present: codexCutoverActivationPresent }],
+        [{ present: true }],
+        [{ provider: "claude" }, { provider: "codex" }, { provider: "xai" }],
       ];
       let index = 0;
       return {
@@ -855,8 +930,19 @@ describe("embedded worker lifecycle contract", () => {
     await expect(dbReadyCheck(embeddedDb(false), options)()).rejects.toThrow(
       /missing the 0352 session Variable Set attachment runtime receipt/,
     );
-    await expect(dbReadyCheck(embeddedDb(true, false), options)()).rejects.toThrow(
-      /missing the Claude subscription account activation receipt/,
+    // The embedded (scoped) topology also requires the drained retirement.
+    await expect(
+      dbReadyCheck(
+        embeddedDb(true, [
+          "routine embedded.resolve_claude_authority_pool(uuid, uuid, text, jsonb)",
+        ]),
+        options,
+      )(),
+    ).rejects.toThrow(
+      /retired subscription routine embedded\.resolve_claude_authority_pool\(uuid, uuid, text, jsonb\) is present; apply the drained retirement migration 0751_subscription_core_legacy_retirement\.sql/,
+    );
+    await expect(dbReadyCheck(embeddedDb(true, [], false), options)()).rejects.toThrow(
+      /missing the 0689 Codex subscription-core cutover receipt/,
     );
   });
 

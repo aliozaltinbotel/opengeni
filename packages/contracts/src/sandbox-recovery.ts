@@ -1,91 +1,147 @@
+import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
 /** Public, content-free selection. Never include native provider bindings. */
-export const SandboxRecoverySelection = z
-  .object({
-    version: z.literal(1),
-    sessionId: z.string().uuid(),
-    sandboxGroupId: z.string().uuid(),
-    leaseId: z.string().uuid(),
-    routeEpoch: z.number().int().nonnegative(),
-    authorityEpoch: z.number().int().positive(),
-    leaseEpoch: z.number().int().nonnegative(),
-    workspaceGeneration: z.number().int().nonnegative(),
-    archiveGeneration: z.number().int().nonnegative(),
-    artifactId: z.string().uuid(),
-    revision: z.string().min(1).max(512),
-    capturedAt: z.string().datetime(),
-  })
-  .strict();
+export const SandboxRecoverySelection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      sessionId: z.string().uuid(),
+      sandboxGroupId: z.string().uuid(),
+      leaseId: z.string().uuid(),
+      routeEpoch: z.number().int().nonnegative(),
+      authorityEpoch: z.number().int().positive(),
+      leaseEpoch: z.number().int().nonnegative(),
+      workspaceGeneration: z.number().int().nonnegative(),
+      archiveGeneration: z.number().int().nonnegative(),
+      artifactId: z.string().uuid(),
+      revision: z.string().min(1).max(512),
+      capturedAt: z.string().datetime(),
+    })
+    .strict(),
+);
 export type SandboxRecoverySelection = z.infer<typeof SandboxRecoverySelection>;
 
-export const SandboxRecoveryProjection = z
-  .object({
-    version: z.literal(1),
-    status: z.enum([
-      "unsupported",
-      "blocked",
-      "eligible",
-      "consent_accepted",
-      "restoring",
-      "restored",
-    ]),
-    reason: z.string().max(128).nullable(),
-    checkpoint: SandboxRecoverySelection.nullable(),
-    operationId: z.string().uuid().nullable(),
-    /** Retry may elect a system-selected verified checkpoint; no consent POST. */
-    automaticAvailable: z.boolean().optional(),
-    /** What an automatic Retry will do: restore `checkpoint`, or continue on a
-     * new empty workspace because no usable checkpoint survived the loss. */
-    automaticLane: z.enum(["checkpoint", "fresh_workspace"]).optional(),
-    /** For a timed recovery wait: the earliest time a Retry or a new message
-     * can let Opengeni decide again. Nothing proceeds by itself before then. */
-    availableAt: z.string().datetime().optional(),
-  })
-  .strict();
+/** Exact failed/current workspace selection; portable archives need no native
+ * checkpoint artifact. Contains no object keys or provider credentials. */
+export const SandboxRecoveryTarget = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      sessionId: z.string().uuid(),
+      sandboxGroupId: z.string().uuid(),
+      leaseId: z.string().uuid(),
+      routeEpoch: z.number().int().nonnegative(),
+      authorityEpoch: z.number().int().positive(),
+      leaseEpoch: z.number().int().nonnegative(),
+      workspaceGeneration: z.number().int().nonnegative(),
+      archiveGeneration: z.number().int().nonnegative().nullable(),
+      revision: z.string().min(1).max(512).nullable(),
+      restoreStatus: z.string().min(1).max(64),
+      restoreCompletedAt: z.string().datetime().nullable(),
+    })
+    .strict(),
+);
+export type SandboxRecoveryTarget = z.infer<typeof SandboxRecoveryTarget>;
+
+export const SandboxRecoveryProjection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      status: z.enum([
+        "unsupported",
+        "blocked",
+        "eligible",
+        "consent_accepted",
+        "restoring",
+        "restored",
+      ]),
+      reason: z.string().max(128).nullable(),
+      checkpoint: SandboxRecoverySelection.nullable(),
+      operationId: z.string().uuid().nullable(),
+      target: SandboxRecoveryTarget.optional(),
+      retryAvailable: z.boolean().optional(),
+      freshWorkspaceAvailable: z.boolean().optional(),
+      groupSessionCount: z.number().int().positive().optional(),
+      /** Retry may elect a system-selected verified checkpoint; no consent POST. */
+      automaticAvailable: z.boolean().optional(),
+      /** What an automatic Retry will do: restore `checkpoint`, or continue on a
+       * new empty workspace because no usable checkpoint survived the loss. */
+      automaticLane: z.enum(["checkpoint", "fresh_workspace"]).optional(),
+      /** For a timed recovery wait: the earliest time a Retry or a new message
+       * can let Opengeni decide again. Nothing proceeds by itself before then. */
+      availableAt: z.string().datetime().optional(),
+    })
+    .strict(),
+);
 export type SandboxRecoveryProjection = z.infer<typeof SandboxRecoveryProjection>;
 
 /** Why a definitively lost managed sandbox continues on an empty workspace. */
-export const SandboxFreshWorkspaceReason = z.enum([
-  "archive_unavailable",
-  "archive_unverified",
-  "checkpoint_unrestorable",
-  "checkpoint_restore_failed",
-]);
+export const SandboxFreshWorkspaceReason = /* @__PURE__ */ defineSchema(() =>
+  z.enum([
+    "archive_unavailable",
+    "archive_unverified",
+    "checkpoint_unrestorable",
+    "checkpoint_restore_failed",
+    "restore_abandoned",
+  ]),
+);
 export type SandboxFreshWorkspaceReason = z.infer<typeof SandboxFreshWorkspaceReason>;
 
 /** Durable, content-free fresh-workspace decision for one group member. */
-export const SandboxFreshWorkspaceRecovery = z
-  .object({
-    version: z.literal(1),
-    sessionId: z.string().uuid(),
-    sandboxGroupId: z.string().uuid(),
-    leaseId: z.string().uuid(),
-    leaseEpoch: z.number().int().nonnegative(),
-    workspaceGeneration: z.number().int().nonnegative(),
-    archiveGeneration: z.number().int().nonnegative().nullable(),
-    lostAt: z.string().datetime(),
-    reason: SandboxFreshWorkspaceReason,
-  })
-  .strict();
+export const SandboxFreshWorkspaceRecovery = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      version: z.literal(1),
+      sessionId: z.string().uuid(),
+      sandboxGroupId: z.string().uuid(),
+      leaseId: z.string().uuid(),
+      leaseEpoch: z.number().int().nonnegative(),
+      workspaceGeneration: z.number().int().nonnegative(),
+      archiveGeneration: z.number().int().nonnegative().nullable(),
+      lostAt: z.string().datetime(),
+      reason: SandboxFreshWorkspaceReason,
+    })
+    .strict(),
+);
 export type SandboxFreshWorkspaceRecovery = z.infer<typeof SandboxFreshWorkspaceRecovery>;
 
-export const SandboxRecoveryRequest = z
-  .object({
-    operationId: z.string().uuid(),
-    acceptHistoricalCheckpoint: z.literal(true),
-    selection: SandboxRecoverySelection,
-  })
-  .strict();
+export const SandboxRecoveryRequest = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z
+      .object({
+        operationId: z.string().uuid(),
+        acceptHistoricalCheckpoint: z.literal(true),
+        selection: SandboxRecoverySelection,
+      })
+      .strict(),
+    z
+      .object({
+        operationId: z.string().uuid(),
+        action: z.literal("retry"),
+        target: SandboxRecoveryTarget,
+      })
+      .strict(),
+    z
+      .object({
+        operationId: z.string().uuid(),
+        action: z.literal("continue_fresh"),
+        acceptEmptyWorkspace: z.literal(true),
+        target: SandboxRecoveryTarget,
+      })
+      .strict(),
+  ]),
+);
 export type SandboxRecoveryRequest = z.infer<typeof SandboxRecoveryRequest>;
 
-export const SandboxRecoveryResponse = z
-  .object({
-    outcome: z.enum(["accepted", "replayed"]),
-    operationId: z.string().uuid(),
-    recovery: SandboxRecoveryProjection,
-  })
-  .strict();
+export const SandboxRecoveryResponse = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      outcome: z.enum(["accepted", "replayed"]),
+      operationId: z.string().uuid(),
+      recovery: SandboxRecoveryProjection,
+    })
+    .strict(),
+);
 export type SandboxRecoveryResponse = z.infer<typeof SandboxRecoveryResponse>;
 
 /** Re-injected from durable receipts on every attempt, not lossy transcript state. */
@@ -112,5 +168,8 @@ export function automaticSandboxRecoveryDiscontinuity(
 export function freshWorkspaceSandboxRecoveryDiscontinuity(
   recovery: SandboxFreshWorkspaceRecovery,
 ): string {
+  if (recovery.reason === "restore_abandoned") {
+    return `Filesystem discontinuity: at ${recovery.lostAt}, an authorized person chose to continue this sandbox group on a new empty workspace after restoration failed. The previous archive is retained for recovery, but its files, repository clones, installed packages and processes are not present in this workspace. Conversation and tool receipts remain historical evidence, not proof that their files still exist. External effects are not undone. Verify the current filesystem before relying on previous work. Recreate what you need deliberately; never automatically replay commands or operations with unknown outcomes. Selection alone does not prove the new workspace is ready.`;
+  }
   return `Filesystem discontinuity: the previous managed sandbox was lost at ${recovery.lostAt} and there is no checkpoint Opengeni can restore automatically, so Opengeni continued this session on a new empty workspace. Files, repository clones, installed packages and running processes from before that time are not available in this workspace; do not assume they exist. Anything now in the workspace was created after that loss. Conversation and tool receipts from before it remain historical evidence, not proof that their files still exist. External effects are not undone. Verify the current filesystem before relying on previous work, and recreate what you need deliberately. Never automatically replay prior commands or operations with unknown outcomes.`;
 }

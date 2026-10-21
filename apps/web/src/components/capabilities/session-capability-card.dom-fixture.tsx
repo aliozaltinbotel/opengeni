@@ -1,4 +1,5 @@
 // Run explicitly through session-capability-card.test.tsx so Radix sees the DOM at import time.
+import { t } from "@/lib/console-text";
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, StrictMode } from "react";
@@ -201,8 +202,8 @@ async function render(
         },
       },
     ];
-    expect(buildTimeline(startupEvents)).toEqual([]);
-    const requested = buildTimeline([
+    expect(buildTimeline(t, startupEvents)).toEqual([]);
+    const requested = buildTimeline(t, [
       ...startupEvents,
       {
         ...startupEvents[0]!,
@@ -229,6 +230,7 @@ async function render(
     expect(auth).toBeDefined();
     if (!auth) throw new Error("Requested authorization event was lost from the timeline");
     const recommendation = sessionAuthRecommendation(
+      t,
       auth,
       (await context.client.listCapabilities()).items as CapabilityCatalogItem[],
     );
@@ -275,6 +277,39 @@ function button(container: HTMLElement, label: string) {
 }
 
 describe("conversation connection card", () => {
+  test("1Password setup preserves the chat and links to this workspace's protected form", async () => {
+    const onePassword = CapabilityCatalogItem.parse({
+      id: "api:1password",
+      name: "1Password",
+      kind: "api",
+      source: "built_in",
+      surfaceType: "first_party_onepassword",
+      providerDomain: "1password.com",
+      runtime: { available: true },
+    });
+    const notice = {
+      ...item,
+      capability: {
+        ...item.capability!,
+        id: onePassword.id,
+        name: "1Password",
+        kind: "api" as const,
+      },
+    };
+    const h = await render(false, onePassword, onePassword, false, "workspace", notice);
+    try {
+      await act(async () => button(h.container, "Connect").click());
+      const link = h.container.querySelector<HTMLAnchorElement>('a[href*="/secrets"]');
+      expect(link?.getAttribute("href")).toBe(
+        "/workspaces/workspace/secrets?view=connect-1password",
+      );
+      expect(link?.getAttribute("target")).toBe("_blank");
+      expect(createConnection).not.toHaveBeenCalled();
+      expect(enableCapability).not.toHaveBeenCalled();
+    } finally {
+      await h.close();
+    }
+  });
   const fiken = CapabilityCatalogItem.parse({
     id: "api:fiken",
     name: "Fiken",

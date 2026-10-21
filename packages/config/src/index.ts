@@ -1,6 +1,10 @@
 export { managedUserEmailAllowed } from "./managed-user-admission";
 export * from "./realtime-voice-pricing";
 export * from "./web-search";
+import {
+  WebSearchProviderCredentialsSchema,
+  webSearchProviderCredentialsFromEnv,
+} from "./web-search";
 import { EnvCreditPromotionPolicy } from "./credit-promotions";
 export {
   CreditPromotionPolicy,
@@ -21,6 +25,8 @@ import {
   currentAgentLearningToolSelection,
   resolveWorkspaceSessionToolDefaults,
   workspaceModelCompactionThreshold,
+  organizationModelCompactionThreshold,
+  type OrganizationModelDefaults,
   type ModelCompactionPolicy,
   Entitlements,
   EntitlementsMode,
@@ -32,12 +38,14 @@ import {
   ReasoningEffort,
   FIRST_PARTY_MCP_TOOL_NAMES,
   FirstPartyMcpToolName,
+  normalizeSitesDomain,
   OpenGeniSlackBotDisplayName,
   SandboxBackend,
   SessionMcpApprovalPolicy,
   SEEDANCE_2_5_MODEL_ID,
   StaticUsageLimits,
   TurnExecutionPolicyV1,
+  TurnServingPolicyV1,
   UsageLimitsMode,
   type TurnExecutionLatencyModeSourceV1,
   type TurnExecutionModelSourceV1,
@@ -154,6 +162,68 @@ const EnvGoalIdleBackoffMs = z.preprocess((value) => {
     return trimmed === "" ? Number.NaN : Number(trimmed);
   });
 }, z.array(z.number().int().nonnegative()).min(1, "OPENGENI_GOAL_IDLE_BACKOFF_MS must list at least one delay in milliseconds").readonly());
+
+/** Comma-separated Modal region selectors (for example `eu` or
+ * `us-east-1,us-west-2`). Blank or unset keeps Modal's own placement. */
+const EnvModalRegions = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    return source.split(",").map((entry) => entry.trim().toLowerCase());
+  },
+  z
+    .array(
+      z
+        .string()
+        .regex(
+          /^[a-z][a-z0-9-]{0,62}$/u,
+          "OPENGENI_MODAL_REGIONS entries must be Modal region names such as eu or us-east-1",
+        ),
+    )
+    .min(1)
+    .refine((regions) => new Set(regions).size === regions.length, {
+      message: "OPENGENI_MODAL_REGIONS must not repeat a region",
+    })
+    .readonly()
+    .optional(),
+);
+
+/** `{"<workspace id>": bytes}`: per-workspace retained-image limits. */
+const EnvRetainedImageWorkspaceQuotaOverrides = z.preprocess(
+  (value) => {
+    if (typeof value !== "string") return value;
+    const source = value.trim();
+    if (!source) return undefined;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(source);
+    } catch {
+      return value;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return parsed;
+    return Object.fromEntries(
+      Object.entries(parsed).map(([workspaceId, bytes]) => [workspaceId.toLowerCase(), bytes]),
+    );
+  },
+  z
+    .record(z.string().uuid(), z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER))
+    .default({}),
+);
+
+/** The retained-image byte limit for one workspace: its override, else the deployment default. */
+export function retainedImageWorkspaceQuotaBytes(
+  settings: Pick<
+    Settings,
+    "retainedImageWorkspaceQuotaBytes" | "retainedImageWorkspaceQuotaOverrides"
+  >,
+  workspaceId: string,
+): number {
+  return (
+    settings.retainedImageWorkspaceQuotaOverrides[workspaceId.toLowerCase()] ??
+    settings.retainedImageWorkspaceQuotaBytes
+  );
+}
 
 const EnvFirstPartyMcpTools = z.preprocess(
   (value) => {
@@ -285,7 +355,7 @@ export const McpOperationRecoverySchema = z
 
 /** Public, digest-pinned desktop image used by Modal unless the operator overrides it. */
 export const DEFAULT_MODAL_IMAGE_REF =
-  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:554d5b324a580071dd669e7c1190931e498eb1b397412a27c7de84a430ef393a";
+  "opengenipublicneuacr.azurecr.io/opengeni-desktop@sha256:5bb54a1a6d0c6e99f058290718e55c13193fde3dcbcb54568ce95ddef0768805";
 
 const SettingsSchema = z.object({
   serviceName: z.string().default("opengeni"),
@@ -299,6 +369,11 @@ const SettingsSchema = z.object({
   // reuses the application handle. Keep the historical default for existing
   // deployments and let operators budget this per process with replica counts.
   apiDatabasePoolMax: z.coerce.number().int().positive().default(32),
+  // Named prepared statements for the application database pools. Unset → on
+  // for direct connections and off when the URL targets port 6432 (PgBouncer's
+  // port, including Azure Flexible Server's built-in pooler). Set false for any
+  // other transaction-pooling proxy; set true to force them on.
+  databasePreparedStatements: EnvBoolean.optional(),
   // Step I (§7.8 runtime half). Dedicated Postgres schema for the EMBEDDED
   // topology. Default "" → standalone: no search_path scoping, server default
   // (`public`). When set (e.g. "opengeni"), the db handle + the managed-auth
@@ -410,17 +485,29 @@ const SettingsSchema = z.object({
   agentStableVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
-    .default("0.1.16"),
+    .default("0.1.54"),
+  // Optional pin for the desktop app served by /desktop/latest/*. When unset,
+  // the newest desktop-v release on the agent release repository is served.
+  desktopStableVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   // Optional independent beta-channel pointer. When unset, the beta update
   // manifest route is unavailable rather than silently serving stable.
   agentBetaVersion: z
     .string()
     .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
+  // Bring every live Connected Machine to its channel's promoted build without
+  // a click. The agent applies an update only at an idle point, so this never
+  // interrupts accepted work; a busy machine is retried until it can apply.
+  agentAutoUpdate: EnvBoolean.default(true),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   // Explicit launch gate for the one-time $10 verified self-service signup grant.
   // A migration or deployment alone must not start issuing live credits.
+  // Legacy pre-0845 money switch; current signup eligibility is unconditional
+  // and zero-valued. Kept for compatibility with existing deployment config.
   verifiedSignupTrialCreditsEnabled: EnvBoolean.default(false),
   creditPromotionPolicy: EnvCreditPromotionPolicy,
   entitlementsMode: EntitlementsMode.default("none"),
@@ -471,10 +558,33 @@ const SettingsSchema = z.object({
     .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   environmentsEncryptionKey: z.string().optional(),
+  // Dev/seed only: accept the `ops_fake_healthy` / `ops_fake_sync_error`
+  // 1Password tokens, backed by the in-memory fake provider. The managed
+  // product posture refuses to start with it set (OP-7).
+  onePasswordFakeTokens: EnvBoolean.default(false),
+  // Operator-installed official pass-cli; never auto-download or resolve an
+  // agent-controlled executable from PATH. The adapter verifies its version.
+  protonPassCliPath: z
+    .string()
+    .trim()
+    .min(1)
+    .max(1_024)
+    .refine(
+      (value) => value.startsWith("/") || /^[a-z]:[\\/]/i.test(value),
+      "Proton Pass CLI path must be absolute",
+    )
+    .optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
-  integrationsOauthShortStateEnabled: EnvBoolean.default(false),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
+  // Privacy limits a deployment (for example a product that embeds Opengeni)
+  // sets for every organization. They only narrow what organizations choose:
+  // Only me chats and schedules off in shared workspaces, new chats and
+  // schedules always starting as Workspace, and admins always seeing that
+  // other people's Only me schedules exist.
+  privacyOnlyMeAllowed: EnvBoolean.default(true),
+  privacyWorkspaceDefaultRequired: EnvBoolean.default(false),
+  privacyAdminScheduleSummariesRequired: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
   gmailWatchTopicName: z
     .string()
@@ -571,6 +681,15 @@ const SettingsSchema = z.object({
   // into @opengeni/db once at boot.
   // Env: OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED.
   childLifecycleNoticesEnabled: EnvBoolean.default(false),
+  // Per-task (root session) API-equivalent usage limits: producer
+  // flag only. Off (default) rejects NEW non-null limits on create and on the
+  // usage-limit route and hides the editor; limits already persisted are still
+  // metered and enforced, and clearing stays allowed. Metering and enforcement
+  // never depend on this flag. Enable only after every API, worker, web, SDK
+  // and embedded host consumer runs an image that understands the
+  // `session_usage_limit` stop and goal reason.
+  // Env: OPENGENI_SESSION_USAGE_LIMITS_ENABLED.
+  sessionUsageLimitsEnabled: EnvBoolean.default(false),
   // Per-channel and per-DM Slack workspace routing. Default ON. A channel does
   // not count a personal workspace as a candidate, so an organization with one
   // shared workspace resolves it as the sole candidate and never asks; the
@@ -651,7 +770,7 @@ const SettingsSchema = z.object({
   openaiBaseUrl: z.string().optional(),
   openaiModel: z.string().default("gpt-6-astra"),
   openaiAllowedModels: z.string().default("gpt-6-astra,gpt-6-sol,gpt-6-luna"),
-  // OpenGeni-managed Vercel AI Gateway. When configured, the two reviewed
+  // Opengeni-managed Vercel AI Gateway. When configured, the two reviewed
   // Gateway models below are added to the managed-credit catalog. Workspace
   // Gateway keys use the encrypted connection broker and never this secret.
   vercelAiGatewayApiKey: z.string().optional(),
@@ -678,6 +797,17 @@ const SettingsSchema = z.object({
     .positive()
     .max(Number.MAX_SAFE_INTEGER)
     .default(20 * 1024 * 1024 * 1024),
+  // Bytes of retained session images (screenshots, viewed images) a workspace
+  // keeps. When a new image does not fit, the workspace's oldest images are
+  // evicted to make room; a new image is only refused when it is larger than
+  // the whole limit. The overrides map a workspace id to its own limit.
+  retainedImageWorkspaceQuotaBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(5 * 1024 * 1024 * 1024),
+  retainedImageWorkspaceQuotaOverrides: EnvRetainedImageWorkspaceQuotaOverrides,
   videoGenerationTempDirectory: z.string().trim().min(1).max(1_024).default("/tmp/opengeni-video"),
   videoGenerationFfprobePath: z.string().trim().min(1).max(1_024).default("ffprobe"),
   // Opengeni's customer price, not a claim about the provider's delayed cost report.
@@ -727,8 +857,11 @@ const SettingsSchema = z.object({
     .positive()
     .max(25 * 1024 * 1024)
     .default(8 * 1024 * 1024),
-  /** Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md). */
-  sessionArchiveEnabled: EnvBoolean.default(false),
+  /**
+   * Move idle sessions' bulky content to object storage (docs/session-storage-lifecycle.md).
+   * On by default; without object storage the worker skips archiving.
+   */
+  sessionArchiveEnabled: EnvBoolean.default(true),
   /**
    * Cendra fork (MAINT-P09-433): an organization key acting as an external user (`asUser`)
    * may create that user's missing shared-workspace membership on first use. Off by default:
@@ -800,6 +933,8 @@ const SettingsSchema = z.object({
   // this flag. Set false and omit codex-subscription from PROVIDER_ORDER to
   // keep subscription model routing while disabling Codex voice input.
   voiceInputCodexExperimentalEnabled: EnvBoolean.default(false),
+  /** Deployment-wide override for every credit price calculated from a provider rate. */
+  creditMarginBpsOverride: z.coerce.number().int().min(0).max(10_000).optional(),
   modelPricingJson: z.string().default("{}"),
   // Supported-model membership source. Database mode is resolved by the async
   // core overlay; getSettings remains synchronous and env-only.
@@ -843,6 +978,18 @@ const SettingsSchema = z.object({
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  // Cache the session-independent system-prompt prefix (on by default after an A/B
+  // comparison; set false to disable) separately on Anthropic Messages requests.
+  experimentSystemPromptCacheSplit: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT
+  // Honor a model-requested foreground shell wait up to 4 minutes instead of 30
+  // seconds, returning early for quiet servers and input prompts (on by default
+  // after an A/B halved command polls; set false to disable).
+  experimentCutPolling: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_CUT_POLLING
+  // Lean non-strict `exec_command` schema: only `cmd` and `max_output_tokens`
+  // are required (on by default after an A/B; set false to disable).
+  experimentOutputCost: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_OUTPUT_COST
+  // Explicit operator opt-in for active turns to continue using provider extra credits.
+  // Default: re-admit each model request against included subscription usage.
   // SuperGrok/xAI connected subscription. This is a workspace-scoped OAuth
   // account pool and a distinct rail from the existing xai/* API-key provider.
   supergrokSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED
@@ -893,6 +1040,17 @@ const SettingsSchema = z.object({
   // emergency compatibility diagnosis.
   // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(true),
+  // Carry Codex subscription model requests over the backend's Responses
+  // WebSocket (one warm connection per conversation) instead of a new HTTP
+  // request per step. Requests the socket cannot carry fall back to HTTP.
+  // OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED
+  codexResponsesWebSocketEnabled: EnvBoolean.default(true),
+  // The same transport for the OpenAI API (/v1/responses) and Azure OpenAI's
+  // v1 API (/openai/v1/responses): one connection per conversation, each step
+  // continuing the previous response with only its new input. Other
+  // OpenAI-compatible hosts always use HTTP.
+  // OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED
+  openaiResponsesWebSocketEnabled: EnvBoolean.default(true),
   // Provider-neutral progressive disclosure for direct OpenAI/Azure native
   // client search and ordinary-function generic dispatch. Kept separate from
   // the Codex rollout so an emergency Codex opt-out cannot disable every model.
@@ -908,6 +1066,8 @@ const SettingsSchema = z.object({
   // the timeout; it never changes placement.
   // OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED, OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS
   subscriptionCoreShadowEnabled: EnvBoolean.default(true),
+  // D-43: dormant until the failover hooks and serving-model notice ship.
+  subscriptionCrossProviderFailoverEnabled: EnvBoolean.default(false),
   subscriptionCoreShadowTimeoutMs: z.coerce.number().int().min(10).max(1_000).default(250),
   // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
   // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
@@ -960,12 +1120,15 @@ const SettingsSchema = z.object({
   // and the sandbox capability tools, never replacing them.
   webSearchEnabled: EnvBoolean.default(true),
   // Provider-agnostic web search (`web_search` / `web_fetch` agent tools,
-  // see ./web-search.ts). Inert until a provider is named; validated lazily so
-  // a misconfiguration withholds the tools instead of failing boot.
+  // see ./web-search.ts). Inert until a provider and its key are set; validated
+  // lazily so a misconfiguration withholds the tools instead of failing boot.
   webSearchProvider: z.string().optional(),
+  webFetchProvider: z.string().optional(),
+  webSearchPrefer: z.string().optional(),
+  webSearchProviderCredentials: WebSearchProviderCredentialsSchema,
+  // Earlier single-provider settings, applied to the first provider of a slot.
   webSearchApiKey: z.string().optional(),
   webSearchBaseUrl: z.string().optional(),
-  webFetchProvider: z.string().optional(),
   webFetchApiKey: z.string().optional(),
   webFetchBaseUrl: z.string().optional(),
   webSearchProviderMode: z.string().optional(),
@@ -992,6 +1155,10 @@ const SettingsSchema = z.object({
   // instructions. Defaulting to DEFAULT_AGENT_INSTRUCTIONS keeps the composed
   // default pinned by runtime tests.
   agentInstructionsTemplate: z.string().default(DEFAULT_AGENT_INSTRUCTIONS),
+  deploymentAgentInstructions: z.string().optional(),
+  // Knowledge retrieval, correction and standing-preference guidance (on by default after the
+  // instruction-following A/B; set false to disable).
+  experimentKnowledgeRetrievalGuidance: EnvBoolean.default(true), // OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE
   azureOpenaiBaseUrl: z.string().optional(),
   azureOpenaiEndpoint: z.string().optional(),
   azureOpenaiDeployment: z.string().optional(),
@@ -1062,6 +1229,12 @@ const SettingsSchema = z.object({
   // resume cannot silently change the reservation.
   modalSandboxCpu: z.coerce.number().positive().optional(),
   modalSandboxMemoryMiB: z.coerce.number().int().positive().optional(),
+  // Optional Modal placement for every new physical box (fresh create and
+  // snapshot restore alike). Every setup step and tool call is a round trip from
+  // the worker to the box, so placing boxes near the workers cuts per-command
+  // latency; Modal bills region selection as a compute multiplier. Existing
+  // boxes keep their placement on resume. Knob: OPENGENI_MODAL_REGIONS.
+  modalRegions: EnvModalRegions,
   modalTokenId: z.string().optional(),
   modalTokenSecret: z.string().optional(),
   modalEnvironment: z.string().optional(),
@@ -1071,7 +1244,7 @@ const SettingsSchema = z.object({
   // idleTimeoutSecs=undefined, so Modal applies its OWN short server-default idle
   // timeout (~minutes) — and a box between turns sits with NO active connection,
   // so that idle clock runs and Modal idle-reaps the box LONG before Opengeni's
-  // own reaper waits out sandboxIdleGraceMs (15min) to resume+persist+terminate
+  // own reaper waits out sandboxIdleGraceMs to resume+persist+terminate
   // it. The observed failure: every drain logs "drainable box already gone
   // (NotFound on resume)", persistWorkspace() never fires, /workspace is lost.
   // Modal's idle-reap is a SECOND reaper racing Opengeni's — and it wins. The fix:
@@ -1145,8 +1318,22 @@ const SettingsSchema = z.object({
   runloopBlueprintId: z.string().optional(),
   runloopTunnel: EnvBoolean.default(true),
   runloopKeepAliveSeconds: z.coerce.number().int().positive().optional(),
-  // --- e2b (SDK reads E2B_API_KEY from env; mirrored for validation + forwarding) ---
+  // --- e2b: E2B's cloud or any E2B-compatible API ---
+  // The key, domain and addresses are handed to the SDK explicitly on every
+  // create and resume; unset ones keep the SDK's defaults (E2B's cloud).
   e2bApiKey: z.string().optional(),
+  // Sandboxes are reached as `<port>-<sandbox id>.<domain>`; the API is
+  // `https://api.<domain>` unless e2bApiUrl is set.
+  e2bDomain: z
+    .string()
+    .regex(/^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::\d{1,5})?$/, {
+      message: "must be a host name such as sandboxes.example.com, without a scheme or path",
+    })
+    .optional(),
+  e2bApiUrl: z.string().url().optional(),
+  // One address for all envd traffic, routed by the E2b-Sandbox-Id and
+  // E2b-Sandbox-Port headers, instead of a name per sandbox.
+  e2bSandboxUrl: z.string().url().optional(),
   e2bTemplate: z.string().optional(),
   e2bTimeoutSeconds: z.coerce.number().int().positive().optional(),
   e2bTimeoutAction: z.enum(["pause", "kill"]).optional(),
@@ -1211,6 +1398,30 @@ const SettingsSchema = z.object({
     .max(63)
     .regex(/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/)
     .optional(),
+  // --- Opengeni compute (optional; Opengeni's own microVM sandboxes) ---
+  // Every compute sandbox runs the Connected Machine agent, reached through
+  // its host's link to this API's agent gateway, so this backend also needs
+  // the relay and the agent op-stream. Nothing here is read unless a session
+  // or the deployment selects `compute`, or the gateway URL is set.
+  computeApiUrl: z.string().url().optional(),
+  computeApiKey: z.string().min(1).max(8192).optional(),
+  // Compute image refs. Omitted, the control service's default image. The desktop image is
+  // used when OPENGENI_SANDBOX_DESKTOP_ENABLED=true and carries the display stack.
+  computeImage: z.string().min(1).max(2048).optional(),
+  computeDesktopImage: z.string().min(1).max(2048).optional(),
+  computeVcpus: z.coerce.number().int().min(1).max(64).default(2),
+  computeMemoryMib: z.coerce.number().int().min(512).max(262_144).default(4096),
+  // Guaranteed shares below the ceilings above; omitted, the whole ceiling.
+  computeMemoryRequestMib: z.coerce.number().int().min(128).max(262_144).optional(),
+  computeCpuRequestMillis: z.coerce.number().int().min(10).max(64_000).optional(),
+  // The agent gateway's public WebSocket URL (wss://). Compute hosts dial it,
+  // and it is the exact audience of their host tokens and sandbox tickets, so
+  // it must equal the URL the control service is configured with for Opengeni's team.
+  // This API serves the gateway at its path.
+  computeLinkUrl: z.string().url().optional(),
+  // How long a create waits for the sandbox's agent to connect, and how long
+  // a request to an unreachable sandbox keeps waking and retrying it.
+  computeAgentReadyTimeoutMs: z.coerce.number().int().min(1_000).max(900_000).default(120_000),
   // --- sandbox ownership inversion (P1.2 rollout flag, default OFF) ---
   // The keystone flag for the stateless resume-by-id model. When FALSE the
   // agent-turn path is BYTE-FOR-BYTE today's build-and-discard behavior (no
@@ -1345,11 +1556,12 @@ const SettingsSchema = z.object({
   // dial — when the user navigates away the box keeps refcount 0, but it survives
   // this whole window so a "glanced away then came back" re-arms the SAME warm box
   // (acquireLease re-arms draining->warm; the reaper's BEFORE-terminate re-read
-  // skips a re-armed box). Default 15min so a brief detour never cold-creates a
-  // fresh EMPTY box; lower it to trade warm cost for a snappier reclaim.
+  // skips a re-armed box). Default 1min: a box restores from its workspace
+  // snapshot when the next turn comes later, so a long warm tail mostly bills an
+  // idle box. Raise it to trade warm cost for warm resumes after longer pauses.
   // getSettings caps the default at half a shorter configured Modal lifetime so
   // the entire reaper window always fits. Knob: OPENGENI_SANDBOX_IDLE_GRACE_MS.
-  sandboxIdleGraceMs: z.coerce.number().int().positive().default(900_000),
+  sandboxIdleGraceMs: z.coerce.number().int().positive().default(60_000),
   // Idle command containment. A legacy retained background command (a dev
   // server, a command whose output is still draining, a stopped command the
   // provider no longer answers for) keeps its box warm through a non-expiring
@@ -1359,8 +1571,8 @@ const SettingsSchema = z.object({
   // request, no held wait_for_input, no other holder or writer, measured from
   // durable turn/holder/admission facts - the reaper checkpoints the workspace,
   // stops the box and settles those commands `lost` with reason
-  // `idle_containment`. Default 30min: twice the default
-  // idle grace, so a lease that is only waiting for a "glanced away" user is
+  // `idle_containment`. Default 30min: well above the idle
+  // grace, so a lease that is only waiting for a "glanced away" user is
   // never contained earlier than an idle lease would drain, and well inside
   // the 1h provider-deadline rotation lead, so an idle box is saved long before
   // the deadline path has to act. Set 0 to disable new idle enrollments without
@@ -1500,6 +1712,182 @@ const SettingsSchema = z.object({
   documentEmbeddingApiKey: z.string().optional(),
   documentEmbeddingBaseUrl: z.string().url().optional(),
   documentEmbeddingBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Site SQL: optional per-Site Cloudflare storage (one SQLite Durable Object
+  // per Site, docs/site-data.md). Off unless enabled here, the gateway's
+  // internal origin is set and the published Sites gateway secret is
+  // configured; the API signs its calls to the gateway with that secret.
+  // Usage is recorded in the usage ledger only. Free-profile defaults are strict.
+  sitesCloudflareStorageEnabled: EnvBoolean.default(false),
+  sitesGatewayInternalOrigin: z
+    .string()
+    .url()
+    .refine((value) => {
+      const url = new URL(value);
+      if (url.pathname !== "/" || url.search || url.hash || url.username || url.password)
+        return false;
+      if (url.protocol === "https:") return true;
+      return url.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
+    }, "must be an https origin (http only on loopback)")
+    .optional(),
+  // Site SQL storage per Site; defaults to the 5 GiB hard ceiling.
+  sitesSqlFreeStorageBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(5 * 1024 * 1024 * 1024),
+  // Optional per-Site monthly row quotas; unset means none (the platform
+  // meters rows per workspace instead; rate and per-call caps still apply).
+  sitesSqlFreeRowsReadPerMonth: z.coerce.number().int().positive().optional(),
+  sitesSqlFreeRowsWrittenPerMonth: z.coerce.number().int().positive().optional(),
+  sitesSqlFreeCallsPerMinutePerViewer: z.coerce.number().int().positive().default(60),
+  sitesSqlFreeCallsPerMinutePerSite: z.coerce.number().int().positive().default(600),
+  sitesSqlMaxRowsPerCall: z.coerce.number().int().min(1).max(5_000).default(1_000),
+  sitesSqlMaxResponseBytes: z.coerce
+    .number()
+    .int()
+    .min(1024)
+    .max(4 * 1024 * 1024)
+    .default(1024 * 1024),
+  sitesSqlTimeoutMs: z.coerce.number().int().min(1_000).max(60_000).default(15_000),
+  // Site Data quotas and write rate limits. Usage is recorded in the
+  // usage ledger only; shadow and paid modes are a later rollout step.
+  siteDataRecordBytesPerSite: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(100 * 1024 * 1024),
+  siteDataMaxRecordBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(256 * 1024),
+  siteDataMaxCollectionsPerSite: z.coerce.number().int().positive().default(50),
+  siteDataFileBytesPerSite: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
+  siteDataMaxFileBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(10 * 1024 * 1024),
+  siteDataWorkspaceBytes: z.coerce
+    .number()
+    .int()
+    .positive()
+    .default(1024 * 1024 * 1024),
+  siteDataViewerWritesPerMinute: z.coerce.number().int().positive().default(120),
+  siteDataSiteWritesPerMinute: z.coerce.number().int().positive().default(600),
+  siteDataViewerReadsPerMinute: z.coerce.number().int().positive().default(600),
+  siteDataManagerWritesPerMinute: z.coerce.number().int().positive().default(6_000),
+  // Schema-validation time one Site may spend per minute.
+  siteDataSiteValidationMsPerMinute: z.coerce.number().int().positive().default(5_000),
+  // Schema-validation time all of a workspace's Sites may spend per minute.
+  siteDataWorkspaceValidationMsPerMinute: z.coerce.number().int().positive().default(20_000),
+  siteDataMaxRecordsPerCollection: z.coerce.number().int().positive().default(100_000),
+  // Published Sites (docs/design/published-sites-2026-10-14.md). Publishing is
+  // off unless sitesDomain names the Sites domain; the site-runtime API also
+  // needs the gateway secret. Defaults are strict.
+  sitesDomain: z.string().trim().min(3).max(200).optional(),
+  sitesGatewaySecret: z.string().min(32).optional(),
+  // Accepted during rotation only; remove once the gateway signs with the new secret.
+  sitesGatewaySecretPrevious: z.string().min(32).optional(),
+  sitesPublicEnabled: EnvBoolean.default(true),
+  sitesPublicAgentsEnabled: EnvBoolean.default(true),
+  // Login-only deployments (staging): public means any signed-in user; no guests.
+  sitesLoginOnly: EnvBoolean.default(false),
+  sitesForceNoindex: EnvBoolean.default(false),
+  // Defaults to abuse@<sites domain>.
+  sitesAbuseEmail: z.string().email().optional(),
+  // Guests start embedded agents only after the gateway verified a bot challenge.
+  sitesGuestAgentHumanCheck: EnvBoolean.default(false),
+  // Rate brakes of every Site limit profile (all access modes).
+  sitesFreeRequestsPerMinutePerVisitor: z.coerce.number().int().positive().default(120),
+  sitesFreeGuestWritesPerMinute: z.coerce.number().int().nonnegative().default(30),
+  // Deprecated (the former free profile): fallbacks for the public and guest
+  // settings below when those are unset.
+  sitesFreeConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesFreeAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  // Standard model-spend limits (micro-USD) for people outside the workspace
+  // (invited and public alike). Members are never limited by Site limits:
+  // they use the workspace's normal session limits. Unset: the deprecated
+  // free setting, else $10 per Site per month and no per-person limit.
+  sitesAgentMicrosPerSitePerMonth: z.coerce.number().int().nonnegative().optional(),
+  sitesAgentMicrosPerPersonPerDay: z.coerce.number().int().nonnegative().optional(),
+  // Internal guards for anonymous public visitors (not shown to Site owners). Unset:
+  // the deprecated free setting, else 20, 500, 50 and $1.
+  sitesGuestConversationsPerVisitorPerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestConversationsPerSitePerDay: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestTurnsPerConversation: z.coerce.number().int().nonnegative().optional(),
+  sitesGuestAgentMicrosPerConversation: z.coerce.number().int().nonnegative().optional(),
+  // What each agent turn of someone outside the workspace holds against the
+  // Site's spend limits while it runs (micro-USD; actual spend replaces it
+  // when settled), capped by the conversation's own cap and what is left.
+  sitesAgentReservationMicrosPerTurn: z.coerce.number().int().min(1_000).default(250_000),
+  // The credits profile multiplies the standard spend caps and guest guards.
+  sitesCreditsLimitMultiplier: z.coerce.number().int().min(1).max(1_000).default(10),
+  // Site platform usage (gateway requests, Site SQL rows and storage, Site
+  // Data storage), metered apart from model spend. usage_only records it;
+  // shadow computes the charge without charging; credits charges usage above
+  // the per-workspace monthly allowance.
+  sitesPlatformBillingMode: z.enum(["usage_only", "shadow", "credits"]).default("usage_only"),
+  // Credits mode: false refuses usage past the allowance instead of charging it.
+  sitesPlatformOverageEnabled: EnvBoolean.default(true),
+  sitesPlatformAllowanceRequests: z.coerce.number().int().nonnegative().default(1_000_000),
+  sitesPlatformAllowanceSqlRowsRead: z.coerce.number().int().nonnegative().default(10_000_000),
+  sitesPlatformAllowanceSqlRowsWritten: z.coerce.number().int().nonnegative().default(100_000),
+  sitesPlatformAllowanceStorageBytes: z.coerce.number().int().nonnegative().default(1_000_000_000),
+  // Unit prices in micro-USD: twice the Cloudflare list price (Workers
+  // requests, Durable Object SQLite rows and storage), covering host lookups,
+  // Durable Object requests and duration, and API work.
+  sitesPlatformPriceMicrosPerMillionRequests: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(600_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsRead: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000),
+  sitesPlatformPriceMicrosPerMillionSqlRowsWritten: z.coerce
+    .number()
+    .int()
+    .nonnegative()
+    .default(2_000_000),
+  sitesPlatformPriceMicrosPerGbMonth: z.coerce.number().int().nonnegative().default(400_000),
+  // The Opengeni-wide monthly brake: estimated USD cost of all workspaces'
+  // platform usage at the prices above. 0 turns the brake off.
+  sitesPlatformMonthlyLimitUsd: z.coerce.number().nonnegative().max(100_000_000).default(1_000),
+  sitesPlatformAlertPercent: z.coerce.number().int().min(1).max(100).default(80),
+  sitesReportsPerMinutePerVisitor: z.coerce.number().int().positive().default(5),
+  sitesViewerSessionIdleSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .default(12 * 60 * 60),
+  sitesViewerSessionAbsoluteSeconds: z.coerce
+    .number()
+    .int()
+    .min(60)
+    .max(30 * 24 * 60 * 60)
+    .default(7 * 24 * 60 * 60),
+  // A released hostname stays held for its workspace at least this long.
+  sitesHostnameHoldDays: z.coerce.number().int().min(30).default(30),
+  // Optional Cloudflare edge sync: KV host map and cache purge. All unset: no-op.
+  sitesCloudflareApiToken: z.string().min(1).optional(),
+  sitesCloudflareAccountId: z.string().min(1).optional(),
+  sitesCloudflareKvNamespaceId: z.string().min(1).optional(),
+  sitesCloudflareZoneId: z.string().min(1).optional(),
+  // KV expiry of host-map entries; bounds staleness if a sync write is missed.
+  sitesHostMapTtlSeconds: z.coerce.number().int().min(60).max(86_400).default(300),
+  // Google Web Risk scanning of URLs in Site HTML on publish; off without a key.
+  sitesWebRiskApiKey: z.string().min(1).optional(),
   // Explicit commercial cutover. Existing queued revisions remain unpriced;
   // only jobs created at or after this instant may enter the paid rail.
   documentEmbeddingCreditsActivatedAt: z.iso.datetime().optional(),
@@ -1580,6 +1968,8 @@ const SettingsSchema = z.object({
   // email verification, and invitation-bound account setup keep working. Read
   // at startup; the 0585 runtime switch pauses sign-ups without a restart.
   managedAuthNewSignupsEnabled: EnvBoolean.default(true),
+  // Unset retains environment-based verification (required outside local).
+  managedAuthRequireEmailVerification: EnvBoolean.optional(),
   // Query transport is an explicit second-stage rollout. A pre-compatibility
   // web image understands only fragment bearers, so API replicas must keep
   // generating fragment links until the compatible web fleet has converged.
@@ -1589,12 +1979,19 @@ const SettingsSchema = z.object({
   // confirmation keeps query transport fail closed until that separate sink is
   // proven sanitized.
   organizationUserSetupQueryEdgeSanitizationConfirmed: EnvBoolean.default(false),
+  // Managed mode sends sign-up verification, organization user setup and sign-in
+  // method notices by email. "disabled" is an explicit operator choice for
+  // deployments that provision accounts another way: nothing is ever sent, and
+  // those deliveries settle as failed with errorClass "delivery_disabled".
+  managedEmailDelivery: z.enum(["resend", "disabled"]).default("resend"),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("Opengeni <auth@mail.opengeni.ai>"),
   stripeSecretKey: z.string().optional(),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
   stripeCreditsProductId: z.string().optional(),
+  // Enables subscription service paths only; top-up billing remains independent.
+  subscriptionPlansEnabled: EnvBoolean.default(false),
   mcpServers: z
     .array(
       z.object({
@@ -1603,6 +2000,12 @@ const SettingsSchema = z.object({
         url: z.string().url(),
         allowedTools: z.array(z.string().min(1)).optional(),
         timeoutMs: z.number().int().positive().optional(),
+        /**
+         * Bound for session setup requests only (initialize and tools/list),
+         * when it should be longer than the client's default. Tool calls keep
+         * `timeoutMs` (or the client default) unchanged.
+         */
+        setupTimeoutMs: z.number().int().positive().optional(),
         cacheToolsList: z.boolean().default(false),
         /** Runtime approval policy, overlaid from an attempt-frozen session snapshot. */
         requireApproval: SessionMcpApprovalPolicy.optional(),
@@ -1630,6 +2033,7 @@ const ArtifactServiceSettingsSchema = SettingsSchema.pick({
   deploymentRevision: true,
   dbSchema: true,
   rlsStrategy: true,
+  databasePreparedStatements: true,
   observabilityStructuredLogs: true,
   observabilityMetricsEnabled: true,
   observabilityOtlpEndpoint: true,
@@ -1677,6 +2081,7 @@ function artifactServiceEnvironment(source: NodeJS.ProcessEnv) {
       optional("GITHUB_SHA"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     observabilityStructuredLogs: optional("OPENGENI_OBSERVABILITY_STRUCTURED_LOGS"),
     observabilityMetricsEnabled: optional("OPENGENI_OBSERVABILITY_METRICS_ENABLED"),
     observabilityOtlpEndpoint:
@@ -2317,6 +2722,14 @@ export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): bool
   );
 }
 
+/** Resolve the deployment override without changing unset per-price behavior. */
+function effectiveCreditMarginBps(
+  settings: Pick<Settings, "creditMarginBpsOverride">,
+  configuredMarginBps: number | undefined,
+): number {
+  return settings.creditMarginBpsOverride ?? configuredMarginBps ?? 0;
+}
+
 /**
  * Exact integer credit math. Token usage needs token rates; duration usage
  * uses `microsPerMinute` at millisecond resolution. Both round up once, after
@@ -2325,6 +2738,7 @@ export function voiceInputPricingHasTokenRates(pricing: VoiceInputPricing): bool
 export function calculateVoiceInputCost(
   pricing: VoiceInputPricing,
   usage: VoiceInputUsage,
+  marginBpsOverride?: number,
 ): VoiceInputCost {
   let numerator: bigint;
   let denominator: bigint;
@@ -2364,7 +2778,7 @@ export function calculateVoiceInputCost(
     numerator = BigInt(Math.ceil(usage.seconds * 1_000)) * BigInt(pricing.microsPerMinute);
     denominator = 60_000n;
   }
-  const margin = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const margin = BigInt(10_000 + (marginBpsOverride ?? pricing.marginBps ?? 0));
   const provider = (numerator + denominator - 1n) / denominator;
   const scaled = denominator * 10_000n;
   const credit = (numerator * margin + scaled - 1n) / scaled;
@@ -2516,7 +2930,7 @@ export const CapabilityStateV1Schema = z
 export type CapabilityStateV1 = z.infer<typeof CapabilityStateV1Schema>;
 
 const ModelModalityV1 = z.enum(["text", "image", "audio"]);
-const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast"]);
+const ModelLatencyModeV1 = z.enum(["standard", "priority", "fast", "ultrafast"]);
 
 export const ModelCapabilitiesV1Schema = z
   .object({
@@ -3514,6 +3928,8 @@ export const WORKSPACE_OPENROUTER_CONNECTION_DOMAIN = "openrouter.ai" as const;
 export const WORKSPACE_OPENROUTER_CONNECTION_ROLE = "openrouter" as const;
 export const WORKSPACE_OPPER_CONNECTION_DOMAIN = "api.opper.ai" as const;
 export const WORKSPACE_OPPER_CONNECTION_ROLE = "opper" as const;
+export const WORKSPACE_ELEVENLABS_CONNECTION_DOMAIN = "api.elevenlabs.io" as const;
+export const WORKSPACE_ELEVENLABS_CONNECTION_ROLE = "elevenlabs" as const;
 
 /**
  * Opper issues separate management keys (`op-mak-…`) that its inference routes
@@ -3559,6 +3975,157 @@ export const AI_GATEWAY_REALTIME_MODELS = {
     description: "Fast, natural xAI voice",
   },
 } as const;
+
+export const ELEVENLABS_REALTIME_MODEL_ID_PREFIX = "workspace-elevenlabs/" as const;
+
+/**
+ * Eleven Realtime speech-to-speech models, reached with the workspace's own
+ * ElevenLabs key. v1 max comes first: it is far more reliable at handing work
+ * to the session agent.
+ */
+export const ELEVENLABS_REALTIME_MODELS = {
+  v1Max: {
+    upstreamModelId: "eleven_realtime_v1_max",
+    modelId: `${ELEVENLABS_REALTIME_MODEL_ID_PREFIX}eleven_realtime_v1_max`,
+    label: "Eleven Realtime v1 max",
+    description: "Reasons before replying; best at handing off work",
+  },
+  v1Mini: {
+    upstreamModelId: "eleven_realtime_v1_mini",
+    modelId: `${ELEVENLABS_REALTIME_MODEL_ID_PREFIX}eleven_realtime_v1_mini`,
+    label: "Eleven Realtime v1 mini",
+    description: "Lowest latency and cost",
+  },
+} as const;
+
+/** The ElevenLabs upstream model of a realtime model id, or null for other providers. */
+export function resolveElevenLabsRealtimeModel(modelId: string): string | null {
+  for (const model of Object.values(ELEVENLABS_REALTIME_MODELS)) {
+    if (model.modelId === modelId) return model.upstreamModelId;
+  }
+  return null;
+}
+
+/**
+ * Conversation languages Eleven Realtime accepts (both models). ElevenLabs does
+ * not detect the spoken language: the session's language sets what it hears and
+ * the language it replies in, and an unlisted code fails the session.
+ */
+export const ELEVENLABS_REALTIME_LANGUAGES = [
+  "af",
+  "am",
+  "ar",
+  "as",
+  "ast",
+  "az",
+  "be",
+  "bg",
+  "bn",
+  "bs",
+  "ca",
+  "cs",
+  "cy",
+  "da",
+  "de",
+  "el",
+  "en",
+  "es",
+  "et",
+  "fa",
+  "fi",
+  "fil",
+  "fr",
+  "ga",
+  "gl",
+  "gu",
+  "ha",
+  "he",
+  "hi",
+  "hr",
+  "hu",
+  "hy",
+  "id",
+  "is",
+  "it",
+  "ja",
+  "jv",
+  "ka",
+  "kk",
+  "kn",
+  "ko",
+  "ky",
+  "lb",
+  "lg",
+  "lo",
+  "lt",
+  "lv",
+  "mi",
+  "mk",
+  "ml",
+  "mn",
+  "mr",
+  "ms",
+  "mt",
+  "my",
+  "ne",
+  "nl",
+  "no",
+  "oc",
+  "or",
+  "pa",
+  "pl",
+  "ps",
+  "pt",
+  "pt-br",
+  "ro",
+  "ru",
+  "sd",
+  "sk",
+  "sl",
+  "sn",
+  "so",
+  "sr",
+  "sv",
+  "sw",
+  "ta",
+  "te",
+  "tg",
+  "th",
+  "tl",
+  "tr",
+  "uk",
+  "ur",
+  "uz",
+  "vi",
+  "wo",
+  "yo",
+  "yue",
+  "zh",
+  "zu",
+] as const;
+
+// Tags whose language ElevenLabs lists under another code: Norwegian Bokmål and
+// Nynorsk are Norwegian, and the legacy Hebrew, Indonesian and Javanese codes.
+const ELEVENLABS_REALTIME_LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
+  nb: "no",
+  nn: "no",
+  iw: "he",
+  in: "id",
+  jw: "jv",
+};
+
+/**
+ * The Eleven Realtime language for a BCP 47 tag such as `nb-NO` or `pt-BR`, or
+ * null when ElevenLabs does not support it.
+ */
+export function resolveElevenLabsRealtimeLanguage(tag: string): string | null {
+  const normalized = tag.trim().toLowerCase().replaceAll("_", "-");
+  const supported: readonly string[] = ELEVENLABS_REALTIME_LANGUAGES;
+  if (supported.includes(normalized)) return normalized;
+  const base = normalized.split("-")[0] ?? "";
+  const language = ELEVENLABS_REALTIME_LANGUAGE_ALIASES[base] ?? base;
+  return supported.includes(language) ? language : null;
+}
 
 export type AiGatewayRealtimeModel =
   (typeof AI_GATEWAY_REALTIME_MODELS)[keyof typeof AI_GATEWAY_REALTIME_MODELS];
@@ -3688,6 +4255,12 @@ function opperCapabilities(input: {
  * OPENGENI_OPPER_MODELS_JSON (code mode) or the catalog document's
  * `opperModels` (database mode).
  */
+/**
+ * Default automatic-compaction threshold for Claude Opus 5.5 on every route.
+ * Workspaces can still choose another threshold per model.
+ */
+export const OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT = 300_000;
+
 export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
   OpperCatalogModel.parse({
     upstreamModelId: "aws/claude-opus-5-5",
@@ -3712,7 +4285,8 @@ export const OPENGENI_OPPER_MODELS: readonly OpperCatalogModel[] = [
     contextWindowTokens: 1_000_000,
     // 1,000,000 minus Opper's 128,000 max output tokens.
     effectiveContextWindowTokens: 872_000,
-    autoCompactTokenLimit: 800_000,
+    // Same product default as the native Claude Opus 5.5 profile.
+    autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT,
     maxOutputTokens: 128_000,
     pricing: {
       // Opper list: $4.40 input / $0.22 cached input / $5.50 5-minute cache
@@ -4304,6 +4878,11 @@ export const SANDBOX_REQUIRED_ENV: Record<
     { field: "openSandboxApiKey", env: "OPENGENI_OPENSANDBOX_API_KEY" },
     { field: "openSandboxImage", env: "OPENGENI_OPENSANDBOX_IMAGE" },
   ],
+  // compute also needs the gateway and relay; computeSettingsIssues checks them.
+  compute: [
+    { field: "computeApiUrl", env: "OPENGENI_COMPUTE_API_URL" },
+    { field: "computeApiKey", env: "OPENGENI_COMPUTE_API_KEY" },
+  ],
   // selfhosted needs NO per-box credentials: it is the user's own machine reached
   // over the agent's own enrollment. The enrollment-signing + relay-token secrets
   // are deployment-level (a single runtime secret, not per-active-backend creds),
@@ -4368,6 +4947,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     serverVersion: optional("OPENGENI_SERVER_VERSION"),
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     apiDatabasePoolMax: optional("OPENGENI_API_DATABASE_POOL_MAX"),
+    databasePreparedStatements: optional("OPENGENI_DATABASE_PREPARED_STATEMENTS"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
     runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
@@ -4421,6 +5001,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
     agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     agentBetaVersion: optional("OPENGENI_AGENT_BETA_VERSION"),
+    desktopStableVersion: optional("OPENGENI_DESKTOP_STABLE_VERSION"),
+    agentAutoUpdate: optional("OPENGENI_AGENT_AUTO_UPDATE"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     verifiedSignupTrialCreditsEnabled: optional("OPENGENI_VERIFIED_SIGNUP_TRIAL_CREDITS_ENABLED"),
@@ -4446,11 +5028,17 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    onePasswordFakeTokens: optional("OPENGENI_ONEPASSWORD_FAKE_TOKENS"),
+    protonPassCliPath: optional("OPENGENI_PROTON_PASS_CLI_PATH"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
-    integrationsOauthShortStateEnabled: optional("OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED"),
     integrationsAllowPrivateNetworkTargets: optional(
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
+    ),
+    privacyOnlyMeAllowed: optional("OPENGENI_PRIVACY_ONLY_ME_ALLOWED"),
+    privacyWorkspaceDefaultRequired: optional("OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED"),
+    privacyAdminScheduleSummariesRequired: optional(
+      "OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
     gmailWatchTopicName: optional("OPENGENI_GMAIL_WATCH_TOPIC_NAME"),
@@ -4492,6 +5080,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     goalIdleBackoffMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MS"),
     goalIdleBackoffMaxMs: optional("OPENGENI_GOAL_IDLE_BACKOFF_MAX_MS"),
     childLifecycleNoticesEnabled: optional("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED"),
+    sessionUsageLimitsEnabled: optional("OPENGENI_SESSION_USAGE_LIMITS_ENABLED"),
     slackWorkspaceRoutingEnabled: optional("OPENGENI_SLACK_WORKSPACE_ROUTING_ENABLED"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
     contextWindowTokens: optional("OPENGENI_CONTEXT_WINDOW_TOKENS"),
@@ -4528,6 +5117,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       "OPENGENI_VIDEO_GENERATION_MAX_CONCURRENT_PER_WORKSPACE",
     ),
     videoGenerationWorkspaceQuotaBytes: optional("OPENGENI_VIDEO_GENERATION_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaBytes: optional("OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_BYTES"),
+    retainedImageWorkspaceQuotaOverrides: optional(
+      "OPENGENI_RETAINED_IMAGE_WORKSPACE_QUOTA_OVERRIDES",
+    ),
     videoGenerationTempDirectory: optional("OPENGENI_VIDEO_GENERATION_TEMP_DIRECTORY"),
     videoGenerationFfprobePath: optional("OPENGENI_VIDEO_GENERATION_FFPROBE_PATH"),
     videoGenerationCredit480pMicrosPerSecond: optional(
@@ -4579,6 +5172,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     voiceInputOpenaiPricingJson: optional("OPENGENI_VOICE_INPUT_OPENAI_PRICING_JSON"),
     voiceInputAzurePricingJson: optional("OPENGENI_VOICE_INPUT_AZURE_PRICING_JSON"),
     voiceInputCodexExperimentalEnabled: optional("OPENGENI_VOICE_INPUT_CODEX_EXPERIMENTAL"),
+    creditMarginBpsOverride: optional("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelCatalogSource,
     modelCostPolicyJson,
@@ -4588,6 +5182,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedModelsJson: optional("OPENGENI_MANAGED_MODELS_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    experimentSystemPromptCacheSplit: optional("OPENGENI_EXPERIMENT_SYSTEM_PROMPT_CACHE_SPLIT"),
+    experimentCutPolling: optional("OPENGENI_EXPERIMENT_CUT_POLLING"),
+    experimentOutputCost: optional("OPENGENI_EXPERIMENT_OUTPUT_COST"),
     supergrokSubscriptionEnabled: optional("OPENGENI_SUPERGROK_SUBSCRIPTION_ENABLED"),
     claudeSubscriptionEnabled: optional("OPENGENI_CLAUDE_SUBSCRIPTION_ENABLED"),
     supergrokResponseStreamIdleTimeoutMs: optional(
@@ -4597,9 +5194,14 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modelStreamProgressTimeoutMs: optional("OPENGENI_MODEL_STREAM_PROGRESS_TIMEOUT_MS"),
     codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
+    codexResponsesWebSocketEnabled: optional("OPENGENI_CODEX_RESPONSES_WEBSOCKET_ENABLED"),
+    openaiResponsesWebSocketEnabled: optional("OPENGENI_OPENAI_RESPONSES_WEBSOCKET_ENABLED"),
     lazyToolSearchEnabled: optional("OPENGENI_LAZY_TOOL_SEARCH_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),
     subscriptionCoreShadowEnabled: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_ENABLED"),
+    subscriptionCrossProviderFailoverEnabled: optional(
+      "OPENGENI_SUBSCRIPTION_CROSS_PROVIDER_FAILOVER_ENABLED",
+    ),
     subscriptionCoreShadowTimeoutMs: optional("OPENGENI_SUBSCRIPTION_CORE_SHADOW_TIMEOUT_MS"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
     reasoningConfigurationUpdatesEnabled: optional(
@@ -4615,6 +5217,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openaiMaxRetries: optional("OPENGENI_OPENAI_MAX_RETRIES"),
     webSearchEnabled: optional("OPENGENI_WEB_SEARCH_ENABLED"),
     webSearchProvider: optional("OPENGENI_WEB_SEARCH_PROVIDER"),
+    webSearchPrefer: optional("OPENGENI_WEB_SEARCH_PREFER"),
+    webSearchProviderCredentials: webSearchProviderCredentialsFromEnv(source),
     webSearchApiKey: optional("OPENGENI_WEB_SEARCH_API_KEY"),
     webSearchBaseUrl: optional("OPENGENI_WEB_SEARCH_BASE_URL"),
     webFetchProvider: optional("OPENGENI_WEB_FETCH_PROVIDER"),
@@ -4629,6 +5233,10 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     jevRequestTimeoutMs: optional("OPENGENI_JEV_REQUEST_TIMEOUT_MS"),
     codeSearchMode: optional("OPENGENI_CODE_SEARCH_MODE"),
     agentInstructionsTemplate: optional("OPENGENI_AGENT_INSTRUCTIONS_TEMPLATE"),
+    deploymentAgentInstructions: optional("OPENGENI_DEPLOYMENT_AGENT_INSTRUCTIONS"),
+    experimentKnowledgeRetrievalGuidance: optional(
+      "OPENGENI_EXPERIMENT_KNOWLEDGE_RETRIEVAL_GUIDANCE",
+    ),
     azureOpenaiBaseUrl: optional("OPENGENI_AZURE_OPENAI_BASE_URL"),
     azureOpenaiEndpoint: optional("OPENGENI_AZURE_OPENAI_ENDPOINT"),
     azureOpenaiDeployment: optional("OPENGENI_AZURE_OPENAI_DEPLOYMENT"),
@@ -4650,6 +5258,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     modalTimeoutSeconds: optional("OPENGENI_MODAL_TIMEOUT_SECONDS"),
     modalSandboxCpu: optional("OPENGENI_MODAL_SANDBOX_CPU"),
     modalSandboxMemoryMiB: optional("OPENGENI_MODAL_SANDBOX_MEMORY_MIB"),
+    modalRegions: optional("OPENGENI_MODAL_REGIONS"),
     modalTokenId: optional("OPENGENI_MODAL_TOKEN_ID"),
     modalTokenSecret: optional("OPENGENI_MODAL_TOKEN_SECRET"),
     modalEnvironment: optional("OPENGENI_MODAL_ENVIRONMENT"),
@@ -4681,6 +5290,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     runloopTunnel: optional("OPENGENI_RUNLOOP_TUNNEL"),
     runloopKeepAliveSeconds: optional("OPENGENI_RUNLOOP_KEEP_ALIVE_SECONDS"),
     e2bApiKey: optional("OPENGENI_E2B_API_KEY"),
+    e2bDomain: optional("OPENGENI_E2B_DOMAIN"),
+    e2bApiUrl: optional("OPENGENI_E2B_API_URL"),
+    e2bSandboxUrl: optional("OPENGENI_E2B_SANDBOX_URL"),
     e2bTemplate: optional("OPENGENI_E2B_TEMPLATE"),
     e2bTimeoutSeconds: optional("OPENGENI_E2B_TIMEOUT_SECONDS"),
     e2bTimeoutAction: optional("OPENGENI_E2B_TIMEOUT_ACTION"),
@@ -4723,6 +5335,16 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     openSandboxKubernetesInventoryNamespace: optional(
       "OPENGENI_OPENSANDBOX_KUBERNETES_INVENTORY_NAMESPACE",
     ),
+    computeApiUrl: optional("OPENGENI_COMPUTE_API_URL"),
+    computeApiKey: optional("OPENGENI_COMPUTE_API_KEY"),
+    computeImage: optional("OPENGENI_COMPUTE_IMAGE"),
+    computeDesktopImage: optional("OPENGENI_COMPUTE_DESKTOP_IMAGE"),
+    computeVcpus: optional("OPENGENI_COMPUTE_VCPUS"),
+    computeMemoryMib: optional("OPENGENI_COMPUTE_MEMORY_MIB"),
+    computeMemoryRequestMib: optional("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB"),
+    computeCpuRequestMillis: optional("OPENGENI_COMPUTE_CPU_REQUEST_MILLIS"),
+    computeLinkUrl: optional("OPENGENI_COMPUTE_LINK_URL"),
+    computeAgentReadyTimeoutMs: optional("OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
     rigVerificationLeaseOwnershipEnabled: optional(
       "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
@@ -4793,6 +5415,112 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     documentEmbeddingApiKey: optional("OPENGENI_DOCUMENT_EMBEDDING_API_KEY"),
     documentEmbeddingBaseUrl: optional("OPENGENI_DOCUMENT_EMBEDDING_BASE_URL"),
     documentEmbeddingBillingMode: optional("OPENGENI_DOCUMENT_EMBEDDING_BILLING_MODE"),
+    sitesCloudflareStorageEnabled: optional("OPENGENI_SITES_CLOUDFLARE_STORAGE_ENABLED"),
+    sitesGatewayInternalOrigin: optional("OPENGENI_SITES_GATEWAY_INTERNAL_ORIGIN"),
+    sitesSqlFreeStorageBytes: optional("OPENGENI_SITES_SQL_FREE_STORAGE_BYTES"),
+    sitesSqlFreeRowsReadPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_READ_PER_MONTH"),
+    sitesSqlFreeRowsWrittenPerMonth: optional("OPENGENI_SITES_SQL_FREE_ROWS_WRITTEN_PER_MONTH"),
+    sitesSqlFreeCallsPerMinutePerViewer: optional(
+      "OPENGENI_SITES_SQL_FREE_CALLS_PER_MINUTE_PER_VIEWER",
+    ),
+    sitesSqlFreeCallsPerMinutePerSite: optional(
+      "OPENGENI_SITES_SQL_FREE_CALLS_PER_MINUTE_PER_SITE",
+    ),
+    sitesSqlMaxRowsPerCall: optional("OPENGENI_SITES_SQL_MAX_ROWS_PER_CALL"),
+    sitesSqlMaxResponseBytes: optional("OPENGENI_SITES_SQL_MAX_RESPONSE_BYTES"),
+    sitesSqlTimeoutMs: optional("OPENGENI_SITES_SQL_TIMEOUT_MS"),
+    siteDataRecordBytesPerSite: optional("OPENGENI_SITE_DATA_RECORD_BYTES_PER_SITE"),
+    siteDataMaxRecordBytes: optional("OPENGENI_SITE_DATA_MAX_RECORD_BYTES"),
+    siteDataMaxCollectionsPerSite: optional("OPENGENI_SITE_DATA_MAX_COLLECTIONS_PER_SITE"),
+    siteDataFileBytesPerSite: optional("OPENGENI_SITE_DATA_FILE_BYTES_PER_SITE"),
+    siteDataMaxFileBytes: optional("OPENGENI_SITE_DATA_MAX_FILE_BYTES"),
+    siteDataWorkspaceBytes: optional("OPENGENI_SITE_DATA_WORKSPACE_BYTES"),
+    siteDataViewerWritesPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_WRITES_PER_MINUTE"),
+    siteDataSiteWritesPerMinute: optional("OPENGENI_SITE_DATA_SITE_WRITES_PER_MINUTE"),
+    siteDataViewerReadsPerMinute: optional("OPENGENI_SITE_DATA_VIEWER_READS_PER_MINUTE"),
+    siteDataManagerWritesPerMinute: optional("OPENGENI_SITE_DATA_MANAGER_WRITES_PER_MINUTE"),
+    siteDataSiteValidationMsPerMinute: optional("OPENGENI_SITE_DATA_SITE_VALIDATION_MS_PER_MINUTE"),
+    siteDataWorkspaceValidationMsPerMinute: optional(
+      "OPENGENI_SITE_DATA_WORKSPACE_VALIDATION_MS_PER_MINUTE",
+    ),
+    siteDataMaxRecordsPerCollection: optional("OPENGENI_SITE_DATA_MAX_RECORDS_PER_COLLECTION"),
+    sitesDomain: optional("OPENGENI_SITES_DOMAIN"),
+    sitesGatewaySecret: optional("OPENGENI_SITES_GATEWAY_SECRET"),
+    sitesGatewaySecretPrevious: optional("OPENGENI_SITES_GATEWAY_SECRET_PREVIOUS"),
+    sitesPublicEnabled: optional("OPENGENI_SITES_PUBLIC_ENABLED"),
+    sitesPublicAgentsEnabled: optional("OPENGENI_SITES_PUBLIC_AGENTS_ENABLED"),
+    sitesLoginOnly: optional("OPENGENI_SITES_LOGIN_ONLY"),
+    sitesForceNoindex: optional("OPENGENI_SITES_FORCE_NOINDEX"),
+    sitesAbuseEmail: optional("OPENGENI_SITES_ABUSE_EMAIL"),
+    sitesGuestAgentHumanCheck: optional("OPENGENI_SITES_GUEST_AGENT_HUMAN_CHECK"),
+    sitesFreeRequestsPerMinutePerVisitor: optional(
+      "OPENGENI_SITES_FREE_REQUESTS_PER_MINUTE_PER_VISITOR",
+    ),
+    sitesFreeGuestWritesPerMinute: optional("OPENGENI_SITES_FREE_GUEST_WRITES_PER_MINUTE"),
+    sitesFreeConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_FREE_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesFreeTurnsPerConversation: optional("OPENGENI_SITES_FREE_TURNS_PER_CONVERSATION"),
+    sitesFreeAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesFreeAgentMicrosPerVisitorPerDay: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_VISITOR_PER_DAY",
+    ),
+    sitesFreeAgentMicrosPerSitePerMonth: optional(
+      "OPENGENI_SITES_FREE_AGENT_MICROS_PER_SITE_PER_MONTH",
+    ),
+    sitesCreditsLimitMultiplier: optional("OPENGENI_SITES_CREDITS_LIMIT_MULTIPLIER"),
+    sitesAgentReservationMicrosPerTurn: optional(
+      "OPENGENI_SITES_AGENT_RESERVATION_MICROS_PER_TURN",
+    ),
+    sitesAgentMicrosPerSitePerMonth: optional("OPENGENI_SITES_AGENT_MICROS_PER_SITE_PER_MONTH"),
+    sitesAgentMicrosPerPersonPerDay: optional("OPENGENI_SITES_AGENT_MICROS_PER_PERSON_PER_DAY"),
+    sitesGuestConversationsPerVisitorPerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_VISITOR_PER_DAY",
+    ),
+    sitesGuestConversationsPerSitePerDay: optional(
+      "OPENGENI_SITES_GUEST_CONVERSATIONS_PER_SITE_PER_DAY",
+    ),
+    sitesGuestTurnsPerConversation: optional("OPENGENI_SITES_GUEST_TURNS_PER_CONVERSATION"),
+    sitesGuestAgentMicrosPerConversation: optional(
+      "OPENGENI_SITES_GUEST_AGENT_MICROS_PER_CONVERSATION",
+    ),
+    sitesPlatformBillingMode: optional("OPENGENI_SITES_PLATFORM_BILLING_MODE"),
+    sitesPlatformOverageEnabled: optional("OPENGENI_SITES_PLATFORM_OVERAGE_ENABLED"),
+    sitesPlatformAllowanceRequests: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_REQUESTS"),
+    sitesPlatformAllowanceSqlRowsRead: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_READ"),
+    sitesPlatformAllowanceSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_ALLOWANCE_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformAllowanceStorageBytes: optional("OPENGENI_SITES_PLATFORM_ALLOWANCE_STORAGE_BYTES"),
+    sitesPlatformPriceMicrosPerMillionRequests: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_REQUESTS",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsRead: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_READ",
+    ),
+    sitesPlatformPriceMicrosPerMillionSqlRowsWritten: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_MILLION_SQL_ROWS_WRITTEN",
+    ),
+    sitesPlatformPriceMicrosPerGbMonth: optional(
+      "OPENGENI_SITES_PLATFORM_PRICE_MICROS_PER_GB_MONTH",
+    ),
+    sitesPlatformMonthlyLimitUsd: optional("OPENGENI_SITES_PLATFORM_MONTHLY_LIMIT_USD"),
+    sitesPlatformAlertPercent: optional("OPENGENI_SITES_PLATFORM_ALERT_PERCENT"),
+    sitesReportsPerMinutePerVisitor: optional("OPENGENI_SITES_REPORTS_PER_MINUTE_PER_VISITOR"),
+    sitesViewerSessionIdleSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_IDLE_SECONDS"),
+    sitesViewerSessionAbsoluteSeconds: optional("OPENGENI_SITES_VIEWER_SESSION_ABSOLUTE_SECONDS"),
+    sitesHostnameHoldDays: optional("OPENGENI_SITES_HOSTNAME_HOLD_DAYS"),
+    sitesCloudflareApiToken: optional("OPENGENI_SITES_CLOUDFLARE_API_TOKEN"),
+    sitesCloudflareAccountId: optional("OPENGENI_SITES_CLOUDFLARE_ACCOUNT_ID"),
+    sitesCloudflareKvNamespaceId: optional("OPENGENI_SITES_CLOUDFLARE_KV_NAMESPACE_ID"),
+    sitesCloudflareZoneId: optional("OPENGENI_SITES_CLOUDFLARE_ZONE_ID"),
+    sitesHostMapTtlSeconds: optional("OPENGENI_SITES_HOST_MAP_TTL_SECONDS"),
+    sitesWebRiskApiKey: optional("OPENGENI_SITES_WEB_RISK_API_KEY"),
     documentEmbeddingCreditsActivatedAt: optional(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT",
     ),
@@ -4855,18 +5583,23 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     apnsPrivateKey: optional("OPENGENI_APNS_PRIVATE_KEY"),
     fcmServiceAccountJson: optional("OPENGENI_FCM_SERVICE_ACCOUNT_JSON"),
     managedAuthNewSignupsEnabled: optional("OPENGENI_MANAGED_AUTH_NEW_SIGNUPS_ENABLED"),
+    managedAuthRequireEmailVerification: optional(
+      "OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION",
+    ),
     organizationUserSetupEmailTokenTransport: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_EMAIL_TOKEN_TRANSPORT",
     ),
     organizationUserSetupQueryEdgeSanitizationConfirmed: optional(
       "OPENGENI_ORGANIZATION_USER_SETUP_QUERY_EDGE_SANITIZATION_CONFIRMED",
     ),
+    managedEmailDelivery: optional("OPENGENI_MANAGED_EMAIL_DELIVERY"),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
     stripeCreditsProductId: optional("OPENGENI_STRIPE_CREDITS_PRODUCT_ID"),
+    subscriptionPlansEnabled: optional("OPENGENI_SUBSCRIPTION_PLANS_ENABLED"),
     mcpServers: parseMcpServers(optional("OPENGENI_MCP_SERVERS")),
   };
   const parsed = SettingsSchema.parse(raw);
@@ -4874,7 +5607,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     ...parsed,
     sandboxIdleGraceMs:
       raw.sandboxIdleGraceMs === undefined && parsed.sandboxBackend === "modal"
-        ? Math.min(900_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
+        ? Math.min(60_000, Math.floor((parsed.modalTimeoutSeconds * 1000) / 2))
         : parsed.sandboxIdleGraceMs,
     sandboxRotationLeadMs:
       raw.sandboxRotationLeadMs === undefined && parsed.sandboxBackend === "modal"
@@ -4930,26 +5663,37 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
       }
     }
   }
-  warnRetiredOrganizationTenancyActivationSwitch(source);
+  warnRetiredDeploymentSwitches(source);
   validateSettings(settings, source);
   return settings;
 }
 
-let retiredOrganizationTenancyActivationSwitchWarned = false;
-
 /**
- * Session-tenancy activation is universal since migration 0611, so the former
- * deployment switch is accepted and ignored. Deployments that still set it keep
- * booting; the one-time warning tells the operator to delete it.
+ * Former deployment switches that are now accepted and ignored. Deployments
+ * that still set one keep booting; a one-time warning tells the operator to
+ * delete it.
  */
-function warnRetiredOrganizationTenancyActivationSwitch(source: NodeJS.ProcessEnv): void {
-  if (retiredOrganizationTenancyActivationSwitchWarned) return;
-  if (source.OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED === undefined) return;
-  retiredOrganizationTenancyActivationSwitchWarned = true;
-  console.warn(
-    "[config] OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED is retired and ignored: " +
-      "every organization is session-tenancy activated (migration 0611). Remove it from the deployment.",
-  );
+const RETIRED_DEPLOYMENT_SWITCHES: ReadonlyArray<{ name: string; reason: string }> = [
+  {
+    name: "OPENGENI_ORGANIZATION_TENANCY_CANONICAL_ACTIVATION_ENABLED",
+    reason: "every organization is session-tenancy activated (migration 0611)",
+  },
+  {
+    name: "OPENGENI_INTEGRATIONS_OAUTH_SHORT_STATE_ENABLED",
+    reason: "MCP OAuth always sends the short reference state (migration 0507)",
+  },
+];
+
+const warnedRetiredDeploymentSwitches = new Set<string>();
+
+function warnRetiredDeploymentSwitches(source: NodeJS.ProcessEnv): void {
+  for (const { name, reason } of RETIRED_DEPLOYMENT_SWITCHES) {
+    if (source[name] === undefined || warnedRetiredDeploymentSwitches.has(name)) continue;
+    warnedRetiredDeploymentSwitches.add(name);
+    console.warn(
+      `[config] ${name} is retired and ignored: ${reason}. Remove it from the deployment.`,
+    );
+  }
 }
 
 const LOCAL_FIRST_PARTY_DELEGATION_SECRET = "opengeni-local-first-party-delegation-secret-v1";
@@ -5036,10 +5780,21 @@ export function resolveSessionFirstPartyMcpTools(
   session: Pick<Session, "firstPartyMcpTools" | "toolPolicy"> & Partial<Pick<Session, "agent">>,
   workspaceSettings: unknown,
 ): FirstPartyMcpToolNameType[] {
-  const selected =
-    session.toolPolicy.firstPartyMode === "workspace_default"
-      ? resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools
-      : session.firstPartyMcpTools;
+  let selected: readonly FirstPartyMcpToolNameType[] | null | undefined =
+    session.firstPartyMcpTools;
+  if (session.toolPolicy.firstPartyMode === "workspace_default") {
+    // Follow today's defaults, plus any tools the creator guaranteed on top.
+    const defaults = resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools;
+    const additions = session.toolPolicy.firstPartyAdditions ?? [];
+    selected = additions.length
+      ? [
+          ...new Set([
+            ...(defaults ?? resolveFirstPartyMcpToolPolicy(settings).default),
+            ...additions,
+          ]),
+        ]
+      : defaults;
+  }
   const allowed = allowedFirstPartyMcpToolsForSession(settings, selected);
   return session.agent ? agentConfigFirstPartyMcpTools(session.agent, allowed) : allowed;
 }
@@ -5101,10 +5856,10 @@ export function effectiveSandboxLifecycle(
 /**
  * One shared upper bound for the durable provider-capture claim and for command
  * admission waiting behind it. The SDK request itself is bounded by
- * sandboxSnapshotTimeoutMs; the extra window lets a non-cancellable provider
- * response settle and release its exact claim without turning a normal
- * checkpoint into a visible command failure. Database validation caps both
- * consumers at one hour.
+ * sandboxSnapshotTimeoutMs (a warm host-backed spool capture is stopped there);
+ * the extra window lets a non-cancellable provider response settle and release
+ * its exact claim without turning a normal checkpoint into a visible command
+ * failure. Database validation caps both consumers at one hour.
  */
 export function sandboxArchiveCaptureTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs">,
@@ -5121,6 +5876,35 @@ export function effectiveSandboxDrainSnapshotTimeoutMs(
   settings: Pick<Settings, "sandboxSnapshotTimeoutMs" | "sandboxDrainSnapshotTimeoutMs">,
 ): number {
   return settings.sandboxDrainSnapshotTimeoutMs ?? settings.sandboxSnapshotTimeoutMs;
+}
+
+/**
+ * How long before a finite provider deadline the deadline save stops waiting
+ * for an orderly shutdown and becomes mandatory. Past this point the
+ * reaper captures and terminates the box around anything that cannot finish in
+ * time (pending owner quiescence, sibling attempts that do not hold the box,
+ * in-flight requests whose holders are gone, commands that ignored their stop
+ * request) instead of letting the provider kill it uncaptured. It leaves the
+ * legacy command stop grace, the full drain capture budget and two reaper
+ * periods before the deadline, and never exceeds the rotation lead.
+ */
+export function sandboxDeadlineMandatoryCaptureLeadMs(
+  settings: Pick<
+    Settings,
+    | "sandboxRotationLeadMs"
+    | "sandboxSnapshotTimeoutMs"
+    | "sandboxDrainSnapshotTimeoutMs"
+    | "sandboxLeaseReaperPeriodMs"
+  >,
+): number {
+  return Math.min(
+    settings.sandboxRotationLeadMs,
+    SANDBOX_DEADLINE_COMMAND_STOP_GRACE_MS +
+      sandboxArchiveCaptureTimeoutMs({
+        sandboxSnapshotTimeoutMs: effectiveSandboxDrainSnapshotTimeoutMs(settings),
+      }) +
+      2 * settings.sandboxLeaseReaperPeriodMs,
+  );
 }
 
 export function sandboxLifecycleTransitionWaitMs(
@@ -5195,7 +5979,7 @@ const REASONING_EFFORT_ORDER = new Map(
 );
 const MODALITY_ORDER = new Map(["text", "image", "audio"].map((value, index) => [value, index]));
 const LATENCY_MODE_ORDER = new Map(
-  ["standard", "priority", "fast"].map((value, index) => [value, index]),
+  ["standard", "priority", "fast", "ultrafast"].map((value, index) => [value, index]),
 );
 
 function normalizeRegistryBaseUrl(value: string, providerId: string): string {
@@ -6152,6 +6936,41 @@ export function withOrganizationOpenRouterCredential(
 
 /** OpenAI GPT-5.6 Fast mode is 2× Standard list rates (service_tier fast/priority). */
 const GPT56_FAST_BILLING_MULTIPLIER_BPS = 20_000;
+/**
+ * OpenAI Ultrafast is 6× Standard list rates (service_tier ultrafast). Codex
+ * subscriptions count it against included limits at 8×; those limits are
+ * observed from the provider's own usage readings, not priced here.
+ */
+const ULTRAFAST_BILLING_MULTIPLIER_BPS = 60_000;
+/** Upstream slugs OpenAI serves at the Ultrafast tier. */
+const ULTRAFAST_UPSTREAM_SLUGS: readonly string[] = ["gpt-6-astra", "gpt-6.1-sol"];
+
+/**
+ * Ultrafast for a model id (`gpt-6-astra` or `codex/gpt-6-astra`), when OpenAI
+ * serves its slug at that tier. Codex accounts must still advertise the tier:
+ * placement serves an Ultrafast turn only from an account whose live model
+ * list includes it for that model.
+ */
+function ultrafastLatencyModeForModel(modelId: string):
+  | {
+      id: "ultrafast";
+      upstream: "supported";
+      runnable: true;
+      billingMultiplierBps: number;
+    }
+  | undefined {
+  const slug = modelId.startsWith(CODEX_MODEL_ID_PREFIX)
+    ? modelId.slice(CODEX_MODEL_ID_PREFIX.length)
+    : modelId;
+  return ULTRAFAST_UPSTREAM_SLUGS.includes(slug)
+    ? {
+        id: "ultrafast",
+        upstream: "supported",
+        runnable: true,
+        billingMultiplierBps: ULTRAFAST_BILLING_MULTIPLIER_BPS,
+      }
+    : undefined;
+}
 
 /**
  * Product display label for catalog/picker UI.
@@ -6248,6 +7067,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
     modelId.startsWith("codex/gpt-5.6-") ||
     /^codex\/gpt-6(?:\.\d+)?-/u.test(modelId)
   ) {
+    const ultrafast = ultrafastLatencyModeForModel(modelId);
     return [
       { id: "standard", upstream: "supported", runnable: true },
       {
@@ -6256,6 +7076,7 @@ function builtinLatencyModesForModel(modelId: string): Array<{
         runnable: true,
         billingMultiplierBps: GPT56_FAST_BILLING_MULTIPLIER_BPS,
       },
+      ...(ultrafast ? [ultrafast] : []),
     ];
   }
   return [{ id: "standard", upstream: "unknown", runnable: true }];
@@ -6266,23 +7087,30 @@ function isReviewedGptVisionModel(slug: string): boolean {
 }
 
 /** Repair missing reviewed capabilities in live/stored Codex definitions.
- * Explicit latency restrictions and every unrelated catalog field remain authoritative.
+ * GPT-6 models accept image input and JSON-schema output (`text.format`, as the
+ * Codex CLI's `--output-schema` sends it; verified live). Explicit latency and
+ * structured-output restrictions and every unrelated catalog field remain
+ * authoritative.
  */
 function reviewedCodexCatalogCapabilities(
   slug: string,
   capabilities: ModelCapabilitiesV1,
 ): ModelCapabilitiesV1 {
   if (!/^gpt-6(?:\.\d+)?-/u.test(slug)) return capabilities;
-  const fast = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`).find(
-    (mode) => mode.id === "fast",
+  const builtin = builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`);
+  const added = builtin.filter(
+    (mode) =>
+      (mode.id === "fast" || mode.id === "ultrafast") &&
+      !capabilities.latencyModes.some((existing) => existing.id === mode.id),
   );
   return normalizeCapabilities({
     ...capabilities,
     inputModalities: [...new Set([...capabilities.inputModalities, "image" as const])],
-    latencyModes:
-      fast && !capabilities.latencyModes.some((mode) => mode.id === "fast")
-        ? [...capabilities.latencyModes, fast]
-        : capabilities.latencyModes,
+    structuredOutput:
+      capabilities.structuredOutput.upstream === "unknown"
+        ? { upstream: "supported", runnable: true }
+        : capabilities.structuredOutput,
+    latencyModes: [...capabilities.latencyModes, ...added],
   });
 }
 
@@ -6329,14 +7157,18 @@ export function isDirectOpenAiApiBaseUrl(baseUrl: string | undefined): boolean {
 /**
  * Map Opengeni latency mode to the provider `service_tier` wire value.
  * Azure, Codex ChatGPT, and xAI accept `priority`; OpenAI API accepts `fast`.
+ * Ultrafast is `ultrafast` wherever a model declares it (OpenAI API and Codex).
  * Standard omits the field.
  */
 export function serviceTierForLatencyMode(
   providerId: string,
   latencyMode: LatencyMode,
-): "fast" | "priority" | undefined {
+): "fast" | "priority" | "ultrafast" | undefined {
   if (latencyMode === "standard") {
     return undefined;
+  }
+  if (latencyMode === "ultrafast") {
+    return "ultrafast";
   }
   if (
     providerId === "azure" ||
@@ -6355,6 +7187,9 @@ export function responseSatisfiesLatencyMode(
 ): boolean {
   if (requested === "standard") {
     return true;
+  }
+  if (requested === "ultrafast") {
+    return responseServiceTier === "ultrafast";
   }
   return responseServiceTier === "priority" || responseServiceTier === "fast";
 }
@@ -6555,10 +7390,19 @@ function canonicalJson(value: unknown): string {
 function definitionVersionFor(
   model: Omit<ConfiguredModel, "definitionVersion">,
   provider: ResolvedModelProvider,
-  options: { includeWireProfile?: boolean } = {},
+  options: { includeWireProfile?: boolean; includeAutoCompactTokenLimit?: boolean } = {},
 ): string {
   const requestMetadata = staticRequestMetadataForDigest(provider);
   const includeWireProfile = options.includeWireProfile ?? true;
+  // The automatic-compaction trigger is a context-management default, not
+  // executable identity: workspace and organization compaction preferences
+  // already replace it live on every attempt of an accepted turn. Freezing
+  // it made a changed default strand every in-flight turn of that model.
+  // Only the pre-exclusion compatibility digests below still include it.
+  const { autoCompactTokenLimit, ...executableLimits } = model.executionLimits;
+  const executionLimits = options.includeAutoCompactTokenLimit
+    ? { ...executableLimits, autoCompactTokenLimit }
+    : executableLimits;
   const digestInput = canonicalJson({
     schemaVersion: model.schemaVersion,
     id: model.id,
@@ -6575,7 +7419,7 @@ function definitionVersionFor(
     },
     credentialSource: model.credentialSource,
     billing: model.billing,
-    executionLimits: model.executionLimits,
+    executionLimits,
     capabilities: model.capabilities,
     // Workspace-facing free/credits classification is a separate live
     // deployment policy. Operators must drain/fence accepted turns before
@@ -6590,6 +7434,22 @@ function definitionVersionFor(
     .digest("hex")}`;
 }
 
+/**
+ * The digest a turn accepted before the compaction trigger left the
+ * definition carries. It reproduces only the current trigger value, so an
+ * accepted turn stays runnable across the release that drops the field, and
+ * every other executable field must still match exactly.
+ */
+function legacyFrozenAutoCompactDefinitionVersionFor(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): string {
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  return definitionVersionFor(modelWithoutVersion, provider, {
+    includeAutoCompactTokenLimit: true,
+  });
+}
+
 function legacyImplicitOpenAiDefinitionVersionFor(
   model: ConfiguredModel,
   provider: ResolvedModelProvider,
@@ -6598,6 +7458,7 @@ function legacyImplicitOpenAiDefinitionVersionFor(
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
   return definitionVersionFor(modelWithoutVersion, provider, {
     includeWireProfile: false,
+    includeAutoCompactTokenLimit: true,
   });
 }
 
@@ -6625,7 +7486,18 @@ function legacyCodexAstraImplicitCachingDefinitionVersionFor(
   // Recompute, rather than allowlisting an incident hash: all other current
   // fields must still reproduce the accepted digest. Do not compose this with
   // the older wire-profile compatibility or rewrite the accepted policy.
-  return definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider);
+  // Ultrafast was declared later; that historical declaration never had it.
+  return definitionVersionFor(
+    {
+      ...modelWithoutVersion,
+      capabilities: {
+        ...capabilities,
+        latencyModes: capabilities.latencyModes.filter((mode) => mode.id !== "ultrafast"),
+      },
+    },
+    provider,
+    { includeAutoCompactTokenLimit: true },
+  );
 }
 
 function matchesAdditiveCapabilityDefinitionVersion(
@@ -6635,8 +7507,8 @@ function matchesAdditiveCapabilityDefinitionVersion(
 ): boolean {
   const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
   const { latencyModes, inputModalities } = model.capabilities;
-  // V1 has only three unique latency ids and three unique input modalities:
-  // at most 4 * 7 subset digests retaining the frozen mode. Reconstruct an
+  // V1 has four unique latency ids and three unique input modalities:
+  // at most 15 * 7 subset digests retaining the frozen mode. Reconstruct an
   // exact historical declaration; never ignore the digest or alter existing
   // mode support, runnable state, billing multiplier, or request-tier routing.
   // Every other executable field remains in the digest. Do not compose this
@@ -6660,14 +7532,76 @@ function matchesAdditiveCapabilityDefinitionVersion(
         inputModalities: retainedInputs,
       };
       if (
-        policy.definitionVersion ===
-        definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+        matchesCurrentOrPreCompactionExclusionDigest(
+          policy,
+          { ...modelWithoutVersion, capabilities },
+          provider,
+        )
       ) {
         return true;
       }
     }
   }
   return false;
+}
+
+/**
+ * The model as accepted before runnable structured output was declared, or
+ * null when it is not declared. Agent turns never request structured output
+ * (only stateless single calls do), so enabling it from the exact unknown/off
+ * declaration cannot change an accepted turn's execution. Every definition
+ * compatibility check also runs against this one historical declaration;
+ * every other field still has to reproduce the frozen digest.
+ */
+function structuredOutputPreEnablementModel(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+): ConfiguredModel | null {
+  if (!model.capabilities.structuredOutput.runnable) return null;
+  const { definitionVersion: _definitionVersion, ...modelWithoutVersion } = model;
+  const historical = {
+    ...modelWithoutVersion,
+    capabilities: {
+      ...model.capabilities,
+      structuredOutput: { upstream: "unknown" as const, runnable: false },
+    },
+  };
+  return { ...historical, definitionVersion: definitionVersionFor(historical, provider) };
+}
+
+/** Whether a frozen digest matches this model definition or one tolerated historical form of it. */
+function acceptedDefinitionVersionMatches(
+  model: ConfiguredModel,
+  provider: ResolvedModelProvider,
+  policy: TurnExecutionPolicyV1,
+): boolean {
+  return (
+    policy.definitionVersion === model.definitionVersion ||
+    policy.definitionVersion === legacyFrozenAutoCompactDefinitionVersionFor(model, provider) ||
+    policy.definitionVersion === legacyImplicitOpenAiDefinitionVersionFor(model, provider) ||
+    policy.definitionVersion ===
+      legacyCodexAstraImplicitCachingDefinitionVersionFor(model, provider) ||
+    matchesAdditiveCapabilityDefinitionVersion(model, provider, policy) ||
+    matchesWebSearchEnablementDefinitionVersion(model, provider, policy)
+  );
+}
+
+/**
+ * Operator-change compatibility (an added capability or enabled web search)
+ * also applies to a turn accepted before the compaction trigger left the
+ * digest. This is the same single historical declaration in either digest
+ * form, never an additional tolerated change.
+ */
+function matchesCurrentOrPreCompactionExclusionDigest(
+  policy: TurnExecutionPolicyV1,
+  model: Omit<ConfiguredModel, "definitionVersion">,
+  provider: ResolvedModelProvider,
+): boolean {
+  return (
+    policy.definitionVersion === definitionVersionFor(model, provider) ||
+    policy.definitionVersion ===
+      definitionVersionFor(model, provider, { includeAutoCompactTokenLimit: true })
+  );
 }
 
 /** The one pre-enablement hosted web-search declaration an operator may upgrade from. */
@@ -6694,9 +7628,10 @@ function matchesWebSearchEnablementDefinitionVersion(
     ...model.capabilities,
     hostedTools: { ...model.capabilities.hostedTools, webSearch: webSearchPreEnablementState() },
   };
-  return (
-    policy.definitionVersion ===
-    definitionVersionFor({ ...modelWithoutVersion, capabilities }, provider)
+  return matchesCurrentOrPreCompactionExclusionDigest(
+    policy,
+    { ...modelWithoutVersion, capabilities },
+    provider,
   );
 }
 
@@ -6852,7 +7787,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
     models:
       catalogModels ??
       CODEX_FALLBACK_MODEL_SLUGS.map((slug) => {
-        const capabilities = {
+        const capabilities = reviewedCodexCatalogCapabilities(slug, {
           ...legacyModelCapabilities(settings, {
             reasoningEffort: true,
             hostedWebSearch: true,
@@ -6864,7 +7799,7 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
               }
             : {}),
           latencyModes: builtinLatencyModesForModel(`${CODEX_MODEL_ID_PREFIX}${slug}`),
-        };
+        });
         return {
           id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
           upstreamModelId: slug,
@@ -6984,6 +7919,60 @@ export function policyProviderIdForModel(settings: Settings, modelId: string): s
   }
   const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
   return configured?.providerId ?? builtinProviderId(settings);
+}
+
+/**
+ * Provider ids whose models are never paid with Opengeni credits: connected
+ * subscriptions and workspace/organization-owned API keys. A model id under
+ * one of these prefixes is attributed to its own payer even against BASE
+ * settings, where the per-workspace overlay that defines it is not injected.
+ */
+const NON_CREDIT_POLICY_PROVIDER_IDS = new Set<string>([
+  CODEX_PROVIDER_ID,
+  XAI_SUBSCRIPTION_PROVIDER_ID,
+  WORKSPACE_GATEWAY_PROVIDER_ID,
+  ORGANIZATION_GATEWAY_PROVIDER_ID,
+  WORKSPACE_OPENROUTER_PROVIDER_ID,
+  ORGANIZATION_OPENROUTER_PROVIDER_ID,
+  WORKSPACE_OPPER_PROVIDER_ID,
+  ORGANIZATION_OPPER_PROVIDER_ID,
+  "workspace-anthropic",
+  "organization-anthropic",
+  "workspace-claude-subscription",
+  "organization-claude-subscription",
+]);
+
+/**
+ * Whether a model id spends Opengeni credits, for the workspace model
+ * policy's credit switch. MUST agree with the cost the worker bills
+ * (`ConfiguredModel.cost === "credits"`):
+ *   - a configured model → its own cost class;
+ *   - `codex/…`, `xai…/`, and workspace/organization connection ids → never;
+ *   - anything else → the legacy built-in fallback, which the deployment pays
+ *     and bills in credits unless the cost policy marks that exact id free.
+ *     Failing closed here keeps an unknown id from slipping past a workspace
+ *     that turned credits off.
+ */
+export function policyChargesCreditsForModel(settings: Settings, modelId: string): boolean {
+  const canonicalModelId = canonicalizeConfiguredModelId(settings, modelId);
+  const configured = configuredModels(settings).find((model) => model.id === canonicalModelId);
+  if (configured) return configured.cost === "credits";
+  if (canonicalModelId.startsWith(CODEX_MODEL_ID_PREFIX)) return false;
+  if (canonicalModelId.startsWith(XAI_SUBSCRIPTION_MODEL_ID_PREFIX)) return false;
+  const slash = canonicalModelId.indexOf("/");
+  const providerPrefix = slash > 0 ? canonicalModelId.slice(0, slash) : "";
+  if (
+    NON_CREDIT_POLICY_PROVIDER_IDS.has(providerPrefix) ||
+    // Direct workspace OpenAI / Azure OpenAI keys (`workspace-openai-<id>/…`).
+    providerPrefix.startsWith("workspace-openai-") ||
+    providerPrefix.startsWith("workspace-azure-openai-")
+  ) {
+    return false;
+  }
+  return (
+    (parseModelCostPolicyJson(settings.modelCostPolicyJson)[canonicalModelId] ?? "credits") ===
+    "credits"
+  );
 }
 
 function resolvedExecutionLimits(
@@ -7486,7 +8475,30 @@ export class TurnExecutionPolicyDefinitionMismatchError extends Error {
 
 /**
  * Parse-time validation lives in @opengeni/contracts; this verifier binds a
- * present snapshot to the current executable definition and exact turn row.
+ * serving snapshot to its executable definition and mapped reasoning. This
+ * does not activate placement or replace the immutable accepted-turn policy.
+ */
+export function assertTurnServingPolicyMatchesConfigV1(
+  settings: Settings,
+  revision: TurnServingPolicyV1,
+  acceptedPolicy: TurnExecutionPolicyV1,
+): ReturnType<typeof assertTurnExecutionPolicyMatchesConfigV1> {
+  if (!settings.subscriptionCrossProviderFailoverEnabled)
+    throw new Error("Subscription model failover is disabled");
+  if (TurnExecutionPolicyV1.parse(acceptedPolicy).credentialRestriction !== undefined) {
+    throw new Error("Restricted accepted policies cannot switch");
+  }
+  const { policy } = TurnServingPolicyV1.parse(revision);
+  // Verify the SERVING definition and mapped level, never compare with the
+  // accepted model or mutate that immutable admission/authority snapshot.
+  return assertTurnExecutionPolicyMatchesConfigV1(settings, policy, {
+    modelId: policy.productModelId,
+    reasoningEffort: policy.reasoningEffort,
+    latencyMode: policy.latencyMode,
+  });
+}
+
+/** Bind an accepted snapshot to the current definition and exact turn row.
  * Non-additive executable drift fails before a provider or compaction call.
  */
 export function assertTurnExecutionPolicyMatchesConfigV1(
@@ -7559,22 +8571,22 @@ export function assertTurnExecutionPolicyMatchesConfigV1(
           billing: parsed.billing,
         },
         resolved.provider,
+        { includeAutoCompactTokenLimit: true },
       );
   // wireProfile was added to the definition digest after policies already
   // existed in durable in-flight turns. An omitted profile meant exactly
   // "openai", so accept that one legacy digest only; Azure and every other
-  // executable-definition change remain fail-closed.
-  const legacyImplicitOpenAiDefinitionVersion = legacyImplicitOpenAiDefinitionVersionFor(
+  // executable-definition change remain fail-closed. A model whose structured
+  // output was enabled after acceptance is also checked in its one
+  // pre-enablement form.
+  const structuredOutputHistorical = structuredOutputPreEnablementModel(
     resolved.model,
     resolved.provider,
   );
   const definitionVersionMatches =
-    parsed.definitionVersion === resolved.model.definitionVersion ||
-    parsed.definitionVersion === legacyImplicitOpenAiDefinitionVersion ||
-    parsed.definitionVersion ===
-      legacyCodexAstraImplicitCachingDefinitionVersionFor(resolved.model, resolved.provider) ||
-    matchesAdditiveCapabilityDefinitionVersion(resolved.model, resolved.provider, parsed) ||
-    matchesWebSearchEnablementDefinitionVersion(resolved.model, resolved.provider, parsed);
+    acceptedDefinitionVersionMatches(resolved.model, resolved.provider, parsed) ||
+    (structuredOutputHistorical !== null &&
+      acceptedDefinitionVersionMatches(structuredOutputHistorical, resolved.provider, parsed));
   const identityMismatched =
     parsed.providerId !== resolved.provider.id ||
     parsed.upstreamModelId !== resolved.model.upstreamModelId ||
@@ -7854,6 +8866,7 @@ export function settingsWithResolvedModelContext(
     | "toolOutputTruncationTokens"
   > & { id?: string },
   workspaceSettings?: unknown,
+  organizationDefaults?: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null,
 ): Settings {
   const contextWindowTokens = model.contextWindowTokens ?? settings.contextWindowTokens;
   const resolved = {
@@ -7881,11 +8894,16 @@ export function settingsWithResolvedModelContext(
       settings,
       { ...model, id: model.id },
       workspaceSettings,
+      organizationDefaults,
     ).effectiveTokens,
   };
 }
 
-/** One policy projection for settings UI and all model-facing worker paths. */
+/**
+ * One policy projection for settings UI and all model-facing worker paths.
+ * The workspace's own preference wins, then the organization's default for
+ * the model, then the model's own default.
+ */
 export function workspaceModelCompactionPolicy(
   settings: Settings,
   model: Pick<
@@ -7893,6 +8911,7 @@ export function workspaceModelCompactionPolicy(
     "id" | "contextWindowTokens" | "effectiveContextWindowTokens" | "autoCompactTokenLimit"
   >,
   workspaceSettings: unknown,
+  organizationDefaults?: Pick<OrganizationModelDefaults, "modelCompactionThresholds"> | null,
 ): ModelCompactionPolicy {
   const resolved = settingsWithResolvedModelContext(settings, model);
   const maximumTokens = Math.max(
@@ -7909,10 +8928,12 @@ export function workspaceModelCompactionPolicy(
         Math.max(0.3, Math.min(0.9, resolved.contextCompactionThresholdRatio)),
   );
   const overrideTokens = workspaceModelCompactionThreshold(workspaceSettings, model.id);
+  const organizationTokens = organizationModelCompactionThreshold(organizationDefaults, model.id);
   return {
     defaultTokens,
     overrideTokens,
-    effectiveTokens: clamp(overrideTokens ?? defaultTokens),
+    organizationTokens,
+    effectiveTokens: clamp(overrideTokens ?? organizationTokens ?? defaultTokens),
     minimumTokens,
     maximumTokens,
   };
@@ -8044,7 +9065,8 @@ export function calculateModelListUsageCostSnapshot(
   let providerCostMicros = sumListCostClasses(classes);
   let creditCostMicros = 0;
   for (const [pricing, raw] of rawCostByPricing) {
-    creditCostMicros += Math.ceil((raw * (10_000 + (pricing.marginBps ?? 0))) / 10_000);
+    const marginBps = effectiveCreditMarginBps(settings, pricing.marginBps);
+    creditCostMicros += Math.ceil((raw * (10_000 + marginBps)) / 10_000);
   }
   let listByClassApprox = false;
   const latencyMode = options.latencyMode ?? "standard";
@@ -8282,7 +9304,7 @@ function calculateUsageCostBreakdown(
   let providerCostMicros = 0;
   let creditCostMicros = 0;
   for (const [pricing, rawCost] of rawCostByPricing) {
-    const marginBps = pricing.marginBps ?? 0;
+    const marginBps = effectiveCreditMarginBps(settings, pricing.marginBps);
     providerCostMicros += rawCost;
     creditCostMicros += Math.ceil((rawCost * (10_000 + marginBps)) / 10_000);
   }
@@ -8363,7 +9385,7 @@ export function calculateGatewayReportedCostBreakdown(
   const pricing = selectModelPricing(schedule, positiveInt(options?.inputTokens));
   const { providerNumerator, decimalScale, providerCostMicros } =
     parseGatewayReportedCostDecimal(inferenceCostUsd);
-  const marginBps = BigInt(10_000 + (pricing.marginBps ?? 0));
+  const marginBps = BigInt(10_000 + effectiveCreditMarginBps(settings, pricing.marginBps));
   const numerator = providerNumerator * marginBps;
   const denominator = decimalScale * 10_000n;
   const creditMicros = (numerator + denominator - 1n) / denominator;
@@ -8541,6 +9563,36 @@ export function collectGitIdentityEnvironment(settings: Settings): Record<string
 
 const DEFAULT_SANDBOX_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+/** Platform-owned manifest env names that are not `OPENGENI_*` pointers. */
+const PLATFORM_SANDBOX_ENVIRONMENT_NAMES = new Set([
+  "HOME",
+  "PATH",
+  "GIT_AUTHOR_NAME",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_ASKPASS",
+  "GIT_TERMINAL_PROMPT",
+]);
+
+/**
+ * The manifest-env constants predicate (W1 secrets delivery, RM-3). A sandbox
+ * manifest may carry only deployment constants: HOME, PATH, git identity and
+ * askpass pointers, `OPENGENI_*` pointers, and the deployment allowlist
+ * (`sandboxEnvironmentVariableNames`). User secrets never qualify: they are
+ * resolved per command from `{{secret:…}}` references. Used by `buildManifest`
+ * and the persisted-envelope strip as a defensive filter.
+ */
+export function sandboxManifestEnvironmentNamePredicate(
+  settings: Settings,
+): (name: string) => boolean {
+  const deployment = new Set(sandboxEnvironmentVariableNames(settings));
+  return (name) =>
+    PLATFORM_SANDBOX_ENVIRONMENT_NAMES.has(name) ||
+    name.startsWith("OPENGENI_") ||
+    deployment.has(name);
+}
+
 function prependPathEntry(pathValue: string | undefined, entry: string): string {
   const parts = (pathValue ?? DEFAULT_SANDBOX_PATH).split(":").filter(Boolean);
   return [entry, ...parts.filter((part) => part !== entry)].join(":");
@@ -8557,9 +9609,9 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * manifest lacks or carries a different value for).
  *
  * Precedence (lowest → highest): deployment allowlist (`collectSandboxEnvironment`)
- * < git identity (`collectGitIdentityEnvironment`) < the session's attached
- * workspace environment < the backend-aware HOME default. Reserved-name validation
- * at write time keeps workspace values from colliding with platform entries.
+ * < git identity (`collectGitIdentityEnvironment`) < the backend-aware HOME default.
+ * The manifest holds deployment constants only: user secrets never ride it.
+ * They are resolved per command from `{{secret:…}}` references (W1 delivery).
  *
  * DELIBERATELY EXCLUDES the per-run, ROTATING git provider token VALUES that
  * `sandboxEnvironmentForRun` mints when a repository resource is
@@ -8575,18 +9627,15 @@ function prependPathEntry(pathValue: string | undefined, entry: string): string 
  * the platform never mints or seeds git provider tokens there. The attach
  * surfaces have only the `Session` (no repo resources) and so never seed a token,
  * but unwritten files simply yield no auth; the BLOCKING attach-vs-turn error
- * this helper fixes is for the common (no-repo) and workspace-environment-attached
- * provisioned-box cases.
+ * this helper fixes is for the common (no-repo) provisioned-box case.
  */
 export function stableSandboxEnvironmentForRun(
   settings: Settings,
-  workspaceEnvironment: Record<string, string> = {},
   options: { workspaceId?: string } = {},
 ): Record<string, string> {
   const environment: Record<string, string> = {
     ...collectSandboxEnvironment(settings),
     ...collectGitIdentityEnvironment(settings),
-    ...workspaceEnvironment,
   };
   // Backend-aware HOME: a provisioned box (docker + every cloud provider) runs the
   // agent under the descriptor's workspaceRoot. `local` runs in-process as the host
@@ -9126,6 +10175,13 @@ function positiveInt(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
+/**
+ * Setup bound for Opengeni's own MCP servers. They are the deployment's API,
+ * which is briefly slow while it restarts or is under load; the client's
+ * 5-second default turned that into failed turns. Tool calls are unaffected.
+ */
+export const FIRST_PARTY_MCP_SETUP_TIMEOUT_MS = 30_000;
+
 function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
   const existing = settings.mcpServers.filter((server) => server.id !== "opengeni");
   const firstPartyMcpUrl = firstPartyMcpServerUrl(settings);
@@ -9150,6 +10206,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
       // permission-invariant tool and docs is already uncached, so both stay
       // safe to cache / leave as-is.)
       cacheToolsList: false,
+      setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
     },
     ...(hasFiles
       ? []
@@ -9160,6 +10217,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
             url: firstPartyFilesMcpUrl,
             allowedTools: ["files_get_download_url"],
             cacheToolsList: true,
+            setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
           },
         ]),
     ...(hasDocs
@@ -9171,6 +10229,7 @@ function ensureBuiltInMcpServers(settings: Settings): Settings["mcpServers"] {
             url: firstPartyDocsMcpUrl,
             allowedTools: ["knowledge_search", "knowledge_get", "knowledge_browse"],
             cacheToolsList: false,
+            setupTimeoutMs: FIRST_PARTY_MCP_SETUP_TIMEOUT_MS,
           },
         ]),
     ...existing,
@@ -9369,9 +10428,40 @@ export function localSandboxApiRouteAllowed(pathname: string): boolean {
   return LOCAL_SANDBOX_API_ROUTES.some((route) => route.test(pathname));
 }
 
+/**
+ * Published Sites serve untrusted HTML, so their domain must not hold or sit
+ * inside the console or API hosts: a Site could otherwise read or set their
+ * cookies. A separate registrable domain is required (see
+ * docs/published-sites.md); this catches the nesting a host check can see.
+ */
+export function validateSitesDomain(
+  settings: Pick<Settings, "sitesDomain" | "publicBaseUrl" | "webBaseUrl">,
+): void {
+  if (settings.sitesDomain === undefined) return;
+  let domain: string;
+  try {
+    domain = normalizeSitesDomain(settings.sitesDomain);
+  } catch {
+    throw new Error("OPENGENI_SITES_DOMAIN must be a domain name such as sites.example.com");
+  }
+  const hosts: Array<[string, string | undefined]> = [
+    ["OPENGENI_PUBLIC_BASE_URL", settings.publicBaseUrl],
+    ["OPENGENI_WEB_BASE_URL", settings.webBaseUrl],
+  ];
+  for (const [name, url] of hosts) {
+    if (!url) continue;
+    const host = new URL(url).hostname.toLowerCase().replace(/\.$/u, "");
+    if (host === domain || host.endsWith(`.${domain}`) || domain.endsWith(`.${host}`))
+      throw new Error(
+        `OPENGENI_SITES_DOMAIN (${domain}) must be a separate domain from the console and API: ${name} uses ${host}`,
+      );
+  }
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
+  validateSitesDomain(settings);
   if (
     settings.organizationUserSetupEmailTokenTransport === "query" &&
     !settings.organizationUserSetupQueryEdgeSanitizationConfirmed
@@ -9397,6 +10487,11 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     );
   }
   if (settings.productAccessMode === "managed") {
+    if (settings.onePasswordFakeTokens && !["local", "test"].includes(settings.environment)) {
+      throw new Error(
+        "OPENGENI_ONEPASSWORD_FAKE_TOKENS is a local development switch and is refused by the managed runtime",
+      );
+    }
     if (!settings.publicBaseUrl) {
       throw new Error(
         "OPENGENI_PUBLIC_BASE_URL is required when OPENGENI_PRODUCT_ACCESS_MODE=managed",
@@ -9421,8 +10516,17 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
         "OPENGENI_PUBLIC_BASE_URL must use https when browser session sets are enabled outside local/test",
       );
     }
-    if (!["local", "test"].includes(settings.environment) && !settings.resendApiKey) {
+    if (
+      settings.managedEmailDelivery === "resend" &&
+      !["local", "test"].includes(settings.environment) &&
+      !settings.resendApiKey
+    ) {
       throw new Error("OPENGENI_RESEND_API_KEY is required for managed mode outside local/test");
+    }
+    if (settings.managedEmailDelivery === "disabled" && settings.resendApiKey) {
+      throw new Error(
+        "OPENGENI_RESEND_API_KEY must be unset when OPENGENI_MANAGED_EMAIL_DELIVERY=disabled",
+      );
     }
     if (!["local", "test"].includes(settings.environment) && !settings.environmentsEncryptionKey) {
       throw new Error(
@@ -9822,6 +10926,12 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     throw new Error(
       "OPENGENI_DOCUMENT_EMBEDDING_CREDITS_ACTIVATED_AT is required for paid OpenAI embeddings",
     );
+  }
+  if (settings.sandboxBackend === "compute") {
+    const issues = computeSettingsIssues(settings);
+    if (issues.length > 0) {
+      throw new Error(`OPENGENI_SANDBOX_BACKEND=compute: ${issues.join("; ")}`);
+    }
   }
   if (settings.sandboxBackend === "opensandbox") {
     if (!/@sha256:[0-9a-f]{64}$/i.test(settings.openSandboxImage ?? "")) {
@@ -10229,6 +11339,61 @@ export function streamTokenDegraded(settings: Settings): boolean {
   return settings.sandboxDesktopEnabled && resolveStreamTokenSecret(settings) === undefined;
 }
 
+/** Whether this deployment serves the compute agent gateway: the control service API
+ * it reads link keys from and the gateway's own URL are both configured. */
+export function computeGatewayConfigured(settings: Settings): boolean {
+  return Boolean(settings.computeApiUrl && settings.computeApiKey && settings.computeLinkUrl);
+}
+
+/** Everything a deployment must configure before a compute sandbox can work,
+ * as human-readable problems; empty when it is ready. Checked at boot when
+ * compute is the deployment backend, and whenever a compute client is built,
+ * so a session that selects compute fails clearly instead of half-creating. */
+export function computeSettingsIssues(settings: Settings): string[] {
+  const issues: string[] = [];
+  if (!settings.computeApiUrl) issues.push("OPENGENI_COMPUTE_API_URL is required");
+  if (!settings.computeApiKey) issues.push("OPENGENI_COMPUTE_API_KEY is required");
+  if (
+    settings.computeApiUrl &&
+    !["local", "test"].includes(settings.environment) &&
+    !settings.computeApiUrl.startsWith("https://")
+  ) {
+    issues.push("OPENGENI_COMPUTE_API_URL must use https outside local/test");
+  }
+  const linkUrl = settings.computeLinkUrl;
+  if (!linkUrl) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL is required");
+  } else if (
+    !linkUrl.startsWith("wss://") &&
+    !(["local", "test"].includes(settings.environment) && linkUrl.startsWith("ws://"))
+  ) {
+    issues.push("OPENGENI_COMPUTE_LINK_URL must be a wss:// URL (ws:// only in local/test)");
+  }
+  if (!settings.selfhostedRelayUrl || !resolveRelayTokenSecret(settings)) {
+    issues.push(
+      "OPENGENI_SELFHOSTED_RELAY_URL and the relay token secret are required (terminal, desktop and ports)",
+    );
+  }
+  if (settings.agentOpStreamEnabled !== true) {
+    issues.push("OPENGENI_AGENT_OP_STREAM_ENABLED must stay true (agent exec needs op-stream)");
+  }
+  if (
+    settings.computeMemoryRequestMib !== undefined &&
+    settings.computeMemoryRequestMib > settings.computeMemoryMib
+  ) {
+    issues.push("OPENGENI_COMPUTE_MEMORY_REQUEST_MIB must not exceed OPENGENI_COMPUTE_MEMORY_MIB");
+  }
+  if (
+    settings.computeCpuRequestMillis !== undefined &&
+    settings.computeCpuRequestMillis > settings.computeVcpus * 1000
+  ) {
+    issues.push(
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS must not exceed OPENGENI_COMPUTE_VCPUS * 1000",
+    );
+  }
+  return issues;
+}
+
 /**
  * Resolve the secret the control plane signs the enrollment bearer credential
  * with (the `oge_` envelope the agent presents back — M5). Falls
@@ -10483,6 +11648,14 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: number;
       autoCompactTokenLimit?: number;
       prefixBoundThinking?: boolean;
+      /**
+       * The model writes its notes for the person between tool calls as
+       * progress-update `thinking` blocks instead of `text` blocks. Requests
+       * use `thinking.display: "updates"` so those blocks, and only those,
+       * carry readable text (Anthropic's documented way to tell them apart
+       * from reasoning).
+       */
+      progressUpdates?: boolean;
     }>
   >
 > = Object.fromEntries([
@@ -10503,7 +11676,12 @@ const CLAUDE_NATIVE_MODEL_PROFILES: Readonly<
       maxOutputTokens: 128_000,
       prefixBoundThinking:
         id === "claude-opus-5-5" || id === "claude-sonnet-5-5" || id === "claude-haiku-5-5",
-      ...(id === "claude-haiku-5-5" ? { autoCompactTokenLimit: 95_000 } : {}),
+      ...(id === "claude-opus-5-5" || id === "claude-sonnet-5-5" ? { progressUpdates: true } : {}),
+      ...(id === "claude-haiku-5-5"
+        ? { autoCompactTokenLimit: 95_000 }
+        : id === "claude-opus-5-5"
+          ? { autoCompactTokenLimit: OPUS_5_5_AUTO_COMPACT_TOKEN_LIMIT }
+          : {}),
     },
   ]),
   ...["claude-opus-4-6", "claude-sonnet-4-6"].map((id) => [
@@ -10530,6 +11708,16 @@ export function claudeNativeModelProfile(upstreamModelId: string) {
     ? CLAUDE_NATIVE_MODEL_PROFILES[upstreamModelId]
     : undefined;
 }
+/**
+ * Models a new Claude connection offers without anyone adding them. Seeded
+ * once per scope and connection kind, only when that scope never configured
+ * Claude models; a removed model stays removed.
+ */
+export const CLAUDE_DEFAULT_CONNECTION_MODEL_IDS = [
+  "claude-opus-5-5",
+  "claude-sonnet-5-5",
+  "claude-haiku-5-5",
+] as const;
 export function claudeProviderId(
   kind: ClaudeConnectionKind,
   scope: "workspace" | "organization" = "organization",
@@ -10599,11 +11787,13 @@ export function withClaudeConnectionCatalog(
                   ? "Claude Haiku 5.5"
                   : model.upstreamModelId),
           reasoningEffort: adaptiveThinking,
-          hostedWebSearch: false,
+          // Claude's server-side web search runs on every Claude route (API
+          // key and subscription) under the deployment's web search switch.
+          hostedWebSearch: settings.webSearchEnabled,
           capabilities: {
             ...legacyModelCapabilities(settings, {
               reasoningEffort: adaptiveThinking,
-              hostedWebSearch: false,
+              hostedWebSearch: settings.webSearchEnabled,
               vision: true,
             }),
             inputFileMediaTypes: [],

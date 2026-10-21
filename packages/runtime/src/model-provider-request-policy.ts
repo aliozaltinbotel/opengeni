@@ -164,8 +164,37 @@ export function azureModelRequestPolicy({
 }: {
   body: Readonly<Record<string, unknown>>;
 }): ReturnType<ModelJsonRequestPolicy> {
+  // Azure documents sources for web search and result snippets for reasoning
+  // models. Request only when the native tool is actually attached; this is not
+  // capability discovery or a second search. Effort presence is a conservative
+  // predicate: no/disabled reasoning still receives URL-only sources.
+  const hostedSearch =
+    body.input !== undefined &&
+    Array.isArray(body.tools) &&
+    body.tools.some((tool) => tool?.type === "web_search" || tool?.type === "web_search_preview");
+  let projectedBody: Record<string, unknown> = body;
+  if (hostedSearch && (body.include === undefined || Array.isArray(body.include))) {
+    const reasoning = body.reasoning as { effort?: unknown } | undefined;
+    const includes = [
+      ...(Array.isArray(body.include) ? body.include : []),
+      "web_search_call.action.sources",
+      ...(typeof reasoning?.effort === "string" &&
+      reasoning.effort.trim() &&
+      reasoning.effort !== "none"
+        ? ["web_search_call.results"]
+        : []),
+    ];
+    const include = [...new Set(includes)];
+    if (
+      !Array.isArray(body.include) ||
+      include.length !== body.include.length ||
+      include.some((value, index) => value !== (body.include as unknown[])[index])
+    ) {
+      projectedBody = { ...body, include };
+    }
+  }
   const input = body.input;
-  if (!Array.isArray(input)) return undefined;
+  if (!Array.isArray(input)) return projectedBody === body ? undefined : { body: projectedBody };
   const containsComputerProtocol = input.some(
     (item) =>
       item &&
@@ -173,7 +202,8 @@ export function azureModelRequestPolicy({
       ((item as Record<string, unknown>).type === "computer_call" ||
         (item as Record<string, unknown>).type === "computer_call_output"),
   );
-  if (!containsComputerProtocol) return undefined;
+  if (!containsComputerProtocol)
+    return projectedBody === body ? undefined : { body: projectedBody };
   const projectedInput = input.map((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return item;
     const record = item as Record<string, unknown>;
@@ -188,10 +218,14 @@ export function azureModelRequestPolicy({
     }
     return item;
   });
-  const projectedBody: Record<string, unknown> = { ...body, input: projectedInput };
-  const changedComputerCalls = rewriteComputerCallsToActionsOnly(projectedBody);
-  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(projectedBody);
-  return changedComputerCalls || changedScreenshots ? { body: projectedBody } : undefined;
+  const computerBody = { ...projectedBody, input: projectedInput };
+  const changedComputerCalls = rewriteComputerCallsToActionsOnly(computerBody);
+  const changedScreenshots = rewriteEmptyComputerCallOutputImageUrls(computerBody);
+  return changedComputerCalls || changedScreenshots
+    ? { body: computerBody }
+    : projectedBody === body
+      ? undefined
+      : { body: projectedBody };
 }
 
 /**
@@ -202,6 +236,22 @@ export function azureModelRequestPolicy({
  */
 export function isOpperClaudeUpstreamModel(model: unknown): boolean {
   return typeof model === "string" && /(?:^|[/.])claude-/iu.test(model);
+}
+
+function hasExplicitChatCacheControl(body: Record<string, unknown>): boolean {
+  const marked = (value: unknown): boolean =>
+    value !== null &&
+    typeof value === "object" &&
+    (Object.hasOwn(value, "cache_control") || Object.hasOwn(value, "prompt_cache_breakpoint"));
+  if (Object.hasOwn(body, "cache_control")) return true;
+  if (Array.isArray(body.tools) && body.tools.some(marked)) return true;
+  return (
+    Array.isArray(body.messages) &&
+    body.messages.some(
+      (message) =>
+        marked(message) || (Array.isArray(message?.content) && message.content.some(marked)),
+    )
+  );
 }
 
 /**
@@ -226,7 +276,20 @@ export function modelRequestPolicyForProvider(
       Array.isArray(body.messages)
     ) {
       const messages = projectUnsignedClaudeChatReasoning(body.messages);
-      return messages === body.messages ? undefined : { body: { ...body, messages } };
+      // OpenRouter's Anthropic routes require opt-in even for repeated prefixes.
+      // Request-level automatic caching leaves every earlier message/tool intact;
+      // do not move client-side breakpoints as new history arrives. Caller-owned
+      // cache controls win (including explicit breakpoints and their TTL/limit).
+      const automaticCache = !hasExplicitChatCacheControl(body);
+      return messages === body.messages && !automaticCache
+        ? undefined
+        : {
+            body: {
+              ...body,
+              messages,
+              ...(automaticCache ? { cache_control: { type: "ephemeral" } } : {}),
+            },
+          };
     }
     if (
       (provider.kind === "opper-managed" ||

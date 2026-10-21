@@ -1,6 +1,7 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
-import { partitionPinnedSessions, recentSessionsForHome } from "@opengeni/react/session-list-model";
-import type { LatencyMode, ReasoningEffort, Session } from "@opengeni/sdk";
+import { useOpenGeniText } from "@opengeni/react/messages";
+import { recentSessionsForHome } from "@opengeni/react/session-list-model";
+import type { LatencyMode, ReasoningEffort } from "@opengeni/sdk";
 import { useNativeFileAttachments } from "@opengeni/react-native";
 import {
   AttachmentChips,
@@ -31,7 +32,9 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import * as Haptics from "expo-haptics";
 import { useAccount } from "@/account";
+import { useAgentCall } from "@/call";
 import { cachedLists, rememberLists } from "@/session-list-cache";
+import { EMPTY_SESSION_LISTS, useSessionPinToggle, type SessionLists } from "@/session-pins";
 import { serverLabel } from "@/account-store";
 import { BrandMark } from "@/brand-mark";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
@@ -90,6 +93,7 @@ function Gate() {
 /* The web home canvas at phone width: the question, the new-session composer
    and the quiet Recent sessions list under it. The rail lives behind the menu. */
 function Home() {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   const insets = useSafeAreaInsets();
@@ -107,7 +111,9 @@ function Home() {
     error,
     reload,
   } = useAccount();
-  const [sessions, setSessions] = useState<Session[]>(() => cachedLists(workspaceId).home ?? []);
+  const [lists, setLists] = useState<SessionLists>(
+    () => cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS,
+  );
   // Only a pull shows the refresh spinner; focus refreshes are quiet so the
   // composer never jumps when you come back to this screen.
   const [pulling, setPulling] = useState(false);
@@ -124,9 +130,11 @@ function Home() {
     try {
       // Top-level conversations only, as web's home: sub-agents are reached from
       // their parent and would otherwise crowd the list.
-      const list = await client.listSessions(workspaceId, { limit: 12, parentSessionId: null });
-      rememberLists(workspaceId, { home: list });
-      setSessions(list);
+      // The page also carries every pin, which leads the list as on web.
+      const page = await client.listSessionPage(workspaceId, { limit: 12, parentSessionId: null });
+      const next = { pinned: page.pinned, sessions: page.sessions };
+      rememberLists(workspaceId, { home: next });
+      setLists(next);
       setListError(null);
     } catch (caught) {
       setListError(caught instanceof Error ? caught.message : String(caught));
@@ -135,7 +143,7 @@ function Home() {
 
   // A workspace switch shows that workspace's last list at once.
   useEffect(() => {
-    setSessions(cachedLists(workspaceId).home ?? []);
+    setLists(cachedLists(workspaceId).home ?? EMPTY_SESSION_LISTS);
   }, [workspaceId]);
 
   useFocusEffect(
@@ -178,11 +186,17 @@ function Home() {
         : { workspaceId, model, effort, latencyMode }),
       ...patch,
     }));
-  const pill = model ? compactModelPill(models, model, effort) : null;
-  const recent = useMemo(() => {
-    const { pinned } = partitionPinnedSessions(sessions);
-    return recentSessionsForHome(sessions, pinned, 6);
-  }, [sessions]);
+  const pill = model ? compactModelPill(t, models, model, effort) : null;
+  const recent = useMemo(
+    () => recentSessionsForHome(t, lists.sessions, lists.pinned, 6),
+    [t, lists],
+  );
+  const togglePin = useSessionPinToggle({ client, workspaceId, setLists });
+  useEffect(() => {
+    if (workspaceId && (lists.pinned.length > 0 || lists.sessions.length > 0)) {
+      rememberLists(workspaceId, { home: lists });
+    }
+  }, [lists, workspaceId]);
 
   // The new chat's photos and files upload to the workspace as they are picked.
   const attachments = useNativeFileAttachments({
@@ -241,7 +255,6 @@ function Home() {
         ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
         ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
         ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
-        ...(chosen.variableSetIds ? { variableSetIds: chosen.variableSetIds } : {}),
         ...(chosen.excludedMcpServerIds
           ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
           : {}),
@@ -256,6 +269,39 @@ function Home() {
       setListError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setCreating(false);
+    }
+  };
+
+  // A call from the empty composer starts a new conversation as a call, with
+  // the chosen model and options, then opens it beneath the call screen.
+  const agentCall = useAgentCall();
+  const [calling, setCalling] = useState(false);
+  const startCall = async () => {
+    if (!workspaceId || calling || creating) return;
+    setCalling(true);
+    void Haptics.selectionAsync();
+    try {
+      const chosen = options.request();
+      const created = await client.createSession(workspaceId, {
+        startMode: "realtime",
+        ...(model ? { model } : {}),
+        ...(effort ? { reasoningEffort: effort } : {}),
+        ...(latencyMode !== "standard" ? { latencyMode } : {}),
+        ...(chosen.visibility ? { visibility: chosen.visibility } : {}),
+        ...(chosen.targetSandboxId ? { targetSandboxId: chosen.targetSandboxId } : {}),
+        ...(chosen.channelId ? { channelId: chosen.channelId } : {}),
+        ...(chosen.excludedMcpServerIds
+          ? { excludedMcpServerIds: chosen.excludedMcpServerIds }
+          : {}),
+        ...(chosen.resources.length ? { resources: chosen.resources } : {}),
+      });
+      options.reset();
+      router.push(`/session/${created.id}`);
+      agentCall.callSession(created.id);
+    } catch (caught) {
+      setListError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setCalling(false);
     }
   };
 
@@ -385,6 +431,11 @@ function Home() {
             sending={creating}
             placeholder="Describe a task for the agent..."
             voice={voice}
+            call={
+              workspaceId
+                ? { onPress: () => void startCall(), busy: calling, disabled: creating }
+                : undefined
+            }
             onPasteImages={(files) => void attachments.addFiles(files)}
             renderLeading={() => (
               <ComposerPlusMenu
@@ -411,6 +462,7 @@ function Home() {
                   label={pill.name}
                   detail={pill.effort}
                   fast={latencyMode === "fast"}
+                  ultrafast={latencyMode === "ultrafast"}
                   leading={<ModelMark model={model ?? ""} size={14} color={c.fg} />}
                   onPress={() => {
                     catalog.refresh();
@@ -456,6 +508,7 @@ function Home() {
               sessions={recent}
               models={models}
               onOpen={(sessionId) => router.push(`/session/${sessionId}`)}
+              onTogglePin={(session) => void togglePin(session)}
             />
           </View>
         ) : null}

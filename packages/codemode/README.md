@@ -71,6 +71,13 @@ await tab.getByRole("button", { name: "Save" }).click();
 const still = await tab.screenshot({ quality: 40 });
 console.log(still.path); // Open this local PNG/JPEG/WebP with view_image.
 
+// Bulk captures: wait for client-rendered data, then keep each still as a file.
+for (const width of [1440, 390]) {
+  await tab.act({ type: "viewport", width, height: 900 }); // Desktop unless mobile: true.
+  await tab.navigate("http://127.0.0.1:3000/reports", { waitUntil: "network_idle" });
+  await tab.screenshot({ saveTo: `shots/reports-${width}.jpg` });
+}
+
 const { downloads } = await browser.downloads.list();
 const completed = downloads.find((download) => download.status === "completed");
 if (completed) {
@@ -96,6 +103,13 @@ simple tag, class, id, descendant, and child selectors; attribute and pseudo
 selectors are rejected to prevent secret-value probing. Browser image blocks
 are bounded below the Code Mode journal limit; for an oversized screenshot,
 capture the viewport or lower JPEG quality.
+
+`CodemodeCallOptions.expectedDefinitionDigest` optionally pins one complete
+public entry. The client checks it before submission and again after the one
+permitted pre-execution stale-catalog refresh. Local Site previews always pass
+this pin, so a retry cannot execute a changed definition while reporting old
+metadata. The pin grants no authority and does not alter durable operation
+reconciliation or frozen approval decisions.
 
 Both surfaces return the same durable tool receipts. Human approval, catalog
 generation, operation idempotency, and outcome-unknown behavior remain enforced

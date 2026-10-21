@@ -1,5 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { REALTIME_SESSION_SOURCE_SCHEMA } from "@opengeni/contracts";
+import * as db from "@opengeni/db";
 import {
   parseRealtimeVoicePricingJson,
   parseRealtimeVoicePricingTableJson,
@@ -10,8 +11,11 @@ import { spendableCreditMicros, VOICE_CREDIT_USAGE } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import {
   createRealtimeVoiceBilling,
+  createVoiceInputBilling,
   deploymentRealtimeVoice,
+  RealtimeVoiceUnavailableError,
   realtimeVoiceOfferProblem,
+  TranscriptionServiceError,
   voiceCreditStanding,
   voiceInsufficientCreditsMessage,
 } from "../src";
@@ -25,6 +29,16 @@ test("live voice pricing: strict JSON, margin rounds up, every started minute", 
   expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 })).toEqual({
     providerCostMicros: 50_000,
     creditCostMicros: 52_500,
+  });
+  expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 }, 0)).toEqual({
+    providerCostMicros: 50_000,
+    creditCostMicros: 50_000,
+  });
+  expect(
+    realtimeVoiceMinuteCreditMicros({ microsPerMinute: 50_000, marginBps: 500 }, 1_000),
+  ).toEqual({
+    providerCostMicros: 50_000,
+    creditCostMicros: 55_000,
   });
   expect(realtimeVoiceMinuteCreditMicros({ microsPerMinute: 3, marginBps: 1 })).toEqual({
     providerCostMicros: 3,
@@ -93,7 +107,7 @@ test("promotional chat-only credits are named, not reported as no credits", () =
     "Promotional credits don't cover live voice. Add credits to use it.",
   );
   expect(voiceInsufficientCreditsMessage("Voice input", "none")).toBe(
-    "Voice input needs Opengeni credits. Add credits to continue.",
+    "Voice input needs credits. Add credits to continue.",
   );
 });
 
@@ -170,4 +184,53 @@ test("native occurrence is separate from immutable final accounting and remains 
     await expect(billing.recordProviderSessionOccurrence({ accountId: "account", workspaceId: "workspace", sessionId: "session", source }))
       .rejects.toThrow("receipt unavailable");
   } finally { writer.mockRestore(); sourceReader.mockRestore(); }
+});
+
+test("credit-funded voice honors the workspace switch that turns Opengeni credits off", async () => {
+  const policy = spyOn(db, "getWorkspaceModelPolicy").mockResolvedValue({
+    allowedProviders: null,
+    allowedModels: null,
+    allowCreditModels: false,
+  });
+  const reconcile = spyOn(db, "reconcileUnsettledVoiceInputCharges").mockResolvedValue(
+    undefined as never,
+  );
+  try {
+    const settings = testSettings({
+      billingMode: "stripe",
+      azureLiveEndpoint: "https://voice.example.test",
+      azureLiveApiKey: "key",
+      azureLivePricingJson: '{"microsPerMinute":50000}',
+    });
+    const database = {} as db.Database;
+    const live = createRealtimeVoiceBilling({ db: database, settings });
+    expect(await live.creditsDisabled("workspace-a")).toBe(true);
+    const admitted = live.admit({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      model: "opengeni-azure/gpt-live-1" as never,
+      attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
+    });
+    await expect(admitted).rejects.toBeInstanceOf(RealtimeVoiceUnavailableError);
+    await expect(admitted).rejects.toMatchObject({ code: "credits_disabled" });
+
+    const dictation = createVoiceInputBilling({ db: database, settings });
+    const refused = dictation.admit({
+      accountId: "account-a",
+      workspaceId: "workspace-a",
+      attribution: { kind: "human", initiatingHumanSubjectId: "user:a" } as never,
+    });
+    await expect(refused).rejects.toBeInstanceOf(TranscriptionServiceError);
+    await expect(refused).rejects.toMatchObject({ code: "policy_blocked", fallbackSafe: true });
+
+    // Without credit billing nothing is charged, so the switch has nothing to block.
+    const selfHosted = createRealtimeVoiceBilling({
+      db: database,
+      settings: { ...settings, billingMode: "disabled", usageLimitsMode: "none" },
+    });
+    expect(await selfHosted.creditsDisabled("workspace-a")).toBe(false);
+  } finally {
+    policy.mockRestore();
+    reconcile.mockRestore();
+  }
 });

@@ -2,7 +2,11 @@
 // approvals, goals paused on them) and what they chose to tell them. The same
 // rules as the web Inbox page: rows are messages, approvals decide in place, a
 // single short choice answers in one tap, everything else opens its session.
-import { parseNotificationText, type NotificationSpan } from "@opengeni/react/timeline-model";
+import {
+  notificationPlainText,
+  parseNotificationText,
+  type NotificationSpan,
+} from "@opengeni/react/timeline-model";
 import type { InboxItem, ListInboxResponse, OpenGeniClient } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
@@ -10,7 +14,6 @@ import {
   Alert,
   Animated,
   AppState,
-  Linking,
   PanResponder,
   Platform,
   Pressable,
@@ -19,11 +22,13 @@ import {
   type LayoutChangeEvent,
 } from "react-native";
 
+import { useOpenNativeLink } from "../links";
 import { Button } from "./controls";
 import { Icon, type NativeIconName } from "./icon";
 import { withAlpha } from "./primitives";
 import { SectionLabel } from "./session-list";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 
 export type NativeInboxClient = Pick<
   OpenGeniClient,
@@ -40,13 +45,33 @@ function snoozedNow(item: InboxItem, now: number): boolean {
   return item.snoozedUntil !== null && Date.parse(item.snoozedUntil) > now;
 }
 
+/** Questions, approvals and paused goals wait on the person; notes and replies don't. */
+export function isNeedsYouKind(kind: InboxItem["kind"]): boolean {
+  return kind === "question" || kind === "approval" || kind === "goal_paused";
+}
+
 /** What waits on the person right now: needs-you items plus unread notes, unsnoozed. */
 export function nativeInboxAttentionCount(data: ListInboxResponse | null): number {
   if (!data) return 0;
   const now = Date.now();
   return data.items.filter(
-    (item) => !snoozedNow(item, now) && (item.kind !== "notification" || item.unread),
+    (item) => !snoozedNow(item, now) && (isNeedsYouKind(item.kind) || item.unread),
   ).length;
+}
+
+/**
+ * An item as this app reads it. Servers from before rich notifications leave
+ * out the subtitle, facts, link and moment; read those as empty.
+ */
+function normalizeInboxItem(item: InboxItem): InboxItem {
+  return {
+    ...item,
+    subtitle: item.subtitle ?? "",
+    facts: Array.isArray(item.facts) ? item.facts : [],
+    link: item.link ?? null,
+    eventSequence: item.eventSequence ?? null,
+    choices: Array.isArray(item.choices) ? item.choices : [],
+  };
 }
 
 /** The person's inbox, refreshed on an interval, on foreground and after every action. */
@@ -57,7 +82,8 @@ export function useNativeInbox(client: NativeInboxClient, options: { pollMs?: nu
   const refresh = useCallback(async () => {
     const request = ++generation.current;
     try {
-      const data = await client.listInbox();
+      const listed = await client.listInbox();
+      const data = { ...listed, items: listed.items.map(normalizeInboxItem) };
       if (request === generation.current) setState({ data, error: null, loading: false });
     } catch (error) {
       if (request === generation.current)
@@ -90,38 +116,46 @@ const KIND_ICON: Record<InboxItem["kind"], NativeIconName> = {
   approval: "shield-check",
   goal_paused: "circle-pause",
   notification: "bell",
+  reply: "message-square-text",
 };
 
 function kindIcon(item: InboxItem): NativeIconName {
   return item.kind === "notification" && item.urgency === "time_sensitive"
     ? "bell-ring"
-    : KIND_ICON[item.kind];
+    : (KIND_ICON[item.kind] ?? "bell");
 }
 
 const MONO = Platform.OS === "ios" ? "Menlo" : "monospace";
 
 function Spans({ spans }: { spans: NotificationSpan[] }) {
   const theme = useNativeTimelineTheme();
+  const openLink = useOpenNativeLink();
   const c = theme.colors;
+  // Spans are the positional pieces of one parsed message and never reorder,
+  // so their index is their identity.
   return spans.map((span, index) =>
     span.kind === "bold" ? (
+      // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
       <Text key={index} style={{ ...fontStyle(theme, 500), color: c.fg }}>
         {span.text}
       </Text>
     ) : span.kind === "code" ? (
+      // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
       <Text key={index} style={{ fontFamily: MONO, fontSize: 13, color: c.fg }}>
         {span.text}
       </Text>
     ) : span.kind === "link" ? (
       <Text
+        // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
         key={index}
         accessibilityRole="link"
-        onPress={() => void Linking.openURL(span.href)}
+        onPress={() => openLink(span.href)}
         style={{ color: c.fg, textDecorationLine: "underline" }}
       >
         {span.text}
       </Text>
     ) : (
+      // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
       <Text key={index}>{span.text}</Text>
     ),
   );
@@ -153,12 +187,15 @@ function NotificationContent({ item }: { item: InboxItem }) {
         <View style={{ gap: 6, marginTop: 2 }}>
           {blocks.map((block, index) =>
             block.kind === "paragraph" ? (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <Text key={index} style={text}>
                 <Spans spans={block.spans} />
               </Text>
             ) : (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <View key={index} style={{ gap: 2 }}>
                 {block.items.map((spans, bullet) => (
+                  // oxlint-disable-next-line react/no-array-index-key -- positional bullet of one list
                   <View key={bullet} style={{ flexDirection: "row", gap: 8 }}>
                     <View
                       style={{
@@ -221,8 +258,11 @@ function NotificationContent({ item }: { item: InboxItem }) {
 const SWIPE_ACTION = 76;
 /** A partial swipe past this opens the actions. */
 const SWIPE_OPEN = 56;
-/** A full swipe past this dismisses outright. */
-const SWIPE_FULL = 220;
+/** A long swipe past this dismisses outright: just beyond the open actions,
+ * so dismissing never needs a drag across the whole row. */
+const SWIPE_FULL = SWIPE_ACTION * 2 + 20;
+/** A quick leftward flick past one action's width also dismisses. */
+const FLICK_VELOCITY = 1.1;
 
 type SwipeAction = { label: string; icon: NativeIconName; color: string; onPress: () => void };
 
@@ -237,6 +277,7 @@ function SwipeRow(props: {
   dismiss: SwipeAction;
   onThreshold?: (() => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const x = useRef(new Animated.Value(0)).current;
   const width = useRef(0);
@@ -282,7 +323,8 @@ function SwipeRow(props: {
         },
         onPanResponderRelease: (_event, gesture) => {
           const end = Math.min(0, base.current + gesture.dx);
-          if (full.current) {
+          const flicked = gesture.vx < -FLICK_VELOCITY && end < -SWIPE_ACTION;
+          if (full.current || flicked) {
             full.current = false;
             Animated.timing(x, {
               toValue: -(width.current || 400),
@@ -381,7 +423,7 @@ function SwipeRow(props: {
         {open ? (
           // While open, a tap on the row closes the actions instead of opening it.
           <Pressable
-            accessibilityLabel="Close actions"
+            accessibilityLabel={t("native.timeline.inbox.closeActions")}
             onPress={() => settle(0)}
             style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0 }}
           />
@@ -391,15 +433,17 @@ function SwipeRow(props: {
   );
 }
 
-function relative(iso: string): string {
+function relative(t: OpenGeniText, iso: string): string {
   const seconds = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
-  if (seconds < 60) return "Just now";
+  if (seconds < 60) return t("native.timeline.inbox.justNow");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} min ago`;
+  if (minutes < 60) return t("native.timeline.inbox.minutesMinAgo", { minutes });
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h ago`;
   const days = Math.floor(hours / 24);
-  return days === 1 ? "Yesterday" : `${days} days ago`;
+  return days === 1
+    ? t("native.timeline.inbox.yesterday")
+    : t("native.timeline.inbox.daysDaysAgo", { days });
 }
 
 function tomorrowMorning(): Date {
@@ -410,15 +454,18 @@ function tomorrowMorning(): Date {
 }
 
 /** How long ago, or until when a snoozed item stays hidden. */
-function when(item: InboxItem): string {
+function when(t: OpenGeniText, item: InboxItem): string {
   if (item.snoozedUntil === null || Date.parse(item.snoozedUntil) <= Date.now()) {
-    return relative(item.updatedAt);
+    return relative(t, item.updatedAt);
   }
   const until = new Date(item.snoozedUntil);
   const time = until.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
   return until.toDateString() === new Date().toDateString()
-    ? `Until ${time}`
-    : `Until ${until.toLocaleDateString(undefined, { weekday: "short" })} ${time}`;
+    ? t("native.timeline.inbox.untilTime", { time })
+    : t("native.timeline.inbox.untilLocaledatestringTime", {
+        localeDateString: until.toLocaleDateString(undefined, { weekday: "short" }),
+        time,
+      });
 }
 
 export interface NativeInboxListProps {
@@ -443,21 +490,29 @@ export function NativeInboxList({
   onNotice,
   onSwipeThreshold,
 }: NativeInboxListProps) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
+  const openLink = useOpenNativeLink();
   const [busy, setBusy] = useState<Record<string, string>>({});
   const now = Date.now();
   const items = useMemo(() => inbox.data?.items ?? [], [inbox.data]);
   const awake = items.filter((item) => !snoozedNow(item, now));
-  const needsYou = awake.filter((item) => item.kind !== "notification");
+  // Most important first: what waits on the person, then agents' notes, then replies.
+  const needsYou = awake.filter((item) => isNeedsYouKind(item.kind));
   const fromAgents = awake.filter((item) => item.kind === "notification");
+  const replies = awake.filter((item) => item.kind === "reply");
   const snoozed = items.filter((item) => snoozedNow(item, now));
   const spansWorkspaces = new Set(items.map((item) => item.workspaceId)).size > 1;
 
-  // Seen once shown: the server learns, the dot stays for this visit.
+  // An agent's note is read once shown in full here (the dot stays for this
+  // visit). A reply shows only its start, so it is read once opened, here or
+  // in its session; reading never removes it.
   const shownUnread = useRef(new Set<string>());
   useEffect(() => {
-    const unseen = items.filter((item) => item.unread && !shownUnread.current.has(item.id));
+    const unseen = items.filter(
+      (item) => item.unread && item.kind !== "reply" && !shownUnread.current.has(item.id),
+    );
     if (unseen.length === 0) return;
     for (const item of unseen) shownUnread.current.add(item.id);
     const timer = setTimeout(() => {
@@ -470,13 +525,29 @@ export function NativeInboxList({
   const leave = (item: InboxItem) =>
     inbox.patch((current) => current.filter((each) => each.id !== item.id));
 
+  // Opening an item reads it.
+  const open = (item: InboxItem) => {
+    if (item.unread) {
+      inbox.patch((current) =>
+        current.map((each) => (each.id === item.id ? { ...each, unread: false } : each)),
+      );
+      void client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
+    }
+    // Another member's private session would not open for this person.
+    if (item.sessionAvailable === false) return;
+    onOpenSession(item);
+  };
+
   const run = async (item: InboxItem, label: string, action: () => Promise<void>) => {
     setBusy((current) => ({ ...current, [item.id]: label }));
     try {
       await action();
       void inbox.refresh();
     } catch (error) {
-      Alert.alert("That didn't go through", error instanceof Error ? error.message : "Try again.");
+      Alert.alert(
+        t("native.timeline.inbox.thatDidnTGoThrough"),
+        error instanceof Error ? error.message : t("native.timeline.inbox.tryAgain"),
+      );
     } finally {
       setBusy(({ [item.id]: _done, ...rest }) => rest);
     }
@@ -489,7 +560,11 @@ export function NativeInboxList({
         decision,
       });
       leave(item);
-      onNotice?.(decision === "approve" ? "Approved" : "Denied");
+      onNotice?.(
+        decision === "approve"
+          ? t("native.timeline.inbox.approved")
+          : t("native.timeline.inbox.denied"),
+      );
     });
 
   const choose = (item: InboxItem, choice: { id: string; label: string }) =>
@@ -502,7 +577,7 @@ export function NativeInboxList({
       const question = request.questions[0];
       if (request.status !== "pending" || !question) {
         leave(item);
-        onNotice?.("Already answered");
+        onNotice?.(t("native.timeline.inbox.alreadyAnswered"));
         return;
       }
       await client.submitHumanInputResponse(item.workspaceId, item.sessionId, item.sourceKey, {
@@ -510,7 +585,7 @@ export function NativeInboxList({
         answers: [{ questionId: question.id, values: [choice.id] }],
       });
       leave(item);
-      onNotice?.(`Answered: ${choice.label}`);
+      onNotice?.(t("native.timeline.inbox.answeredLabel", { label: choice.label }));
     });
 
   const snooze = (item: InboxItem, until: Date | null) =>
@@ -536,7 +611,7 @@ export function NativeInboxList({
       ActionSheetIOS.showActionSheetWithOptions(
         {
           title,
-          options: [...actions.map((action) => action.label), "Cancel"],
+          options: [...actions.map((action) => action.label), t("native.timeline.inbox.cancel")],
           cancelButtonIndex: actions.length,
           destructiveButtonIndex: actions.findIndex((action) => action.destructive),
         },
@@ -550,7 +625,7 @@ export function NativeInboxList({
         style: action.destructive ? ("destructive" as const) : ("default" as const),
         onPress: action.run,
       })),
-      { text: "Cancel", style: "cancel" as const },
+      { text: t("native.timeline.inbox.cancel"), style: "cancel" as const },
     ]);
   };
 
@@ -558,30 +633,41 @@ export function NativeInboxList({
   const swipeSnooze = (item: InboxItem) => {
     if (snoozedNow(item, Date.now())) {
       snooze(item, null);
-      onNotice?.("Back in your inbox");
+      onNotice?.(t("native.timeline.inbox.backInYourInbox"));
       return;
     }
-    showSheet("Snooze", [
-      { label: "For 1 hour", run: () => snooze(item, new Date(Date.now() + 3_600_000)) },
-      { label: "Until tomorrow morning", run: () => snooze(item, tomorrowMorning()) },
+    showSheet(t("native.timeline.inbox.snooze"), [
+      {
+        label: t("native.timeline.inbox.for1Hour"),
+        run: () => snooze(item, new Date(Date.now() + 3_600_000)),
+      },
+      {
+        label: t("native.timeline.inbox.untilTomorrowMorning"),
+        run: () => snooze(item, tomorrowMorning()),
+      },
     ]);
   };
 
   const openMenu = (item: InboxItem) => {
     const isSnoozed = snoozedNow(item, Date.now());
     const actions: Array<{ label: string; run: () => void; destructive?: boolean }> = [
-      { label: "Open session", run: () => onOpenSession(item) },
+      { label: t("native.timeline.inbox.openSession"), run: () => open(item) },
       ...(isSnoozed
-        ? [{ label: "Unsnooze", run: () => snooze(item, null) }]
+        ? [{ label: t("native.timeline.inbox.unsnooze"), run: () => snooze(item, null) }]
         : [
             {
-              label: "Snooze for 1 hour",
+              label: t("native.timeline.inbox.snoozeFor1Hour"),
               run: () => snooze(item, new Date(Date.now() + 3_600_000)),
             },
-            { label: "Snooze until tomorrow", run: () => snooze(item, tomorrowMorning()) },
+            {
+              label: t("native.timeline.inbox.snoozeUntilTomorrow"),
+              run: () => snooze(item, tomorrowMorning()),
+            },
           ]),
       {
-        label: item.kind === "notification" ? "Dismiss" : "Remove from inbox",
+        label: isNeedsYouKind(item.kind)
+          ? t("native.timeline.inbox.removeFromInbox")
+          : t("native.timeline.inbox.dismiss"),
         run: () => dismiss(item),
         destructive: true,
       },
@@ -592,13 +678,17 @@ export function NativeInboxList({
   // Where it comes from; the time sits apart so a long session title never hides it.
   const meta = (item: InboxItem): string => {
     const parts: string[] = [];
+    // Another member's agent sent it: say who, first.
+    if (item.sender) parts.push(t("native.timeline.inbox.fromLabel", { label: item.sender.label }));
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
-      parts.push("Time-sensitive");
+      parts.push(t("native.timeline.inbox.timeSensitive"));
     }
-    if (item.kind === "question") parts.push("Question");
-    if (item.kind === "goal_paused") parts.push("Goal paused");
-    if (item.kind === "approval" && !item.body) parts.push("Approval");
-    parts.push(item.sessionTitle ?? "Untitled session");
+    if (item.kind === "question") parts.push(t("native.timeline.inbox.question"));
+    if (item.kind === "goal_paused") parts.push(t("native.timeline.inbox.goalPaused"));
+    if (item.kind === "reply") parts.push(t("native.timeline.inbox.reply"));
+    if (item.kind === "approval" && !item.body) parts.push(t("native.timeline.inbox.approval"));
+    if (item.sessionAvailable !== false)
+      parts.push(item.sessionTitle ?? t("native.timeline.inbox.untitledSession"));
     const workspace = spansWorkspaces ? workspaceNames?.get(item.workspaceId) : undefined;
     if (workspace) parts.push(workspace);
     if (item.kind === "question" && item.body) parts.push(item.body);
@@ -611,13 +701,21 @@ export function NativeInboxList({
       return (
         <>
           <Button
-            label={pending === "reject" ? "Denying…" : "Deny"}
+            label={
+              pending === "reject"
+                ? t("native.timeline.inbox.denying")
+                : t("native.timeline.inbox.deny")
+            }
             icon="x"
             disabled={Boolean(pending)}
             onPress={() => decide(item, "reject")}
           />
           <Button
-            label={pending === "approve" ? "Approving…" : "Approve"}
+            label={
+              pending === "approve"
+                ? t("native.timeline.inbox.approving")
+                : t("native.timeline.inbox.approve")
+            }
             icon="check"
             disabled={Boolean(pending)}
             onPress={() => decide(item, "approve")}
@@ -629,7 +727,9 @@ export function NativeInboxList({
       return item.choices.map((choice) => (
         <Button
           key={choice.id}
-          label={pending === `choice:${choice.id}` ? "Sending…" : choice.label}
+          label={
+            pending === `choice:${choice.id}` ? t("native.timeline.inbox.sending") : choice.label
+          }
           disabled={Boolean(pending)}
           onPress={() => choose(item, choice)}
         />
@@ -637,25 +737,22 @@ export function NativeInboxList({
     }
     if (item.kind === "question") {
       return (
-        <Button label="Answer" disabled={Boolean(pending)} onPress={() => onOpenSession(item)} />
+        <Button
+          label={t("native.timeline.inbox.answer")}
+          disabled={Boolean(pending)}
+          onPress={() => onOpenSession(item)}
+        />
       );
     }
     if (item.kind === "notification" && item.link) {
       const url = item.link.url;
-      return (
-        <Button
-          label={item.link.label}
-          icon="arrow-up-right"
-          onPress={() => void Linking.openURL(url)}
-        />
-      );
+      return <Button label={item.link.label} icon="arrow-up-right" onPress={() => openLink(url)} />;
     }
     return null;
   };
 
   const row = (item: InboxItem, index: number) => {
-    const unread =
-      item.kind === "notification" && (item.unread || shownUnread.current.has(item.id));
+    const unread = !isNeedsYouKind(item.kind) && (item.unread || shownUnread.current.has(item.id));
     const rowActions = actions(item);
     return (
       <View key={item.id}>
@@ -665,13 +762,17 @@ export function NativeInboxList({
         <SwipeRow
           onThreshold={onSwipeThreshold}
           snooze={{
-            label: snoozedNow(item, now) ? "Unsnooze" : "Snooze",
+            label: snoozedNow(item, now)
+              ? t("native.timeline.inbox.unsnooze")
+              : t("native.timeline.inbox.snooze"),
             icon: "alarm-clock",
             color: c["status-waiting"],
             onPress: () => swipeSnooze(item),
           }}
           dismiss={{
-            label: item.kind === "notification" ? "Dismiss" : "Remove",
+            label: isNeedsYouKind(item.kind)
+              ? t("native.timeline.inbox.remove")
+              : t("native.timeline.inbox.dismiss"),
             icon: "x",
             color: c["danger-fill"],
             onPress: () => dismiss(item),
@@ -679,20 +780,28 @@ export function NativeInboxList({
         >
           <Pressable
             accessibilityRole="button"
-            accessibilityLabel={`${item.title}. ${meta(item)}, ${when(item)}`}
-            accessibilityHint="Opens the session"
+            accessibilityLabel={`${item.title}. ${meta(item)}, ${when(t, item)}`}
+            accessibilityHint={t("native.timeline.inbox.opensTheSession")}
             accessibilityActions={[
-              { name: "snooze", label: snoozedNow(item, now) ? "Unsnooze" : "Snooze" },
+              {
+                name: "snooze",
+                label: snoozedNow(item, now)
+                  ? t("native.timeline.inbox.unsnooze")
+                  : t("native.timeline.inbox.snooze"),
+              },
               {
                 name: "dismiss",
-                label: item.kind === "notification" ? "Dismiss" : "Remove from inbox",
+                label:
+                  item.kind === "notification"
+                    ? t("native.timeline.inbox.dismiss")
+                    : t("native.timeline.inbox.removeFromInbox"),
               },
             ]}
             onAccessibilityAction={(event) => {
               if (event.nativeEvent.actionName === "snooze") swipeSnooze(item);
               if (event.nativeEvent.actionName === "dismiss") dismiss(item);
             }}
-            onPress={() => onOpenSession(item)}
+            onPress={() => open(item)}
             onLongPress={() => openMenu(item)}
             style={({ pressed }) => ({
               flexDirection: "row",
@@ -728,7 +837,7 @@ export function NativeInboxList({
               </View>
               {unread ? (
                 <View
-                  accessibilityLabel="Unread"
+                  accessibilityLabel={t("native.timeline.inbox.unread")}
                   style={{
                     position: "absolute",
                     top: -3,
@@ -775,6 +884,18 @@ export function NativeInboxList({
                 </View>
               ) : item.kind === "notification" ? (
                 <NotificationContent item={item} />
+              ) : item.kind === "reply" && item.body ? (
+                <Text
+                  numberOfLines={2}
+                  style={{
+                    ...fontStyle(theme),
+                    fontSize: 14,
+                    lineHeight: 20,
+                    color: c["fg-muted"],
+                  }}
+                >
+                  {notificationPlainText(item.body)}
+                </Text>
               ) : null}
               <View style={{ flexDirection: "row", marginTop: 2 }}>
                 <Text
@@ -798,7 +919,7 @@ export function NativeInboxList({
                     color: c["fg-subtle"],
                   }}
                 >
-                  {` · ${when(item)}`}
+                  {` · ${when(t, item)}`}
                 </Text>
               </View>
               {rowActions ? (
@@ -809,7 +930,9 @@ export function NativeInboxList({
             </View>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`More actions for ${item.title}`}
+              accessibilityLabel={t("native.timeline.inbox.moreActionsForTitle", {
+                title: item.title,
+              })}
               hitSlop={8}
               onPress={() => openMenu(item)}
               style={({ pressed }) => ({
@@ -846,7 +969,7 @@ export function NativeInboxList({
     return (
       <View style={{ alignItems: "center", paddingTop: 72, paddingHorizontal: 32, gap: 12 }}>
         <Text style={{ ...fontStyle(theme, 600), fontSize: 16, color: c.fg, textAlign: "center" }}>
-          Couldn't load your inbox
+          {t("native.timeline.inbox.couldnTLoadYourInbox")}
         </Text>
         <Text
           style={{
@@ -857,9 +980,9 @@ export function NativeInboxList({
             textAlign: "center",
           }}
         >
-          Check your connection, or this server may not have the inbox yet.
+          {t("native.timeline.inbox.checkYourConnectionOrThis")}
         </Text>
-        <Button label="Try again" onPress={() => void inbox.refresh()} />
+        <Button label={t("native.timeline.inbox.tryAgain")} onPress={() => void inbox.refresh()} />
       </View>
     );
   }
@@ -880,7 +1003,9 @@ export function NativeInboxList({
           <Icon name="inbox" size={20} color={c["fg-muted"]} />
         </View>
         <Text style={{ ...fontStyle(theme, 600), fontSize: 16, color: c.fg, textAlign: "center" }}>
-          {inbox.loading ? "Loading your inbox" : "Nothing is waiting on you"}
+          {inbox.loading
+            ? t("native.timeline.inbox.loadingYourInbox")
+            : t("native.timeline.inbox.nothingIsWaitingOnYou")}
         </Text>
         {inbox.loading ? null : (
           <Text
@@ -892,8 +1017,7 @@ export function NativeInboxList({
               textAlign: "center",
             }}
           >
-            When an agent asks you something, needs an approval or wants you to know something, it
-            shows up here.
+            {t("native.timeline.inbox.whenAnAgentAsksYou")}
           </Text>
         )}
       </View>
@@ -902,8 +1026,13 @@ export function NativeInboxList({
 
   return (
     <View>
-      {section("Needs you", needsYou, true)}
-      {section("From your agents", fromAgents, needsYou.length === 0)}
+      {section(t("native.timeline.inbox.needsYou"), needsYou, true)}
+      {section(t("native.timeline.inbox.fromYourAgents"), fromAgents, needsYou.length === 0)}
+      {section(
+        t("native.timeline.inbox.replies"),
+        replies,
+        needsYou.length === 0 && fromAgents.length === 0,
+      )}
       {awake.length === 0 ? (
         <Text
           style={{
@@ -914,10 +1043,10 @@ export function NativeInboxList({
             paddingHorizontal: 4,
           }}
         >
-          Nothing needs you right now. Snoozed items come back on their own.
+          {t("native.timeline.inbox.nothingNeedsYouRightNow")}
         </Text>
       ) : null}
-      {section("Snoozed", snoozed, awake.length === 0)}
+      {section(t("native.timeline.inbox.snoozed"), snoozed, awake.length === 0)}
     </View>
   );
 }

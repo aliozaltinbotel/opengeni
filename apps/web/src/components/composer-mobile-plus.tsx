@@ -13,20 +13,20 @@ import type {
   ComposerPlusProps,
   Panel,
 } from "./composer-mobile-plus-panel";
-import { Button } from "@/components/ui/button";
-import { COMPOSER_MENU_PANEL_CLASS } from "@/components/ui/composer-menu";
-import { Dialog } from "@/components/ui/dialog";
-import { MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
+import { Button } from "@opengeni/react/ui/button";
+import { COMPOSER_MENU_PANEL_CLASS } from "@opengeni/react/ui/composer-menu";
+import { Dialog } from "@opengeni/react/ui/dialog";
+import { MENU_NOTE_CLASS } from "@opengeni/react/ui/menu-styles";
 import {
   ComposerMenuRowsSkeleton,
   lazyComposerPanel,
   preloadComposerMenuPanels,
-} from "@/components/ui/composer-menu";
+} from "@opengeni/react/ui/composer-menu";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@opengeni/react/ui/dropdown-menu";
 
 export type { ComposerPlusProps, Panel as ComposerPlusPanel } from "./composer-mobile-plus-panel";
 
@@ -104,14 +104,17 @@ export function ComposerMobilePlus(
     const handle = window.setTimeout(preloadComposerMenus, 1500);
     return () => window.clearTimeout(handle);
   }, []);
+  // The usage limit panel holds a text field, which a menu cannot contain, so
+  // it always opens as a dialog.
   const dialogOpen =
     open &&
     panel !== "root" &&
-    panel !== "tools" &&
-    panel !== "capabilities" &&
-    panel !== "settings" &&
-    panel !== "visibility" &&
-    props.expandedPanelPresentation === "dialog";
+    (panel === "usage-limit" ||
+      (panel !== "tools" &&
+        panel !== "capabilities" &&
+        panel !== "settings" &&
+        panel !== "visibility" &&
+        props.expandedPanelPresentation === "dialog"));
   // The retired menu's deferred callback must observe the current owner,
   // including after the lazy panel has changed presentation or unmounted.
   dialogFocusOwnerRef.current = dialogOpen;

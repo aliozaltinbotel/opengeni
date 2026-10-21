@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import {
   attachSessionCapability,
   prepareSessionCapabilityAccess,
@@ -8,8 +9,8 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import { SessionMcpCapabilityCard, type AuthNeededItem } from "@opengeni/react";
 import { CheckIcon, Loader2Icon } from "lucide-react";
 import { useAppContext } from "@/context";
-import { Button } from "@/components/ui/button";
-import { Notice } from "@/components/ui/notice";
+import { Button } from "@opengeni/react/ui/button";
+import { Notice } from "@opengeni/react/ui/notice";
 import { SessionCapabilityFrame } from "./session-capability-frame";
 import { capabilityLogoSource } from "./capability-logo-source";
 import { DetailBody, type ConnectAction } from "./capability-detail-sheet";
@@ -17,11 +18,15 @@ import { performCapabilityAction } from "./perform-capability-action";
 import { useCapabilitiesCatalog } from "./use-capabilities-catalog";
 import { SessionCustomMcpCard } from "./session-custom-mcp-card";
 import { capabilityConnectPlan, capabilityErrorToast, connectionHealth } from "@/lib/capabilities";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@/lib/permissions";
 import type { CapabilityCatalogItem, ResourceRef } from "@/types";
 import type { ChatSendContext } from "./session-github-repositories";
 import { SessionGitHubCapabilityCard } from "./session-github-card";
+import { SessionMachineCapabilityCard } from "./session-machine-card";
+
+/** The built-in card for connecting a person's own computer to this chat. */
+export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 
 const CodexSubscriptionsCard = lazy(async () => ({
   default: (await import("@/components/models/codex-models")).CodexSubscriptionsCard,
@@ -76,6 +81,18 @@ export function SessionCapabilityCard(props: SessionCapabilityCardProps) {
       }
     : props.item;
   const capability = item.capability;
+  if (capability?.id === CONNECTED_MACHINE_CAPABILITY_ID) {
+    return (
+      <SessionMachineCapabilityCard
+        key={`${props.workspaceId}:${props.sessionId}`}
+        item={item}
+        workspaceId={props.workspaceId}
+        sessionId={props.sessionId}
+        sendContext={props.sendContext}
+        onConfigured={props.onConfigured}
+      />
+    );
+  }
   if (capability?.id === "api:github-app") {
     return (
       <SessionGitHubCapabilityCard
@@ -396,6 +413,7 @@ function SessionCapabilitySetup({
             if (!updated?.enabled)
               throw new Error("Setup could not be verified. Refresh and try again.");
             const plan = await prepareSessionCapabilityAccess(
+              t,
               context.client,
               workspaceId,
               sessionId,
@@ -407,7 +425,7 @@ function SessionCapabilitySetup({
               setParentAccessReview({ plan, invocation });
               return;
             }
-            await applySessionCapabilityAccess(context.client, plan, current);
+            await applySessionCapabilityAccess(t, context.client, plan, current);
             await onConfigured?.();
             if (current()) onComplete();
           },
@@ -446,6 +464,7 @@ function SessionCapabilitySetup({
       const plan =
         parentAccessPlan ??
         (await prepareSessionCapabilityAccess(
+          t,
           context.client,
           workspaceId,
           sessionId,
@@ -460,7 +479,7 @@ function SessionCapabilitySetup({
         setParentAccessReview({ plan, invocation });
         return;
       }
-      await applySessionCapabilityAccess(context.client, plan, current);
+      await applySessionCapabilityAccess(t, context.client, plan, current);
       if (current()) setParentAccessReview(null);
       if (current()) await onConfigured?.();
       if (current()) onComplete();
@@ -501,6 +520,7 @@ function SessionCapabilitySetup({
         </Notice>
       ) : (
         <DetailBody
+          workspaceId={workspaceId}
           setupOnly
           showIdentity={false}
           onCancel={ownsActionRow ? onClose : undefined}
@@ -617,6 +637,7 @@ function SessionCodexAppsSetup({
       if (!item?.enabled || !item.runtime.available)
         throw new Error("Choose an active subscription for Codex Apps before continuing.");
       await attachSessionCapability(
+        t,
         context.client,
         workspaceId,
         sessionId,

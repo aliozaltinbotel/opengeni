@@ -1,4 +1,5 @@
 import { compactModelPill } from "@opengeni/react/model-policy";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import { NativeMenu, type MenuAction } from "@/native-menu";
 import { sessionDisplayTitle } from "@opengeni/react/session-list-model";
 import { useOpenGeniNativeSession } from "@opengeni/react-native";
@@ -30,23 +31,34 @@ import {
   useOutsideCallPreferences,
 } from "@/call-preferences";
 import { copyText } from "@/clipboard";
+import { markSessionInboxRead, useSessionRepliesMute } from "@/notifications";
 import { useSessionComputeLabel } from "@/compute-label";
 import { useWorkspaceModelCatalog } from "@/model-catalog";
 import { ComposerPlusMenu } from "@/new-session-options";
 import { AppThemeProvider } from "@/theme";
 import { useComposerVoice } from "@/voice";
+import { openLinkFromApp } from "@/app-link-registry";
 import { openOnWeb, webPaths } from "@/web-links";
 
 /** The session menu item that sends outside calls (Siri, Phone, Shortcuts) to this session. */
 const CALL_PIN_ACTION = "opengeni.take-calls-here";
 /** The session menu item that opens this conversation in the web app. */
 const OPEN_ON_WEB_ACTION = "opengeni.open-on-web";
+/** The session menu item that mutes or unmutes this session's replies for the person. */
+const MUTE_REPLIES_ACTION = "opengeni.mute-replies";
 
 export default function SessionScreen() {
-  const { id, at } = useLocalSearchParams<{ id: string; at?: string }>();
-  // Opened from the inbox or a notification: land on that moment.
+  const { id, at, workspace } = useLocalSearchParams<{
+    id: string;
+    at?: string;
+    workspace?: string;
+  }>();
+  // Opened from the inbox, a notification or a link: land on that moment.
   const focusSequence = at && /^[1-9][0-9]*$/u.test(at) ? Number(at) : undefined;
-  const { client, models, workspaceId } = useAccount();
+  const { client, models, workspaceId: currentWorkspaceId } = useAccount();
+  // A session opened from elsewhere names its own workspace, so the screens
+  // underneath keep theirs and Back returns to them unchanged.
+  const workspaceId = workspace || currentWorkspaceId;
   if (!workspaceId || !id) {
     return (
       <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
@@ -74,8 +86,17 @@ function LiveSession(props: {
   sessionId: string;
   workspaceId: string;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const insets = useSafeAreaInsets();
+  // Reading the session reads its replies in the inbox, on arrival and on leaving.
+  const { client: inboxClient, sessionId: readSessionId } = props;
+  useFocusEffect(
+    useCallback(() => {
+      void markSessionInboxRead(inboxClient, readSessionId);
+      return () => void markSessionInboxRead(inboxClient, readSessionId);
+    }, [inboxClient, readSessionId]),
+  );
   useEffect(() => {
     rememberOpenedSession({ workspaceId: props.workspaceId, sessionId: props.sessionId });
   }, [props.workspaceId, props.sessionId]);
@@ -113,6 +134,11 @@ function LiveSession(props: {
         );
     };
     return createWebMarkdownRenderer({
+      // Opengeni conversations open in the app; anything else in the browser.
+      onLinkPress: (url) => {
+        openLinkFromApp(url);
+        return false;
+      },
       onCopy: (text) => void copyText(text),
       onOpenGeniLink: openLink,
       ...createNativePreviewRenderers({
@@ -137,8 +163,9 @@ function LiveSession(props: {
   const model = policy?.model ?? session?.model ?? null;
   const effort = policy?.reasoningEffort ?? session?.reasoningEffort ?? null;
   // The web composer's phone-width pill: compact model name, effort when it is a choice.
-  const pill = model ? compactModelPill(props.models, model, effort ?? undefined) : null;
-  const status = controller.sessionStatus;
+  const pill = model ? compactModelPill(t, props.models, model, effort ?? undefined) : null;
+  // A session the runtime could not start reads as stuck, never "Waiting on you".
+  const status = controller.displayStatus;
   const paused = controller.queue.effectiveControl?.state === "paused";
   // Web header: the status badge beside the title (a paused workstream says so).
   const refreshSession = controller.session.refresh;
@@ -158,6 +185,12 @@ function LiveSession(props: {
   const takesCalls =
     callPreferences.target === "pinned" && callPreferences.pinned?.sessionId === props.sessionId;
   const workspaceId = props.workspaceId;
+  const repliesMute = useSessionRepliesMute(
+    props.client,
+    props.workspaceId,
+    props.sessionId,
+    session ? session.parentSessionId === null : false,
+  );
   const headerTitle = useCallback(
     () => (
       <AppThemeProvider>
@@ -181,7 +214,7 @@ function LiveSession(props: {
               hitSlop={8}
               onPress={() => {
                 void Haptics.selectionAsync();
-                agentCall.callSession(props.sessionId);
+                agentCall.callSession(props.sessionId, workspaceId);
               }}
               style={({ pressed }) => ({
                 width: 36,
@@ -219,6 +252,17 @@ function LiveSession(props: {
                         ? "phone.down"
                         : "phone.arrow.down.left") as MenuAction["image"],
                     },
+                    ...(repliesMute
+                      ? [
+                          {
+                            id: MUTE_REPLIES_ACTION,
+                            title: repliesMute.muted ? "Unmute replies" : "Mute replies",
+                            image: (repliesMute.muted
+                              ? "bell"
+                              : "bell.slash") as MenuAction["image"],
+                          },
+                        ]
+                      : []),
                     ...actions.map((action) => ({
                       id: action.key,
                       title: action.label,
@@ -241,6 +285,15 @@ function LiveSession(props: {
                         pinCallSession({ workspaceId, sessionId: props.sessionId, title });
                       return;
                     }
+                    if (nativeEvent.event === MUTE_REPLIES_ACTION) {
+                      void Haptics.selectionAsync();
+                      void repliesMute?.toggle().then((muted) => {
+                        if (muted === null) {
+                          void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+                        }
+                      });
+                      return;
+                    }
                     actions.find((action) => action.key === nativeEvent.event)?.onPress();
                   }}
                 >
@@ -257,6 +310,7 @@ function LiveSession(props: {
       props.client,
       props.sessionId,
       refreshSession,
+      repliesMute,
       session,
       takesCalls,
       theme.colors.fg,
@@ -300,12 +354,21 @@ function LiveSession(props: {
         composer={{
           onActionFeedback: () => void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light),
           voice,
+          // An empty composer calls this session, as its header button does.
+          call: {
+            active: onCall,
+            onPress: () => {
+              void Haptics.selectionAsync();
+              agentCall.callSession(props.sessionId, workspaceId);
+            },
+          },
           renderLeading: () => attachMenu,
           options: pill ? (
             <ComposerPill
               label={pill.name}
               detail={pill.effort}
               fast={(policy?.latencyMode ?? session?.latencyMode) === "fast"}
+              ultrafast={(policy?.latencyMode ?? session?.latencyMode) === "ultrafast"}
               leading={<ModelMark model={model ?? ""} size={14} color={theme.colors.fg} />}
               onPress={
                 policy

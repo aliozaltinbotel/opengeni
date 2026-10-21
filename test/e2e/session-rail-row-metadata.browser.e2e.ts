@@ -40,7 +40,10 @@ describe("Session rail row metadata in Chromium", () => {
     );
     browser = await chromium.launch({ headless: true });
     page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
     await page.goto(`${baseUrl}/test/session-rail-row-metadata.html`, { waitUntil: "networkidle" });
+    expect(pageErrors).toEqual([]);
   }, 60_000);
 
   afterAll(async () => {
@@ -159,7 +162,7 @@ describe("Session rail row metadata in Chromium", () => {
     }
   });
 
-  test("contains every production-width row and keeps titles clear of real metadata", async () => {
+  test("contains every production-width row and ends title fades before metadata", async () => {
     const rail = page.getByTestId("production-session-rail");
     expect((await rail.boundingBox())?.width).toBe(244);
     expect(await rail.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
@@ -190,7 +193,15 @@ describe("Session rail row metadata in Chromium", () => {
       const metadataBox = await metadata.boundingBox();
       expect(titleBox).not.toBeNull();
       expect(metadataBox).not.toBeNull();
-      expect(titleBox!.x + titleBox!.width).toBeLessThanOrEqual(metadataBox!.x + 0.5);
+      // The fade stays inside the title column with a clear 4px gap before
+      // the first metadata slot; no title text paints beneath icons.
+      expect(titleBox!.x + titleBox!.width).toBeCloseTo(metadataBox!.x - 4, 0);
+      const style = await row.locator("[data-session-row-title]").evaluate((element) => {
+        const computed = getComputedStyle(element);
+        return { mask: computed.maskImage, overflow: computed.textOverflow };
+      });
+      expect(style.mask).toContain("linear-gradient");
+      expect(style.overflow).toBe("clip");
     }
   });
 
@@ -221,9 +232,11 @@ describe("Session rail row metadata in Chromium", () => {
 
     const text = await hoverCard.innerText();
     expect(text).toContain(longTitle);
-    expect(text).toContain("Created by Bendik Nyheim");
+    expect(text).toContain("Example Owner");
+    expect(text).toContain("Created");
+    expect(text).toContain("Updated");
     expect(text).toContain("3 sub-agents");
-    expect(text).not.toContain("Idle");
+    expect(text).toContain("Idle");
     expect(text).not.toContain("Read");
 
     const rowBox = await row.boundingBox();
@@ -248,7 +261,9 @@ describe("Session rail row metadata in Chromium", () => {
       expect(box.x).toBeGreaterThanOrEqual(cardBox.x);
       expect(box.x + box.width).toBeLessThanOrEqual(cardBox.x + cardBox.width);
     }
-    expect(await card.locator("p").innerText()).toBe("Long_unbroken_session_title_".repeat(8));
+    expect(await card.locator("p").first().innerText()).toBe(
+      "Long_unbroken_session_title_".repeat(8),
+    );
     await page.screenshot({ path: "/tmp/opengeni-session-hover-overflow.png", fullPage: true });
   });
 

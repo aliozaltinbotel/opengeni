@@ -1,6 +1,7 @@
 import {
   materializeRigVersionForAttempt,
   getWorkspaceModelPolicy,
+  getOrganizationModelDefaults,
   getFilesForSubject,
   getWorkspace,
   resolveCompanyBrainContextSelection,
@@ -23,6 +24,7 @@ import {
 } from "@opengeni/runtime";
 import {
   codeSearchDeploymentPolicy,
+  policyChargesCreditsForModel,
   settingsWithResolvedModelContext,
   type Settings,
 } from "@opengeni/config";
@@ -111,6 +113,8 @@ export type GovernanceModelOk = {
   workspaceAgentIdentity: string | null;
   workspaceGovernance: ReturnType<typeof renderWorkspaceGovernanceContext>;
   structuredWorkspacePolicyActive: boolean;
+  /** False when the workspace turned Opengeni credits off (model policy). */
+  workspaceCreditModelsAllowed: boolean;
   workspaceMemory: string | null | undefined;
   buildCompanyBrainContributionReceiptFor: (
     skillCatalogText: string,
@@ -221,6 +225,7 @@ export async function prepareGovernanceAndModel(
     rigMaterialization,
     [workspace, companyProfileSnapshot, instructionPolicySnapshot, preferenceSnapshot],
     workspaceModelPolicy,
+    organizationModelDefaults,
   ] = await Promise.all([
     session.rigId && session.rigVersionId
       ? (async () =>
@@ -244,6 +249,7 @@ export async function prepareGovernanceAndModel(
       ),
     ]),
     getWorkspaceModelPolicy(db, input.workspaceId),
+    getOrganizationModelDefaults(db, input.accountId),
   ]);
   const rigVersion = rigMaterialization?.version ?? null;
   // Rig display name for the doctrine block + setup events/errors (only on a
@@ -340,8 +346,8 @@ export async function prepareGovernanceAndModel(
     // provider-native ID is applied only to fresh creation without
     // changing the logical lease image.
     ...providerImageSettings,
-    openaiModel: turn.model,
-    openaiReasoningEffort: turn.reasoningEffort,
+    openaiModel: turnExecutionPolicy.productModelId,
+    openaiReasoningEffort: turnExecutionPolicy.reasoningEffort,
     sandboxBackend: turn.sandboxBackend,
   };
   const runSettings = await measureTurnStartupPhase(
@@ -413,7 +419,10 @@ export async function prepareGovernanceAndModel(
     runSettings.reasoningConfigurationUpdatesEnabled &&
     providerApi === "responses" &&
     (resolvedModel?.provider.id === "codex" || resolvedModel?.provider.id === "openai") &&
-    supportsReasoningConfiguration(turnExecutionPolicy.upstreamModelId, turn.reasoningEffort);
+    supportsReasoningConfiguration(
+      turnExecutionPolicy.upstreamModelId,
+      turnExecutionPolicy.reasoningEffort,
+    );
   const modelHistoryProjector = async (
     items: Array<Record<string, unknown>>,
     projectionOptions?: Parameters<typeof attachmentProjector>[1],
@@ -445,7 +454,12 @@ export async function prepareGovernanceAndModel(
   // catalog values and must reach pre-turn compaction, history guards, and
   // every model call together.
   eventing.modelRunSettings = resolvedModel
-    ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured, workspace.settings)
+    ? settingsWithResolvedModelContext(
+        runSettings,
+        resolvedModel.configured,
+        workspace.settings,
+        organizationModelDefaults,
+      )
     : runSettings;
   // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
   // after resolution and BEFORE any model call (the compaction summarizer
@@ -460,6 +474,11 @@ export async function prepareGovernanceAndModel(
       const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
         providerId: turnExecutionPolicy.providerId,
         modelId: turnExecutionPolicy.productModelId,
+        // The same cost class the claim bills (`chargesOpenGeniCredits`):
+        // the resolved definition when present, else the frozen product id.
+        chargesCredits: resolvedModel
+          ? resolvedModel.configured.cost === "credits"
+          : policyChargesCreditsForModel(capabilitySettings, turnExecutionPolicy.productModelId),
       });
       if (!verdict.allowed) {
         throw new WorkspaceModelPolicyBlockedError(
@@ -520,6 +539,7 @@ export async function prepareGovernanceAndModel(
       workspaceAgentIdentity,
       workspaceGovernance,
       structuredWorkspacePolicyActive,
+      workspaceCreditModelsAllowed: workspaceModelPolicy?.allowCreditModels !== false,
       workspaceMemory,
       buildCompanyBrainContributionReceiptFor,
       logicalSandboxSettings,

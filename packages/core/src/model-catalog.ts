@@ -43,6 +43,7 @@ import {
   type ModelAvailabilityV1,
   type ModelCredentialReadinessV1,
   type WorkspaceModelPolicyContract,
+  type LatencyMode,
 } from "@opengeni/contracts";
 import {
   listConnectionsMetadata,
@@ -55,8 +56,8 @@ import {
   getOrganizationModelProviderCustomModelForExecution,
   getOrganizationModelProviderCatalogForWorkspace,
   lockActiveOrganizationModelProviderCustomModelForAdmission,
-  type OrganizationClaudeModelAdmissionAuthority,
   type Database,
+  type OrganizationClaudeModelAdmissionAuthority,
   type WorkspaceCustomModelProviderKind,
   type WorkspaceGatewayCustomModel,
   type WorkspaceOpenRouterCustomModel,
@@ -179,7 +180,12 @@ export async function lockActiveCustomModelForAdmission(
     accountId: string;
     workspaceId: string;
     reference: WorkspaceCustomModelReference;
-    claudeAuthority?: OrganizationClaudeModelAdmissionAuthority;
+    /**
+     * The accepted Claude authority this admission re-reads. Every caller
+     * states it: an organization Claude model is never admitted without it,
+     * so an omitted value would refuse that model silently.
+     */
+    claudeAuthority: OrganizationClaudeModelAdmissionAuthority | null;
   },
 ): Promise<boolean> {
   if (input.reference.scope === "organization") {
@@ -188,8 +194,8 @@ export async function lockActiveCustomModelForAdmission(
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         providerKind: input.reference.providerKind,
-        upstreamModelId: input.reference.upstreamModelId,
         ...(input.claudeAuthority ? { claudeAuthority: input.claudeAuthority } : {}),
+        upstreamModelId: input.reference.upstreamModelId,
       }),
     );
   }
@@ -517,6 +523,11 @@ export type ModelAvailabilityObservation = {
   status: "available" | "degraded" | "unavailable";
   reason: "not_entitled" | "provider_unhealthy" | null;
   checkedAt: string;
+  /**
+   * Speeds the model declares that no account serving this workspace offers
+   * (for example Ultrafast on plans without it). Omitted when unknown.
+   */
+  unavailableLatencyModes?: readonly LatencyMode[];
 };
 
 export type ModelCredentialReadinessObservation =
@@ -581,6 +592,8 @@ export type WorkspaceModelSelection = {
   credentialReadiness: ModelCredentialReadinessV1;
   policyAllowed: boolean;
   availability: ModelAvailabilityV1;
+  /** Declared speeds no account serving this workspace offers; see the observation. */
+  unavailableLatencyModes?: readonly LatencyMode[];
 };
 
 function modelDefinitionRunnable(model: ConfiguredModel): boolean {
@@ -817,6 +830,8 @@ function availabilityFor(input: {
   model: ConfiguredModel;
   credentialReadiness: ModelCredentialReadinessV1;
   policyAllowed: boolean;
+  /** Blocked only because the workspace turned Opengeni credits off. */
+  creditsDisabled?: boolean;
   observation?: ModelAvailabilityObservation | undefined;
   nowMs: number;
   maxAgeMs: number;
@@ -846,7 +861,7 @@ function availabilityFor(input: {
     return {
       status: "unavailable",
       selectable: false,
-      reason: "policy_blocked",
+      reason: input.creditsDisabled ? "credits_disabled" : "policy_blocked",
       checkedAt: null,
     };
   }
@@ -935,11 +950,27 @@ export function resolveWorkspaceModelSelection(
     .filter((model) => isModelAvailableForNewSelection(catalogSettings, model.id))
     .map((model) => {
       const provider = providers.get(model.providerId);
-      const policyAllowed =
-        evaluateWorkspaceModelPolicy(input.policy, {
-          providerId: model.providerId,
-          modelId: model.id,
-        }).allowed && modelAllowedByConnections(input.connectionModelRestrictions ?? {}, model.id);
+      const verdict = evaluateWorkspaceModelPolicy(input.policy, {
+        providerId: model.providerId,
+        modelId: model.id,
+        chargesCredits: model.cost === "credits",
+      });
+      const allowedByConnections = modelAllowedByConnections(
+        input.connectionModelRestrictions ?? {},
+        model.id,
+      );
+      const policyAllowed = verdict.allowed && allowedByConnections;
+      // Name the credit switch only when it is the sole reason; an allowlist
+      // or connection restriction keeps the generic policy reason.
+      const creditsDisabled =
+        !verdict.allowed &&
+        verdict.reason === "credits" &&
+        allowedByConnections &&
+        input.policy != null &&
+        evaluateWorkspaceModelPolicy(
+          { ...input.policy, allowCreditModels: true },
+          { providerId: model.providerId, modelId: model.id, chargesCredits: true },
+        ).allowed;
       const credentialReadiness = credentialReadinessFor({
         model,
         provider,
@@ -958,14 +989,18 @@ export function resolveWorkspaceModelSelection(
         nowMs,
         maxAgeMs,
       });
+      const unavailableLatencyModes =
+        input.observations?.[model.definitionVersion]?.unavailableLatencyModes;
       return {
         model,
         credentialReadiness,
         policyAllowed,
+        ...(unavailableLatencyModes?.length ? { unavailableLatencyModes } : {}),
         availability: availabilityFor({
           model,
           credentialReadiness,
           policyAllowed,
+          creditsDisabled,
           observation: input.observations?.[model.definitionVersion],
           nowMs,
           maxAgeMs,

@@ -4,6 +4,7 @@ import {
   CODEX_UNCONDITIONAL_LEASING_MAINTENANCE_CUTOVER,
   contractForProfile,
   deploymentProfiles,
+  CREDIT_MARGIN_BPS_PASSTHROUGH_ENV,
   EXTERNAL_BROWSER_PROVIDER_PASSTHROUGH_ENV,
   JEV_CODE_SEARCH_PASSTHROUGH_ENV,
   WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV,
@@ -22,6 +23,7 @@ import {
   SANDBOX_SURFACING_PASSTHROUGH_ENV,
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
+  SESSION_USAGE_LIMITS_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
@@ -1044,6 +1046,13 @@ describe("deployment contract", () => {
     expect(contract.access.mode).toBe("externalGateway");
     expect(vars).not.toContain("OPENGENI_ACCESS_KEY");
     expect(vars).toContain("OPENGENI_BETTER_AUTH_SECRET");
+    expect(vars).toContain("OPENGENI_RESEND_API_KEY");
+    const emailDisabledVars = requiredRuntimeEnvVars(contract, {
+      OPENGENI_MANAGED_EMAIL_DELIVERY: "disabled",
+    });
+    expect(emailDisabledVars).toContain("OPENGENI_MANAGED_EMAIL_DELIVERY");
+    expect(emailDisabledVars).not.toContain("OPENGENI_RESEND_API_KEY");
+    expect(emailDisabledVars).not.toContain("OPENGENI_EMAIL_FROM");
     expect(vars).toContain("OPENGENI_STRIPE_WEBHOOK_SECRET");
     expect(vars).toContain("OPENGENI_STRIPE_CREDITS_PRODUCT_ID");
     expect(vars).toContain("OPENGENI_MODEL_PRICING_JSON");
@@ -1570,6 +1579,7 @@ describe("deployment contract", () => {
         "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
         "OPENGENI_MODAL_SANDBOX_CPU",
         "OPENGENI_MODAL_SANDBOX_MEMORY_MIB",
+        "OPENGENI_MODAL_REGIONS",
         "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
         "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
         "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
@@ -1788,6 +1798,24 @@ describe("deployment contract", () => {
     expect(absent.missingEnvVars).not.toContain("OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED");
   });
 
+  test("renders the session usage limits producer flag only when configured", () => {
+    expect(SESSION_USAGE_LIMITS_PASSTHROUGH_ENV).toEqual(["OPENGENI_SESSION_USAGE_LIMITS_ENABLED"]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_SESSION_USAGE_LIMITS_ENABLED: "true",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=true");
+    expect(configured.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+  });
+
   test("renders configured external browser providers without making them mandatory", () => {
     const env = {
       OPENGENI_BROWSERBASE_API_KEY: "browserbase-private",
@@ -1871,13 +1899,35 @@ describe("deployment contract", () => {
       helm_set_values: { value: {} },
     };
     const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
-      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish",
-      OPENGENI_WEB_SEARCH_API_KEY: "search-key",
+      OPENGENI_WEB_SEARCH_PROVIDER: "tinyfish,parallel",
+      OPENGENI_WEB_TINYFISH_API_KEY: "tinyfish-key",
+      OPENGENI_WEB_PARALLEL_API_KEY: "parallel-key",
     });
-    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish");
-    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_API_KEY=search-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_SEARCH_PROVIDER=tinyfish,parallel");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_TINYFISH_API_KEY=tinyfish-key");
+    expect(configured.runtimeEnv).toContain("OPENGENI_WEB_PARALLEL_API_KEY=parallel-key");
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+      expect(absent.runtimeEnv).not.toContain(`${key}=`);
+      expect(absent.missingEnvVars).not.toContain(key);
+    }
+  });
+
+  test("passes the optional credit margin override through without making it required", () => {
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE: "0",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE=0");
+    expect(configured.summary.runtimeEnvKeys).toContain("OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE");
+
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
       expect(absent.runtimeEnv).not.toContain(`${key}=`);
       expect(absent.missingEnvVars).not.toContain(key);
     }

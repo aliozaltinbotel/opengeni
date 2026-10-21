@@ -184,6 +184,7 @@ describe("Bun canary publication boundary", () => {
     ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.test/oidc",
     ACTIONS_ID_TOKEN_REQUEST_TOKEN: "synthetic-oidc",
     NODE_AUTH_TOKEN: "synthetic-registry-token",
+    GITHUB_OUTPUT: "/synthetic/github-output",
   };
 
   test("refuses a controller/source or OIDC mismatch before any registry write", () => {
@@ -196,14 +197,32 @@ describe("Bun canary publication boundary", () => {
       { ACTIONS_ID_TOKEN_REQUEST_URL: "" },
       { ACTIONS_ID_TOKEN_REQUEST_TOKEN: "" },
       { NODE_AUTH_TOKEN: "" },
+      { GITHUB_OUTPUT: "" },
     ]) {
       expect(() =>
         verifyCanarySourceBinding({ ...env, ...changed }, sha, "/source", "/source"),
       ).toThrow("must agree");
     }
-    expect(() => verifyCanarySourceBinding(env, sha, "/older-source", "/controller")).toThrow(
-      "must agree",
-    );
+    expect(() => verifyCanarySourceBinding(env, sha, "/source", "/controller")).not.toThrow();
+    const older = "b".repeat(40);
+    expect(() =>
+      verifyCanarySourceBinding(
+        { ...env, SOURCE_SHA: older },
+        older,
+        "/source",
+        "/controller",
+        sha,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      verifyCanarySourceBinding(
+        { ...env, SOURCE_SHA: older },
+        older,
+        "/controller",
+        "/controller",
+        sha,
+      ),
+    ).toThrow();
   });
 
   test("reads synthetic registry metadata and rejects malformed or occupied existing versions", async () => {
@@ -253,7 +272,7 @@ describe("Bun canary publication boundary", () => {
     ).rejects.toThrow("Canary registry read failed");
   });
 
-  test("admits a new package and preserves an absent latest tag", async () => {
+  test("admits a new package whose first publication npm also tags latest", async () => {
     const absent = await readRegistryPackage(
       "@example/new-package",
       async () => new Response(null, { status: 404 }),
@@ -307,6 +326,19 @@ describe("Bun canary publication boundary", () => {
       packed,
       async () => receipt,
     );
+    // npm points `latest` at a package's first version whatever tag the
+    // publish asked for, so a first canary may carry it.
+    await confirmCanaryPublication(
+      packages[0]!.name,
+      "1.0.1-canary.4",
+      undefined,
+      packed,
+      async () => ({
+        ...receipt,
+        "dist-tags": { latest: "1.0.1-canary.4", canary: "1.0.1-canary.4" },
+      }),
+    );
+    // Any other version under `latest` is still a moved stable tag.
     await expect(
       confirmCanaryPublication(
         packages[0]!.name,
@@ -315,7 +347,7 @@ describe("Bun canary publication boundary", () => {
         packed,
         async () => ({
           ...receipt,
-          "dist-tags": { latest: "1.0.1-canary.4", canary: "1.0.1-canary.4" },
+          "dist-tags": { latest: "1.0.0", canary: "1.0.1-canary.4" },
         }),
       ),
     ).rejects.toThrow("Stable tag changed");
@@ -460,6 +492,7 @@ describe("Bun canary publication boundary", () => {
         },
         timeoutMs: 6_000,
         pollIntervalMs: 1_000,
+        maxPollIntervalMs: 1_000,
       },
     );
     expect(reads).toBe(7);
@@ -486,9 +519,10 @@ describe("Bun canary publication boundary", () => {
           },
           timeoutMs: 2_500,
           pollIntervalMs: 1_000,
+          maxPollIntervalMs: 1_000,
         },
       ),
-    ).rejects.toThrow("after 3 reads (version_pending)");
+    ).rejects.toThrow("(version_pending) after 3s and 3 observations");
     expect(reads).toBe(3);
     expect(elapsed).toBe(2_500);
   });
@@ -525,7 +559,7 @@ describe("Bun canary publication boundary", () => {
         },
         { now: () => elapsed, timeoutMs: 1_000 },
       ),
-    ).rejects.toThrow("after 1 reads (read_exceeded_deadline)");
+    ).rejects.toThrow("(read_exceeded_deadline) after 2s and 1 observations");
     expect(reads).toBe(1);
   });
 

@@ -1,8 +1,6 @@
 // Regression: a background command that keeps running across the warm
-// checkpoint interval must not starve workspace snapshots. Staging session
-// 5040c525 kept 35 commands "running" for a whole day; every checkpoint was
-// refused while any of them held the box, so the provider's 24h deadline lost
-// about 10 hours of files. Drives the real warm-snapshot path
+// checkpoint interval must not starve workspace snapshots. Drives the real
+// warm-snapshot path
 // (maybePersistWarmWorkspaceSnapshot -> claimWorkspaceArchiveCapture ->
 // persistWarmSnapshot) and the real lease/process ledger against PostgreSQL;
 // only the provider snapshot RPC is faked.
@@ -255,13 +253,36 @@ function captureScope(fixture: Fixture) {
 }
 
 describe("warm checkpoints while background commands run", () => {
+  test("a compute sandbox gets no periodic warm checkpoint: compute persists it", async () => {
+    const fixture = await runningTurnWithBackgroundCommand();
+    await admin`update sandbox_leases set backend = 'compute', resume_backend_id = 'compute'
+      where id = ${fixture.leaseId}`;
+    let reads = 0;
+    const session = {
+      backendId: "compute",
+      state: { workspacePersistence: "tar" },
+      persistWorkspace: async () => {
+        reads += 1;
+        return new Uint8Array();
+      },
+    };
+    const { skipped, metrics } = skipRecorder();
+    expect(await checkpoint(fixture, session, metrics)).toBe(false);
+    expect(reads).toBe(0);
+    expect(skipped).toEqual(["capture_policy"]);
+    expect(await readLease(db, fixture.workspaceId, fixture.attempt.sandboxGroupId)).toMatchObject({
+      liveness: "warm",
+      archiveCapture: null,
+    });
+  });
+
   test("a command running across the snapshot interval is checkpointed around, never starving capture", async () => {
     const fixture = await runningTurnWithBackgroundCommand();
     const provider = modalSession();
     const { skipped, metrics } = skipRecorder();
 
     // Previously this returned false (holder_in_progress) for as long as the
-    // command ran, which in the incident was the box's whole 24h lifetime.
+    // command ran, potentially preventing periodic recovery points indefinitely.
     expect(await checkpoint(fixture, provider.session, metrics)).toBe(true);
     expect(provider.calls()).toBe(1);
     expect(skipped).toEqual([]);
@@ -468,7 +489,23 @@ describe("warm checkpoints while background commands run", () => {
     ).toEqual({ status: "holder_in_progress" });
   }, 60_000);
 
-  test("a viewer or a sibling turn still holds capture off", async () => {
+  test("a sibling turn or a direct request still holds capture off", async () => {
+    for (const kind of ["turn", "direct"] as const) {
+      const fixture = await runningTurnWithBackgroundCommand();
+      const provider = modalSession();
+      const { skipped, metrics } = skipRecorder();
+      await admin`insert into sandbox_lease_holders
+        (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
+        values (${fixture.accountId}, ${fixture.leaseId}, ${fixture.workspaceId}, ${kind},
+          ${`${kind === "turn" ? "turn-attempt" : kind}:${crypto.randomUUID()}`},
+          ${fixture.attempt.sessionId}, now())`;
+      expect(await checkpoint(fixture, provider.session, metrics), kind).toBe(false);
+      expect(provider.calls(), kind).toBe(0);
+      expect(skipped, kind).toEqual(["holder_in_progress"]);
+    }
+  }, 60_000);
+
+  test("an open viewer no longer holds capture off; the archive stays one generation behind", async () => {
     const fixture = await runningTurnWithBackgroundCommand();
     const provider = modalSession();
     const { skipped, metrics } = skipRecorder();
@@ -476,8 +513,10 @@ describe("warm checkpoints while background commands run", () => {
       (account_id, lease_id, workspace_id, kind, holder_id, subject_id, last_heartbeat_at)
       values (${fixture.accountId}, ${fixture.leaseId}, ${fixture.workspaceId}, 'viewer',
         ${`viewer:${crypto.randomUUID()}`}, ${fixture.attempt.sessionId}, now())`;
-    expect(await checkpoint(fixture, provider.session, metrics)).toBe(false);
-    expect(provider.calls()).toBe(0);
-    expect(skipped).toEqual(["holder_in_progress"]);
+    expect(await checkpoint(fixture, provider.session, metrics)).toBe(true);
+    expect(provider.calls()).toBe(1);
+    expect(skipped).toEqual([]);
+    const lease = await readLease(db, fixture.workspaceId, fixture.attempt.sandboxGroupId);
+    expect(lease!.archiveGeneration).toBe(lease!.workspaceGeneration - 1);
   }, 60_000);
 });

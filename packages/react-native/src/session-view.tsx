@@ -1,9 +1,9 @@
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   FlatList,
   KeyboardAvoidingView,
-  Linking,
   Platform,
   Pressable,
   ScrollView,
@@ -28,8 +28,10 @@ import type {
   TimelineItem,
   ToolCallItem,
 } from "@opengeni/react/session";
+import type { SessionDisplayStatus } from "@opengeni/react/timeline-model";
 import type { OpenGeniNativeSessionController } from "./use-native-session";
 import type { NativeFileAttachmentsResult } from "./attachments";
+import { useOpenNativeLink } from "./links";
 import {
   DEFAULT_OPENGENI_NATIVE_LABELS,
   DEFAULT_OPENGENI_NATIVE_THEME,
@@ -99,10 +101,17 @@ export interface NativeComposerActionContext {
   canSubmit: boolean;
   draftSaving: boolean;
   submitLabel: string;
+  /**
+   * The other way to send while the agent works: Queue when Send steers,
+   * Steer when Send queues. `null` when it is not offered: Send is not taking
+   * its busy path, or there is nothing to send yet.
+   */
+  alternateSubmitLabel: string | null;
   onAttachDocument(): void;
   onAttachImage(): void;
   onTogglePause(): void;
   onSubmit(): void;
+  onAlternateSubmit(): void;
 }
 
 export type NativeComposerActionRenderer = (context: NativeComposerActionContext) => ReactNode;
@@ -140,7 +149,16 @@ export interface OpenGeniNativeSessionViewProps {
   testID?: string | undefined;
 }
 
-export function OpenGeniNativeSessionView({
+/** One Send (`busySend: "steer"` without `offerQueue`) reads as waiting messages, with no Steer. */
+export function OpenGeniNativeSessionView(props: OpenGeniNativeSessionViewProps) {
+  return (
+    <SingleSendWording enabled={props.controller.composer.singleSend === true}>
+      <NativeSessionViewBody {...props} />
+    </SingleSendWording>
+  );
+}
+
+function NativeSessionViewBody({
   controller,
   theme = DEFAULT_OPENGENI_NATIVE_THEME,
   labels: labelOverrides,
@@ -157,9 +175,10 @@ export function OpenGeniNativeSessionView({
   keyboardVerticalOffset = 0,
   testID,
 }: OpenGeniNativeSessionViewProps) {
+  const t = useOpenGeniText();
   const labels = useMemo(
-    () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS, ...labelOverrides }),
-    [labelOverrides],
+    () => ({ ...DEFAULT_OPENGENI_NATIVE_LABELS(t), ...labelOverrides }),
+    [t, labelOverrides],
   );
   const listRef = useRef<FlatList<TimelineGroup>>(null);
   const followTail = useRef(true);
@@ -618,6 +637,7 @@ function TimelineRow({
   renderTool?: NativeToolRenderer | undefined;
   theme: OpenGeniNativeTheme;
 }) {
+  if (item.kind === "turn-steps") return <TurnStepsAction item={item} theme={theme} />;
   if (item.kind === "tool-call" && renderTool) {
     const rendered = renderTool(item, { compact: compactActivity, labels, theme });
     if (rendered !== null && rendered !== undefined) return <>{rendered}</>;
@@ -851,7 +871,7 @@ function timelineTitle(
     case "startup-phase":
       return labels.activity;
     case "session-status":
-      return nativeSessionStatusLabel(item.status, labels);
+      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
     case "human-input":
       return labels.humanInputAsked;
     case "goal":
@@ -866,6 +886,7 @@ function timelineTitle(
       return labels.fleetDecision;
     case "turn-end":
       return labels.turn;
+    case "turn-steps":
     case "notice":
     case "machine-input-batch":
     case "auth-needed":
@@ -951,6 +972,7 @@ function NoticeRow({
   theme: OpenGeniNativeTheme;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const openLink = useOpenNativeLink();
   const action = item.action;
   const failed = item.tone === "failed";
   const waiting = item.tone === "waiting" || item.tone === "input";
@@ -999,7 +1021,7 @@ function NoticeRow({
       {action ? (
         <Pressable
           accessibilityRole="link"
-          onPress={() => void Linking.openURL(action.url)}
+          onPress={() => openLink(action.url)}
           style={styles.noticeLink}
         >
           <Text style={[styles.noticeAction, { color: foreground }]}>{action.label}</Text>
@@ -1018,8 +1040,11 @@ function SessionStatusRow({
   labels: OpenGeniNativeLabels;
   theme: OpenGeniNativeTheme;
 }) {
-  const label = nativeSessionStatusLabel(item.status, labels).toLocaleLowerCase();
-  const dotColor = sessionStatusColor(item.status, theme);
+  const label = nativeSessionStatusLabel(
+    item.blocked ? "blocked" : item.status,
+    labels,
+  ).toLocaleLowerCase();
+  const dotColor = sessionStatusColor(item.blocked ? "blocked" : item.status, theme);
   const relativeTime = formatNativeRelativeTime(item.occurredAt, labels);
 
   return (
@@ -1042,11 +1067,9 @@ function SessionStatusRow({
   );
 }
 
-function sessionStatusColor(
-  status: Extract<TimelineItem, { kind: "session-status" }>["status"],
-  theme: OpenGeniNativeTheme,
-): string {
+function sessionStatusColor(status: SessionDisplayStatus, theme: OpenGeniNativeTheme): string {
   switch (status) {
+    case "blocked":
     case "failed":
       return theme.colors.danger;
     case "requires_action":
@@ -1107,7 +1130,7 @@ function timelineSummary(
     case "startup-phase":
       return nativeTimelineStatusLabel(item.status, labels);
     case "session-status":
-      return nativeSessionStatusLabel(item.status, labels);
+      return nativeSessionStatusLabel(item.blocked ? "blocked" : item.status, labels);
     case "human-input":
       return nativeHumanInputSummary(item, labels);
     case "goal":
@@ -1128,6 +1151,8 @@ function timelineSummary(
       return nativeFleetDecisionSummary(item, labels);
     case "turn-end":
       return item.failureText ?? nativeTimelineStatusLabel(item.outcome, labels);
+    case "turn-steps":
+      return "";
   }
 }
 
@@ -1319,14 +1344,16 @@ function QueueSurface({
                   variant="quiet"
                   disabled={controller.composer.hasDraftContent() || controller.queue.mutating}
                 />
-                <ActionButton
-                  compact
-                  label={labels.runNext}
-                  onPress={() => void controller.queue.steerTurn(turn.id)}
-                  theme={theme}
-                  variant="quiet"
-                  disabled={controller.queue.mutating}
-                />
+                {controller.composer.singleSend ? null : (
+                  <ActionButton
+                    compact
+                    label={labels.runNext}
+                    onPress={() => void controller.queue.steerTurn(turn.id)}
+                    theme={theme}
+                    variant="quiet"
+                    disabled={controller.queue.mutating}
+                  />
+                )}
                 <ActionButton
                   compact
                   label={labels.remove}
@@ -1773,10 +1800,19 @@ function Composer({
     canSubmit: controller.composer.canSend && !busy,
     draftSaving: controller.composer.draftSaving,
     submitLabel: labels.send,
+    alternateSubmitLabel:
+      !controller.composer.sendAlternate || !controller.composer.canSend
+        ? null
+        : controller.composer.alternateSend === "queue"
+          ? labels.queue
+          : controller.composer.alternateSend === "steer"
+            ? labels.steer
+            : null,
     onAttachDocument: () => void controller.attachments.pickDocuments(),
     onAttachImage: () => void controller.attachments.pickImages(),
     onTogglePause: () => void (paused ? controller.composer.resume() : controller.composer.pause()),
     onSubmit: () => void controller.composer.send(),
+    onAlternateSubmit: () => void controller.composer.sendAlternate?.(),
   };
   const composerContext: NativeComposerRenderContext = {
     ...actionContext,
@@ -1882,6 +1918,15 @@ function DefaultComposerActions(context: NativeComposerActionContext) {
           variant="quiet"
           disabled={context.busy}
         />
+        {context.alternateSubmitLabel !== null ? (
+          <ActionButton
+            label={context.alternateSubmitLabel}
+            onPress={() => context.onAlternateSubmit()}
+            theme={context.theme}
+            variant="quiet"
+            disabled={!context.canSubmit}
+          />
+        ) : null}
         <ActionButton
           label={context.submitLabel}
           onPress={() => context.onSubmit()}
@@ -1890,6 +1935,41 @@ function DefaultComposerActions(context: NativeComposerActionContext) {
         />
       </View>
     </View>
+  );
+}
+
+/** A turn's unloaded steps: loaded (and kept) when the reader asks. */
+function TurnStepsAction({
+  item,
+  theme,
+}: {
+  item: Extract<TimelineItem, { kind: "turn-steps" }>;
+  theme: OpenGeniNativeTheme;
+}) {
+  const t = useOpenGeniText();
+  const release = useRef<(() => void) | null>(null);
+  useEffect(() => () => release.current?.(), []);
+  if (item.state === "complete") return null;
+  const label =
+    item.state === "loading"
+      ? t("timeline.turnSteps.loadingSteps")
+      : item.state === "error"
+        ? `${t("timeline.turnSteps.couldNotLoadSteps")} ${t("timeline.turnSteps.retry")}`
+        : item.state === "partial"
+          ? t("timeline.turnSteps.showEarlierSteps")
+          : t("timeline.turnSteps.showSteps");
+  return (
+    <ActionButton
+      compact
+      disabled={item.state === "loading"}
+      label={label}
+      onPress={() => {
+        release.current ??= item.retain();
+        item.load();
+      }}
+      theme={theme}
+      variant="quiet"
+    />
   );
 }
 

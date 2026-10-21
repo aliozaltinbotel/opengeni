@@ -125,6 +125,13 @@ pub fn request_desktop_grants() {
     macffi::request_grants();
 }
 
+/// Fires one permission's consent prompt, for a desktop app that asks for them
+/// one at a time.
+#[cfg(feature = "macos-desktop")]
+pub fn request_desktop_permission(permission: macffi::DesktopPermission) {
+    macffi::request_permission(permission);
+}
+
 /// How many times [`MacosDesktop::capture`] retries a TRANSIENT capture miss (a
 /// null image / timeout on a warming ScreenCaptureKit stream) before giving up.
 /// Small: a real capture lands on the first or second frame; more attempts just
@@ -140,6 +147,12 @@ const CAPTURE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_milli
 #[cfg(feature = "macos-desktop")]
 #[async_trait]
 impl DesktopBackend for MacosDesktop {
+    fn can_offer_display(&self) -> bool {
+        // CoreGraphics display metadata does not require Screen Recording. A
+        // pending TCC grant must not hide enrollment's explicit control consent.
+        macffi::list_displays().is_ok_and(|displays| !displays.is_empty())
+    }
+
     fn probe(&self) -> Option<v1::Display> {
         let info = macffi::probe_display()?;
         Some(v1::Display {
@@ -179,7 +192,9 @@ impl DesktopBackend for MacosDesktop {
                             // SCK retains its completion callback after our
                             // bounded wait. Timeout is not native completion.
                             if let Some(reservation) = crate::current_work_reservation() {
-                                reservation.mark_unsettled();
+                                reservation.mark_unsettled(format!(
+                                    "ScreenCaptureKit callback still pending: {err}"
+                                ));
                             }
                         }
                         let terminal = !macffi::screen_capture_granted();

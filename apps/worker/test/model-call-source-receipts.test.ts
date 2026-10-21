@@ -851,3 +851,31 @@ test("copied receipt owner attempt contention refuses completeness without recei
   const retained = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, { input: rows.map(row => row.item) });
   expect(retained.complete).toBe(true); expect(retained.closure.some(node => node.sourceRef.id === producer.id)).toBe(true);
 });
+
+test("a dispatch refused before bytes is settled and leaves the quiesced-intent reconciliation; an unknown intent stays in it", async () => {
+  const { createModelCallUsageSourceHooks } = await import("../src/activities/agent-turn/model-usage");
+  const { reconcileQuiescedModelCallReceipts } = await import("@opengeni/db");
+  const {identity}=await fixture();
+  const call={accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,turnId:identity.turnId,
+    turnAttemptId:identity.attemptId,callKind:"response" as const,scope:"call" as const,provider:"gateway",providerApi:"responses",
+    upstreamProvider:null,model:"scripted",billingPath:"external" as const};
+  const refusedKey=crypto.randomUUID(),unknownKey=crypto.randomUUID();
+  await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:refusedKey,requestIndex:1},{input:"Synthetic request"});
+  await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:unknownKey,requestIndex:2},{input:"Synthetic request"});
+  const refusal=new Error("authority withdrawn");
+  const refused=createModelCallUsageSourceHooks(app.db,call,new Set(),async()=>{throw refusal;});
+  await expect(refused.beforeProviderDispatch!(refusedKey)).rejects.toBe(refusal);
+  await refused.onDispatchFailure!(refusedKey);
+  // Transport loss after bytes: the intent stays unknown.
+  const lost=createModelCallUsageSourceHooks(app.db,call,new Set(),async()=>{});
+  await lost.beforeProviderDispatch!(unknownKey);
+  await lost.onDispatchFailure!(unknownKey);
+  const rows=await shared.admin`SELECT event_type, idempotency_key, attributes FROM usage_events WHERE turn_id=${identity.turnId}::uuid ORDER BY recorded_at, idempotency_key`;
+  expect(rows.map(row=>row.event_type).sort()).toEqual(["model.call.dispatch","model.call.dispatch","model.call.dispatch.refused"]);
+  const settlement=rows.find(row=>row.event_type==="model.call.dispatch.refused")!;
+  expect(settlement.idempotency_key).toBe(`usage:model.call.dispatch.refused:${identity.turnId}:${refusedKey}`);
+  expect(settlement.attributes).toMatchObject({outcome:"cancelled",usageReported:false,totalTokens:null,estimatedProviderCostMicros:null});
+  await shared.admin`UPDATE session_turn_attempts SET state='closed', outcome='failed', closed_at=now(), quiesced_at=now() WHERE id=${identity.attemptId}::uuid`;
+  const observed=await reconcileQuiescedModelCallReceipts(app.db,{workspaceId:identity.workspaceId});
+  expect(observed).toMatchObject({settled:0,observed:1,truncated:false});
+});

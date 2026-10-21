@@ -21,13 +21,21 @@ import {
 import {
   FileResourceRef,
   MODEL_ATTACHMENT_CATALOG_MARKER,
+  MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD,
+  MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
+  collapseRepeatedSessionGoalContexts,
+  expandUnchangedSessionGoalContexts,
+  formatModelContextTimestamp,
+  isTransientSessionSystemUpdateBatch,
   latestSkillCatalogContext,
   readSkillCatalogContext,
+  resourceMountPath,
 } from "@opengeni/contracts";
 import { bindModelSourceInput, modelSourceInputBinding } from "./model-request-capture";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
+import { projectHostedSearchEvidence } from "./hosted-search-evidence";
 
 import {
   latestReasoningConfiguration,
@@ -476,13 +484,15 @@ function jsonStringUtf8ByteLength(value: string): number {
 }
 
 const IMAGE_LOW_DETAIL_TOKENS = 85;
-const IMAGE_HIGH_DETAIL_BASE_TOKENS = 85;
-const IMAGE_HIGH_DETAIL_TILE_TOKENS = 170;
-const IMAGE_HIGH_DETAIL_TILE_SIZE = 512;
-const IMAGE_HIGH_DETAIL_MAX_SIDE = 2_048;
-const IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE = 768;
+// Current vision models price an image by the patches it covers at the
+// resolution it is sent. One token per 28 px patch is a safe bound for both
+// families in use: OpenAI's 32 px patches cost about 1.2 tokens each, which is
+// slightly less per pixel. A photo sent at full resolution therefore costs
+// many thousands of tokens, not a few hundred.
+const IMAGE_PATCH_SIZE = 28;
 export const UNKNOWN_IMAGE_TOKENS = 4_096;
-export const MAX_NATIVE_IMAGE_TOKENS = 8_192;
+/** OpenAI rejects images above 30,000 of its patches (about 36,000 tokens). */
+export const MAX_NATIVE_IMAGE_TOKENS = 36_000;
 
 export type NativeImageEstimateReason = "dimensions" | "bounded_fallback";
 export type NativeImageTokenEstimate = {
@@ -695,27 +705,10 @@ function dimensionsFromImageSource(source: unknown): [number, number] | null {
   );
 }
 
-function highDetailImageTokens(width: number, height: number): number {
-  let scaledWidth = width;
-  let scaledHeight = height;
-  const longest = Math.max(scaledWidth, scaledHeight);
-  if (longest > IMAGE_HIGH_DETAIL_MAX_SIDE) {
-    const scale = IMAGE_HIGH_DETAIL_MAX_SIDE / longest;
-    scaledWidth *= scale;
-    scaledHeight *= scale;
-  }
-  const shortest = Math.min(scaledWidth, scaledHeight);
-  if (shortest > IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE) {
-    const scale = IMAGE_HIGH_DETAIL_TARGET_SHORT_SIDE / shortest;
-    scaledWidth *= scale;
-    scaledHeight *= scale;
-  }
-  const tiles =
-    Math.ceil(scaledWidth / IMAGE_HIGH_DETAIL_TILE_SIZE) *
-    Math.ceil(scaledHeight / IMAGE_HIGH_DETAIL_TILE_SIZE);
+function patchImageTokens(width: number, height: number): number {
   return Math.min(
     MAX_NATIVE_IMAGE_TOKENS,
-    IMAGE_HIGH_DETAIL_BASE_TOKENS + IMAGE_HIGH_DETAIL_TILE_TOKENS * Math.max(1, tiles),
+    Math.max(1, Math.ceil(width / IMAGE_PATCH_SIZE) * Math.ceil(height / IMAGE_PATCH_SIZE)),
   );
 }
 
@@ -749,7 +742,7 @@ export function estimateNativeImageTokens(input: {
     };
   }
   return {
-    tokens: highDetailImageTokens(width, height),
+    tokens: patchImageTokens(width, height),
     width,
     height,
     detail,
@@ -1559,7 +1552,11 @@ export function prepareCompactionPromptInput(
 ): PreparedCompactionPromptInput {
   const budget = Math.max(0, Math.floor(maxInputTokens));
   const origins = new Map<CompactionItem,CompactionItem>();
-  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items,(source,projected)=>origins.set(projected,source)).slice();
+  let history = omitOpaqueArtifactsFromPortableCompactionHistory(items,(source,projected)=>origins.set(projected,source)).map(item => {
+    const projected = projectHostedSearchEvidence(item);
+    if (projected !== item) origins.set(projected, origins.get(item) ?? item);
+    return projected;
+  });
   let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
   let rewrittenToolOutputs = 0;
 
@@ -1632,30 +1629,126 @@ function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
 }
 
 /**
+ * Shared preparation for both retention builders.
+ *
+ * - `source` has every "unchanged goal" stand-in restored to its full goal
+ *   context, so whichever message ends up oldest in the retained window can
+ *   still carry the goal in full.
+ * - `charged` is what the model will see for each message once repeated goal
+ *   contexts collapse; the retention budget is charged on this form so
+ *   repeated goal copies do not crowd out real input.
+ * - Transient machine-status batches (command results, wait timeouts, child
+ *   progress, goal nudges) are not retained verbatim once newer input exists:
+ *   the summary already carries them. The newest input is always retained,
+ *   and it carries the current goal context.
+ */
+function prepareRetainedInputs(
+  items: readonly CompactionItem[],
+  isCandidate: (item: CompactionItem) => boolean,
+): {
+  source: CompactionItem[];
+  charged: CompactionItem[];
+  skip: (index: number) => boolean;
+  goalAllowanceTokens: (index: number) => number;
+} {
+  const source = expandUnchangedSessionGoalContexts(items);
+  const charged = collapseRepeatedSessionGoalContexts(source);
+  let newest = -1;
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    if (isCandidate(source[index]!)) {
+      newest = index;
+      break;
+    }
+  }
+  return {
+    source,
+    charged,
+    skip: (index) => index !== newest && isTransientSessionSystemUpdateBatch(source[index]!),
+    goalAllowanceTokens: (index) =>
+      source[index] === charged[index]
+        ? 0
+        : Math.max(
+            0,
+            estimateTextTokens(messageText(source[index]!)) -
+              estimateTextTokens(messageText(charged[index]!)),
+          ),
+  };
+}
+
+function isPortableRetentionCandidate(item: CompactionItem): boolean {
+  return isPortableInputMessage(item) && !isCompactionSummary(item) && !isAttachmentCatalog(item);
+}
+
+function hasAttachmentRefs(item: CompactionItem): boolean {
+  const raw = item[MODEL_ATTACHMENT_REFS_FIELD];
+  return Array.isArray(raw) && raw.length > 0;
+}
+
+/**
+ * Only the newest user message that carries attachments keeps them inline
+ * after compaction. Older retained messages drop their references, so their
+ * files are listed in the dated attachment catalog instead of being replayed
+ * as images on every later request. Their text is unchanged and they are
+ * charged only for that text.
+ */
+function withOnlyNewestAttachmentsInline(items: readonly CompactionItem[]): CompactionItem[] {
+  let newest = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (itemRole(item) === "user" && !isAttachmentCatalog(item) && hasAttachmentRefs(item)) {
+      newest = index;
+      break;
+    }
+  }
+  return items.map((item, index) => {
+    if (index === newest || isAttachmentCatalog(item) || !hasAttachmentRefs(item)) return item;
+    const stripped: CompactionItem = { ...item };
+    delete stripped[MODEL_ATTACHMENT_REFS_FIELD];
+    delete stripped[MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD];
+    return stripped;
+  });
+}
+
+/**
  * Build the active history after compaction:
  * the newest user/system input messages that fit one cumulative, model-bounded budget
- * (prior summaries excluded, retained images preserved) plus one marked summary item.
+ * (prior summaries excluded) plus one marked summary item. Only the newest
+ * user message with attachments keeps its images inline.
+ * Each distinct session goal context is kept once, and answered transient
+ * machine-status batches are left to the summary.
+ * Attachments of messages that were not retained are listed in one dated
+ * platform catalog placed before the retained messages, never after them.
  */
 export function buildCompactionReplacementHistory(
   items: readonly CompactionItem[],
   summaryBody: string,
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
   retainedMessageBudgetTokens = COMPACT_USER_MESSAGE_MAX_TOKENS,
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
 ): CompactionItem[] {
   const retainedReversed: CompactionItem[] = [];
   let remaining = Math.max(
     0,
     Math.min(COMPACT_USER_MESSAGE_MAX_TOKENS, retainedMessageBudgetTokens),
   );
-  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const item = items[index]!;
-    if (!isPortableInputMessage(item) || isCompactionSummary(item) || isAttachmentCatalog(item)) {
+  const prepared = prepareRetainedInputs(
+    withOnlyNewestAttachmentsInline(items),
+    isPortableRetentionCandidate,
+  );
+  for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = prepared.charged[index]!;
+    if (!isPortableRetentionCandidate(item) || prepared.skip(index)) {
       continue;
     }
     const textTokens = estimateTextTokens(messageText(item));
     const nonTextTokens = Math.max(0, retainedItemTokens(item) - textTokens);
     if (nonTextTokens >= remaining) continue;
-    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+    retainedReversed.push(
+      compactRetainedMessage(
+        prepared.source[index]!,
+        remaining - nonTextTokens + prepared.goalAllowanceTokens(index),
+      ),
+    );
     if (textTokens + nonTextTokens > remaining) {
       remaining = 0;
       break;
@@ -1663,9 +1756,13 @@ export function buildCompactionReplacementHistory(
     remaining -= textTokens + nonTextTokens;
   }
   const currentCatalog = latestSkillCatalogContext(items);
-  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
-  const attachmentCatalog = buildAttachmentCatalogItem(items, history);
-  if (attachmentCatalog) history.push(attachmentCatalog);
+  const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
+  const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
+  const history = [
+    ...(currentCatalog ? [currentCatalog] : []),
+    ...(attachmentCatalog ? [attachmentCatalog] : []),
+    ...retained,
+  ];
   history.push(buildSummaryItem(summaryBody));
   const reasoning = latestReasoningConfiguration(items);
   if (reasoning) history.push(reasoningConfigurationItem(reasoning));
@@ -1699,40 +1796,54 @@ export function isRetainedRemoteV2Message(item: unknown): boolean {
  * newest retained user/system/developer messages within the CLI 64k budget plus the
  * opaque `{ type: "compaction", encrypted_content }` item.
  *
- * Both modes preserve retained image parts. Charge their projected image
- * tokens, including uploads represented by durable refs, against the budget.
+ * Both modes keep attachments inline only on the newest user message that has
+ * them, and charge its projected image tokens against the budget.
  */
 export function buildRemoteV2ReplacementHistory(
   items: readonly CompactionItem[],
   compactionItem: CompactionItem,
   retainedItemTokens: (item: CompactionItem) => number = (item) => estimateTokens([item]),
+  attachmentUploadTimes: AttachmentUploadTimes = new Map(),
 ): CompactionItem[] {
   if (!isRemoteCompactionItem(compactionItem)) {
-    throw new EmptyCompactionSummaryError({ stage: "remote_v2_compaction_item" });
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_compaction_item",
+    });
   }
   const retainedReversed: CompactionItem[] = [];
   let remaining = REMOTE_V2_RETAINED_MESSAGE_TOKEN_BUDGET;
-  for (let index = items.length - 1; index >= 0 && remaining > 0; index -= 1) {
-    const item = items[index]!;
+  const prepared = prepareRetainedInputs(
+    withOnlyNewestAttachmentsInline(items),
+    (item) => readSkillCatalogContext(item) === null && isRetainedRemoteV2Message(item),
+  );
+  for (let index = prepared.charged.length - 1; index >= 0 && remaining > 0; index -= 1) {
+    const item = prepared.charged[index]!;
     if (readSkillCatalogContext(item) !== null) continue;
     if (!isRetainedRemoteV2Message(item)) continue;
+    if (prepared.skip(index)) continue;
     const textTokens = estimateTextTokens(messageText(item));
     const chargeTokens = Math.max(1, retainedItemTokens(item));
     const nonTextTokens = Math.max(0, chargeTokens - textTokens);
     if (nonTextTokens >= remaining) continue;
+    const full = prepared.source[index]!;
+    const allowance = prepared.goalAllowanceTokens(index);
     if (chargeTokens <= remaining) {
-      retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+      retainedReversed.push(compactRetainedMessage(full, remaining - nonTextTokens + allowance));
       remaining -= chargeTokens;
       continue;
     }
-    retainedReversed.push(compactRetainedMessage(item, remaining - nonTextTokens));
+    retainedReversed.push(compactRetainedMessage(full, remaining - nonTextTokens + allowance));
     remaining = 0;
     break;
   }
   const currentCatalog = latestSkillCatalogContext(items);
-  const history = [...(currentCatalog ? [currentCatalog] : []), ...retainedReversed.reverse()];
-  const attachmentCatalog = buildAttachmentCatalogItem(items, history);
-  if (attachmentCatalog) history.push(attachmentCatalog);
+  const retained = collapseRepeatedSessionGoalContexts(retainedReversed.reverse());
+  const attachmentCatalog = buildAttachmentCatalogItem(items, retained, attachmentUploadTimes);
+  const history = [
+    ...(currentCatalog ? [currentCatalog] : []),
+    ...(attachmentCatalog ? [attachmentCatalog] : []),
+    ...retained,
+  ];
   history.push({
     type: "compaction",
     encrypted_content: compactionItem.encrypted_content,
@@ -1767,21 +1878,67 @@ function attachmentRefsFromCompactionItems(items: readonly CompactionItem[]): Fi
   return refs;
 }
 
+/** Upload time of each referenced file, frozen into a catalog when compaction creates it. */
+export type AttachmentUploadTimes = ReadonlyMap<string, Date | string>;
+
+/** File ids whose upload times a compaction may need for its attachment catalog. */
+export function compactionAttachmentFileIds(items: readonly CompactionItem[]): string[] {
+  return attachmentRefsFromCompactionItems(items).map((ref) => ref.fileId);
+}
+
+const ATTACHMENT_CATALOG_HEADER = "[Opengeni earlier attachments]";
+
+function attachmentCatalogUploadText(value: Date | string | undefined): string {
+  if (value === undefined) return "upload time unknown";
+  try {
+    return `uploaded ${formatModelContextTimestamp(value)}`;
+  } catch {
+    return "upload time unknown";
+  }
+}
+
+/**
+ * The complete model-visible catalog text. It is frozen into canonical history
+ * when compaction creates the catalog, so later turns replay it unchanged.
+ */
+function renderAttachmentCatalogText(
+  refs: readonly FileResourceRef[],
+  uploadTimes: AttachmentUploadTimes,
+): string {
+  return [
+    ATTACHMENT_CATALOG_HEADER,
+    "Files from earlier in this conversation whose messages are now summarized or no longer shown. " +
+      "This list is a platform record, not a message or attachment from the user. " +
+      "Treat a file as part of the current request only when the latest user message refers to it.",
+    ...refs.map(
+      (ref) =>
+        `- fileId=${ref.fileId}; ${attachmentCatalogUploadText(uploadTimes.get(ref.fileId))}; ` +
+        `mountDirectory=${resourceMountPath(ref)}`,
+    ),
+    "To open one, use the existing file in its mountDirectory, or call " +
+      "files__files_get_download_url with its fileId and download it with the shell.",
+  ].join("\n");
+}
+
 function buildAttachmentCatalogItem(
   original: readonly CompactionItem[],
   retained: readonly CompactionItem[],
+  uploadTimes: AttachmentUploadTimes,
 ): CompactionItem | null {
   const retainedIds = new Set(attachmentRefsFromCompactionItems(retained).map((ref) => ref.fileId));
   const omittedRefs = attachmentRefsFromCompactionItems(original).filter(
     (ref) => !retainedIds.has(ref.fileId),
   );
   if (omittedRefs.length === 0) return null;
+  // A platform record, not user input: system role, complete text, and placed
+  // before the retained messages so it cannot read as part of the latest one.
   return {
     type: "message",
-    role: "user",
-    content: "[Opengeni retained attachment references]",
+    role: "system",
+    content: renderAttachmentCatalogText(omittedRefs, uploadTimes),
     [MODEL_ATTACHMENT_REFS_FIELD]: omittedRefs,
     [MODEL_ATTACHMENT_CATALOG_MARKER]: true,
+    [MODEL_ATTACHMENT_CATALOG_RENDERED_FIELD]: true,
   };
 }
 
@@ -1809,7 +1966,10 @@ export function buildRemoteCompactionV2PromptInput(
 /** Extract exactly one compaction output item from a Responses payload. */
 export function extractRemoteCompactionV2OutputItem(response: unknown): CompactionItem {
   if (!response || typeof response !== "object") {
-    throw new EmptyCompactionSummaryError({ stage: "remote_v2_extract", reason: "no_response" });
+    throw new EmptyCompactionSummaryError({
+      stage: "remote_v2_extract",
+      reason: "no_response",
+    });
   }
   const record = response as Record<string, unknown>;
   const output = Array.isArray(record.output) ? record.output : [];
@@ -2013,7 +2173,10 @@ function messageText(item: CompactionItem): string {
 }
 
 export function renderCompactionPromptInputForChat(input: readonly CompactionItem[]): string {
-  return input.map(renderItem).join("\n");
+  return input
+    .map((item) => projectHostedSearchEvidence(item))
+    .map(renderItem)
+    .join("\n");
 }
 
 function renderItem(item: CompactionItem): string {

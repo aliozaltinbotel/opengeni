@@ -1,5 +1,7 @@
+import { t } from "@/lib/console-text";
 import { providerRecoverySubject } from "@opengeni/react";
 import type { SessionFailureSummary } from "./events";
+import { freeCreditGapReason, type FreeCreditGap } from "./free-credit-gap";
 
 /**
  * Known provider failure classes. Presentation only: the stored event keeps the
@@ -96,6 +98,8 @@ const PROVIDER_ERROR: KnownFailure = {
 const UNKNOWN_FAILURE = "The session stopped unexpectedly.";
 const EXECUTION_CONNECTION_FAILURE = "Opengeni lost contact with the execution environment.";
 const CODEX_REQUEST_REJECTED = "Codex rejected this request.";
+const COMPACTION_FAILURE =
+  "Couldn’t compact conversation history. If the next message fails too, start a new session.";
 
 /** The worker's closed quota marker, on a quota turn failure or a compaction failure. */
 function quotaScopeFailure(scope: string | null | undefined): KnownFailure | null {
@@ -142,8 +146,9 @@ export function classifyProviderFailure(
     "Claude credentials expired or were revoked. Replace the key or setup token in Models."
   )
     return CREDENTIALS;
-  // Opengeni's own credit exhaustion has a dedicated billing remedy upstream.
-  if (text.includes("opengeni credits")) return null;
+  // Platform credit exhaustion ("workspace credits"; older history says
+  // "Opengeni credits") has a dedicated billing remedy upstream.
+  if (text.includes("workspace credits") || text.includes("opengeni credits")) return null;
   // Provider SDKs prefix the HTTP status ("401 Incorrect API key ..."). A
   // status alone classifies only 401/402/403/429; other statuses do not prove
   // a cause and use the generic headline with recorded diagnostics.
@@ -193,6 +198,8 @@ export function failedSessionCopy(
   creditExhausted = false,
   modelChanged = false,
   canChooseModel = false,
+  /** Free credit remains, but not for this model: name the gap instead of an empty workspace. */
+  freeCreditGap: FreeCreditGap | null = null,
 ): {
   reason: string;
   unavailableModel: boolean;
@@ -202,6 +209,8 @@ export function failedSessionCopy(
   detail?: string;
   /** A daily allowance is spent; the banner may name the deployment's free model. */
   dailyLimit?: true;
+  /** The compaction-failure headline; the timeline's own landmark can carry it instead. */
+  compaction?: true;
 } {
   const recorded = failure.reason?.replace(/\s+/g, " ").trim();
   const diagnostic = failure.recordedDetail || failure.reason;
@@ -239,7 +248,7 @@ export function failedSessionCopy(
     !failure.safetyRefusal &&
     !failure.quotaScope
   ) {
-    const subject = providerRecoverySubject(recovery);
+    const subject = providerRecoverySubject(t, recovery);
     return {
       reason: modelChanged
         ? `${subject}. Retry to continue with the selected model.`
@@ -295,7 +304,7 @@ export function failedSessionCopy(
     !failure.structuralSandboxFailure &&
     !unavailableModel &&
     (!code || code === "pre_claim_failure") &&
-    !/opengeni credits/i.test(recorded ?? "")
+    !/(?:workspace|opengeni) credits/i.test(recorded ?? "")
   ) {
     const detail = diagnostic;
     return {
@@ -309,8 +318,25 @@ export function failedSessionCopy(
       ...(detail ? { detail } : {}),
     };
   }
+  // The recorded compaction text is the provider's raw rejection: name the
+  // outcome and keep the exact text behind Details.
+  if (
+    code === "context_compaction_failed" &&
+    !creditExhausted &&
+    !failure.safetyRefusal &&
+    !unavailableModel
+  ) {
+    return {
+      reason: COMPACTION_FAILURE,
+      unavailableModel: false,
+      compaction: true,
+      ...(diagnostic ? { detail: diagnostic } : {}),
+    };
+  }
   const reason = creditExhausted
-    ? "This workspace is out of Opengeni credits."
+    ? freeCreditGap
+      ? freeCreditGapReason(freeCreditGap)
+      : "This workspace is out of Opengeni credits."
     : failure.safetyRefusal
       ? "The model provider declined this request."
       : unavailableModel

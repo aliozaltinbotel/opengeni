@@ -3,13 +3,15 @@ import { heartbeat } from "@temporalio/activity";
 import { CODEX_CLIENT_VERSION, codexSubscriptionHeaders } from "@opengeni/codex";
 import type { ModelCallOutcome, ReadRealtimeSessionUsageSource } from "@opengeni/contracts";
 import { createRealtimeVoiceBilling } from "@opengeni/core";
-import { buildCodexTokenResolver, existingUsageEventIdempotencyKeys, isTransactionHandle,
+import { acquireSubscriptionCoreCodexOperationLease, buildSubscriptionCoreCodexConnectionTokenResolver,
+  readSubscriptionCoreSessionOwner, resolveSubscriptionCoreCodexConnectionId, renewSubscriptionCoreCodexOperationLease,
+  releaseSubscriptionCoreCodexOperationLease, existingUsageEventIdempotencyKeys, isTransactionHandle,
   loadRealtimeSessionUsageSource, recordUsageEvent } from "@opengeni/db";
 import type { ControlActivityServices, RealtimeUsageInput } from "./types";
 
 type Observation = { action: "waiting" } | { action: "closed"; outcome: ModelCallOutcome };
 type ObserverInput = { url: string; headers: Record<string, string>; source: ReadRealtimeSessionUsageSource;
-  previouslyAttached: boolean; onAttached: () => Promise<void>; heartbeat: () => void };
+  previouslyAttached: boolean; onAttached: () => Promise<void>; heartbeat: () => void | Promise<void> };
 
 /** Only authenticated messages on the exact existing provider session are
  * considered. An observer disconnect is never a session close. */
@@ -28,7 +30,7 @@ export async function observeRealtimeSession(input: ObserverInput): Promise<Obse
     };
     const timer = setTimeout(() => { if (!finalObserved) finish({ action: "waiting" }); }, 30_000);
     const pulse = setInterval(() => {
-      try { input.heartbeat(); } catch (error) { finish({ action: "waiting" }, error); }
+      try { void Promise.resolve(input.heartbeat()).catch(error => finish({ action: "waiting" }, error)); } catch (error) { finish({ action: "waiting" }, error); }
     }, 5_000);
     socket.onopen = () => {
       attachment = input.onAttached();
@@ -86,13 +88,30 @@ export function createRealtimeUsageActivities(services: () => Promise<ControlAct
     if (keys.has(finalKey)) return { action: "terminal" };
     const waiting = { action: "waiting", delayMs: 30_000 } as const;
     if (!source.source.providerSessionId) return waiting;
+    let releaseLease: (() => Promise<unknown>) | undefined;
+    let renewLease: (() => Promise<Date | null>) | undefined;
+    try {
     let url: string;
     let headers: Record<string, string>;
     if (source.source.provider === "codex-subscription" && source.source.providerCredentialId) {
       // Resolve the exact credential which created this provider occurrence,
       // including its current revocation fence; never choose another account.
+      const owner = await readSubscriptionCoreSessionOwner(db, input);
+      if (!owner) return waiting;
+      const scope = { kind: "session" as const, accountId: input.accountId, workspaceId: input.workspaceId,
+        sessionId: input.sessionId, sessionOwnerSubjectId: owner.ownerSubjectId };
+      const connectionId = await resolveSubscriptionCoreCodexConnectionId(db, {
+        accountId: input.accountId, workspaceId: input.workspaceId, connectionId: source.source.providerCredentialId,
+      });
+      if (!connectionId) return waiting;
+      const ref = { operationId: input.connectionId, attemptId: crypto.randomUUID(), operationKind: "realtime" as const,
+        connectionId, holderId: `realtime-observer:${input.connectionId}`, generation: 1 };
+      const lease = await acquireSubscriptionCoreCodexOperationLease(db, scope, ref);
+      if (lease.kind !== "acquired") return waiting;
+      releaseLease = () => releaseSubscriptionCoreCodexOperationLease(db, scope, ref);
+      renewLease = () => renewSubscriptionCoreCodexOperationLease(db, scope, ref);
       let token;
-      try { token = await buildCodexTokenResolver(db, settings, input.workspaceId, source.source.providerCredentialId).getToken(); }
+      try { token = await buildSubscriptionCoreCodexConnectionTokenResolver(db, settings, scope, connectionId, ref).getToken(); }
       catch { return waiting; }
       headers = codexSubscriptionHeaders({ ...token, clientVersion: CODEX_CLIENT_VERSION });
       url = `wss://api.openai.com/v1/live/${encodeURIComponent(source.source.providerSessionId)}`;
@@ -101,7 +120,10 @@ export function createRealtimeUsageActivities(services: () => Promise<ControlAct
       headers = { "api-key": settings.azureLiveApiKey };
     } else return waiting;
     const result = await (options.observe ?? observeRealtimeSession)({ url, headers, source: source.source,
-      previouslyAttached: keys.has(attachedKey), heartbeat: options.heartbeat ?? (() => heartbeat()),
+      previouslyAttached: keys.has(attachedKey), heartbeat: async () => {
+        (options.heartbeat ?? (() => heartbeat()))();
+        if (renewLease && !(await renewLease())) throw new Error("REALTIME_OBSERVER_CREDENTIAL_LEASE_LOST");
+      },
       onAttached: async () => {
         await recordUsageEvent(db, { ...input, eventType: "model.realtime.session.attached", quantity: 1, unit: "session",
           sourceResourceType: "model_realtime_session", sourceResourceId: input.connectionId, idempotencyKey: attachedKey,
@@ -112,6 +134,7 @@ export function createRealtimeUsageActivities(services: () => Promise<ControlAct
     if (result.action === "waiting" || result.outcome === "indeterminate") return waiting;
     await createRealtimeVoiceBilling({ db, settings }).recordProviderSessionFinal({ ...input, source: source.source, outcome: result.outcome });
     return { action: "terminal" };
+    } finally { await releaseLease?.(); }
   }
   return { observeRealtimeSessionUsage };
 }

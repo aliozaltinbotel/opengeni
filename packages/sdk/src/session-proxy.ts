@@ -1,3 +1,4 @@
+import { observedSessionSequence, SESSION_SEQUENCE_HEADER } from "./session-sequence";
 import type { OpenGeniEmbeddingClient } from "./embedding-client";
 import { OpenGeniApiError, OpenGeniSetupError } from "./errors";
 import { chatDefaults, type Chats } from "./chats";
@@ -100,7 +101,10 @@ export type SessionProxyContext = {
  * to refuse an input.
  */
 export type SessionProxyCreateInput = {
+  /** Empty for a voice-first session; no initial user message is fabricated. */
   initialMessage: string;
+  /** Available only while the proxy permits realtime voice. */
+  startMode?: "realtime" | undefined;
   /** Browser retry key; replay is scoped to the acting user by the API. */
   idempotencyKey?: string | undefined;
   /** Files attached to the first message (uploaded through this proxy). */
@@ -117,6 +121,8 @@ export type SessionProxyCreateInput = {
 export type SessionProxyMessageInput = {
   /** Absent for `create`. */
   sessionId?: string | undefined;
+  /** An empty voice-first session shell, not an initial model-producing turn. */
+  startMode?: "realtime" | undefined;
   /**
    * `realtime` is live voice: once when a call starts (refuse it, or rotate
    * MCP credentials), and before each batch of finalized transcripts and spoken
@@ -165,6 +171,13 @@ export type SessionProxyToolServer = {
    * (unprefixed MCP tool names), or `true` for every tool. Others run directly.
    */
   approvals?: { ask: string[] | true } | undefined;
+  /**
+   * Tools the agent has from the first model request, so everyday reads (for
+   * example search and get-by-id) need no `tool_search` round trip: unprefixed
+   * MCP tool names, or `true` for every tool. Other tools stay searchable. Keep
+   * the list short and stable: every listed schema is part of each request.
+   */
+  eager?: string[] | true | undefined;
   /** Token signing secret. Defaults to `OPENGENI_API_KEY`; `verifyToolRequest` must use the same. */
   secret?: string | undefined;
   /** Token lifetime in seconds. Defaults to 24 hours; refreshed on every message, approval, and answer. */
@@ -225,9 +238,9 @@ export type SessionProxyHandlerOptions = {
   /**
    * Attach your product's MCP tool server to every session the `createSession`
    * hook creates, authenticated as the resolved user. The proxy mints the
-   * token, adds the `mcpServers` entry (plus an eager ref when the hook lists
-   * explicit `tools`), and rotates the token on every send, steer, submit,
-   * approval decision, and human-input answer.
+   * token, adds the `mcpServers` entry (with its `eager` tools, or every tool
+   * when the hook lists explicit `tools`), and rotates the token on every send,
+   * steer, submit, approval decision, and human-input answer.
    */
   toolServer?: SessionProxyToolServer | undefined;
   /** Mount prefix, e.g. `/api/opengeni`. Defaults to everything before the first `/v1/`. */
@@ -305,6 +318,16 @@ export type SessionProxyHandlerOptions = {
    */
   artifacts?: boolean | { editableLiveUrl?: string | undefined } | undefined;
   /**
+   * Read the workspace's Sites without naming a session: list, detail,
+   * content and HTML of published artifacts the signed-in user may read, for
+   * pages that belong to the workspace rather than to one chat (for example a
+   * page several sessions keep up to date, shown with `SiteDetail`). Read-only:
+   * publishing, rollback and status changes stay closed. Requests that send
+   * `x-opengeni-session-id` keep the session-scoped `artifacts` checks.
+   * Explicit opt-in, default false.
+   */
+  sites?: boolean | undefined;
+  /**
    * Chat list for `SessionList` / `OpenGeniChat` (`listSessionPage` only).
    * `"mine"` (default) lists sessions the resolved user created; `"visible"`
    * lists every session Opengeni lets that user read in the workspace (shared
@@ -349,6 +372,7 @@ const CREATE_FIELDS: ReadonlySet<string> = new Set([
   "initialMessage",
   "idempotencyKey",
   "resources",
+  "startMode",
 ]);
 const MODEL_FIELDS = ["model", "reasoningEffort", "latencyMode"] as const;
 /** The API's single-recording ceiling (25 MiB) plus multipart framing. */
@@ -406,6 +430,7 @@ export function createSessionProxyHandler(
   const realtimeVoiceEnabled = options.realtimeVoice ?? true;
   const sandboxFilesEnabled = options.sandboxFiles === true;
   const artifactsEnabled = options.artifacts !== undefined && options.artifacts !== false;
+  const sitesEnabled = options.sites === true;
   const editableLiveUrl = artifactsEnabled
     ? liveSocketUrl(
         (typeof options.artifacts === "object" ? options.artifacts.editableLiveUrl : undefined) ??
@@ -647,8 +672,16 @@ export function createSessionProxyHandler(
       // Unknown additive query parameters on allowlisted reads pass through, so a
       // newer browser SDK keeps working; the route and method allowlist is exact.
       const query = Object.fromEntries(url.searchParams);
-      const read = async (path: string) =>
-        json(await client.requestJson("GET", path, undefined, query, call));
+      const read = async (path: string) => {
+        const body = await client.requestJson("GET", path, undefined, query, call);
+        // Keep the projection's read-consistency sequence for the browser hooks.
+        const sequence = observedSessionSequence(body);
+        return json(
+          body,
+          200,
+          sequence === undefined ? {} : { [SESSION_SEQUENCE_HEADER]: String(sequence) },
+        );
+      };
       const [root, ...rest] = segments;
       if (root === "config") {
         if (rest.length === 1 && rest[0] === "client" && method === "GET") {
@@ -681,7 +714,13 @@ export function createSessionProxyHandler(
             }
           }
           // Upstream proxy capabilities never authorize this host's routes.
-          const { artifacts: _upstreamArtifacts, ...conversationConfig } = config;
+          // Task usage limits are set by this host's server, never through the
+          // browser boundary, so the producer capability is not forwarded.
+          const {
+            artifacts: _upstreamArtifacts,
+            sessionUsageLimits: _upstreamUsageLimits,
+            ...conversationConfig
+          } = config;
           const upstreamVoice = config.voiceInput;
           if (upstreamVoice && typeof upstreamVoice === "object") {
             // Only one-shot recordings are forwarded, never resumable chunk uploads.
@@ -851,6 +890,59 @@ export function createSessionProxyHandler(
       }
 
       if (area === "editable-artifacts" || area === "published-artifacts") {
+        if (
+          area === "published-artifacts" &&
+          sitesEnabled &&
+          !request.headers.get(SESSION_SCOPE_HEADER)
+        ) {
+          // Workspace Sites under Opengeni's own read authorization for this user.
+          const [siteId, ...siteOp] = tail as [string | undefined, ...string[]];
+          const op = siteOp.join("/");
+          if (method !== "GET") return errorJson(404, "route_not_allowed", "Not found.");
+          if (siteId === undefined) {
+            return json(
+              await client.requestJson(
+                "GET",
+                `${base}/published-artifacts`,
+                undefined,
+                pick(query, SITE_LIST_FIELDS) as Record<string, string>,
+                call,
+              ),
+            );
+          }
+          if (!SEGMENT.test(siteId) || (op !== "" && op !== "content" && op !== "html")) {
+            return errorJson(404, "route_not_allowed", "Not found.");
+          }
+          const versionId = query.versionId;
+          if (
+            versionId !== undefined &&
+            (typeof versionId !== "string" || !SEGMENT.test(versionId))
+          ) {
+            reject(400, "version_invalid", "versionId is invalid.");
+          }
+          if (op === "html") {
+            if (typeof versionId !== "string") {
+              reject(400, "version_required", "versionId is required.");
+            }
+            const html = await downloadSessionProxySiteHtml(client, workspaceId, siteId, {
+              versionId: versionId as string,
+              signal: request.signal,
+            });
+            return new Response(boundedSiteHtml(html.body, request.signal), {
+              headers: SITE_HTML_HEADERS,
+            });
+          }
+          const item = `${base}/published-artifacts/${siteId}`;
+          return json(
+            await client.requestJson(
+              "GET",
+              op === "content" ? `${item}/content` : item,
+              undefined,
+              op === "content" && typeof versionId === "string" ? { versionId } : {},
+              call,
+            ),
+          );
+        }
         if (!artifactsEnabled) return errorJson(404, "route_not_allowed", "Not found.");
         const [artifactId, ...artifactOp] = tail as [string | undefined, ...string[]];
         const route = `${method} ${artifactOp.join("/")}`;
@@ -942,13 +1034,19 @@ export function createSessionProxyHandler(
           return errorJson(404, "route_not_allowed", "Not found.");
         }
         const input = createInput(await readJsonBody(request, maxBodyBytes), modelSelection);
+        if (input.startMode === "realtime" && !realtimeVoiceEnabled) {
+          return errorJson(404, "route_not_allowed", "Not found.");
+        }
         const hooked = await options.createSession(input, context);
         if (hooked instanceof Response) return hooked;
         const created = withBrowserCreateChoices(
           toolServer ? withToolServer(hooked, toolServer, await toolToken()) : hooked,
           input,
         );
-        const extras = await messageExtras({ delivery: "create" });
+        const extras = await messageExtras({
+          delivery: "create",
+          ...(input.startMode ? { startMode: input.startMode } : {}),
+        });
         if (extras instanceof Response) return extras;
         const modelContext = joinContext(extras?.modelContext, created.modelContext);
         return json(
@@ -1036,6 +1134,30 @@ export function createSessionProxyHandler(
             reject(400, "invalid_body", "Only { title } may be updated.");
           }
           return json(await client.requestJson("PATCH", session, { title }));
+        }
+        case "PUT attention": {
+          // Only "I have read this", for the resolved user's own read state:
+          // an open conversation acknowledges replies the person watched.
+          const through = body?.acknowledgedThroughSequence;
+          const keys = Object.keys(body ?? {});
+          if (
+            body?.unread !== false ||
+            keys.some((key) => key !== "unread" && key !== "acknowledgedThroughSequence") ||
+            (through !== undefined &&
+              (typeof through !== "number" || !Number.isSafeInteger(through) || through < 0))
+          ) {
+            reject(
+              400,
+              "invalid_body",
+              "Only { unread: false, acknowledgedThroughSequence? } may be set.",
+            );
+          }
+          return json(
+            await client.requestJson("PUT", `${session}/attention`, {
+              unread: false,
+              ...(through !== undefined ? { acknowledgedThroughSequence: through } : {}),
+            }),
+          );
         }
         case "GET events":
           return await listEvents(client, `${session}/events`, query, call);
@@ -1170,7 +1292,12 @@ const PROXY_METHODS: readonly string[] = ["GET", "POST", "PUT", "PATCH", "DELETE
 const UPLOAD_FIELDS = ["scope", "filename", "contentType", "sizeBytes", "sha256"] as const;
 
 type RealtimeRoute = "begin" | "connect" | "heartbeat" | "end" | "activate" | "sync";
-const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set(["webrtc", "gateway", "supergrok"]);
+const REALTIME_CONNECT_ROUTES: ReadonlySet<string> = new Set([
+  "webrtc",
+  "websocket",
+  "gateway",
+  "supergrok",
+]);
 /** Ledger entries that become (or join) messages and so accept `modelContext`. */
 const REALTIME_MESSAGE_KINDS: ReadonlySet<string> = new Set([
   "delegation_call",
@@ -1261,6 +1388,10 @@ function normalizeToolServer(toolServer: SessionProxyToolServer): NormalizedTool
   if (ask !== undefined && ask !== true && !(Array.isArray(ask) && ask.every(isToolName))) {
     throw new TypeError("toolServer.approvals.ask must be true or a list of tool names.");
   }
+  const eager = toolServer.eager;
+  if (eager !== undefined && eager !== true && !(Array.isArray(eager) && eager.every(isToolName))) {
+    throw new TypeError("toolServer.eager must be true or a list of tool names.");
+  }
   // Resolve now so a missing secret fails at startup, not on the first chat.
   return {
     ...toolServer,
@@ -1287,6 +1418,12 @@ function withToolServer(
     );
   }
   const ask = toolServer.approvals?.ask;
+  const eager =
+    toolServer.eager === true
+      ? true
+      : toolServer.eager?.length
+        ? [...new Set(toolServer.eager)]
+        : undefined;
   const tools = created.tools;
   return {
     ...created,
@@ -1298,19 +1435,23 @@ function withToolServer(
         url: toolServer.url,
         headers: { Authorization: `Bearer ${token}` },
         ...(ask === true ? { requireApproval: true } : ask?.length ? { requireApproval: ask } : {}),
+        ...(eager !== undefined ? { eager } : {}),
       },
     ],
     // Omitted tools keep workspace defaults; the attachment alone selects the
-    // server. An explicit allow-list gets the server's tools on the first request.
+    // server, and its `eager` marker names the first-request tools. An explicit
+    // allow-list without an `eager` choice gets every server tool on the first
+    // request, as before.
     ...(Array.isArray(tools) && !tools.some((tool) => tool.id === toolServer.id)
       ? {
-          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: true }],
+          tools: [...tools, { kind: "mcp" as const, id: toolServer.id, eager: eager ?? true }],
         }
       : {}),
   };
 }
 
 const EDITABLE_ARTIFACT_LIVE_PATH = "/v1/editable-artifacts/live";
+const SITE_LIST_FIELDS = ["limit", "cursor", "status"] as const;
 const TICKET_FIELDS = [
   "replicaId",
   "modality",
@@ -1657,13 +1798,27 @@ function createInput(
   }
   const initialMessage = body?.initialMessage;
   const idempotencyKey = body?.idempotencyKey;
-  if (typeof initialMessage !== "string" || !initialMessage.trim()) {
+  const startMode = body?.startMode;
+  if (startMode !== undefined && startMode !== "realtime") {
+    reject(400, "invalid_start_mode", "startMode must be realtime when supplied.");
+  }
+  if (startMode === "realtime" && initialMessage !== undefined && initialMessage !== "") {
+    reject(
+      400,
+      "initial_message_not_allowed",
+      "Voice-first creation does not send an initial message.",
+    );
+  }
+  if (startMode !== "realtime" && (typeof initialMessage !== "string" || !initialMessage.trim())) {
     reject(400, "initial_message_required", "initialMessage is required.");
   }
   if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || !idempotencyKey)) {
     reject(400, "invalid_idempotency_key", "idempotencyKey must be a non-empty string.");
   }
   const resources = createResources(body?.resources);
+  if (startMode === "realtime" && resources.length > 0) {
+    reject(400, "resource_not_allowed", "Keep attachments in the draft until a message is sent.");
+  }
   const policy: Pick<SessionProxyCreateInput, "model" | "reasoningEffort" | "latencyMode"> = {};
   for (const field of MODEL_FIELDS) {
     const value = body?.[field];
@@ -1674,7 +1829,8 @@ function createInput(
     (policy as Record<string, string>)[field] = value;
   }
   return {
-    initialMessage,
+    initialMessage: startMode === "realtime" ? "" : (initialMessage as string),
+    ...(startMode === "realtime" ? { startMode } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(resources.length > 0 ? { resources } : {}),
     ...policy,
@@ -1723,6 +1879,12 @@ function withBrowserCreateChoices(
   const added = (input.resources ?? []).filter((resource) => !attached.has(resource.fileId));
   return {
     ...created,
+    // Preserve browser retry identity even when a simple host hook omits it;
+    // an explicit server-owned key continues to take precedence.
+    ...(created.idempotencyKey === undefined && input.idempotencyKey
+      ? { idempotencyKey: input.idempotencyKey }
+      : {}),
+    ...(input.startMode === "realtime" ? { startMode: "realtime", initialMessage: undefined } : {}),
     ...(added.length > 0 ? { resources: [...existing, ...added] } : {}),
     ...(input.model ? { model: input.model } : {}),
     ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),

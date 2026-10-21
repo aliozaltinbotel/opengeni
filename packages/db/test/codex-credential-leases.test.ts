@@ -1,3 +1,4 @@
+import { legacyWorkspaceCodexSubscriptionActive as workspaceCodexSubscriptionActive } from "./fixtures/legacy-codex";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireSharedTestDatabase,
@@ -11,19 +12,32 @@ import {
   chooseRotationActive,
   selectCodexCredentialLeaseForTurn,
   type RotationDecision,
-} from "../../../apps/worker/src/activities/codex-rotation";
+} from "../../../apps/worker/test/fixtures/legacy-codex/rotation";
 import { codexCredentialLeaseHolderId } from "../../../apps/worker/src/activities/agent-turn/claim";
-import { codexCapacityDecision } from "../../../apps/worker/src/activities/codex-capacity";
+import { codexCapacityDecision } from "../../../apps/worker/test/fixtures/legacy-codex/capacity";
 import * as schema from "../src/schema";
 import {
-  acquireCodexCredentialLease,
   applySessionTurnSettlement,
-  armCodexCapacityWait,
   claimSessionWorkForAttempt,
   CodexCredentialLeaseAttemptFencedError,
   createDb,
   createSessionGoal,
   encryptEnvironmentValue,
+  mutateSessionControlInTransaction,
+  materializeGoalContinuation,
+  requestSessionTurnRecovery,
+  getSession,
+  withSessionActivityRlsContext,
+  withRlsContext,
+  type CodexCredentialLeaseSessionState,
+  type CodexCredentialLeaseSelectionContext,
+  type Database,
+  type DbClient,
+  type SessionActivityDatabase,
+} from "../src/index";
+import {
+  acquireCodexCredentialLease,
+  armCodexCapacityWait,
   ensureCodexRotationSettings,
   getSessionCodexState,
   getSessionCodexAccounts,
@@ -31,14 +45,11 @@ import {
   heartbeatCodexCredentialLeaseUntil,
   listCodexAccountStatuses,
   loadCodexCredentialForRun,
-  mutateSessionControlInTransaction,
-  materializeGoalContinuation,
   quarantineCodexCredentialForLease,
   recordCodexAccountUsage,
   recordCodexAccountUsageForFinalization,
   recordCodexAccountUsageWithWakeTargets,
   recordSessionCodexSelectionForTurnAttempt,
-  requestSessionTurnRecovery,
   recordCodexTokenRefresh,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
@@ -51,20 +62,11 @@ import {
   setSessionCodexPinInTransaction,
   setWorkspaceCodexSubscriptionMode,
   switchSessionCodexAccount,
-  getSession,
   updateCodexRotationSettings,
   upsertCodexSubscriptionCredential,
   withCodexCredentialRefreshLock,
   withSessionCodexCapacityMutation,
-  withSessionActivityRlsContext,
-  withRlsContext,
-  workspaceCodexSubscriptionActive,
-  type CodexCredentialLeaseSessionState,
-  type CodexCredentialLeaseSelectionContext,
-  type Database,
-  type DbClient,
-  type SessionActivityDatabase,
-} from "../src/index";
+} from "./fixtures/legacy-codex";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -1209,9 +1211,10 @@ describe("credential allocator atomic Codex credential allocation", () => {
   ] as const) {
     test(`explicit ${selection} overrides a snapshot-bearing wait through reconciliation and reacquisition`, async () => {
       if (!available) return;
-      const { ws, turnId, fence, exhausted, healthy, waiter } = await pinnedCapacityWait();
+      const { ws, turnId, fence, healthy, waiter } = await pinnedCapacityWait();
       const before = await getSession(dbA, ws.workspaceId, fence.sessionId);
-      expect(before?.codexCurrentSelection).toEqual({ credentialId: exhausted, waiting: true });
+      // The current Session projection never reconstructs a selection from historical decision rows.
+      expect(before?.codexCurrentSelection).toEqual({ credentialId: null, waiting: true });
       if (selection.startsWith("legacy_")) {
         await admin`update session_turns set metadata = metadata #- '{codexCredentialPolicySnapshotV1,source}' where id = ${turnId}`;
       }
@@ -1313,7 +1316,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
       expect(rows[0]!.id).toBe(turnId);
       expect(
         (await getSession(dbA, ws.workspaceId, fence.sessionId))?.codexCurrentSelection,
-      ).toEqual({ credentialId: healthy, waiting: false });
+      ).toEqual({ credentialId: null, waiting: false });
     }, 60_000);
   }
 
@@ -1840,6 +1843,10 @@ describe("credential allocator atomic Codex credential allocation", () => {
   test("pool-aware admission stays active when only a non-pointer credential is healthy", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
+    // Migration 0680 seeds every organization enabled on the shared core;
+    // this covers the legacy pool, so it starts from the pre-cutover world.
+    await admin`delete from subscription_provider_cutovers
+      where account_id = ${ws!.accountId}::uuid and provider = 'codex'`;
     const activeCredential = await connectCredential(ws!, "pointer-broken");
     await connectCredential(ws!, "healthy-alternate");
     expect(await setActiveCodexCredential(dbA, ws!.workspaceId, activeCredential)).toBe(true);
@@ -2287,6 +2294,34 @@ describe("credential allocator atomic Codex credential allocation", () => {
         lease.generation!,
       ),
     ).toBe(true);
+  });
+
+  test("unknown usage holds never shorten a real provider cooldown or consume refusal budget", async () => {
+    if (!available) return;
+    const [ws] = await freshAccount();
+    const credentialId = await connectCredential(ws!, "unknown-usage-hold");
+    const turnId = await seedTurn(ws!, 1);
+    const lease = await acquire(dbA, ws!, turnId);
+    const until = new Date(Date.now() + 3_600_000);
+    await admin`update codex_subscription_credentials set exhausted_until=${until},exhausted_kind='quota',exhausted_revision=exhausted_revision+1 where id=${credentialId}`;
+    const result = await quarantineCodexCredentialForLease(dbA, {
+      accountId: ws!.accountId,
+      workspaceId: ws!.workspaceId,
+      ...(await attemptFenceForTurn(turnId)),
+      turnId,
+      credentialId,
+      credentialVersion: 1,
+      holderId: lease.holderId!,
+      generation: lease.generation!,
+      maxFailovers: lease.failoverLimit,
+      quarantine: { kind: "usage_verification", until: new Date(Date.now() + 60_000) },
+    });
+    expect(result).toMatchObject({ action: "recorded", failoverCount: 0, exhausted: false });
+    const [after] = await admin<
+      { exhausted_until: Date; exhausted_kind: string }[]
+    >`select exhausted_until,exhausted_kind from codex_subscription_credentials where id=${credentialId}`;
+    expect(after!.exhausted_until.getTime()).toBe(until.getTime());
+    expect(after!.exhausted_kind).toBe("quota");
   });
 
   test("a reconnect version fences a stale provider refusal from poisoning the fresh token family", async () => {

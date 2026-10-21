@@ -1,4 +1,5 @@
 import type {
+  HumanInputAnswer,
   HumanInputQuestion,
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
@@ -14,11 +15,31 @@ import {
   type HumanInputAnswerDraft,
   type HumanInputFormMessages,
 } from "@opengeni/react/timeline-model";
-import { createContext, useContext, useMemo, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+import { createOpenGeniText, useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { Button } from "./controls";
 import { Icon } from "./icon";
 import { blendOver, withAlpha } from "./primitives";
+import { SecretQuestionField } from "./secret-field";
+import {
+  defaultSecretFieldMessages,
+  initialSecretDraft,
+  isSecretQuestion,
+  secretSubmission,
+  type SecretDraft,
+  type SecretFieldMessages,
+} from "./secret-field-model";
+import { Selector } from "./selector";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 
@@ -48,10 +69,15 @@ export interface HumanInputCardProps {
   error?: string | null | undefined;
   /** The shared question-form catalog; hosts translate by overriding entries. */
   messages?: Partial<HumanInputFormMessages> | undefined;
+  /** Copy for secret questions (Save to, Generate, show / hide). */
+  secretMessages?: Partial<SecretFieldMessages> | undefined;
 }
 
 const HumanInputMessagesContext = createContext<HumanInputFormMessages>(
-  defaultHumanInputFormMessages,
+  defaultHumanInputFormMessages(createOpenGeniText()),
+);
+const SecretFieldMessagesContext = createContext<SecretFieldMessages>(
+  defaultSecretFieldMessages(createOpenGeniText()),
 );
 
 /** One decision shell for pending requests, oldest first, "N of M" when stepping. */
@@ -61,8 +87,17 @@ export function HumanInputCard({
   respondingRequestId = null,
   error,
   messages,
+  secretMessages,
 }: HumanInputCardProps) {
-  const merged = useMemo(() => ({ ...defaultHumanInputFormMessages, ...messages }), [messages]);
+  const t = useOpenGeniText();
+  const merged = useMemo(
+    () => ({ ...defaultHumanInputFormMessages(t), ...messages }),
+    [t, messages],
+  );
+  const mergedSecret = useMemo(
+    () => ({ ...defaultSecretFieldMessages(t), ...secretMessages }),
+    [secretMessages, t],
+  );
   const batchTotal = useRef(0);
   const ordered = useMemo(() => {
     const now = Date.now();
@@ -83,14 +118,23 @@ export function HumanInputCard({
   const position = batchTotal.current - ordered.length + 1;
   return (
     <HumanInputMessagesContext.Provider value={merged}>
-      <HumanInputForm
-        key={active.id}
-        request={active}
-        progressLabel={batchTotal.current > 1 ? `${position} of ${batchTotal.current}` : null}
-        submitting={respondingRequestId !== null}
-        error={error ?? null}
-        onSubmit={(response) => onSubmit(active.id, response)}
-      />
+      <SecretFieldMessagesContext.Provider value={mergedSecret}>
+        <HumanInputForm
+          key={active.id}
+          request={active}
+          progressLabel={
+            batchTotal.current > 1
+              ? t("native.timeline.decisions.positionOfCurrent", {
+                  position,
+                  current: batchTotal.current,
+                })
+              : null
+          }
+          submitting={respondingRequestId !== null}
+          error={error ?? null}
+          onSubmit={(response) => onSubmit(active.id, response)}
+        />
+      </SecretFieldMessagesContext.Provider>
     </HumanInputMessagesContext.Provider>
   );
 }
@@ -111,13 +155,48 @@ function HumanInputForm({
   const tone = useWaitingTone();
   const { theme } = tone;
   const c = theme.colors;
+  const t = useOpenGeniText();
   const messages = useContext(HumanInputMessagesContext);
+  const secretMessages = useContext(SecretFieldMessagesContext);
   const heading = humanInputHeading(request.questions, messages);
   const single = request.questions.length === 1;
   const required = single && request.questions[0]!.required;
   const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() =>
     initialDrafts(request.questions),
   );
+  // Secret values stay out of React state: keystrokes land in this ref, which
+  // is emptied after a successful submit and when the form goes away.
+  const secretValues = useRef<Record<string, string>>({});
+  const secretClears = useRef<Record<string, () => void>>({});
+  const secretRegistrars = useRef<Record<string, (clear: (() => void) | null) => void>>({});
+  const [secretDrafts, setSecretDrafts] = useState<Record<string, SecretDraft>>(() =>
+    Object.fromEntries(
+      request.questions
+        .filter(isSecretQuestion)
+        .map((question) => [question.id, initialSecretDraft(question.secret)]),
+    ),
+  );
+  useEffect(
+    () => () => {
+      secretValues.current = {};
+    },
+    [],
+  );
+  const registerSecretClear = useCallback((id: string) => {
+    // One stable registrar per question, so the field's effect runs once.
+    const existing = secretRegistrars.current[id];
+    if (existing) return existing;
+    const registrar = (clear: (() => void) | null) => {
+      if (clear) secretClears.current[id] = clear;
+      else delete secretClears.current[id];
+    };
+    secretRegistrars.current[id] = registrar;
+    return registrar;
+  }, []);
+  const clearSecrets = () => {
+    secretValues.current = {};
+    for (const clear of Object.values(secretClears.current)) clear();
+  };
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [collapsed, setCollapsed] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -129,6 +208,7 @@ function HumanInputForm({
     setInFlight(true);
     try {
       await onSubmit(response);
+      clearSecrets();
     } catch (cause) {
       setSubmitError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -136,23 +216,55 @@ function HumanInputForm({
     }
   };
   const send = () => {
-    const result = answersFromDrafts(request.questions, drafts, messages);
-    setErrors(result.errors);
-    if (Object.keys(result.errors).length > 0) return;
+    const result = answersFromDrafts(
+      t,
+      request.questions.filter((question) => !isSecretQuestion(question)),
+      drafts,
+      messages,
+    );
+    const secret = secretSubmission(
+      request.questions,
+      secretDrafts,
+      secretValues.current,
+      messages.required,
+    );
+    const nextErrors = { ...result.errors, ...secret.errors };
+    setErrors(nextErrors);
+    if (Object.keys(nextErrors).length > 0) return;
+    const byQuestion = new Map<string, HumanInputAnswer>(
+      [...result.answers, ...secret.answers].map((answer) => [answer.questionId, answer]),
+    );
     void submit({
       outcome: "answered",
-      answers: result.answers,
-    } as SubmitHumanInputResponseRequest);
+      answers: request.questions.flatMap((question) => byQuestion.get(question.id) ?? []),
+      ...(secret.secretAnswers.length > 0 ? { secretAnswers: secret.secretAnswers } : {}),
+    });
   };
-  const update = (id: string, next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => {
-    setDrafts((current) => ({ ...current, [id]: next(current[id] ?? emptyDraft()) }));
-    // Editing a question clears its validation message, as on web.
+  // Editing a question clears its validation message, as on web.
+  const clearError = (id: string) =>
     setErrors((current) => {
       if (!(id in current)) return current;
       const remaining = { ...current };
       delete remaining[id];
       return remaining;
     });
+  const update = (id: string, next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => {
+    setDrafts((current) => ({ ...current, [id]: next(current[id] ?? emptyDraft()) }));
+    clearError(id);
+  };
+  const updateSecret = (
+    question: HumanInputQuestion,
+    next: (draft: SecretDraft) => SecretDraft,
+  ) => {
+    setSecretDrafts((current) => ({
+      ...current,
+      [question.id]: next(current[question.id] ?? initialSecretDraft(question.secret)),
+    }));
+    clearError(question.id);
+  };
+  const setSecretValue = (id: string, value: string) => {
+    secretValues.current[id] = value;
+    if (value) clearError(id);
   };
 
   return (
@@ -252,10 +364,23 @@ function HumanInputForm({
                 question={question}
                 index={single ? null : index + 1}
                 draft={drafts[question.id] ?? emptyDraft()}
-                error={errors[question.id]}
+                error={isSecretQuestion(question) ? undefined : errors[question.id]}
                 disabled={busy}
                 onChange={(next) => update(question.id, next)}
-              />
+              >
+                {isSecretQuestion(question) ? (
+                  <SecretQuestionField
+                    question={question}
+                    draft={secretDrafts[question.id] ?? initialSecretDraft(question.secret)}
+                    onDraft={(next) => updateSecret(question, next)}
+                    onValue={(value) => setSecretValue(question.id, value)}
+                    registerClear={registerSecretClear(question.id)}
+                    messages={secretMessages}
+                    error={errors[question.id]}
+                    disabled={busy}
+                  />
+                ) : null}
+              </QuestionControls>
             ))}
           </ScrollView>
           <View
@@ -315,6 +440,7 @@ function QuestionControls({
   error,
   disabled,
   onChange,
+  children,
 }: {
   question: HumanInputQuestion;
   index: number | null;
@@ -322,7 +448,10 @@ function QuestionControls({
   error?: string | undefined;
   disabled: boolean;
   onChange: (next: (draft: HumanInputAnswerDraft) => HumanInputAnswerDraft) => void;
+  /** A control that replaces the built-in ones (the secret field). */
+  children?: ReactNode;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const c = theme.colors;
@@ -389,7 +518,9 @@ function QuestionControls({
           {hint}
         </Text>
       ) : null}
-      {question.kind === "text" ? (
+      {children ? (
+        children
+      ) : question.kind === "text" ? (
         <TextInput
           accessibilityLabel={question.label ?? question.prompt}
           editable={!disabled}
@@ -466,7 +597,9 @@ function QuestionControls({
               <View style={{ flex: 1, gap: 6 }}>
                 <Text style={label}>{messages.other}</Text>
                 <TextInput
-                  accessibilityLabel={`Other answer for ${question.label ?? question.prompt}`}
+                  accessibilityLabel={t("native.timeline.decisions.otherAnswerForLabel", {
+                    label: question.label ?? question.prompt,
+                  })}
                   editable={!disabled}
                   value={draft.other}
                   onFocus={() =>
@@ -498,34 +631,6 @@ function QuestionControls({
   );
 }
 
-function Selector({ multi, selected }: { multi: boolean; selected: boolean }) {
-  const theme = useNativeTimelineTheme();
-  const c = theme.colors;
-  return (
-    <View
-      style={{
-        marginTop: 2,
-        width: 14,
-        height: 14,
-        borderRadius: multi ? 3 : 7,
-        borderWidth: 1,
-        borderColor: selected ? c.accent : c["fg-muted"],
-        backgroundColor: selected && multi ? c.accent : c["surface-1"],
-        alignItems: "center",
-        justifyContent: "center",
-      }}
-    >
-      {selected ? (
-        multi ? (
-          <Icon name="check" size={10} color={c["accent-fg"]} strokeWidth={3} />
-        ) : (
-          <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: c.accent }} />
-        )
-      ) : null}
-    </View>
-  );
-}
-
 export interface ApprovalStripMessages {
   approve: string;
   reject: string;
@@ -535,13 +640,13 @@ export interface ApprovalStripMessages {
   formatToolName: (name: string) => string;
 }
 
-export const defaultApprovalStripMessages: ApprovalStripMessages = {
-  approve: "Approve",
-  reject: "Reject",
-  approved: "Approved",
-  rejected: "Rejected",
+export const defaultApprovalStripMessages = (t: OpenGeniText): ApprovalStripMessages => ({
+  approve: t("native.timeline.decisions.approve"),
+  reject: t("native.timeline.decisions.reject"),
+  approved: t("native.timeline.decisions.approved"),
+  rejected: t("native.timeline.decisions.rejected"),
   formatToolName: (name) => name,
-};
+});
 
 export interface ApprovalStripProps {
   approvals: PendingApproval[];
@@ -551,7 +656,8 @@ export interface ApprovalStripProps {
 
 /** The web live decision strip: one waiting Notice per pending tool approval. */
 export function ApprovalStrip({ approvals, onDecide, messages: overrides }: ApprovalStripProps) {
-  const messages = { ...defaultApprovalStripMessages, ...overrides };
+  const t = useOpenGeniText();
+  const messages = { ...defaultApprovalStripMessages(t), ...overrides };
   const tone = useWaitingTone();
   const { theme } = tone;
   const c = theme.colors;

@@ -36,6 +36,13 @@ import {
   parseAllowanceExhaustedRefusal,
 } from "@opengeni/contracts/allowance-refusal";
 import {
+  formatSessionUsageMicros,
+  parseSessionUsageLimitReachedRefusal,
+  SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON,
+  SESSION_USAGE_LIMIT_SEGMENT,
+  type ParsedSessionUsageLimitReachedRefusal,
+} from "@opengeni/contracts/session-usage-limit-refusal";
+import {
   allowedFirstPartyMcpToolsForSession,
   resolveFirstPartyMcpToolPolicy,
   type Settings,
@@ -216,9 +223,10 @@ const MAX_SLACK_CHILD_DETAIL_CHARS = 240;
 const SLACK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 /**
  * Goal pause reasons the Slack thread announces. `user_pause`, `api`, `agent`,
- * and `no_progress` are deliberately absent.
+ * and `no_progress` are deliberately absent. A task usage limit pause needs a
+ * person to raise or remove the limit, so it posts too.
  *
- * A Map, not a plain object: this lookup is the sole gate of a two-reason
+ * A Map, not a plain object: this lookup is the sole gate of a fixed-reason
  * invariant, and a plain object indexed by a payload-derived string answers
  * `constructor` (and every other prototype key) with a truthy value that would
  * sail past the `if (!headline)` guard. No payload reaches it with such a
@@ -227,7 +235,36 @@ const SLACK_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-
 const SLACK_GOAL_PAUSED_HEADLINES = new Map<string, string>([
   ["limits", "Goal paused (budget)"],
   ["max_auto_continuations", "Goal paused (continuation cap)"],
+  [SESSION_USAGE_LIMIT_GOAL_PAUSED_REASON, "Goal paused at the task's usage limit"],
 ]);
+
+/**
+ * The thread line when a task stops at its usage limit: the amounts when the
+ * stop marker carries them, what a person can do, and a link to the task.
+ * API-equivalent model usage, never credits, billing or a monthly reset.
+ */
+export function slackSessionUsageLimitStopText(input: {
+  mention: string;
+  refusal: Pick<ParsedSessionUsageLimitReachedRefusal, "limitMicros" | "usedMicros"> | null;
+  link: string | null;
+}): string {
+  const amounts = input.refusal
+    ? ` (${formatSessionUsageMicros(input.refusal.usedMicros)} of ${formatSessionUsageMicros(input.refusal.limitMicros)} API-equivalent model usage)`
+    : "";
+  const link = input.link ? ` <${input.link}|Open in Opengeni>` : "";
+  return `${input.mention}Opengeni paused at this task's usage limit${amounts}. A person can raise or remove the limit in Opengeni, then reply in this thread to continue.${link}`;
+}
+
+/** A Send or start refused because the task's usage limit is reached. */
+function slackSessionUsageLimitRefusal(
+  error: HTTPException,
+): ParsedSessionUsageLimitReachedRefusal | null {
+  return (
+    parseSessionUsageLimitReachedRefusal(error.cause) ??
+    parseSessionUsageLimitReachedRefusal(record(error.cause)?.error) ??
+    parseSessionUsageLimitReachedRefusal(error)
+  );
+}
 /**
  * Slack delivery restrictions are durable session-level authority, not
  * attacker-adjacent user-message context. Migration 0240 backfilled the original
@@ -248,9 +285,9 @@ const SLACK_FILE_CONTEXT_GUIDANCE =
 
 /**
  * Slack-originated tasks may retrieve the workspace bot's bounded read surface
- * and explicitly deliver a retained task file to their own thread. Connector
- * tools are explicit-only, so freeze that narrow selection at session creation;
- * ordinary interaction messages remain owned by the durable delivery pump.
+ * and explicitly deliver a retained task file to their own thread. These tools
+ * are guaranteed on top of the defaults a Slack session follows; ordinary
+ * interaction messages remain owned by the durable delivery pump.
  */
 export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   ...DEFAULT_FIRST_PARTY_MCP_TOOLS,
@@ -264,6 +301,10 @@ export const SLACK_TASK_FIRST_PARTY_MCP_TOOLS = [
   "slack_bot_upload_file",
 ] satisfies readonly FirstPartyMcpToolName[];
 
+/** The Slack task tools that are not already default built-in tools. */
+export const SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS: readonly FirstPartyMcpToolName[] =
+  SLACK_TASK_FIRST_PARTY_MCP_TOOLS.filter((tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool));
+
 /**
  * The workspace's default first-party selection (or the deployment default)
  * plus the bounded Slack task tools. These are added whatever the base is, then
@@ -276,10 +317,10 @@ export function slackTaskFirstPartyMcpTools(
   const base =
     resolveWorkspaceSessionToolDefaults(workspaceSettings)?.firstPartyMcpTools ??
     resolveFirstPartyMcpToolPolicy(settings).default;
-  const connectorTools = SLACK_TASK_FIRST_PARTY_MCP_TOOLS.filter(
-    (tool) => !DEFAULT_FIRST_PARTY_MCP_TOOLS.includes(tool),
-  );
-  return allowedFirstPartyMcpToolsForSession(settings, [...base, ...connectorTools]);
+  return allowedFirstPartyMcpToolsForSession(settings, [
+    ...base,
+    ...SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS,
+  ]);
 }
 
 export type NormalizedSlackInteraction = {
@@ -2430,7 +2471,6 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
       interaction,
       `slack:${entry.connectionId}:${entry.providerEventId}`,
     );
-    const workspace = await getWorkspace(deps.db, interaction.workspaceId);
     const prepared = slackInvocationPreparedMessage(
       deps,
       preparedEntry,
@@ -2447,19 +2487,25 @@ async function processSlackInboxEntry(deps: ApiRouteDeps, entry: SlackInteractio
         initialMessage: prepared.entry.text,
         ...(prepared.modelContext ? { modelContext: prepared.modelContext } : {}),
         instructions: SLACK_SESSION_INSTRUCTIONS,
-        // A retried create replays the reserved shell's exact selection;
-        // otherwise the workspace default plus the Slack read tools.
+        // The session follows the workspace's built-in defaults, including
+        // tools added later, with the Slack read tools guaranteed on top. Only
+        // a retried create of a shell that pinned an exact list replays it.
         firstPartyMcpTools:
           defaults.firstPartyMcpTools !== undefined
             ? allowedFirstPartyMcpToolsForSession(deps.settings, defaults.firstPartyMcpTools)
-            : slackTaskFirstPartyMcpTools(deps.settings, workspace?.settings),
+            : undefined,
         resources: [...defaults.resources, ...preparedAttachments.resources],
         ...(!defaults.model && preferredModel ? { model: preferredModel } : {}),
         idempotencyKey: `slack:${entry.connectionId}:${entry.providerEventId}`,
         clientEventId: `slack:${entry.providerEventId}`,
       },
       undefined,
-      { surface: "slack" },
+      {
+        surface: "slack",
+        ...(defaults.firstPartyMcpTools === undefined
+          ? { firstPartyMcpToolAdditions: SLACK_TASK_ADDITIONAL_FIRST_PARTY_MCP_TOOLS }
+          : {}),
+      },
     );
   } catch (error) {
     if (error instanceof HTTPException) {
@@ -3403,7 +3449,11 @@ async function slackNewSessionDefaults(
       : {
           excludedMcpServerIds: pending.toolPolicy.excludedMcpServerIds,
         }),
-    firstPartyMcpTools: pending.firstPartyMcpTools,
+    // A shell that follows the built-in defaults keeps following them; only
+    // an exact selection is replayed as one.
+    ...(pending.toolPolicy.firstPartyMode === "workspace_default"
+      ? {}
+      : { firstPartyMcpTools: pending.firstPartyMcpTools }),
     ...(pending.firstPartyMcpPermissions
       ? { firstPartyMcpPermissions: pending.firstPartyMcpPermissions }
       : {}),
@@ -3803,8 +3853,28 @@ async function continueSlackSession(
     deps.db,
     interaction.workspaceId,
     interaction.sessionId,
-    { status: "pending", limit: 2 },
+    { status: "pending", limit: 20 },
   );
+  // A secret is answered only in the Opengeni card, which saves it to a vault.
+  // While one is pending, a thread reply is neither an answer nor a message:
+  // it may be the pasted secret itself (AC-5).
+  if (pending.some((request) => hasSecretQuestion(request.questions))) {
+    const client = await createOpenGeniSlackBotInteractionClient(deps, {
+      accountId: entry.accountId,
+      workspaceId: entry.workspaceId,
+      connectionId: entry.connectionId,
+      subjectId: SLACK_INTERACTION_BOT_SUBJECT_ID,
+    });
+    await client.postMessage({
+      operationId: deterministicUuid(`slack-secret-reply-refused:${entry.id}`),
+      channelId: interaction.slackChannelId,
+      threadTimestamp: interaction.slackThreadTs,
+      text: slackSecretAnswerRefusalText(
+        slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId),
+      ),
+    });
+    return;
+  }
   if (pending.length === 1) {
     const response = humanInputResponse(pending[0]!.questions, entry.text);
     if (response) {
@@ -3875,7 +3945,9 @@ async function withSlackAllowanceAdmissionNotice(
   } catch (error) {
     if (
       error instanceof HTTPException &&
-      (parseAllowanceExhaustedRefusal(error.cause) ?? parseAllowanceExhaustedRefusal(error))
+      (parseAllowanceExhaustedRefusal(error.cause) ??
+        parseAllowanceExhaustedRefusal(error) ??
+        slackSessionUsageLimitRefusal(error))
     ) {
       const client = await createOpenGeniSlackBotInteractionClient(deps, {
         accountId: entry.accountId,
@@ -5049,7 +5121,14 @@ async function slackHumanInputCard(
   const operationId = deterministicUuid(
     slackPostSeed(interaction, `slack-delivery:${interaction.id}:${event.sequence}:human-input`),
   );
-  const text = `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
+  const secretUrl = hasSecretQuestion(request.questions)
+    ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+    : null;
+  const text = hasSecretQuestion(request.questions)
+    ? `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\n${
+        secretUrl ? `<${secretUrl}|Answer in Opengeni>` : "Answer in Opengeni"
+      }; secrets are saved to a vault and never posted in Slack${request.allowSkip ? ". You can also choose Skip" : ""}.`
+    : `${mention}Opengeni needs your input:\n${formatQuestions(request.questions)}\nReply in this thread${request.allowSkip ? " or choose Skip" : ""}.`;
   if (!requesterAuthorized || !interaction.initiatingSlackUserId) return { text, operationId };
   const question = request.questions.length === 1 ? request.questions[0] : null;
   const canUseButtons =
@@ -5219,8 +5298,9 @@ async function slackChildRequiresActionCard(
 }
 
 /**
- * A goal that paused because it ran out of budget or hit the continuation cap
- * stops making progress with nobody watching, so the Slack thread gets one
+ * A goal that paused because it ran out of budget, hit the continuation cap
+ * or reached the task's usage limit stops making progress with nobody
+ * watching, so the Slack thread gets one
  * bounded line. A `user_pause` / `api` / `agent` pause is a decision the human
  * or their agent already made, and `no_progress` is not a stop the human must
  * act on, so none of them post. `goal.resumed` never posts.
@@ -5522,6 +5602,25 @@ async function deliverSlackSessionEvents(
     } else if (event.type === "turn.completed") {
       const payloadOutput = safePayloadText(event.payload, "output");
       const hasPublishableOutput = payloadOutput.trim().length > 0;
+      if (safePayloadText(event.payload, "segmentLimit") === SESSION_USAGE_LIMIT_SEGMENT) {
+        // A person's own limit, not a failure or a billing problem: say what
+        // stopped, who can change it, and where.
+        await postDelivery(
+          client,
+          interaction,
+          event,
+          slackSessionUsageLimitStopText({
+            mention: requester.mention,
+            refusal: parseSessionUsageLimitReachedRefusal(event.payload),
+            link: interaction.sessionId
+              ? slackSessionUrl(deps, interaction.workspaceId, interaction.sessionId)
+              : null,
+          }),
+          "usage-limit",
+        );
+        terminal = "completed";
+        continue;
+      }
       if (safePayloadText(event.payload, "segmentLimit") === "budget_exhausted") {
         const allowance = parseAllowanceExhaustedRefusal(event.payload);
         await postDelivery(
@@ -5968,10 +6067,23 @@ function humanInputResponse(questions: HumanInputQuestion[], text: string) {
   };
 }
 
+function hasSecretQuestion(questions: readonly HumanInputQuestion[]): boolean {
+  return questions.some((question) => question.kind === "secret");
+}
+
+export function slackSecretAnswerRefusalText(sessionUrl: string | null): string {
+  return `This question asks for a secret, so it can only be answered in Opengeni, where it is saved to a vault: ${
+    sessionUrl ? `<${sessionUrl}|answer in Opengeni>` : "open the task in Opengeni"
+  }. Your reply was not sent to the agent; if it contained a password, delete it from Slack.`;
+}
+
 function formatQuestions(questions: HumanInputQuestion[]) {
   return questions
     .slice(0, 5)
     .map((question, index) => {
+      if (question.kind === "secret") {
+        return `${index + 1}. ${boundedOutput(question.prompt)} (secret: answer in Opengeni)`;
+      }
       const options = question.options
         .slice(0, 10)
         .map((option) => option.label)
@@ -6424,6 +6536,10 @@ function safeErrorCode(error: unknown) {
 }
 
 export function slackAdmissionFailureText(error: HTTPException) {
+  const usageLimit = slackSessionUsageLimitRefusal(error);
+  if (usageLimit) {
+    return `Opengeni could not continue this task because its usage limit is reached (${formatSessionUsageMicros(usageLimit.usedMicros)} of ${formatSessionUsageMicros(usageLimit.limitMicros)} API-equivalent model usage). A person can raise or remove the limit in Opengeni, then reply in this thread to continue.`;
+  }
   const allowance =
     parseAllowanceExhaustedRefusal(error.cause) ?? parseAllowanceExhaustedRefusal(error);
   if (allowance) {

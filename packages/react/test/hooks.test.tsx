@@ -22,7 +22,6 @@ import type {
   SessionMcpServerMetadata,
   SessionTurn,
   SteerMessageResult,
-  WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
@@ -31,7 +30,6 @@ import { OpenGeniApiError, OpenGeniClient } from "@opengeni/sdk";
 import { useAvailableModels, useWorkspaceModelCatalog } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
 import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
-import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { useLastStartedTurnPolicy } from "../src/hooks/use-last-started-turn-policy";
 
@@ -42,6 +40,9 @@ import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approv
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
+import { createOpenGeniText } from "../src/messages/runtime";
+
+const englishText = createOpenGeniText();
 
 registerDom();
 
@@ -930,48 +931,51 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
-  test("queue Steer stays bridged into chat until the replacement turn starts", async () => {
-    const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
-    let current = queueSnapshot([turn], { version: 5 });
-    const client = fakeClient({
-      getQueue: async () => current,
-      steerQueueItem: async () => {
-        current = queueSnapshot([], { version: 6 });
-        return {
-          receipt: promptReceipt(turn.id, "queue.steer"),
-          snapshot: current,
-        };
-      },
-    });
-    const hook = await renderHook(
-      (events: SessionEvent[]) =>
-        useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
-      [] as SessionEvent[],
-    );
-    await flush();
+  test.each(["turn.started", "turn.superseded"])(
+    "queue Steer stays bridged into chat until %s",
+    async (terminalType) => {
+      const turn = fakeTurn({ id: "steered-turn", prompt: "New direction" });
+      let current = queueSnapshot([turn], { version: 5 });
+      const client = fakeClient({
+        getQueue: async () => current,
+        steerQueueItem: async () => {
+          current = queueSnapshot([], { version: 6 });
+          return {
+            receipt: promptReceipt(turn.id, "queue.steer"),
+            snapshot: current,
+          };
+        },
+      });
+      const hook = await renderHook(
+        (events: SessionEvent[]) =>
+          useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        [] as SessionEvent[],
+      );
+      await flush();
 
-    await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
-    expect(hook.result.current.acceptedSteers).toEqual([
-      expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
-    ]);
+      await flushing(async () => expect(await hook.result.current.steerTurn(turn.id)).toBe(true));
+      expect(hook.result.current.acceptedSteers).toEqual([
+        expect.objectContaining({ turnId: turn.id, text: "New direction", state: "queued" }),
+      ]);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toHaveLength(1);
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toHaveLength(1);
 
-    await hook.rerender([
-      makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
-      {
-        ...makeEvent(11, "turn.started", { triggerEventId: turn.triggerEventId }),
-        turnId: turn.id,
-      },
-    ]);
-    await flush();
-    expect(hook.result.current.acceptedSteers).toEqual([]);
-    await hook.unmount();
-  });
+      await hook.rerender([
+        makeEvent(10, "session.control.steer_requested", { targetTurnId: turn.id }),
+        {
+          ...makeEvent(11, terminalType, { triggerEventId: turn.triggerEventId }),
+          turnId: turn.id,
+        },
+      ]);
+      await flush();
+      expect(hook.result.current.acceptedSteers).toEqual([]);
+      await hook.unmount();
+    },
+  );
 
   test("a delayed older GET cannot overwrite a newer mutation snapshot", async () => {
     const old = queueSnapshot([fakeTurn({ id: "old" })], { version: 1 });
@@ -2955,6 +2959,157 @@ describe("useComposer queue-vs-steer", () => {
     await hook.unmount();
   });
 
+  test("busySend steer with offerQueue makes a busy Send a Steer and offers Queue; idle Send, paused Send and sendToQueue still queue", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    let destination: "chat" | "queue" = "queue";
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => destination,
+          busySend: "steer",
+          offerQueue: true,
+        }),
+      undefined,
+    );
+    expect(hook.result.current.busySend).toBe("steer");
+    expect(hook.result.current.singleSend).toBe(false);
+    expect(hook.result.current.alternateSend).toBe("queue");
+
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendToQueue?.("after the turn")).toBe(true),
+    );
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("alternate queues")).toBe(true),
+    );
+    destination = "chat";
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
+    destination = "queue";
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+
+    expect(calls).toEqual([
+      { delivery: "steer", text: "busy" },
+      { delivery: "send", text: "after the turn" },
+      { delivery: "send", text: "alternate queues" },
+      { delivery: "send", text: "idle" },
+      { delivery: "send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("busySend steer alone is one Send: no alternate, busy Send steers, paused Send waits", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    let control = queueSnapshot([]).effectiveControl;
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: control,
+          sendDestination: () => "queue",
+          busySend: "steer",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.singleSend).toBe(true);
+    expect(hook.result.current.alternateSend).toBeNull();
+    expect(hook.result.current.sendAlternate).toBeUndefined();
+    await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
+    control = { ...control, state: "paused", directState: "paused" };
+    await hook.rerender(undefined);
+    expect(hook.result.current.alternateSend).toBeNull();
+    await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
+    expect(calls).toEqual([
+      { delivery: "steer", text: "busy" },
+      { delivery: "send", text: "paused" },
+    ]);
+    await hook.unmount();
+  });
+
+  test("in queue mode the alternate beside Send is Steer and steers", async () => {
+    const calls: Array<{ delivery: string; text: string }> = [];
+    const text = (input: unknown) =>
+      typeof input === "string" ? input : (input as { text: string }).text;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "send", text: text(input) });
+        return {
+          ...makeEvent(calls.length, "user.message"),
+          clientEventId: typeof input === "string" ? null : (input.clientEventId ?? null),
+        };
+      },
+      steerMessage: async (_workspaceId, _sessionId, input) => {
+        calls.push({ delivery: "steer", text: text(input) });
+        return steerResult();
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+          initialPolicy: INITIAL_COMPOSER_POLICY,
+          effectiveControl: queueSnapshot([]).effectiveControl,
+          sendDestination: () => "queue",
+        }),
+      undefined,
+    );
+    expect(hook.result.current.alternateSend).toBe("steer");
+    await flushing(async () => expect(await hook.result.current.send("queued")).toBe(true));
+    await flushing(async () =>
+      expect(await hook.result.current.sendAlternate?.("steered")).toBe(true),
+    );
+    expect(calls).toEqual([
+      { delivery: "send", text: "queued" },
+      { delivery: "steer", text: "steered" },
+    ]);
+    await hook.unmount();
+  });
+
   test("accepted Steer reports host-owned resources through onSent", async () => {
     let submitted: SendMessageInput | undefined;
     let accepted: SendMessageInput | undefined;
@@ -4530,8 +4685,8 @@ describe("useComposer durable draft and control binding", () => {
     await flush();
     await flushing(async () => hook.result.current.setValue(" \n"));
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
-    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT]);
+    expect(savedTexts.at(-1)).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT(englishText)]);
     await hook.unmount();
   });
 
@@ -5804,99 +5959,8 @@ describe("useComposer file-only send", () => {
 
     expect(saved).toHaveLength(1);
     expect(sent).toHaveLength(1);
-    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
-    await hook.unmount();
-  });
-});
-
-describe("useEnvironments", () => {
-  test("lists environments and refreshes after each mutation", async () => {
-    const log: string[] = [];
-    let environments: WorkspaceEnvironment[] = [];
-    const client = fakeClient({
-      listEnvironments: async () => {
-        log.push("list");
-        return environments;
-      },
-      createEnvironment: async (_ws, request) => {
-        log.push(`create:${request.name}`);
-        const created: WorkspaceEnvironment = {
-          id: "env-1",
-          accountId: "acc",
-          workspaceId: WORKSPACE_ID,
-          scope: "workspace",
-          generation: 1,
-          status: "active",
-          name: request.name,
-          description: null,
-          variables: [],
-          createdAt: "",
-          updatedAt: "",
-        };
-        environments = [created];
-        return created;
-      },
-      setEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`set:${environmentId}:${name}`);
-        return { name, version: 1, createdAt: "", updatedAt: "" };
-      },
-      getVariableSetVariable: async (_ws, environmentId, name) => {
-        log.push(`read:${environmentId}:${name}`);
-        return {
-          variableSetId: environmentId,
-          name,
-          version: 1,
-          value: `const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`,
-        };
-      },
-      deleteEnvironmentVariable: async (_ws, environmentId, name) => {
-        log.push(`unset:${environmentId}:${name}`);
-      },
-      deleteEnvironment: async (_ws, environmentId) => {
-        log.push(`delete:${environmentId}`);
-        environments = [];
-      },
-    });
-    const hook = await renderHook(
-      () => useEnvironments({ client, workspaceId: WORKSPACE_ID }),
-      undefined,
-    );
-    await flush();
-    expect(hook.result.current.environments).toEqual([]);
-    await flushing(async () => {
-      await hook.result.current.create({
-        name: "staging",
-        variables: [{ name: "EXAMPLE_TOKEN", value: "v" }],
-      });
-    });
-    expect(hook.result.current.environments.map((environment) => environment.name)).toEqual([
-      "staging",
-    ]);
-    await flushing(async () => {
-      const secret = await hook.result.current.readVariable("env-1", "EXAMPLE_TOKEN");
-      expect(secret?.value).toBe(`const fake = "ghp_not_a_credential";\nprintf '%s\\n' "$VALUE"`);
-    });
-    // Plaintext is returned directly to the caller and never triggers a
-    // metadata-cache refresh that could retain it.
-    expect(log.at(-1)).toBe("read:env-1:EXAMPLE_TOKEN");
-    await flushing(async () => {
-      await hook.result.current.setVariable("env-1", "EXAMPLE_TOKEN", "v2");
-      await hook.result.current.deleteVariable("env-1", "EXAMPLE_TOKEN");
-      await hook.result.current.remove("env-1");
-    });
-    expect(log).toEqual([
-      "list",
-      "create:staging",
-      "list",
-      "read:env-1:EXAMPLE_TOKEN",
-      "set:env-1:EXAMPLE_TOKEN",
-      "list",
-      "unset:env-1:EXAMPLE_TOKEN",
-      "list",
-      "delete:env-1",
-      "list",
-    ]);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT(englishText));
     await hook.unmount();
   });
 });
@@ -5982,6 +6046,53 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBe("workspace-default");
     await hook.unmount();
   });
+  test("readers of one workspace catalog share one catalog and config read", async () => {
+    const calls: string[] = [];
+    const client = fakeClient({
+      getWorkspaceModelCatalog: async (workspaceId) => {
+        calls.push(`catalog:${workspaceId}`);
+        return { models: [] } as never;
+      },
+      getClientConfig: async (options) => {
+        calls.push(`config:${options?.workspaceId}`);
+        return { models: [], defaultModel: "workspace-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+        useWorkspaceModelCatalog({ client, workspaceId: WORKSPACE_ID }),
+      ],
+      undefined,
+    );
+    await flush();
+    expect(calls).toEqual([`catalog:${WORKSPACE_ID}`, `config:${WORKSPACE_ID}`]);
+    expect(hook.result.current.map((catalog) => catalog.defaultModel)).toEqual([
+      "workspace-default",
+      "workspace-default",
+    ]);
+    await hook.unmount();
+  });
+  test("readers of the deployment model list share one config read", async () => {
+    let calls = 0;
+    const client = fakeClient({
+      getClientConfig: async () => {
+        calls += 1;
+        return { models: [], defaultModel: "deployment-default" } as never;
+      },
+    });
+    const hook = await renderHook(
+      () => [useAvailableModels({ client }), useAvailableModels({ client })],
+      undefined,
+    );
+    await flush();
+    expect(calls).toBe(1);
+    expect(hook.result.current.map((models) => models.defaultModel)).toEqual([
+      "deployment-default",
+      "deployment-default",
+    ]);
+    await hook.unmount();
+  });
   test("returns the host-exposed models and the default model from getClientConfig", async () => {
     let calls = 0;
     const client = fakeClient({
@@ -6051,6 +6162,8 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.models).toEqual([]);
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
+    // The shared read is released one task after its last reader leaves.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

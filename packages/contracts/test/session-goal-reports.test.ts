@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   GoalSpec,
+  UpdateSessionGoalRequest,
   SessionGoalReportRequirements,
   SessionGoalReportDeliveries,
   SessionGoalSnapshot,
@@ -68,4 +69,22 @@ describe("typed report declarations and deliveries", () => {
     const snapshot = SessionGoalSnapshot.parse({ ...legacy, reportRequirements: [report] });
     expect(renderSessionGoalContext(snapshot)).toContain(JSON.stringify([report]));
   });
+});
+
+test("conditional goal status requests preserve complete observed pause identity", () => {
+  const expectedGoal = { id: delivery.inspectionReceiptId, version: 7, pausedReason: "agent" };
+  expect(UpdateSessionGoalRequest.parse({ status: "active", expectedGoal })).toEqual({
+    status: "active",
+    expectedGoal,
+  });
+  expect(UpdateSessionGoalRequest.parse({ status: "paused" })).toEqual({ status: "paused" });
+  for (const invalid of [
+    { ...expectedGoal, version: 0 },
+    { ...expectedGoal, version: 1.5 },
+    { ...expectedGoal, id: "wrong" },
+    { id: expectedGoal.id, version: 7 },
+  ])
+    expect(
+      UpdateSessionGoalRequest.safeParse({ status: "active", expectedGoal: invalid }).success,
+    ).toBe(false);
 });

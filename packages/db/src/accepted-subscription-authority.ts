@@ -1,9 +1,16 @@
-import { XaiProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
-import { and, desc, eq, isNull } from "drizzle-orm";
-import { resolveClaudeSharedPoolAuthoritySnapshotInTransaction } from "./claude-subscription-accounts";
+import {
+  SubscriptionPersonalAuthorityV2,
+  WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+  XaiProviderAccountAuthoritySnapshotV1,
+} from "@opengeni/contracts";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import { withWorkspaceRls, type Database } from "./database";
 import * as schema from "./schema";
-import { resolveXaiSharedPoolAuthoritySnapshotInTransaction } from "./xai-subscription";
+import {
+  coreSubscriptionAuthorityV2ActiveInTransaction,
+  coreSubscriptionAuthorityV2OrEmptyInTransaction,
+  EMPTY_SUBSCRIPTION_AUTHORITY_V2,
+} from "./subscription-core-acceptance-authority";
 
 type SubscriptionProvider = "xai" | "claude";
 export type FrozenSubscriptionExecutionAuthority = {
@@ -45,17 +52,21 @@ export function subscriptionExecutionAuthorityFromTurn(
  * non-subject creators, and internal producers without causal authority).
  * The result is never user-scoped, so this cannot widen access to a personal
  * pool. The transaction must already carry the account/workspace RLS context.
+ * Claude is on the shared core (its C3 receipt exists): its v1 value is the
+ * column default, never computed from live state and never read (design 5.3,
+ * "v1 columns after a provider's cutover").
  */
 export async function sharedPoolSubscriptionAuthoritySnapshotsInTransaction(
-  db: Database,
-  workspaceId: string,
+  _db: Database,
+  _workspaceId: string,
 ): Promise<{
   xai: XaiProviderAccountAuthoritySnapshotV1;
   claude: XaiProviderAccountAuthoritySnapshotV1;
 }> {
   return {
-    xai: await resolveXaiSharedPoolAuthoritySnapshotInTransaction(db, { workspaceId }),
-    claude: await resolveClaudeSharedPoolAuthoritySnapshotInTransaction(db, { workspaceId }),
+    // Historical v1 carriers stay default-valued for new work.
+    xai: WORKSPACE_XAI_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
+    claude: workspaceAuthority,
   };
 }
 
@@ -76,9 +87,74 @@ export async function receiverSubscriptionAuthorityInTransaction(
   db: Database,
   input: { workspaceId: string; sessionId: string; causalHumanSubjectId: string | null },
 ): Promise<Record<SubscriptionProvider, FrozenSubscriptionExecutionAuthority>> {
+  const source = await receiverAuthoritySourceInTransaction(db, input);
+  let shared: Awaited<
+    ReturnType<typeof sharedPoolSubscriptionAuthoritySnapshotsInTransaction>
+  > | null = null;
+  const resolve = async (
+    provider: SubscriptionProvider,
+  ): Promise<FrozenSubscriptionExecutionAuthority> => {
+    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(source[provider]);
+    if (snapshot.scope !== "user") return { snapshot, subjectId: null };
+    if (source.owner && input.causalHumanSubjectId === source.owner)
+      return { snapshot, subjectId: source.owner };
+    shared ??= await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(db, input.workspaceId);
+    return { snapshot: shared[provider], subjectId: null };
+  };
+  return { xai: await resolve("xai"), claude: await resolve("claude") };
+}
+
+/**
+ * The v2 accepted authority for agent-originated work delivered to
+ * `sessionId` (Agent Message, Agent Steer; design 3.7, EP-T14), for every
+ * provider on the shared core (the frozen value holds each provider's
+ * entry, all with the same owner, so one rule narrows them all): the same
+ * receiving source as the v1 pools above, copied and never recomputed. Its
+ * personal entry is kept only when the receiving source's exact owner is the
+ * human who caused this work; otherwise the empty value (shared capacity
+ * only). A child session without turns uses its exact spawning parent turn's
+ * value. A source accepted before the cutover (no v2 value) yields the empty
+ * value. Returns `null` (write nothing; v1 authoritative) unless some
+ * provider's cutover is active. Call under the receiving session's lock.
+ */
+export async function receiverSubscriptionAuthorityV2InTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    causalHumanSubjectId: string | null;
+  },
+): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  if (!(await coreSubscriptionAuthorityV2ActiveInTransaction(db, input.accountId))) return null;
+  const source = await receiverAuthoritySourceInTransaction(db, input);
+  const frozen =
+    source.codexV2 === null || source.codexV2 === undefined
+      ? null
+      : SubscriptionPersonalAuthorityV2.parse(source.codexV2);
+  if (
+    frozen &&
+    frozen.personal.length > 0 &&
+    source.owner !== null &&
+    input.causalHumanSubjectId === source.owner
+  ) {
+    return frozen;
+  }
+  return EMPTY_SUBSCRIPTION_AUTHORITY_V2;
+}
+
+/** The Codex name of the receiver's v2 value (kept for existing callers). */
+export const receiverCodexSubscriptionAuthorityV2InTransaction =
+  receiverSubscriptionAuthorityV2InTransaction;
+
+async function receiverAuthoritySourceInTransaction(
+  db: Database,
+  input: { workspaceId: string; sessionId: string },
+): Promise<{ xai: unknown; claude: unknown; codexV2: unknown; owner: string | null }> {
   const turnColumns = {
     xai: schema.sessionTurns.xaiProviderAccountAuthoritySnapshot,
     claude: schema.sessionTurns.claudeProviderAccountAuthoritySnapshot,
+    codexV2: schema.sessionTurns.subscriptionAuthority,
     initiatingHumanSubjectId: schema.sessionTurns.initiatingHumanSubjectId,
     initiatorKind: schema.sessionTurns.initiatorKind,
     initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
@@ -141,9 +217,9 @@ export async function receiverSubscriptionAuthorityInTransaction(
           desc(schema.sessionTurns.id),
         )
         .limit(1);
-  let source: { xai: unknown; claude: unknown; owner: string | null };
+  let source: { xai: unknown; claude: unknown; codexV2: unknown; owner: string | null };
   if (turn) {
-    source = { xai: turn.xai, claude: turn.claude, owner: turnOwner(turn) };
+    source = { xai: turn.xai, claude: turn.claude, codexV2: turn.codexV2, owner: turnOwner(turn) };
   } else if (session.parentSessionId && session.parentTurnId) {
     // A child's initial snapshot is copied from its exact spawning parent turn,
     // so that turn's human owns any personal scope in it.
@@ -161,32 +237,22 @@ export async function receiverSubscriptionAuthorityInTransaction(
     source = {
       xai: session.xai,
       claude: session.claude,
+      // No v2 initial snapshot: the exact spawning parent turn's value.
+      codexV2: parentTurn ? parentTurn.codexV2 : null,
       owner: parentTurn ? turnOwner(parentTurn) : null,
     };
   } else {
     source = {
       xai: session.xai,
       claude: session.claude,
+      codexV2: null,
       owner:
         session.createdByKind === "subject" && !session.parentSessionId
           ? session.createdBySubjectId
           : null,
     };
   }
-  let shared: Awaited<
-    ReturnType<typeof sharedPoolSubscriptionAuthoritySnapshotsInTransaction>
-  > | null = null;
-  const resolve = async (
-    provider: SubscriptionProvider,
-  ): Promise<FrozenSubscriptionExecutionAuthority> => {
-    const snapshot = XaiProviderAccountAuthoritySnapshotV1.parse(source[provider]);
-    if (snapshot.scope !== "user") return { snapshot, subjectId: null };
-    if (source.owner && input.causalHumanSubjectId === source.owner)
-      return { snapshot, subjectId: source.owner };
-    shared ??= await sharedPoolSubscriptionAuthoritySnapshotsInTransaction(db, input.workspaceId);
-    return { snapshot: shared[provider], subjectId: null };
-  };
-  return { xai: await resolve("xai"), claude: await resolve("claude") };
+  return source;
 }
 
 /** Reads accepted authority only. This helper never resolves a current account pool. */
@@ -252,6 +318,55 @@ export async function getAcceptedSubscriptionTaskAuthority(
       )
       .limit(1);
     return row ? XaiProviderAccountAuthoritySnapshotV1.parse(row.snapshot) : workspaceAuthority;
+  });
+}
+
+/**
+ * The Codex v2 value a scheduled firing copies (M3 PR 3b, EP-T15): the task's
+ * value frozen at creation, never recomputed. When the task's current
+ * revision was authorized by anyone but its owner, the firing gets the empty
+ * value (another person's edit never inherits the owner's personal entry).
+ */
+export async function getScheduledTaskSubscriptionAuthority(
+  db: Database,
+  input: {
+    workspaceId: string;
+    taskId: string;
+    taskAuthorityRevision?: number;
+    revisionAuthorizerSubjectId: string | null;
+  },
+): Promise<SubscriptionPersonalAuthorityV2 | null> {
+  return withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [row] = await tx
+      .select({
+        accountId: schema.scheduledTasks.accountId,
+        ownerSubjectId: schema.scheduledTasks.ownerSubjectId,
+        subscriptionAuthority: sql<unknown>`opengeni_private.subscription_core_revision_authority_v2(
+          ${schema.scheduledTasks.accountId}, ${schema.scheduledTasks.workspaceId},
+          ${schema.scheduledTasks.id}, coalesce(${input.taskAuthorityRevision ?? null}::bigint, ${schema.scheduledTasks.authorityRevision}))`,
+      })
+      .from(schema.scheduledTasks)
+      .where(
+        and(
+          eq(schema.scheduledTasks.workspaceId, input.workspaceId),
+          eq(schema.scheduledTasks.id, input.taskId),
+          isNull(schema.scheduledTasks.deletedAt),
+        ),
+      )
+      .limit(1);
+    if (!row) return null;
+    const frozen =
+      row.subscriptionAuthority === null || row.subscriptionAuthority === undefined
+        ? null
+        : SubscriptionPersonalAuthorityV2.parse(row.subscriptionAuthority);
+    if (
+      frozen &&
+      frozen.personal.length > 0 &&
+      input.revisionAuthorizerSubjectId !== row.ownerSubjectId
+    ) {
+      return EMPTY_SUBSCRIPTION_AUTHORITY_V2;
+    }
+    return coreSubscriptionAuthorityV2OrEmptyInTransaction(tx, row.accountId, frozen);
   });
 }
 

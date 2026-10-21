@@ -7,11 +7,14 @@
 // codex account indicator — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in rail-shell owns the
 // data wiring and passes the real slots.
+import { t } from "@/lib/console-text";
 import {
   OPEN_WORKSTREAM_CONTROL_EVENT,
   SessionStatus as SessionStatusBadge,
   SESSION_STATUS_META,
   StatusDot,
+  sessionDisplayStatus,
+  type SessionDisplayStatus,
 } from "@opengeni/react";
 import { ModelMark, modelDisplayName, type SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
@@ -19,7 +22,10 @@ import { SiteOriginLink } from "@/components/session/site-origin-link";
 import {
   ArchiveIcon,
   ArchiveRestoreIcon,
+  BellIcon,
+  BellOffIcon,
   CalendarClockIcon,
+  GaugeIcon,
   LockIcon,
   MoreHorizontalIcon,
   PanelRightCloseIcon,
@@ -28,13 +34,21 @@ import {
   PencilIcon,
   PinIcon,
   SearchIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
+  SmartphoneIcon,
 } from "lucide-react";
 import { useCallback, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "@/components/billing-class-mark";
 import { ConnectionPill } from "@/components/common";
+import {
+  GrantSessionAdminAccessDialog,
+  SessionAdminAccessIndicator,
+  type SessionAdminAccessControl,
+} from "@/components/session/session-admin-access";
 import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,9 +56,10 @@ import {
   DropdownMenuMeta,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Skeleton } from "@/components/ui/skeleton";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
 import { requestConversationFind } from "@/lib/conversation-find-event";
+import { currentPhoneAppPlatform, openInAppUrl } from "@/lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "@/lib/session-rail";
 import { useSessionStartup } from "@/lib/session-startup";
 import { isCodexProductModel } from "@/lib/session-model";
@@ -55,6 +70,7 @@ import {
   type InlineRename,
 } from "@/lib/session-rename";
 import { pinLiveAnnouncement } from "@/lib/pin-live-announcement";
+import type { SessionRepliesMute } from "@/lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "@/lib/session-tools";
 import type { LatencyMode, Session } from "@/types";
 
@@ -73,6 +89,9 @@ export function SessionHeader({
   onRename,
   onPin,
   onArchive,
+  repliesMute,
+  adminAccess,
+  onOpenUsageLimit,
   sandboxSlot,
   codexSlot,
   accessSlot,
@@ -105,6 +124,21 @@ export function SessionHeader({
   onPin: (session: Session, pinned: boolean) => Promise<Session | null>;
   /** Archives or restores this root session. Absent hides the action. */
   onArchive?: (session: Session, archived: boolean) => Promise<void>;
+  /**
+   * The signed-in person's mute on this session's replies. Absent hides the
+   * action (sub-agents, people without an inbox, servers without it).
+   */
+  repliesMute?: SessionRepliesMute | null;
+  /**
+   * This session's admin access, when the viewer can see it on or give it.
+   * Absent hides the shield and the menu action.
+   */
+  adminAccess?: SessionAdminAccessControl | null;
+  /**
+   * Opens this chat's usage limit (Agent tab > Usage). Absent hides the menu
+   * item, for servers without usage limits.
+   */
+  onOpenUsageLimit?: (() => void) | null;
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode;
   /**
@@ -136,6 +170,11 @@ export function SessionHeader({
   policyLoading?: boolean;
 }) {
   const waiting = sessionInputWait({ ...session, status });
+  // A session the runtime could not start reads as stuck, not "Waiting on you".
+  const displayStatus = sessionDisplayStatus({
+    status,
+    admissionBlock: session.admissionBlock,
+  });
   const startup = useSessionStartup({ ...session, status });
   const startupLabel =
     startup === "starting"
@@ -155,11 +194,18 @@ export function SessionHeader({
   const policyBits = [
     resolvedModel,
     labelEffort(displayEffort),
-    displayLatency === "fast" ? "Fast" : displayLatency === "priority" ? "Priority" : null,
+    displayLatency === "fast"
+      ? "Fast"
+      : displayLatency === "ultrafast"
+        ? "Ultrafast"
+        : displayLatency === "priority"
+          ? "Priority"
+          : null,
   ].filter((bit): bit is string => Boolean(bit));
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
+  const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
@@ -184,7 +230,11 @@ export function SessionHeader({
     // bar was the light-theme fix — a near-white header on a near-white canvas
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
-    <header className="flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap">
+    <header
+      data-window-drag
+      data-titlebar
+      className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
+    >
       {leading}
       {/* The title takes every pixel the actions leave; it truncates last. */}
       <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
@@ -218,10 +268,16 @@ export function SessionHeader({
           <CompactSessionStatus
             paused={sessionControlPaused(session)}
             waiting={Boolean(waiting)}
-            status={status}
+            status={displayStatus}
             label={startupLabel}
           />
           {accessSlot}
+          {adminAccess ? (
+            <SessionAdminAccessIndicator
+              control={adminAccess}
+              onChangeTimeLimit={() => setGrantAdminOpen(true)}
+            />
+          ) : null}
         </div>
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
@@ -296,7 +352,7 @@ export function SessionHeader({
                 Waiting
               </span>
             ) : (
-              <SessionStatusBadge status={status} label={startupLabel} />
+              <SessionStatusBadge status={displayStatus} label={startupLabel} />
             )
           ) : (
             <WorkstreamControlIndicator session={session} />
@@ -379,10 +435,52 @@ export function SessionHeader({
               <PinIcon className={session.pinned ? "fill-current" : undefined} />
               {session.pinned ? "Unpin" : "Pin"}
             </DropdownMenuItem>
+            {currentPhoneAppPlatform() ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  window.location.href = openInAppUrl(window.location.href);
+                }}
+              >
+                <SmartphoneIcon />
+                Open in app
+              </DropdownMenuItem>
+            ) : null}
             {sandboxSlot ? (
               <div className="flex min-h-9 items-center px-2 empty:hidden lg:hidden">
                 {sandboxSlot}
               </div>
+            ) : null}
+            {repliesMute ? (
+              <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
+                {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
+                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+              </DropdownMenuItem>
+            ) : null}
+            {onOpenUsageLimit ? (
+              <DropdownMenuItem
+                onSelect={() => {
+                  afterMenuClose.current = onOpenUsageLimit;
+                }}
+              >
+                <GaugeIcon />
+                Usage limit
+              </DropdownMenuItem>
+            ) : null}
+            {adminAccess?.state.active && adminAccess.state.canRevoke ? (
+              <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
+                <ShieldOffIcon />
+                Turn off admin access
+              </DropdownMenuItem>
+            ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
+              <DropdownMenuItem
+                disabled={adminAccess.busy}
+                onSelect={() => {
+                  afterMenuClose.current = () => setGrantAdminOpen(true);
+                }}
+              >
+                <ShieldCheckIcon />
+                Give admin access…
+              </DropdownMenuItem>
             ) : null}
             {canArchive ? (
               <>
@@ -396,6 +494,13 @@ export function SessionHeader({
             ) : null}
           </DropdownMenuContent>
         </DropdownMenu>
+        {adminAccess ? (
+          <GrantSessionAdminAccessDialog
+            control={adminAccess}
+            open={grantAdminOpen}
+            onOpenChange={setGrantAdminOpen}
+          />
+        ) : null}
       </div>
     </header>
   );
@@ -410,7 +515,7 @@ function CompactSessionStatus({
 }: {
   paused: boolean;
   waiting: boolean;
-  status: Session["status"];
+  status: SessionDisplayStatus;
   label?: string;
 }) {
   if (paused) {
@@ -437,8 +542,7 @@ function CompactSessionStatus({
       </span>
     );
   }
-  const name =
-    status === "waiting_capacity" ? "Waiting" : (label ?? SESSION_STATUS_META[status].label);
+  const name = label ?? SESSION_STATUS_META(t)[status].label;
   return (
     <span
       data-compact-session-status={status}

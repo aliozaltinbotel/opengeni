@@ -32,7 +32,7 @@ export type DependencyMode = z.infer<typeof DependencyMode>;
 export const StorageApi = z.enum(["s3-compatible", "aws-s3", "azure-blob", "gcs"]);
 export type StorageApi = z.infer<typeof StorageApi>;
 
-// Mirror of `@opengeni/contracts` SandboxBackend (12 values; every member is
+// Mirror of `@opengeni/contracts` SandboxBackend (13 values; every member is
 // additive at the end). 3-way enum parity is pinned by the SDK contract-parity
 // test.
 export const SandboxBackend = z.enum([
@@ -48,6 +48,7 @@ export const SandboxBackend = z.enum([
   "vercel",
   "selfhosted",
   "opensandbox",
+  "compute",
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
@@ -82,6 +83,7 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
       "OPENGENI_MODAL_IDLE_TIMEOUT_SECONDS",
       "OPENGENI_MODAL_SANDBOX_CPU",
       "OPENGENI_MODAL_SANDBOX_MEMORY_MIB",
+      "OPENGENI_MODAL_REGIONS",
       "OPENGENI_MODAL_WORKSPACE_PERSISTENCE",
       "OPENGENI_SANDBOX_ROTATION_BATCH_SIZE",
       "OPENGENI_SANDBOX_ROTATION_LEAD_MS",
@@ -106,7 +108,12 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   },
   e2b: {
     required: ["OPENGENI_E2B_API_KEY"],
-    optional: ["OPENGENI_E2B_TEMPLATE"],
+    optional: [
+      "OPENGENI_E2B_DOMAIN",
+      "OPENGENI_E2B_API_URL",
+      "OPENGENI_E2B_SANDBOX_URL",
+      "OPENGENI_E2B_TEMPLATE",
+    ],
   },
   blaxel: {
     required: ["OPENGENI_BLAXEL_API_KEY"],
@@ -140,6 +147,20 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   // over the agent's enrollment; the enrollment-signing + relay-token secrets are
   // deployment-level (a runtime secret), not per-active-backend required creds.
   selfhosted: { required: [], optional: [] },
+  // compute also relies on the deployment-level Connected Machine plane.
+  compute: {
+    required: ["OPENGENI_COMPUTE_API_URL", "OPENGENI_COMPUTE_API_KEY"],
+    optional: [
+      "OPENGENI_COMPUTE_IMAGE",
+      "OPENGENI_COMPUTE_DESKTOP_IMAGE",
+      "OPENGENI_COMPUTE_VCPUS",
+      "OPENGENI_COMPUTE_MEMORY_MIB",
+      "OPENGENI_COMPUTE_MEMORY_REQUEST_MIB",
+      "OPENGENI_COMPUTE_CPU_REQUEST_MILLIS",
+      "OPENGENI_COMPUTE_LINK_URL",
+      "OPENGENI_COMPUTE_AGENT_READY_TIMEOUT_MS",
+    ],
+  },
 };
 
 // sandbox workspace runtime env (the desktop/Channel-A feature rollout). These are
@@ -198,6 +219,14 @@ export const CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_CHILD_LIFECYCLE_NOTICES_ENABLED",
 ];
 
+/** Per-task usage limit producer flag (API + both workers). Default
+ * off in @opengeni/config; a valueEnv passthrough emitted only when set.
+ * Persisted limits are enforced regardless; enable only after every consumer
+ * (API, workers, web, SDK/React, embedded hosts) understands the new stop. */
+export const SESSION_USAGE_LIMITS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_SESSION_USAGE_LIMITS_ENABLED",
+];
+
 /** Agent configuration rollout switches (sessions.agent_config, migration
  * 0559). Both default off in @opengeni/config; valueEnv passthroughs emitted
  * only when set. Enable admission only after every worker runs a 0559-aware
@@ -250,17 +279,42 @@ export const JEV_CODE_SEARCH_PASSTHROUGH_ENV: readonly string[] = [
 
 /** Provider-agnostic web search (`web_search` / `web_fetch` agent tools).
  * Keys are server runtime secrets: the worker calls the provider and the keys
- * never reach a sandbox. Unset keeps the tools off. */
+ * never reach a sandbox. Unset keeps the tools off. Mirrors
+ * `webSearchEnvironmentVariables()` in @opengeni/config. */
 export const WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WEB_SEARCH_PROVIDER",
+  "OPENGENI_WEB_FETCH_PROVIDER",
+  "OPENGENI_WEB_SEARCH_PREFER",
+  "OPENGENI_WEB_SEARCH_PRICING_JSON",
+  "OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS",
+  "OPENGENI_WEB_TINYFISH_API_KEY",
+  "OPENGENI_WEB_TINYFISH_BASE_URL",
+  "OPENGENI_WEB_PARALLEL_API_KEY",
+  "OPENGENI_WEB_PARALLEL_BASE_URL",
+  "OPENGENI_WEB_PERPLEXITY_API_KEY",
+  "OPENGENI_WEB_PERPLEXITY_BASE_URL",
+  "OPENGENI_WEB_EXA_API_KEY",
+  "OPENGENI_WEB_EXA_BASE_URL",
+  "OPENGENI_WEB_TAVILY_API_KEY",
+  "OPENGENI_WEB_TAVILY_BASE_URL",
+  "OPENGENI_WEB_FIRECRAWL_API_KEY",
+  "OPENGENI_WEB_FIRECRAWL_BASE_URL",
+  "OPENGENI_WEB_BRAVE_API_KEY",
+  "OPENGENI_WEB_BRAVE_BASE_URL",
+  "OPENGENI_WEB_JINA_API_KEY",
+  "OPENGENI_WEB_JINA_BASE_URL",
+  "OPENGENI_WEB_SEARXNG_API_KEY",
+  "OPENGENI_WEB_SEARXNG_BASE_URL",
   "OPENGENI_WEB_SEARCH_API_KEY",
   "OPENGENI_WEB_SEARCH_BASE_URL",
-  "OPENGENI_WEB_FETCH_PROVIDER",
   "OPENGENI_WEB_FETCH_API_KEY",
   "OPENGENI_WEB_FETCH_BASE_URL",
   "OPENGENI_WEB_SEARCH_PROVIDER_MODE",
-  "OPENGENI_WEB_SEARCH_PRICING_JSON",
-  "OPENGENI_WEB_SEARCH_REQUEST_TIMEOUT_MS",
+];
+
+/** Optional deployment-wide margin for provider-rate credit charges. */
+export const CREDIT_MARGIN_BPS_PASSTHROUGH_ENV: readonly string[] = [
+  "OPENGENI_CREDIT_MARGIN_BPS_OVERRIDE",
 ];
 
 /** Public workspace MCP OAuth rollout settings. The enable switch is
@@ -1565,8 +1619,9 @@ export function requiredRuntimeEnvVars(
       "OPENGENI_BETTER_AUTH_SECRET",
       "OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS",
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
-      "OPENGENI_RESEND_API_KEY",
-      "OPENGENI_EMAIL_FROM",
+      ...(env.OPENGENI_MANAGED_EMAIL_DELIVERY === "disabled"
+        ? ["OPENGENI_MANAGED_EMAIL_DELIVERY"]
+        : ["OPENGENI_RESEND_API_KEY", "OPENGENI_EMAIL_FROM"]),
       "OPENGENI_GITHUB_APP_ID",
       "OPENGENI_GITHUB_CLIENT_ID",
       "OPENGENI_GITHUB_CLIENT_SECRET",
@@ -2712,11 +2767,15 @@ function runtimeEnvValues(
             "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
             env.OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY,
           ),
-          requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
-          valueEnv(
-            "OPENGENI_EMAIL_FROM",
-            env.OPENGENI_EMAIL_FROM ?? "Opengeni <auth@mail.opengeni.ai>",
-          ),
+          ...(env.OPENGENI_MANAGED_EMAIL_DELIVERY === "disabled"
+            ? [valueEnv("OPENGENI_MANAGED_EMAIL_DELIVERY", "disabled")]
+            : [
+                requiredEnv("OPENGENI_RESEND_API_KEY", env.OPENGENI_RESEND_API_KEY),
+                valueEnv(
+                  "OPENGENI_EMAIL_FROM",
+                  env.OPENGENI_EMAIL_FROM ?? "Opengeni <auth@mail.opengeni.ai>",
+                ),
+              ]),
           valueEnv(
             "OPENGENI_GITHUB_APP_MANIFEST_BASE_URL",
             env.OPENGENI_GITHUB_APP_MANIFEST_BASE_URL ?? publicBaseUrl,
@@ -2999,6 +3058,9 @@ function runtimeEnvValues(
   for (const key of CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
+  for (const key of SESSION_USAGE_LIMITS_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
   for (const key of AGENT_CONFIG_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
@@ -3015,6 +3077,9 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
   for (const key of WEB_SEARCH_PROVIDER_PASSTHROUGH_ENV) {
+    entries.push(valueEnv(key, env[key]));
+  }
+  for (const key of CREDIT_MARGIN_BPS_PASSTHROUGH_ENV) {
     entries.push(valueEnv(key, env[key]));
   }
 

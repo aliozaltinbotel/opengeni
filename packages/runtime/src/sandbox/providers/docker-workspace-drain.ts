@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
-import { isAbsolute, resolve } from "node:path";
-import { realpath } from "node:fs/promises";
+import { isAbsolute, join, resolve } from "node:path";
+import { constants } from "node:fs";
+import { chmod, lstat, open, readdir, realpath, rm } from "node:fs/promises";
 import { promisify } from "node:util";
 import { DockerSandboxSession, type DockerSandboxClient } from "@openai/agents/sandbox/local";
 import type { SandboxArchiveLimits } from "@openai/agents/sandbox";
@@ -34,6 +35,10 @@ type Ownership = {
   identity: HostWorkspaceRootIdentity;
 };
 const receipts = new WeakMap<object, Ownership>();
+/** Receipts read back from the durable lease envelope, as opposed to minted in
+ * this process. Only these let a later drain attempt re-attach to the host
+ * workspace once the exact container is gone. */
+const durableReceipts = new WeakSet<object>();
 const ownedSdkStates = new WeakSet<object>();
 
 /** Internal SDK producer identity, not caller metadata or a filesystem grant. */
@@ -43,6 +48,23 @@ export function rememberOwnedDockerSdkState(state: State): void {
 
 function invalid(message: string): never {
   throw new SandboxConfigError("docker", "Docker drain workspace authority: " + message);
+}
+
+/** Prove the SDK still owns this exact running container: its session
+ * identity label, workspace mount and mount-authority fingerprint. The SDK's
+ * reuse check also compares the container with the client's configured image
+ * and exposed ports, which answers a different question (would a new
+ * container look the same?). Ownership is a property of the container that
+ * exists, so it is checked against the image and ports it was created with.
+ * Otherwise a deployment that changes the sandbox image could neither serialize
+ * nor drain any container that was live during the upgrade. */
+async function provesLiveSdkOwnership(client: DockerSandboxClient, state: State) {
+  return await client.canReusePreservedOwnedSession(state, {
+    clientOptions: {
+      image: state.image,
+      exposedPorts: [...(state.configuredExposedPorts ?? [])],
+    },
+  });
 }
 
 function shape(state: State) {
@@ -110,7 +132,29 @@ export function rememberSerializedDockerOwnership(state: State, serialized: unkn
     const receipt = parsedReceipt(value, state);
     if (!receipt) invalid("protected ownership receipt is invalid");
     receipts.set(state, receipt);
+    durableReceipts.add(state);
   }
+}
+
+/** Whether a Docker drain of this durable lease envelope captures a
+ * point-in-time image. The drain stops the exact container before it reads the
+ * host workspace (`stopForCapture`), so nothing can write during the read. That
+ * needs the durable ownership receipt: without it a retry after a failed
+ * capture could not prove the stopped container's root is still this
+ * workspace, and would leave the lease draining. */
+export function dockerDrainCaptureIsPointInTime(envelope: unknown): boolean {
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return false;
+  const outer = envelope as Record<string, unknown>;
+  const sessionState =
+    outer.sessionState && typeof outer.sessionState === "object"
+      ? (outer.sessionState as Record<string, unknown>)
+      : outer;
+  const providerState =
+    sessionState.providerState && typeof sessionState.providerState === "object"
+      ? (sessionState.providerState as Record<string, unknown>)
+      : null;
+  const receipt = providerState?.[FIELD];
+  return Boolean(receipt && typeof receipt === "object" && !Array.isArray(receipt));
 }
 
 type Observation = {
@@ -214,7 +258,7 @@ export async function serializeDockerOwnership(
   if (!native?.running) invalid("live SDK ownership could not be verified");
   const mount = await ownedMount(native, state);
   const identity = await readHostWorkspaceRootIdentity(mount.root);
-  if (!(await client.canReusePreservedOwnedSession(state)))
+  if (!(await provesLiveSdkOwnership(client, state)))
     invalid("live SDK ownership could not be verified");
   await readHostWorkspaceRootIdentity(mount.root, identity);
   if ((await daemon(probe)) !== daemonId) invalid("native daemon identity changed");
@@ -232,13 +276,107 @@ export async function serializeDockerOwnership(
   return { [FIELD]: receipt };
 }
 
+/** What happened to the drained host workspace directory after exact
+ * container teardown. `retained` is never an error for the drain: the archive
+ * is already durably published, so the lease still goes cold. */
+export type DockerHostWorkspaceRelease =
+  | { status: "released" }
+  | { status: "already_released" }
+  | { status: "retained"; reason: string };
+
 export type DockerWorkspaceDrainCapture = {
   state: { workspaceRootPath: string; manifest: State["manifest"] };
   workspaceCaptureRootIdentity: HostWorkspaceRootIdentity;
   assertWorkspaceCaptureAuthority: () => Promise<void>;
+  /** Remove the exact container before the capture reads its host workspace,
+   * making the drain capture a point-in-time image. Requires the durable
+   * ownership receipt; the drain terminates the box next anyway. */
+  stopForCapture: () => Promise<void>;
   persistWorkspace: () => Promise<Uint8Array>;
   delete: () => Promise<void>;
+  /** Set by `delete()`; null until teardown ran. */
+  readonly hostWorkspaceRelease: DockerHostWorkspaceRelease | null;
 };
+
+function errorCode(error: unknown): unknown {
+  return error && typeof error === "object" ? Reflect.get(error, "code") : undefined;
+}
+
+function reasonOf(error: unknown): string {
+  return (error instanceof Error ? error.message : String(error)).slice(0, 300);
+}
+
+/** True only when both the recorded SDK path and its canonical receipt root
+ * are definitively absent. Any other failure keeps the ordinary fence. */
+async function rootIsAbsent(sourceRoot: string, canonicalRoot: string): Promise<boolean> {
+  for (const path of [sourceRoot, canonicalRoot]) {
+    try {
+      await lstat(path);
+      return false;
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") return false;
+    }
+  }
+  return true;
+}
+
+/** Grants the owner u+rwx on every real descendant directory so read-only
+ * trees (the Go module cache is written 0555) can be unlinked. Symlinks are
+ * never followed or chmodded, and the root itself is left untouched so its
+ * receipt identity (which includes the mode) still authenticates a retry. */
+async function makeDescendantsRemovable(root: string): Promise<void> {
+  const pending = [root];
+  while (pending.length > 0) {
+    const directory = pending.pop()!;
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const path = join(directory, entry.name);
+      const stats = await lstat(path);
+      if (!stats.isDirectory()) continue;
+      if ((stats.mode & 0o700) !== 0o700) await grantOwnerAccess(path, stats);
+      pending.push(path);
+    }
+  }
+}
+
+/** chmod through a no-follow directory handle pinned to the inode just
+ * lstat'ed, so a path swapped for a symlink or another directory in between
+ * is left alone. A directory without read permission cannot be opened; it
+ * falls back to a path chmod of the same lstat'ed directory. */
+async function grantOwnerAccess(
+  path: string,
+  stats: { dev: number; ino: number; mode: number },
+): Promise<void> {
+  const mode = (stats.mode & 0o7777) | 0o700;
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  } catch (error) {
+    if (errorCode(error) !== "EACCES") throw error;
+    await chmod(path, mode);
+    return;
+  }
+  try {
+    const pinned = await handle.stat();
+    if (pinned.dev !== stats.dev || pinned.ino !== stats.ino) {
+      throw new Error(`workspace directory changed during release: ${path}`);
+    }
+    await handle.chmod(mode);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function removeOwnedTree(root: string): Promise<void> {
+  try {
+    await rm(root, { recursive: true, force: true });
+  } catch (error) {
+    const code = errorCode(error);
+    if (code !== "EACCES" && code !== "EPERM") throw error;
+    await makeDescendantsRemovable(root);
+    await rm(root, { recursive: true, force: true });
+  }
+}
 
 /** Capture-only attachment: no SDK resume/create, exec, viewer, hydration or
  * close capability. Its root comes from the protected SDK receipt and the
@@ -259,13 +397,45 @@ export async function attachDockerWorkspaceForDrain(
     // Preserve its data and lease; neither NotFound nor siblings grant custody.
     if (!native?.running) invalid("legacy stopped/missing workspace has no owned-root receipt");
     await ownedMount(native, state);
-    if (!(await client.canReusePreservedOwnedSession(state)))
+    if (!(await provesLiveSdkOwnership(client, state)))
       invalid("live SDK ownership could not be verified");
     rememberOwnedDockerSdkState(state);
     await serializeDockerOwnership(client, state, probe);
     receipt = receipts.get(state)!;
   }
   const granted = receipt;
+  const durable = durableReceipts.has(state);
+  if (await rootIsAbsent(s.root, granted.root)) {
+    // A previous attempt of this same published drain already tore the
+    // container down and released the host workspace, then died before the
+    // cold commit. Only that exact state may skip the root fence: the archive
+    // is durably published (so no re-arm or continuity can claim this root),
+    // the daemon is unchanged and the exact container is gone.
+    const assertReleased = async () => {
+      if (!(await assertCurrentCapture()).archivePublished)
+        invalid("recorded SDK root is missing before durable publication");
+      if ((await daemon(probe)) !== granted.daemonId) invalid("native daemon identity changed");
+      if (await observe(s.containerId, probe))
+        invalid("recorded SDK root is missing while its exact container exists");
+    };
+    await assertReleased();
+    let release: DockerHostWorkspaceRelease | null = null;
+    const released = () => invalid("host workspace was already released after publication");
+    return {
+      state: { workspaceRootPath: granted.root, manifest: state.manifest },
+      workspaceCaptureRootIdentity: granted.identity,
+      assertWorkspaceCaptureAuthority: async () => released(),
+      stopForCapture: async () => released(),
+      persistWorkspace: async () => released(),
+      async delete() {
+        await assertReleased();
+        release = { status: "already_released" };
+      },
+      get hostWorkspaceRelease() {
+        return release;
+      },
+    };
+  }
   const assertAuthority = async () => {
     await assertCurrentCapture();
     if ((await daemon(probe)) !== granted.daemonId) invalid("native daemon identity changed");
@@ -274,11 +444,59 @@ export async function attachDockerWorkspaceForDrain(
     if (native) await ownedMount(native, state, granted);
     await readHostWorkspaceRootIdentity(granted.root, granted.identity);
   };
+  /** Best effort and never throws: the archive is already durable, and a
+   * throw here would keep the lease draining with a released container. */
+  const releaseHostWorkspace = async (): Promise<DockerHostWorkspaceRelease> => {
+    try {
+      // Re-prove every fence immediately before removal: the same published
+      // capture, the same daemon, the exact container gone (nothing can write
+      // or re-attach through it), and the recorded canonical root still the
+      // receipt's inode/owner/mode. The cold commit that follows is
+      // archive-only and never keeps docker continuity for this root.
+      if (!(await assertCurrentCapture()).archivePublished)
+        return {
+          status: "retained",
+          reason: "capture is no longer durably published",
+        };
+      if ((await daemon(probe)) !== granted.daemonId)
+        return {
+          status: "retained",
+          reason: "native daemon identity changed",
+        };
+      if (await observe(s.containerId, probe))
+        return { status: "retained", reason: "exact container still exists" };
+      if ((await realpath(s.root)) !== granted.root)
+        return { status: "retained", reason: "recorded SDK root changed" };
+      await readHostWorkspaceRootIdentity(granted.root, granted.identity);
+      await removeOwnedTree(granted.root);
+      return { status: "released" };
+    } catch (error) {
+      return { status: "retained", reason: reasonOf(error) };
+    }
+  };
+  let release: DockerHostWorkspaceRelease | null = null;
+  const removeExactContainer = async (): Promise<void> => {
+    if (await observe(s.containerId, probe)) {
+      // Exact-container teardown, without SDK close (which would also remove
+      // unrelated volumes and skips every fence around it).
+      const result = await probe(["rm", "-f", s.containerId], 30_000);
+      if (result.stderr.trim() || result.stdout.trim() !== s.containerId)
+        invalid("exact-container teardown outcome is unknown");
+    }
+  };
   await assertAuthority();
   return {
     state: { workspaceRootPath: granted.root, manifest: state.manifest },
     workspaceCaptureRootIdentity: granted.identity,
     assertWorkspaceCaptureAuthority: assertAuthority,
+    async stopForCapture() {
+      // A minted receipt lives only in this process. A retry after a failed
+      // capture would then find neither the container nor a receipt.
+      if (!durable) invalid("stopping before capture requires a durable ownership receipt");
+      await assertAuthority();
+      await removeExactContainer();
+      await assertAuthority();
+    },
     async persistWorkspace() {
       await assertAuthority();
       if (process.platform !== "linux") {
@@ -309,12 +527,13 @@ export async function attachDockerWorkspaceForDrain(
       if (!(await assertCurrentCapture()).archivePublished)
         invalid("exact capture is not durably published");
       await assertAuthority();
-      if (!(await observe(s.containerId, probe))) return;
-      // Existing post-capture exact-container teardown, without SDK close's
-      // recursive removal of the host-owned workspace or unrelated volumes.
-      const result = await probe(["rm", "-f", s.containerId], 30_000);
-      if (result.stderr.trim() || result.stdout.trim() !== s.containerId)
-        invalid("exact-container teardown outcome is unknown");
+      await removeExactContainer();
+      // Once the published capture's container is gone, nothing references
+      // this host workspace: the lease can only commit cold from an archive.
+      release = await releaseHostWorkspace();
+    },
+    get hostWorkspaceRelease() {
+      return release;
     },
   };
 }
