@@ -204,7 +204,9 @@ async function checkpoint(
         },
       },
     ],
-    async (tx, fence) => {
+    {
+      rowProjection: "event",
+      mutate: async (tx, fence) => {
       if (!fence.allowed) return false;
       if (resultItem)
         await recordPendingSessionToolCallResultInTransaction(
@@ -219,6 +221,7 @@ async function checkpoint(
       else await registerPendingSessionToolCallInTransaction(tx, input, fence);
       if (failAfterReceipt) throw new Error("synthetic checkpoint failure after receipt");
       return true;
+    },
     },
   );
 }

@@ -3465,6 +3465,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       SessionEventSemanticClass,
       "excludeClasses",
     );
+    // Conversation-first readers exclude step events but keep presented tool
+    // calls (images, published files, Skill changes) and turnless rows such as
+    // PTY output, which no per-turn step read finds. Unknown values are ignored
+    // so older and newer clients degrade to the plain type filter.
+    const retainPresentedToolCalls = c.req.query("presentedToolCalls") === "include";
     const limit = latestClass
       ? 1
       : eventListLimit(
@@ -3483,6 +3488,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       excludeTypes,
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
+      ...(retainPresentedToolCalls && !latestClass ? { retainPresentedToolCalls: true } : {}),
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
       ...(latestClass ? { authoritativeLatest: true } : {}),
     });

@@ -1,20 +1,47 @@
 import { ModelSourceRef, FileResourceRef } from "@opengeni/contracts";
-import { validatedStoredModelCallSourceReceipt, importedHistorySourceBasisTx, persistModelCallSourceReceiptWithFence, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
-import { validateRetainedModelSourcesWithFence, type RetainedModelSourceValidationInput, type RetainedModelSourceValidation } from "./model-retained-source-validation";
-export type { RetainedModelSourceValidation, RetainedModelSourceValidationInput, RetainedModelSourceStatus } from "./model-retained-source-validation";
+import {
+  validatedStoredModelCallSourceReceipt,
+  importedHistorySourceBasisTx,
+  persistModelCallSourceReceiptWithFence,
+  type ModelCallSourceIdentity,
+  type NativeModelSourceRequest,
+} from "./model-call-source-receipts";
+import {
+  validateRetainedModelSourcesWithFence,
+  type RetainedModelSourceValidationInput,
+  type RetainedModelSourceValidation,
+} from "./model-retained-source-validation";
+export type {
+  RetainedModelSourceValidation,
+  RetainedModelSourceValidationInput,
+  RetainedModelSourceStatus,
+} from "./model-retained-source-validation";
 /** Facts about exact retained native sources; host authority is checked separately for every request. */
-export async function validateRetainedModelSources(db: Database, input: RetainedModelSourceValidationInput): Promise<RetainedModelSourceValidation> {
+export async function validateRetainedModelSources(
+  db: Database,
+  input: RetainedModelSourceValidationInput,
+): Promise<RetainedModelSourceValidation> {
   return validateRetainedModelSourcesWithFence(db, input, async (tx, identity) => {
     const fence = await lockTurnAttemptWriteFenceTx(tx, identity);
     return fence.allowed && fence.session.accountId === identity.accountId;
   });
 }
-export { readModelCallSourceReceipt, modelSourceContentDigest, type ModelCallSourceIdentity, type NativeModelSourceRequest } from "./model-call-source-receipts";
-export async function persistModelCallSourceReceipt(db:Database,identity:ModelCallSourceIdentity,request:NativeModelSourceRequest) {
- return persistModelCallSourceReceiptWithFence(db,identity,request,async tx=>{
-  const fence=await lockTurnAttemptWriteFenceTx(tx,identity);
-  if(!fence.allowed || fence.session.accountId!==identity.accountId) throw new Error("MODEL_CALL_SOURCE_RECEIPT_ATTEMPT_NOT_CURRENT");
- });
+export {
+  readModelCallSourceReceipt,
+  modelSourceContentDigest,
+  type ModelCallSourceIdentity,
+  type NativeModelSourceRequest,
+} from "./model-call-source-receipts";
+export async function persistModelCallSourceReceipt(
+  db: Database,
+  identity: ModelCallSourceIdentity,
+  request: NativeModelSourceRequest,
+) {
+  return persistModelCallSourceReceiptWithFence(db, identity, request, async (tx) => {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, identity);
+    if (!fence.allowed || fence.session.accountId !== identity.accountId)
+      throw new Error("MODEL_CALL_SOURCE_RECEIPT_ATTEMPT_NOT_CURRENT");
+  });
 }
 import {
   recoverProviderClockAfterDependencyWait,
@@ -113,11 +140,15 @@ import {
 } from "./session-attempt-fence";
 export type { TurnAttemptFenceRejectReason } from "./session-attempt-fence";
 export { lockTurnAttemptWriteFenceTx } from "./session-attempt-fence";
-import type { TurnAttemptFenceResult } from "./session-attempt-fence";
-export type SessionEventMutation = (
+import type { TurnAttemptEventFenceResult, TurnAttemptFenceResult } from "./session-attempt-fence";
+export type SessionEventMutation<Projection extends "full" | "event" = "full"> = (
   tx: Database,
-  fence: TurnAttemptFenceResult,
+  fence: Projection extends "event" ? TurnAttemptEventFenceResult : TurnAttemptFenceResult,
 ) => Promise<boolean>;
+/** Plain callbacks retain full rows; checkpoints may explicitly request only fence fields. */
+export type SessionEventMutationInput =
+  | SessionEventMutation
+  | { rowProjection: "event"; mutate: SessionEventMutation<"event"> };
 export { sessionHasToolRouterHistory } from "./session-tool-router-history";
 export { effectiveSessionPolicyQuery } from "./session-execution-policy";
 
@@ -910,6 +941,7 @@ import {
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_PRESENTED_TOOL_LEAVES,
   SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
   SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
@@ -3906,11 +3938,14 @@ export async function getWorkspaceGrant(
       and(
         eq(schema.workspaceMemberships.subjectId, subjectId),
         eq(schema.workspaceMemberships.workspaceId, workspaceId),
-        provenance?.accountId ? eq(schema.workspaceMemberships.accountId, provenance.accountId) : undefined,
+        provenance?.accountId
+          ? eq(schema.workspaceMemberships.accountId, provenance.accountId)
+          : undefined,
         provenance?.accountId ? eq(schema.workspaces.accountId, provenance.accountId) : undefined,
       ),
     )
-    .limit(1).$dynamic();
+    .limit(1)
+    .$dynamic();
   if (provenance?.lock === "share") query = query.for("share");
   const [row] = await query;
   return row
@@ -6202,8 +6237,19 @@ export async function recordModelCallFact(
           })
         : null;
       const occurredAt = input.occurredAt ?? new Date();
-      const [sourceReceipt] = await scopedDb.select({id:schema.modelCallSourceReceipts.id}).from(schema.modelCallSourceReceipts)
-        .where(and(eq(schema.modelCallSourceReceipts.accountId,input.accountId),eq(schema.modelCallSourceReceipts.workspaceId,input.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,input.sessionId),eq(schema.modelCallSourceReceipts.turnId,input.turnId),eq(schema.modelCallSourceReceipts.sourceKey,input.sourceKey))).limit(1);
+      const [sourceReceipt] = await scopedDb
+        .select({ id: schema.modelCallSourceReceipts.id })
+        .from(schema.modelCallSourceReceipts)
+        .where(
+          and(
+            eq(schema.modelCallSourceReceipts.accountId, input.accountId),
+            eq(schema.modelCallSourceReceipts.workspaceId, input.workspaceId),
+            eq(schema.modelCallSourceReceipts.sessionId, input.sessionId),
+            eq(schema.modelCallSourceReceipts.turnId, input.turnId),
+            eq(schema.modelCallSourceReceipts.sourceKey, input.sourceKey),
+          ),
+        )
+        .limit(1);
       const [row] = await scopedDb
         .insert(schema.modelCallFacts)
         .values({
@@ -7906,94 +7952,180 @@ function assertGeneratedWorkspaceFileMatches(
 /** Temporary model input custody reuses the immutable signed-upload audit owner. */
 export async function getTemporaryModelImageFile(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string; sessionId: string; fileId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    fileId: string;
+  },
 ): Promise<FileAsset | null> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const [audit] = await scopedDb.select({ id: schema.auditEvents.id })
-      .from(schema.auditEvents).where(and(
-        eq(schema.auditEvents.accountId, input.accountId),
-        eq(schema.auditEvents.workspaceId, input.workspaceId),
-        eq(schema.auditEvents.subjectId, input.subjectId),
-        eq(schema.auditEvents.action, "file.signed_upload.issued"),
-        eq(schema.auditEvents.targetType, "workspace_file"),
-        eq(schema.auditEvents.targetId, input.fileId),
-        sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' = ${input.sessionId}`,
-      )).limit(1);
+    const [audit] = await scopedDb
+      .select({ id: schema.auditEvents.id })
+      .from(schema.auditEvents)
+      .where(
+        and(
+          eq(schema.auditEvents.accountId, input.accountId),
+          eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.subjectId, input.subjectId),
+          eq(schema.auditEvents.action, "file.signed_upload.issued"),
+          eq(schema.auditEvents.targetType, "workspace_file"),
+          eq(schema.auditEvents.targetId, input.fileId),
+          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' = ${input.sessionId}`,
+        ),
+      )
+      .limit(1);
     if (!audit) return null;
-    const [session] = await scopedDb.select({ creator: schema.sessions.createdBySubjectId,
-      resources: schema.sessions.resources }).from(schema.sessions).where(and(
-        eq(schema.sessions.accountId, input.accountId),
-        eq(schema.sessions.workspaceId, input.workspaceId),
-        eq(schema.sessions.id, input.sessionId),
-      )).limit(1);
+    const [session] = await scopedDb
+      .select({ creator: schema.sessions.createdBySubjectId, resources: schema.sessions.resources })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
     // Unknown create outcomes may be cleaned before the shell exists. Existing
     // shells must agree with the uploader and the exact immutable image ref.
-    if (session && (session.creator !== input.subjectId ||
-        !session.resources.some((ref) => { const parsed = FileResourceRef.safeParse(ref); return parsed.success && parsed.data.fileId === input.fileId && parsed.data.asImage === true; })))
+    if (
+      session &&
+      (session.creator !== input.subjectId ||
+        !session.resources.some((ref) => {
+          const parsed = FileResourceRef.safeParse(ref);
+          return (
+            parsed.success && parsed.data.fileId === input.fileId && parsed.data.asImage === true
+          );
+        }))
+    )
       return null;
-    const [file] = await scopedDb.select().from(schema.files).where(and(
-      eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
-      eq(schema.files.id, input.fileId), isNull(schema.files.privateOwnerSubjectIds),
-    )).limit(1);
-    if (!file || !["image/jpeg", "image/png", "image/webp"].includes(file.contentType) ||
-        file.sizeBytes > 10 * 1024 * 1024 || !/^[a-f0-9]{64}$/i.test(file.sha256 ?? "")) return null;
+    const [file] = await scopedDb
+      .select()
+      .from(schema.files)
+      .where(
+        and(
+          eq(schema.files.accountId, input.accountId),
+          eq(schema.files.workspaceId, input.workspaceId),
+          eq(schema.files.id, input.fileId),
+          isNull(schema.files.privateOwnerSubjectIds),
+        ),
+      )
+      .limit(1);
+    if (
+      !file ||
+      !["image/jpeg", "image/png", "image/webp"].includes(file.contentType) ||
+      file.sizeBytes > 10 * 1024 * 1024 ||
+      !/^[a-f0-9]{64}$/i.test(file.sha256 ?? "")
+    )
+      return null;
     return mapFile(file);
   });
 }
 
 /** Recover crash/unknown-response cleanup from existing upload and purge audit facts. */
 export async function listTemporaryModelImageCleanup(
-  db: Database, input: { accountId: string; workspaceId: string; subjectId: string },
+  db: Database,
+  input: { accountId: string; workspaceId: string; subjectId: string },
 ): Promise<Array<{ fileId: string; sessionId: string }>> {
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
-    const rows = await scopedDb.selectDistinct({ fileId: schema.auditEvents.targetId,
-      sessionId: sql<string>`${schema.auditEvents.metadata}->>'temporaryForSessionId'` })
-      .from(schema.auditEvents).where(and(
-        eq(schema.auditEvents.accountId, input.accountId), eq(schema.auditEvents.workspaceId, input.workspaceId),
-        eq(schema.auditEvents.subjectId, input.subjectId), eq(schema.auditEvents.action, "file.signed_upload.issued"),
-        eq(schema.auditEvents.targetType, "workspace_file"),
-        sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
-        sql`EXISTS(SELECT 1 FROM ${schema.files} AS temporary_file WHERE temporary_file.account_id = ${input.accountId}
+    const rows = await scopedDb
+      .selectDistinct({
+        fileId: schema.auditEvents.targetId,
+        sessionId: sql<string>`${schema.auditEvents.metadata}->>'temporaryForSessionId'`,
+      })
+      .from(schema.auditEvents)
+      .where(
+        and(
+          eq(schema.auditEvents.accountId, input.accountId),
+          eq(schema.auditEvents.workspaceId, input.workspaceId),
+          eq(schema.auditEvents.subjectId, input.subjectId),
+          eq(schema.auditEvents.action, "file.signed_upload.issued"),
+          eq(schema.auditEvents.targetType, "workspace_file"),
+          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
+          sql`EXISTS(SELECT 1 FROM ${schema.files} AS temporary_file WHERE temporary_file.account_id = ${input.accountId}
           AND temporary_file.workspace_id = ${input.workspaceId} AND temporary_file.id::text = ${schema.auditEvents.targetId}
           AND (temporary_file.status = 'failed' OR ${schema.auditEvents.occurredAt} < now() - interval '5 minutes'
             OR EXISTS(SELECT 1 FROM ${schema.sessionTurns} AS finished_turn WHERE finished_turn.workspace_id = ${input.workspaceId}
               AND finished_turn.session_id::text = ${schema.auditEvents.metadata}->>'temporaryForSessionId'
               AND finished_turn.status IN ('completed','failed','cancelled','superseded'))))`,
-        sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS purged WHERE purged.account_id = ${input.accountId}
+          sql`NOT EXISTS(SELECT 1 FROM ${schema.auditEvents} AS purged WHERE purged.account_id = ${input.accountId}
           AND purged.workspace_id = ${input.workspaceId} AND purged.subject_id = ${input.subjectId}
           AND purged.target_id = ${schema.auditEvents.targetId} AND purged.action = 'file.temporary_input.purged')`,
-      )).limit(100);
-    return rows.flatMap(row => row.fileId ? [{ fileId: row.fileId, sessionId: row.sessionId }] : []);
+        ),
+      )
+      .limit(100);
+    return rows.flatMap((row) =>
+      row.fileId ? [{ fileId: row.fileId, sessionId: row.sessionId }] : [],
+    );
   });
 }
 
 /** Revoke reads and fence finalize in the same upload→file lock order as completion. */
 export async function revokeTemporaryModelImageFile(
   db: Database,
-  input: { accountId: string; workspaceId: string; subjectId: string; sessionId: string; fileId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    sessionId: string;
+    fileId: string;
+  },
 ): Promise<FileAsset | null> {
   if (!(await getTemporaryModelImageFile(db, input))) return null;
   return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
-      const uploads = await tx.select().from(schema.fileUploads).where(and(
-        eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
-        eq(schema.fileUploads.fileId, input.fileId),
-      )).orderBy(asc(schema.fileUploads.id)).for("update");
+      const uploads = await tx
+        .select()
+        .from(schema.fileUploads)
+        .where(
+          and(
+            eq(schema.fileUploads.accountId, input.accountId),
+            eq(schema.fileUploads.workspaceId, input.workspaceId),
+            eq(schema.fileUploads.fileId, input.fileId),
+          ),
+        )
+        .orderBy(asc(schema.fileUploads.id))
+        .for("update");
       if (uploads.length === 0) return null;
-      const [file] = await tx.select().from(schema.files).where(and(
-        eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
-        eq(schema.files.id, input.fileId), isNull(schema.files.privateOwnerSubjectIds),
-      )).for("update").limit(1);
+      const [file] = await tx
+        .select()
+        .from(schema.files)
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+            isNull(schema.files.privateOwnerSubjectIds),
+          ),
+        )
+        .for("update")
+        .limit(1);
       if (!file || !(await getTemporaryModelImageFile(tx, input))) return null;
       const now = new Date();
-      await tx.update(schema.fileUploads).set({ status: "cleanup_pending", updatedAt: now }).where(and(
-        eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
-        eq(schema.fileUploads.fileId, input.fileId), inArray(schema.fileUploads.status, ["pending", "completed", "failed"]),
-      ));
-      const [row] = await tx.update(schema.files).set({ status: "failed", updatedAt: now }).where(and(
-        eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
-        eq(schema.files.id, input.fileId),
-      )).returning();
+      await tx
+        .update(schema.fileUploads)
+        .set({ status: "cleanup_pending", updatedAt: now })
+        .where(
+          and(
+            eq(schema.fileUploads.accountId, input.accountId),
+            eq(schema.fileUploads.workspaceId, input.workspaceId),
+            eq(schema.fileUploads.fileId, input.fileId),
+            inArray(schema.fileUploads.status, ["pending", "completed", "failed"]),
+          ),
+        );
+      const [row] = await tx
+        .update(schema.files)
+        .set({ status: "failed", updatedAt: now })
+        .where(
+          and(
+            eq(schema.files.accountId, input.accountId),
+            eq(schema.files.workspaceId, input.workspaceId),
+            eq(schema.files.id, input.fileId),
+          ),
+        )
+        .returning();
       return row ? mapFile(row) : null;
     }),
   );
@@ -8400,22 +8532,40 @@ export async function getFilesForSubject(
       const access = currentSessionAttachmentReadAccess();
       if (!access) return ordinary;
       const missing = ids.filter((id) => !ordinary.some((file) => file.id === id));
-      const temporaryRows = missing.length === 0 ? [] : await scopedDb.select({ fileId: schema.auditEvents.targetId })
-        .from(schema.auditEvents).where(and(eq(schema.auditEvents.accountId, input.accountId),
-          eq(schema.auditEvents.workspaceId, input.workspaceId), inArray(schema.auditEvents.targetId, missing),
-          eq(schema.auditEvents.action, "file.signed_upload.issued"),
-          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`));
-      const temporaryIds = new Set(temporaryRows.flatMap(row => row.fileId ? [row.fileId] : []));
+      const temporaryRows =
+        missing.length === 0
+          ? []
+          : await scopedDb
+              .select({ fileId: schema.auditEvents.targetId })
+              .from(schema.auditEvents)
+              .where(
+                and(
+                  eq(schema.auditEvents.accountId, input.accountId),
+                  eq(schema.auditEvents.workspaceId, input.workspaceId),
+                  inArray(schema.auditEvents.targetId, missing),
+                  eq(schema.auditEvents.action, "file.signed_upload.issued"),
+                  sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
+                ),
+              );
+      const temporaryIds = new Set(
+        temporaryRows.flatMap((row) => (row.fileId ? [row.fileId] : [])),
+      );
       const images: FileAsset[] = [];
-      if (input.subjectId) for (const fileId of temporaryIds) {
-        const image = await getTemporaryModelImageFile(scopedDb, { accountId: input.accountId,
-          workspaceId: input.workspaceId, subjectId: input.subjectId, sessionId: access.sessionId, fileId });
-        if (image?.status === "ready") images.push(image);
-      }
+      if (input.subjectId)
+        for (const fileId of temporaryIds) {
+          const image = await getTemporaryModelImageFile(scopedDb, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            subjectId: input.subjectId,
+            sessionId: access.sessionId,
+            fileId,
+          });
+          if (image?.status === "ready") images.push(image);
+        }
       const shared = await readSessionFileAttachments(scopedDb, {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
-        fileIds: missing.filter(id => !temporaryIds.has(id)),
+        fileIds: missing.filter((id) => !temporaryIds.has(id)),
         access,
       });
       return [...ordinary, ...shared, ...images];
@@ -9797,22 +9947,42 @@ async function completeFileUploadCleanupInOwnerScope(
         if (!upload || upload.fileId !== input.fileId) {
           return false;
         }
-        const [temporaryInput] = await tx.select({ id: schema.auditEvents.id }).from(schema.auditEvents).where(and(
-          eq(schema.auditEvents.accountId, input.accountId), eq(schema.auditEvents.workspaceId, input.workspaceId),
-          eq(schema.auditEvents.targetId, input.fileId), eq(schema.auditEvents.action, "file.signed_upload.issued"),
-          sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
-        )).limit(1);
+        const [temporaryInput] = await tx
+          .select({ id: schema.auditEvents.id })
+          .from(schema.auditEvents)
+          .where(
+            and(
+              eq(schema.auditEvents.accountId, input.accountId),
+              eq(schema.auditEvents.workspaceId, input.workspaceId),
+              eq(schema.auditEvents.targetId, input.fileId),
+              eq(schema.auditEvents.action, "file.signed_upload.issued"),
+              sql`${schema.auditEvents.metadata}->>'temporaryForSessionId' IS NOT NULL`,
+            ),
+          )
+          .limit(1);
         // Signed URL expiry does not bound a PUT already in flight. Keep this
         // existing owner recurring until the provider proves completion/cancellation.
         if (temporaryInput) {
-          await tx.update(schema.fileUploads).set({ status: "cleanup_pending", updatedAt: new Date() }).where(and(
-            eq(schema.fileUploads.accountId, input.accountId), eq(schema.fileUploads.workspaceId, input.workspaceId),
-            eq(schema.fileUploads.id, input.uploadId),
-          ));
-          await tx.update(schema.files).set({ status: "failed", updatedAt: new Date() }).where(and(
-            eq(schema.files.accountId, input.accountId), eq(schema.files.workspaceId, input.workspaceId),
-            eq(schema.files.id, input.fileId),
-          ));
+          await tx
+            .update(schema.fileUploads)
+            .set({ status: "cleanup_pending", updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.fileUploads.accountId, input.accountId),
+                eq(schema.fileUploads.workspaceId, input.workspaceId),
+                eq(schema.fileUploads.id, input.uploadId),
+              ),
+            );
+          await tx
+            .update(schema.files)
+            .set({ status: "failed", updatedAt: new Date() })
+            .where(
+              and(
+                eq(schema.files.accountId, input.accountId),
+                eq(schema.files.workspaceId, input.workspaceId),
+                eq(schema.files.id, input.fileId),
+              ),
+            );
           return true;
         }
         if (upload.status === input.terminalStatus) {
@@ -29962,12 +30132,19 @@ function assertSessionCreateReplayIdentity(
   existing: typeof schema.sessions.$inferSelect,
   input: SessionCreateReplayIdentity,
 ): void {
-  const oldRefs = ModelSourceRef.array().max(16384).parse(existing.metadata?.nativeInitialMessageModelSourceRefs ?? []);
-  const newRefs = ModelSourceRef.array().max(16384).parse(input.initialMessageModelSourceRefs ?? []);
-  if (stableJson(oldRefs) !== stableJson(newRefs)
-    || ((oldRefs.length > 0 || newRefs.length > 0)
-      && (fromPostgresLosslessText(existing.initialMessage, existing.initialMessageCodecVersion) !== input.initialMessage
-        || (existing.initialModelContext ?? null) !== (input.initialModelContext ?? null))))
+  const oldRefs = ModelSourceRef.array()
+    .max(16384)
+    .parse(existing.metadata?.nativeInitialMessageModelSourceRefs ?? []);
+  const newRefs = ModelSourceRef.array()
+    .max(16384)
+    .parse(input.initialMessageModelSourceRefs ?? []);
+  if (
+    stableJson(oldRefs) !== stableJson(newRefs) ||
+    ((oldRefs.length > 0 || newRefs.length > 0) &&
+      (fromPostgresLosslessText(existing.initialMessage, existing.initialMessageCodecVersion) !==
+        input.initialMessage ||
+        (existing.initialModelContext ?? null) !== (input.initialModelContext ?? null)))
+  )
     throw new SessionCreateIdempotencyConflictError();
   if (
     stableJson(existing.metadata?.[SESSION_CREATE_AGENT_LEARNING_METADATA_KEY] ?? {}) !==
@@ -30199,8 +30376,11 @@ async function createSessionInTransaction(
     selectedInstalledSkillIds,
   );
   delete sessionMetadata.nativeInitialMessageModelSourceRefs;
-  const initialMessageModelSourceRefs = ModelSourceRef.array().max(16384).parse(input.initialMessageModelSourceRefs ?? []);
-  if (initialMessageModelSourceRefs.length > 0) sessionMetadata.nativeInitialMessageModelSourceRefs = initialMessageModelSourceRefs;
+  const initialMessageModelSourceRefs = ModelSourceRef.array()
+    .max(16384)
+    .parse(input.initialMessageModelSourceRefs ?? []);
+  if (initialMessageModelSourceRefs.length > 0)
+    sessionMetadata.nativeInitialMessageModelSourceRefs = initialMessageModelSourceRefs;
   const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const createRequestedVisibility = input.visibility ?? "workspace_shared";
   if (createRequestedVisibility === "user_private" || sessionMetadata._opengeniSiteOrigin) {
@@ -37014,6 +37194,15 @@ export type ListSessionEventsOptions = {
   excludeStreamedAssistantMessages?: boolean;
   payloadMode?: SessionEventPayloadMode;
   /**
+   * Keep `agent.toolCall.created` rows of presented tools (see
+   * SESSION_EVENT_PRESENTED_TOOL_LEAVES) even when that type is excluded, so a
+   * conversation-first reader still sees images, published files and Skill
+   * changes without loading every step. Excluded rows without a turn (PTY
+   * output) are kept too: no per-turn step read can find them. No effect
+   * unless `agent.toolCall.created` is excluded.
+   */
+  retainPresentedToolCalls?: boolean;
+  /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
    * not compete with current truth. Durable session sequence is authoritative
@@ -37022,6 +37211,28 @@ export type ListSessionEventsOptions = {
    */
   authoritativeLatest?: boolean;
 };
+
+function sessionEventExcludeTypesFilter(
+  excludeTypes: readonly SessionEventType[],
+  options: Pick<ListSessionEventsOptions, "retainPresentedToolCalls">,
+): SQL {
+  const excluded = notInArray(schema.sessionEvents.type, [...excludeTypes]);
+  if (!options.retainPresentedToolCalls || !excludeTypes.includes("agent.toolCall.created")) {
+    return excluded;
+  }
+  // The name check reads only created rows (never tool outputs), but it still
+  // detoasts large arguments on each excluded call it scans.
+  const presentedName = `^(.*__)?(${SESSION_EVENT_PRESENTED_TOOL_LEAVES.join("|")})$`;
+  return or(
+    excluded,
+    // Turnless rows (PTY output) belong to no turn's step read.
+    isNull(schema.sessionEvents.turnId),
+    and(
+      eq(schema.sessionEvents.type, "agent.toolCall.created"),
+      sql`(${schema.sessionEvents.payload} ->> 'name') ~ ${presentedName}`,
+    ),
+  )!;
+}
 
 export type ListSessionEventPageOptions = ListSessionEventsOptions & {
   /** UTF-8 JSON-array page target; one oversized full event is returned alone. */
@@ -37206,7 +37417,7 @@ export async function listSessionEventPage(
         filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
       }
       if (typeFilters.excludeTypes.length > 0) {
-        filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+        filters.push(sessionEventExcludeTypesFilter(typeFilters.excludeTypes, options));
       }
       if (direction === "before") {
         if (cursor !== undefined && cursor <= POSTGRES_INT_MAX) {
@@ -37662,7 +37873,7 @@ export async function listSessionEvents(
       filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
     }
     if (typeFilters.excludeTypes.length > 0) {
-      filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+      filters.push(sessionEventExcludeTypesFilter(typeFilters.excludeTypes, options));
     }
     if (before !== undefined && before <= POSTGRES_INT_MAX) {
       filters.push(lt(schema.sessionEvents.sequence, before));
@@ -39639,11 +39850,13 @@ export async function ensureSessionSkillCatalog(
     retainedSources?: readonly import("@opengeni/contracts").ModelSourceRef[];
   },
 ): Promise<string> {
-  const retainedSources = (input.retainedSources ?? []).map(ref => ModelSourceRef.parse(ref));
+  const retainedSources = (input.retainedSources ?? []).map((ref) => ModelSourceRef.parse(ref));
   const catalogItem = skillCatalogContextItem(input.catalog);
   const digest = createHash("sha256").update(JSON.stringify(catalogItem)).digest("hex");
   const sourceBasis: import("@opengeni/contracts").ModelHistorySourceBasis = {
-    kind: "INSTRUCTION", parents: [{ owner: "native.runtime.artifact", id: `skill-catalog:${digest}`, sha256: digest }], retainedSources,
+    kind: "INSTRUCTION",
+    parents: [{ owner: "native.runtime.artifact", id: `skill-catalog:${digest}`, sha256: digest }],
+    retainedSources,
   };
   return withRlsContext(
     db,
@@ -39695,13 +39908,19 @@ export async function ensureSessionSkillCatalog(
           : null;
         if (frozen !== undefined) {
           if (previousCatalog === null) throw new Error("Missing durable skill catalog snapshot");
-          if (input.retainedSources !== undefined && !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources))
+          if (
+            input.retainedSources !== undefined &&
+            !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources)
+          )
             throw new Error("SKILL_CATALOG_RETAINED_SOURCES_CHANGED");
           return previousCatalog;
         }
         let historyId = previous?.id;
-        if (previousCatalog !== input.catalog || (input.retainedSources !== undefined
-          && !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources))) {
+        if (
+          previousCatalog !== input.catalog ||
+          (input.retainedSources !== undefined &&
+            !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources))
+        ) {
           const [boundary] = await tx
             .select({ position: schema.sessionHistoryItems.position })
             .from(schema.sessionHistoryItems)
@@ -39906,7 +40125,12 @@ export async function appendSessionHistoryItems(
     expectedExecutionGeneration: number;
     expectedAttemptId: string;
     modelToolOutputTruncationTokens?: number;
-    items: Array<{ position: number; item: Record<string, unknown>;sourceBasis?:import("@opengeni/contracts").ModelHistorySourceBasis;nativeProducerSourceKey?:string }>;
+    items: Array<{
+      position: number;
+      item: Record<string, unknown>;
+      sourceBasis?: import("@opengeni/contracts").ModelHistorySourceBasis;
+      nativeProducerSourceKey?: string;
+    }>;
     /** Tool outputs already have durable timeline events; retire their receipts with history. */
     completedToolCallIds?: string[];
   },
@@ -39921,109 +40145,148 @@ export async function appendSessionHistoryItems(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_history_append", correlationId: input.expectedAttemptId },
     async (tx) => {
-        const allowed = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.expectedExecutionGeneration,
-          attemptId: input.expectedAttemptId,
-        });
-        if (!allowed.allowed) return false;
-        // Canonicalize once: insertion and exact readback compare the same values.
-        const expected = [];
-        for (const entry of input.items) {
-          let sourceBasis = entry.sourceBasis;
-          if (sourceBasis?.kind === "HISTORY_ROW") throw new Error("MODEL_OUTPUT_SOURCE_BASIS_REQUIRES_PRODUCER");
-          if (entry.nativeProducerSourceKey !== undefined) {
-            if (sourceBasis !== undefined) throw new Error("MODEL_OUTPUT_SOURCE_BASIS_CONFLICT");
-            const [stored] = await tx.select().from(schema.modelCallSourceReceipts).where(and(
-              eq(schema.modelCallSourceReceipts.accountId,input.accountId),eq(schema.modelCallSourceReceipts.workspaceId,input.workspaceId),
-              eq(schema.modelCallSourceReceipts.sessionId,input.sessionId),eq(schema.modelCallSourceReceipts.turnId,input.turnId),
-              eq(schema.modelCallSourceReceipts.attemptId,input.expectedAttemptId),eq(schema.modelCallSourceReceipts.executionGeneration,input.expectedExecutionGeneration),
-              eq(schema.modelCallSourceReceipts.sourceKey,entry.nativeProducerSourceKey))).limit(1);
-            if (!stored) throw new Error("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
-            const producer = validatedStoredModelCallSourceReceipt(stored);
-            if (!producer.complete || producer.incompleteReasons.length || producer.purpose !== "AGENT"
-              || producer.id !== stored.id || producer.accountId !== input.accountId || producer.workspaceId !== input.workspaceId
-              || producer.sessionId !== input.sessionId || producer.turnId !== input.turnId || producer.attemptId !== input.expectedAttemptId
-              || producer.executionGeneration !== input.expectedExecutionGeneration || producer.sourceKey !== entry.nativeProducerSourceKey
-              || producer.requestIndex !== stored.requestIndex) throw new Error("MODEL_OUTPUT_PRODUCER_INEXACT");
-            sourceBasis = {kind:"HISTORY_ROW",parents:[{owner:"model_call_source_receipts",id:producer.id,sha256:producer.digest}]};
-          }
-          expected.push({position:entry.position,...(sourceBasis ? {sourceBasis} : {}),
-            item:canonicalizePersistedHistoryItem(entry.item,input.modelToolOutputTruncationTokens)});
-        }
-        const savedFields = {
-          position: schema.sessionHistoryItems.position,
-          sourceBasis:schema.sessionHistoryItems.sourceBasis,
-          turnId: schema.sessionHistoryItems.turnId,
-          // The schema reads ordered JSON, not the legacy JSONB projection.
-          item: schema.sessionHistoryItems.item,
-          itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
-        };
-        const inserted = expected.length > 0 ? await tx
-          .insert(schema.sessionHistoryItems)
-          .values(
-            withLosslessContentWriteVersion(
-              expected.map((entry) => ({
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                position: entry.position,
-                item: entry.item,
-                ...(entry.sourceBasis?{sourceBasis:entry.sourceBasis}:{}),
-              })),
-              "item",
-              "itemCodecVersion",
-            ),
-          )
-          .onConflictDoNothing({
-            target: [
-              schema.sessionHistoryItems.workspaceId,
-              schema.sessionHistoryItems.sessionId,
-              schema.sessionHistoryItems.position,
-            ],
-          })
-          .returning(savedFields) : [];
-        const byPosition = new Map(inserted.map((row) => [row.position, row]));
-        const conflictingPositions = [
-          ...new Set(
-            expected
-              .filter((entry) => !byPosition.has(entry.position))
-              .map((entry) => entry.position),
-          ),
-        ];
-        // RETURNING contains the stored fresh rows. Only position conflicts
-        // need another read; every row still receives the exact comparison.
-        if (conflictingPositions.length > 0) {
-          const existing = await tx
-            .select(savedFields)
-            .from(schema.sessionHistoryItems)
+      const allowed = await lockTurnAttemptWriteFenceTx(tx, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        executionGeneration: input.expectedExecutionGeneration,
+        attemptId: input.expectedAttemptId,
+      });
+      if (!allowed.allowed) return false;
+      // Canonicalize once: insertion and exact readback compare the same values.
+      const expected = [];
+      for (const entry of input.items) {
+        let sourceBasis = entry.sourceBasis;
+        if (sourceBasis?.kind === "HISTORY_ROW")
+          throw new Error("MODEL_OUTPUT_SOURCE_BASIS_REQUIRES_PRODUCER");
+        if (entry.nativeProducerSourceKey !== undefined) {
+          if (sourceBasis !== undefined) throw new Error("MODEL_OUTPUT_SOURCE_BASIS_CONFLICT");
+          const [stored] = await tx
+            .select()
+            .from(schema.modelCallSourceReceipts)
             .where(
               and(
-                eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
-                eq(schema.sessionHistoryItems.sessionId, input.sessionId),
-                inArray(schema.sessionHistoryItems.position, conflictingPositions),
+                eq(schema.modelCallSourceReceipts.accountId, input.accountId),
+                eq(schema.modelCallSourceReceipts.workspaceId, input.workspaceId),
+                eq(schema.modelCallSourceReceipts.sessionId, input.sessionId),
+                eq(schema.modelCallSourceReceipts.turnId, input.turnId),
+                eq(schema.modelCallSourceReceipts.attemptId, input.expectedAttemptId),
+                eq(
+                  schema.modelCallSourceReceipts.executionGeneration,
+                  input.expectedExecutionGeneration,
+                ),
+                eq(schema.modelCallSourceReceipts.sourceKey, entry.nativeProducerSourceKey),
               ),
-            );
-          for (const row of existing) byPosition.set(row.position, row);
-        }
-        // A position conflict is idempotent only when the exact conversation
-        // item is already there. Never acknowledge a different item as saved.
-        for (const entry of expected) {
-          const row = byPosition.get(entry.position);
+            )
+            .limit(1);
+          if (!stored) throw new Error("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
+          const producer = validatedStoredModelCallSourceReceipt(stored);
           if (
-            !row ||
-            row.turnId !== input.turnId ||
-            !isDeepStrictEqual(fromPostgresLosslessJson(row.item, row.itemCodecVersion), entry.item) ||
-            (entry.sourceBasis!==undefined && !isDeepStrictEqual(row.sourceBasis,entry.sourceBasis))
-          ) {
-            throw new Error(
-              `Conversation history persistence conflict at position ${entry.position}`,
-            );
-          }
+            !producer.complete ||
+            producer.incompleteReasons.length ||
+            producer.purpose !== "AGENT" ||
+            producer.id !== stored.id ||
+            producer.accountId !== input.accountId ||
+            producer.workspaceId !== input.workspaceId ||
+            producer.sessionId !== input.sessionId ||
+            producer.turnId !== input.turnId ||
+            producer.attemptId !== input.expectedAttemptId ||
+            producer.executionGeneration !== input.expectedExecutionGeneration ||
+            producer.sourceKey !== entry.nativeProducerSourceKey ||
+            producer.requestIndex !== stored.requestIndex
+          )
+            throw new Error("MODEL_OUTPUT_PRODUCER_INEXACT");
+          sourceBasis = {
+            kind: "HISTORY_ROW",
+            parents: [
+              { owner: "model_call_source_receipts", id: producer.id, sha256: producer.digest },
+            ],
+          };
         }
+        expected.push({
+          position: entry.position,
+          ...(sourceBasis ? { sourceBasis } : {}),
+          item: canonicalizePersistedHistoryItem(entry.item, input.modelToolOutputTruncationTokens),
+        });
+      }
+      const savedFields = {
+        position: schema.sessionHistoryItems.position,
+        sourceBasis: schema.sessionHistoryItems.sourceBasis,
+        turnId: schema.sessionHistoryItems.turnId,
+        // The schema reads ordered JSON, not the legacy JSONB projection.
+        item: schema.sessionHistoryItems.item,
+        itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
+      };
+      const inserted =
+        expected.length > 0
+          ? await tx
+              .insert(schema.sessionHistoryItems)
+              .values(
+                withLosslessContentWriteVersion(
+                  expected.map((entry) => ({
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: input.turnId,
+                    position: entry.position,
+                    item: entry.item,
+                    ...(entry.sourceBasis ? { sourceBasis: entry.sourceBasis } : {}),
+                  })),
+                  "item",
+                  "itemCodecVersion",
+                ),
+              )
+              .onConflictDoNothing({
+                target: [
+                  schema.sessionHistoryItems.workspaceId,
+                  schema.sessionHistoryItems.sessionId,
+                  schema.sessionHistoryItems.position,
+                ],
+              })
+              .returning(savedFields)
+          : [];
+      const byPosition = new Map(inserted.map((row) => [row.position, row]));
+      const conflictingPositions = [
+        ...new Set(
+          expected
+            .filter((entry) => !byPosition.has(entry.position))
+            .map((entry) => entry.position),
+        ),
+      ];
+      // RETURNING contains the stored fresh rows. Only position conflicts
+      // need another read; every row still receives the exact comparison.
+      if (conflictingPositions.length > 0) {
+        const existing = await tx
+          .select(savedFields)
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+              inArray(schema.sessionHistoryItems.position, conflictingPositions),
+            ),
+          );
+        for (const row of existing) byPosition.set(row.position, row);
+      }
+      // A position conflict is idempotent only when the exact conversation
+      // item is already there. Never acknowledge a different item as saved.
+      for (const entry of expected) {
+        const row = byPosition.get(entry.position);
+        if (
+          !row ||
+          row.turnId !== input.turnId ||
+          !isDeepStrictEqual(
+            fromPostgresLosslessJson(row.item, row.itemCodecVersion),
+            entry.item,
+          ) ||
+          (entry.sourceBasis !== undefined &&
+            !isDeepStrictEqual(row.sourceBasis, entry.sourceBasis))
+        ) {
+          throw new Error(
+            `Conversation history persistence conflict at position ${entry.position}`,
+          );
+        }
+      }
       if (input.completedToolCallIds?.length) {
         await clearDurablePendingSessionToolCallsInTransaction(
           tx,
@@ -40109,7 +40372,7 @@ function pendingToolCallItemsEqual(left: unknown, right: unknown): boolean {
 export async function registerPendingSessionToolCallInTransaction(
   tx: Database,
   input: PendingSessionToolCallInput,
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; registered: boolean }> {
   assertPendingToolCallCheckpointScope(input, fence);
   const inserted = await tx
@@ -40197,7 +40460,7 @@ export async function registerPendingSessionToolCallInTransaction(
 
 function assertPendingToolCallCheckpointScope(
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem">,
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): void {
   if (
     fence.workspace.id !== input.workspaceId ||
@@ -40278,6 +40541,7 @@ async function registerPendingSessionToolCallsOnce(
               turnId: first.turnId,
               executionGeneration: first.executionGeneration,
               attemptId: first.attemptId,
+              rowProjection: "event",
             });
             if (!fence.allowed) return { accepted: false, registeredCallIds: [] as string[] };
             assertPendingToolCallCheckpointScope(first, fence);
@@ -40296,7 +40560,8 @@ async function registerPendingSessionToolCallsOnce(
                       callId: input.callId,
                       callType: input.callType,
                       callItem: input.callItem,
-                      modelToolOutputTruncationTokens: input.modelToolOutputTruncationTokens ?? null,
+                      modelToolOutputTruncationTokens:
+                        input.modelToolOutputTruncationTokens ?? null,
                     },
                     "callItem",
                     "callItemCodecVersion",
@@ -40423,7 +40688,7 @@ export async function recordPendingSessionToolCallResultInTransaction(
       requestDigest: string;
     };
   },
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; recorded: boolean }> {
   assertPendingToolCallCheckpointScope(input, fence);
   const [pending] = await tx
@@ -40544,7 +40809,7 @@ export async function recordPendingSessionToolCallResult(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     { stage: "session_pending_tool_call_result", correlationId: input.callId },
     async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return { accepted: false, recorded: false };
       return await recordPendingSessionToolCallResultInTransaction(tx, input, fence);
     },
@@ -40708,7 +40973,7 @@ export async function clearDurablePendingSessionToolCallsInTransaction(
   input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
     callIds: string[];
   },
-  fence: Extract<TurnAttemptFenceResult, { allowed: true }>,
+  fence: Extract<TurnAttemptEventFenceResult, { allowed: true }>,
 ): Promise<{ accepted: boolean; cleared: number }> {
   assertPendingToolCallCheckpointScope(input, fence);
   if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
@@ -40743,7 +41008,7 @@ export async function clearDurablePendingSessionToolCalls(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, input);
+      const fence = await lockTurnAttemptWriteFenceTx(tx, { ...input, rowProjection: "event" });
       if (!fence.allowed) return { accepted: false, cleared: 0 };
       return await clearDurablePendingSessionToolCallsInTransaction(tx, input, fence);
     },
@@ -40860,7 +41125,7 @@ export async function getActiveSessionHistoryItems(
 ): Promise<
   Array<{
     id: string;
-    sourceSha256?:string;
+    sourceSha256?: string;
     position: number;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt: Date | null;
@@ -40870,7 +41135,7 @@ export async function getActiveSessionHistoryItems(
     const rows = await scopedDb
       .select({
         id: schema.sessionHistoryItems.id,
-            sourceSha256:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
+        sourceSha256: sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
         position: schema.sessionHistoryItems.position,
         item: schema.sessionHistoryItems.item,
         itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
@@ -40961,7 +41226,7 @@ export async function getActiveSessionHistoryItemsPaged(
 ): Promise<
   Array<{
     id: string;
-    sourceSha256?:string;
+    sourceSha256?: string;
     position: number;
     item: Record<string, unknown>;
     providerArtifactInvalidatedAt: Date | null;
@@ -41106,7 +41371,7 @@ export async function getActiveSessionHistoryItemsPaged(
 
       const rows: Array<{
         id: string;
-        sourceSha256?:string;
+        sourceSha256?: string;
         position: number;
         item: Record<string, unknown>;
         providerArtifactInvalidatedAt: Date | null;
@@ -41115,7 +41380,7 @@ export async function getActiveSessionHistoryItemsPaged(
       for (;;) {
         const page: Array<{
           id: string;
-          sourceSha256?:string;
+          sourceSha256?: string;
           position: number;
           item: Record<string, unknown>;
           itemCodecVersion: number | null;
@@ -41123,7 +41388,7 @@ export async function getActiveSessionHistoryItemsPaged(
         }> = await scopedDb
           .select({
             id: schema.sessionHistoryItems.id,
-            sourceSha256:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
+            sourceSha256: sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
             position: schema.sessionHistoryItems.position,
             item: schema.sessionHistoryItems.item,
             itemCodecVersion: schema.sessionHistoryItems.itemCodecVersion,
@@ -41343,8 +41608,8 @@ export async function applyContextCompaction(
     summarySourceIds?: readonly string[];
     /** Exact successful COMPACTION request key from the installed call owner; never latest-per-attempt. */
     summaryModelSourceKey?: string;
-    replacementSourceIds?: readonly (string|null)[];
-    trailingSourceIds?: readonly (string|null)[];
+    replacementSourceIds?: readonly (string | null)[];
+    trailingSourceIds?: readonly (string | null)[];
     trailingItems?: Array<Record<string, unknown>>;
     clearRequestedCompaction?: boolean;
     eventPayload?: Record<string, unknown>;
@@ -41365,24 +41630,77 @@ export async function applyContextCompaction(
         if (!fence.allowed) {
           return { applied: false as const, reason: fence.reason };
         }
-        const sourceRows = await tx.select({id:schema.sessionHistoryItems.id,item:schema.sessionHistoryItems.item,
-          sha256:sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`})
-          .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,input.accountId),eq(schema.sessionHistoryItems.workspaceId,input.workspaceId),eq(schema.sessionHistoryItems.sessionId,input.sessionId),eq(schema.sessionHistoryItems.active,true))).orderBy(schema.sessionHistoryItems.position);
-        const sourceRef = (row:typeof sourceRows[number]) => ({owner:"session_history_items",id:row.id,sha256:row.sha256});
-        const summaryParents = input.summarySourceIds?.map(id=>sourceRows.find(row=>row.id===id)).filter((row):row is typeof sourceRows[number]=>row!==undefined) ?? [];
-        if(input.summarySourceIds && summaryParents.length!==input.summarySourceIds.length) throw new Error("COMPACTION_SOURCE_ROW_UNAVAILABLE");
-        let summaryCallParent:{owner:string;id:string;sha256:string}|undefined;
-        if(input.summaryModelSourceKey!==undefined) {
-          const [stored]=await tx.select().from(schema.modelCallSourceReceipts).where(and(eq(schema.modelCallSourceReceipts.accountId,input.accountId),eq(schema.modelCallSourceReceipts.workspaceId,input.workspaceId),eq(schema.modelCallSourceReceipts.sessionId,input.sessionId),eq(schema.modelCallSourceReceipts.turnId,input.turnId),eq(schema.modelCallSourceReceipts.attemptId,input.expectedAttemptId),eq(schema.modelCallSourceReceipts.executionGeneration,input.expectedExecutionGeneration),eq(schema.modelCallSourceReceipts.sourceKey,input.summaryModelSourceKey))).limit(1);
-          if(!stored)throw new Error("COMPACTION_SOURCE_RECEIPT_UNAVAILABLE");
-          const receipt=validatedStoredModelCallSourceReceipt(stored);
-          if(receipt.id!==stored.id || receipt.purpose!=="COMPACTION" || receipt.sourceKey!==input.summaryModelSourceKey || receipt.accountId!==input.accountId || receipt.workspaceId!==input.workspaceId || receipt.sessionId!==input.sessionId || receipt.turnId!==input.turnId || receipt.attemptId!==input.expectedAttemptId || receipt.executionGeneration!==input.expectedExecutionGeneration)throw new Error("COMPACTION_SOURCE_RECEIPT_MISMATCH");
-          summaryCallParent={owner:"model_call_source_receipts",id:receipt.id,sha256:receipt.digest};
+        const sourceRows = await tx
+          .select({
+            id: schema.sessionHistoryItems.id,
+            item: schema.sessionHistoryItems.item,
+            sha256: sql<string>`encode(sha256(convert_to(${schema.sessionHistoryItems.item}::text,'UTF8')),'hex')`,
+          })
+          .from(schema.sessionHistoryItems)
+          .where(
+            and(
+              eq(schema.sessionHistoryItems.accountId, input.accountId),
+              eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
+              eq(schema.sessionHistoryItems.sessionId, input.sessionId),
+              eq(schema.sessionHistoryItems.active, true),
+            ),
+          )
+          .orderBy(schema.sessionHistoryItems.position);
+        const sourceRef = (row: (typeof sourceRows)[number]) => ({
+          owner: "session_history_items",
+          id: row.id,
+          sha256: row.sha256,
+        });
+        const summaryParents =
+          input.summarySourceIds
+            ?.map((id) => sourceRows.find((row) => row.id === id))
+            .filter((row): row is (typeof sourceRows)[number] => row !== undefined) ?? [];
+        if (input.summarySourceIds && summaryParents.length !== input.summarySourceIds.length)
+          throw new Error("COMPACTION_SOURCE_ROW_UNAVAILABLE");
+        let summaryCallParent: { owner: string; id: string; sha256: string } | undefined;
+        if (input.summaryModelSourceKey !== undefined) {
+          const [stored] = await tx
+            .select()
+            .from(schema.modelCallSourceReceipts)
+            .where(
+              and(
+                eq(schema.modelCallSourceReceipts.accountId, input.accountId),
+                eq(schema.modelCallSourceReceipts.workspaceId, input.workspaceId),
+                eq(schema.modelCallSourceReceipts.sessionId, input.sessionId),
+                eq(schema.modelCallSourceReceipts.turnId, input.turnId),
+                eq(schema.modelCallSourceReceipts.attemptId, input.expectedAttemptId),
+                eq(
+                  schema.modelCallSourceReceipts.executionGeneration,
+                  input.expectedExecutionGeneration,
+                ),
+                eq(schema.modelCallSourceReceipts.sourceKey, input.summaryModelSourceKey),
+              ),
+            )
+            .limit(1);
+          if (!stored) throw new Error("COMPACTION_SOURCE_RECEIPT_UNAVAILABLE");
+          const receipt = validatedStoredModelCallSourceReceipt(stored);
+          if (
+            receipt.id !== stored.id ||
+            receipt.purpose !== "COMPACTION" ||
+            receipt.sourceKey !== input.summaryModelSourceKey ||
+            receipt.accountId !== input.accountId ||
+            receipt.workspaceId !== input.workspaceId ||
+            receipt.sessionId !== input.sessionId ||
+            receipt.turnId !== input.turnId ||
+            receipt.attemptId !== input.expectedAttemptId ||
+            receipt.executionGeneration !== input.expectedExecutionGeneration
+          )
+            throw new Error("COMPACTION_SOURCE_RECEIPT_MISMATCH");
+          summaryCallParent = {
+            owner: "model_call_source_receipts",
+            id: receipt.id,
+            sha256: receipt.digest,
+          };
         }
-        const copiedBasis = (sourceId:string|null|undefined) => {
-          const source=sourceRows.find(row=>row.id===sourceId);
-          if(sourceId && !source) throw new Error("COMPACTION_SOURCE_ROW_UNAVAILABLE");
-          return {kind:"COPIED" as const,parents:source?[sourceRef(source)]:[]};
+        const copiedBasis = (sourceId: string | null | undefined) => {
+          const source = sourceRows.find((row) => row.id === sourceId);
+          if (sourceId && !source) throw new Error("COMPACTION_SOURCE_ROW_UNAVAILABLE");
+          return { kind: "COPIED" as const, parents: source ? [sourceRef(source)] : [] };
         };
         const [{ maxPosition } = { maxPosition: -1 }] = await tx
           .select({
@@ -41450,7 +41768,13 @@ export async function applyContextCompaction(
               turnId: input.turnId,
               position: summaryPosition,
               item: omitOutputOnlyHistoryItemFields(input.summaryItem),
-              sourceBasis:{kind:"SUMMARY",parents:[...summaryParents.map(sourceRef),...(summaryCallParent?[summaryCallParent]:[])]},
+              sourceBasis: {
+                kind: "SUMMARY",
+                parents: [
+                  ...summaryParents.map(sourceRef),
+                  ...(summaryCallParent ? [summaryCallParent] : []),
+                ],
+              },
               active: true,
             },
             "item",
@@ -68744,15 +69068,21 @@ export async function setSessionGoalStatus(
       throw new Error(`Session goal not found: ${sessionId}`);
     }
     // Compare under the canonical goal lock, before callbacks, events or wakes.
-    if (input.expectedGoal && (existing.id !== input.expectedGoal.id
-      || existing.version !== input.expectedGoal.version
-      || existing.pausedReason !== input.expectedGoal.pausedReason)) {
+    if (
+      input.expectedGoal &&
+      (existing.id !== input.expectedGoal.id ||
+        existing.version !== input.expectedGoal.version ||
+        existing.pausedReason !== input.expectedGoal.pausedReason)
+    ) {
       throw new SessionControlConflictError("session goal status guard is stale");
     }
     // An explicit operator Pause claims an agent/system pause. Repeating that
     // operator Pause is unchanged; an agent cannot steal it back.
-    const operatorPauseClaim = input.status === "paused" && existing.status === "paused"
-      && input.pausedReason === "api" && existing.pausedReason !== "api";
+    const operatorPauseClaim =
+      input.status === "paused" &&
+      existing.status === "paused" &&
+      input.pausedReason === "api" &&
+      existing.pausedReason !== "api";
     if (existing.status === input.status && !operatorPauseClaim) {
       return {
         goal: mapSessionGoal(existing),
@@ -70487,7 +70817,11 @@ export async function initializeSessionStartAtomically(
                     payload: {
                       ...initialPayload,
                       ...(Array.isArray(session.metadata?.nativeInitialMessageModelSourceRefs)
-                        ? { messageModelSourceRefs: session.metadata.nativeInitialMessageModelSourceRefs } : {}),
+                        ? {
+                            messageModelSourceRefs:
+                              session.metadata.nativeInitialMessageModelSourceRefs,
+                          }
+                        : {}),
                       ...(session.initialModelContext
                         ? { modelContext: session.initialModelContext }
                         : {}),
@@ -70666,9 +71000,15 @@ export async function initializeSessionStartAtomically(
                   sandboxBackend: session.sandboxBackend,
                   sandboxOs: session.sandboxOs,
                   metadata: {
-                    ...(input.turnExecutionPolicy ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy) : {}),
+                    ...(input.turnExecutionPolicy
+                      ? metadataWithTurnExecutionPolicyV1({}, input.turnExecutionPolicy)
+                      : {}),
                     ...(Array.isArray(session.metadata?.nativeInitialMessageModelSourceRefs)
-                      ? { nativeMessageModelSourceRefs: session.metadata.nativeInitialMessageModelSourceRefs } : {}),
+                      ? {
+                          nativeMessageModelSourceRefs:
+                            session.metadata.nativeInitialMessageModelSourceRefs,
+                        }
+                      : {}),
                   },
                   lineage: {},
                   ...initiatorColumns(creator),
@@ -75336,24 +75676,62 @@ export async function claimSessionWorkForAttempt(
         const historyItems = [];
         for (const [index, historyTurn] of historyTurns.entries()) {
           const importedSourceBasis = await importedHistorySourceBasisTx(tx, {
-            accountId: session.accountId, workspaceId, context: historyTurn.modelContext, metadata: session.metadata,
+            accountId: session.accountId,
+            workspaceId,
+            context: historyTurn.modelContext,
+            metadata: session.metadata,
           });
-          const messageHistoryItem = omitOutputOnlyHistoryItemFields(durableUserHistoryItem(
-            fromPostgresLosslessText(historyTurn.prompt, historyTurn.promptCodecVersion),
-            Array.isArray(historyTurn.resources) ? (historyTurn.resources as ResourceRef[]) : [],
-            TimelineAnnotations.parse(historyTurn.annotations), historyTurn.modelContext,
-            SessionGoalSnapshot.parse(historyTurn.goalSnapshot), historyTurn.createdAt, humanTurnSenderLabel(historyTurn),
-          ));
-          const messageDigest = createHash("sha256").update(JSON.stringify(messageHistoryItem)).digest("hex");
-          const messageModelSourceRefs = ModelSourceRef.array().max(16384).parse(historyTurn.metadata?.nativeMessageModelSourceRefs ?? []);
-          const messageSourceBasis = messageModelSourceRefs.length > 0
-            ? { ...(importedSourceBasis ?? { kind: "INSTRUCTION" as const, parents: [{ owner: "native.runtime.artifact", id: `host-message:${historyTurn.id}:${messageDigest}`, sha256: messageDigest }] }),
-                retainedSources: [...(importedSourceBasis?.retainedSources ?? []), ...messageModelSourceRefs] }
-            : importedSourceBasis;
-          historyItems.push(withLosslessContentWriteVersion({
-            accountId: session.accountId, workspaceId, sessionId, turnId: historyTurn.id,
-            position: Number(historyPosition) + index, ...(messageSourceBasis ? { sourceBasis: messageSourceBasis } : {}), item: messageHistoryItem,
-          }, "item", "itemCodecVersion"));
+          const messageHistoryItem = omitOutputOnlyHistoryItemFields(
+            durableUserHistoryItem(
+              fromPostgresLosslessText(historyTurn.prompt, historyTurn.promptCodecVersion),
+              Array.isArray(historyTurn.resources) ? (historyTurn.resources as ResourceRef[]) : [],
+              TimelineAnnotations.parse(historyTurn.annotations),
+              historyTurn.modelContext,
+              SessionGoalSnapshot.parse(historyTurn.goalSnapshot),
+              historyTurn.createdAt,
+              humanTurnSenderLabel(historyTurn),
+            ),
+          );
+          const messageDigest = createHash("sha256")
+            .update(JSON.stringify(messageHistoryItem))
+            .digest("hex");
+          const messageModelSourceRefs = ModelSourceRef.array()
+            .max(16384)
+            .parse(historyTurn.metadata?.nativeMessageModelSourceRefs ?? []);
+          const messageSourceBasis =
+            messageModelSourceRefs.length > 0
+              ? {
+                  ...(importedSourceBasis ?? {
+                    kind: "INSTRUCTION" as const,
+                    parents: [
+                      {
+                        owner: "native.runtime.artifact",
+                        id: `host-message:${historyTurn.id}:${messageDigest}`,
+                        sha256: messageDigest,
+                      },
+                    ],
+                  }),
+                  retainedSources: [
+                    ...(importedSourceBasis?.retainedSources ?? []),
+                    ...messageModelSourceRefs,
+                  ],
+                }
+              : importedSourceBasis;
+          historyItems.push(
+            withLosslessContentWriteVersion(
+              {
+                accountId: session.accountId,
+                workspaceId,
+                sessionId,
+                turnId: historyTurn.id,
+                position: Number(historyPosition) + index,
+                ...(messageSourceBasis ? { sourceBasis: messageSourceBasis } : {}),
+                item: messageHistoryItem,
+              },
+              "item",
+              "itemCodecVersion",
+            ),
+          );
         }
         await tx.insert(schema.sessionHistoryItems).values(historyItems);
         const consumed = queuedBatch.slice(0, -1);
@@ -81967,7 +82345,8 @@ export async function requestSessionTurnRecovery(
           };
         }
       }
-      if (input.modelFallback && input.subscriptionServingTarget) throw new Error("Recovery cannot change both declared and subscription serving routes");
+      if (input.modelFallback && input.subscriptionServingTarget)
+        throw new Error("Recovery cannot change both declared and subscription serving routes");
       // F-2: the declared fallback, checked against the turn's own frozen declaration before anything changes.
       let modelFallback: {
         columns: { model: string; reasoningEffort: string; latencyMode: string };
@@ -82105,66 +82484,71 @@ export async function requestSessionTurnRecovery(
         now,
       );
       const nextRecoveryMetadata = {
-            ...recoveryMetadata,
-            ...(input.persistentModelTransportHttpOnly
-              ? { persistentModelTransportHttpOnly: true }
-              : {}),
-            ...(retryNotBefore
-              ? {
-                  [RECOVERY_RETRY_METADATA_KEY]: {
-                    version: 1,
-                    notBefore: retryNotBefore.toISOString(),
-                    afterSequence: sequence,
-                  } satisfies SessionTurnRecoveryRetry,
-                }
-              : {}),
-            ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
-            ...(input.subscriptionLeaseBusy
-              ? {
-                  subscriptionLeaseBusy: {
-                    startedAt: input.subscriptionLeaseBusy.startedAt,
-                    executionGeneration: input.subscriptionLeaseBusy.executionGeneration,
-                  },
-                }
-              : {}),
-            ...(input.sandboxSetupOutcomeUnknown
-              ? {
-                  [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
-                    version: 1,
-                    turnId: input.turnId,
-                    attemptId: input.attemptId,
-                    reason: "sandbox_command_start_outcome_unknown",
-                  } satisfies SandboxSetupOutcomeUnknown,
-                }
-              : {}),
-            ...(input.sandboxSetupRecoveryExhausted
-              ? {
-                  [SANDBOX_SETUP_RECOVERY_EXHAUSTED_METADATA_KEY]: {
-                    version: 1,
-                    turnId: input.turnId,
-                    attemptId: input.attemptId,
-                    reason: "sandbox_command_start_recovery_exhausted",
-                    setupOutcome: "not_started",
-                    providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
-                  } satisfies SandboxSetupRecoveryExhausted,
-                }
-              : {}),
-            ...(input.providerRecoveryCount !== undefined
-              ? {
-                  providerRecoveryCount: input.providerRecoveryCount,
-                  providerRecoveryStartedAt:
-                    providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
-                    typeof recoveryMetadata.providerRecoveryStartedAt === "string"
-                      ? recoveryMetadata.providerRecoveryStartedAt
-                      : now.toISOString(),
-                  providerRecoveryReason: input.reason,
-                }
-              : {}),
-          };
+        ...recoveryMetadata,
+        ...(input.persistentModelTransportHttpOnly
+          ? { persistentModelTransportHttpOnly: true }
+          : {}),
+        ...(retryNotBefore
+          ? {
+              [RECOVERY_RETRY_METADATA_KEY]: {
+                version: 1,
+                notBefore: retryNotBefore.toISOString(),
+                afterSequence: sequence,
+              } satisfies SessionTurnRecoveryRetry,
+            }
+          : {}),
+        ...(servingTarget ? { turnPendingServingPolicyV1: servingTarget } : {}),
+        ...(input.subscriptionLeaseBusy
+          ? {
+              subscriptionLeaseBusy: {
+                startedAt: input.subscriptionLeaseBusy.startedAt,
+                executionGeneration: input.subscriptionLeaseBusy.executionGeneration,
+              },
+            }
+          : {}),
+        ...(input.sandboxSetupOutcomeUnknown
+          ? {
+              [SANDBOX_SETUP_OUTCOME_UNKNOWN_METADATA_KEY]: {
+                version: 1,
+                turnId: input.turnId,
+                attemptId: input.attemptId,
+                reason: "sandbox_command_start_outcome_unknown",
+              } satisfies SandboxSetupOutcomeUnknown,
+            }
+          : {}),
+        ...(input.sandboxSetupRecoveryExhausted
+          ? {
+              [SANDBOX_SETUP_RECOVERY_EXHAUSTED_METADATA_KEY]: {
+                version: 1,
+                turnId: input.turnId,
+                attemptId: input.attemptId,
+                reason: "sandbox_command_start_recovery_exhausted",
+                setupOutcome: "not_started",
+                providerRecoveryCount: SANDBOX_SETUP_RECOVERY_LIMIT,
+              } satisfies SandboxSetupRecoveryExhausted,
+            }
+          : {}),
+        ...(input.providerRecoveryCount !== undefined
+          ? {
+              providerRecoveryCount: input.providerRecoveryCount,
+              providerRecoveryStartedAt:
+                providerRecoveryCountFromTurnMetadata(turn.metadata) > 0 &&
+                typeof recoveryMetadata.providerRecoveryStartedAt === "string"
+                  ? recoveryMetadata.providerRecoveryStartedAt
+                  : now.toISOString(),
+              providerRecoveryReason: input.reason,
+            }
+          : {}),
+      };
       const routeRecoveryMetadata = modelFallback
-        ? metadataWithTurnRouteDeclarationV1(metadataWithTurnExecutionPolicyV1(nextRecoveryMetadata, input.modelFallback!.policy), {
-            ...modelFallback.declaration.declaration, executed: "fallback", fallbackReason: input.modelFallback!.reason,
-          })
+        ? metadataWithTurnRouteDeclarationV1(
+            metadataWithTurnExecutionPolicyV1(nextRecoveryMetadata, input.modelFallback!.policy),
+            {
+              ...modelFallback.declaration.declaration,
+              executed: "fallback",
+              fallbackReason: input.modelFallback!.reason,
+            },
+          )
         : nextRecoveryMetadata;
       const [updatedTurn] = await tx
         .update(schema.sessionTurns)
@@ -87065,7 +87449,7 @@ export async function appendSessionEventsForTurnAttempt(
   attemptId: string,
   inputs: AppendEventInput[],
   observer?: SessionEventAppendObserver,
-  mutate?: SessionEventMutation,
+  mutate?: SessionEventMutationInput,
 ): Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -87117,10 +87501,12 @@ export async function appendTurnCapabilityCardOnce(
     executionGeneration,
     attemptId,
     [input],
-    async (tx) => {
-      const [existing] = await rawRows<{ id: string }>(
-        tx,
-        sql`
+    {
+      rowProjection: "event",
+      mutate: async (tx) => {
+        const [existing] = await rawRows<{ id: string }>(
+          tx,
+          sql`
           select id from session_events
           where workspace_id = ${workspaceId}::uuid
             and session_id = ${sessionId}::uuid
@@ -87132,9 +87518,10 @@ export async function appendTurnCapabilityCardOnce(
           order by sequence
           limit 1
         `,
-      );
-      existingEventId = existing?.id ?? null;
-      return existingEventId === null;
+        );
+        existingEventId = existing?.id ?? null;
+        return existingEventId === null;
+      },
     },
   );
   return {
@@ -87233,7 +87620,7 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
   executionGeneration: number,
   attemptId: string,
   inputs: AppendEventInput[],
-  mutate: SessionEventMutation | undefined,
+  mutate: SessionEventMutationInput | undefined,
   observer?: SessionEventAppendObserver,
 ): Promise<{
   events: SessionEvent[];
@@ -87289,10 +87676,10 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                         ? ("no_key_update" as const)
                         : ("key_share" as const),
                   };
-                  // Preserve the full-row callback contract. An event-only
-                  // batch uses the same locks and decisions without copying
-                  // frozen configuration and authority catalogs across the wire.
-                  if (mutate) {
+                  // Preserve plain callbacks' full-row contract. Explicit
+                  // checkpoints use the same fence without copying frozen
+                  // configuration and authority catalogs across the wire.
+                  if (typeof mutate === "function") {
                     const fence = await lockTurnAttemptWriteFenceTx(tx, input);
                     return { fence, applyMutation: () => mutate(tx, fence) };
                   }
@@ -87300,7 +87687,11 @@ export async function mutateAndAppendSessionEventsForTurnAttempt(
                     ...input,
                     rowProjection: "event",
                   });
-                  return { fence, applyMutation: async () => true };
+                  return {
+                    fence,
+                    applyMutation: () =>
+                      mutate ? mutate.mutate(tx, fence) : Promise.resolve(true),
+                  };
                 },
                 ({ fence }) => (fence.allowed ? "ok" : "rejected"),
               );
@@ -87720,26 +88111,29 @@ export async function settleCodemodeOperationWithOutput(
         },
       },
     ],
-    async (tx) =>
-      settlement.state === "completed"
-        ? await completeCodemodeOperationInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            attemptId: input.attemptId,
-            operationId: input.operationId,
-            claimId: input.claimId,
-            result: settlement.result,
-          })
-        : await failCodemodeOperationInTransaction(tx, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            attemptId: input.attemptId,
-            operationId: input.operationId,
-            claimId: input.claimId,
-            state: settlement.state,
-            errorCode: settlement.errorCode,
-            errorMessage: settlement.errorMessage,
-          }),
+    {
+      rowProjection: "event",
+      mutate: async (tx) =>
+        settlement.state === "completed"
+          ? await completeCodemodeOperationInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              operationId: input.operationId,
+              claimId: input.claimId,
+              result: settlement.result,
+            })
+          : await failCodemodeOperationInTransaction(tx, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              attemptId: input.attemptId,
+              operationId: input.operationId,
+              claimId: input.claimId,
+              state: settlement.state,
+              errorCode: settlement.errorCode,
+              errorMessage: settlement.errorMessage,
+            }),
+    },
   );
   return {
     committed: result.mutationApplied,

@@ -2914,6 +2914,7 @@ export class OpenGeniClient {
         ...(listOptions?.excludeClasses?.length
           ? { excludeClasses: listOptions.excludeClasses.join(",") }
           : {}),
+        ...(listOptions?.presentedToolCalls === "include" ? { presentedToolCalls: "include" } : {}),
         ...(options.latest ? { latest: options.latest } : {}),
       }),
       {

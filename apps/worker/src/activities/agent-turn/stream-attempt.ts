@@ -295,7 +295,11 @@ export type TurnStreamAttemptDeps = {
   claimedModelUsageSourceKeys: Set<string>;
   emittedModelUsageSourceKeys: Set<string>;
   modelUsageDispatchId: string;
-  beforeModelCallSourceReceipt: ((request: import("@openai/agents").ModelRequest, purpose?: "AGENT" | "COMPACTION" | "TITLE") => Promise<string>) & Pick<import("@opengeni/runtime").BeforeModelCallSourceReceipt, "beforeProviderDispatch">;
+  beforeModelCallSourceReceipt: ((
+    request: import("@openai/agents").ModelRequest,
+    purpose?: "AGENT" | "COMPACTION" | "TITLE",
+  ) => Promise<string>) &
+    Pick<import("@opengeni/runtime").BeforeModelCallSourceReceipt, "beforeProviderDispatch">;
   workerPreparationStartedAt: number;
   fileDownloadsMaterializedForRun: boolean;
   unavailableSandboxFilesNote: string | undefined;
@@ -446,21 +450,37 @@ export async function runTurnStreamAttempt(
   if (!activeTurnId) {
     throw new Error("Turn id was not initialized");
   }
-  const usageSourceHooks = (callKind: "response" | "compaction" | "session_title", titleRoute?: ReturnType<typeof sessionTitleRoute>) =>
-    createModelCallUsageSourceHooks(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: turn.id,
-      turnAttemptId: input.attemptId,
-      callKind,
-      scope: "call",
-      provider: titleRoute?.resolvedModel?.provider.id ?? resolvedModel?.provider.id ?? settings.openaiProvider,
-      providerApi: titleRoute?.resolvedModel?.provider.api ?? resolvedModel?.provider.api ?? "responses",
-      upstreamProvider: null,
-      model: titleRoute?.usageModelId ?? titleRoute?.resolvedModel?.configured.id ?? resolvedModel?.configured.id ?? turn.model,
-      billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
-    }, claimedModelUsageSourceKeys, beforeModelCallSourceReceipt.beforeProviderDispatch);
+  const usageSourceHooks = (
+    callKind: "response" | "compaction" | "session_title",
+    titleRoute?: ReturnType<typeof sessionTitleRoute>,
+  ) =>
+    createModelCallUsageSourceHooks(
+      db,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        turnAttemptId: input.attemptId,
+        callKind,
+        scope: "call",
+        provider:
+          titleRoute?.resolvedModel?.provider.id ??
+          resolvedModel?.provider.id ??
+          settings.openaiProvider,
+        providerApi:
+          titleRoute?.resolvedModel?.provider.api ?? resolvedModel?.provider.api ?? "responses",
+        upstreamProvider: null,
+        model:
+          titleRoute?.usageModelId ??
+          titleRoute?.resolvedModel?.configured.id ??
+          resolvedModel?.configured.id ??
+          turn.model,
+        billingPath: billingState.chargesOpenGeniCredits ? "opengeni_credits" : "external",
+      },
+      claimedModelUsageSourceKeys,
+      beforeModelCallSourceReceipt.beforeProviderDispatch,
+    );
   const sessionTitleUsageState = createSessionTitleModelUsageEventState(
     claimedModelUsageSourceKeys,
   );
@@ -701,8 +721,8 @@ export async function runTurnStreamAttempt(
   // the first no-response-ID fallback key and suppress a real model call.
   const modelResponseState = createModelResponseEventState(claimedModelUsageSourceKeys);
 
-  const sourceKeysByResponseId=new Map<string,string>();
-  const sourceKeysByResponse=new WeakMap<object,string>();
+  const sourceKeysByResponseId = new Map<string, string>();
+  const sourceKeysByResponse = new WeakMap<object, string>();
   // Text of the newest assistant message any stream of this activity completed
   // durably: the reply a wait-ended human turn records on turn.completed.
   let latestAssistantMessageText: string | null = null;
@@ -911,46 +931,53 @@ export async function runTurnStreamAttempt(
       });
     };
     const ownedEstablished = ownedTurnSandboxForAgent(sandboxState);
-      const settleCapturedModelTerminal = (event: Parameters<typeof processModelResponseTerminalEvent>[0]["event"]) =>
-        processModelResponseTerminalEvent({
-            creditPolicyRevision,
-            event,
-            state: modelResponseState,
-            nativeSourceKey: (responseId,event)=>{
-              if(responseId) return sourceKeysByResponseId.get(responseId);
-              if(event.type!=="raw_model_stream_event") return undefined;
-              const data=event.data as Record<string,unknown>;
-              const response=data.type==="response_done"?data.response:(data.event as Record<string,unknown>|undefined)?.response;
-              return response && typeof response==="object" ? sourceKeysByResponse.get(response) : undefined;
-            },
-            dispatchId: modelUsageDispatchId,
-            settings,
-            db,
-            observability,
-            publish: eventing.publish,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            turnAttemptId: input.attemptId,
-            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-            providerApi: resolvedModel?.provider.api ?? "responses",
-            model: turnExecutionPolicy.productModelId,
-            latencyMode: turnExecutionPolicy.latencyMode,
-            metricProvider: streamProvider,
-            externallyBilled: billingState.isExternallyBilledTurn,
-            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-            countsTowardTokenCap: billingState.countsTowardTokenCap,
-            servingCredentialId: providerTurn.effectiveCodexCredentialId,
-            priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-            emittedSourceKeys: emittedModelUsageSourceKeys,
-            renewLease: () => leases.renewServing("model_usage"),
-            leaseLost: leases.servingLost,
-            leaseLostMessage: "Provider credential lease expired during the active turn",
-            setLastInputTokens: setLastInputTokensFenced,
-            contextContributions: eventing.companyBrainContextContributions,
-            responseTiming: () => streamTiming.completeResponse(),
-          });
+    const settleCapturedModelTerminal = (
+      event: Parameters<typeof processModelResponseTerminalEvent>[0]["event"],
+    ) =>
+      processModelResponseTerminalEvent({
+        creditPolicyRevision,
+        event,
+        state: modelResponseState,
+        nativeSourceKey: (responseId, event) => {
+          if (responseId) return sourceKeysByResponseId.get(responseId);
+          if (event.type !== "raw_model_stream_event") return undefined;
+          const data = event.data as Record<string, unknown>;
+          const response =
+            data.type === "response_done"
+              ? data.response
+              : (data.event as Record<string, unknown> | undefined)?.response;
+          return response && typeof response === "object"
+            ? sourceKeysByResponse.get(response)
+            : undefined;
+        },
+        dispatchId: modelUsageDispatchId,
+        settings,
+        db,
+        observability,
+        publish: eventing.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: activeTurnId,
+        turnAttemptId: input.attemptId,
+        provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+        providerApi: resolvedModel?.provider.api ?? "responses",
+        model: turnExecutionPolicy.productModelId,
+        latencyMode: turnExecutionPolicy.latencyMode,
+        metricProvider: streamProvider,
+        externallyBilled: billingState.isExternallyBilledTurn,
+        chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+        countsTowardTokenCap: billingState.countsTowardTokenCap,
+        servingCredentialId: providerTurn.effectiveCodexCredentialId,
+        priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+        emittedSourceKeys: emittedModelUsageSourceKeys,
+        renewLease: () => leases.renewServing("model_usage"),
+        leaseLost: leases.servingLost,
+        leaseLostMessage: "Provider credential lease expired during the active turn",
+        setLastInputTokens: setLastInputTokensFenced,
+        contextContributions: eventing.companyBrainContextContributions,
+        responseTiming: () => streamTiming.completeResponse(),
+      });
 
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
       const eagerResolvedSandbox = sandboxState.resolvedSandbox;
@@ -1101,22 +1128,32 @@ export async function runTurnStreamAttempt(
           signal: runtimeCancellationSignal,
           ...(turnRouteWatch ? { callModelInputFilter: turnRouteWatch.filter } : {}),
           sandboxEnvironment,
-          beforeModelCallSourceReceipt: Object.assign(async (request: import("@openai/agents").ModelRequest) => {
-            await checkpointBeforeProviderDispatch();
-            return await beforeModelCallSourceReceipt(request,"AGENT");
-          }, usageSourceHooks("response")),
-          onModelToolSource:async source=>historySink.recordModelToolSource(source),
-          onModelCallSourceCompleted: async (sourceKey,responseId,response,restoreHistorySources) => {
+          beforeModelCallSourceReceipt: Object.assign(
+            async (request: import("@openai/agents").ModelRequest) => {
+              await checkpointBeforeProviderDispatch();
+              return await beforeModelCallSourceReceipt(request, "AGENT");
+            },
+            usageSourceHooks("response"),
+          ),
+          onModelToolSource: async (source) => historySink.recordModelToolSource(source),
+          onModelCallSourceCompleted: async (
+            sourceKey,
+            responseId,
+            response,
+            restoreHistorySources,
+          ) => {
             historySink.recordModelSourceRestorer(restoreHistorySources);
-            sourceKeysByResponse.set(response,sourceKey);
-            if (responseId) sourceKeysByResponseId.set(responseId,sourceKey);
+            sourceKeysByResponse.set(response, sourceKey);
+            if (responseId) sourceKeysByResponseId.set(responseId, sourceKey);
             // The transport preserves a bounded failed terminal before the SDK
             // throws. Account through the same awaited owner as ordinary finals.
             if ((response as { status?: unknown }).status === "failed") {
-              await settleCapturedModelTerminal({ type: "raw_model_stream_event", source: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
-                data: { type: "model", event: { type: "response.failed", response } } } as Parameters<typeof processModelResponseTerminalEvent>[0]["event"]);
+              await settleCapturedModelTerminal({
+                type: "raw_model_stream_event",
+                source: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+                data: { type: "model", event: { type: "response.failed", response } },
+              } as Parameters<typeof processModelResponseTerminalEvent>[0]["event"]);
             }
-
           },
           onModelVisibleContext: async (snapshot) => {
             await persistModelContextSnapshot(db, {
@@ -1294,7 +1331,7 @@ export async function runTurnStreamAttempt(
     }
     eventing.toolPathPhases = new ToolPathPhaseTimer(toolPathPhaseMetricObserver(observability));
     const toolPathPhases = eventing.toolPathPhases;
-    eventing.batcher = createRuntimeBatcher<SessionEventMutation>(
+    eventing.batcher = createRuntimeBatcher<SessionEventMutation<"event">>(
       async (events, mutations = []) => {
         await eventing.publish!(
           events,
@@ -1362,7 +1399,9 @@ export async function runTurnStreamAttempt(
 
     // Post-durability work of tool events whose append was deferred to the
     // batch's flushing append. Runs only after that append returns.
-    let deferredToolEventReleases: Array<Parameters<typeof releaseMcpResultCustomDataFromSdkEvent>[0]> = [];
+    let deferredToolEventReleases: Array<
+      Parameters<typeof releaseMcpResultCustomDataFromSdkEvent>[0]
+    > = [];
     let deferredDurableToolCallIds: string[] = [];
     const closeStreamWaitAdmission = eventing.preparedTools?.inputWaitYield?.captureStreamClose();
     let streamDone = false;
@@ -1467,7 +1506,9 @@ export async function runTurnStreamAttempt(
           streamSawPerResponseUsage ||= responseResult.usageReported;
           currentToolBatchCallIds = new Set<string>();
           currentToolBatchCompletedCallIds = new Set<string>();
-          await toolPathPhases.measure("terminal_history_reconciliation", () => historySink.reconcileConversationTruth());
+          await toolPathPhases.measure("terminal_history_reconciliation", () =>
+            historySink.reconcileConversationTruth(),
+          );
           const responseSettledAt = performance.now();
           recordModelStepPhase(observability, {
             provider: streamProvider,
@@ -1499,7 +1540,7 @@ export async function runTurnStreamAttempt(
           ? compactGeneratedImageSdkEvent(next.value, generatedImageReceipt)
           : next.value;
         const pendingToolCall = pendingToolCallFromSdkEvent(durableSdkEvent);
-        let toolCheckpoint: SessionEventMutation | undefined;
+        let toolCheckpoint: SessionEventMutation<"event"> | undefined;
         if (pendingToolCall) {
           // Observe already-streamed siblings before deciding the atomic flush.
           // Each sibling keeps its own checkpoint in that same append.
@@ -1840,12 +1881,16 @@ export async function runTurnStreamAttempt(
             // sibling's append. The batch's last output (which settles the
             // stable batch) flushes every deferred output in order.
             // Video workflow start follows this output's committed acceptance.
-            const defer = !videoGenerationAcceptancesByCallId.has(completedToolCall?.callId ?? "") &&
-              !stableToolCallIdsToClear && isToolOutputSdkEvent(streamReader.peek());
+            const defer =
+              !videoGenerationAcceptancesByCallId.has(completedToolCall?.callId ?? "") &&
+              !stableToolCallIdsToClear &&
+              isToolOutputSdkEvent(streamReader.peek());
             deferredToolEventAppend ||= defer;
             await withMcpCallIdentity((event.payload as { id: string }).id, () =>
               measureMcpPhase("event_persistence", () =>
-                toolPathPhases.measureStructuralPublication(() => batcher.push(event, checkpoint, { defer })),
+                toolPathPhases.measureStructuralPublication(() =>
+                  batcher.push(event, checkpoint, { defer }),
+                ),
               ),
             );
           } else if (event.type === "agent.toolCall.created") {
@@ -1858,7 +1903,9 @@ export async function runTurnStreamAttempt(
             // Every call of the batch is registered; its `created` events share one append.
             const defer = isToolCalledSdkEvent(streamReader.peek());
             deferredToolEventAppend ||= defer;
-            await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event, checkpoint, { defer }));
+            await toolPathPhases.measureStructuralPublication(() =>
+              eventing.batcher!.push(event, checkpoint, { defer }),
+            );
           } else {
             await eventing.batcher.push(event, checkpoint);
           }
@@ -1923,7 +1970,8 @@ export async function runTurnStreamAttempt(
         // push returns. The complete result is now retained in the event
         // row and pending-call recovery receipt, so release only our
         // duplicate live SDK marker before a long turn accumulates it.
-        for (const released of deferredToolEventReleases) releaseMcpResultCustomDataFromSdkEvent(released);
+        for (const released of deferredToolEventReleases)
+          releaseMcpResultCustomDataFromSdkEvent(released);
         deferredToolEventReleases = [];
         releaseMcpResultCustomDataFromSdkEvent(durableSdkEvent);
         if (stableToolCallIdsToClear) {
@@ -2637,39 +2685,41 @@ export async function runTurnStreamAttempt(
     !runtimeCancellationSignal.aborted
   ) {
     titleCreditPolicyRevision = creditPolicyRevision;
-    const settleSessionTitleUsage = async (generated: import("@opengeni/runtime").GeneratedSessionTitle) => {
-        if (generated.usage || generated.sourceKey) {
-          await processSessionTitleModelUsageEvent({
-            usage: generated.usage,
-            ...(generated.outcome ? { outcome: generated.outcome } : {}),
-            creditPolicyRevision: titleCreditPolicyRevision,
-            ...(generated.sourceKey?{nativeSourceKey:generated.sourceKey}:{}),
-            state: sessionTitleUsageState,
-            dispatchId: modelUsageDispatchId,
-            settings,
-            db,
-            observability,
-            publish: eventing.publish,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            turnAttemptId: input.attemptId,
-            provider: titleRoute.resolvedModel?.provider.id ?? settings.openaiProvider,
-            providerApi: titleRoute.resolvedModel?.provider.api ?? "responses",
-            model: titleRoute.usageModelId ?? turnExecutionPolicy.productModelId,
-            externallyBilled: billingState.isExternallyBilledTurn,
-            chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
-            countsTowardTokenCap: billingState.countsTowardTokenCap,
-            servingCredentialId: providerTurn.effectiveCodexCredentialId,
-            priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
-            emittedSourceKeys: emittedModelUsageSourceKeys,
-            renewLease: () => leases.renewServing("model_usage"),
-            leaseLost: leases.servingLost,
-            leaseLostMessage: "Provider credential lease expired during session title generation",
-          });
-        }
-      };
+    const settleSessionTitleUsage = async (
+      generated: import("@opengeni/runtime").GeneratedSessionTitle,
+    ) => {
+      if (generated.usage || generated.sourceKey) {
+        await processSessionTitleModelUsageEvent({
+          usage: generated.usage,
+          ...(generated.outcome ? { outcome: generated.outcome } : {}),
+          creditPolicyRevision: titleCreditPolicyRevision,
+          ...(generated.sourceKey ? { nativeSourceKey: generated.sourceKey } : {}),
+          state: sessionTitleUsageState,
+          dispatchId: modelUsageDispatchId,
+          settings,
+          db,
+          observability,
+          publish: eventing.publish,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          turnAttemptId: input.attemptId,
+          provider: titleRoute.resolvedModel?.provider.id ?? settings.openaiProvider,
+          providerApi: titleRoute.resolvedModel?.provider.api ?? "responses",
+          model: titleRoute.usageModelId ?? turnExecutionPolicy.productModelId,
+          externallyBilled: billingState.isExternallyBilledTurn,
+          chargesOpenGeniCredits: billingState.chargesOpenGeniCredits,
+          countsTowardTokenCap: billingState.countsTowardTokenCap,
+          servingCredentialId: providerTurn.effectiveCodexCredentialId,
+          priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+          emittedSourceKeys: emittedModelUsageSourceKeys,
+          renewLease: () => leases.renewServing("model_usage"),
+          leaseLost: leases.servingLost,
+          leaseLostMessage: "Provider credential lease expired during session title generation",
+        });
+      }
+    };
     const titleRoute = sessionTitleRoute({
       resolvedModel,
       modelName: turnExecutionPolicy.upstreamModelId,
@@ -2732,10 +2782,8 @@ export async function runTurnStreamAttempt(
         settle: settleSessionTitleUsage,
         generate: async (signal) =>
           await withSessionTitleProviderRequestContext(() =>
-            runtime.generateSessionTitle!(
-              runSettings,
-              sessionTitlePrompt,
-              { ...sessionTitleGenerationOptions({
+            runtime.generateSessionTitle!(runSettings, sessionTitlePrompt, {
+              ...sessionTitleGenerationOptions({
                 resolvedModel: titleRoute.resolvedModel,
                 modelName: titleRoute.modelName,
                 serviceTier,
@@ -2743,11 +2791,11 @@ export async function runTurnStreamAttempt(
               }),
               onFailedTerminal: settleSessionTitleUsage,
               beforeModelCallSourceReceipt: Object.assign(
-                (request: import("@openai/agents").ModelRequest) => beforeModelCallSourceReceipt(request, "TITLE"),
+                (request: import("@openai/agents").ModelRequest) =>
+                  beforeModelCallSourceReceipt(request, "TITLE"),
                 usageSourceHooks("session_title", titleRoute),
               ),
-              },
-            ),
+            }),
           ),
         onError: (error) => {
           observability.warn("parallel session title generation failed", {

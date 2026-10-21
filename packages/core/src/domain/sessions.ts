@@ -1677,10 +1677,11 @@ async function finishStartSession(
     }),
   );
   // Initialization committed the initial turn, events and wake outbox together.
-  // Live fanout is not workflow authority: signal from the durable revision
-  // without waiting for NATS, but retain and fully join both notifications.
+  // Notifications and the response read depend on that commit, not on one
+  // another. Read authoritative state while the immediate delivery attempts run;
+  // retain and fully join all work before returning (including on failure).
   const wakeRevision = started.workflowWakeRevision;
-  const [fanout, wake] = await Promise.allSettled([
+  const [fanout, wake, response] = await Promise.allSettled([
     measureSessionStartPhase(input.startupObservability, "event_fanout", () =>
       publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events),
     ),
@@ -1695,11 +1696,7 @@ async function finishStartSession(
             wakeRevision,
           }),
         ),
-  ]);
-  // Keep the prior serial error priority without detaching attempt work. Normal
-  // transport failure remains best-effort inside publishDurableSessionEvents.
-  if (fanout.status === "rejected") throw fanout.reason;
-  if (wake.status === "rejected") throw wake.reason;
+    (async () => {
   const persisted = await measureSessionStartPhase(
     input.startupObservability,
     "session_reload",
@@ -1709,8 +1706,16 @@ async function finishStartSession(
     started.turn?.id ??
     (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
     null;
+      return { ...persisted, initialTurnId };
+    })(),
+  ]);
+  // Keep the prior serial error priority without detaching attempt work. Normal
+  // transport failure remains best-effort inside publishDurableSessionEvents.
+  if (fanout.status === "rejected") throw fanout.reason;
+  if (wake.status === "rejected") throw wake.reason;
+  if (response.status === "rejected") throw response.reason;
   return {
-    session: { ...persisted, initialTurnId },
+    session: response.value,
     changed: started.changed,
   };
 }
