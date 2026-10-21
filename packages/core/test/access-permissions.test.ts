@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   normalizePermission,
+  organizationAccessPresetPermissions,
   signDelegatedAccessToken,
   type AccessGrant,
 } from "@opengeni/contracts";
@@ -189,6 +190,65 @@ describe("literal high-trust permissions", () => {
 });
 
 describe("secret permission aliases (AX-6)", () => {
+  test("delegation uses the same explicit secret aliases as native access without rewriting stored keys", () => {
+    const full = organizationAccessPresetPermissions("full");
+    const stored = full.filter((permission) => permission !== "secrets:use");
+    const before = [...stored];
+    expect(hasPermission(stored, "secrets:use", "explicit")).toBe(true);
+    expect(() =>
+      requireExplicitPermissionDelegation({ permissions: stored, permissionMode: "explicit" }, [
+        "workspace:admin",
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation({ permissions: stored, permissionMode: "explicit" }, [
+        "secrets:use",
+      ]),
+    ).not.toThrow();
+    expect(() =>
+      requireExplicitPermissionDelegation({ permissions: full, permissionMode: "explicit" }, [
+        "workspace:admin",
+      ]),
+    ).not.toThrow();
+    expect(stored).toEqual(before);
+    for (const missing of ["secrets:use", "secrets:read", "goals:manage"] as const) {
+      const narrowed = stored.filter((permission) => normalizePermission(permission) !== missing);
+      expect(() =>
+        requireExplicitPermissionDelegation({ permissions: narrowed, permissionMode: "explicit" }, [
+          "workspace:admin",
+        ]),
+      ).toThrow("cannot delegate a legacy workspace-admin wildcard");
+    }
+  });
+
+  test("delegation aliases stay one-way and never grant plaintext secret read", () => {
+    const stored = {
+      permissions: ["variable-sets:use"] as AccessGrant["permissions"],
+      permissionMode: "explicit" as const,
+    };
+    expect(() => requireExplicitPermissionDelegation(stored, ["secrets:use"])).not.toThrow();
+    expect(() => requireExplicitPermissionDelegation(stored, ["secrets:read"])).toThrow(
+      "outside the organization key policy",
+    );
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { permissions: ["variable-sets:read"], permissionMode: "explicit" },
+        ["secrets:read"],
+      ),
+    ).toThrow("outside the organization key policy");
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { permissions: ["secrets:use"], permissionMode: "explicit" },
+        ["variable-sets:use"],
+      ),
+    ).toThrow("outside the organization key policy");
+    expect(() =>
+      requireExplicitPermissionDelegation(
+        { permissions: ["workspace:admin"], permissionMode: "explicit" },
+        ["secrets:use"],
+      ),
+    ).toThrow("outside the organization key policy");
+  });
   test("legacy variable-set names grant their canonical secrets permission", () => {
     const stored = Object.freeze([
       "variable-sets:read",
