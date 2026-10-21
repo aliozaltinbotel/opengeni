@@ -33,6 +33,12 @@ setting the existing authentication and console flow are unchanged. The configur
 API base still owns authentication and authorization; this browser bridge grants
 no native workspace or session authority.
 
+External-actor workspace inventory is separate from its lazy scoped grants. Before
+publishing console navigation, the bootstrap and access refresh read missing
+grants through `/v1/workspaces/:workspaceId/access/grant`, validate their current
+subject/account/workspace tuple, and preserve cancellation and principal fences.
+Inventory alone never grants workspace authority.
+
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
 

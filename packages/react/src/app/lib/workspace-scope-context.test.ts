@@ -6,6 +6,7 @@ import {
 } from "@opengeni/react/app/lib/managed-self-context";
 import {
   authorizedWorkspaceFromList,
+  hydrateWorkspaceAccessContext,
   resolveWorkspaceScopeContext,
 } from "./workspace-scope-context";
 import type { AccessContext, Workspace } from "@opengeni/react/app/types";
@@ -180,5 +181,114 @@ describe("workspace scope context", () => {
         managedSelfContext: suspended,
       }),
     ).toMatchObject({ workspaceKind: "personal", personalWorkspaceId: null });
+  });
+});
+
+describe("external workspace access bootstrap", () => {
+  const external = () => ({
+    ...access(),
+    subjectId: "external_user:11111111-1111-4111-8111-111111111111",
+    workspaceGrants: [],
+    defaultWorkspaceId: null,
+  });
+  const grant = (context: AccessContext) => ({
+    workspaceId: personal.id,
+    accountId: personal.accountId,
+    subjectId: context.subjectId,
+    permissions: ["workspace:read"],
+  });
+  test("uses the real selected-workspace grant before an external inventory row can become a landing target", async () => {
+    const context = external();
+    const reads: string[] = [];
+    expect(
+      authorizedWorkspaceFromList({
+        workspaceId: personal.id,
+        workspaces: [personal],
+        accessContext: context,
+      }),
+    ).toBeNull();
+    const next = await hydrateWorkspaceAccessContext({
+      context,
+      workspaces: [personal],
+      isCurrent: () => true,
+      readGrant: async (id) => {
+        reads.push(id);
+        return grant(context);
+      },
+    });
+    expect(reads).toEqual([personal.id]);
+    expect(next.workspaceGrants).toEqual([grant(context)]);
+    expect(
+      authorizedWorkspaceFromList({
+        workspaceId: personal.id,
+        workspaces: [personal],
+        accessContext: next,
+      }),
+    ).toEqual(personal);
+    expect(context.workspaceGrants).toEqual([]);
+  });
+  test.each(["subjectId", "accountId", "workspaceId"])(
+    "rejects a mismatched %s without publishing a grant",
+    async (key) => {
+      const context = external();
+      await expect(
+        hydrateWorkspaceAccessContext({
+          context,
+          workspaces: [personal],
+          isCurrent: () => true,
+          readGrant: async () => ({
+            ...grant(context),
+            [key]: key === "subjectId" ? "user:other" : sharedWorkspaceId,
+          }),
+        }),
+      ).rejects.toThrow();
+      expect(context.workspaceGrants).toEqual([]);
+    },
+  );
+  test("never replaces an already exact server grant with an extra lookup", async () => {
+    const context = access();
+    const next = await hydrateWorkspaceAccessContext({
+      context,
+      workspaces: [personal],
+      isCurrent: () => true,
+      readGrant: async () => {
+        throw Error("unexpected lookup");
+      },
+    });
+    expect(next).toBe(context);
+  });
+  test("a principal change during the scoped read refuses the whole projection", async () => {
+    const context = external();
+    let current = true;
+    await expect(
+      hydrateWorkspaceAccessContext({
+        context,
+        workspaces: [personal],
+        isCurrent: () => current,
+        readGrant: async () => {
+          current = false;
+          return grant(context);
+        },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(context.workspaceGrants).toEqual([]);
+  });
+  test("an aborted bootstrap never starts a grant request", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let reads = 0;
+    await expect(
+      hydrateWorkspaceAccessContext({
+        context: external(),
+        workspaces: [personal],
+        signal: controller.signal,
+        isCurrent: () => true,
+        readGrant: async () => {
+          reads++;
+          return {};
+        },
+      }),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(reads).toBe(0);
   });
 });
