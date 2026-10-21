@@ -2,6 +2,8 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import {
   Permission,
+  WorkspaceMember,
+  WorkspaceMemberCandidate,
   normalizeOrganizationAccessPolicy,
   organizationAccessPresetPermissions,
   type ApiKey,
@@ -398,6 +400,60 @@ describe("organization key policy API and canonical access", () => {
     expect(update).not.toHaveBeenCalled();
     expect(cancel).not.toHaveBeenCalled();
   });
+  test("stored full keys retain secret-alias delegation within their selected workspace", async () => {
+    const stored = organizationAccessPresetPermissions("full").filter(
+      (permission) => permission !== "secrets:use",
+    );
+    const { app } = fixture(policy(stored, [first]));
+    const candidate = WorkspaceMemberCandidate.parse({
+      organizationMembershipId: future,
+      subjectId: "user:alias-fixture",
+      name: "Fixture",
+      email: null,
+      organizationRole: "member",
+    });
+    let members: WorkspaceMember[] = [];
+    track(spyOn(db, "listWorkspaceMemberManagementCandidates").mockResolvedValue([candidate]));
+    track(spyOn(db, "listWorkspaceMembers").mockImplementation(async () => members));
+    track(spyOn(db, "getManagedUserProfilesByIds").mockResolvedValue([]));
+    const mutate = track(
+      spyOn(db, "upsertWorkspaceMemberAsWorkspaceManager").mockImplementation(
+        async (_db, input) => {
+          members = [
+            WorkspaceMember.parse({
+              subjectId: input.targetSubjectId,
+              subjectLabel: input.subjectLabel,
+              role: input.role,
+              permissions: input.permissions,
+              createdAt: time,
+            }),
+          ];
+          return {} as never;
+        },
+      ),
+    );
+    for (const permissions of [["workspace:admin"], ["secrets:use"]]) {
+      members = [];
+      expect(
+        (
+          await request(app, `/v1/workspaces/${first}/members`, "POST", {
+            organizationMembershipId: future,
+            permissions,
+          })
+        ).status,
+      ).toBe(201);
+      expect(
+        (
+          await request(app, `/v1/workspaces/${second}/members`, "POST", {
+            organizationMembershipId: future,
+            permissions,
+          })
+        ).status,
+      ).toBe(403);
+    }
+    expect(mutate).toHaveBeenCalledTimes(2);
+  });
+
   test("custom membership managers cannot delegate an unheld permission or admin wildcard", async () => {
     const { app } = fixture(policy(["workspace:read", "workspace:admin", "members:manage"]));
     const mutate = track(

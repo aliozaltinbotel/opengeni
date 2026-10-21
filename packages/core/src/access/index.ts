@@ -224,9 +224,10 @@ export function requireApiKeyDelegationContext(
   const authority = accountScopedApiKeyWorkspaceAuthority(context);
   const external = externalActorContexts.get(context);
   const ceiling = authority ?? external;
+  // Q-16 aliases apply to delegation as to access; explicit mode never borrows an admin wildcard.
   if (
     ceiling?.permissionMode === "explicit" &&
-    permissions.some((permission) => !ceiling.permissions.includes(permission))
+    permissions.some((permission) => !hasPermission(ceiling.permissions, permission, "explicit"))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -238,7 +239,7 @@ export function requireApiKeyDelegationContext(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !ceiling.permissions.includes(permission),
+        !hasPermission(ceiling.permissions, permission, "explicit"),
     )
   ) {
     throw new HTTPException(403, {
@@ -283,7 +284,7 @@ export function requireExplicitPermissionDelegation(
 ): void {
   if (
     grant.permissionMode === "explicit" &&
-    requested.some((permission) => !grant.permissions.includes(permission))
+    requested.some((permission) => !hasPermission(grant.permissions, permission, "explicit"))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -295,7 +296,7 @@ export function requireExplicitPermissionDelegation(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !grant.permissions.includes(permission),
+        !hasPermission(grant.permissions, permission, "explicit"),
     )
   ) {
     throw new HTTPException(403, {
