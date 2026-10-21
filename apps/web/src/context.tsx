@@ -57,6 +57,8 @@ import {
   checkDeploymentRevision,
   mountApiUpdateNotice,
   getStoredAccessKey,
+  hasExternalAccessTokenSource,
+  signOutExternalAccess,
   setStoredAccessKey,
   signInEmail,
   signOutManaged,
@@ -751,7 +753,8 @@ export function RootRouteComponent() {
   const [accessKeyDraft, setAccessKeyDraft] = useState("");
   const [accessKeyVersion, setAccessKeyVersion] = useState(0);
   const keyAuthRequired =
-    clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken";
+    !hasExternalAccessTokenSource() &&
+    (clientConfig?.auth.mode === "deploymentKey" || clientConfig?.auth.mode === "configuredToken");
   const managedAuthRequired = clientConfig?.auth.mode === "managedSession";
   // "Add AI agents to my product" left its developer setup step unfinished
   // (reload, closed tab, another device): show it again until it is done.
@@ -2390,6 +2393,12 @@ export function RootRouteComponent() {
   }
 
   function forgetAccessKey() {
+    if (hasExternalAccessTokenSource()) {
+      void handleManagedSignOut().catch((error: unknown) =>
+        toast.error("Couldn't sign out", { description: userErrorText(error) }),
+      );
+      return;
+    }
     invalidatePrincipalWorkspaceState();
     clearStoredAccessKey();
     setHasAccessKey(false);
@@ -2481,6 +2490,17 @@ export function RootRouteComponent() {
   }
 
   async function handleManagedSignOut() {
+    if (hasExternalAccessTokenSource()) {
+      flushSync(() => {
+        invalidatePrincipalWorkspaceState();
+        setSession(null);
+        setAccessContext(null);
+        setWorkspaces([]);
+        setAccessError(null);
+      });
+      await signOutExternalAccess();
+      return;
+    }
     // Unmount authenticated readers before sign-out can invalidate their
     // cookie. Keep the neutral surface until an ambiguous response is
     // reconciled against the authoritative session.

@@ -2,6 +2,7 @@
 // Settings gear. Feedback, Help, Appearance and Sign out live in the account
 // menu; the collapse toggle lives at the top of the rail with the wordmark.
 // Collapsed, the avatar and the gear stack.
+import { hasExternalAccessTokenSource } from "@/api";
 import { LockIcon, LogOutIcon, UserIcon } from "lucide-react";
 import { lazy, Suspense, useState } from "react";
 import { toast } from "sonner";
@@ -159,7 +160,7 @@ export function RailFooter() {
                   </>
                 ) : null}
                 {hasDesktopAccounts() ? null : <DropdownMenuSeparator />}
-                {hasDesktopAccounts() ? null : managed ? (
+                {hasDesktopAccounts() ? null : managed || hasExternalAccessTokenSource() ? (
                   <DropdownMenuItem
                     variant="destructive"
                     onSelect={() => {

@@ -80,11 +80,23 @@ if (reportClientSignals) {
   );
 }
 
+const ClerkConsoleAuth = React.lazy(() =>
+  import("./clerk-auth").then((module) => ({ default: module.ClerkConsoleAuth })),
+);
+
 function renderApp() {
   createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
       <AppearanceProvider>
-        <App />
+        {import.meta.env.VITE_CLERK_PUBLISHABLE_KEY?.trim() ? (
+          <React.Suspense fallback={null}>
+            <ClerkConsoleAuth publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY.trim()}>
+              <App />
+            </ClerkConsoleAuth>
+          </React.Suspense>
+        ) : (
+          <App />
+        )}
       </AppearanceProvider>
     </React.StrictMode>,
   );

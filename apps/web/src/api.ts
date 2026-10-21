@@ -33,6 +33,83 @@ export const bundleDeploymentRevision = String(
   import.meta.env.VITE_OPENGENI_DEPLOYMENT_REVISION ?? "",
 );
 const accessKeyStorageKey = "opengeni.accessKey";
+/** Host authentication stays in memory; each native API request resolves a current token. */
+let externalAccessTokenSource: (() => Promise<string | null>) | null = null;
+let externalAccessTokenRevoked = false;
+export function hasExternalAccessTokenSource(): boolean {
+  return externalAccessTokenSource !== null;
+}
+export function registerExternalAccessTokenSource(
+  source: () => Promise<string | null>,
+): () => void {
+  managedActorRevision += 1;
+  abortManagedActorRequests(new DOMException("The browser account changed", "AbortError"));
+  externalAccessTokenSource = source;
+  externalAccessTokenRevoked = false;
+  return () => {
+    if (externalAccessTokenSource === source) {
+      externalAccessTokenSource = null;
+      managedActorRevision += 1;
+      abortManagedActorRequests(new DOMException("The browser account changed", "AbortError"));
+    }
+  };
+}
+
+let externalSignOut: (() => Promise<void>) | null = null;
+export function registerExternalSignOut(signOut: () => Promise<void>): () => void {
+  externalSignOut = signOut;
+  return () => {
+    if (externalSignOut === signOut) externalSignOut = null;
+  };
+}
+export async function signOutExternalAccess(): Promise<boolean> {
+  const signOut = externalSignOut;
+  if (signOut === null) return false;
+  externalAccessTokenRevoked = true;
+  managedActorRevision += 1;
+  abortManagedActorRequests(new DOMException("The browser account signed out", "AbortError"));
+  await signOut();
+  return true;
+}
+
+function requestCredentials(
+  input: string | URL | Request,
+  init: RequestInit,
+): RequestCredentials | undefined {
+  return (
+    init.credentials ??
+    (typeof Request !== "undefined" && input instanceof Request ? input.credentials : undefined)
+  );
+}
+
+async function applyExternalAccessToken(
+  input: string | URL | Request,
+  init: RequestInit,
+  headers: Headers,
+): Promise<void> {
+  const source = externalAccessTokenSource;
+  if (source === null || requestCredentials(input, init) === "omit") return;
+  const base = new URL(apiBaseUrl || "/", window.location.origin);
+  const target = new URL(
+    typeof input === "string" ? input : input instanceof URL ? input.href : input.url,
+    window.location.origin,
+  );
+  if (
+    target.origin !== base.origin ||
+    (base.pathname !== "/" &&
+      target.pathname !== base.pathname &&
+      !target.pathname.startsWith(`${base.pathname}/`))
+  )
+    return;
+  if (externalAccessTokenRevoked) throw new ApiError(401, "External authentication is required.");
+  const token = await source();
+  if (externalAccessTokenRevoked || externalAccessTokenSource !== source || !token?.trim()) {
+    throw new ApiError(401, "External authentication is required.");
+  }
+  headers.delete("x-opengeni-access-key");
+  headers.set("authorization", `Bearer ${token}`);
+}
+
 const deploymentReloadStoragePrefix = "opengeni.reloadForRevision:";
 const contractReloadStoragePrefix = "opengeni.reloadForApiContract:";
 let apiContractReloadTimer: number | null = null;
@@ -198,12 +275,17 @@ export function isApiErrorStatus(error: unknown, status: number): boolean {
  */
 export function createOpenGeniClient(beginSharedRead?: () => number): OpenGeniBrowserClient {
   const createdAtActorRevision = managedActorRevision;
+  const createdWithExternalAccess = externalAccessTokenSource !== null;
   return new OpenGeniBrowserClient({
     baseUrl: apiBaseUrl,
     beginSharedRead,
     headers: () => ({ ...authHeaders(), ...userActivityHeaders(), ...desktopAppHeaders() }),
     fetch: async (input, init) => {
-      const actorBound = activeAuthConfig?.mode === "managedSession" || managedActorEpoch !== null;
+      const actorBound =
+        createdWithExternalAccess ||
+        externalAccessTokenSource !== null ||
+        activeAuthConfig?.mode === "managedSession" ||
+        managedActorEpoch !== null;
       if (actorBound) {
         if (createdAtActorRevision !== managedActorRevision) {
           throw new DOMException("The browser account changed", "AbortError");
@@ -285,7 +367,7 @@ export async function managedActorFetch(
       window.location.origin,
     );
     if (
-      init.credentials !== "omit" &&
+      requestCredentials(input, init) !== "omit" &&
       requestUrl.origin === new URL(apiBaseUrl || "/", window.location.origin).origin
     ) {
       apiPathname = requestUrl.pathname;
@@ -335,7 +417,11 @@ export async function managedActorFetch(
   if (isForegroundApiRequest(input, init, headers, boundedHttp1Sse)) {
     endForegroundRequest = beginManagedActorForegroundRequest();
   }
-  if (acceptedEpoch && init.credentials !== "omit" && !headers.has(MANAGED_ACTOR_EPOCH_HEADER)) {
+  if (
+    acceptedEpoch &&
+    requestCredentials(input, init) !== "omit" &&
+    !headers.has(MANAGED_ACTOR_EPOCH_HEADER)
+  ) {
     headers.set(MANAGED_ACTOR_EPOCH_HEADER, acceptedEpoch);
   }
   let boundedRequestTimer: ReturnType<typeof setTimeout> | null = null;
@@ -350,6 +436,10 @@ export async function managedActorFetch(
         );
       }, nativeLifetimeMs);
       await waitForManagedActorForegroundIdle(controller.signal);
+    }
+    if (externalAccessTokenSource !== null) {
+      await applyExternalAccessToken(transportInput, init, headers);
+      controller.signal.throwIfAborted();
     }
     const response = await fetch(transportInput, {
       ...init,

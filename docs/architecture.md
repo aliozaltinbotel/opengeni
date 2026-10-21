@@ -24,6 +24,16 @@ Legacy positive receipts remain eligible and retain their balances; no backfill.
 
 ## 1. Startup
 
+The console optionally uses Clerk when `VITE_CLERK_PUBLISHABLE_KEY` is configured.
+`apps/web/src/clerk-auth.tsx` mounts the existing app only after registering its
+current session token source in `api.ts`. Native API requests, including bootstrap,
+SDK and editable-artifact transport requests, obtain a token in memory per request;
+signed-out sessions cannot fall back to a saved deployment key. Without that build
+setting the existing authentication and console flow are unchanged. The configured
+API base still owns authentication and authorization; this browser bridge grants
+no native workspace or session authority.
+
+
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
 
 ---

@@ -188,7 +188,6 @@ export async function recordCoreCodexRefusal(input: {
     evidence: {
       refreshGeneration: generation,
       cooldownSeconds: input.failure.cooldownSeconds,
-      ...(input.failure.origin ? { origin: input.failure.origin } : {}),
     },
   }).catch(() => false);
   let health = false;
