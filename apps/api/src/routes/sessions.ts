@@ -1,3 +1,4 @@
+import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import {
   legacyVariableSetFields,
@@ -7,8 +8,8 @@ import {
 } from "../http/variable-sets-removed";
 import { AZURE_LIVE_MODEL_ID, buildSessionAzureLiveBroker } from "../azure-live";
 import { getRetainedProviderCommand } from "@opengeni/db/retained-provider-commands";
-import { assertGoalResumeAllowed, GoalResumeBlockedError } from "@opengeni/core";
-import { UnsupportedLatencyModeError } from "@opengeni/config";
+import { assertGoalResumeAllowed, resolveGoalModelAdmission, GoalResumeBlockedError } from "@opengeni/core";
+import { UnsupportedLatencyModeError, resolveTurnExecutionPolicyV1 } from "@opengeni/config";
 import { searchSessionMessagesForSubject, SessionMessageSearchCursorError } from "@opengeni/db";
 import { listWorkspaceBackgroundCommandsForSubject } from "@opengeni/db";
 import { isVaultError, vaultErrorFromDatabase } from "@opengeni/db";
@@ -219,6 +220,7 @@ import {
   decodeSessionListCursor,
   revokeViewer,
   setSessionGoalStatusWithEvent,
+  resumeSessionGoalWithInput,
   upsertSessionGoalWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
@@ -3208,6 +3210,61 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
     }
     try {
+      if (payload.continuationInput && payload.expectedGoal?.pausedReason === "agent") {
+        const result = await resumeSessionGoalWithInput(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+          workflowId: workflowIdForSession(sessionId),
+          expectedGoal: { ...payload.expectedGoal, pausedReason: "agent" },
+          continuationInput: payload.continuationInput,
+          defaultMaxAutoContinuations: deps.settings.goalMaxAutoContinuations ?? null,
+          policy: async (tx) => {
+            const session = await getSession(tx, workspaceId, sessionId);
+            if (!session) throw new HTTPException(404, { message: "session not found" });
+            const decision = await resolveGoalModelAdmission(
+              tx,
+              deps.catalogSourceSettings ?? deps.settings,
+              session,
+            );
+            if (decision.blocked) throw new HTTPException(422, { message: decision.blocked });
+            return {
+              model: decision.model,
+              reasoningEffort: session.reasoningEffort,
+              latencyMode: session.latencyMode,
+              turnExecutionPolicy: resolveTurnExecutionPolicyV1(decision.settings, {
+                modelId: decision.model,
+                requestedModelId: null,
+                modelSource: "continuation",
+                reasoningEffort: session.reasoningEffort,
+                reasoningSource: "continuation",
+                latencyMode: session.latencyMode,
+                latencyModeSource: "continuation",
+              }),
+              tools: decision.settings.mcpServers.some((server) => server.id === "opengeni")
+                ? mergeToolRefs(session.tools, [{ kind: "mcp", id: "opengeni" }])
+                : session.tools,
+              sandboxBackend: session.sandboxBackend,
+            };
+          },
+          beforeResume: (tx, currentSession, causalTurn) =>
+            assertGoalResumeAllowed({ ...deps, db: tx }, currentSession, causalTurn),
+        });
+        await publishDurableSessionEvents(bus, workspaceId, sessionId, result.events);
+        if (result.workflowWakeRevision !== null) {
+          await workflowClient.wakeSessionWorkflow({
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            workflowId: workflowIdForSession(sessionId),
+            wakeRevision: result.workflowWakeRevision,
+          });
+        }
+        return c.json(
+          (await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? result.goal,
+        );
+      }
       if (existing.status === "completed") {
         throw new HTTPException(409, {
           message: "session goal is completed; set a new goal instead",
@@ -3279,6 +3336,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       if (error instanceof SessionControlConflictError) {
         throw new HTTPException(409, { message: error.message, cause: error });
+      }
+      if (error instanceof GoalResumeBlockedError) {
+        throw new HTTPException(422, { message: error.message, cause: error });
       }
       throw error;
     }

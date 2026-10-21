@@ -28377,6 +28377,9 @@
       "shape": {
         "$": "union=[\"0\",\"1\"]",
         "$|0": "object",
+        "$|0.continuationInput": "object?",
+        "$|0.continuationInput.operationKey": "string!",
+        "$|0.continuationInput.text": "string!",
         "$|0.expectedGoal": "object?",
         "$|0.expectedGoal.id": "string!",
         "$|0.expectedGoal.pausedReason": "string! null",

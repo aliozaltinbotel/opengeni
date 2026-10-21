@@ -32,6 +32,25 @@ updates coalesced into that turn are attached as ordinary message context. It ne
 agent-instruction prefix or exists only in activity memory, so later requests
 extend the same prompt-cache prefix and recovery replays identical authority.
 
+## Atomic continuation input
+
+An authorized host can resume an agent-paused Goal with canonical input using the
+existing `PATCH /v1/workspaces/:workspaceId/sessions/:sessionId/goal` route (SDK
+`updateGoal`). Supply `status: "active"`, the exact observed
+`expectedGoal: { id, version, pausedReason: "agent" }`, and
+`continuationInput: { operationKey, text }`. Reuse the same operation key and
+identical input after an ambiguous response.
+
+The Goal resume, canonical native `goal_continuation` input, accepted execution
+policy and durable workflow wake commit together. This input never creates an
+ordinary human/API queue row. Current resume admission still applies; a busy or
+closed session refuses the whole transaction, leaving the Goal paused. A fresh
+attempt can retry once the current work settles or its inference gate opens.
+The native claim checks the active Goal identity/version before delivering the
+canonical user-role model input. A later human Pause or Goal change invalidates
+unclaimed work. A committed replay returns the original obligation without
+resuming a newer pause; a changed request under that key conflicts.
+
 ## Report delivery
 
 Agents answer in chat by default, including summaries, reports, briefs, letters

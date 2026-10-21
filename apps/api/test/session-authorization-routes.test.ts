@@ -193,7 +193,7 @@ async function callMcpTool<T>(
   return JSON.parse(text) as T;
 }
 
-async function fixture() {
+async function fixture(model = "test-model") {
   const suffix = crypto.randomUUID();
   const access = await bootstrapWorkspace(client.db, {
     accountExternalSource: "session-authorization-test",
@@ -211,7 +211,7 @@ async function fixture() {
     initialMessage: "private root",
     resources: [],
     metadata: {},
-    model: "test-model",
+    model,
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "modal",
@@ -226,7 +226,7 @@ async function fixture() {
     initialModelContext: "host-only selected-record context",
     resources: [],
     metadata: {},
-    model: "test-model",
+    model,
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "modal",
@@ -239,7 +239,7 @@ async function fixture() {
     initialMessage: "hidden sibling",
     resources: [],
     metadata: {},
-    model: "test-model",
+    model,
     reasoningEffort: "medium",
     latencyMode: "standard",
     sandboxBackend: "modal",
@@ -2144,3 +2144,42 @@ test("conditional goal resume refuses a newer operator pause with HTTP 409 and n
     events,
   );
 });
+
+
+test("atomic goal input public PATCH freezes canonical goal work and replays after a newer pause", async () => {
+  if (!available) throw new Error("PostgreSQL required for atomic goal input");
+  const value = await fixture("scripted-model");
+  await initializeSessionStartAtomically(client.db, { accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId, sessionId: value.root.id,
+    reasoningEffortFallback: "medium", createdEventPayload: {}, goal: { text: "Finish canonical proposal" } });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.root.id, workflowId: `session-${value.root.id}`, workflowRunId: crypto.randomUUID(),
+    attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") throw new Error("initial turn not claimed");
+  await applySessionTurnSettlement(client.db, value.grant.workspaceId, {
+    sessionId: value.root.id, turnId: claim.turn.id, triggerEventId: claim.turn.triggerEventId,
+    attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null,
+    events: [{ type: "turn.completed", payload: {} }],
+  });
+  const paused = await setSessionGoalStatusWithEvent(client.db, value.grant.workspaceId, value.root.id, {
+    status: "paused", pausedReason: "agent", event: { type: "goal.paused", actor: "agent", reason: "agent" },
+  });
+  const app = appWith();
+  const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/goal`;
+  const headers = { authorization: value.authorization, "content-type": "application/json" };
+  const request = { status: "active", expectedGoal: { id: paused.goal.id, version: paused.goal.version, pausedReason: "agent" },
+    continuationInput: { operationKey: crypto.randomUUID(), text: "Canonical public continuation input" } };
+  const send = (body: unknown) => app.request(path, { method: "PATCH", headers, body: JSON.stringify(body) });
+  const accepted = await send(request);
+  expect(accepted.status, await accepted.clone().text()).toBe(200);
+  expect(await accepted.json()).toMatchObject({ status: "active" });
+  expect((await send({ status: "paused" })).status).toBe(200);
+  const events = await listSessionEvents(client.db, value.grant.workspaceId, value.root.id);
+  const replay = await send(request);
+  expect(replay.status).toBe(200);
+  expect(await replay.json()).toMatchObject({ status: "paused", pausedReason: "api" });
+  expect(await listSessionEvents(client.db, value.grant.workspaceId, value.root.id)).toEqual(events);
+  expect((await send({ ...request, continuationInput: { ...request.continuationInput, text: "changed" } })).status).toBe(409);
+}, 180_000);

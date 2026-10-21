@@ -1541,7 +1541,11 @@ All producers use the ordinary session/turn runtime:
 
 - an active **goal** creates a durable continuation obligation; conditional
   host status transitions compare goal identity, version and pause owner under
-  its canonical row lock, so a newer operator Pause cannot be overwritten;
+  its canonical row lock, so a newer operator Pause cannot be overwritten.
+  An optional canonical continuation input on the existing Goal resume route
+  commits the exact agent-pause CAS, native goal-owned input and durable wake
+  atomically; its immutable native update receipt makes retries inert after a
+  newer pause. Busy/closed admission rolls the whole request back;
 - a **scheduled task** freezes one accepted occurrence and its execution
   authority before dispatch;
 - an **automation** authenticates an external event, freezes the matching

@@ -8334,11 +8334,38 @@ export type GoalSpec = z.infer<typeof GoalSpec>;
 
 export const UpdateSessionGoalRequest = /* @__PURE__ */ defineSchema(() =>
   z.union([
-    z.object({
-      status: z.enum(["paused", "active"]),
-      expectedGoal: z.object({ id: z.string().uuid(), version: z.number().int().positive(), pausedReason: z.string().nullable() }).optional(),
-      rationale: SessionGoalRationaleWrite.optional(),
-    }),
+    z
+      .object({
+        status: z.enum(["paused", "active"]),
+        expectedGoal: z
+          .object({
+            id: z.string().uuid(),
+            version: z.number().int().positive(),
+            pausedReason: z.string().nullable(),
+          })
+          .optional(),
+        rationale: SessionGoalRationaleWrite.optional(),
+        continuationInput: z
+          .object({
+            operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
+            text: z.string().trim().min(1).max(32768),
+          })
+          .strict()
+          .optional(),
+      })
+      .superRefine((value, ctx) => {
+        if (
+          value.continuationInput &&
+          (value.status !== "active" ||
+            !value.expectedGoal ||
+            value.expectedGoal.pausedReason !== "agent")
+        ) {
+          ctx.addIssue({
+            code: "custom",
+            message: "Canonical continuation requires an exact agent-paused goal resume",
+          });
+        }
+      }),
     z.object({
       text: SessionGoalTextWrite,
       successCriteria: SessionGoalSuccessCriteriaWrite.nullable().optional(),

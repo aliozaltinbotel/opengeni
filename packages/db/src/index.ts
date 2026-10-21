@@ -708,6 +708,7 @@ import {
 } from "./external-link-work";
 
 import {
+  SESSION_OPERATION_KEY_MAX_CHARS,
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
   SESSION_GOAL_ROOT_CONSTRAINT_MAX_BYTES,
@@ -69662,6 +69663,121 @@ export type MaterializeGoalContinuationResult =
       workflowWakeRevision: number;
     };
 
+/** Resume an exact agent pause and accept canonical input as one native goal obligation.
+ * The native update is the durable replay receipt; replay never resumes a later pause.
+ * Busy/closed admission rolls the entire transition back instead of accepting partial work.
+ */
+export async function resumeSessionGoalWithInput(
+  db: Database,
+  input: Omit<
+    Parameters<typeof materializeGoalContinuation>[1],
+    "prompt" | "canonicalInput" | "policy"
+  > & {
+    policy:
+      | Parameters<typeof materializeGoalContinuation>[1]["policy"]
+      | ((tx: Database) => Promise<Parameters<typeof materializeGoalContinuation>[1]["policy"]>);
+    subjectId: string;
+    expectedGoal: { id: string; version: number; pausedReason: "agent" };
+    continuationInput: { operationKey: string; text: string };
+    beforeResume: SessionGoalResumeValidation;
+  },
+): Promise<{
+  goal: SessionGoal;
+  update: SessionSystemUpdate;
+  replay: boolean;
+  events: SessionEvent[];
+  workflowWakeRevision: number | null;
+}> {
+  if (
+    !input.continuationInput.operationKey ||
+    input.continuationInput.operationKey.length > SESSION_OPERATION_KEY_MAX_CHARS ||
+    !input.continuationInput.text.trim() ||
+    Buffer.byteLength(input.continuationInput.text) > MAX_INTERNAL_UPDATE_BYTES ||
+    input.expectedGoal.pausedReason !== "agent"
+  ) {
+    throw new SessionControlConflictError("Invalid canonical goal continuation input");
+  }
+  const dedupeKey = `goal-input:${input.continuationInput.operationKey}`;
+  const requestHash = canonicalSessionCommandHash({
+    subjectId: input.subjectId,
+    expectedGoal: input.expectedGoal,
+    continuationInput: input.continuationInput,
+  });
+  return await withSessionActivityRlsContext(
+    db,
+    input,
+    async (scopedDb) =>
+      await withSessionActivitySavepoint(scopedDb, async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session || session.accountId !== input.accountId)
+          throw new SessionControlConflictError("Goal session unavailable");
+        const [receipt] = await tx
+          .select()
+          .from(schema.sessionSystemUpdates)
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.dedupeKey, dedupeKey),
+            ),
+          )
+          .limit(1);
+        if (receipt) {
+          if (
+            receipt.kind !== "goal_continuation" ||
+            receipt.lineage.canonicalInputHash !== requestHash
+          ) {
+            throw new SessionControlConflictError("Canonical goal input replay changed");
+          }
+          const goal = await getSessionGoal(tx, input.workspaceId, input.sessionId);
+          if (!goal) throw new SessionControlConflictError("Goal unavailable");
+          return {
+            goal,
+            update: mapSessionSystemUpdate(receipt),
+            replay: true,
+            events: [],
+            workflowWakeRevision: null,
+          };
+        }
+        const goal = await getSessionGoal(tx, input.workspaceId, input.sessionId);
+        if (!goal || goal.status !== "paused" || goal.pausedReason !== "agent") {
+          throw new SessionControlConflictError("Goal is not paused by the agent");
+        }
+        const resumed = await setSessionGoalStatusWithEvent(
+          tx,
+          input.workspaceId,
+          input.sessionId,
+          {
+            status: "active",
+            expectedGoal: input.expectedGoal,
+            beforeResume: input.beforeResume,
+            event: { type: "goal.resumed", actor: "api" },
+          },
+        );
+        const materialized = await materializeGoalContinuation(tx, {
+          ...input,
+          policy: typeof input.policy === "function" ? await input.policy(tx) : input.policy,
+          prompt: () => input.continuationInput.text,
+          canonicalInput: { dedupeKey, requestHash },
+        });
+        if (materialized.action !== "continue")
+          throw new SessionControlConflictError("Canonical goal input cannot be admitted yet");
+        return {
+          goal: resumed.goal,
+          update: materialized.update,
+          replay: false,
+          events: [...resumed.events, ...materialized.events],
+          workflowWakeRevision: materialized.workflowWakeRevision,
+        };
+      }),
+  );
+}
+
 /**
  * Consume one durable goal-wake revision into one continuation obligation.
  *
@@ -69701,6 +69817,8 @@ export async function materializeGoalContinuation(
       sandboxBackend: SandboxBackend;
     };
     prompt: (goal: SessionGoal, autoContinuation: number, cap: number | null) => string;
+    /** Trusted atomic-resume receipt, never accepted directly from a client. */
+    canonicalInput?: { dedupeKey: string; requestHash: string };
   },
 ): Promise<MaterializeGoalContinuationResult> {
   return await withSessionActivityRlsContext(
@@ -70207,12 +70325,17 @@ export async function materializeGoalContinuation(
                   kind: "goal_continuation",
                   classification: "info",
                   sourceId: decision.goal.id,
-                  dedupeKey: `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
+                  dedupeKey:
+                    input.canonicalInput?.dedupeKey ??
+                    `goal-continuation:${decision.goal.id}:wake:${goalWakeRevision}`,
                   summary: "Continue active session goal",
                   payload,
                   lineage: {
                     goalId: decision.goal.id,
                     goalWakeRevision,
+                    ...(input.canonicalInput
+                      ? { canonicalInputHash: input.canonicalInput.requestHash }
+                      : {}),
                     ...(causalTurn ? { causalTurnId: causalTurn.id } : {}),
                     ...(causalTurn?.initiatingHumanSubjectId &&
                     personalConnectionDelegations.length > 0

@@ -23,6 +23,7 @@ import {
   createSession,
   evaluateGoalContinuation,
   getSessionGoalWithContinuation,
+  getActiveSessionHistoryItems,
   getSession,
   listSessionsForSubject,
   getScheduledTargetSessionExecution,
@@ -39,6 +40,7 @@ import {
   listSessionGoalRevisions,
   listSessionSystemUpdatesForTurn,
   materializeGoalContinuation,
+  resumeSessionGoalWithInput,
   markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   projectSessionGoalPromptField,
@@ -241,8 +243,8 @@ async function settleIdle(ctx: GoalFixture) {
   expect(settled.action).toBe("settled");
 }
 
-function materialize(ctx: GoalFixture) {
-  return materializeGoalContinuation(client.db, {
+function continuationInput(ctx: GoalFixture): Parameters<typeof materializeGoalContinuation>[1] {
+  return {
     accountId: ctx.grant.accountId,
     workspaceId: ctx.grant.workspaceId!,
     sessionId: ctx.session.id,
@@ -272,8 +274,13 @@ function materialize(ctx: GoalFixture) {
       tools: [],
       sandboxBackend: "none",
     },
-    prompt: (goal, count) => `continue ${goal.text} (${count})`,
-  });
+    prompt: (goal: import("@opengeni/contracts").SessionGoal, count: number) =>
+      `continue ${goal.text} (${count})`,
+  };
+}
+
+function materialize(ctx: GoalFixture) {
+  return materializeGoalContinuation(client.db, continuationInput(ctx));
 }
 
 async function counts(ctx: GoalFixture) {
@@ -4628,4 +4635,151 @@ describe("input-aware continuation cap and idle backoff", () => {
     // The Steer is the authoritative next direction; no continuation is synthesized beside it.
     expect((await materializeWith(ctx, { defaultMaxAutoContinuations: 1 })).action).toBe("queue");
   });
+});
+
+describe("atomic canonical goal handoff", () => {
+  async function pausedFixture() {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const { goal } = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "paused",
+        pausedReason: "agent",
+        event: { type: "goal.paused", actor: "agent", reason: "agent" },
+      },
+    );
+    const request = {
+      ...continuationInput(ctx),
+      subjectId: ctx.grant.subjectId,
+      expectedGoal: { id: goal.id, version: goal.version, pausedReason: "agent" as const },
+      continuationInput: {
+        operationKey: crypto.randomUUID(),
+        text: "Canonical approved proposal continuation",
+      },
+      beforeResume: async () => {},
+    };
+    return { ctx, goal, request };
+  }
+
+  test("commits canonical goal-owned input once; lost ACK/restart replay cannot undo a newer human pause", async () => {
+    const { ctx, request } = await pausedFixture();
+    const accepted = await resumeSessionGoalWithInput(client.db, request);
+    expect(accepted.replay).toBe(false);
+    expect(accepted.update.payload).toMatchObject({
+      type: "goal_continuation",
+      prompt: request.continuationInput.text,
+    });
+    const before = await counts(ctx);
+    const paused = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "paused",
+        pausedReason: "api",
+        event: { type: "goal.paused", actor: "api", reason: "api" },
+      },
+    );
+    const restarted = createDb(shared.appUrl);
+    try {
+      const replay = await resumeSessionGoalWithInput(restarted.db, request);
+      expect(replay.replay).toBe(true);
+      expect(replay.update.id).toBe(accepted.update.id);
+      expect(await counts(ctx)).toEqual(before);
+      expect(
+        (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+          ?.version,
+      ).toBe(paused.goal.version);
+      const claim = await claimSessionWorkForAttempt(restarted.db, ctx.grant.workspaceId!, {
+        sessionId: ctx.session.id,
+        workflowId: `session-${ctx.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      expect(claim.action).toBe("unclaimed");
+    } finally {
+      await restarted.close();
+    }
+    await expect(
+      resumeSessionGoalWithInput(client.db, {
+        ...request,
+        continuationInput: { ...request.continuationInput, text: "changed" },
+      }),
+    ).rejects.toThrow();
+  }, 180_000);
+
+  test("newer human pause wins before handoff without input, resume or wake writes", async () => {
+    const { ctx, request } = await pausedFixture();
+    const paused = await setSessionGoalStatusWithEvent(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+      {
+        status: "paused",
+        pausedReason: "api",
+        event: { type: "goal.paused", actor: "api", reason: "api" },
+      },
+    );
+    const before = await counts(ctx);
+    await expect(resumeSessionGoalWithInput(client.db, request)).rejects.toThrow();
+    expect(await counts(ctx)).toEqual(before);
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.version,
+    ).toBe(paused.goal.version);
+  }, 180_000);
+
+  test("racing exact retries commit one native obligation", async () => {
+    const { ctx, request } = await pausedFixture();
+    const [first, second] = await Promise.all([
+      resumeSessionGoalWithInput(client.db, request), resumeSessionGoalWithInput(client.db, request),
+    ]);
+    expect(first.update.id).toBe(second.update.id);
+    expect([first.replay, second.replay].sort()).toEqual([false, true]);
+    expect((await counts(ctx)).updates).toBe(1);
+  }, 180_000);
+
+  test("busy session or current admission refusal rolls back resume and all input effects", async () => {
+    const { ctx, request, goal } = await pausedFixture();
+    await expect(resumeSessionGoalWithInput(client.db, { ...request, beforeResume: async () => { throw new Error("live admission refused"); } })).rejects.toThrow("live admission refused");
+    expect((await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))?.version).toBe(goal.version);
+    await withWorkspaceSubjectRls(client.db, ctx.grant.workspaceId!, ctx.grant.subjectId, (tx) => submitHumanPromptInTransaction(tx, {
+      accountId: ctx.grant.accountId, workspaceId: ctx.grant.workspaceId!, sessionId: ctx.session.id,
+      subjectId: ctx.grant.subjectId, actor: { type: "human", subjectId: ctx.grant.subjectId },
+      operationKey: crypto.randomUUID(), delivery: "send", text: "new human input", resources: [],
+      reasoningEffortFallback: "low", source: "user",
+    }));
+    const before = await counts(ctx);
+    await expect(resumeSessionGoalWithInput(client.db, request)).rejects.toThrow();
+    expect(await counts(ctx)).toEqual(before);
+    expect((await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))?.version).toBe(goal.version);
+  }, 180_000);
+
+  test("claim executes canonical input with native goal ownership", async () => {
+    const { ctx, request } = await pausedFixture();
+    await resumeSessionGoalWithInput(client.db, request);
+    const claim = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
+      sessionId: ctx.session.id,
+      workflowId: `session-${ctx.session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
+    if (claim.action !== "claimed") throw new Error("canonical handoff not claimed");
+    expect(claim.turn.source).toBe("goal");
+    const history = await getActiveSessionHistoryItems(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    const canonicalItems = history.filter((row) => JSON.stringify(row.item).includes(request.continuationInput.text));
+    expect(canonicalItems).toHaveLength(1);
+    expect(claim.turn.goalSnapshot).toMatchObject({
+      state: "active",
+      goalId: request.expectedGoal.id,
+    });
+  }, 180_000);
 });
