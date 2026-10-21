@@ -174,16 +174,25 @@ export function createRuntimeBatcher<Mutation = never>(
     "turn.cancelled",
   ]);
   return {
-    push: async (event: { type: SessionEventType; payload: unknown }, mutation?: Mutation) => {
+    /** Deferral never detaches a durable mutation from its event's transaction. */
+    push: async (
+      event: { type: SessionEventType; payload: unknown; occurredAt?: Date },
+      mutation?: Mutation,
+      pushOptions: { defer?: boolean } = {},
+    ) => {
       throwIfFlushFailed();
       if (mutation !== undefined && !structural.has(event.type)) {
         throw new Error("A durable checkpoint requires a structural event");
       }
       // Append BEFORE the structural check so a structural event's flush always
       // carries any pending deltas in order (same flush, order preserved).
-      const pendingEvent = { type: event.type, payload: event.payload };
+      const pendingEvent = { type: event.type, payload: event.payload, ...(event.occurredAt ? { occurredAt: event.occurredAt } : {}) };
       pending.push(pendingEvent);
       if (mutation !== undefined) pendingMutations.set(pendingEvent, mutation);
+      if (pushOptions.defer) {
+        if (activeBatchSize + pending.length >= MAX_BUFFERED_EVENTS) await flush();
+        return;
+      }
       const elapsed = Date.now() - lastFlush;
       if (structural.has(event.type)) {
         await flush();
@@ -328,6 +337,105 @@ export function startActivityHeartbeat(
     timer.unref();
   }
   return timer;
+}
+
+/**
+ * Record when the Agents SDK emits each stream event, by wrapping the run
+ * result's `_addItem` (the one funnel through which the SDK enqueues every
+ * event). The SDK streams a batch's `tool_called` items immediately before it
+ * executes the batch and its outputs immediately after, so these times are the
+ * batch's own execution start and end, independent of how far the consumer lags
+ * behind. A result without that funnel yields no times (callers then keep the
+ * append time).
+ */
+export function observeStreamEmissionTimes(stream: unknown): (event: unknown) => Date | undefined {
+  const emitted = new WeakMap<object, Date>();
+  const result = stream as { _addItem?: unknown } | null;
+  if (result && typeof result._addItem === "function") {
+    const add = (result._addItem as (item: unknown) => void).bind(result);
+    result._addItem = (item: unknown) => {
+      if (item && typeof item === "object") emitted.set(item, new Date());
+      add(item);
+    };
+  }
+  return (event) => (event && typeof event === "object" ? emitted.get(event) : undefined);
+}
+
+/**
+ * A stream reader that can take, without waiting, the events the producer has
+ * already queued. The SDK streams a parallel tool batch's N items adjacently
+ * (its `tool_called` items before it executes the batch, its outputs after),
+ * so the consumer can persist the batch as a unit. Draining never waits for the
+ * producer: a read that is not already settled when the event loop next turns
+ * is kept and becomes the reader's next read, never a second read on top of it.
+ *
+ * A ReadableStream is read through its own reader, so `cancel()` cancels the
+ * producer at once even while such a read is pending (an async iterator's
+ * `return()` would wait behind that read).
+ */
+export function createStreamLookahead<T>(source: ReadableStream<T> | AsyncIterable<T>, context: Context | null) {
+  const reader =
+    typeof (source as ReadableStream<T>).getReader === "function"
+      ? (source as ReadableStream<T>).getReader()
+      : null;
+  const iterator = reader ? null : (source as AsyncIterable<T>)[Symbol.asyncIterator]();
+  const read = (): Promise<IteratorResult<T>> =>
+    reader
+      ? (reader.read() as Promise<IteratorResult<T>>)
+      : Promise.resolve(iterator!.next());
+  const source$ = { next: read };
+  const buffered: T[] = [];
+  let pendingRead: Promise<IteratorResult<T>> | null = null;
+  const notReady: unique symbol = Symbol("not-ready");
+  return {
+    async next(): Promise<IteratorResult<T>> {
+      if (buffered.length > 0) {
+        const signal = context?.cancellationSignal;
+        if (signal?.aborted) throw signal.reason;
+        return { done: false, value: buffered.shift()! };
+      }
+      if (pendingRead) {
+        const kept = pendingRead;
+        pendingRead = null;
+        return await nextStreamEvent({ next: () => kept }, context);
+      }
+      return await nextStreamEvent(source$, context);
+    },
+    /** The next already-taken event, if any, without consuming it. */
+    peek(): T | undefined {
+      return buffered[0];
+    },
+    /** Take every already-queued event into the buffer; returns the buffer (read-only). */
+    async drainReady(limit = 256): Promise<readonly T[]> {
+      while (!pendingRead && buffered.length < limit) {
+        let attempt: Promise<IteratorResult<T>>;
+        try {
+          attempt = read();
+        } catch (error) {
+          attempt = Promise.reject(error);
+        }
+        const settled = await Promise.race([
+          attempt.then(
+            (result) => result,
+            () => notReady,
+          ),
+          new Promise<typeof notReady>((resolve) => setImmediate(() => resolve(notReady))),
+        ]);
+        if (typeof settled === "symbol" || settled.done) {
+          // Not yet produced, finished or failed: the reader's next read settles it in order.
+          pendingRead = attempt;
+          break;
+        }
+        buffered.push(settled.value);
+      }
+      return buffered;
+    },
+    /** Cancel the producer; never waits behind a pending lookahead read. */
+    async cancel(): Promise<void> {
+      if (reader) await reader.cancel();
+      else await iterator!.return?.();
+    },
+  };
 }
 
 export async function nextStreamEvent<T>(

@@ -3,7 +3,7 @@ import type { SessionEventType } from "@opengeni/contracts";
 import type { AppendEventInput } from "@opengeni/db";
 import type { Context } from "@temporalio/activity";
 import {
-  createRuntimeBatcher,
+  createRuntimeBatcher, createStreamLookahead, observeStreamEmissionTimes,
   mergeAdjacentTextDeltas,
   nextStreamEvent,
   TRAILING_FLUSH_MS,
@@ -492,4 +492,162 @@ describe("nextStreamEvent", () => {
 
     await expect(pending).rejects.toBe(reason);
   });
+});
+
+describe("deferred structural events", () => {
+  test("a parallel tool batch's structural events share the next structural flush, in order", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(1, TOOLCALL), undefined, { defer: true });
+    await sleep(60); // past the trailing window: a deferred event starts no drain or timer
+    await batcher.push(delta(2, TOOLCALL), undefined, { defer: true });
+    expect(flushes).toEqual([]);
+    await batcher.push(delta(3, TOOLCALL));
+    expect(flushes).toEqual([[1, 2, 3]]);
+  });
+
+  test("an explicit flush carries deferred events", async () => {
+    const { batcher, flushes } = recordingBatcher();
+    await batcher.push(delta(1, TOOLCALL), undefined, { defer: true });
+    await batcher.flush();
+    expect(flushes).toEqual([[1]]);
+  });
+
+  test("a failed flush of deferred events is rethrown at the flushing push", async () => {
+    const failure = new Error("append failed");
+    const batcher = createRuntimeBatcher(async () => {
+      throw failure;
+    });
+    await batcher.push(delta(1, TOOLCALL), undefined, { defer: true });
+    await expect(batcher.push(delta(2, TOOLCALL))).rejects.toBe(failure);
+  });
+});
+
+describe("createStreamLookahead", () => {
+  function counted<T>(inner: AsyncIterator<T>) {
+    let reads = 0;
+    const iterator = { next: () => { reads += 1; return inner.next(); } } as AsyncIterator<T>;
+    return {
+      iterator: { [Symbol.asyncIterator]: () => iterator } as AsyncIterable<T>,
+      reads: () => reads,
+    };
+  }
+
+  test("drains only the events the producer has already queued, then keeps the pending read", async () => {
+    let controller!: ReadableStreamDefaultController<number>;
+    const stream = new ReadableStream<number>({ start: (c) => { controller = c; } });
+    const { iterator, reads } = counted(stream[Symbol.asyncIterator]());
+    const reader = createStreamLookahead(iterator, null);
+    controller.enqueue(1);
+    controller.enqueue(2);
+    controller.enqueue(3);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2, 3]);
+    expect(reads()).toBe(4); // three values plus one read still waiting for the producer
+    expect(await reader.next()).toEqual({ done: false, value: 2 });
+    expect(await reader.next()).toEqual({ done: false, value: 3 });
+    setTimeout(() => controller.enqueue(4), 10);
+    expect(await reader.next()).toEqual({ done: false, value: 4 });
+    expect(reads()).toBe(4); // the waiting read was reused, never a second read on top of it
+    controller.close();
+    expect((await reader.next()).done).toBe(true);
+  });
+
+  test("a producer failure after queued events surfaces only after those events", async () => {
+    const failure = new Error("stream failed");
+    const iterator = (async function* () {
+      yield 1;
+      yield 2;
+      throw failure;
+    })();
+    const reader = createStreamLookahead({ [Symbol.asyncIterator]: () => iterator }, null);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2]);
+    expect(await reader.next()).toEqual({ done: false, value: 2 });
+    await expect(reader.next()).rejects.toBe(failure);
+  });
+
+  test("an aborted activity refuses buffered events with its cancellation reason", async () => {
+    const controller = new AbortController();
+    const context = { cancelled: new Promise<never>(() => undefined), cancellationSignal: controller.signal } as Context;
+    const iterator = (async function* () {
+      yield 1;
+      yield 2;
+    })();
+    const reader = createStreamLookahead({ [Symbol.asyncIterator]: () => iterator }, context);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2]);
+    const reason = new Error("activity cancelled");
+    controller.abort(reason);
+    await expect(reader.next()).rejects.toBe(reason);
+  });
+});
+
+describe("createStreamLookahead over a ReadableStream", () => {
+  test("drains queued events and keeps the producer's order", async () => {
+    let controller!: ReadableStreamDefaultController<number>;
+    const stream = new ReadableStream<number>({ start: (c) => { controller = c; } });
+    const reader = createStreamLookahead(stream, null);
+    controller.enqueue(1);
+    controller.enqueue(2);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([2]);
+    expect(reader.peek()).toBe(2);
+    setTimeout(() => { controller.enqueue(3); controller.close(); }, 10);
+    expect(await reader.next()).toEqual({ done: false, value: 2 });
+    expect(await reader.next()).toEqual({ done: false, value: 3 });
+    expect((await reader.next()).done).toBe(true);
+  });
+
+  test("cancel trips the producer at once while a lookahead read is pending", async () => {
+    let cancelled = false;
+    let controller!: ReadableStreamDefaultController<number>;
+    const stream = new ReadableStream<number>({ start: (c) => { controller = c; }, cancel: () => { cancelled = true; } });
+    const reader = createStreamLookahead(stream, null);
+    controller.enqueue(1);
+    expect(await reader.next()).toEqual({ done: false, value: 1 });
+    expect(await reader.drainReady()).toEqual([]);
+    void reader.cancel();
+    expect(cancelled).toBe(true);
+  });
+});
+
+
+describe("tool event occurrence time", () => {
+  test("the batcher keeps an explicit occurredAt through its flush and omits it otherwise", async () => {
+    const flushed: AppendEventInput[][] = [];
+    const batcher = createRuntimeBatcher(async (events) => { flushed.push(events); });
+    const at = new Date(1_790_000_000_000);
+    await batcher.push({ type: TOOLCALL, payload: { n: 1 }, occurredAt: at }, undefined, { defer: true });
+    await batcher.push({ type: TOOLCALL, payload: { n: 2 } });
+    expect(flushed).toEqual([[{ type: TOOLCALL, payload: { n: 1 }, occurredAt: at }, { type: TOOLCALL, payload: { n: 2 } }]]);
+  });
+
+  test("emission times come from the SDK's _addItem, not from when the consumer reads", async () => {
+    const enqueued: unknown[] = [];
+    const result = { _addItem(item: unknown) { enqueued.push(item); } };
+    const emittedAt = observeStreamEmissionTimes(result);
+    const item = { type: "run_item_stream_event" };
+    const before = Date.now();
+    result._addItem(item);
+    const after = Date.now();
+    await sleep(20);
+    expect(enqueued).toEqual([item]);
+    const at = emittedAt(item)!.getTime();
+    expect(at).toBeGreaterThanOrEqual(before);
+    expect(at).toBeLessThanOrEqual(after);
+    expect(emittedAt({ type: "never-emitted" })).toBeUndefined();
+    expect(observeStreamEmissionTimes({})(item)).toBeUndefined();
+  });
+});
+
+test("deferred checkpoints retain every receipt in the same flushing append", async () => {
+  const committed: Array<{ ids: number[]; mutations: number[] }> = [];
+  const batcher = createRuntimeBatcher<number>(async (events, mutations = []) => {
+    committed.push({ ids: events.map(e => (e.payload as { n: number }).n), mutations });
+  });
+  await batcher.push(delta(1, TOOLCALL), 1, { defer: true });
+  await batcher.push(delta(2, TOOLCALL), 2, { defer: true });
+  expect(committed).toEqual([]);
+  await batcher.push(delta(3, TOOLCALL), 3);
+  expect(committed).toEqual([{ ids: [1, 2, 3], mutations: [1, 2, 3] }]);
 });

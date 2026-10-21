@@ -496,9 +496,10 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       });
       let deliver!: () => void, reject!: (error: Error) => void;
       const delivered = new Promise<void>((resolve, fail) => { deliver = resolve; reject = fail; });
-      expect(transport.upgrade(new Request(attachment.url.replace(/^ws/, "http"), {
-        headers: { "sec-websocket-protocol": `opengeni-realtime.v1, opengeni-frame-proxy.${attachment.token}` },
-      }), { upgrade(_request, options) { relay = options.data; return true; } })).toBeUndefined();
+      const upgrade = transport.upgrade(new Request(attachment.url.replace(/^ws/, "http"), {
+        headers: { "sec-websocket-protocol": attachment.protocols.join(", ") },
+      }), { upgrade(_request, options) { relay = options.data; return true; } });
+      expect(upgrade ? await upgrade.text() : undefined).toBeUndefined();
       if (!relay) throw new Error("Actual realtime relay was not admitted");
       relay.attach({ data: relay, send(data) {
         expect(typeof data).toBe("string");

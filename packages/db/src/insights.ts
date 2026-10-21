@@ -1619,14 +1619,14 @@ function numberOrNull(value: unknown): number | null {
 export async function reconcileQuiescedModelCallReceipts(
   db: Database,
   input: { workspaceId: string; limit?: number },
-): Promise<{ settled: number; truncated: boolean }> {
+): Promise<{ settled: number; observed: number; truncated: boolean }> {
   if (isTransactionHandle(db)) throw new Error("MODEL_CALL_RECONCILE_REQUIRES_ROOT_DATABASE");
   const limit = Math.max(1, Math.min(input.limit ?? 500, 1_000));
   const context = await rlsContextForWorkspace(db, input.workspaceId);
   return await withRlsContext(db, context, async scopedDb => {
     const rows = await scopedDb.execute<{
       account_id: string; session_id: string; turn_id: string; turn_attempt_id: string;
-      source_resource_id: string; source_key: string; occurred_at: Date;
+      source_resource_id: string; source_key: string; occurred_at: Date | string;
       attributes: Record<string, unknown>;
     }>(sql`
       select intent.account_id, intent.session_id, intent.turn_id, intent.turn_attempt_id,
@@ -1655,6 +1655,13 @@ export async function reconcileQuiescedModelCallReceipts(
             and terminal.idempotency_key = 'usage:model.call:' || intent.turn_id::text || ':' || source.source_key
             and terminal.attributes->>'outcome' <> 'indeterminate'
         )
+        -- A dispatch refused before any bytes is settled: known to have had no effect.
+        and not exists (
+          select 1 from ${schema.usageEvents} refused
+          where refused.account_id = intent.account_id and refused.workspace_id = intent.workspace_id
+            and refused.event_type = 'model.call.dispatch.refused'
+            and refused.idempotency_key = 'usage:model.call.dispatch.refused:' || intent.turn_id::text || ':' || source.source_key
+        )
       order by intent.occurred_at, intent.id
       limit ${limit + 1}
       for share of attempt
@@ -1674,10 +1681,11 @@ export async function reconcileQuiescedModelCallReceipts(
         eventType: "model.call.dispatch", quantity: 1, unit: "call", sourceResourceType: "model_dispatch",
         sourceResourceId: row.source_resource_id,
         idempotencyKey: `usage:model.call.dispatch:${row.turn_id}:${row.source_key}`,
-        occurredAt: row.occurred_at, attributes,
+        // A raw row carries the driver's text timestamp; recordUsageEvent needs a Date.
+        occurredAt: new Date(row.occurred_at), attributes,
       });
     }
     // Reobserving unknown source facts never settles provider accounting.
-    return { settled: 0, truncated: rows.length > limit };
+    return { settled: 0, observed: Math.min(rows.length, limit), truncated: rows.length > limit };
   });
 }

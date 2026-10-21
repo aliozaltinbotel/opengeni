@@ -4062,7 +4062,15 @@ describe("release schema contract", () => {
       sha256: "75604a1d9cce1bf698184e87d4f0405493e200e06378938b2f10adbfaa565f2d",
       deploymentMode: "rolling",
     });
-    const forwardMigrationPaths = [...companyBrainMigrationPaths, ...appendedMigrationPaths];
+    // Keep the published-history exceptions above, while deriving all new
+    // forward migrations from the actual release rather than a maintained list.
+    const forwardMigrationPaths = [...new Set([
+      ...companyBrainMigrationPaths,
+      ...appendedMigrationPaths,
+      ...unfilteredSourceContract.migrations
+        .filter((migration) => migration.path.slice(0, 4) > "0326")
+        .map((migration) => migration.path),
+    ])];
     const sourceContract =
       forwardMigrationPaths.length > 0
         ? await contractWithoutMigrations(forwardMigrationPaths)

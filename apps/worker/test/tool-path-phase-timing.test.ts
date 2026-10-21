@@ -196,7 +196,7 @@ describe("tool-path phase timing", () => {
     );
     // Each instrumented call is still awaited exactly once, through the timer, with the same function.
     for (const [phase, call] of [
-      ["pending_tool_registration", "registerPendingSessionToolCall(db, {"],
+      ["pending_tool_registration", "registerPendingSessionToolCalls("],
       ["pending_result_recording", "recordPendingSessionToolCallResult(db, {"],
       [
         "stable_history_reconciliation",
@@ -213,8 +213,10 @@ describe("tool-path phase timing", () => {
     }
     expect(source).toContain("toolPathPhases.measureTerminal(() =>");
     expect(source).toContain("const admitModelCall = () =>\n      ensureRunAllowedBetweenModelCalls({");
+    // A parallel batch's created events share one append: every push but the
+    // batch's last is deferred, and the last one flushes them all.
     expect(source).toContain(
-      "await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event));",
+      "await toolPathPhases.measureStructuralPublication(() => eventing.batcher!.push(event, { defer }));",
     );
   });
 });

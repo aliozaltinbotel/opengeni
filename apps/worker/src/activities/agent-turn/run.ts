@@ -1,6 +1,6 @@
 import type { ModelRequest } from "@openai/agents";
 import type { AuthorizeModelCallSource } from "@opengeni/contracts";
-import { persistModelCallSourceReceipt, readModelCallSourceReceipt, type NativeModelSourceRequest } from "@opengeni/db";
+import { persistModelCallSourceReceipt, type NativeModelSourceRequest } from "@opengeni/db";
 import { withClaudeConnectionCredential } from "@opengeni/config";
 import {
   getSessionAuthorityProjection,
@@ -105,6 +105,7 @@ import {
 } from "./file-resources";
 import { TurnEventPublisher } from "./model-usage";
 import { waitForTurnOperation, throwIfTurnOperationCancelled } from "./sandbox-provision";
+import { createAttemptModelSourceDispatch } from "./model-source-dispatch";
 import { createTurnContext, type EventingState } from "./turn-context";
 import { finalizeTurnAttempt } from "./finalization";
 import { settleTurnFailure } from "./failure-settlement";
@@ -605,6 +606,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       } = claimed.ok;
       let nativeSourceRequestIndex=0;
       let nativeInstructionSelections:NativeModelSourceRequest["instructionSelections"];
+      // Attempt-scoped: created in this activity closure, so nothing it holds
+      // outlives or crosses this attempt.
+      const sourceDispatch = resolvedServices.authorizeModelCallSource
+        ? createAttemptModelSourceDispatch({
+            db,
+            scope: { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, turnId: turn.id, attemptId: input.attemptId },
+            executionGeneration: () => attempt.executionGeneration,
+            authorize: resolvedServices.authorizeModelCallSource,
+            ...(runtimeCancellationSignal ? { signal: runtimeCancellationSignal } : {}),
+            throwIfTurnCancelled,
+          })
+        : null;
+      const authorizePersistedSource: AuthorizeModelCallSource | undefined = sourceDispatch && resolvedServices.authorizeModelCallSource
+        ? (() => {
+            const authorize = resolvedServices.authorizeModelCallSource;
+            return async (receipt, context) => {
+              sourceDispatch.retain(receipt);
+              await authorize(receipt, context);
+            };
+          })()
+        : resolvedServices.authorizeModelCallSource;
       const beforeModelCallSourceReceipt: ((request: ModelRequest, purpose?: "AGENT" | "COMPACTION" | "TITLE") => Promise<string>) & Pick<BeforeModelCallSourceReceipt, "beforeProviderDispatch"> = async (request, purpose = "AGENT") => {
         await throwIfTurnCancelled();
         const requestIndex=++nativeSourceRequestIndex;
@@ -612,22 +634,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const admittedSourceKey = await persistAndAuthorizeModelCallSource(db,{accountId:input.accountId,workspaceId:input.workspaceId,sessionId:input.sessionId,
           turnId:turn.id,attemptId:input.attemptId,executionGeneration:attempt.executionGeneration,sourceKey,requestIndex},
           {instructions:request.systemInstructions,input:request.input,tools:request.tools,purpose,sourceBindings:modelSourceBindings(request.input),...(purpose!=="TITLE" && nativeInstructionSelections?{instructionSelections:nativeInstructionSelections}:{})},
-          resolvedServices.authorizeModelCallSource, runtimeCancellationSignal,
+          authorizePersistedSource, runtimeCancellationSignal,
           { observability: resolvedServices.observability, provider: turnExecutionPolicy.providerId, backend: turn.sandboxBackend });
         await throwIfTurnCancelled();
         return admittedSourceKey;
       };
-      if (resolvedServices.authorizeModelCallSource) {
-        const authorize = resolvedServices.authorizeModelCallSource;
-        beforeModelCallSourceReceipt.beforeProviderDispatch = async sourceKey => {
-          await throwIfTurnCancelled();
-          const { receipt } = await readModelCallSourceReceipt(db, { accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId, sourceKey });
-          if (!receipt || receipt.turnId !== turn.id || receipt.attemptId !== input.attemptId || receipt.executionGeneration !== attempt.executionGeneration || receipt.sourceKey !== sourceKey) {
-            throw new Error("MODEL_SOURCE_RECEIPT_DISPATCH_MISMATCH");
-          }
-          await waitForTurnOperation(authorize(receipt, { signal: runtimeCancellationSignal }), runtimeCancellationSignal, undefined);
-          await throwIfTurnCancelled();
-        };
+      if (sourceDispatch) {
+        beforeModelCallSourceReceipt.beforeProviderDispatch = sourceDispatch.beforeProviderDispatch;
       }
       // F-2: the settlement names a declared budget's end, and a declared fallback's use, by this declaration.
       providerTurn.turnRouteDeclaration = turnRouteDeclaration;

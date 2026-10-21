@@ -384,13 +384,13 @@ for (const streamed of [false, true]) {
   });
 }
 
-test("generic stream errors leave terminal accounting indeterminate", async () => {
+for (const event of [{ type: "error", message: "connection lost" }, { type: "response.failed" }]) test(`unproven ${event.type} leaves terminal accounting indeterminate`, async () => {
   let terminalCalls = 0;
-  const { client } = fakeClient({ responses: () => iterate([{ type: "error", message: "connection lost" }]) });
+  const { client } = fakeClient({ responses: () => iterate([event]) });
   await expect(runSingleModelCall(
     { client, provider: provider("responses"), modelId: "test-model" },
     { messages: [{ role: "user", content: "Synthetic request" }] },
     { onTextDelta: () => {}, onFailedTerminal: async () => { terminalCalls++; } },
-  )).rejects.toThrow("connection lost");
+  )).rejects.toThrow(SingleModelCallProviderError);
   expect(terminalCalls).toBe(0);
 });

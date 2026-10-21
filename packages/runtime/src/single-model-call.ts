@@ -403,7 +403,8 @@ async function runResponsesCall(
         terminal = (event.response as Record<string, unknown> | undefined) ?? {};
         break;
       case "response.failed": {
-        await settleFailedTerminal(options, sourceKey, event.response);
+        if (event.response && typeof event.response === "object" && !Array.isArray(event.response))
+          await settleFailedTerminal(options, sourceKey, event.response);
         const error = (event.response as { error?: { message?: unknown } } | undefined)?.error;
         throw new SingleModelCallProviderError(
           typeof error?.message === "string" ? error.message : "The model request failed",

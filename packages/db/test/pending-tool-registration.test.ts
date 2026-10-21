@@ -5,12 +5,14 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { DatabaseTransactionError } from "../src/persistence-errors";
 import {
   applySessionTurnSettlement,
+  appendSessionEventsForTurnAttempt,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
   mutateSessionControlInTransaction,
   registerPendingSessionToolCall,
+  registerPendingSessionToolCalls,
   recordPendingSessionToolCallResult,
   submitHumanPromptInTransaction,
   withWorkspaceSubjectSessionActivityRls,
@@ -793,5 +795,108 @@ describe("pending tool registration rollback retries", () => {
     expect(await registration).toEqual({ result: { accepted: false, registered: false } });
     expect(await attemptCount()).toBe(1);
     expect(await receipts(input)).toHaveLength(0);
+  });
+});
+
+describe("parallel batch registration", () => {
+  function batchOf(input: PendingSessionToolCallInput, size: number): PendingSessionToolCallInput[] {
+    return Array.from({ length: size }, (_, index) => {
+      const callId = `${input.callId}-${index}`;
+      return { ...input, callId, callItem: { type: "function_call", callId, name: "read", arguments: `{"index":${index}}` } };
+    });
+  }
+
+  test("registers every call of a batch in one transaction under one fence", async () => {
+    const { input } = await fixture();
+    const batch = batchOf(input, 4);
+    await shared.admin`ALTER SEQUENCE pending_receipt_registration_attempt RESTART WITH 1`;
+    for (const call of batch) {
+      await shared.admin`INSERT INTO pending_receipt_registration_fault (call_id, failures, code, delay_seconds)
+        VALUES (${call.callId}, 0, '40001', 0)`;
+    }
+    const result = await registerPendingSessionToolCalls(client.db, batch);
+    expect(result).toEqual({ accepted: true, registeredCallIds: batch.map((call) => call.callId) });
+    // The fixture trigger fires once per inserted row; one transaction id covers all four.
+    expect(await attemptCount()).toBe(4);
+    const [transactions] = await shared.admin`SELECT
+      (SELECT last_value FROM pending_receipt_registration_first_xid) AS first,
+      (SELECT last_value FROM pending_receipt_registration_last_xid) AS last`;
+    expect(Number(transactions!.last)).toBe(Number(transactions!.first));
+    const rows = await receipts(input);
+    expect(rows.map((row) => row.call_id).sort()).toEqual(batch.map((call) => call.callId).sort());
+    expect(new Set(rows.map((row) => row.attempt_id))).toEqual(new Set([input.attemptId]));
+  });
+
+  test("a retried batch rolls back as a unit and admits each call once", async () => {
+    const { input } = await fixture();
+    const batch = batchOf(input, 3);
+    await inject(batch[2]!, 1, "40P01");
+    const result = await registerPendingSessionToolCalls(client.db, batch);
+    expect(result.accepted).toBe(true);
+    expect(result.registeredCallIds.sort()).toEqual(batch.map((call) => call.callId).sort());
+    expect(await receipts(input)).toHaveLength(3);
+  });
+
+  test("a batch converges with calls already registered one by one and refuses a conflicting duplicate", async () => {
+    const { input } = await fixture();
+    const batch = batchOf(input, 3);
+    expect(await registerPendingSessionToolCall(client.db, batch[1]!)).toEqual({ accepted: true, registered: true });
+    const result = await registerPendingSessionToolCalls(client.db, batch);
+    expect(result).toEqual({ accepted: true, registeredCallIds: [batch[0]!.callId, batch[2]!.callId] });
+    expect(await receipts(input)).toHaveLength(3);
+    await expect(
+      registerPendingSessionToolCalls(client.db, [{ ...batch[0]!, callItem: { ...batch[0]!.callItem, arguments: "{}" } }]),
+    ).rejects.toThrow("Pending tool receipt conflicts with the registered call");
+    await expect(
+      registerPendingSessionToolCalls(client.db, [batch[0]!, { ...batch[0]!, callType: "shell_call" }]),
+    ).rejects.toThrow("Pending tool receipt conflicts with the registered call");
+    expect(await receipts(input)).toHaveLength(3);
+  });
+
+  test("calls of another attempt are refused before any write", async () => {
+    const { input } = await fixture();
+    const batch = batchOf(input, 2);
+    await expect(
+      registerPendingSessionToolCalls(client.db, [batch[0]!, { ...batch[1]!, attemptId: crypto.randomUUID() }]),
+    ).rejects.toThrow("Pending tool calls of one registration must share one attempt");
+    expect(await receipts(input)).toHaveLength(0);
+  });
+
+  test("a batch cannot name an account other than its locked session owner", async () => {
+    const { input } = await fixture();
+    const foreign = await fixture();
+    const batch = batchOf(input, 2).map(call => ({ ...call, accountId: foreign.input.accountId }));
+    await expect(registerPendingSessionToolCalls(client.db, batch)).rejects.toThrow();
+    expect(await receipts(input)).toHaveLength(0);
+  });
+
+  test("a fenced attempt registers nothing", async () => {
+    const { input } = await fixture();
+    const batch = batchOf(input, 2).map((call) => ({ ...call, executionGeneration: call.executionGeneration + 1 }));
+    expect(await registerPendingSessionToolCalls(client.db, batch)).toEqual({ accepted: false, registeredCallIds: [] });
+    expect(await receipts(input)).toHaveLength(0);
+  });
+});
+
+describe("tool event occurrence time", () => {
+  test("an explicit occurredAt is stored as given while created_at stays the append time, in sequence order", async () => {
+    const { input } = await fixture();
+    const executionStarted = new Date(Date.now() - 5_000);
+    const executionEnded = new Date(Date.now() - 4_000);
+    const appendStarted = Date.now();
+    const appended = await appendSessionEventsForTurnAttempt(
+      client.db, input.workspaceId, input.sessionId, input.turnId, input.executionGeneration, input.attemptId,
+      [
+        { type: "agent.toolCall.created", payload: { id: input.callId, name: "read" }, turnId: input.turnId, occurredAt: executionStarted },
+        { type: "agent.toolCall.output", payload: { id: input.callId, output: "done" }, turnId: input.turnId, occurredAt: executionEnded },
+      ],
+    );
+    expect(appended.accepted).toBe(true);
+    const rows = await shared.admin`SELECT type, sequence, occurred_at, created_at FROM session_events
+      WHERE session_id = ${input.sessionId} AND type IN ('agent.toolCall.created', 'agent.toolCall.output') ORDER BY sequence`;
+    expect(rows.map((row) => row.type)).toEqual(["agent.toolCall.created", "agent.toolCall.output"]);
+    expect(new Date(rows[0]!.occurred_at).getTime()).toBe(executionStarted.getTime());
+    expect(new Date(rows[1]!.occurred_at).getTime()).toBe(executionEnded.getTime());
+    for (const row of rows) expect(new Date(row.created_at).getTime()).toBeGreaterThanOrEqual(appendStarted - 1_000);
   });
 });

@@ -43,6 +43,7 @@ import {
   MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
   MODEL_CALL_USAGE_EVENT_TYPE,
   MODEL_CALL_DISPATCH_EVENT_TYPE,
+  MODEL_CALL_DISPATCH_REFUSED_EVENT_TYPE,
   ModelCallUsageAttributes,
   type LatencyMode,
   type ModelContextContributionSummary,
@@ -1156,7 +1157,8 @@ export async function recordModelCallUsageEvent(
     sourceKey: string;
     callKind: ModelCallUsageAttributes["callKind"];
     outcome?: ModelCallUsageAttributes["outcome"];
-    stage?: "dispatch" | "terminal";
+    /** `refused`: the intent's dispatch was refused before any request bytes. */
+    stage?: "dispatch" | "refused" | "terminal";
     scope: ModelCallUsageAttributes["scope"];
     provider: string;
     providerApi: string;
@@ -1171,8 +1173,12 @@ export async function recordModelCallUsageEvent(
     } | null;
   },
 ): Promise<void> {
-  const eventType = input.stage === "dispatch" || input.outcome === "indeterminate" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE;
+  const eventType = input.stage === "refused"
+    ? MODEL_CALL_DISPATCH_REFUSED_EVENT_TYPE
+    : input.stage === "dispatch" || input.outcome === "indeterminate" ? MODEL_CALL_DISPATCH_EVENT_TYPE : MODEL_CALL_USAGE_EVENT_TYPE;
   if (eventType === MODEL_CALL_DISPATCH_EVENT_TYPE) input = { ...input, billing: null, outcome: "indeterminate" };
+  // Known to have had no provider effect: admission revoked before consumption.
+  if (eventType === MODEL_CALL_DISPATCH_REFUSED_EVENT_TYPE) input = { ...input, billing: null, outcome: "cancelled" };
   const telemetry = input.billing?.normalizedUsage.telemetry ?? null;
   const attributes = ModelCallUsageAttributes.parse({
     schema: MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA,
@@ -1202,7 +1208,7 @@ export async function recordModelCallUsageEvent(
     eventType,
     quantity: 1,
     unit: "call",
-    sourceResourceType: eventType === MODEL_CALL_DISPATCH_EVENT_TYPE ? "model_dispatch" : "model_response",
+    sourceResourceType: eventType === MODEL_CALL_USAGE_EVENT_TYPE ? "model_response" : "model_dispatch",
     sourceResourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,
     turnId: input.turnId,
@@ -1215,6 +1221,12 @@ export async function recordModelCallUsageEvent(
 /** One installed usage producer for literal transport admission and failure.
  * Intent is durable outside a transaction before bytes; it never bills.
  * A failed transport has unknown provider effect, so its call is indeterminate.
+ * Source authority is checked once per literal dispatch, after the intent: the
+ * receipt-persistence check has just run, so a check before the intent would
+ * only repeat it. A refusal here throws before bytes, so its effect is known to
+ * be none: the intent is settled by a `model.call.dispatch.refused` row
+ * (outcome cancelled, no usage, no cost), never left indeterminate, and
+ * `onDispatchFailure` leaves a settled refusal alone.
  */
 export function createModelCallUsageSourceHooks(
   db: ActivityServices["db"],
@@ -1226,21 +1238,30 @@ export function createModelCallUsageSourceHooks(
   return {
     beforeProviderDispatch: async sourceKey => {
       assertRoot();
-      await authorize?.(sourceKey);
       await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "dispatch", outcome: "indeterminate", billing: null });
-      // Persistence may have waited: recheck the current source authority at
-      // the final literal boundary, outside the intent transaction.
-      await authorize?.(sourceKey);
+      // The one live check at the final literal boundary, outside the intent
+      // transaction: persistence may have waited, so it runs after the intent.
+      try {
+        await authorize?.(sourceKey);
+      } catch (refusal) {
+        try {
+          await recordModelCallUsageEvent(db, { ...call, sourceKey, stage: "refused", billing: null });
+        } catch {
+          // The intent then stays unknown (indeterminate): still never billed.
+        }
+        throw refusal;
+      }
     },
     onDispatchFailure: async sourceKey => {
       assertRoot();
       if (claimedSourceKeys.has(sourceKey)) return;
       const dispatchKey = `usage:${MODEL_CALL_DISPATCH_EVENT_TYPE}:${call.turnId}:${sourceKey}`;
       const terminalKey = `usage:${MODEL_CALL_USAGE_EVENT_TYPE}:${call.turnId}:${sourceKey}`;
+      const refusedKey = `usage:${MODEL_CALL_DISPATCH_REFUSED_EVENT_TYPE}:${call.turnId}:${sourceKey}`;
       const existing = await existingUsageEventIdempotencyKeys(db, {
-        accountId: call.accountId, workspaceId: call.workspaceId, keys: [dispatchKey, terminalKey],
+        accountId: call.accountId, workspaceId: call.workspaceId, keys: [dispatchKey, terminalKey, refusedKey],
       });
-      if (!existing.has(dispatchKey) || existing.has(terminalKey)) return;
+      if (!existing.has(dispatchKey) || existing.has(terminalKey) || existing.has(refusedKey)) return;
       // Transport loss supplies no provider terminal. Preserve the existing
       // unknown dispatch SOURCE_FACT without claiming the final accounting key
       // or suppressing a later authenticated provider terminal.

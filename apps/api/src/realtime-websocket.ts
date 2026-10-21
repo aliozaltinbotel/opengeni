@@ -306,7 +306,7 @@ async function mintAiGatewayClientSecret(input: {
   if (
     typeof token !== "string" ||
     token.length === 0 ||
-    (expiresAt !== undefined && expiresAt !== null && typeof expiresAt !== "number")
+    (expiresAt !== undefined && expiresAt !== null && (typeof expiresAt !== "number" || normalizeExpiry(expiresAt) === null))
   ) {
     throw new RealtimeWebsocketBrokerError(
       "invalid_provider_response",
@@ -314,7 +314,7 @@ async function mintAiGatewayClientSecret(input: {
       response.status,
     );
   }
-  return { token, expiresAt: typeof expiresAt === "number" ? expiresAt : null };
+  return { token, expiresAt: normalizeExpiry(expiresAt) };
 }
 
 const SUPERGROK_UPSTREAM_MODEL_ID = "grok-voice-think-fast-2.0";
