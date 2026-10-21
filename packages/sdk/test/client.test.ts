@@ -2923,3 +2923,18 @@ test("bodiless browser-guarded mutations still send JSON", async () => {
     expect(request.body).toBe("{}");
   }
 });
+
+
+test("canonical Goal continuation uses its dedicated fail-closed route while ordinary status uses PATCH", async () => {
+  const { client, requests } = makeClient(() => jsonResponse({}));
+  const request = { status: "active" as const,
+    expectedGoal: { id: SESSION_ID, version: 7, pausedReason: "agent" as const },
+    continuationInput: { operationKey: "approved-input:1", text: "Continue approved input" } };
+  await client.updateGoal(WORKSPACE_ID, SESSION_ID, request);
+  await client.updateGoal(WORKSPACE_ID, SESSION_ID, { status: "paused" });
+  expect(requests[0]?.method).toBe("POST");
+  expect(requests[0]?.url).toEndWith(`/sessions/${SESSION_ID}/goal/continuation-input`);
+  expect(JSON.parse(requests[0]!.body!)).toEqual(request);
+  expect(requests[1]?.method).toBe("PATCH");
+  expect(requests[1]?.url).toEndWith(`/sessions/${SESSION_ID}/goal`);
+});

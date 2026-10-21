@@ -35,8 +35,8 @@ extend the same prompt-cache prefix and recovery replays identical authority.
 ## Atomic continuation input
 
 An authorized host can resume an agent-paused Goal with canonical input using the
-existing `PATCH /v1/workspaces/:workspaceId/sessions/:sessionId/goal` route (SDK
-`updateGoal`). Supply `status: "active"`, the exact observed
+dedicated `POST /v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input` route
+(SDK `updateGoal` selects it only when `continuationInput` is present). Supply `status: "active"`, the exact observed
 `expectedGoal: { id, version, pausedReason: "agent" }`, and
 `continuationInput: { operationKey, text }`. Reuse the same operation key and
 identical input after an ambiguous response.
@@ -49,7 +49,9 @@ attempt can retry once the current work settles or its inference gate opens.
 The native claim checks the active Goal identity/version before delivering the
 canonical user-role model input. A later human Pause or Goal change invalidates
 unclaimed work. A committed replay returns the original obligation without
-resuming a newer pause; a changed request under that key conflicts.
+resuming a newer pause; a changed request under that key conflicts. Older APIs
+refuse the unknown dedicated route before any ordinary Goal resume can run; an
+older replica cannot silently strip the canonical input during a mixed rollout.
 
 ## Report delivery
 

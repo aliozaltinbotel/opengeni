@@ -3470,7 +3470,7 @@ const routeLabelPatterns: Array<{
     label: "/v1/workspaces/:workspaceId/sessions/:id/viewers",
   },
   {
-    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/goal$/,
+    pattern: /^\/v1\/workspaces\/[^/]+\/sessions\/[^/]+\/goal(?:\/continuation-input)?$/,
     label: "/v1/workspaces/:workspaceId/sessions/:id/goal",
   },
   {

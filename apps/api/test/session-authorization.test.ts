@@ -58,6 +58,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["DELETE", "/realtime/33333333-3333-4333-8333-333333333333", "session.realtime.control"],
   ["GET", "/goal", "session.goal.read"],
   ["PATCH", "/goal", "session.goal.write"],
+  ["POST", "/goal/continuation-input", "session.goal.write"],
   ["DELETE", "/goal", "session.goal.write"],
   ["GET", "/goal/revisions", "session.goal.read"],
   ["GET", "/goal/revisions/page", "session.goal.read"],

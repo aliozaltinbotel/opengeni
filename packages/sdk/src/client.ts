@@ -3582,10 +3582,13 @@ export class OpenGeniClient {
     sessionId: string,
     request: UpdateSessionGoalRequest,
   ): Promise<SessionGoal> {
+    if ("status" in request && request.continuationInput !== undefined) {
+      return await this.requestJson<SessionGoal>(
+        "POST", `${sessionPath(workspaceId, sessionId)}/goal/continuation-input`, request,
+      );
+    }
     return await this.requestJson<SessionGoal>(
-      "PATCH",
-      `${sessionPath(workspaceId, sessionId)}/goal`,
-      request,
+      "PATCH", `${sessionPath(workspaceId, sessionId)}/goal`, request,
     );
   }
 

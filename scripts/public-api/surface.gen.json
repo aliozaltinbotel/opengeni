@@ -7855,6 +7855,19 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input",
+      "sdk": [
+        "OpenGeniClient.updateGoal"
+      ],
+      "request": [
+        "UpdateSessionGoalRequest"
+      ],
+      "response": [
+        "SessionGoal"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions",
       "sdk": [

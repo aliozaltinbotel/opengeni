@@ -6798,6 +6798,14 @@ export type SessionGoal = {
 export type UpdateSessionGoalRequest =
   | {
       status: "paused" | "active";
+      expectedGoal?: { id: string; version: number; pausedReason: string | null } | undefined;
+      continuationInput?: never;
+      rationale?: string | undefined;
+    }
+  | {
+      status: "active";
+      expectedGoal: { id: string; version: number; pausedReason: "agent" };
+      continuationInput: { operationKey: string; text: string };
       rationale?: string | undefined;
     }
   | {

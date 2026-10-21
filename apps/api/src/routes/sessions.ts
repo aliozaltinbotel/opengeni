@@ -3153,12 +3153,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     },
   );
 
-  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
+  const updateSessionGoal = async (c: Context): Promise<Response> => {
+    const workspaceId = c.req.param("workspaceId")!;
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
-    const sessionId = c.req.param("sessionId");
+    const sessionId = c.req.param("sessionId")!;
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
+    const canonicalInputRoute = c.req.path.endsWith("/goal/continuation-input");
+    if (canonicalInputRoute !== ("status" in payload && payload.continuationInput !== undefined)) {
+      throw new HTTPException(400, { message: "Canonical Goal input requires its dedicated continuation-input route" });
+    }
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
       throw new HTTPException(404, { message: "session goal not found" });
@@ -3342,7 +3346,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       }
       throw error;
     }
-  });
+  };
+  app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", updateSessionGoal);
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input", updateSessionGoal);
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -5727,6 +5733,7 @@ export function sessionAuthorizationOperationForHttp(
         ? "session.goal.write"
         : null;
   }
+  if (suffix === "/goal/continuation-input" && verb === "POST") return "session.goal.write";
   if (suffix === "/goal/revisions" && verb === "GET") return "session.goal.read";
   if (suffix === "/goal/revisions/page" && verb === "GET") return "session.goal.read";
   if (/^\/goal\/revisions\/[^/]+\/apply$/.test(suffix) && verb === "POST") {
