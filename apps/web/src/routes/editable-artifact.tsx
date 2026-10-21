@@ -14,7 +14,7 @@ import type { AccessContext, Workspace } from "@opengeni/sdk";
 // oxlint-disable-next-line import/default
 import artifactWorkerUrl from "@opengeni/sdk/editable-artifacts/worker?worker&url";
 
-import { apiBaseUrl, authHeadersForAccessKey, getStoredAccessKey } from "@/api";
+import { apiBaseUrl, authHeadersForAccessKey, getStoredAccessKey, managedActorFetch } from "@/api";
 import { useAppContext } from "@/context";
 import { ARTIFACT_ACCESS_REQUIRED, isArtifactReadDenied } from "@/lib/artifact-access";
 import {
@@ -107,6 +107,7 @@ function EditableArtifactContent({
         }}
         transport={{
           credentials: "include",
+          fetch: managedActorFetch as typeof fetch,
           ...(Object.keys(headers).length > 0 ? { headers } : {}),
           ...(insecureLoopback ? { allowInsecureDevelopmentTransport: true } : {}),
         }}
