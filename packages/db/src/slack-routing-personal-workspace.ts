@@ -2,6 +2,7 @@
 //
 // Both the Slack routing resolvers and the Slack access-request path need it,
 // and this keeps that from becoming an import cycle between them.
+import { SessionScopeSubjectId } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 
 import { type Database } from "./database";
@@ -15,8 +16,8 @@ import { rlsSubjectIdOrEmpty } from "./workspace-authority";
  * `personalWorkspaceId` pointer is read - never a default workspace, a
  * `created_by`, or current access.
  *
- * Non-`user:` subjects (API keys, delegated service principals, configured and
- * local principals) can never own an organization membership, so they
+ * Only canonical human subjects (`user:` and `external_user:`) can own an
+ * organization membership. API keys, service and configured principals
  * short-circuit rather than tripping `list_self_organization_memberships`'
  * `42501` guard.
  *
@@ -30,7 +31,7 @@ export async function namedSubjectPersonalWorkspaceId(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<string | null> {
-  if (!input.subjectId.startsWith("user:")) return null;
+  if (!SessionScopeSubjectId.safeParse(input.subjectId).success) return null;
   // `listSelfOrganizationMemberships` opens its own scope and sets
   // `opengeni.subject_id` to the probed subject. Under drizzle a nested
   // transaction is a SAVEPOINT, and releasing a savepoint does NOT undo a
