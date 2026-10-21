@@ -28,6 +28,8 @@ for (const scenario of [
     const checkpointTx = {} as db.Database;
     const allowedFence = { allowed: true } as Parameters<db.SessionEventMutation<"event">>[1];
     const mutationEvents: string[] = [];
+    const callIds = ["call_first", "call_sibling"] as const;
+    const registeredCallIds: string[] = [];
     const spies = [
       spyOn(runInput, "turnInput").mockResolvedValue({
         input: { input: checkpoint },
@@ -44,10 +46,14 @@ for (const scenario of [
       // This fixture has no stored programmatic operations to recover.
       spyOn(db, "listTurnCodemodeApprovals").mockResolvedValue([]),
       spyOn(db, "sessionTurnHasFinalReplyNudge").mockResolvedValue(false),
-      spyOn(db, "registerPendingSessionToolCallInTransaction").mockResolvedValue({
-        accepted: true,
-        registered: true,
-      }),
+      spyOn(db, "registerPendingSessionToolCallInTransaction").mockImplementation(
+        async (tx, input, fence) => {
+          expect(tx).toBe(checkpointTx);
+          expect(fence).toBe(allowedFence);
+          registeredCallIds.push(input.callId);
+          return { accepted: true, registered: true };
+        },
+      ),
       spyOn(db, "recordPendingSessionToolCallResultInTransaction").mockImplementation(
         async (tx, input, fence) => {
           expect(tx).toBe(checkpointTx);
@@ -72,7 +78,7 @@ for (const scenario of [
       error: null,
       toStream: () => ({
         async *[Symbol.asyncIterator]() {
-          for (const callId of ["call_first", "call_sibling"]) {
+          for (const callId of callIds) {
             yield {
               type: "run_item_stream_event",
               item: {
@@ -199,7 +205,8 @@ for (const scenario of [
       } catch (error) {
         caught = error;
       }
-      expect(mutationEvents).toEqual(["created", "created", "output"]);
+      expect(mutationEvents).toEqual(["created", "output"]);
+      expect(registeredCallIds).toEqual([...callIds]);
       if (scenario === "fenced" || scenario === "checkpoint_fenced") {
         expect(caught).toBeInstanceOf(TurnAttemptFencedError);
         expect(order).not.toContain("event_started");
