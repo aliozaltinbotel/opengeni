@@ -24,6 +24,7 @@ import {
   evaluateGoalContinuation,
   getSessionGoalWithContinuation,
   getActiveSessionHistoryItems,
+  listSessionEvents,
   getSession,
   listSessionsForSubject,
   getScheduledTargetSessionExecution,
@@ -4762,7 +4763,10 @@ describe("atomic canonical goal handoff", () => {
 
   test("claim executes canonical input with native goal ownership", async () => {
     const { ctx, request } = await pausedFixture();
-    await resumeSessionGoalWithInput(client.db, request);
+    const accepted = await resumeSessionGoalWithInput(client.db, request);
+    expect(accepted.events.find((event) => event.type === "goal.continuation")?.payload).toMatchObject({
+      operationKey: request.continuationInput.operationKey, updateId: accepted.update.id,
+    });
     const claim = await claimSessionWorkForAttempt(client.db, ctx.grant.workspaceId!, {
       sessionId: ctx.session.id,
       workflowId: `session-${ctx.session.id}`,
@@ -4774,6 +4778,9 @@ describe("atomic canonical goal handoff", () => {
     expect(claim.action).toBe("claimed");
     if (claim.action !== "claimed") throw new Error("canonical handoff not claimed");
     expect(claim.turn.source).toBe("goal");
+    const events = await listSessionEvents(client.db, ctx.grant.workspaceId!, ctx.session.id);
+    expect(events.find((event) => event.type === "system.update.delivered" &&
+      event.turnId === claim.turn.id)?.payload).toMatchObject({ updateIds: [accepted.update.id] });
     const history = await getActiveSessionHistoryItems(client.db, ctx.grant.workspaceId!, ctx.session.id);
     const canonicalItems = history.filter((row) => JSON.stringify(row.item).includes(request.continuationInput.text));
     expect(canonicalItems).toHaveLength(1);

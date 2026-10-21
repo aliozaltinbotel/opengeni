@@ -8332,6 +8332,12 @@ export const GoalSpec = /* @__PURE__ */ defineSchema(() =>
 );
 export type GoalSpec = z.infer<typeof GoalSpec>;
 
+/** Opaque request identity and its native Goal update; never continuation text or actor identity. */
+export const GoalContinuationInputAttribution = /* @__PURE__ */ defineSchema(() =>
+  z.object({ operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS), updateId: z.string().uuid() }).strict(),
+);
+export type GoalContinuationInputAttribution = z.infer<typeof GoalContinuationInputAttribution>;
+
 export const UpdateSessionGoalRequest = /* @__PURE__ */ defineSchema(() =>
   z.union([
     z

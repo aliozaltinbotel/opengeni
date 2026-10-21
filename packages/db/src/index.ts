@@ -708,6 +708,7 @@ import {
 } from "./external-link-work";
 
 import {
+  GoalContinuationInputAttribution,
   SESSION_OPERATION_KEY_MAX_CHARS,
   SESSION_GOAL_PROGRESS_MAX_BYTES,
   SESSION_GOAL_RATIONALE_MAX_BYTES,
@@ -70422,6 +70423,9 @@ export async function materializeGoalContinuation(
                     version: decision.goal.version,
                     goalWakeRevision,
                     autoContinuation: decision.autoContinuation,
+                    ...(input.canonicalInput ? GoalContinuationInputAttribution.parse({
+                      operationKey: input.canonicalInput.dedupeKey.slice("goal-input:".length), updateId: update.id,
+                    }) : {}),
                   },
                   occurredAt: now,
                 },

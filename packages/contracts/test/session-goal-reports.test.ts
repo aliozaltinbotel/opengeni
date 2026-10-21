@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   GoalSpec,
+  GoalContinuationInputAttribution,
   UpdateSessionGoalRequest,
   SessionGoalReportRequirements,
   SessionGoalReportDeliveries,
@@ -114,4 +115,15 @@ test("canonical continuation requires exact agent pause and immutable bounded in
     ].map((input) => ({ status: "active", expectedGoal, continuationInput: input })),
   ])
     expect(UpdateSessionGoalRequest.safeParse(request).success).toBe(false);
+});
+
+
+test("canonical Goal event attribution is bounded identity without payload or actor data", () => {
+  const identity = { operationKey: "canonical-input:1", updateId: delivery.inspectionReceiptId };
+  expect(GoalContinuationInputAttribution.parse(identity)).toEqual(identity);
+  for (const invalid of [{ ...identity, updateId: "invalid" }, { ...identity, operationKey: "" },
+    { ...identity, operationKey: "x".repeat(257) }, { ...identity, text: "continuation payload" },
+    { ...identity, subjectId: "synthetic-actor" }]) {
+    expect(GoalContinuationInputAttribution.safeParse(invalid).success).toBe(false);
+  }
 });
