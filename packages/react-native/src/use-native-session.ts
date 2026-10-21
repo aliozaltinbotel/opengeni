@@ -1,4 +1,5 @@
 import { useCallback, useMemo } from "react";
+import { useOpenGeniText } from "@opengeni/react/messages";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 import {
   groupTimeline,
@@ -12,6 +13,7 @@ import {
   useSessionLineage,
   useSessionMcpApprovalPolicy,
   useTurnQueue,
+  type ComposerBusySend,
   type FileAttachmentClientLike,
   type GoalClientLike,
   type HumanInputSessionClientLike,
@@ -23,7 +25,12 @@ import {
   type TimelineGroup,
   type TimelineItem,
 } from "@opengeni/react/session";
-import { useNativeFileAttachments, type NativeFileAttachmentsResult } from "./attachments";
+import { sessionAdmissionBlocked, type SessionDisplayStatus } from "@opengeni/react/timeline-model";
+import {
+  nativeComposerAttachmentCallbacks,
+  useNativeFileAttachments,
+  type NativeFileAttachmentsResult,
+} from "./attachments";
 import { useOpenGeniReactNativeEnvironment } from "./environment";
 import {
   useNativeReadAcknowledgement,
@@ -64,6 +71,13 @@ export interface OpenGeniNativeSessionController {
   /** Spawned sub-agent sessions, refreshed by spawn and completion events. */
   lineage: ReturnType<typeof useSessionLineage>;
   active: boolean;
+  /**
+   * The runtime refused to start the next turn (an admission block). Nothing
+   * is asked of the person; Resume rechecks and starts the kept work again.
+   */
+  admissionBlocked: boolean;
+  /** `sessionStatus` as a person should read it: `blocked` instead of "Waiting on you". */
+  displayStatus: SessionDisplayStatus | null;
   runActive: boolean;
   error: Error | null;
   refresh(): Promise<void>;
@@ -79,11 +93,38 @@ function sessionRunActive(status: SessionStatus | null): boolean {
   );
 }
 
+/** The newest loaded status change, and whether the runtime blocked admission there. */
+function latestStatusChange(
+  events: readonly SessionEvent[],
+): { sequence: number; blocked: boolean } | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type !== "session.status.changed") continue;
+    return {
+      sequence: event.sequence,
+      blocked: (event.payload as { code?: unknown } | undefined)?.code === "admission_blocked",
+    };
+  }
+  return null;
+}
+
 export function useOpenGeniNativeSession(input: {
   client: OpenGeniNativeSessionClient;
   workspaceId: string;
   sessionId: string;
   mcpApprovalPolicyServerId?: string;
+  /**
+   * What an ordinary Send does while the agent is working: `queue` (default)
+   * runs it after the current turn; `steer` has the agent read it within
+   * seconds (a reply still being written stops; running tools are not cut off).
+   *
+   * Under `steer` the screen has one Send and nothing to learn: no Queue
+   * choice beside it and no Queue or Steer words. Set `offerQueue` to also
+   * offer Queue beside Send.
+   */
+  busySend?: ComposerBusySend;
+  /** Under `busySend: "steer"`, also offer Queue beside Send while the agent works. */
+  offerQueue?: boolean;
 }): OpenGeniNativeSessionController {
   const environment = useOpenGeniReactNativeEnvironment();
   const events = useSessionEvents(input.sessionId, {
@@ -119,9 +160,11 @@ export function useOpenGeniNativeSession(input: {
     // at once instead of flashing as a chat bubble before it is queued.
     sendDestination: () =>
       (session.session?.activeTurnId ?? null) !== null || queue.queue.length > 0 ? "queue" : "chat",
+    busySend: input.busySend,
+    offerQueue: input.offerQueue,
     sendExtras: () => ({ resources: attachments.readyResources }),
     sendBlocked: () => attachments.hasUnresolved,
-    onSent: () => attachments.clear(),
+    ...nativeComposerAttachmentCallbacks(attachments),
   });
   const control = useSessionControl(input.sessionId, {
     client: input.client,
@@ -149,7 +192,8 @@ export function useOpenGeniNativeSession(input: {
     pollIntervalMs: 30_000,
   });
   const approvals = useMemo(() => projectPendingApprovals(events.events), [events.events]);
-  const timelineGroups = useMemo(() => groupTimeline(events.timeline), [events.timeline]);
+  const t = useOpenGeniText();
+  const timelineGroups = useMemo(() => groupTimeline(t, events.timeline), [t, events.timeline]);
   useNativeReadAcknowledgement({
     client: input.client,
     workspaceId: input.workspaceId,
@@ -179,6 +223,23 @@ export function useOpenGeniNativeSession(input: {
     ]);
   }, [events, humanInput, mcpApprovalPolicy, queue, session]);
 
+  const detail = session.session ?? null;
+  const latestChange = latestStatusChange(events.events);
+  // A recheck (Resume) clears an admission block and restores the earlier
+  // status without a status event, so once the detail read is as fresh as the
+  // block event it is the truth. Until it lands, the block event is.
+  const detailCurrent =
+    detail !== null &&
+    latestChange?.blocked === true &&
+    detail.lastSequence >= latestChange.sequence;
+  const sessionStatus = detailCurrent
+    ? detail.status
+    : (events.sessionStatus ?? detail?.status ?? null);
+  const admissionBlocked = detailCurrent
+    ? sessionAdmissionBlocked(detail)
+    : sessionStatus === "requires_action" &&
+      (latestChange?.blocked === true || (detail !== null && sessionAdmissionBlocked(detail)));
+
   return {
     sessionId: input.sessionId,
     workspaceId: input.workspaceId,
@@ -187,7 +248,9 @@ export function useOpenGeniNativeSession(input: {
     timeline: events.timeline,
     timelineGroups,
     connectionState: events.connectionState,
-    sessionStatus: events.sessionStatus ?? session.session?.status ?? null,
+    sessionStatus,
+    admissionBlocked,
+    displayStatus: admissionBlocked ? "blocked" : sessionStatus,
     initialLoading: events.initialLoading || session.loading,
     hasOlder: events.hasOlder,
     loadingOlder: events.loadingOlder,
@@ -202,7 +265,8 @@ export function useOpenGeniNativeSession(input: {
     goal,
     lineage,
     active: environment.active,
-    runActive: sessionRunActive(events.sessionStatus ?? session.session?.status ?? null),
+    // A blocked session runs nothing: the composer offers Send, not Stop.
+    runActive: !admissionBlocked && sessionRunActive(sessionStatus),
     error:
       events.error ??
       session.error ??

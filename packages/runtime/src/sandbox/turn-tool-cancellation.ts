@@ -16,6 +16,7 @@ import {
   renderRoutingMutationOutcomeUnknownToolResult,
   type RoutingCommandDispatchOptions,
 } from "./routing/routing-session";
+import { createHash } from "node:crypto";
 import { sendCommandInput } from "./command-input";
 import {
   withPendingCommandSupervision,
@@ -37,10 +38,51 @@ import {
 } from "./synchronous-command";
 import type { ChannelASession, ChannelAExecArgs } from "./channel-a";
 import { withNativeSynchronousCommandCollection } from "./native-synchronous-collection";
+import { isSecretReferenceError, type SecretResolver } from "@opengeni/contracts";
+import {
+  prepareSecretExec,
+  prepareSecretStdin,
+  resolveSecretImagePath,
+  resolveSecretPatchText,
+  runWithSecretCarry,
+  type SecretFilesWriter,
+} from "./secret-delivery";
 
 const TURN_PROVIDER_YIELD_SLICE_MS = 250;
 const TURN_DEFAULT_MODEL_WAIT_MS = 10_000;
 const TURN_MAX_MODEL_WAIT_MS = 30_000;
+/**
+ * Cut polling (settings.experimentCutPolling, on by default, kill
+ * switch `OPENGENI_EXPERIMENT_CUT_POLLING=false`): honor the model's requested
+ * foreground wait up to this ceiling instead of the 30-second cap.
+ * Models request 60-300 s for builds and test suites; the silent 30-second cap
+ * turned each such command into repeated empty `write_stdin` polls, each a
+ * full-context model request. The wait still returns on exit and stays
+ * cancellable between provider slices. The ceiling stays under the default
+ * 5-minute Claude prompt-cache TTL (and typical OpenAI in-memory retention) so
+ * the next request still reads the cached prefix instead of rewriting it.
+ */
+const CUT_POLLING_MAX_MODEL_WAIT_MS = 240_000;
+/**
+ * With cut polling a long wait must not hold a dev server, watcher, tail or
+ * REPL for minutes after it printed what the model needs. Once the ordinary
+ * (30-second) window has passed, a command that produced output during this
+ * call and then stayed quiet this long returns control. The 30-second floor
+ * keeps the result identical to the default for every command the default
+ * already returned inline: in DeepSWE runs, output-then-silence gaps of 5-30 s
+ * are common in builds and tests, and a shorter floor would add model polls.
+ */
+const CUT_POLLING_OUTPUT_QUIET_MS = 5_000;
+/** Output that ends in an input prompt returns after this much silence. */
+const CUT_POLLING_PROMPT_QUIET_MS = 2_000;
+/**
+ * A Steer returns a foreground wait at once when the process keeps running as
+ * a session background command. A turn-scoped process (a handle held in one
+ * worker's memory) stops at the Steer's handover, as at any turn end, so its
+ * wait gets this much longer to see a short command finish and keep its
+ * result; after that the Steer is read and the process stops at the handover.
+ */
+export const TURN_SCOPED_STEER_GRACE_MS = 5_000;
 const SHELL_HELPER_YIELD_MS = 1_000;
 const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
@@ -108,8 +150,6 @@ type ActiveShellSession = {
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
-  /** Never adopt as a session background command; finalization stops it. */
-  turnScoped?: boolean;
 };
 
 type CommandCancellationSession = {
@@ -139,6 +179,10 @@ type CommandCancellationSession = {
     providerSessionId: number,
     command?: string,
   ): Promise<void>;
+  /** Rebind a session background command started by an earlier turn so this
+   * turn reads and writes it through the retained-process path. False when the
+   * handle is not such a command. */
+  attachSessionProcess?(providerSessionId: number): Promise<boolean>;
   retainedProcessIdentity?(providerSessionId: number): { id: string } | null;
   cancelSupervisedCommand?(providerSessionId: number, reason: "explicit_stop"): Promise<boolean>;
   writeStdinForProcessRead?(args: {
@@ -166,7 +210,19 @@ type CommandCancellationSession = {
     providerSessionId: number,
     args: TurnSandboxCommandArgs,
   ): Promise<string>;
+  /** Attempt-scoped private secret files (apply_patch / view_image `secretfile`). */
+  writeSecretFiles?(
+    scope: string,
+    files: ReadonlyArray<{ path: string; content: Uint8Array }>,
+  ): Promise<void>;
+  /** Remove this attempt's secret files (attempt end; SEC-4). */
+  clearSecretFilesForAttempt?(scope?: string): Promise<void>;
 };
+
+function secretFilesWriter(session?: CommandCancellationSession): SecretFilesWriter | null {
+  const write = session?.writeSecretFiles;
+  return write ? async (scope, files) => await write.call(session, scope, files) : null;
+}
 
 async function usesRemoteOperationCancellation(
   session: CommandCancellationSession | undefined,
@@ -264,6 +320,24 @@ export type TurnToolCancellationFence = {
     session: ChannelASession,
     args: ChannelAExecArgs,
   ): Promise<SynchronousCommandResult>;
+  /**
+   * While active, every model-facing foreground wait (the exec_command and
+   * write_stdin wait windows) returns at its next provider slice with the
+   * process's live handle, exactly as when its window ends: the process keeps
+   * running and is adopted as a session background command. A handle that
+   * cannot become one (turn-scoped, held in this worker's memory) first gets
+   * up to TURN_SCOPED_STEER_GRACE_MS of its requested wait to finish, since
+   * the handover stops it. The worker activates this while a Steer waits for
+   * this turn, so the Steer is read within seconds instead of after the
+   * requested wait.
+   */
+  setForegroundWaitYield(active: boolean): void;
+  /**
+   * Remove every attempt-scoped secret file the wrapped sessions wrote
+   * (`secretfile` paths, leftover env files). Called at attempt end after the
+   * writers drain; rejects with the first failure after trying every session.
+   */
+  clearSecretFiles?(): Promise<void>;
 };
 
 export type TurnToolCancellationController = TurnToolCancellationFence & {
@@ -306,31 +380,37 @@ function cappedYield(value: unknown, cap: number): number {
     : cap;
 }
 
-function modelWaitMs(value: unknown): number {
+export function modelWaitMs(value: unknown, cutPolling: boolean): number {
+  const max = cutPolling ? CUT_POLLING_MAX_MODEL_WAIT_MS : TURN_MAX_MODEL_WAIT_MS;
   return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? Math.min(value, TURN_MAX_MODEL_WAIT_MS)
+    ? Math.min(value, max)
     : TURN_DEFAULT_MODEL_WAIT_MS;
 }
 
-const BARE_INTERACTIVE_SHELL =
-  /^(?:exec\s+)?(?:(?:\/usr)?\/bin\/)?(?:ba|z|da|k|a|fi)?sh(?:\s+(?:-[A-Zabd-z]+|--[a-z][a-z-]*))*$/;
+// oxlint-disable-next-line no-control-regex
+const ANSI_ESCAPE = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g;
+const INPUT_PROMPT_TAIL = /(?:[?:>$#]|\[[yn]\/[yn]\]|\((?:y|yes)\/(?:n|no)\))[ \t]?$/i;
 
 /**
- * True when the command's final step starts a shell that only reads stdin (for
- * example `bash --noprofile --norc`): a REPL the model drives with write_stdin
- * during this turn. Such a shell never exits on its own, so adopting it as a
- * session background command would keep the sandbox busy indefinitely after
- * the turn. It stays turn-scoped instead and the ordinary finalization drain
- * stops it. A `-c` command string, a script argument, or any other trailing
- * token is not a bare shell and keeps normal background adoption.
+ * True when the visible last line of command output looks like a prompt that
+ * is waiting for input (a REPL `>>> `/`> `, a shell `$ `, `Password: `,
+ * `Continue? [y/N] `): non-empty, not newline-terminated, short, and ending in a
+ * prompt marker. Progress output (`.....`, `[ 45%]`) does not match.
  */
-export function isBareInteractiveShellCommand(command: string): boolean {
-  const steps = command
-    .split(/\n|;|&&|\|\|/)
-    .map((step) => step.trim())
-    .filter((step) => step.length > 0 && !step.startsWith("#"));
-  const last = steps.at(-1);
-  return last !== undefined && BARE_INTERACTIVE_SHELL.test(last);
+export function looksLikeInputPrompt(output: string): boolean {
+  if (output.length === 0 || output.endsWith("\n")) return false;
+  const lastLine = output.slice(output.lastIndexOf("\n") + 1);
+  const visible = lastLine.slice(lastLine.lastIndexOf("\r") + 1).replace(ANSI_ESCAPE, "");
+  return visible.trim().length > 0 && visible.length <= 200 && INPUT_PROMPT_TAIL.test(visible);
+}
+
+/** Model-facing foreground wait for one exec/read call. */
+function foregroundWait(
+  value: unknown,
+  cutPolling: boolean,
+): { waitMs: number; quietReturnAfterMs?: number } {
+  if (!cutPolling) return { waitMs: modelWaitMs(value, false) };
+  return { waitMs: modelWaitMs(value, true), quietReturnAfterMs: modelWaitMs(value, false) };
 }
 
 function execOutput(raw: string): string {
@@ -537,24 +617,80 @@ export function cancellableShellCommand(command: string, markerPath: string): st
     ].join("\n"),
     markerPath,
   );
+  // Carry the group-leader program once, verbatim. The setsid, python and
+  // in-place branches all run this same text, so embedding it per branch
+  // tripled every command's provider argv and forced callers to split payloads
+  // into more sandbox round trips. A quoted heredoc keeps the exact command
+  // bytes visible (secret delivery matches its command by that text); the
+  // in-place branch evaluates the identical text in the current shell.
+  const capture = heredocSourceCapture(groupLeaderCommand, markerPath);
   return [
     ...processInspectionCommandLines(),
+    ...capture.lines,
     '__opengeni_outer_pid="$$"',
     '__opengeni_outer_pgid="$(__opengeni_process_group_id "$__opengeni_outer_pid")"',
     'case "$__opengeni_outer_pid:$__opengeni_outer_pgid" in *[!0-9:]*|*:|:*) exit 125 ;; esac',
     'if [ "$__opengeni_outer_pid" != "$__opengeni_outer_pgid" ]; then',
     '  __opengeni_setsid="$(command -v setsid 2>/dev/null)"',
     '  if [ -n "$__opengeni_setsid" ]; then',
-    `    exec "$__opengeni_setsid" /bin/sh -c ${singleQuote(groupLeaderCommand)}`,
+    `    exec "$__opengeni_setsid" /bin/sh -c "$${capture.variable}"`,
     "  fi",
     // macOS has setsid(2), but no setsid executable. The parent is proven
     // not to be a group leader, so the same process can safely start a session.
     '  __opengeni_python="$(command -v python3 2>/dev/null)"',
     '  [ -n "$__opengeni_python" ] || exit 125',
-    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} ${singleQuote(groupLeaderCommand)}`,
+    `  exec "$__opengeni_python" -c ${singleQuote('import os,sys; os.setsid(); os.execv("/bin/sh", ["/bin/sh", "-c", sys.argv[1]])')} "$${capture.variable}"`,
     "fi",
-    groupLeaderCommand,
+    `eval "$${capture.variable}"`,
   ].join("\n");
+}
+
+/** Read `source` byte-for-byte from a quoted heredoc into a shell variable,
+ * without external tools. The program starts by unsetting that variable, so
+ * code evaluated in the current shell never observes it. The delimiter is
+ * derived from the per-invocation marker, keeping the wrapper a pure function
+ * of its inputs, and is re-derived until it cannot collide with the source. */
+function heredocSourceCapture(source: string, seed: string): { lines: string[]; variable: string } {
+  const derive = (attempt: number) =>
+    createHash("sha256").update(`${seed}\0${attempt}`, "utf8").digest("hex").slice(0, 32);
+  let attempt = 0;
+  let token = derive(attempt);
+  let delimiter = `__OPENGENI_HEREDOC_${token}__`;
+  let sentinel = `__OPENGENI_END_${token}__`;
+  while (source.split("\n").includes(delimiter) || source.includes(sentinel)) {
+    attempt += 1;
+    token = derive(attempt);
+    delimiter = `__OPENGENI_HEREDOC_${token}__`;
+    sentinel = `__OPENGENI_END_${token}__`;
+  }
+  const variable = `__opengeni_program_${token}`;
+  const line = `${variable}_line`;
+  const found = `${variable}_found`;
+  return {
+    variable,
+    lines: [
+      `${variable}=""`,
+      `${line}=""`,
+      `${found}=0`,
+      `while IFS= read -r ${line}; do`,
+      `  case "$${line}" in`,
+      `    *${sentinel})`,
+      `      ${line}="\${${line}%${sentinel}}"`,
+      `      ${variable}="$${variable}$${line}"`,
+      `      ${found}=1`,
+      "      break ;;",
+      "    *)",
+      `      ${variable}="$${variable}$${line}
+"`,
+      "      ;;",
+      "  esac",
+      `done <<'${delimiter}'`,
+      `unset ${variable}\n${source}${sentinel}`,
+      delimiter,
+      `[ "$${found}" = 1 ] || exit 125`,
+      `unset ${line} ${found}`,
+    ],
+  };
 }
 
 /** Keep large internal synchronous commands out of the repeated process-group
@@ -882,6 +1018,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private reason: unknown;
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly shellSessions = new Map<number, ActiveShellSession>();
+  /** See setForegroundWaitYield. */
+  private foregroundWaitYield = false;
   private readonly pendingShellStarts = new Set<PendingShellStart>();
   private readonly remoteExecs = new Set<ActiveRemoteExec>();
   private rawExecInvoke: FunctionToolInvoke | null = null;
@@ -889,9 +1027,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private drainPromise: Promise<void> | null = null;
   private readonly signal: AbortSignal | undefined;
   private readonly onAbort = (): void => this.cancel(this.signal?.reason);
+  private readonly cutPolling: boolean;
+  private readonly secretResolver: SecretResolver | null;
+  private readonly secretFileSessions = new Set<CommandCancellationSession>();
 
-  constructor(signal?: AbortSignal) {
+  constructor(signal?: AbortSignal, options: TurnToolCancellationControllerOptions = {}) {
     this.signal = signal;
+    this.cutPolling = options.cutPolling === true;
+    this.secretResolver = options.secretResolver ?? null;
     if (signal?.aborted) {
       this.cancel(signal.reason);
     } else {
@@ -912,6 +1055,22 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   async waitForQuiescence(): Promise<void> {
     this.cancel(this.reason);
     await this.ensureDrain();
+  }
+
+  setForegroundWaitYield(active: boolean): void {
+    this.foregroundWaitYield = active;
+  }
+
+  async clearSecretFiles(): Promise<void> {
+    let failure: unknown = null;
+    for (const session of this.secretFileSessions) {
+      try {
+        await session.clearSecretFilesForAttempt!();
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+    if (failure !== null) throw failure;
   }
 
   runSandboxCommand(
@@ -1340,6 +1499,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   wrapTools<T>(tools: T[], session?: CommandCancellationSession): T[] {
+    if (this.secretResolver?.enabled && session?.clearSecretFilesForAttempt) {
+      this.secretFileSessions.add(session);
+    }
     const structuralTools = tools as unknown as Array<Record<string, unknown>>;
     for (const tool of structuralTools) {
       if (tool.type !== "function") continue;
@@ -1350,7 +1512,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     const wrapped = structuralTools.map((tool) => {
       if (tool.type === "function") return this.wrapFunctionTool(tool as FunctionTool, session);
-      if (tool.type === "apply_patch") return this.wrapApplyPatchTool(tool as ApplyPatchTool);
+      if (tool.type === "apply_patch")
+        return this.wrapApplyPatchTool(tool as ApplyPatchTool, session);
       if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
       return tool;
     });
@@ -1391,6 +1554,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               return "command_input failed: provide a native session_id and nonempty chars; use command_read for observation";
             }
             try {
+              await session?.attachSessionProcess?.(input.session_id);
               if (session?.supportsCommandInput?.(input.session_id) === false) {
                 return "command_input unsupported: this retained provider command has no arbitrary stdin capability";
               }
@@ -1467,6 +1631,27 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             const useRemoteOpCancellation =
               await usesRemoteOperationCancellation(cancellationSession);
             if (this.cancelled) throw cancellationError(this.reason);
+            // Secret references: managed sandboxes always parse the command in
+            // POSIX sh (the wrapper below), so splice now; connected machines
+            // splice in their own dialect at delivery. Resolution failures are
+            // the tool result and nothing is dispatched or recorded.
+            let secret: Awaited<ReturnType<typeof prepareSecretExec>>;
+            try {
+              secret = await prepareSecretExec(parsed.cmd, {
+                resolver: this.secretResolver,
+                dialect: useRemoteOpCancellation ? null : "posix",
+                use: {
+                  surface: "shell",
+                  toolName: "exec_command",
+                  ...(details?.toolCall?.callId ? { sourceCallId: details.toolCall.callId } : {}),
+                },
+              });
+            } catch (error) {
+              if (isSecretReferenceError(error)) return error.toModelOutput();
+              throw error;
+            }
+            if (this.cancelled) throw cancellationError(this.reason);
+            const commandText = secret?.text ?? parsed.cmd;
             const interactive = parsed.tty !== false;
             const remoteExec =
               cancelExecCommand && useRemoteOpCancellation
@@ -1476,10 +1661,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   )
                 : null;
             const cancellableInput = useRemoteOpCancellation
-              ? input
+              ? commandText === parsed.cmd
+                ? input
+                : JSON.stringify({ ...parsed, cmd: commandText })
               : JSON.stringify({
                   ...parsed,
-                  cmd: cancellableShellCommand(parsed.cmd, markerPath),
+                  cmd: cancellableShellCommand(commandText, markerPath),
                   // Preserve an explicit pipe-mode request. When tty is omitted,
                   // retain the historical PTY default and Ctrl-C fast path. Every
                   // mode keeps the process marker plus TERM/KILL escalation, and
@@ -1502,25 +1689,32 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             const startedAt = performance.now();
             let output: Awaited<ReturnType<FunctionToolInvoke>>;
             try {
-              output = await runWithToolCallCorrelation(
-                correlationId,
-                async () =>
-                  await withPendingCommandSupervision(pendingStart?.supervision, () =>
-                    tool.invoke(runContext, cancellableInput, details),
-                  ),
-                {
-                  onDurableOpOwnershipTransferStarted: (opId) =>
-                    remoteExec?.startOwnershipTransfer(opId),
-                  onDurableOpOwnershipTransferFailed: (opId) =>
-                    remoteExec?.failOwnershipTransfer(opId),
-                  onDurableOpOwnershipTransferred: (opId) =>
-                    remoteExec?.releaseCancellationAuthority(opId),
-                  onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
-                  onRemoteOperationTransportSelected: (transport) =>
-                    remoteExec?.bindTransport(transport),
-                },
+              output = await runWithSecretCarry(secret?.carry ?? null, () =>
+                runWithToolCallCorrelation(
+                  correlationId,
+                  async () =>
+                    await withPendingCommandSupervision(pendingStart?.supervision, () =>
+                      tool.invoke(runContext, cancellableInput, details),
+                    ),
+                  {
+                    onDurableOpOwnershipTransferStarted: (opId) =>
+                      remoteExec?.startOwnershipTransfer(opId),
+                    onDurableOpOwnershipTransferFailed: (opId) =>
+                      remoteExec?.failOwnershipTransfer(opId),
+                    onDurableOpOwnershipTransferred: (opId) =>
+                      remoteExec?.releaseCancellationAuthority(opId),
+                    onRemoteOperationNotDispatched: (opId) => remoteExec?.settleNotDispatched(opId),
+                    onRemoteOperationTransportSelected: (transport) =>
+                      remoteExec?.bindTransport(transport),
+                  },
+                ),
               );
             } catch (error) {
+              if (isSecretReferenceError(error)) {
+                // Delivery-time refusal (e.g. cmd.exe on a machine), before dispatch.
+                pendingStart?.settle();
+                return error.toModelOutput();
+              }
               const retainedProcess =
                 !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
                   ? error.retainedProcess
@@ -1553,7 +1747,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   identity: null,
                   identityValidated: false,
                   cancellation: null,
-                  ...(isBareInteractiveShellCommand(parsed.cmd) ? { turnScoped: true } : {}),
                 });
                 pendingStart?.settle(retainedProcess.providerSessionId);
               }
@@ -1607,11 +1800,6 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
-                // The exact marker kill is the finalization authority for a
-                // turn-scoped shell; op-stream (remote) launches have none.
-                ...(!useRemoteOpCancellation && isBareInteractiveShellCommand(parsed.cmd)
-                  ? { turnScoped: true }
-                  : {}),
               };
               // Provider retention preserves the physical process but does not
               // transfer it to the session. Keep it turn-owned and cancellable
@@ -1627,7 +1815,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 state,
                 initialOutput: output,
                 startedAt,
-                waitMs: modelWaitMs(parsed.yield_time_ms),
+                ...foregroundWait(parsed.yield_time_ms, this.cutPolling),
                 maxOutputTokens:
                   typeof parsed.max_output_tokens === "number" ? parsed.max_output_tokens : 20_000,
               });
@@ -1651,12 +1839,39 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               Number.isSafeInteger(parsed.session_id)
                 ? parsed.session_id
                 : null;
+            let secretStdin: Awaited<ReturnType<typeof prepareSecretStdin>> = null;
+            if (typeof parsed?.chars === "string") {
+              try {
+                secretStdin = await prepareSecretStdin(parsed.chars, {
+                  resolver: this.secretResolver,
+                  use: {
+                    surface: "stdin",
+                    toolName: "write_stdin",
+                    ...(details?.toolCall?.callId ? { sourceCallId: details.toolCall.callId } : {}),
+                  },
+                });
+              } catch (error) {
+                if (isSecretReferenceError(error)) return error.toModelOutput();
+                throw error;
+              }
+              if (secretStdin) parsed.chars = secretStdin.text;
+            }
             const cappedInput = parsed
               ? JSON.stringify({
                   ...parsed,
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
                 })
               : input;
+            if (sessionId !== null) {
+              // A command an earlier turn left running is session-owned. Bind
+              // it before choosing a path so this turn never claims it as its
+              // own shell and stops it at finalization.
+              try {
+                await cancellationSession?.attachSessionProcess?.(sessionId);
+              } catch (error) {
+                return renderDirectToolFault(error, sessionId);
+              }
+            }
             const directProcessSession =
               sessionId === null ? null : retainedProcessSession(cancellationSession, sessionId);
             const typedHandleLoss =
@@ -1674,14 +1889,16 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               // tool error string, never escape as a ToolCallError that fails
               // the whole turn.
               try {
-                output = await directProcessSession.writeStdinForProcessMutation({
-                  sessionId,
-                  ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
-                  yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
-                  ...(typeof parsed?.max_output_tokens === "number"
-                    ? { maxOutputTokens: parsed.max_output_tokens }
-                    : {}),
-                });
+                output = await runWithSecretCarry(secretStdin?.carry ?? null, () =>
+                  directProcessSession.writeStdinForProcessMutation!({
+                    sessionId,
+                    ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
+                    yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_PROVIDER_YIELD_SLICE_MS),
+                    ...(typeof parsed?.max_output_tokens === "number"
+                      ? { maxOutputTokens: parsed.max_output_tokens }
+                      : {}),
+                  }),
+                );
               } catch (error) {
                 if (!(error instanceof ProviderCommandObservationUnavailableError))
                   return renderDirectToolFault(error, sessionId);
@@ -1691,7 +1908,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 output = "";
               }
             } else {
-              output = await tool.invoke(runContext, cappedInput, details);
+              output = await runWithSecretCarry(secretStdin?.carry ?? null, () =>
+                tool.invoke(runContext, cappedInput, details),
+              );
             }
             if (sessionId !== null && typeof output === "string") {
               if (!typedHandleLoss && isExecSessionLostBanner(output, sessionId)) {
@@ -1752,13 +1971,36 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   initialOutput: output,
                   ...(initialObservationFailure ? { initialObservationFailure } : {}),
                   startedAt,
-                  waitMs: modelWaitMs(parsed?.yield_time_ms),
+                  ...foregroundWait(parsed?.yield_time_ms, this.cutPolling),
                   maxOutputTokens:
                     typeof parsed?.max_output_tokens === "number"
                       ? parsed.max_output_tokens
                       : 20_000,
                 })
               : output;
+          }),
+      };
+    }
+
+    if (tool.name === "apply_patch" || tool.name === "view_image") {
+      const writeFiles = secretFilesWriter(cancellationSession);
+      return {
+        ...tool,
+        invoke: (runContext, input, details) =>
+          this.track(async () => {
+            let resolvedInput: string | null;
+            try {
+              resolvedInput = await this.resolveSecretToolInput(
+                tool.name,
+                input,
+                writeFiles,
+                details?.toolCall?.callId,
+              );
+            } catch (error) {
+              if (isSecretReferenceError(error)) return error.toModelOutput();
+              throw error;
+            }
+            return await tool.invoke(runContext, resolvedInput ?? input, details);
           }),
       };
     }
@@ -1770,18 +2012,69 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     };
   }
 
+  /**
+   * Resolve references in a function `apply_patch` patch (content lines, not
+   * paths) or a `view_image` path (`secretfile` only). The model's arguments
+   * stay unchanged everywhere above this call. Returns null when unchanged.
+   */
+  private async resolveSecretToolInput(
+    toolName: string,
+    input: string,
+    writeFiles: SecretFilesWriter | null,
+    sourceCallId: string | undefined,
+  ): Promise<string | null> {
+    if (!this.secretResolver?.enabled || !input.includes("{{secret")) return null;
+    const use = {
+      surface: toolName === "view_image" ? ("view_image" as const) : ("file_write" as const),
+      toolName,
+      ...(sourceCallId ? { sourceCallId } : {}),
+    };
+    const parsed = parsedObject(input);
+    if (toolName === "view_image") {
+      if (!parsed || typeof parsed.path !== "string") return null;
+      const path = await resolveSecretImagePath(parsed.path, {
+        resolver: this.secretResolver,
+        use,
+        writeFiles,
+      });
+      return path === null ? null : JSON.stringify({ ...parsed, path });
+    }
+    if (parsed && typeof parsed.patch === "string") {
+      const patch = await resolveSecretPatchText(parsed.patch, {
+        resolver: this.secretResolver,
+        use,
+        headers: true,
+        writeFiles,
+      });
+      return patch === null ? null : JSON.stringify({ ...parsed, patch });
+    }
+    if (!parsed && input.trimStart().startsWith("*** Begin Patch")) {
+      return await resolveSecretPatchText(input, {
+        resolver: this.secretResolver,
+        use,
+        headers: true,
+        writeFiles,
+      });
+    }
+    return null;
+  }
+
   private async awaitModelFacingShellResult(input: {
     state: ActiveShellSession;
     initialOutput: string;
     initialObservationFailure?: ProviderCommandObservationUnavailableError;
     startedAt: number;
     waitMs: number;
+    /**
+     * Cut polling only: after this much of the wait, return once output produced
+     * during this call has gone quiet (see CUT_POLLING_OUTPUT_QUIET_MS).
+     */
+    quietReturnAfterMs?: number;
     maxOutputTokens: number;
   }): Promise<string> {
-    const { state, startedAt, waitMs, maxOutputTokens } = input;
+    const { state, startedAt, waitMs, quietReturnAfterMs, maxOutputTokens } = input;
     const canAdoptInBackground =
-      state.turnScoped !== true &&
-      (state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true);
+      state.processSession?.canAdoptRetainedProcessAsBackgroundCommand?.(state.sessionId) ?? true;
     if (!state.typedHandleLoss && isExecSessionLostBanner(input.initialOutput, state.sessionId)) {
       this.shellSessions.delete(state.sessionId);
       return input.initialOutput;
@@ -1799,12 +2092,30 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
 
     let output = appendBoundedOutput("", execOutput(input.initialOutput), maxOutputTokens);
+    let lastOutputAt: number | null = output ? performance.now() : null;
     let observationFailure: ProviderCommandObservationUnavailableError | null =
       input.initialObservationFailure ?? null;
+    let steerSeenAt: number | null = null;
     for (;;) {
       if (observationFailure?.readRetryAllowed === false) break;
-      if (performance.now() - startedAt >= waitMs) break;
+      // Check cancellation before any return-control exit, so a Pause/Steer
+      // that lands between slices never lets the command be adopted below.
       if (this.cancelled) throw cancellationError(this.reason);
+      if (performance.now() - startedAt >= waitMs) break;
+      // A Steer is waiting: return control as if the window had ended. The
+      // process keeps running as a session background command; a turn-scoped
+      // one first gets a short grace to finish (TURN_SCOPED_STEER_GRACE_MS).
+      if (this.foregroundWaitYield) {
+        if (canAdoptInBackground) break;
+        steerSeenAt ??= performance.now();
+        if (performance.now() - steerSeenAt >= TURN_SCOPED_STEER_GRACE_MS) break;
+      }
+      if (quietReturnAfterMs !== undefined && lastOutputAt !== null) {
+        const now = performance.now();
+        const quietMs = now - lastOutputAt;
+        if (quietMs >= CUT_POLLING_PROMPT_QUIET_MS && looksLikeInputPrompt(output)) break;
+        if (now - startedAt >= quietReturnAfterMs && quietMs >= CUT_POLLING_OUTPUT_QUIET_MS) break;
+      }
       if (
         !state.writeInvoke &&
         !state.processSession?.writeStdinForProcessRead &&
@@ -1862,7 +2173,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         return next;
       }
       const nextOutput = execOutput(next);
-      if (nextOutput) output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+      if (nextOutput) {
+        output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+        lastOutputAt = performance.now();
+      }
       const exitCode = parseExecBannerExitCode(next);
       if (exitCode !== null) {
         this.shellSessions.delete(state.sessionId);
@@ -1881,13 +2195,15 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return `${renderDirectToolFault(observationFailure, state.sessionId)}${commandId ? `\nCommand ID: ${commandId}` : ""}\nOutput:\n${output}`;
     }
     if (!canAdoptInBackground) {
-      // Docker/local handles belong to this exact worker session, and a bare
-      // interactive shell waits on stdin forever. Keep the shell registered
-      // with the turn fence: finalization must stop and settle it. Returning
+      // A handle held only in this worker's memory (no in-sandbox supervisor)
+      // cannot be controlled after the turn. Keep the shell registered with
+      // the turn fence: finalization must stop and settle it. Returning
       // control is not durable background-command adoption.
       return `${runningCommandBanner(state.sessionId, output)}\nThis process is turn-scoped; it will stop when this turn ends or is interrupted.\n`;
     }
     if (state.processSession?.adoptRetainedProcessAsBackgroundCommand) {
+      // A cancelled turn keeps the process on its fence so the drain stops it.
+      if (this.cancelled) throw cancellationError(this.reason);
       await state.processSession.adoptRetainedProcessAsBackgroundCommand(
         state.sessionId,
         state.command,
@@ -1901,13 +2217,30 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     );
   }
 
-  private wrapApplyPatchTool(tool: ApplyPatchTool): ApplyPatchTool {
+  private wrapApplyPatchTool(
+    tool: ApplyPatchTool,
+    cancellationSession?: CommandCancellationSession,
+  ): ApplyPatchTool {
     const editor = tool.editor;
+    const writeFiles = secretFilesWriter(cancellationSession);
+    // Hosted apply_patch: resolve references in each operation's diff (content
+    // only; the path is never resolved). The model's call keeps references.
+    const resolveDiff = async (operation: unknown): Promise<unknown> => {
+      const diff = (operation as { diff?: unknown } | null)?.diff;
+      if (typeof diff !== "string") return operation;
+      const resolved = await resolveSecretPatchText(diff, {
+        resolver: this.secretResolver,
+        use: { surface: "file_write", toolName: "apply_patch" },
+        headers: false,
+        writeFiles,
+      });
+      return resolved === null ? operation : { ...(operation as object), diff: resolved };
+    };
     const wrappedEditor: ApplyPatchEditor = {
       createFile: (operation, context) =>
-        this.track(async () => await editor.createFile(operation, context)),
+        this.track(async () => await editor.createFile(await resolveDiff(operation), context)),
       updateFile: (operation, context) =>
-        this.track(async () => await editor.updateFile(operation, context)),
+        this.track(async () => await editor.updateFile(await resolveDiff(operation), context)),
       deleteFile: (operation, context) =>
         this.track(async () => await editor.deleteFile(operation, context)),
     };
@@ -2673,10 +3006,27 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 }
 
+export type TurnToolCancellationControllerOptions = {
+  /**
+   * Honor long model-requested foreground waits (settings.experimentCutPolling,
+   * OPENGENI_EXPERIMENT_CUT_POLLING; on by default in production settings).
+   * Omitted means the ordinary 30-second cap.
+   */
+  cutPolling?: boolean;
+  /**
+   * The attempt's secret resolver. Commands, stdin, patches and image paths
+   * holding `{{secret:…}}` / `{{secretfile:…}}` references are resolved below
+   * every recorder (design §10.3). Omitted, or `enabled: false`, passes
+   * references through literally.
+   */
+  secretResolver?: SecretResolver | null;
+};
+
 export function createTurnToolCancellationController(
   signal?: AbortSignal,
+  options: TurnToolCancellationControllerOptions = {},
 ): TurnToolCancellationController {
-  return new TurnToolCancellationControllerImpl(signal);
+  return new TurnToolCancellationControllerImpl(signal, options);
 }
 
 /** Wrap a capability instance without depending on SDK-private subclasses. */

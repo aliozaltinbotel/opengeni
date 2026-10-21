@@ -17,25 +17,33 @@ import {
   ComposerMenuHeader,
   ComposerMenuRowsSkeleton,
   ComposerMenuSwitch,
-} from "@/components/ui/composer-menu";
-import { MENU_BUTTON_CLASS, MENU_LABEL_CLASS, MENU_NOTE_CLASS } from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/composer-menu";
+import {
+  MENU_BUTTON_CLASS,
+  MENU_LABEL_CLASS,
+  MENU_NOTE_CLASS,
+} from "@opengeni/react/ui/menu-styles";
 
 import {
   ManualRepositoryEditor,
   type ManualRepositoryAttachResult,
 } from "@/components/manual-repository-editor";
 import { RepositoryRefInput } from "@/components/repository-ref-input";
-import { Button } from "@/components/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@opengeni/react/ui/collapsible";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { MetaChip } from "@/components/ui/meta-chip";
-import { userErrorText } from "@/lib/api-error";
+} from "@opengeni/react/ui/dropdown-menu";
+import { Input } from "@opengeni/react/ui/input";
+import { Label } from "@opengeni/react/ui/label";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { repoCountLabel } from "@/lib/format";
 import { attachedManualRepositoryCount } from "@/lib/manual-repositories";
 import {
@@ -855,7 +863,7 @@ export function RepositoryContextMenuBody(props: RepositoryContextPickerProps) {
             0 ? (
             <p className="px-2.5 text-xs leading-4.5 text-fg-muted">
               Mounted repositories cannot be removed or retargeted.{" "}
-              <a href={props.newChatUrl} className="text-brand hover:underline">
+              <a href={props.newChatUrl} className="og-link">
                 Start a new chat
               </a>{" "}
               to change them.

@@ -1,13 +1,16 @@
-import { canonicalizeConfiguredModelId } from "@opengeni/config";
+import { canonicalizeConfiguredModelId, resolveModelProvider } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import {
   applyCreditDebitUpToBalance,
   existingUsageEventIdempotencyKeys,
   isTransactionHandle,
   recordUsageEvent,
+  isStoredVerbatimAsLosslessJsonString,
   recordModelCallFact,
   type AppendEventInput,
   type CanonicalTurnStartupMilestoneReceipt,
+  type ModelCallTiming,
+  type SessionEventMutation,
 } from "@opengeni/db";
 import {
   modelResponseServiceTierFromSdkEvent,
@@ -18,20 +21,8 @@ import {
   type ModelCallUsageNormalization,
 } from "@opengeni/runtime";
 import {
-  calculateGatewayReportedCostBreakdown,
-  calculateGatewayReportedProviderCostMicros,
-  calculateModelListUsageCostSnapshot,
-  calculateModelUsageCostBreakdown,
-  configuredModelListPricingSchedules,
   configuredModels,
-  configuredModelPricingSchedules,
-  resolveModelProvider,
   responseSatisfiesLatencyMode,
-  OPENGENI_GATEWAY_PROVIDER_ID,
-  OPPER_PROVIDER_ID,
-  ORGANIZATION_OPPER_PROVIDER_ID,
-  WORKSPACE_GATEWAY_PROVIDER_ID,
-  WORKSPACE_OPPER_PROVIDER_ID,
   WORKSPACE_GATEWAY_MODEL_ID_PREFIX,
   type ModelUsageInput,
   type ModelPricingScheduleV1,
@@ -57,8 +48,17 @@ import {
   type ModelContextContributionSummary,
   type SessionEvent,
 } from "@opengeni/contracts";
-import type { InsightsUsageClassMicros } from "@opengeni/contracts/insights-usage";
 import { safeErrorDiagnostic } from "./errors";
+import {
+  holdSessionUsageReceipt,
+  releaseHeldSessionUsageReceiptMeteredByEvent,
+} from "./session-usage-custody";
+import {
+  sanitizedModelUsageInput,
+  sessionUsageMeterAmountMicros,
+  settleModelUsage,
+  type ModelUsageBillingRecord,
+} from "@opengeni/core";
 
 export function modelUsageSourceKey(input: {
   responseId?: string | null | undefined;
@@ -132,6 +132,7 @@ export async function recordCompletedModelCallBeforeOwnershipFences(input: {
 export type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
+  mutate?: SessionEventMutation,
 ) => Promise<{
   events: SessionEvent[];
   accepted: boolean;
@@ -150,6 +151,15 @@ export type CompactionModelUsageEventState = {
   usageCount: number;
   claimedSourceKeys: Set<string>;
 };
+
+/**
+ * Why the worker made a model call. The durable `agent.model.usage` payload
+ * records it so a reader can tell the turn's own inference (`main`, including
+ * the aggregate billing fallback) from the auxiliary context summarizer and
+ * session-title calls. Only the worker sets it, at the call site; it changes no
+ * source key, billing, credit, idempotency or metric label.
+ */
+export type ModelCallPurpose = "main" | "compaction" | "session-title";
 
 export function createModelResponseEventState(
   claimedSourceKeys: Set<string> = new Set<string>(),
@@ -253,12 +263,16 @@ export async function processModelResponseTerminalEvent(input: {
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
+  /** The shared-core subscription connection that served the call (billing attribution). */
+  subscriptionConnectionId?: string | null;
   emittedSourceKeys: Set<string>;
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
   leaseLostMessage: string;
   setLastInputTokens: (tokens: number | null) => Promise<void>;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  /** Timing of the call this terminal response completes; read once per claimed response. */
+  responseTiming?: () => ModelCallTiming | null;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -301,11 +315,8 @@ export async function processModelResponseTerminalEvent(input: {
       billingPath: (input.chargesOpenGeniCredits ?? !input.externallyBilled) ? "opengeni_credits" : "external" });
     return { status: "processed", sourceKey, authoritative: false, usageReported: false };
   }
+  const timing = input.responseTiming?.() ?? null;
   const responseUsage = terminal.usage;
-  if (responseUsage) {
-    input.state.claimedSourceKeys.add(sourceKey);
-    input.state.responseCount = responseOrdinal;
-  }
 
   const normalizedUsage = normalizeModelCallUsage(responseUsage?.usage);
   const accountContext = modelCallAccountContext({
@@ -375,6 +386,8 @@ export async function processModelResponseTerminalEvent(input: {
         observability: input.observability,
         metricProvider: input.provider,
       });
+      input.state.claimedSourceKeys.add(sourceKey);
+      input.state.responseCount = responseOrdinal;
       authoritative = await emitModelCallUsage({
         observability: input.observability,
         publish: input.publish,
@@ -385,6 +398,7 @@ export async function processModelResponseTerminalEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
+        purpose: "main",
         sourceKey,
         usage: responseUsage,
         normalizedUsage,
@@ -394,9 +408,11 @@ export async function processModelResponseTerminalEvent(input: {
         servingAccountHash: accountContext.servingAccountHash,
         accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
         emittedSourceKeys: input.emittedSourceKeys,
+        timing,
       });
       if (authoritative && billing) {
         await recordAuthoritativeModelCallFact({
+          timing,
           db: input.db,
           observability: input.observability,
           accountId: input.accountId,
@@ -409,6 +425,7 @@ export async function processModelResponseTerminalEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          subscriptionConnectionId: input.subscriptionConnectionId ?? null,
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
@@ -420,6 +437,7 @@ export async function processModelResponseTerminalEvent(input: {
           model: input.model,
           externallyBilled: input.externallyBilled,
           billing,
+          webSearchRequests: responseUsage?.webSearchRequests,
         });
       }
       const observedInput = normalizedUsage.telemetry.inputTokens;
@@ -429,12 +447,15 @@ export async function processModelResponseTerminalEvent(input: {
     },
     recordAttemptSignals: async () => {
       if (!authoritative) return;
-      const observedTotal = normalizedUsage.totalTokens;
+      // Context is what the last request sent, not the sum of a response that
+      // took several requests (each re-sends the whole prefix).
+      const finalRequest = normalizedUsage.requestUsageEntries?.at(-1);
+      const observedTotal = finalRequest?.totalTokens ?? normalizedUsage.totalTokens;
       input.state.contextSignal =
         observedTotal !== null && observedTotal > 0
           ? { revision: responseOrdinal, totalTokens: observedTotal }
           : null;
-      const observedInput = normalizedUsage.telemetry.inputTokens;
+      const observedInput = finalRequest?.inputTokens ?? normalizedUsage.telemetry.inputTokens;
       await input.setLastInputTokens(
         observedInput !== null && observedInput > 0 ? observedInput : null,
       );
@@ -460,7 +481,7 @@ export async function processCompactionModelUsageEvent(input: {
   outcome?: ModelCallUsageAttributes["outcome"];
   nativeSourceKey?:string;
   state: CompactionModelUsageEventState;
-  sourceKind?: "compaction" | "session-title";
+  sourceKind?: Exclude<ModelCallPurpose, "main">;
   dispatchId: string | null;
   settings: Settings;
   db: ActivityServices["db"];
@@ -480,6 +501,8 @@ export async function processCompactionModelUsageEvent(input: {
   creditPolicyRevision?: number | undefined;
   servingCredentialId: string | null;
   priorSessionCredentialId: string | null;
+  /** The shared-core subscription connection that served the call (billing attribution). */
+  subscriptionConnectionId?: string | null;
   emittedSourceKeys: Set<string>;
   renewLease: () => Promise<void>;
   leaseLost: () => boolean;
@@ -532,11 +555,12 @@ export async function processCompactionModelUsageEvent(input: {
     return { status: "processed", sourceKey, authoritative: true };
   }
   const usage = input.usage;
+  const purpose = input.sourceKind ?? "compaction";
   const usageOrdinal = input.state.usageCount + 1;
   const sourceKey = input.nativeSourceKey ?? modelUsageSourceKey({
     responseId: usage.responseId,
     dispatchId: input.dispatchId,
-    positionalKey: `${input.sourceKind ?? "compaction"}-${usageOrdinal}`,
+    positionalKey: `${purpose}-${usageOrdinal}`,
   });
   if (input.state.claimedSourceKeys.has(sourceKey)) {
     return { status: "duplicate", sourceKey };
@@ -592,6 +616,7 @@ export async function processCompactionModelUsageEvent(input: {
         provider: input.provider,
         providerApi: input.providerApi,
         model: input.model,
+        purpose,
         sourceKey,
         usage: usage,
         normalizedUsage,
@@ -616,6 +641,7 @@ export async function processCompactionModelUsageEvent(input: {
           providerApi: input.providerApi,
           model: input.model,
           billing,
+          subscriptionConnectionId: input.subscriptionConnectionId ?? null,
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
@@ -653,6 +679,8 @@ export async function emitModelCallUsage(input: {
   provider: string;
   providerApi: ModelProviderApi;
   model: string;
+  /** Why the worker made this call; durable event and log line only, never a metric label. */
+  purpose: ModelCallPurpose;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
   normalizedUsage?: ModelCallUsageNormalization;
@@ -676,6 +704,8 @@ export async function emitModelCallUsage(input: {
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
+  /** Worker-measured call timing, stored with the event for Insights repair. */
+  timing?: ModelCallTiming | null;
 }): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -700,6 +730,7 @@ export async function emitModelCallUsage(input: {
           provider: input.provider,
           providerApi: input.providerApi,
           model: input.model,
+          purpose: input.purpose,
           sourceKey: input.sourceKey,
           ...(input.billingPath ? { billingPath: input.billingPath } : {}),
           ...(input.upstreamProvider ? { upstreamProvider: input.upstreamProvider } : {}),
@@ -713,6 +744,7 @@ export async function emitModelCallUsage(input: {
                 listByClassApprox: input.billingSnapshot.listByClassApprox ?? false,
               }
             : {}),
+          ...(input.timing ? { timing: input.timing } : {}),
           ...telemetry,
         },
       },
@@ -729,11 +761,13 @@ export async function emitModelCallUsage(input: {
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
   if (!authoritative) return false;
+  releaseReceiptMeteredByCommittedEvent(input, telemetry);
   try {
     input.observability.info("model call usage", {
       provider: input.provider,
       providerApi: input.providerApi,
       model: input.model,
+      purpose: input.purpose,
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
@@ -765,6 +799,63 @@ export async function emitModelCallUsage(input: {
   return true;
 }
 
+const METERED_PRICING_SOURCES = new Set(["configured_list_price", "gateway_reported"]);
+const MAX_METERED_SOURCE_KEY_BYTES = 1024;
+
+/**
+ * The committed `agent.model.usage` event metered this call's task usage in
+ * its own transaction (the database trigger applies `<turnId>:<sourceKey>`
+ * with the payload's amount; a failure would have rolled the event back).
+ * Drop a held receipt for that identity when the event carried exactly its
+ * amount, mirroring the trigger's acceptance rules conservatively: anything
+ * the trigger might value differently keeps the hold for the direct write.
+ * A source key the lossless codec stores encoded (NUL, a lone surrogate, the
+ * codec prefix) reaches the trigger as a different string and identity, so it
+ * never counts as metered here: the hold stays and fails closed.
+ */
+function releaseReceiptMeteredByCommittedEvent(
+  input: {
+    sessionId: string;
+    turnId: string;
+    sourceKey: string;
+    billingSnapshot?: Pick<
+      ModelUsageBillingRecord,
+      "estimatedProviderCostMicros" | "pricingSource"
+    >;
+  },
+  telemetry: { inputTokens?: number | null; outputTokens?: number | null },
+): void {
+  if (!isStoredVerbatimAsLosslessJsonString(input.sourceKey)) return;
+  const keyBytes = new TextEncoder().encode(input.sourceKey).byteLength;
+  if (keyBytes < 1 || keyBytes > MAX_METERED_SOURCE_KEY_BYTES) return;
+  const estimated = input.billingSnapshot?.estimatedProviderCostMicros ?? null;
+  const pricingSource = input.billingSnapshot?.pricingSource ?? null;
+  const tokens = (value: number | null | undefined) =>
+    typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value < 1e15
+      ? value
+      : null;
+  const eventAmount =
+    estimated !== null &&
+    Number.isSafeInteger(estimated) &&
+    estimated >= 0 &&
+    estimated < 1e16 &&
+    pricingSource !== null &&
+    METERED_PRICING_SOURCES.has(pricingSource)
+      ? sessionUsageMeterAmountMicros({
+          estimatedProviderCostMicros: estimated,
+          gatewayReported: pricingSource === "gateway_reported",
+          inputTokens: tokens(telemetry.inputTokens),
+          outputTokens: tokens(telemetry.outputTokens),
+        })
+      : null;
+  releaseHeldSessionUsageReceiptMeteredByEvent({
+    sessionId: input.sessionId,
+    sourceId: `${input.turnId}:${input.sourceKey}`,
+    amountMicros: eventAmount,
+    pricingSource: eventAmount === null ? null : pricingSource,
+  });
+}
+
 /**
  * Apply one authoritative, normalized model-call usage frame to the shared
  * prompt-cache metrics. The durable source-key fence in `emitModelCallUsage`
@@ -782,21 +873,8 @@ export function applyCodexCacheTelemetry(
   });
 }
 
-export type ModelUsageBillingRecord = {
-  billingPath: "opengeni_credits" | "external";
-  /** Same quantity written to usage_events.model.cost when present; else 0. */
-  pricedCostMicros: number;
-  /** Hypothetical provider-rate USD micros; never an Opengeni charge. */
-  estimatedProviderCostMicros: number | null;
-  /** Hypothetical Opengeni credit price at the captured rate; never a debit. */
-  equivalentCreditCostMicros: number | null;
-  pricingSource: "configured_list_price" | "gateway_reported" | null;
-  /** Forward-only provider list class snapshot; older facts/events stay unknown. */
-  listByClassMicros?: InsightsUsageClassMicros | null;
-  listByClassApprox?: boolean;
-  normalizedUsage: ModelCallUsageNormalization;
-  upstreamProvider?: string;
-};
+export type { ModelUsageBillingRecord };
+export { sanitizedModelUsageInput };
 
 // Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
@@ -834,286 +912,66 @@ export async function recordModelUsageAndDebitCredits(
     observability?: ActivityServices["observability"];
     /** Configured provider id for metric labels; never billing authority. */
     metricProvider?: string;
+    /** The caller retains the response durably and retries the whole transaction. */
+    atomicReceiptPersistence?: boolean;
   },
 ): Promise<ModelUsageBillingRecord | null> {
   if (!input.usage) {
     return null;
   }
-  const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
-  const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
-  const inputTokens = sanitizedUsage.inputTokens ?? 0;
-  const outputTokens = sanitizedUsage.outputTokens ?? 0;
-  const totalTokens = sanitizedUsage.totalTokens ?? 0;
-  const chargesOpenGeniCredits = input.chargesOpenGeniCredits ?? !input.externallyBilled;
-  const countsTowardTokenCap = input.countsTowardTokenCap ?? !input.externallyBilled;
-  const resolvedGatewayModel = input.gatewayBilling
-    ? resolveModelProvider(settings, input.model)
-    : undefined;
-  const gatewayProviderId = resolvedGatewayModel?.provider.id;
-  // Opper reports the exact USD cost of every response (`usage.opper.cost`);
-  // the Chat adapter surfaces it with `finalProvider: "opper"`.
-  const opperReported =
-    (gatewayProviderId === OPPER_PROVIDER_ID ||
-      gatewayProviderId === WORKSPACE_OPPER_PROVIDER_ID ||
-      gatewayProviderId === ORGANIZATION_OPPER_PROVIDER_ID) &&
-    input.gatewayBilling?.finalProvider === "opper";
-  const gatewayBilling =
-    gatewayProviderId === OPENGENI_GATEWAY_PROVIDER_ID ||
-    gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID ||
-    opperReported
-      ? input.gatewayBilling
-      : undefined;
-  const allowedProviders = resolvedGatewayModel?.model.requestPolicy?.gateway.only;
-  // Scoped Opper rails settle externally; record the exact provider cost only.
-  const unpinnedWorkspaceGatewayModel =
-    (gatewayProviderId === WORKSPACE_GATEWAY_PROVIDER_ID && allowedProviders === undefined) ||
-    (opperReported && gatewayProviderId !== OPPER_PROVIDER_ID);
-  if (gatewayBilling && !opperReported) {
-    if (
-      !unpinnedWorkspaceGatewayModel &&
-      (!allowedProviders ||
-        !(allowedProviders as readonly string[]).includes(gatewayBilling.finalProvider))
-    ) {
-      throw new Error(
-        `AI Gateway reported unapproved provider ${gatewayBilling.finalProvider} for ${input.model}`,
-      );
-    }
-    if (unpinnedWorkspaceGatewayModel && chargesOpenGeniCredits) {
-      throw new Error(
-        `Workspace Gateway custom model ${input.model} cannot charge Opengeni credits without pinned pricing`,
-      );
-    }
-  }
-  const pricingSchedules = configuredModelPricingSchedules(settings);
-  const configuredPricingModel = pricingSchedules[input.model]
-    ? input.model
-    : input.model.startsWith("codex/") && pricingSchedules[input.model.slice("codex/".length)]
-      ? input.model.slice("codex/".length)
-      : null;
-  const pricingBreakdown = gatewayBilling
-    ? unpinnedWorkspaceGatewayModel
-      ? {
-          providerCostMicros: calculateGatewayReportedProviderCostMicros(
-            gatewayBilling.inferenceCostUsd,
-          ),
-          creditCostMicros: 0,
-        }
-      : calculateGatewayReportedCostBreakdown(
-          settings,
-          configuredPricingModel ?? input.model,
-          gatewayBilling.inferenceCostUsd,
-          { inputTokens },
-        )
-    : configuredPricingModel
-      ? calculateModelUsageCostBreakdown(settings, configuredPricingModel, sanitizedUsage, {
-          latencyMode: input.latencyMode ?? "standard",
-        })
-      : null;
-  const hasCompleteCoreTokenTelemetry =
-    normalizedUsage.telemetry.inputTokens !== null &&
-    normalizedUsage.telemetry.outputTokens !== null;
-  // Comparison rates are deliberately separate from debit authority. The
-  // current usage frame does not establish geography/service-tier provenance,
-  // so forward class splits stay unknown even when a total estimate is priced.
-  const listPricingSchedules = configuredModelListPricingSchedules(settings);
-  const configuredListPricingModel = listPricingSchedules[input.model]
-    ? input.model
-    : input.model.startsWith("codex/") && listPricingSchedules[input.model.slice("codex/".length)]
-      ? input.model.slice("codex/".length)
-      : null;
-  const listSnapshot =
-    !gatewayBilling && hasCompleteCoreTokenTelemetry && configuredListPricingModel
-      ? calculateModelListUsageCostSnapshot(settings, configuredListPricingModel, sanitizedUsage, {
-          latencyMode: input.latencyMode ?? "standard",
-          priceContextKnown: false,
-        })
-      : null;
-  const listClasses = {
-    listByClassMicros: listSnapshot?.listByClassMicros ?? null,
-    listByClassApprox: listSnapshot?.listByClassApprox ?? false,
-  };
-  const estimatedProviderCostMicros = gatewayBilling
-    ? (pricingBreakdown?.providerCostMicros ?? null)
-    : hasCompleteCoreTokenTelemetry
-      ? (listSnapshot?.providerCostMicros ?? pricingBreakdown?.providerCostMicros ?? null)
-      : null;
-  const equivalentCreditCostMicros =
-    pricingBreakdown && !unpinnedWorkspaceGatewayModel
-      ? gatewayBilling || hasCompleteCoreTokenTelemetry
-        ? pricingBreakdown.creditCostMicros
-        : null
-      : null;
-  const pricingSource = gatewayBilling
-    ? ("gateway_reported" as const)
-    : estimatedProviderCostMicros !== null
-      ? ("configured_list_price" as const)
-      : null;
-  // MAINT-P09-430: the call's own authoritative per-call fact, on every billing
-  // path and before anything else is recorded for it. Durable like
-  // model.tokens: a refused write rejects (never a soft fail), and the
-  // idempotency key makes a replay of the same call the same row.
-  const resolvedCallProvider =
-    input.provider === undefined || input.providerApi === undefined
-      ? resolveModelProvider(settings, input.model)?.provider
-      : undefined;
-  // The schedule that produced the estimate, chosen exactly as the estimate is:
-  // the list (comparison) schedule when its snapshot priced the call, else the
-  // configured debit schedule.
-  const estimateSchedule =
-    pricingSource !== "configured_list_price"
-      ? null
-      : listSnapshot?.providerCostMicros != null && configuredListPricingModel
-        ? (listPricingSchedules[configuredListPricingModel] ?? null)
-        : configuredPricingModel
-          ? (pricingSchedules[configuredPricingModel] ?? null)
-          : null;
-  if (input.recordCall !== false)
-    await recordModelCallUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      turnAttemptId: input.turnAttemptId,
-      sourceKey: input.sourceKey,
-      callKind: input.callKind ?? "response",
-      outcome: input.outcome ?? "completed",
-      scope: input.scope ?? "call",
-      provider: input.provider ?? resolvedCallProvider?.id ?? settings.openaiProvider ?? "openai",
-      providerApi: input.providerApi ?? resolvedCallProvider?.api ?? "responses",
-      upstreamProvider: gatewayBilling?.finalProvider ?? null,
-      model: input.model,
-      billingPath: chargesOpenGeniCredits ? "opengeni_credits" : "external",
-      billing: {
-        normalizedUsage,
-        estimatedProviderCostMicros,
-        pricingSource,
-        priceVersion: estimateSchedule ? modelPricingScheduleVersion(estimateSchedule) : null,
-      },
-    });
-  // Provider settlement and workspace-facing cost are separate. Externally
-  // metered subscription/workspace turns remain exempt from the Opengeni token
-  // cap, while a deployment-funded free model still records model.tokens. Every
-  // non-credit path records a zero-cost marker and never consults pricing for a
-  // debit.
-  if (countsTowardTokenCap && totalTokens > 0) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "model.tokens",
-      quantity: totalTokens,
-      unit: "tokens",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      turnAttemptId: input.turnAttemptId,
-      idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
-    });
-  }
-  if (!chargesOpenGeniCredits) {
-    await recordUsageEvent(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      eventType: "model.cost",
-      quantity: 0,
-      unit: "usd_micros",
-      sourceResourceType: "model_response",
-      sourceResourceId: `${input.turnId}:${input.sourceKey}`,
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      turnAttemptId: input.turnAttemptId,
-      idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
-    });
-    return {
-      billingPath: "external",
-      pricedCostMicros: 0,
-      estimatedProviderCostMicros,
-      equivalentCreditCostMicros,
-      pricingSource,
-      ...listClasses,
-      normalizedUsage,
-      ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
-    };
-  }
-  const shouldDebit = settings.billingMode === "stripe" || settings.usageLimitsMode === "managed";
-  if (!shouldDebit || (totalTokens === 0 && !gatewayBilling)) {
-    return {
-      billingPath: "opengeni_credits",
-      pricedCostMicros: 0,
-      estimatedProviderCostMicros,
-      equivalentCreditCostMicros,
-      pricingSource,
-      ...listClasses,
-      normalizedUsage,
-      ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
-    };
-  }
-  if (!pricingBreakdown) {
-    throw new Error(`Missing model pricing for ${input.model}`);
-  }
-  const costMicros = pricingBreakdown.creditCostMicros;
-  await recordUsageEvent(db, {
+  return await settleModelUsage(settings, db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
-    eventType: "model.cost",
-    quantity: costMicros,
-    unit: "usd_micros",
-    sourceResourceType: "model_response",
-    sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+    model: input.model,
+    chargesOpenGeniCredits: input.chargesOpenGeniCredits ?? !input.externallyBilled,
+    countsTowardTokenCap: input.countsTowardTokenCap ?? !input.externallyBilled,
+    creditPolicyRevision: input.creditPolicyRevision,
+    ...(input.gatewayBilling ? { gatewayBilling: input.gatewayBilling } : {}),
+    normalizedUsage: input.normalizedUsage ?? normalizeModelCallUsage(input.usage),
+    ...(input.recordCall === false ? {} : { onAuthoritativeCall: async (record) => {
+      const resolved = input.provider === undefined || input.providerApi === undefined
+        ? resolveModelProvider(settings, input.model)?.provider : undefined;
+      await recordModelCallUsageEvent(db, {
+        accountId: input.accountId, workspaceId: input.workspaceId, sessionId: input.sessionId,
+        turnId: input.turnId, turnAttemptId: input.turnAttemptId, sourceKey: input.sourceKey,
+        callKind: input.callKind ?? "response", outcome: input.outcome ?? "completed", scope: input.scope ?? "call",
+        provider: input.provider ?? resolved?.id ?? settings.openaiProvider ?? "openai",
+        providerApi: input.providerApi ?? resolved?.api ?? "responses", upstreamProvider: record.upstreamProvider ?? null,
+        model: input.model, billingPath: record.billingPath,
+        billing: { normalizedUsage: record.normalizedUsage, estimatedProviderCostMicros: record.estimatedProviderCostMicros,
+          pricingSource: record.pricingSource, priceVersion: record.estimateSchedule ? modelPricingScheduleVersion(record.estimateSchedule) : null },
+      });
+    } }),
+    sourceId: `${input.turnId}:${input.sourceKey}`,
     sessionId: input.sessionId,
     turnId: input.turnId,
     turnAttemptId: input.turnAttemptId,
-    idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
-  });
-  if (costMicros > 0) {
-    const result = await applyCreditDebitUpToBalance(db, {
-      accountId: input.accountId,
-      workspaceId: input.workspaceId,
-      type: "model_usage_debit",
-      requestedAmountMicros: costMicros,
-      modelId: canonicalizeConfiguredModelId(settings, input.model),
-      creditPolicyRevision: input.creditPolicyRevision,
-      sourceType: "model_response",
-      sourceId: `${input.turnId}:${input.sourceKey}`,
-      idempotencyKey: `credit:model_usage_debit:${input.turnId}:${input.sourceKey}`,
-      metadata: {
-        model: input.model,
-        sessionId: input.sessionId,
-        turnId: input.turnId,
-        sourceKey: input.sourceKey,
-        latencyMode: input.latencyMode ?? "standard",
-        inputTokens,
-        outputTokens,
-        totalTokens,
-        // Additive: the prompt-cache slice of this call's input tokens, so the
-        // per-call debit record carries cache efficiency alongside the token
-        // counts. 0 when the provider did not report cached tokens.
-        cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
-        ...(gatewayBilling ? { gatewayProvider: gatewayBilling.finalProvider } : {}),
-      },
-    });
-    recordCreditMicros(input.observability, "usage", result.debitedMicros);
-    try {
+    usageLimitMetrics: input.observability ?? null,
+    // A failed task-usage receipt write never loses or replays the response:
+    // custody writes it before the next model request or turn completion.
+    receiptCustody: input.atomicReceiptPersistence
+      ? null
+      : (receipt) =>
+          holdSessionUsageReceipt(
+            { accountId: input.accountId, workspaceId: input.workspaceId },
+            receipt,
+          ),
+    ...(input.latencyMode ? { latencyMode: input.latencyMode } : {}),
+    debitMetadata: {
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      sourceKey: input.sourceKey,
+    },
+    onCreditsDebited: (result) => {
+      recordCreditMicros(input.observability, "usage", result.debitedMicros);
       recordModelCreditsCharged(input.observability, {
         provider: input.metricProvider ?? "unknown",
         model: modelMetricProductId(settings, input.metricProvider, input.model),
         debitedMicros: result.debitedMicros,
         grantDebitedMicros: result.grantDebitedMicros,
       });
-    } catch {
-      // The debit is committed; metrics are best-effort only.
-    }
-  }
-  return {
-    billingPath: "opengeni_credits",
-    pricedCostMicros: costMicros,
-    estimatedProviderCostMicros,
-    equivalentCreditCostMicros,
-    pricingSource,
-    ...listClasses,
-    normalizedUsage,
-    ...(gatewayBilling ? { upstreamProvider: gatewayBilling.finalProvider } : {}),
-  };
+    },
+  });
 }
 
 const modelMetricProductIds = new WeakMap<Settings, Map<string, string>>();
@@ -1164,6 +1022,8 @@ export function recordAuthoritativeModelUsageMetrics(input: {
   model: string;
   externallyBilled: boolean;
   billing: ModelUsageBillingRecord;
+  /** Provider-run web searches this response billed, when the provider reports them. */
+  webSearchRequests?: number | undefined;
 }): void {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -1174,10 +1034,17 @@ export function recordAuthoritativeModelUsageMetrics(input: {
       tokens: telemetry,
       estimatedProviderCostMicros: input.billing.estimatedProviderCostMicros,
       pricingSource: input.billing.pricingSource,
+      ...(input.webSearchRequests ? { webSearchRequests: input.webSearchRequests } : {}),
     });
   } catch {
     // Durable event + billing already committed; metrics are best-effort only.
   }
+}
+
+function isForeignKeyViolation(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  const causeCode = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return code === "23503" || causeCode === "23503";
 }
 
 /** Soft-fail Insights fact write — never throws into the billing/emit path. */
@@ -1194,11 +1061,15 @@ export async function recordAuthoritativeModelCallFact(input: {
   providerApi: ModelProviderApi;
   model: string;
   billing: ModelUsageBillingRecord;
+  /** The shared-core subscription connection that served the call, if any. */
+  subscriptionConnectionId?: string | null;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  timing?: ModelCallTiming | null;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
-    await recordModelCallFact(input.db, {
+    const fact = (connectionId: string | null) => ({
+      connectionId,
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
@@ -1221,10 +1092,19 @@ export async function recordAuthoritativeModelCallFact(input: {
       cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       totalTokens: input.billing.normalizedUsage.totalTokens,
+      timing: input.timing ?? null,
       ...(input.contextContributions !== undefined
         ? { contextContributions: input.contextContributions }
         : {}),
     });
+    try {
+      await recordModelCallFact(input.db, fact(input.subscriptionConnectionId ?? null));
+    } catch (error) {
+      // The served connection was deleted mid-turn: keep the usage fact and
+      // drop only its attribution, never the whole fact.
+      if (!input.subscriptionConnectionId || !isForeignKeyViolation(error)) throw error;
+      await recordModelCallFact(input.db, fact(null));
+    }
   } catch (error) {
     input.observability.warn("model call fact persist failed", {
       ...safeErrorDiagnostic(error),
@@ -1394,40 +1274,6 @@ export async function recordUnreportedModelCalls(
   return sourceKeys.length;
 }
 
-export function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): ModelUsageInput {
-  return {
-    ...(normalized.telemetry.inputTokens !== null
-      ? { inputTokens: normalized.telemetry.inputTokens }
-      : {}),
-    ...(normalized.telemetry.outputTokens !== null
-      ? { outputTokens: normalized.telemetry.outputTokens }
-      : {}),
-    ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
-    ...(normalized.telemetry.cachedTokens !== null ||
-    normalized.telemetry.cacheWriteTokens !== null ||
-    normalized.cacheWriteTokensByTtl !== undefined
-      ? {
-          inputTokensDetails: {
-            ...(normalized.telemetry.cachedTokens === null
-              ? {}
-              : { cached_tokens: normalized.telemetry.cachedTokens }),
-            ...(normalized.telemetry.cacheWriteTokens === null
-              ? {}
-              : { cache_write_tokens: normalized.telemetry.cacheWriteTokens }),
-            ...(normalized.cacheWriteTokensByTtl?.fiveMinute == null
-              ? {}
-              : { cache_write_tokens_5m: normalized.cacheWriteTokensByTtl.fiveMinute }),
-            ...(normalized.cacheWriteTokensByTtl?.oneHour == null
-              ? {}
-              : { cache_write_tokens_1h: normalized.cacheWriteTokensByTtl.oneHour }),
-          },
-        }
-      : {}),
-    ...(normalized.requestUsageEntries
-      ? { requestUsageEntries: normalized.requestUsageEntries }
-      : {}),
-  };
-}
 
 export function startOfUtcMonth(): Date {
   const now = new Date();

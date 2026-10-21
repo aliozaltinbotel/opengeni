@@ -130,6 +130,12 @@ export type EmbeddingProviderDispatch = {
 export type DocumentEmbedder = {
   model: string;
   dimensions: number;
+  /**
+   * False when this embedder cannot make any request, for example a provider
+   * with no credential. Callers leave indexing queued instead of retrying a
+   * request that can only fail. Absent means available.
+   */
+  readonly available?: boolean;
   // Optional synchronous observers retain completed calls even if validation
   // then throws. They capture facts only; persistence belongs to the caller.
   embedMany: (
@@ -426,6 +432,11 @@ export class OpenAIEmbeddingProvider implements DocumentEmbedder {
   readonly dimensions: number;
   private readonly defaultHeaders: Record<string, string> | undefined;
   private readonly defaultQuery: Record<string, string> | undefined;
+
+  /** Without an API key every request fails before reaching the provider. */
+  get available(): boolean {
+    return Boolean(this.apiKey);
+  }
 
   async embedMany(
     texts: string[],

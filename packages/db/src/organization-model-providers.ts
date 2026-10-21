@@ -1,11 +1,21 @@
 import { createHash } from "node:crypto";
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  CLAUDE_DEFAULT_CONNECTION_MODEL_IDS,
+  environmentsEncryptionKeyBytes,
+  type Settings,
+} from "@opengeni/config";
 import { ClaudeProviderAccountAuthoritySnapshotV1 } from "@opengeni/contracts";
 import { and, count, eq, exists, inArray, isNull, sql } from "drizzle-orm";
 
-import { type Database, rawRows, setSubjectRlsContext, withRlsContext } from "./database";
-import { workspaceClaudeSubscriptionActiveForAuthority } from "./claude-subscription-accounts";
+import { type Database, setSubjectRlsContext, withRlsContext } from "./database";
+import { SUBSCRIPTION_CORE_CLAUDE_PROVIDER } from "./subscription-core-claude-adapter";
+import {
+  subscriptionCoreClaudeCustomModelAdmitted,
+  type SubscriptionCoreClaudeAdmissionCarrier,
+} from "./subscription-core-claude-reads";
+import { readSubscriptionCoreProviderRoute } from "./subscription-core/provider-route";
 import { decryptEnvironmentValue } from "./environment-crypto";
+import { defaultModelRequestHash } from "./model-catalog";
 import * as schema from "./schema";
 
 export type OrganizationModelProviderKind =
@@ -36,7 +46,35 @@ export type OrganizationModelProviderCustomModel = {
 /** Exact accepted source; never resolve the caller's current pool at this fence. */
 export type OrganizationClaudeModelAdmissionAuthority =
   | { sessionId: string }
-  | { authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1 };
+  | {
+      authoritySnapshot: ClaudeProviderAccountAuthoritySnapshotV1;
+      /**
+       * The scheduled task an update re-admits. On Claude's core route its
+       * accepted authority (the task's compatibility record) decides instead
+       * of the v1 snapshot; ignored on the legacy route.
+       */
+      scheduledTaskId?: string;
+      /**
+       * The accepted source a fresh prompt copies: an edit's source turn, or
+       * the receiving session of agent-submitted work. On Claude's core
+       * route its accepted authority decides; ignored on the legacy route
+       * (the snapshot already carries it). Absent for a human's own new work
+       * and for service actors, which resolve the current source.
+       */
+      acceptedSource?:
+        | { kind: "session_turn"; turnId: string }
+        | { kind: "receiving_session"; sessionId: string };
+    };
+
+/** The carrier whose accepted authority Claude's core route reads for an admission. */
+function claudeAdmissionCarrier(
+  authority: OrganizationClaudeModelAdmissionAuthority,
+): SubscriptionCoreClaudeAdmissionCarrier | null {
+  if ("sessionId" in authority) return { kind: "session_initial", sessionId: authority.sessionId };
+  if (authority.scheduledTaskId !== undefined)
+    return { kind: "scheduled_task", scheduledTaskId: authority.scheduledTaskId };
+  return authority.acceptedSource ?? null;
+}
 
 export class OrganizationModelProviderConflictError extends Error {}
 export class OrganizationModelProviderLimitError extends Error {}
@@ -114,7 +152,7 @@ async function recordConnectionOperation(
   });
 }
 
-function mapModel(
+export function mapOrganizationModelProviderCustomModel(
   row: typeof schema.organizationModelProviderCustomModels.$inferSelect,
 ): OrganizationModelProviderCustomModel {
   return {
@@ -129,6 +167,8 @@ function mapModel(
     updatedAt: row.updatedAt,
   };
 }
+
+const mapModel = mapOrganizationModelProviderCustomModel;
 
 export async function getOrganizationModelProviderConnection(
   db: Database,
@@ -335,9 +375,20 @@ export async function loadOrganizationModelProviderApiKey(
   db: Database,
   settings: Settings,
   input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+  prepared?: {
+    loadOrganizationCredentials: boolean;
+    encryptedCredentials: Partial<Record<OrganizationModelProviderKind, string>>;
+  },
 ): Promise<string | null> {
   const key = environmentsEncryptionKeyBytes(settings);
+  if (prepared && prepared.loadOrganizationCredentials !== (key !== null)) {
+    throw new Error("Prepared provider credentials do not match encryption settings");
+  }
   if (!key) return null;
+  if (prepared) {
+    const encrypted = prepared.encryptedCredentials[input.providerKind];
+    return encrypted === undefined ? null : decryptEnvironmentValue(key, encrypted);
+  }
   return await withRlsContext(db, input, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
@@ -353,6 +404,27 @@ export async function loadOrganizationModelProviderApiKey(
       )
       .limit(1);
     return row ? decryptEnvironmentValue(key, row.credentialEncrypted) : null;
+  });
+}
+
+/** Execution metadata only, under the same tenant scope as the credential loader. */
+export async function getOrganizationModelProviderExecutionConnectionId(
+  db: Database,
+  input: { accountId: string; workspaceId: string; providerKind: OrganizationModelProviderKind },
+): Promise<string | null> {
+  return withRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ id: schema.organizationModelProviderConnections.id })
+      .from(schema.organizationModelProviderConnections)
+      .where(
+        and(
+          eq(schema.organizationModelProviderConnections.accountId, input.accountId),
+          eq(schema.organizationModelProviderConnections.providerKind, input.providerKind),
+          eq(schema.organizationModelProviderConnections.status, "active"),
+        ),
+      )
+      .limit(1);
+    return row?.id ?? null;
   });
 }
 
@@ -493,44 +565,25 @@ export async function lockActiveOrganizationModelProviderCustomModelForAdmission
   return await withOrganizationModelProviderCustomModelReadLock(db, input, async (scopedDb) => {
     if (input.providerKind === "claude_subscription") {
       if (!input.claudeAuthority) return null;
-      let snapshot: unknown;
-      if ("sessionId" in input.claudeAuthority) {
-        const [session] = await scopedDb
-          .select({ snapshot: schema.sessions.initialClaudeProviderAccountAuthoritySnapshot })
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.claudeAuthority.sessionId),
-            ),
-          )
-          .limit(1);
-        snapshot = session?.snapshot;
-      } else {
-        snapshot = input.claudeAuthority.authoritySnapshot;
-      }
-      const authority = ClaudeProviderAccountAuthoritySnapshotV1.safeParse(snapshot);
-      if (!authority.success || authority.data.scope !== "organization") return null;
-      // The admission caller already established this transaction's subject.
-      // Do not borrow a session creator or infer a human for a service actor.
-      const [scope] = await rawRows<{ subjectId: string | null }>(
-        scopedDb,
-        sql`select nullif(current_setting('opengeni.subject_id', true), '') as "subjectId"`,
-      );
-      if (
-        !scope?.subjectId ||
-        !(await workspaceClaudeSubscriptionActiveForAuthority(
-          scopedDb,
-          { claudeSubscriptionEnabled: true },
-          {
+      // Claude's provider route (design 5.3, C2a): legacy keeps the v1
+      // admission; maintenance admits nothing; the core admits from the
+      // organization pool and never reads a v1 snapshot.
+      const route = await readSubscriptionCoreProviderRoute(scopedDb, {
+        accountId: input.accountId,
+        provider: SUBSCRIPTION_CORE_CLAUDE_PROVIDER,
+      });
+      if (route !== "core") return null;
+      if (route === "core") {
+        if (
+          !(await subscriptionCoreClaudeCustomModelAdmitted(scopedDb, {
+            accountId: input.accountId,
             workspaceId: input.workspaceId,
-            subjectId: scope.subjectId,
-            authoritySnapshot: authority.data,
-          },
-        ))
-      )
-        return null;
+            upstreamModelId: input.upstreamModelId,
+            carrier: claudeAdmissionCarrier(input.claudeAuthority),
+          }))
+        )
+          return null;
+      }
     }
     const [row] = await scopedDb
       .select()
@@ -585,6 +638,49 @@ export async function listOrganizationModelProviderCustomModels(
         ),
       );
     return rows.map(mapModel);
+  });
+}
+
+/**
+ * First connection of a Claude account for the organization: offer the
+ * default models. Does nothing once the organization has any Claude model
+ * record of this kind, active or removed, so a configured or trimmed list is
+ * never changed. Returns how many models were added.
+ */
+export async function seedOrganizationClaudeDefaultModels(
+  db: Database,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    providerKind: "anthropic" | "claude_subscription";
+  },
+): Promise<number> {
+  return await withOrganizationProviderAdministrator(db, input, async (scopedDb) => {
+    await scopedDb.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${`organization-model-provider-models:${input.organizationId}:${input.providerKind}`}, 0))`,
+    );
+    const [existing] = await scopedDb
+      .select({ value: count() })
+      .from(schema.organizationModelProviderCustomModels)
+      .where(
+        and(
+          eq(schema.organizationModelProviderCustomModels.accountId, input.organizationId),
+          eq(schema.organizationModelProviderCustomModels.providerKind, input.providerKind),
+        ),
+      );
+    if (Number(existing?.value ?? 0) > 0) return 0;
+    await scopedDb.insert(schema.organizationModelProviderCustomModels).values(
+      CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.map((upstreamModelId) => ({
+        accountId: input.organizationId,
+        providerKind: input.providerKind,
+        upstreamModelId,
+        label: null,
+        createOperationId: crypto.randomUUID(),
+        createRequestHash: defaultModelRequestHash(upstreamModelId),
+        createdBySubjectId: input.actorSubjectId,
+      })),
+    );
+    return CLAUDE_DEFAULT_CONNECTION_MODEL_IDS.length;
   });
 }
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { ResponsesTransportDiagnostic } from "@opengeni/network/responses-websocket";
 import { errorCodeToJSON } from "@opengeni/agent-proto";
 import {
   BundledSkillId,
@@ -12,6 +13,8 @@ import {
   ACTIVE_USER_WINDOWS,
   type ActiveUserWindow,
   type CreditGrantTotals,
+  type IdleInteractionInspection,
+  type ModelCallTiming,
   type SessionEventAppendPhaseObservation,
 } from "@opengeni/db";
 import {
@@ -34,6 +37,7 @@ import {
 } from "./opensandbox-kubernetes-inventory";
 import {
   MCP_TOOL_METRIC_EXTERNAL_LABEL,
+  SANDBOX_OPERATION_PURPOSES,
   SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
   WORKSPACE_CAPTURE_SKIP_REASONS,
   isMcpToolMetricLabel,
@@ -164,6 +168,22 @@ function eventAttributeValue(value: unknown): AttributeValue {
   }
 }
 
+const SANDBOX_SETUP_OPERATIONS = new Set([
+  "exec",
+  "execCommand",
+  "readFile",
+  "writeFile",
+  "listDir",
+  "pathExists",
+  "materializeEntry",
+]);
+
+/** Single provider round trips are sub-second when healthy; the tail covers
+ * clone and long setup commands. */
+const SANDBOX_SETUP_OPERATION_BUCKETS = [
+  0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1, 1.5, 2.5, 5, 10, 30, 120,
+];
+
 export function runtimeMetricsHooksForObservability(
   observability: Observability,
 ): RuntimeMetricsHooks {
@@ -244,6 +264,27 @@ export function runtimeMetricsHooksForObservability(
         name: "opengeni_workspace_capture_duration_seconds",
         help: "Physical warm workspace capture and publication duration, including late settlement after caller timeout.",
         labels: { backend: safeBackend, outcome },
+        value: durationSeconds,
+      });
+    },
+    onSandboxSetupOperation: ({ backend, op, purpose, outcome, durationSeconds }) => {
+      if (!Number.isFinite(durationSeconds) || durationSeconds < 0) return;
+      const safeBackend = SandboxBackend.safeParse(backend).success ? backend : "unknown";
+      const safeOp = SANDBOX_SETUP_OPERATIONS.has(op) ? op : "other";
+      const safePurpose = (SANDBOX_OPERATION_PURPOSES as readonly string[]).includes(purpose)
+        ? purpose
+        : "other";
+      completedOperationSpan(observability, "worker.sandbox_setup.operation", durationSeconds, {
+        backend: safeBackend,
+        outcome,
+        op: safeOp,
+        purpose: safePurpose,
+      });
+      observability.observeHistogram({
+        name: "opengeni_sandbox_setup_operation_duration_seconds",
+        help: "Platform setup operations on a raw provider session (lifecycle hooks, run credentials, file resources, repository skills), by purpose. Count is the number of provider round trips.",
+        buckets: SANDBOX_SETUP_OPERATION_BUCKETS,
+        labels: { backend: safeBackend, op: safeOp, purpose: safePurpose, outcome },
         value: durationSeconds,
       });
     },
@@ -1245,6 +1286,7 @@ export const SANDBOX_INVENTORY_PROJECTION_DOMAINS = [
   "opensandbox_kubernetes",
   "modal_provider",
   "interaction_idle",
+  "checkpoint_staleness",
 ] as const;
 
 export type SandboxInventoryProjectionDomain =
@@ -1527,6 +1569,7 @@ export function recordSandboxDeadlineRotationsRequested(
 export const SANDBOX_COMMAND_CONTAINMENT_OUTCOMES = [
   "idle_enrolled",
   "deadline_enrolled",
+  "forced_deadline_enrolled",
   "quiescence_enrolled",
   "resumed_enrolled",
   "not_eligible",
@@ -1563,6 +1606,7 @@ export const SUBSCRIPTION_CORE_SHADOW_PLACEMENTS = [
 /** Requirements the reference checker can report, plus checker failure. */
 export const SUBSCRIPTION_CORE_SHADOW_REQUIREMENTS = [
   "SUB-ACCESS-06",
+  "SUB-CREDITS-01",
   "SUB-ELIG-01",
   "SUB-ELIG-02",
   "SUB-ELIG-03",
@@ -1732,6 +1776,19 @@ export function recordSubscriptionCoreShadowStuckLoad(
   });
 }
 
+/** Idle browser/desktop release inspections by fixed outcome: `checkpointing`
+ * (idle browser saves prepared), `released` (holders released without a save). */
+export function recordSandboxIdleInteractionRelease(
+  observability: Observability,
+  outcome: IdleInteractionInspection,
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_idle_interaction_release_total",
+    help: "Idle browser and desktop release inspections on warm boxes, by fixed outcome.",
+    labels: { outcome },
+  });
+}
+
 export function recordSandboxCommandContainment(
   observability: Observability,
   outcome: SandboxCommandContainmentOutcome,
@@ -1755,6 +1812,19 @@ export function recordSandboxProviderMissingBeforeCapture(
     name: "opengeni_sandbox_provider_missing_before_capture_total",
     help: "Exact sandbox cold commits after definitive provider disappearance before workspace capture.",
     labels: { backend: safeBackend },
+  });
+}
+
+/** Host workspace directory outcome after a Docker drain's exact-container
+ * teardown (`retained` means the directory stays on disk). */
+export function recordSandboxDockerWorkspaceRelease(
+  observability: Observability,
+  status: "released" | "already_released" | "retained",
+): void {
+  observability.incrementCounter({
+    name: "opengeni_sandbox_docker_workspace_release_total",
+    help: "Docker drain host workspace directories released or retained after exact-container teardown.",
+    labels: { status },
   });
 }
 
@@ -1809,6 +1879,31 @@ export function recordSandboxAutomaticRecoverySelected(
     name: "opengeni_sandbox_checkpoint_fallback_total",
     help: "System-selected continuity after managed provider loss: verified checkpoint or empty workspace.",
     labels: { backend: safeBackend, outcome },
+  });
+}
+
+/** How long live boxes have held changes no checkpoint covers yet. */
+export function recordSandboxCheckpointStalenessGauges(
+  observability: Observability,
+  staleness: { dirty: number; stale4h: number; stale12h: number; maxAgeSeconds: number },
+): void {
+  const values = {
+    dirty: staleness.dirty,
+    stale_4h: staleness.stale4h,
+    stale_12h: staleness.stale12h,
+  } as const;
+  for (const [kind, value] of Object.entries(values)) {
+    observability.setGauge({
+      name: "opengeni_sandbox_checkpoint_staleness",
+      help: "Live Modal sandboxes holding a write their last checkpoint did not capture, by age of the first such write.",
+      labels: { kind },
+      value,
+    });
+  }
+  observability.setGauge({
+    name: "opengeni_sandbox_checkpoint_age_max_seconds",
+    help: "Age in seconds of the oldest write a live Modal sandbox's last checkpoint did not capture.",
+    value: Number.isFinite(staleness.maxAgeSeconds) ? Math.max(0, staleness.maxAgeSeconds) : 0,
   });
 }
 
@@ -1940,6 +2035,7 @@ export const RETAINED_PROCESS_RECONCILIATION_OUTCOMES = [
   "proof_checkpoint_failed",
   "settled_exited",
   "settled_lost",
+  "provider_lost_whole_box",
   "settlement_failed",
   "identity_mismatch",
   "resume_state_missing",
@@ -2051,6 +2147,7 @@ export function recordModelResponseUsage(
     };
     estimatedProviderCostMicros: number | null;
     pricingSource: "configured_list_price" | "gateway_reported" | null;
+    webSearchRequests?: number;
   },
 ): void {
   const model = boundedModelMetricLabel(observability, input.model);
@@ -2079,6 +2176,14 @@ export function recordModelResponseUsage(
       amount,
     });
   }
+  const searches = nonnegativeSafeInteger(input.webSearchRequests ?? 0);
+  if (searches > 0)
+    observability.incrementCounter({
+      name: "opengeni_model_web_search_requests_total",
+      help: "Provider-run web searches billed with authoritative model responses, by provider, catalog model and payer.",
+      labels: { ...base, payer: input.payer },
+      amount: searches,
+    });
   const cost = nonnegativeSafeInteger(input.estimatedProviderCostMicros);
   if (priced && input.pricingSource !== null && cost > 0) {
     observability.incrementCounter({
@@ -2129,41 +2234,139 @@ const MODEL_REQUEST_PHASE_BUCKETS = [
  * Provider ids come from the resolved provider registry; phase/outcome are closed
  * enums. This function never performs I/O outside the in-memory metrics registry.
  */
+/**
+ * How a model request reached its provider, where the provider has more than
+ * one transport (Codex: a new or reused Responses WebSocket, a reused one
+ * continuing the previous response with only new input, or HTTP). Empty for
+ * providers with a single transport.
+ */
+export type ModelRequestTransportLabel =
+  | ""
+  | "websocket_new"
+  | "websocket_reused"
+  | "websocket_incremental"
+  | "http";
+
+/** The bounded metric label for how a Codex request was carried. */
+export function codexRequestTransportLabel(
+  transport:
+    | { kind: "websocket"; connection: "new" | "reused"; input: "full" | "incremental" }
+    | { kind: "http" },
+): ModelRequestTransportLabel {
+  if (transport.kind === "http") return "http";
+  if (transport.input === "incremental") return "websocket_incremental";
+  return transport.connection === "reused" ? "websocket_reused" : "websocket_new";
+}
+
 export function recordModelRequestPhase(
   observability: Observability,
   input: {
     provider: string;
-    phase: "headers" | "first_byte" | "terminal";
+    /** `handshake`: the time a request waited for its new WebSocket to open. */
+    phase: "handshake" | "headers" | "first_byte" | "terminal";
     outcome?: "completed" | "failed" | "timed_out";
     durationSeconds: number;
+    transport?: ModelRequestTransportLabel;
   },
 ): void {
   const outcome = input.outcome ?? "";
+  const transport = input.transport ?? "";
   observability.incrementCounter({
     name: "opengeni_model_request_phases_total",
-    help: "Provider model-request lifecycle phases by bounded phase and outcome.",
-    labels: { provider: input.provider, phase: input.phase, outcome },
+    help: "Provider model-request lifecycle phases by bounded phase, outcome and transport.",
+    labels: { provider: input.provider, phase: input.phase, outcome, transport },
   });
   observability.observeHistogram({
     name: "opengeni_model_request_phase_duration_seconds",
     help: "Monotonic seconds from provider dispatch to a model-request lifecycle phase.",
     buckets: MODEL_REQUEST_PHASE_BUCKETS,
-    labels: { provider: input.provider, phase: input.phase },
+    labels: { provider: input.provider, phase: input.phase, transport },
     value: Math.max(0, input.durationSeconds),
   });
+}
+
+/** One bounded metric family shared by every persistent Responses provider. */
+export function recordResponsesTransportDiagnostic(
+  observability: Observability,
+  provider: string,
+  event: ResponsesTransportDiagnostic,
+): void {
+  const labels = {
+    provider,
+    phase: event.phase,
+    position: event.position,
+    transport: codexRequestTransportLabel(event.transport),
+  };
+  observability.observeHistogram({
+    name: "opengeni_model_transport_phase_seconds",
+    help: "Persistent model transport phase duration, including final-prefix startup overlap.",
+    buckets: MODEL_REQUEST_PHASE_BUCKETS,
+    labels,
+    value: Math.max(0, event.durationMs / 1000),
+  });
+  if (event.phase === "terminal") {
+    observability.incrementCounter({
+      name: "opengeni_model_transport_requests_total",
+      help: "Persistent model transport request outcomes.",
+      labels: {
+        ...labels,
+        outcome: event.outcome ?? "completed",
+        reason: event.transport.kind === "http" ? event.transport.reason : "",
+      },
+    });
+    if (
+      event.promptTokens !== undefined &&
+      event.promptTokens > 0 &&
+      event.cachedTokens !== undefined
+    ) {
+      observability.observeHistogram({
+        name: "opengeni_model_transport_cache_ratio",
+        help: "Provider-reported cache ratio on completed persistent requests, first versus later in a turn.",
+        labels: { provider, position: event.position },
+        buckets: MODEL_CACHE_HIT_RATIO_BUCKETS,
+        value: Math.min(1, event.cachedTokens / event.promptTokens),
+      });
+    }
+  }
+  if (event.inputBytes !== undefined && event.fullInputBytes !== undefined) {
+    for (const [kind, value] of [
+      ["wire", event.inputBytes],
+      ["full", event.fullInputBytes],
+    ] as const) {
+      observability.incrementCounter({
+        name: "opengeni_model_transport_input_bytes_total",
+        help: "Wire and equivalent full request bytes for persistent model transport.",
+        labels: { provider, kind },
+        amount: value,
+      });
+    }
+  }
 }
 
 export type TurnStartupPhase =
   | "services_initialization"
   | "claim_catalog_read"
   | "claim_atomic"
+  | "claim_transaction_admission"
+  | "claim_savepoint_admission"
+  | "claim_rls_setup"
+  | "claim_scoped_callback"
+  | "claim_continued_accounts"
+  | "claim_update_authority"
   | "claim_session_read"
   | "claim_capability_settings"
+  | "claim_provider_settings"
   | "learning_policy_freeze"
   | "attachment_authority_projection"
   | "claim_and_policy"
   | "turn_start_settlement"
   | "credential_selection"
+  | "credential_identity_read"
+  | "credential_entitlements"
+  | "credential_entitlement_refresh"
+  | "credential_health_recovery"
+  | "credential_placement"
+  | "credential_selection_receipt"
   | "runtime_preparation"
   | "session_mcp_settings"
   | "sandbox_establish"
@@ -2420,6 +2623,8 @@ function completedOperationSpan(
     provider?: string;
     backend?: string;
     tool?: string;
+    op?: string;
+    purpose?: string;
     correlationId?: string | undefined;
   },
 ): void {
@@ -2702,6 +2907,15 @@ export type ProviderFirstContent = "any" | "text";
  * still be persisting the previous response's tool results when the producer
  * dispatches the next request, but the next request's first delta always
  * follows its own dispatch. Purely observational and clock-injectable.
+ *
+ * `completeResponse` also returns the same measurements for one model call,
+ * which the worker stores on its usage event and Insights fact. The next model
+ * entry waits until the consumer has settled the previous response, so a
+ * response's terminal event is always read before the next dispatch.
+ * A call that needs several requests before its one terminal response (a
+ * transport retry, or a provider continuation such as Claude's `pause_turn`)
+ * is measured from its first dispatch and keeps that request's pre-dispatch
+ * work, so its duration and first token cover the whole response.
  */
 export class StreamTimingMetrics {
   private readonly now: () => number;
@@ -2711,6 +2925,13 @@ export class StreamTimingMetrics {
   private modelEntryAt: number | null = null;
   private dispatchedAt: number | null = null;
   private readonly providerFirstRecorded = new Set<ProviderFirstContent>();
+  /** The model call awaiting its terminal response, if one was dispatched. */
+  private openCall: {
+    dispatchedAt: number;
+    preDispatchMs: number | null;
+    firstContentAt: number | null;
+    firstTextAt: number | null;
+  } | null = null;
 
   constructor(
     private readonly observability: Observability,
@@ -2721,21 +2942,25 @@ export class StreamTimingMetrics {
   }
 
   /** Producer side: the SDK entered a model request (first admission check).
-   *  Admission can be re-entered for the same request; keep the earliest. */
-  onModelRequestEntry(): void {
+   *  Keep the earliest model entry, but ignore transport rechecks: native
+   *  providers can run those after dispatch, while the response is in flight. */
+  onModelRequestEntry(point: "model_entry" | "transport" = "model_entry"): void {
+    if (point !== "model_entry") return;
     if (this.modelEntryAt === null) this.modelEntryAt = this.now();
   }
 
   /** Producer side: request bytes are about to leave this process. */
   onProviderDispatch(): void {
     const at = this.now();
+    let preDispatchMs: number | null = null;
     if (this.modelEntryAt !== null) {
+      preDispatchMs = Math.max(0, at - this.modelEntryAt);
       this.observability.observeHistogram({
         name: "opengeni_model_request_pre_dispatch_seconds",
         help: "Seconds of Opengeni work from SDK model-request entry to literal provider dispatch.",
         buckets: MODEL_REQUEST_PRE_DISPATCH_BUCKETS,
         labels: { provider: this.options.provider },
-        value: Math.max(0, (at - this.modelEntryAt) / 1000),
+        value: preDispatchMs / 1000,
       });
       this.modelEntryAt = null;
     }
@@ -2743,6 +2968,8 @@ export class StreamTimingMetrics {
     // belongs to the latest dispatch.
     this.dispatchedAt = at;
     this.providerFirstRecorded.clear();
+    // Later dispatches before the terminal response belong to the same call.
+    this.openCall ??= { dispatchedAt: at, preDispatchMs, firstContentAt: null, firstTextAt: null };
   }
 
   onEvent(type: SessionEventType): void {
@@ -2757,6 +2984,10 @@ export class StreamTimingMetrics {
       return;
     }
     const at = this.now();
+    if (this.openCall) {
+      this.openCall.firstContentAt ??= at;
+      if (deltaClass === "message") this.openCall.firstTextAt ??= at;
+    }
     if (this.ttftArmed) {
       this.observability.observeHistogram({
         name: "opengeni_stream_ttft_seconds",
@@ -2782,6 +3013,26 @@ export class StreamTimingMetrics {
       });
     }
     this.lastDeltaAt.set(deltaClass, at);
+  }
+
+  /**
+   * Consumer side: the dispatched call's terminal response was read. Returns its
+   * timing once, measured from the call's first dispatch, or null when no call
+   * is open (for example a mirrored terminal event, or a provider that reports
+   * no dispatch).
+   */
+  completeResponse(): ModelCallTiming | null {
+    const call = this.openCall;
+    if (!call) return null;
+    this.openCall = null;
+    const since = (at: number | null) =>
+      at === null ? null : Math.round(Math.max(0, at - call.dispatchedAt));
+    return {
+      preDispatchMs: call.preDispatchMs === null ? null : Math.round(call.preDispatchMs),
+      timeToFirstTokenMs: since(call.firstContentAt),
+      timeToFirstTextMs: since(call.firstTextAt),
+      durationMs: since(this.now()),
+    };
   }
 
   private observeProviderFirst(content: ProviderFirstContent, at: number): void {
@@ -2820,6 +3071,50 @@ export function recordBatchFlush(
     buckets: STREAM_IO_BUCKETS,
     value: input.durationSeconds,
   });
+}
+
+const MODEL_STEP_PHASE_BUCKETS = [0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30];
+
+/**
+ * Opengeni work between two model requests of one stream, measured with local
+ * clocks on the side that does it:
+ *
+ *   - `response_settlement` — consumer: a terminal model response arrived to
+ *     the moment the next model request is allowed to proceed (`settle`).
+ *   - `response_usage` — the part of settlement that meters the response
+ *     (lease renewal, usage and credit recording, the usage event).
+ *   - `response_history` — the part that retains media and reconciles history.
+ *   - `settlement_wait` — producer: a model request entered and waited this
+ *     long for the previous response's settlement.
+ *   - `admission` — producer: the per-request admission revalidation (durable
+ *     history checkpoint, subscription source, usage limits).
+ *
+ * Tool execution runs between a response and the next model entry, in parallel
+ * with settlement; only `settlement_wait` and `admission` delay the next
+ * request beyond the tools themselves.
+ */
+export type ModelStepPhase =
+  | "response_settlement"
+  | "response_usage"
+  | "response_history"
+  | "settlement_wait"
+  | "admission";
+
+export function recordModelStepPhase(
+  observability: Observability,
+  input: { provider: string; phase: ModelStepPhase; durationSeconds: number },
+): void {
+  try {
+    observability.observeHistogram({
+      name: "opengeni_model_step_phase_duration_seconds",
+      help: "Seconds of Opengeni work between model requests of one stream, by phase.",
+      buckets: MODEL_STEP_PHASE_BUCKETS,
+      labels: { provider: input.provider, phase: input.phase },
+      value: Math.max(0, input.durationSeconds),
+    });
+  } catch {
+    // Metrics emission must never affect a model call.
+  }
 }
 
 /** Latency of the durable `appendSessionEvents` DB write — the write path. A p99

@@ -27,6 +27,7 @@ type LeaseOptions = Pick<
   | "downloadDirectory"
   | "downloadEvents"
   | "emulation"
+  | "passkeys"
 >;
 
 /** Experimental opt-in path for bounded disposable verification.
@@ -108,6 +109,8 @@ export class EphemeralChromiumContextPool {
             targetLifecycle: "cdp",
             browserContextId: contextId,
             focusEmulation: true,
+            // The pool's private headless Chromium runs on this machine.
+            completeClientHints: true,
             connect: async (endpoint) => {
               assertLease();
               let connection: BrowserCdpConnection;

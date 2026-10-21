@@ -13,7 +13,10 @@ import {
   validateHumanInputAnswers,
   type NativeHumanInputDraft,
 } from "../src/view-model";
-import { DEFAULT_OPENGENI_NATIVE_LABELS } from "../src/presentation";
+import { createOpenGeniText } from "@opengeni/react/messages";
+import { DEFAULT_OPENGENI_NATIVE_LABELS as nativeLabels } from "../src/presentation";
+
+const DEFAULT_OPENGENI_NATIVE_LABELS = nativeLabels(createOpenGeniText());
 
 describe("native session view-models", () => {
   test("presents folded assistant commentary as progress, never as reasoning", () => {
@@ -65,6 +68,20 @@ describe("native session view-models", () => {
     expect(nativeSessionStatusTone("running")).toBe("working");
     expect(nativeSessionStatusTone("requires_action")).toBe("attention");
     expect(nativeSessionStatusTone("failed")).toBe("failed");
+    // The runtime could not start the next turn: not a request of the person.
+    expect(nativeSessionStatusTone("blocked")).toBe("failed");
+    expect(
+      timelineAccessibilityLabel(
+        {
+          kind: "session-status",
+          id: "blocked",
+          status: "requires_action",
+          blocked: true,
+          occurredAt: "2026-09-28T00:00:00.000Z",
+        },
+        DEFAULT_OPENGENI_NATIVE_LABELS,
+      ),
+    ).toBe("Stuck");
   });
 
   test("bounds inspectable tool payloads", () => {
@@ -102,7 +119,9 @@ describe("native session view-models", () => {
     } satisfies ActivityItem;
 
     expect(nativeToolDisplayName(item.name)).toBe("Exec command");
-    expect(inspectableValuePreview(item.output)).toBe("Working tree clean");
+    expect(inspectableValuePreview(item.output, DEFAULT_OPENGENI_NATIVE_LABELS)).toBe(
+      "Working tree clean",
+    );
     expect(nativeActivityPresentation(item, DEFAULT_OPENGENI_NATIVE_LABELS)).toEqual({
       title: "Exec command",
       preview: "Working tree clean",

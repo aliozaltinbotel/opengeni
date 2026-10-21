@@ -20,7 +20,22 @@ const requestJson = mock(
     return nextUsage;
   },
 );
-const context = { client: { requestJson } };
+const context = {
+  client: {
+    requestJson,
+    getWorkspaceInsightsSiteUsage: async () => ({ rows: [] }),
+    getSitePlatformUsage: async () => ({
+      workspaceId: "ws",
+      periodStart: "2026-10-01",
+      billingMode: "usage_only",
+      meters: [],
+      estimatedMicros: 0,
+      chargedMicros: 0,
+      shadowMicros: 0,
+      brake: { engaged: false, engagedAt: null },
+    }),
+  },
+};
 mock.module("@/context", () => ({ useAppContext: () => context }));
 
 beforeAll(() => {
@@ -143,7 +158,7 @@ describe("Insights usage dashboard", () => {
     try {
       const titles = breakdownTitles(view.container);
       expect(titles).toContain("GPT-6.1 Sol");
-      expect(titles).toContain("Claude Opus 5.5");
+      expect(titles).toContain("Opus 5.5");
       expect(titles).toContain("Grok 4.6");
       const text = view.container.textContent ?? "";
       expect(text).not.toContain("codex/gpt-6.1-sol");
@@ -397,7 +412,7 @@ describe("Insights usage dashboard", () => {
       const chips = [...view.container.querySelectorAll('[aria-label="Active filters"] li')].map(
         (chip) => chip.textContent,
       );
-      expect(chips).toEqual(["Model:Claude Opus 5.5 · Claude plan"]);
+      expect(chips).toEqual(["Model:Opus 5.5 · Claude plan"]);
       await act(async () =>
         view.container
           .querySelector<HTMLButtonElement>('[aria-label^="Remove filter Model"]')

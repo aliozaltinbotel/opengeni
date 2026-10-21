@@ -1,7 +1,12 @@
 import type { TurnHeartbeatDetails } from "../../op-journal";
 import type { Settings } from "@opengeni/config";
 import type { CodexUsageHeaderSnapshot } from "@opengeni/codex";
-import type { AppendEventInput, ApplySessionTurnSettlementInput } from "@opengeni/db";
+import type {
+  AppendEventInput,
+  ApplySessionTurnSettlementInput,
+  SubscriptionCoreTurnIdentity,
+  SessionEventMutation,
+} from "@opengeni/db";
 import type {
   CodexCredentialPolicySnapshotV1,
   ModelContextContributionSummary,
@@ -38,7 +43,7 @@ export type ClaimedResult = (
   >,
 ) => RunAgentTurnResult;
 
-export type TurnSettleFn = (input: {
+export type TurnSettleInput = {
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
   turnStatus:
     | "queued"
@@ -54,7 +59,20 @@ export type TurnSettleFn = (input: {
   allowanceGoalPause?: ApplySessionTurnSettlementInput["allowanceGoalPause"];
   consumeRequestedCompactionFailure?: boolean;
   runState?: ApplySessionTurnSettlementInput["runState"];
-}) => Promise<boolean>;
+  notStartedToolCallIds?: readonly string[];
+};
+
+/**
+ * Durable turn settlement. `false` means this attempt lost ownership. With
+ * `requirePendingSteer`, `"pending_steer_withdrawn"` means the precondition
+ * failed under the session lock and nothing was written.
+ */
+export type TurnSettleFn = {
+  (
+    input: TurnSettleInput & { requirePendingSteer: true },
+  ): Promise<boolean | "pending_steer_withdrawn">;
+  (input: TurnSettleInput): Promise<boolean>;
+};
 
 export type TurnControlState = {
   cancellationRequestedAt: number | null;
@@ -79,7 +97,8 @@ export type AttemptIdentityState = {
   modelMetricRoute?: { provider: string; model: string };
   /** Public display labels of the accepted model route, for recovery copy only. */
   modelRoutePresentation?: { model: string; modelLabel: string; providerLabel: string };
-  claudeAuthRecovery?: { credentialId: string; credentialVersion: number } | undefined;
+  /** The stored shared-core lease-busy chain this turn's previous attempt recorded. */
+  subscriptionLeaseBusy?: { startedAt: number; executionGeneration: number } | undefined;
   modelRequestStarted: boolean;
   redispatchesAtDispatch: number;
   // Held for same-turn recovery: an approval-decision rerun must re-enter
@@ -148,7 +167,7 @@ export type RenewalState = {
 export type EventingState = {
   heartbeatDetails: TurnHeartbeatDetails | null;
   heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-  batcher: ReturnType<typeof createRuntimeBatcher> | null;
+  batcher: ReturnType<typeof createRuntimeBatcher<SessionEventMutation>> | null;
   /** Per-occurrence tool-path phase timing (diagnostics only; tool-path-phase-timing.ts). */
   toolPathPhases: ToolPathPhaseTimer | null;
   preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null;
@@ -160,14 +179,13 @@ export type EventingState = {
   settle: TurnSettleFn | null;
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+  /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
+  inputWaitReplyGuard: (() => Promise<string | null>) | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;
   firstModelRequestCheckpointAt: number | null;
   initialModelWireDispatch: InitialModelWireDispatchClock;
-  /** Diagnostic only: the current stream's timing hook for a native transport's
-   *  literal provider dispatch. Never joins, fences or fails the request. */
-  providerDispatchObserver: (() => void) | null;
   companyBrainContextContributions: readonly ModelContextContributionSummary[] | null;
   /** Skill ids in this turn's frozen, model-visible Skill index; telemetry only. */
   modelVisibleSkillIds: ReadonlySet<string> | null;
@@ -181,7 +199,40 @@ export type WorkspaceRefState = {
   rigVersionId: string;
 };
 
+/** A chat turn placed by the shared subscription core, for any provider. */
+export type SubscriptionCoreTurn = {
+  identity: SubscriptionCoreTurnIdentity;
+  connectionId: string;
+  /** Refresh generation of the connection when it was placed. */
+  placedRefreshGeneration: number;
+  /**
+   * Refresh generation of the credential the latest request carried, when
+   * the provider's resolver reports it (SuperGrok and Claude; Codex keeps its
+   * own field).
+   */
+  credentialVersion?: number;
+  personal: boolean;
+  /**
+   * The accepted product model id, for a provider whose refusals cool one
+   * model of the connection (Claude's per-model rate limits).
+   */
+  productModelId?: string;
+  requests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  titleRequests?: import("./subscription-core-requests").CoreSubscriptionRequests;
+  /**
+   * The turn's quota observations from its responses (usage headers), when
+   * the provider reports them per response (Claude). `settled` joins every
+   * write so far and is true when one ended a stored exhaustion.
+   */
+  quota?: { settled(): Promise<boolean> };
+};
+
+/** A Codex chat turn running on the shared subscription core (M3 name). */
+export type CodexSubscriptionCoreTurn = SubscriptionCoreTurn;
+
 export type ProviderTurnState = {
+  /** Survives step progress and is persisted on recovery, never inherited by another turn. */
+  persistentModelTransportHttpOnly?: boolean;
   // The Codex account this turn runs on (pin > workspace active), resolved once
   // a codex-billed turn is confirmed and threaded into the token resolver.
   effectiveCodexCredentialId: string | null;
@@ -196,16 +247,30 @@ export type ProviderTurnState = {
   codexProductModelId?: string | null;
   /** Accepted Codex allocator policy captured with the first durable lease. */
   codexPolicySnapshot: CodexCredentialPolicySnapshotV1 | null;
+  /**
+   * Set only when this Codex turn was placed by the shared subscription core
+   * (the account's Codex cutover is enabled). `effectiveCodexCredentialId` is
+   * then a core connection id: legacy Codex tables must never receive it.
+   */
+  codexSubscriptionCore: CodexSubscriptionCoreTurn | null;
+  /** Epoch ms of the latest Codex model call that produced a response. */
+  lastCodexResponseCompletedAt?: number | null;
   effectiveClaudeCredentialId: string | null;
-  effectiveClaudeCredentialVersion: number | null;
-  claudeUpstreamModelId: string | null;
-  claudeRotationEnabled: boolean;
-  claudeAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
+  /**
+   * Set only when this Claude turn was placed by the shared subscription core
+   * (the organization's Claude cutover committed and is enabled).
+   * `effectiveClaudeCredentialId` is then a core connection id: legacy Claude
+   * tables must never receive it.
+   */
+  claudeSubscriptionCore: SubscriptionCoreTurn | null;
   effectiveXaiCredentialId: string | null;
-  xaiRotationEnabled: boolean;
-  xaiAuthoritySnapshot: XaiProviderAccountAuthoritySnapshotV1 | null;
   xaiRequestContext: XaiSubscriptionRequestContext | null;
-  xaiCredentialQuarantined: boolean;
+  /**
+   * Set when this SuperGrok turn was placed by the shared subscription core,
+   * the only SuperGrok path. `effectiveXaiCredentialId` is then its core
+   * connection id.
+   */
+  xaiSubscriptionCore: SubscriptionCoreTurn | null;
   // The session's Codex credential BEFORE this turn resolved its own — captured
   // before recordSessionActiveCodexCredential overwrites the durable pointer, so
   // a per-call usage log can report whether the serving account CHANGED since the
@@ -219,7 +284,6 @@ export type ProviderTurnState = {
   // scraped. Lives on the turn context so the finalizer sees it; the sink is
   // wired into codexContext.onUsageHeaders by the orchestrator.
   latestCodexUsage: CodexUsageHeaderSnapshot | null;
-  latestClaudeUsage: Map<string, import("./claude-usage-observer").CapturedClaudeUsage>;
   lastCodexRequestOpaqueArtifacts: readonly string[];
   /** F-2: the turn's frozen route declaration (set at claim), for the settlement of a declared budget or fallback. */
   turnRouteDeclaration: TurnRouteDeclarationV1 | null;
@@ -321,12 +385,12 @@ export function createTurnContext(input: {
       settle: null,
       turnStartedPublished: false,
       stream: undefined,
+      inputWaitReplyGuard: null,
       modelRunSettings: input.settings,
       firstModelRequestPreparationStartedAt: null,
       firstModelRequestPreparationRecorded: false,
       firstModelRequestCheckpointAt: null,
       initialModelWireDispatch: new InitialModelWireDispatchClock(),
-      providerDispatchObserver: null,
       companyBrainContextContributions: null,
       modelVisibleSkillIds: null,
     },
@@ -340,19 +404,15 @@ export function createTurnContext(input: {
       effectiveCodexCredentialVersion: null,
       codexCredentialFailoverLimit: 1,
       codexPolicySnapshot: null,
+      codexSubscriptionCore: null,
+      lastCodexResponseCompletedAt: null,
       effectiveClaudeCredentialId: null,
-      effectiveClaudeCredentialVersion: null,
-      claudeUpstreamModelId: null,
-      claudeRotationEnabled: false,
-      claudeAuthoritySnapshot: null,
+      claudeSubscriptionCore: null,
       effectiveXaiCredentialId: null,
-      xaiRotationEnabled: false,
-      xaiAuthoritySnapshot: null,
       xaiRequestContext: null,
-      xaiCredentialQuarantined: false,
+      xaiSubscriptionCore: null,
       priorSessionCodexCredentialId: null,
       latestCodexUsage: null,
-      latestClaudeUsage: new Map(),
       lastCodexRequestOpaqueArtifacts: [],
       turnRouteDeclaration: null,
       turnRouteWatch: null,
@@ -361,3 +421,22 @@ export function createTurnContext(input: {
     },
   };
 }
+
+/** The turn's shared-core placement, whichever provider placed it (at most one does). */
+export function subscriptionCoreTurnOf(
+  providerTurn: SubscriptionCorePlacedFields,
+): SubscriptionCoreTurn | null {
+  return (
+    providerTurn.codexSubscriptionCore ??
+    providerTurn.xaiSubscriptionCore ??
+    providerTurn.claudeSubscriptionCore ??
+    null
+  );
+}
+
+/** The provider fields that can hold a turn's shared-core placement. */
+export type SubscriptionCorePlacedFields = Pick<
+  ProviderTurnState,
+  "codexSubscriptionCore" | "xaiSubscriptionCore"
+> &
+  Partial<Pick<ProviderTurnState, "claudeSubscriptionCore">>;

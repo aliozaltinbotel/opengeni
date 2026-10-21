@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { freePort } from "@opengeni/testing";
 import { chromium, type Browser, type Page } from "playwright";
+import { MARKDOWN_TABLE_MAX_WIDTH_REM } from "../../packages/react/src/components/markdown-table-layout";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const demoRoot = `${repoRoot}/packages/react/demo`;
@@ -287,7 +288,12 @@ describe("timeline scroll ownership browser regression", () => {
           await tablePage.waitForTimeout(100); // ResizeObserver + layout measurement frames.
           const geometry = await tableGeometry(tablePage);
           assertTableContainment(geometry);
-          expect(geometry.tables.Oversized!.width).toBeCloseTo(geometry.right - geometry.left, 0);
+          // An oversized table widens into the panel gutters, but only up to the
+          // readable cap; beyond it its unbreakable cells scroll locally.
+          expect(geometry.tables.Oversized!.width).toBeCloseTo(
+            Math.min(geometry.right - geometry.left, MARKDOWN_TABLE_MAX_WIDTH_REM * 16),
+            0,
+          );
           expect(geometry.tables.Oversized!.scrollWidth).toBeGreaterThan(
             geometry.tables.Oversized!.width + 100,
           );
@@ -1817,7 +1823,7 @@ describe("timeline scroll ownership browser regression", () => {
       expect(await disclosure.getAttribute("aria-expanded")).toBe("true");
       expect(await fallback.count()).toBe(1);
       expect(await fallback.isVisible()).toBe(true);
-      expect(await page.getByText("Wait for input", { exact: false }).count()).toBe(1);
+      expect(await page.getByText("Waited", { exact: true }).count()).toBe(1);
 
       await disclosure.click();
       expect(await disclosure.getAttribute("aria-expanded")).toBe("false");

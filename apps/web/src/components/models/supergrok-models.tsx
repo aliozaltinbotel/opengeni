@@ -20,12 +20,12 @@ import {
   type SuperGrokSubscriptions,
 } from "@/components/supergrok-connection";
 import { SubscriptionConnectScope } from "./subscription-connect-scope";
-import { DetailSection } from "@/components/ui/detail-sheet";
-import { FieldStack } from "@/components/ui/field";
-import { ListRow } from "@/components/ui/list-row";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
-import { UsageMeterGroup, UsageReadout } from "@/components/ui/usage-meter";
+import { DetailSection } from "@opengeni/react/ui/detail-sheet";
+import { FieldStack } from "@opengeni/react/ui/field";
+import { ListRow } from "@opengeni/react/ui/list-row";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
+import { UsageMeterGroup, UsageReadout } from "@opengeni/react/ui/usage-meter";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
 /* ----------------------------------------------------------------------------
@@ -44,6 +44,7 @@ export interface SuperGrokPlaces {
   /** Opens the connect step; with an account, to sign that account in again. */
   openConnect: (reconnectAccountId?: string) => void;
   openAccess: (accountId: string) => void;
+  sharePersonal?: ((accountId: string) => void) | undefined;
   backToList: () => void;
 }
 
@@ -53,9 +54,10 @@ function needsReconnect(account: SuperGrokAccount): boolean {
 
 export function planOf(account: SuperGrokAccount): string {
   const plan = account.plan ?? account.quota?.subscriptionTier;
-  return plan
-    ? `SuperGrok ${plan.charAt(0).toLocaleUpperCase()}${plan.slice(1)}`
-    : "SuperGrok plan";
+  if (!plan) return "SuperGrok plan";
+  // The tier may already carry the product name ("SuperGrok", "SuperGrok Heavy").
+  const tier = plan.replace(/^super\s*grok[\s_-]*/i, "").trim();
+  return tier ? `SuperGrok ${tier.charAt(0).toLocaleUpperCase()}${tier.slice(1)}` : "SuperGrok";
 }
 
 export function percentLeft(account: SuperGrokAccount): number | null {
@@ -63,9 +65,9 @@ export function percentLeft(account: SuperGrokAccount): number | null {
   return typeof used === "number" ? Math.max(0, Math.min(100, Math.round(100 - used))) : null;
 }
 
-function accountStatus(account: SuperGrokAccount): "connected" | "paused" | "needs_reconnect" {
+function accountStatus(account: SuperGrokAccount): "connected" | "disabled" | "needs_reconnect" {
   if (needsReconnect(account)) return "needs_reconnect";
-  if (!account.allocatorEnabled) return "paused";
+  if (!account.allocatorEnabled) return "disabled";
   return "connected";
 }
 
@@ -171,7 +173,7 @@ export function SuperGrokRow({
   account: SuperGrokAccount;
   places: SuperGrokPlaces;
   /** Overrides the tag, for an organization account whose "Available in" is known. */
-  scopeLabel?: string | undefined;
+  scopeLabel?: ReactNode;
   onOpen: () => void;
 }) {
   const primary = grok.accounts.length > 1 && account.id === grok.activeAccountId;
@@ -185,15 +187,13 @@ export function SuperGrokRow({
       primary={primary}
       meta={[scopeLabel ?? scopeOf(grok, account, places), planOf(account)]}
       cells={{
-        usage: needsReconnect(account) ? null : status === "paused" ? (
-          <StatusBadge status="paused" variant="dot" />
+        usage: needsReconnect(account) ? null : status === "disabled" ? (
+          <StatusBadge status="disabled" variant="dot" />
         ) : (
           <UsageReadout
             percent={left}
             window="this period"
-            {...(account.quota?.periodEnd
-              ? { resetsLabel: formatReset(account.quota.periodEnd) }
-              : {})}
+            {...(account.quota?.periodEnd ? { resets: [{ at: account.quota.periodEnd }] } : {})}
           />
         ),
       }}
@@ -296,6 +296,7 @@ export function SuperGrokConnectPage({
   fields,
   blockedReason,
   onAccountConnected,
+  scope: fixedScope,
 }: {
   grok: SuperGrokSubscriptions;
   places: SuperGrokPlaces;
@@ -307,9 +308,12 @@ export function SuperGrokConnectPage({
   blockedReason?: string | null;
   /** Runs once the account is connected, before its page opens, even if this page was left. */
   onAccountConnected?: ((accountId: string | null) => Promise<void> | void) | undefined;
+  /** Connect with this scope and don't offer the choice. */
+  scope?: "workspace" | "user" | undefined;
 }) {
   const organization = Boolean(grok.organizationId);
-  const [scope, setScope] = useState<"workspace" | "user">("workspace");
+  const [chosenScope, setScope] = useState<"workspace" | "user">("workspace");
+  const scope = fixedScope ?? chosenScope;
   const [connected, setConnected] = useState(false);
   const active = useRef(true);
   useEffect(() => {
@@ -353,7 +357,7 @@ export function SuperGrokConnectPage({
     >
       <FieldStack>
         {fields}
-        {!organization ? (
+        {!organization && !fixedScope ? (
           <SubscriptionConnectScope
             value={scope}
             disabled={signingIn}

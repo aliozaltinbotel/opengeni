@@ -58,9 +58,16 @@ Then open the smallest source files that answer the question:
   fabricated sessions. See `docs/remote-mcp-credentials.md` for cutover status.
 - Config/env: `packages/config/src/index.ts`, `.env.example`, `README.md`, `AGENTS.md`.
 - Run lifecycle / goals / memory: `docs/run-lifecycle.md`, `docs/goals.md`, plus `apps/worker/src/workflows/session.ts` and `apps/worker/src/activities/agent-turn/`.
-- Feature subsystems: `docs/variable-sets.md` (scoped organization/workspace/user secrets), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
+- Feature subsystems: `docs/secrets.md` (vaults, `{{secret:…}}` references and delivery), `docs/capabilities.md` (Plugins, Skills, and the MCP catalog), and `docs/automations.md` (authenticated event sources, immutable triggers, logical runs, and ordinary-session dispatch).
 - Feedback: `docs/feedback.md`, `apps/api/src/routes/feedback.ts`, and `packages/db/src/feedback.ts` own authenticated general comments and session/turn ratings, separate from agent context.
 - Database/state: `packages/db/src/schema.ts`, `packages/db/src/index.ts`, `packages/db/drizzle/`.
+- Subscription policy and lifecycle: `packages/subscriptions/` and
+  `packages/db/src/subscription-core/`, with provider bindings registered in
+  `subscription-core-providers.ts`. Session account choice has one transaction
+  in `subscription-core/session-choice.ts`; legacy provider endpoints project
+  their existing receipts, never duplicate its writer. Check the cutover and
+  retirement runbooks before activation; stored legacy rows are not runtime
+  fallbacks. See `docs/subscription-accounts.md`.
 - Event bus/SSE: `packages/events/src/index.ts`, `apps/api/src/http/sse.ts`.
 - Worker/orchestration: `apps/worker/src/workflows/`, `apps/worker/src/activities/`. Physical finalization after execution has a five-minute per-stage containment deadline on normal and cancelled exits; `agent-turn/finalization-monitor.ts` owns the bounded stage heartbeat/metrics. The deadline requests host-owned graceful worker drain so peer turns checkpoint and resume; the standalone host retains a 100-second exit backstop if cleanup cannot quiesce. Embedded hosts supply their termination policy. Cleanup consumes only exact durable terminal process proof, including independent reaper settlement. This is never a limit on agent execution. Closed-attempt writers still gate successors; adopted background commands retain their independent lifetime.
 - Command-output collection follows durable custody independently of model
@@ -68,6 +75,8 @@ Then open the smallest source files that answer the question:
   `apps/worker/src/activities/agent-turn/quiescence.ts`, background replay/release
   in `apps/worker/src/activities/sandbox-lease.ts`, and
   `packages/db/src/session-background-commands.ts` before diagnosing retention.
+- Parallel title cleanup settles completed results and their separate Codex
+  custody before failure recovery; pending/unknown requests remain fenced.
 - Startup telemetry: `apps/worker/src/observability-metrics.ts` separates blocking
   preparation from background MCP work. Phase durations can overlap; use durable
   milestones for elapsed startup latency. Runtime stream initialization is not
@@ -138,7 +147,11 @@ organization-wide Skill registry or Skill inheritance for this boundary. See
 
 Keep these boundaries explicit:
 
-- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; scoped Variable Sets are selected through that boundary but may be organization-, workspace-, or organization-user-owned.
+- Workspace scoping is core. Public operational routes use `/v1/workspaces/:workspaceId/...`; vaults are reached through that boundary but may be organization-, workspace-, user- or task-owned.
+- Session authorization classifies model-account writes neutrally inside core,
+  but existing host ports receive the legacy operation name until explicitly
+  opting in after migrating policy keys. Never retry host denials under aliases;
+  inspect `SessionAuthorizationPort` and `docs/embedding.md` before changing it.
 - External product backends use an **organization API key**. Organization key
   administration uses `/v1/organizations/:organizationId/api-keys`; the key is
   server-held and cannot reach Personal workspaces through organization
@@ -187,7 +200,7 @@ Keep these concepts straight while working:
 - **Admission block**: a non-transient preclaim persistence rejection parks accepted work without failing or consuming it. Inspect `sessions.admission_block`, the worker classifier and `docs/run-lifecycle.md`; authorized Resume or new Send/Steer explicitly rechecks, never grants missing authority. Operational DB failures retain timed recovery.
 - **Control observation**: unavailable scoped reads are not deletion or idle truth; exact still-owned attempts are not successor admission. Versioned observers wait on signals/bounded control timers, retain outbox obligations, and inspect exact Temporal identity without replacing physical-writer proof. See `docs/run-lifecycle.md` before changing these paths.
 - **Session memory (three stores, three jobs)**: `session_history_items` is exact accepted conversation truth fed to the model (default read path); `agent_run_states` is the serialized RunState blob, used only to resume a turn paused for a human approval; `session_events` is the exact append-only human-audit timeline for accepted payloads and is never fed back to the model. Protocol/size projections are deterministic and must not classify or rewrite content. Sandbox recovery state lives separately in `sandbox_session_envelopes`. See `docs/run-lifecycle.md`.
-- **Variable Set**: named organization-, workspace-, or organization-user-owned collection of authenticated-encrypted secret env vars, attached to a session/scheduled-task and injected into the sandbox at run time. Attachment and runtime use require independent `variable-sets:attach` and `variable-sets:use` authority; exact plaintext access is a separate explicit permissioned operation with metadata-only audit. Never expose values through unrelated list/detail projections. See `docs/variable-sets.md`.
+- **Vault**: organization-, workspace-, user- (Only me) or task-owned collection of items with authenticated-encrypted, versioned fields (or a linked 1Password/host provider vault). Agents use values only through `{{secret:…}}` references resolved at the execution boundary under the acting human's reach and the session's vault policy; nothing is injected into sandbox env. Plaintext reveal is a separate `secrets:read` operation with metadata-only audit. See `docs/secrets.md`.
 - **Event log**: append-only session timeline with per-session sequence numbers. It supports replay, SSE reconnect, UI timeline projection, and auditing.
 - **SSE/NATS split**: Postgres is replay/source of truth. NATS is live fanout. If live events are missed, API should backfill from Postgres by sequence.
 - **Temporal**: orchestration, signals, timers, schedules, and worker dispatch. Token streams/tool output should not be pushed through workflow history unless the code intentionally changes that design.
@@ -355,6 +368,23 @@ For sandbox configuration work, read `references/sandbox-configuration.md`. Use 
 
 ## Tools And MCP Discovery
 
+For known current-human tool calls, inspect `apps/api/src/workspace-tool-target.ts`
+and the targeted contracts in `packages/contracts/src/tool-catalog.ts`. Resolve
+only the selected authorized registry/account route before constructing providers;
+do not add full-workspace discovery as a fallback. Definition pins are full-entry
+preconditions, never authority. Version-2 approvals bind the existing executable
+effect digest and Site tuple, separately from private authority, and retain the
+v1 operation tombstone namespace.
+For raw/local targets lacking adapter private authority, use the runtime's
+existing executable-authority digest and exact selected configuration, never
+the public-catalog fallback; preserve v1/frozen semantics. Targeted requests use one
+live fence (`apps/api/src/workspace-tool-target-fence.ts`): each physical callback
+evaluates caller, Site, selected route (narrow reads) and live action policy once,
+after its last credential step; never share or cache decisions, never lock or
+write the key inside it, and start no further part after its deadline; do not change
+frozen worker/Codemode policy semantics. SDK/Site adoption and explicit legacy mode are documented in
+`packages/sdk/README.md`; local previews retain frozen Codemode authority.
+
 For unified Skills work, start with `docs/design/skills-system.md`. Server-side
 file primitives and packaged guidance live in `packages/runtime/src/skill-files.ts`,
 `skill-library.ts`, and `runtime-skills.ts`; worker gateway adapters live under
@@ -374,10 +404,21 @@ activation guards belong to the maintenance cutover, not a permanent fallback.
 
 For tools and MCP work, distinguish:
 
+Required first-party MCP setup outages use paced same-turn recovery without a
+retry cutoff; only runtime-verified connect/list transport failures qualify.
+Inspect `provider-recovery-policy.ts`, the DB provider-recovery clock, and
+`docs/run-lifecycle.md` before changing that boundary. External tools, protocol
+rejections, and uncertain tool mutations must not inherit setup-wait policy.
+
 - MCP tool providers selected by session/turn/scheduled-task config.
 - First-party MCP servers exposed by the API.
 - Built-in SDK sandbox capabilities for shell/files, and Opengeni's separate Skill catalog and reader.
 - Tools available inside the sandbox image, such as CLIs.
+
+Conversation target context is non-authoritative: inspect
+`packages/db/src/session-target.ts` and `docs/session-monitoring-mcp.md` for
+`session_target_get/set` and exact Send/Steer receipt tracking. Selection must
+never transfer voice, dispatch work, or replace live session authorization.
 
 Configured agents receive capability-gated prompt modules under
 `packages/runtime/src/agent-instructions/`; media guidance belongs to the media
@@ -397,8 +438,19 @@ Find current MCP behavior in config parsing, tool validation, runtime `prepareTo
 
 ## Scheduling Discovery
 
+Scheduled bot posting uses ordinary selected capabilities and instructions, not a
+separate schedule-only approval field. Slack installation availability, incoming
+channel routing and workspace automation settings have distinct owners; see
+`docs/slack-bot.md` before changing them. Personal Add and Reconnect preserve
+separate Slack team/user identities.
+
+Workspace default machines apply to fresh sessions and schedules that explicitly
+follow the workspace default. Accepted runs and existing chats retain their
+placement; missing or unavailable selected machines never silently fall back.
+See `docs/connected-machines.md` for resolution and replay boundaries.
+
 The stock Schedules chat shortcut sends the request and time zone. Its setup
-procedure lives in `packages/runtime/src/bundled_schedule_skills/opengeni-schedules/SKILL.md`,
+procedure lives in `packages/runtime/src/bundled_schedule_skills/schedules/SKILL.md`,
 selected through the worker's configured bundled-Skill rules.
 
 For queueing or scheduling work:

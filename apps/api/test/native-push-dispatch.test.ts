@@ -44,6 +44,19 @@ describe("native push presentation", () => {
     expect(nativePushCategory(payload)).toBe(undefined);
   });
 
+  test("a secret question push is title-only with no inline answer action (AC-5)", () => {
+    const secret = {
+      ...payload,
+      eventType: "session.humanInput.requested",
+      secretQuestion: true,
+    };
+    expect(nativePushCategory(secret)).toBe(undefined);
+    const alert = nativePushAlert(secret);
+    expect(alert.title).toBe("The agent needs a secret");
+    expect(alert.body).not.toContain("Which branch");
+    expect(alert.body).toContain("Open Opengeni");
+  });
+
   test("falls back to a title per rule and keeps the agent's text", () => {
     expect(nativePushAlert(payload)).toEqual({
       title: "The agent needs you",
@@ -79,12 +92,28 @@ describe("native push presentation", () => {
     ).toEqual({ title: "Release is out" });
   });
 
-  test("only questions, approvals and time-sensitive notifications break through Focus", () => {
-    expect(nativePushInterruptionLevel(payload)).toBe("time-sensitive");
+  test("time-sensitive notifications, questions and approvals break through Focus", () => {
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "agent" })).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "normal" })).toBe(
+      "active",
+    );
     expect(
       nativePushInterruptionLevel({ ...payload, rule: "agent", urgency: "time_sensitive" }),
     ).toBe("time-sensitive");
+    // A question or approval is ordinary unless its person asked for
+    // time-sensitive ones, which puts the urgency on the delivery.
+    expect(nativePushInterruptionLevel(payload)).toBe("active");
+    expect(nativePushInterruptionLevel({ ...payload, urgency: "time_sensitive" })).toBe(
+      "time-sensitive",
+    );
+    // Replies and failures never are.
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "reply_ready", urgency: "time_sensitive" }),
+    ).toBe("active");
+    expect(
+      nativePushInterruptionLevel({ ...payload, rule: "failed", urgency: "time_sensitive" }),
+    ).toBe("active");
     expect(nativePushInterruptionLevel({ ...payload, rule: "reply_ready" })).toBe("active");
   });
 
@@ -165,6 +194,28 @@ describe("native app sign-in helpers", () => {
     expect(nativeAppRedirectAllowed("opengeni://auth/callback?x=1", ["opengeni"])).toBe(false);
     expect(nativeAppRedirectAllowed("evil://auth/callback", ["opengeni"])).toBe(false);
     expect(nativeAppRedirectAllowed("https://auth/callback", ["opengeni"])).toBe(false);
+  });
+
+  test("the Office add-in's callback is allowed only on this deployment's web origins", () => {
+    const origins = ["https://app.example.com"];
+    expect(
+      nativeAppRedirectAllowed(
+        "https://app.example.com/office/auth-callback.html",
+        ["opengeni"],
+        origins,
+      ),
+    ).toBe(true);
+    for (const other of [
+      "https://evil.example.com/office/auth-callback.html",
+      "https://app.example.com/office/auth-callback.html?x=1",
+      "https://app.example.com/office/other.html",
+      "http://app.example.com/office/auth-callback.html",
+    ]) {
+      expect(nativeAppRedirectAllowed(other, ["opengeni"], origins)).toBe(false);
+    }
+    expect(
+      nativeAppRedirectAllowed("https://app.example.com/office/auth-callback.html", ["opengeni"]),
+    ).toBe(false);
   });
 
   test("PKCE S256 matches RFC 7636 appendix B", () => {

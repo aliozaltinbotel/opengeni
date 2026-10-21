@@ -1,11 +1,12 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
+import { realtimeVoiceOptions } from "../realtime-websocket";
 import {
   createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
   realtimeVoiceOfferProblem,
 } from "@opengeni/core";
 import { withDirectModelProviders, workspaceModelCompactionPolicy } from "@opengeni/config";
-import { listConnectionsMetadata } from "@opengeni/db";
+import { getWorkspaceSettings, listConnectionsMetadata } from "@opengeni/db";
 import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
@@ -15,7 +16,10 @@ import {
 import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
-import { WorkspacePauseTimerRequest } from "@opengeni/contracts";
+import {
+  resolveWorkspaceRealtimeVoiceSettings,
+  WorkspacePauseTimerRequest,
+} from "@opengeni/contracts";
 import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
@@ -32,6 +36,7 @@ import {
   DeleteWorkspaceGatewayCustomModelRequest,
   DeleteWorkspaceOpenRouterCustomModelRequest,
   UpdateWorkspaceModelPolicyRequest,
+  WorkspaceModelPolicyResponse,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -54,7 +59,7 @@ import {
   type WorkspaceMemberCandidate,
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
-import { loadWorkspaceCodexModelAvailability } from "@opengeni/core";
+import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   getBillingBalance,
@@ -64,7 +69,12 @@ import {
   findWorkspaceByExternalIdentity,
   getManagedUserProfilesByIds,
   getWorkspace,
+  getSandbox,
+  getEnrollment,
   getWorkspaceModelPolicy,
+  getWorkspaceModelPolicyLayers,
+  getOrganizationModelDefaults,
+  deleteWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listWorkspaceMembers,
   listWorkspaceMemberManagementCandidates,
@@ -89,10 +99,11 @@ import {
   updateWorkspace,
   upsertWorkspaceMemberAsWorkspaceManager,
   upsertWorkspaceModelPolicy,
-  workspaceCodexSubscriptionActive,
+  readCodexCutoverDisposition,
+  listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
-  workspaceXaiSubscriptionActive,
   workspaceVercelAiGatewayConnectionActive,
+  getWorkspaceProviderApiKeyConnectionMetadata,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -127,7 +138,10 @@ import {
   requireFreshAccessGrant,
   resolveWorkspaceCatalogSettings,
   creditsDefaultSessionModel,
+  loadCoreRoutedXaiCatalogReadiness,
   loadWorkspaceClaudeSubscriptionReadiness,
+  loadCoreRoutedClaudeCatalogReadiness,
+  withCoreRoutedXaiRestriction,
   resolveDefaultSessionModelForSelections,
   resolveWorkspaceModelSelection,
 } from "@opengeni/core";
@@ -146,6 +160,7 @@ import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
 import {
   AI_GATEWAY_REALTIME_MODELS,
+  ELEVENLABS_REALTIME_MODELS,
   CODEX_REALTIME_MODEL_ID,
   SUPERGROK_REALTIME_MODEL_ID,
   canonicalizeConfiguredModelId,
@@ -165,6 +180,7 @@ import {
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function canonicalWorkspacePolicyModelIds(
   settings: Settings,
@@ -275,6 +291,27 @@ export function externalWorkspaceAccountId(
       omittedIssueCount: 0,
     },
   });
+}
+
+/**
+ * Codex Live readiness: the legacy active subscription without a cutover
+ * row; on the shared core, any shared connection that could serve a
+ * realtime operation here; never ready during maintenance.
+ */
+async function workspaceCodexRealtimeReady(
+  routeDeps: ApiRouteDeps,
+  grant: { accountId: string; subjectId: string },
+  workspaceId: string,
+): Promise<boolean> {
+  const disposition = await readCodexCutoverDisposition(routeDeps.db, grant.accountId, workspaceId);
+  if (disposition === "maintenance" || !routeDeps.settings.codexSubscriptionEnabled) return false;
+  const candidates = await listSubscriptionCoreCodexOperationCandidates(routeDeps.db, {
+    kind: "workspace",
+    accountId: grant.accountId,
+    workspaceId,
+    subjectId: grant.subjectId,
+  });
+  return candidates.length > 0;
 }
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -520,7 +557,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   // deep-merges (top-level) a settings patch, preserving unknown/future keys.
   app.patch("/v1/workspaces/:workspaceId/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, {
@@ -532,6 +569,33 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(422, {
         message:
           "defaultSandboxImage must be one of the images in this deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST",
+      });
+    }
+    const executionTarget = parsed.data.defaultExecutionTarget;
+    if (executionTarget?.kind === "machine") {
+      const machine = await getSandbox(deps.db, grant, executionTarget.targetSandboxId);
+      const enrollment = machine?.enrollmentId
+        ? await getEnrollment(deps.db, grant, machine.enrollmentId)
+        : null;
+      if (
+        !deps.settings.sandboxOwnershipEnabled ||
+        !deps.settings.sandboxSelfhostedEnabled ||
+        !machine ||
+        machine.kind !== "selfhosted" ||
+        machine.scope === "user" ||
+        !enrollment ||
+        enrollment.status !== "active"
+      ) {
+        throw new HTTPException(422, {
+          message: "Choose an available shared Connected Machine for the workspace default.",
+        });
+      }
+    } else if (
+      executionTarget?.kind === "managed" &&
+      ["selfhosted", "none"].includes(deps.settings.sandboxBackend)
+    ) {
+      throw new HTTPException(422, {
+        message: "This deployment does not provide a managed sandbox.",
       });
     }
     // Request-scoped: bound the exclusive control-prefix wait so a busy
@@ -575,28 +639,62 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           kind !== "claude_subscription" || resolvedCatalog.settings.claudeSubscriptionEnabled,
       ),
     ];
+    // Claude by its provider route: the shared core's projection (readiness
+    // and both Claude model restrictions) once it has cut over, else legacy.
+    const claudeCore = loadCoreRoutedClaudeCatalogReadiness(deps.db, resolvedCatalog.settings, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+    });
     const [
-      connectionModelRestrictions,
+      currentConnectionModelRestrictions,
       policy,
-      codexSubscriptionActive,
-      codexModelAvailability,
-      xaiSubscriptionActive,
+      codexCatalog,
+      xaiCatalog,
       claudePool,
       workspaceConnections,
       workspaceCustomModels,
       organizationProviders,
       workspace,
     ] = await Promise.all([
-      getWorkspaceConnectionModelRestrictions(deps.db, workspaceId, grant.subjectId),
+      claudeCore.then((core) =>
+        getWorkspaceConnectionModelRestrictions(
+          deps.db,
+          workspaceId,
+          grant.subjectId,
+          undefined,
+          core?.restrictions,
+        ),
+      ),
       getWorkspaceModelPolicy(deps.db, workspaceId),
-      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
-      loadWorkspaceCodexModelAvailability(deps.db, resolvedCatalog.settings, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
-      loadWorkspaceClaudeSubscriptionReadiness(deps.db, resolvedCatalog.settings, {
+      // By the organization's Codex cutover row: legacy without one, the
+      // shared core for the caller when enabled, not ready while disabled.
+      loadWorkspaceCodexCatalogReadiness(
+        deps.db,
+        resolvedCatalog.settings,
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        { activeSettings: deps.settings },
+      ),
+      // SuperGrok runs only on the shared core: its projection, or not
+      // ready on any other route.
+      loadCoreRoutedXaiCatalogReadiness(deps.db, deps.settings, {
         accountId: grant.accountId,
         workspaceId,
         subjectId: grant.subjectId,
-      }),
+      }).then(async (core) => ({
+        core,
+        active: core?.ready ?? false,
+      })),
+      // The route read above decides for both Claude readers (read once).
+      claudeCore.then(
+        async (core) =>
+          await loadWorkspaceClaudeSubscriptionReadiness(
+            deps.db,
+            resolvedCatalog.settings,
+            { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+            core,
+          ),
+      ),
       listConnectionsMetadata(deps.db, workspaceId, null),
       listWorkspaceProviderCustomModelsByKind(deps.db, {
         accountId: grant.accountId,
@@ -610,6 +708,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       }),
       getWorkspace(deps.db, workspaceId),
     ]);
+    const xaiSubscriptionActive = xaiCatalog.active;
+    const connectionModelRestrictions = xaiCatalog.core
+      ? withCoreRoutedXaiRestriction(currentConnectionModelRestrictions, xaiCatalog.core)
+      : currentConnectionModelRestrictions;
+    const organizationDefaults = await getOrganizationModelDefaults(deps.db, grant.accountId);
     const claudeConnections: ClaudeConnectionCatalog = {};
     const workspaceClaudeConnections: ClaudeConnectionCatalog = {};
     const workspaceConnectionActive = (kind: WorkspaceCustomModelProviderKind) =>
@@ -640,8 +743,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       connectionModelRestrictions,
       settings: workspaceCatalogSettings,
       policy,
-      observations: codexModelAvailability,
-      codexSubscriptionActive,
+      observations: codexCatalog.observations,
+      codexSubscriptionActive: codexCatalog.active,
       xaiSubscriptionActive,
       workspaceGatewayConnectionActive: workspaceConnectionActive("vercel_gateway"),
       workspaceGatewayCustomModels: workspaceCustomModels.vercel_gateway,
@@ -668,6 +771,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceSettings,
       selections,
+      organizationDefaults,
     });
     const catalog = projectWorkspaceModelCatalog(selections, {
       defaultSelection,
@@ -675,6 +779,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         settings: workspaceCatalogSettings,
         selections,
         workspaceSettings,
+        organizationDefaults,
       }),
     });
     for (const model of catalog.models) {
@@ -689,6 +794,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           autoCompactTokenLimit: model.executionLimits?.autoCompactTokenLimit ?? undefined,
         },
         workspaceSettings,
+        organizationDefaults,
       );
     }
     if (creditBalance) {
@@ -1127,10 +1233,24 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/realtime-model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const [codexConnected, supergrokConnected, workspaceGatewayConnected] = await Promise.all([
-      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
-      workspaceXaiSubscriptionActive(deps.db, deps.settings, workspaceId, grant.subjectId),
+    const [
+      codexConnected,
+      supergrokConnected,
+      workspaceGatewayConnected,
+      elevenLabsConnected,
+      workspaceSettings,
+    ] = await Promise.all([
+      workspaceCodexRealtimeReady(deps, grant, workspaceId),
+      workspaceXaiOperationAvailable(deps.db, deps.settings, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+      }),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
+      getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, "elevenlabs").then(
+        (connection) => connection !== null,
+      ),
+      getWorkspaceSettings(deps.db, workspaceId),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1165,28 +1285,38 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ? model.id === AZURE_LIVE_MODEL_ID
           : true,
       );
-    const creditStanding =
+    const realtimeVoiceBilling = createRealtimeVoiceBilling({
+      db: deps.db,
+      settings: deps.settings,
+    });
+    const [creditStanding, creditsDisabled] =
       managedCandidates.length > 0
-        ? await createRealtimeVoiceBilling({
-            db: deps.db,
-            settings: deps.settings,
-          }).creditStanding(grant.accountId)
-        : "none";
+        ? await Promise.all([
+            realtimeVoiceBilling.creditStanding(grant.accountId),
+            realtimeVoiceBilling.creditsDisabled(workspaceId),
+          ])
+        : (["none", false] as const);
     const hasCredits = creditStanding === "spendable";
     const models = [
       ...managedCandidates.map((model, index) => ({
         ...model,
         provider: "OpenGeni" as const,
-        ...(hasCredits
-          ? { available: true, unavailableReason: null, unavailableCode: null }
-          : {
+        ...(creditsDisabled
+          ? {
               available: false,
-              unavailableReason:
-                creditStanding === "promotional_only"
-                  ? "Promotional credits don't cover live voice. Add credits to use it."
-                  : "Add Opengeni credits to use live voice",
-              unavailableCode: "insufficient_credits",
-            }),
+              unavailableReason: "Credits are turned off in this workspace",
+              unavailableCode: "credits_disabled",
+            }
+          : hasCredits
+            ? { available: true, unavailableReason: null, unavailableCode: null }
+            : {
+                available: false,
+                unavailableReason:
+                  creditStanding === "promotional_only"
+                    ? "Promotional credits don't cover live voice. Add credits to use it."
+                    : "Add credits to use live voice",
+                unavailableCode: "insufficient_credits",
+              }),
         recommended: index === 0,
       })),
       {
@@ -1205,6 +1335,14 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...availability(supergrokConnected, "Connect SuperGrok to use this voice model"),
         recommended: false,
       },
+      ...Object.values(ELEVENLABS_REALTIME_MODELS).map((model) => ({
+        id: model.modelId,
+        label: model.label,
+        provider: "Your ElevenLabs" as const,
+        description: model.description,
+        ...availability(elevenLabsConnected, "Connect a workspace ElevenLabs key"),
+        recommended: false,
+      })),
       ...gatewayModels.map((model) => ({
         id: model.workspaceModelId,
         label: model.label,
@@ -1214,22 +1352,39 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         recommended: false,
       })),
     ];
+    // Each model lists the voice settings its provider offers, with the
+    // workspace's saved values for it.
+    const withVoiceSettings = models.map((model) => {
+      const saved = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model.id);
+      return {
+        ...model,
+        ...realtimeVoiceOptions(model.id),
+        ...(saved ? { workspaceVoiceSettings: saved } : {}),
+      };
+    });
     c.header("cache-control", "private, no-store");
-    return c.json(WorkspaceRealtimeModelCatalogResponse.parse({ models }));
+    return c.json(WorkspaceRealtimeModelCatalogResponse.parse({ models: withVoiceSettings }));
   });
 
+  // The policy the workspace runs with and where it comes from: its own
+  // saved policy, else its organization's default, else no restriction.
   app.get("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
-    const policy = await getWorkspaceModelPolicy(deps.db, workspaceId);
-    return c.json({
-      allowedProviders: policy?.allowedProviders ?? null,
-      allowedModels: policy?.allowedModels ?? null,
-    });
+    return c.json(await workspaceModelPolicyResponse(deps, workspaceId));
+  });
+
+  // Remove the workspace's own policy so it follows the organization default.
+  app.delete("/v1/workspaces/:workspaceId/model-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
+    await deleteWorkspaceModelPolicy(deps.db, { accountId: grant.accountId, workspaceId });
+    return c.json(await workspaceModelPolicyResponse(deps, workspaceId));
   });
 
   // Full replace (PUT, not merge): null/omitted = unrestricted for that
-  // dimension; an empty array is a valid explicit total block. Settings access
+  // dimension; an empty array is a valid explicit total block. The credit
+  // switch is a workspace setting and never changes here. Settings access
   // admits workspace administrators and the verified Personal owner, without
   // widening membership or API-key delegation authority.
   app.put("/v1/workspaces/:workspaceId/model-policy", async (c) => {
@@ -1240,13 +1395,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
     });
-    const policy = await upsertWorkspaceModelPolicy(deps.db, {
+    await upsertWorkspaceModelPolicy(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       allowedProviders: payload.allowedProviders ?? null,
       allowedModels: canonicalWorkspacePolicyModelIds(catalog.settings, payload.allowedModels),
     });
-    return c.json(policy);
+    return c.json(await workspaceModelPolicyResponse(deps, workspaceId));
   });
 
   app.post("/v1/workspaces/:workspaceId/pause-timer", async (c) => {
@@ -1352,10 +1507,15 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "rigs:manage");
+    // Members may create and edit Sandbox Environments; which one every new
+    // session starts in is a workspace setting. A person-less API key keeps
+    // the rigs:manage it was explicitly given by an administrator.
+    if (grant.principalKind !== "api_key")
+      await requireWorkspaceSettingsGrant(c, deps, workspaceId);
     const payload = await parseRequestJson(c, SetWorkspaceDefaultRigRequest);
     if (payload.rigId) {
-      const rig = await getRig(deps.db, workspaceId, payload.rigId);
+      const rig = await getRig(deps.db, grant, payload.rigId);
       if (!rig) {
         throw new HTTPException(422, {
           message: `unknown rigId: ${payload.rigId}`,
@@ -1540,6 +1700,21 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         : {}),
     });
     return c.body(null, 204);
+  });
+}
+
+async function workspaceModelPolicyResponse(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+): Promise<WorkspaceModelPolicyResponse> {
+  const layers = await getWorkspaceModelPolicyLayers(deps.db, workspaceId);
+  const effective = layers.workspace ?? layers.organization;
+  return WorkspaceModelPolicyResponse.parse({
+    allowedProviders: effective?.allowedProviders ?? null,
+    allowedModels: effective?.allowedModels ?? null,
+    source: layers.workspace ? "workspace" : layers.organization ? "organization" : "none",
+    organization: layers.organization,
+    allowCreditModels: layers.allowCreditModels,
   });
 }
 

@@ -1,11 +1,22 @@
+import { t } from "@/lib/console-text";
 import type { MachineView } from "@opengeni/react/machines";
+import { DEFAULT_SESSION_USAGE_LIMIT_LABELS } from "@opengeni/react/usage";
 import type { NewSessionSelectionHistory, Rig } from "@opengeni/sdk";
-import { BoxIcon, LaptopIcon, LockIcon, ServerIcon, UsersIcon } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import {
+  BoxIcon,
+  GaugeIcon,
+  InfinityIcon,
+  LaptopIcon,
+  LockIcon,
+  MessageSquareIcon,
+  ServerIcon,
+  UsersIcon,
+} from "lucide-react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 
-import { Button } from "@/components/ui/button";
-import { ComposerMenuHeader } from "@/components/ui/composer-menu";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import { Button } from "@opengeni/react/ui/button";
+import { ComposerMenuHeader } from "@opengeni/react/ui/composer-menu";
+import { DropdownMenuItem } from "@opengeni/react/ui/dropdown-menu";
 import {
   RadioGroup,
   RadioRow,
@@ -13,19 +24,24 @@ import {
   type MenuBodyPresentation,
 } from "./composer-menu-radio";
 export type { MenuBodyPresentation } from "./composer-menu-radio";
-import { Input } from "@/components/ui/input";
-import { Notice } from "@/components/ui/notice";
+import { HelpTip } from "@opengeni/react/ui/inline-help";
+import { Input } from "@opengeni/react/ui/input";
+import { Notice } from "@opengeni/react/ui/notice";
 import {
   MENU_LABEL_CLASS,
   MENU_NOTE_CLASS,
   MENU_SEPARATOR_CLASS,
-} from "@/components/ui/menu-styles";
+} from "@opengeni/react/ui/menu-styles";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
 import {
   rememberedMachineFolder,
   workspaceDefaultRigOptionLabel,
   type SessionDraft,
 } from "@/lib/session-create";
+import {
+  parseSessionUsageLimitDraft,
+  type SessionUsageLimitDraft,
+} from "@/lib/session-usage-limit";
 import { cn } from "@/lib/utils";
 
 /*
@@ -54,6 +70,12 @@ export type RunsOnChoices = {
   workspaceDefaultRigId: string | null;
   /** The deployment runs sessions only on connected machines. */
   selfhostedPrimary: boolean;
+  /**
+   * The deployment has no managed sandbox backend. A chat that does not run on
+   * a connected machine has no computer at all, so the choice reads as chat
+   * only and Sandbox Environments do not apply.
+   */
+  noManagedSandbox?: boolean;
   fleetLoadFailed: boolean;
   selectedChannelId: string | null;
   selectionHistory: NewSessionSelectionHistory;
@@ -61,13 +83,17 @@ export type RunsOnChoices = {
 
 /** Whether "Runs on" has anything to choose; otherwise the + menu omits it. */
 export function hasRunsOnChoices(
-  choices: Pick<RunsOnChoices, "machines" | "rigs" | "selfhostedPrimary" | "fleetLoadFailed">,
+  choices: Pick<
+    RunsOnChoices,
+    "machines" | "rigs" | "selfhostedPrimary" | "noManagedSandbox" | "fleetLoadFailed" | "draft"
+  >,
 ): boolean {
   return (
+    choices.draft.compute.kind === "machine" ||
     choices.selfhostedPrimary ||
     choices.fleetLoadFailed ||
     choices.machines.length > 0 ||
-    choices.rigs.length > 0
+    (!choices.noManagedSandbox && choices.rigs.length > 0)
   );
 }
 
@@ -78,9 +104,10 @@ export function runsOnSummary(choices: RunsOnChoices): string {
     const sandboxId = draft.compute.sandboxId;
     return (
       choices.machines.find((machine) => machine.sandboxId === sandboxId)?.name ??
-      "Choose a machine"
+      (sandboxId ? "Machine unavailable" : "Choose a machine")
     );
   }
+  if (choices.noManagedSandbox) return NO_COMPUTER_LABEL;
   if (draft.rigId) {
     return choices.rigs.find((rig) => rig.id === draft.rigId)?.name ?? "Managed sandbox";
   }
@@ -92,7 +119,12 @@ export function runsOnSummary(choices: RunsOnChoices): string {
  * Why "Runs on" keeps Send disabled, if it does. The choice lives behind "+",
  * so the page says what is missing and where to fix it.
  */
-export type RunsOnAttention = "fleet-load-failed" | "connect-machine" | "pick-machine" | null;
+export type RunsOnAttention =
+  | "fleet-load-failed"
+  | "connect-machine"
+  | "pick-machine"
+  | "machine-unavailable"
+  | null;
 
 export function runsOnAttention(
   choices: Pick<RunsOnChoices, "draft" | "machines" | "fleetLoadFailed"> & {
@@ -103,7 +135,13 @@ export function runsOnAttention(
   if (choices.fleetLoadFailed) return "fleet-load-failed";
   if (choices.fleetLoading) return null;
   const compute = choices.draft.compute;
-  if (compute.kind !== "machine" || compute.sandboxId !== null) return null;
+  if (compute.kind !== "machine") return null;
+  if (compute.sandboxId !== null)
+    return choices.machines.some(
+      (item) => item.sandboxId === compute.sandboxId && isMachineComputeSelectable(item.state),
+    )
+      ? null
+      : "machine-unavailable";
   return choices.machines.length === 0 ? "connect-machine" : "pick-machine";
 }
 
@@ -138,6 +176,12 @@ export function RunsOnNotice(props: {
       </Notice>
     );
   }
+  if (props.attention === "machine-unavailable")
+    return (
+      <Notice tone="waiting" live="polite">
+        Machine unavailable. Reconnect it or choose another under + &gt; Runs on.
+      </Notice>
+    );
   if (props.attention === "connect-machine") {
     return (
       <Notice tone="waiting" live="polite" action={props.connectAction}>
@@ -156,6 +200,7 @@ export function RunsOnNotice(props: {
 }
 
 const SANDBOX_VALUE = "sandbox";
+const NO_COMPUTER_LABEL = "No computer";
 const machineValue = (sandboxId: string) => `machine:${sandboxId}`;
 
 /**
@@ -194,7 +239,11 @@ export function RunsOnMenuBody(
   }, [compute]);
   const personalRigs = props.rigs.filter((rig) => rig.scope === "user");
   const workspaceRigs = props.rigs.filter((rig) => rig.scope !== "user");
-  const showWhere = props.selfhostedPrimary || props.machines.length > 0 || props.fleetLoadFailed;
+  const showWhere =
+    compute.kind === "machine" ||
+    props.selfhostedPrimary ||
+    props.machines.length > 0 ||
+    props.fleetLoadFailed;
   const whereValue =
     compute.kind === "sandbox"
       ? props.selfhostedPrimary
@@ -206,7 +255,10 @@ export function RunsOnMenuBody(
 
   const selectSandbox = () => {
     if (compute.kind === "sandbox") return;
-    props.onComputeChange({ ...draft, compute: { kind: "sandbox", backend: "" } });
+    props.onComputeChange({
+      ...draft,
+      compute: { kind: "sandbox", backend: "" },
+    });
   };
   const selectMachine = (machine: MachineView) => {
     if (compute.kind === "machine" && compute.sandboxId === machine.sandboxId) return;
@@ -265,9 +317,9 @@ export function RunsOnMenuBody(
               <RadioRow
                 value={SANDBOX_VALUE}
                 disabled={props.disabled}
-                icon={<BoxIcon />}
-                label="Managed sandbox"
-                meta="Set up for you"
+                icon={props.noManagedSandbox ? <MessageSquareIcon /> : <BoxIcon />}
+                label={props.noManagedSandbox ? NO_COMPUTER_LABEL : "Managed sandbox"}
+                meta={props.noManagedSandbox ? "Chat only" : "Set up for you"}
                 onSelect={selectSandbox}
               />
             )}
@@ -293,7 +345,7 @@ export function RunsOnMenuBody(
           </RadioGroup>
         ) : null}
 
-        {compute.kind === "sandbox" && props.rigs.length > 0 ? (
+        {compute.kind === "sandbox" && !props.noManagedSandbox && props.rigs.length > 0 ? (
           <RadioGroup
             presentation={presentation}
             label="Sandbox environment"
@@ -363,7 +415,10 @@ export function RunsOnMenuBody(
                   onChange={(event) =>
                     props.onComputeChange({
                       ...draft,
-                      compute: { ...compute, folder: { kind: "path", path: event.target.value } },
+                      compute: {
+                        ...compute,
+                        folder: { kind: "path", path: event.target.value },
+                      },
                     })
                   }
                   onKeyDown={(event) => {
@@ -439,6 +494,134 @@ export function VisibilityMenuBody(props: {
             onSelect={() => props.onChange("private")}
           />
         </RadioGroup>
+      </div>
+    </>
+  );
+}
+
+/**
+ * The new chat's usage limit: none (the default), or pause at a dollar amount
+ * of API-equivalent model usage. Local to this composer, never remembered
+ * across chats; sent on create only when the server offers limits.
+ *
+ * It holds a text field, so "+" always opens it as a dialog (a menu may only
+ * contain menu items): a radio group and a labelled input with ordinary Tab
+ * order, Escape to close and focus back on "+".
+ */
+export function UsageLimitMenuBody(props: {
+  leading?: ReactNode;
+  /** Accepted for the shared drill-in contract; this body is always a dialog. */
+  presentation?: MenuBodyPresentation;
+  value: SessionUsageLimitDraft;
+  disabled: boolean;
+  /** A Send was blocked by this amount: show "enter an amount" even when empty. */
+  showRequiredError?: boolean;
+  onChange: (value: SessionUsageLimitDraft) => void;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const focusInput = useRef(false);
+  const inputId = useId();
+  const errorId = `${inputId}-error`;
+  const helpId = `${inputId}-help`;
+  const value = props.value;
+  // Open on the checked choice (the dialog would otherwise focus Back).
+  useEffect(() => {
+    const body = bodyRef.current;
+    if (!body || body.contains(document.activeElement)) return;
+    body
+      .querySelector<HTMLElement>('[role="radio"][aria-checked="true"]:not(:disabled)')
+      ?.focus({ preventScroll: true });
+  }, []);
+  useEffect(() => {
+    if (focusInput.current && inputRef.current) {
+      focusInput.current = false;
+      inputRef.current.focus({ preventScroll: true });
+    }
+  }, [value.kind]);
+  const parsed = parseSessionUsageLimitDraft(value);
+  const error =
+    value.kind === "limit" && !parsed.ok && (value.text.trim() || props.showRequiredError)
+      ? parsed.error
+      : null;
+  const labels = DEFAULT_SESSION_USAGE_LIMIT_LABELS(t);
+  return (
+    <>
+      <ComposerMenuHeader title={labels.title} leading={props.leading} />
+      <div
+        ref={bodyRef}
+        data-usage-limit-menu
+        className="min-h-0 overflow-y-auto overscroll-contain pb-1"
+      >
+        <RadioGroup presentation="dialog" label={labels.title} value={value.kind}>
+          <RadioRow
+            value="none"
+            disabled={props.disabled}
+            icon={<InfinityIcon />}
+            label={labels.noLimit}
+            onSelect={() => props.onChange({ kind: "none" })}
+          />
+          <RadioRow
+            value="limit"
+            disabled={props.disabled}
+            icon={<GaugeIcon />}
+            label="Pause at an amount"
+            onSelect={() => {
+              if (value.kind === "limit") {
+                inputRef.current?.focus({ preventScroll: true });
+                return;
+              }
+              focusInput.current = true;
+              props.onChange({ kind: "limit", text: "" });
+            }}
+          />
+        </RadioGroup>
+        {value.kind === "limit" ? (
+          <div className="px-2.5 pt-1 pb-1.5">
+            <label htmlFor={inputId} className="mb-1 block text-xs leading-4.5 text-fg-muted">
+              Limit in US dollars
+            </label>
+            <div className="relative">
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-y-0 left-3 flex items-center text-sm text-fg-muted"
+              >
+                $
+              </span>
+              <Input
+                id={inputId}
+                ref={inputRef}
+                value={value.text}
+                disabled={props.disabled}
+                inputMode="decimal"
+                autoComplete="off"
+                placeholder="25.00"
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? `${errorId} ${helpId}` : helpId}
+                onChange={(event) => props.onChange({ kind: "limit", text: event.target.value })}
+                onKeyDown={(event) => {
+                  // The value applies as typed; Enter must not submit anything.
+                  if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                  }
+                }}
+                className="h-8 pl-6 text-sm pointer-coarse:h-11"
+              />
+            </div>
+            {error ? (
+              <p id={errorId} className="mt-1.5 text-xs leading-4.5 text-danger">
+                {error}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        <p
+          id={helpId}
+          className={cn(MENU_NOTE_CLASS, "flex items-start gap-1.5 text-xs leading-4.5")}
+        >
+          <span className="min-w-0 flex-1">{labels.explanation}</span>
+          <HelpTip label="About usage limits">{labels.notYourBill}</HelpTip>
+        </p>
       </div>
     </>
   );

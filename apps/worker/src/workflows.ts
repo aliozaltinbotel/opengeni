@@ -23,6 +23,8 @@ export {
 } from "./workflows/knowledge-source-sync";
 export {
   sandboxDrainWorkflow,
+  sandboxIdleCheckpointSweepWorkflow,
+  sandboxIdleCheckpointWorkflow,
   sandboxReaperMaintenanceWorkflow,
   sandboxReaperWorkflow,
   sandboxReaperWorkflowV2,
@@ -39,6 +41,7 @@ export {
   videoGenerationWorkflowId,
   type VideoGenerationWorkflowInput,
 } from "./workflows/video-generation";
+export { sessionTitleWorkflow } from "./workflows/session-title";
 export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,

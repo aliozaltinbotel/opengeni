@@ -88,6 +88,20 @@ spec:
               and on (job, instance)
               (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="rotation_backlog"} < {{ $inventoryFreshnessSeconds }})
             )
+        - record: opengeni:sandbox_checkpoint_staleness:fresh_max
+          expr: |
+            max by (kind) (
+              opengeni_sandbox_checkpoint_staleness{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="checkpoint_staleness"} < {{ $inventoryFreshnessSeconds }})
+            )
+        - record: opengeni:sandbox_checkpoint_age_max_seconds:fresh_max
+          expr: |
+            max(
+              opengeni_sandbox_checkpoint_age_max_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
+              and on (job, instance)
+              (time() - opengeni_sandbox_inventory_refresh_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},domain="checkpoint_staleness"} < {{ $inventoryFreshnessSeconds }})
+            )
         - record: opengeni:retained_processes_active:fresh_max
           expr: |
             max by (owner_state) (
@@ -469,9 +483,11 @@ spec:
             next_step: 'No action if it happens once; if it repeats, check the pod''s termination reason (for example OOMKilled) and logs.'
             description: A turn-worker process exited unexpectedly within the last 10 minutes. Correlate the affected Pod logs with same-turn recovery outcomes before assuming the active turn completed normally.
         - alert: OpenGeniTurnWorkerCrashLoop
+          # Round the reset-aware estimate so ordinary scrape extrapolation does not
+          # turn one restart into a crash loop; assess each pod independently.
           expr: |
-            sum(
-              increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }},container="worker"}[10m])
+            max by (pod) (
+              round(increase(kube_pod_container_status_restarts_total{namespace={{ .Release.Namespace | quote }},container="worker"}[10m]))
               * on(namespace, pod) group_left()
               max by (namespace, pod) (
                 kube_pod_labels{namespace={{ .Release.Namespace | quote }},label_app_kubernetes_io_instance={{ .Release.Name | quote }},label_app_kubernetes_io_component="worker-turns"}
@@ -481,12 +497,12 @@ spec:
           labels:
             severity: critical
           annotations:
-            summary: 'Turn workers restarted more than once in 10 minutes, which looks like a crash loop.'
-            headline: 'Turn worker crash-looping'
+            summary: 'A turn worker restarted more than once in 10 minutes, which looks like a crash loop.'
+            headline: 'Turn worker {{ "{{ $labels.pod }}" }} crash-looping'
             value: '{{ "{{ printf `%.0f` $value }}" }} restarts in 10 min'
             user_impact: 'Agent turns keep getting interrupted; replies stall and some sessions will fail after repeated retries.'
             next_step: 'Check the worker pod''s last termination reason and logs now (OOM, bad config, recent deploy); roll back if it started right after a deploy.'
-            description: More than one turn-worker container restart occurred within 10 minutes. Treat this as an active crash loop because repeated worker loss can exhaust bounded same-turn recovery and fail a session.
+            description: The rounded restart estimate exceeds one on the same turn-worker pod within 10 minutes. Treat this as an active crash loop because repeated worker loss can exhaust bounded same-turn recovery and fail a session.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniTurnWorkerDeathRecovered
           expr: |
@@ -616,23 +632,32 @@ spec:
         - alert: OpenGeniMcpToolLatencyHigh
           # `tool` is bounded: a first-party Opengeni tool name, or `external` for
           # every connector, API-integration, and custom MCP tool.
+          # Command polling permits up to 50 seconds of requested waiting. Its
+          # total-duration budget includes that wait plus 15 seconds overhead.
           expr: |
-            histogram_quantile(
-              0.95,
-              sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m]))
-            ) > 15
+            (
+              histogram_quantile(
+                0.95,
+                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool!~"command_read|command_wait"}[10m]))
+              ) > 15
+              or
+              histogram_quantile(
+                0.95,
+                sum by (le, tool) (rate(opengeni_mcp_tool_call_duration_seconds_bucket{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},tool=~"command_read|command_wait"}[10m]))
+              ) > 65
+            )
             and on(tool)
             sum by (tool) (increase(opengeni_mcp_tool_call_duration_seconds_count{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}[10m])) >= 5
           for: 10m
           labels:
             severity: warning
           annotations:
-            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool take more than 15 seconds at p95. "external" means a connector or custom tool rather than an Opengeni tool.'
+            summary: 'Calls to the {{ "{{ $labels.tool }}" }} tool exceed their p95 latency budget: 65 seconds for command polling, 15 seconds for other tools. "external" means a connector or custom tool rather than an Opengeni tool.'
             headline: 'Slow tool calls: {{ "{{ $labels.tool }}" }}'
             value: 'p95 {{ "{{ $value | humanizeDuration }}" }}'
             user_impact: 'Agent tasks take noticeably longer while waiting on this tool.'
             next_step: 'For an Opengeni tool, check the Opengeni API and database for that tool. For "external", find the slow connector in Grafana; it is usually the outside service.'
-            description: Tool latency is materially delaying turns. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
+            description: Tool duration exceeds its budget. command_read and command_wait permit up to 50 seconds of requested waiting, so their total-duration budget is 65 seconds; it does not measure actual service overhead. Other tools retain a 15-second budget. The tool label names the first-party Opengeni tool, or "external" for every connector and custom tool. Split by structural outcome and compare MCP connect time before attributing this to model inference.
         - alert: OpenGeniHttp5xxRatioHigh
           expr: |
             (
@@ -1161,12 +1186,28 @@ spec:
             user_impact: 'No impact yet; if unresolved, the sandbox may be killed together with the command.'
             next_step: 'Inspect the blocking process and its owner; let it finish or settle before the deadline.'
             description: A provider-deadline rotation has been process-blocked for 10m. Inspect the current process, owner settlement, deadline cancellation and checkpoint capture while the provider is still available.
+        - alert: OpenGeniSandboxCheckpointStale
+          expr: opengeni:sandbox_checkpoint_staleness:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="stale_12h"} > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: 'A live sandbox has held uncaptured workspace changes for over 12 hours.'
+            headline: 'Sandbox changes unsaved for 12h+'
+            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) stale'
+            user_impact: 'If the provider ends this sandbox before its next checkpoint, the user loses the changes made since the first unsaved write.'
+            next_step: 'Find the lease with the runbook query in docs/application-observability.md, then check skipped-capture reasons and what holds the box (open requests, supervised commands, a turn held on wait_for_input).'
+            description: A live Modal sandbox has had a write its last checkpoint did not capture for over 12 hours (half the default 24h provider lifetime). The deadline save still runs before the provider ends the box, so this is risk from an unplanned provider loss, not certain loss. A box kept warm while idle (an open tab after a short turn, or a held wait_for_input with a running command) is not checkpointed between turns and can also raise this.
         - alert: OpenGeniModalProviderMissingBeforeCapture
+          # The durable count and process counter overlap. Prefer a positive durable
+          # count; use the process counter only until that observation is available.
           # A newly created counter may have only one sample after its first
           # loss, so increase() alone would miss that first observation. The
           # offset arm catches a new positive series for the same 30m window.
           expr: |
             (
+              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="provider_missing_before_capture"}) > 0)
+              or
               (sum(
                 increase(opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"}[30m]) > 0
                 or
@@ -1176,16 +1217,14 @@ spec:
                   opengeni_sandbox_provider_missing_before_capture_total{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},backend="modal"} offset 30m
                 )
               ) or vector(0))
-              +
-              (sum(opengeni:sandbox_recovery_observations_recent:fresh_max{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},kind="provider_missing_before_capture"}) or vector(0))
             ) > 0
           for: 1m
           labels:
             severity: critical
+          # Counter fallback is an estimate, not a distinct sandbox inventory.
           annotations:
             summary: 'A Modal sandbox disappeared before its workspace files could be saved.'
             headline: 'Modal sandbox lost before saving its files'
-            value: '{{ "{{ printf `%.0f` $value }}" }} sandbox(es) lost (30 min)'
             user_impact: 'A user''s sandbox vanished before its latest files were saved; they may lose recent work unless an earlier checkpoint is restored.'
             next_step: 'Check the session''s sandbox.box.terminated event and whether an earlier checkpoint can be restored.'
             description: The exact draining-to-cold commit recorded providerMissingBeforeCapture. Inspect the sandbox.box.terminated event and the current archive/recovery state; a prior checkpoint may still be restorable. This is observed loss, independent of overdue rotation backlog.
@@ -1477,7 +1516,7 @@ spec:
             next_step: 'Check worker logs for memory-guard errors and that host/cgroup memory files are readable.'
             description: The hard headroom protection is degraded. Restore readable host/cgroup memory signals and the graceful worker lifecycle before admitting sustained turn load.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
-        # ── OpenGeni-hosting node pressure ───────────────────────────────────
+        # ── Opengeni-hosting node pressure ───────────────────────────────────
         - alert: OpenGeniNodeMemoryPressureStalled
           expr: |
             opengeni:node_memory_psi_stall_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}} > 0.1
@@ -1537,13 +1576,13 @@ spec:
             and on (node)
             opengeni:workload_node:present{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }}}
           labels:
-            severity: critical
+            severity: warning
           annotations:
             summary: 'Container runtime operations ({{ "{{ $labels.operation_type }}" }}) are failing on server {{ "{{ $labels.node }}" }}.'
             headline: 'Server {{ "{{ $labels.node }}" }}: container runtime errors'
             value: '{{ "{{ printf `%.0f` $value }}" }} error(s) (5 min)'
             user_impact: 'Pods on this server may fail to start or restart, making services look down.'
-            next_step: 'Check kubelet and container runtime health on the node; cordon and replace it if errors continue.'
+            next_step: 'Check the operation type and node health; confirm repeated errors or affected pods before replacing the node.'
             description: Runtime errors during node pressure can make unrelated services appear unavailable and can prevent clean replacement capacity from starting.
             runbook_url: https://github.com/Cloudgeni-ai/opengeni/blob/main/docs/launch-monitoring.md#alert--first-action
         - alert: OpenGeniNodeNotReady

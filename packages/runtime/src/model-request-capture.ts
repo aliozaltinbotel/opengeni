@@ -7,6 +7,7 @@ import { stripProviderItemId } from "./model-input";
 import { toolCallIdFromSdkItem } from "./tool-call-identity";
 import { normalizeProtocolJsonValue } from "./protocol-json";
 import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
+import { streamWithPreemption } from "./model-preemption";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ResponsesStreamingTerminalError } from "./responses-terminal-error";
 import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
@@ -257,11 +258,24 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
   }
 }
 
+/**
+ * Where an admission check is requested. The model wrapper asks once when the
+ * SDK enters a model call (`model_entry`); transport layers ask again right
+ * before the wire (`transport`). An entry always revalidates; a transport check
+ * may reuse the admission its own call already received.
+ */
+export type ModelCallAdmissionPoint = "model_entry" | "transport";
+
 /** Awaited producer-side authority, separate from observational request capture. */
 export type ModelCallLifecycle = {
-  beforeModelRequest?: () => Promise<void>;
+  beforeModelRequest?: (point: ModelCallAdmissionPoint) => Promise<void>;
   /** Register before yielding so the next model entry waits for consumer settlement. */
   onModelResponse?: (event: StreamEvent) => Promise<void>;
+  /**
+   * Fires when new user input (a Steer) should cut the in-flight model request
+   * short. Read once per request, when it starts streaming.
+   */
+  modelPreemption?: () => AbortSignal | undefined;
 };
 const modelCallLifecycle = new AsyncLocalStorage<ModelCallLifecycle>();
 
@@ -269,13 +283,23 @@ export function withModelCallLifecycle<T>(lifecycle: ModelCallLifecycle, fn: () 
   return modelCallLifecycle.run(lifecycle, fn);
 }
 
-export async function beforeModelRequest(): Promise<void> {
-  await modelCallLifecycle.getStore()?.beforeModelRequest?.();
+export async function beforeModelRequest(
+  point: ModelCallAdmissionPoint = "transport",
+): Promise<void> {
+  await modelCallLifecycle.getStore()?.beforeModelRequest?.(point);
 }
 
 export function modelResponseSettlement(event: StreamEvent): Promise<void> | undefined {
   if (event.type !== "response_done") return undefined;
   return modelCallLifecycle.getStore()?.onModelResponse?.(event);
+}
+
+/** Stream one model request so that a Steer can preempt it (see streamWithPreemption). */
+export function streamPreemptibleModelRequest(
+  request: ModelRequest,
+  open: (request: ModelRequest) => AsyncIterable<StreamEvent>,
+): AsyncIterable<StreamEvent> {
+  return streamWithPreemption(request, modelCallLifecycle.getStore()?.modelPreemption?.(), open);
 }
 
 /** The same agent can re-enter runAgentStream after in-activity compaction. */
@@ -401,7 +425,7 @@ export class ModelRequestCaptureModel implements Model {
   ) {}
 
   async getResponse(request: ModelRequest) {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     request = this.prepareRequest?.(request) ?? request;
@@ -421,7 +445,7 @@ export class ModelRequestCaptureModel implements Model {
   }
 
   async *getStreamedResponse(request: ModelRequest): AsyncIterable<StreamEvent> {
-    await beforeModelRequest();
+    await beforeModelRequest("model_entry");
     const capture = modelRequestCapture.getStore();
     if(Array.isArray(request.input))restoreProducedSourceBindings(request.input,capture);
     request = this.prepareRequest?.(request) ?? request;
@@ -430,7 +454,7 @@ export class ModelRequestCaptureModel implements Model {
     void notifyModelRequestCapture(request);
     const sourceKey = await capture?.beforeCall?.(request);
     const iterator = withModelCallSourceDispatch(capture?.beforeCall, sourceKey, () =>
-      this.inner.getStreamedResponse(request)[Symbol.asyncIterator](),
+      streamPreemptibleModelRequest(request, prepared => this.inner.getStreamedResponse(prepared))[Symbol.asyncIterator](),
     );
     let finished = false;
     try {

@@ -83,6 +83,15 @@ target workspace must belong to the same organization and remain accessible to
 the owner. `workspace_shared` requires an explicit durable shared-output
 acknowledgement. Revocation is immediate and advances grant generation.
 
+Personal Connected Machines have one bounded tree exception (0851): a machine's
+original `session` grant, or its consumed `once` grant for the originating logical
+turn, can cover true agent-created descendants of the consenting session. Every
+parent/turn link must retain the same workspace, owner and initiating human, with
+live machine snapshots and the original grant's generation/expiry/revocation.
+Claim and dispatch both revalidate that evidence; no independent child grant is
+issued. Other resource kinds and non-descendant sessions retain exact-session
+semantics. See [Connected Machines](connected-machines.md).
+
 Migration `0305_personal_resource_grant_management.sql` replaces the ambient
 owner-management seam with the activated product contract. Only a canonical
 managed-cookie context for the exact subject may use it; API keys, delegated or
@@ -567,6 +576,25 @@ existing permissions and concurrency preconditions; DELETE does not perform
 them. There is currently no supported workspace archive/retirement endpoint,
 so this containment does not remove the retained workspace from inventory.
 Do not delete audit/history rows or weaken their foreign keys to force cleanup.
+Editable documents, spreadsheets, and presentations are such retained records:
+each `editable_artifacts` row references its workspace with `ON DELETE
+RESTRICT` and owns immutable version history, so a workspace that ever held one
+returns that `409` (the message names them) until the organization retention
+lifecycle erases them.
+
+Deletion must not invert the canonical writer prefix described under the 0299
+lock order below. `deleteWorkspaceIfQuiescent` takes the background-command
+lifecycle key, locks the organization row only `FOR NO KEY UPDATE`, takes the
+target's workspace-control prefix exclusively (advisory key and
+inference-control row) before its `workspaces` row `FOR UPDATE`, and locks
+sibling workspaces only `FOR KEY SHARE`. That still serializes concurrent
+deletions and the only-workspace check. Ordinary writers, which hold their
+control and `workspaces` rows and then reach `managed_accounts` through an
+account FK check, cannot deadlock with it; only transactions that lock, delete,
+or re-key a sibling `workspaces` row wait for the deletion to commit. Locking
+the organization or sibling rows `FOR UPDATE`, or the target `workspaces` row
+before its control row, turned deletions into `40P01` victims, surfaced as
+retryable `503 DATABASE_CONTENTION`.
 
 The organization overview, organization/shared-workspace metadata, member
 inventory, retention, and organization Codex routes require either a direct
@@ -723,7 +751,7 @@ and never block leaving the step. It never writes workspace settings or requires
 `workspace:admin`, which Personal workspace owners deliberately do not hold. Skip and invitation
 accept still complete immediately. The step does not widen
 `POST /v1/auth/organization-onboarding`, invitation accept, or any worker
-surface. Empty OpenGeni-credit create and failed-session paths prompt the
+surface. Empty Opengeni-credit create and failed-session paths prompt the
 owner to buy credits or connect a model instead of a dead-end toast.
 
 ### Additional organization creation (0399)
@@ -756,6 +784,15 @@ enabled private-session setting, event, and immutable evidence. Since 0611 the
 receipt is evidence only and Only me is on by default without it. The application role
 can execute only the public creation capability and has no direct DML on either
 receipt table or access to the owner-only activation helper.
+
+Beyond that switch, owners and admins choose the default audience for new chats
+and schedules and whether admins see Only me schedule summaries
+(`organization_privacy_preferences`, migration 0725,
+`/v1/organizations/:organizationId/privacy-settings`). Deployment settings can
+only narrow these: `OPENGENI_PRIVACY_ONLY_ME_ALLOWED`,
+`OPENGENI_PRIVACY_WORKSPACE_DEFAULT_REQUIRED` and
+`OPENGENI_PRIVACY_ADMIN_SCHEDULE_SUMMARIES_REQUIRED`. See
+[the audience design](design/privacy-audiences-2026-10-11.md#settings).
 
 Pre-registration invitation creation now claims a matching durable
 `organization_user_setup_deliveries` row and append-only attempt before calling
@@ -1080,7 +1117,25 @@ current one. Workspace administration, member and API-key management, shared
 connection, GitHub App, and Sandbox Environment administration, Connected
 Machines (`enrollments:read`/`enrollments:manage`, which also gate picking or
 attaching a machine for a session), terminal attach, sandbox file writes, and
-inline MCP servers stay Admin-only. Each such
+inline MCP servers stayed Admin-only after 0555.
+Migration 0865 makes Member a full teammate. It adds `stream:control`,
+`terminal:attach`, `codemode:call`, `files:write` (edit a session's live
+filesystem), `connections:write` (connect one's own Gmail, Slack, GitHub, Drive
+or model subscriptions), `mcp_servers:attach` (session MCP servers),
+`rigs:manage` (create and edit Sandbox Environments, which are versioned) and
+`enrollments:read` (see and pick Connected Machines). A Member also manages any
+Site they can see (Site Data, Site SQL, publication settings, takedown and
+restore) and authors, installs and reviews workspace Skills
+(`documents:manage`). Settings-class powers stay Admin-only:
+`workspace:admin` (workspace settings, instructions, Insights, automations),
+`members:manage`, `api_keys:manage`, `github:manage` (the workspace GitHub
+App), `variable-sets:manage`, `enrollments:manage` (enrolling and sharing
+machines), `capabilities:manage` (integration and plugin install, workspace
+tool policy) and `secrets:read`. Routes where a newly granted permission would
+otherwise reach workspace-wide configuration check the settings power
+explicitly: workspace-owned model-provider keys and the Slack bot need
+`capabilities:manage`, and the workspace default Sandbox Environment needs
+workspace settings authority. Each such
 rollout normalizes only rows whose permissions exactly equal an older named
 Member set (any JSONB order), through a writer trigger for overlapping old
 binaries plus a batched backfill; custom sets are never rewritten. Since 0555
@@ -1778,7 +1833,98 @@ The activated database contract is intentionally narrow:
   receipt. A receipt stranded by a completed turn cannot be resumed or
   resolved, so it no longer blocks transitions, whole-session forks or
   Variable Set changes. This is the same predicate Retry already uses.
-- Transition-to-private additionally requires a singleton sandbox group. A
+  Rolling migration 0759 does the same for pending machine updates (finished
+  background commands, child results, agent messages) that an idle session
+  keeps until its next turn. Such an update blocks only when its frozen
+  authority belongs to someone other than the session owner: a personal
+  connection delegation, subject-scoped account binding or personal
+  subscription authority of another person, a lineage authority subject other
+  than the owner, a user-scoped provider snapshot without its causal subject,
+  or a causal human turn by someone else (an unreadable or malformed causal
+  turn counts as foreign). The owner's own pending updates stay pending across
+  privatization and are delivered by the next turn, because the delivering
+  turn executes with authority the private session could already use.
+- Leftover records never block making a session Only me (rolling migration
+  0768). The private transition settles them in the same transaction instead
+  of refusing: turns left `queued`, `recovering` or `waiting_capacity` on a
+  session whose status shows no work are cancelled with reason
+  `authority_changed`, together with their parked questions, capacity waiters
+  and pending tool calls; RunState rows, questions and capacity waiters whose
+  turn is already terminal are ignored; a finished background command result
+  that carries someone else's authority is cancelled
+  (`system.update.cancelled`, reason `authority_changed`) because the private
+  session could never deliver it; and a schedule that can no longer run
+  (`scheduled_task_is_exhausted`, see 0761) or is deleted no longer counts.
+  Work the person can see is different: a running or parked response, queued
+  messages and an active goal refuse the change with a typed `active_work`
+  conflict unless the request carries `stopActiveWork` ("make private
+  anyway"). With that consent the change cancels parked and queued turns and
+  pauses the goal atomically. A response a worker is executing right now is
+  interrupted first with an `authority_change` interruption, which the worker
+  settles as a terminal cancellation; core waits briefly for that settlement
+  and then makes the same transition, answering a retryable
+  `stopping_active_work` with the same idempotency key if the worker is slow.
+  The owner-only `GET .../visibility/preview?visibility=private`
+  (`session_visibility_change_blocker`) reports that work and any block that
+  stopping it would not clear, so the console shows one summary and one
+  confirmation. Under 0768 alone, other foreign pending updates, live
+  schedules, realtime, workspace writers, retained processes and sandbox
+  access holders still refused the change; 0769 below removes those refusals.
+  Whole-session forks share the
+  narrowed predicate (terminal-turn rows and exhausted schedules no longer
+  count) but still refuse any nonterminal work; they never cancel anything.
+- Nothing in a session refuses making it Only me (rolling migration 0769).
+  The private transition checks only `session_private_transition_blocker`:
+  the session's own work, which the application settles in the same
+  transaction, and a live voice session. Everything else is acted on or
+  ignored:
+  - Another member's authority is dropped. Every pending update that carries
+    someone else's frozen authority (the 0759 rules) is cancelled with
+    `system.update.cancelled`, reason `authority_changed`. A subscription
+    account choice for the session (`subscription_session_bindings`) that
+    points at another person's personal connection, or at a connection the
+    owner cannot see, is removed, so the next response is placed
+    automatically. A `BEFORE INSERT` trigger on `session_system_updates`
+    stores any later pending update with foreign authority on a private
+    session as `cancelled` (scheduled occurrences keep their own run-time
+    validation), so a command another member started earlier cannot deliver
+    into the private session afterwards.
+  - A live voice session ends with `authority_revoked` (an expired lease ends
+    as `lease_expired`); voice connections of an ended voice session close.
+  - Schedules are ignored: each run is admitted under its owner's own session
+    access. Sandbox processes, file operations and viewer holders are ignored
+    as well: they record the authority epoch and visibility they were
+    admitted under, which stop matching after the change, and since 0738
+    files are as shared as the sandbox.
+  The preview's `work` lists what the one confirmation does:
+  `runningTurnCount`, `queuedTurnCount`, `activeGoal`, `liveVoice`,
+  `otherPeoplePendingUpdateCount` and `otherPeopleAccountChoiceCount` (the
+  last two from the owner-only `session_visibility_foreign_authority_items`).
+  A finished background-command notice is not listed; it is a leftover and
+  is cancelled silently as under 0768. A non-empty `work` needs
+  `stopActiveWork`; an empty one changes visibility directly, and the console
+  then shows no dialog. The preview's `blocker` field is deprecated and always
+  `null`, and `session_visibility_change_blocker` always answers `NULL`. Whole-session
+  forks and Variable Set changes keep the full `assert_session_tenancy_quiescent`
+  check.
+- Who can read a session and who can use its sandbox are separate. Since
+  rolling migration 0738, a session may become private, or be created private,
+  while it shares a sandbox group or Connected Machine with other sessions.
+  The session's conversation, events, command records, terminals and stream
+  access stay scoped to its audience through the per-session visibility
+  policies; files on the box are as shared as the box. Quiescence counts only
+  viewer and interaction holders attributed to the session itself, so a
+  sibling's open terminal does not block. A top-level private create may join a
+  group only when the creator can already see a session on it. Whole-session
+  forks no longer require a singleton source either; the destination is always
+  a fresh singleton group. Variable Set changes still require a singleton
+  group, counted across every member including private ones, because a box's
+  Variable Sets are fixed and homogeneous across its group. Effective control
+  walks the complete ancestry, so a paused private ancestor still pauses a
+  visible descendant; a viewer who cannot read that ancestor sees it only as
+  "An ancestor session", without its title, actor or reason. The
+  shared-exposure disclosure counts every member of the group while listing
+  only the ids the caller can read. A
   fresh transition to private in a shared workspace also requires the 0323
   organization setting. Migration 0344 fences the actual visibility update,
   after the lifecycle function's applied-receipt replay return, so a committed

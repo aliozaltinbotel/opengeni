@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { SandboxBackend } from "@opengeni/contracts";
+import { collectDefaultMetrics, Registry } from "prom-client";
 import {
   createObservability,
+  dropFullHeapWalkMetrics,
+  FULL_HEAP_WALK_DEFAULT_METRICS,
   interactionAuthMetricObserver,
   interactionInterventionMetricObserver,
   interactionOperationMetricObserver,
@@ -52,6 +55,24 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_http_request_duration_seconds_bucket");
     expect(metrics).toContain("opengeni_build_info");
     expect(metrics).toContain("opengeni_process_cpu_user_seconds_total");
+  });
+
+  test("a scrape on Bun never walks the whole heap for per-space statistics", async () => {
+    const obs = createObservability(settings, { component: "api", now: () => 1 });
+    const metrics = await obs.prometheusMetrics();
+    expect(metrics).toContain("opengeni_nodejs_heap_size_used_bytes");
+    for (const name of FULL_HEAP_WALK_DEFAULT_METRICS) {
+      expect(metrics).not.toContain(`opengeni_${name}`);
+    }
+  });
+
+  test("per-space heap statistics are kept on a runtime where they are cheap", () => {
+    const registry = new Registry();
+    collectDefaultMetrics({ register: registry, prefix: "x_" });
+    dropFullHeapWalkMetrics(registry, "x_", {});
+    expect(registry.getSingleMetric("x_nodejs_heap_space_size_used_bytes")).toBeDefined();
+    dropFullHeapWalkMetrics(registry, "x_", { bun: "1.3.0" });
+    expect(registry.getSingleMetric("x_nodejs_heap_space_size_used_bytes")).toBeUndefined();
   });
 
   test("records identity-free Insights timing with an exact two-second target bucket", async () => {
@@ -923,6 +944,48 @@ describe("observability", () => {
       clientRoute: "unknown",
       clientRevision: "dev",
     });
+  });
+
+  test("public structured logs admit projected web client error text and nothing raw", () => {
+    const observed: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message?: unknown) => observed.push(String(message));
+    const stack = "TypeError: x is undefined\n    at A (https://app.example.test/assets/a.js:1:2)";
+    try {
+      const obs = createObservability(settings, { component: "api", now: () => 1 });
+      obs.warn("projected", {
+        clientErrorName: "TypeError",
+        clientErrorMessage: "token=[redacted] rejected",
+        clientErrorStack: stack,
+        clientComponentStack: "\n    at ArtifactPageChrome\n    at Suspense",
+      });
+      obs.warn("raw", {
+        clientErrorName: "x".repeat(129),
+        clientErrorMessage: "token=abc rejected",
+        clientErrorStack: "GET https://api.example.test/v1/files?sig=abc",
+        clientComponentStack: 42,
+        clientErrorCode: "free text under an unreviewed name",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(JSON.parse(observed[0]!)).toMatchObject({
+      clientErrorName: "TypeError",
+      clientErrorMessage: "token=[redacted] rejected",
+      clientErrorStack: stack,
+      clientComponentStack: "\n    at ArtifactPageChrome\n    at Suspense",
+    });
+    const raw = JSON.parse(observed[1]!);
+    for (const key of [
+      "clientErrorName",
+      "clientErrorMessage",
+      "clientErrorStack",
+      "clientComponentStack",
+      "clientErrorCode",
+    ]) {
+      expect(raw).not.toHaveProperty(key);
+    }
   });
 
   test("public structured logs retain only grammar-validated request correlation ids", () => {

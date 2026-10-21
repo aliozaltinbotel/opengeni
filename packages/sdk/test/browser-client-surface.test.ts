@@ -34,7 +34,6 @@ const legacyBrowserUnusedMethods = [
   "getCompanyProfileRevision",
   "getDocumentBase",
   "getDocumentOriginalFile",
-  "getEnvironment",
   "getLatestEventResult",
   "getLatestStartedTurn",
   // Shared Insights methods are adopted by the separately owned Insights UI.
@@ -65,9 +64,10 @@ const legacyBrowserUnusedMethods = [
   "listTranscriptionRecordings",
   "moveDocument",
   "openExternalBrowserAuthFlow",
-  "pauseGoal",
+  // The organization account page reads usage from the account overview, so
+  // this standalone usage read stays available to SDK callers only.
+  "organizationCodexAccountUsage",
   "rejectGoalRevision",
-  "resumeGoal",
   "revokeUserResourceGrant",
   "rollbackCompanyProfile",
   "rollbackGoalRevision",
@@ -75,7 +75,6 @@ const legacyBrowserUnusedMethods = [
   "startApiIntegrationOAuth",
   "startOpenGeniSlackBotInstall",
   "startPersonalGitHubOAuth",
-  "supergrokStatus",
   "undoGovernedLearningActivation",
   "updateCompanyProfile",
   "updateOrganizationWorkspaceSettings",
@@ -87,10 +86,52 @@ const legacyBrowserUnusedMethods = [
 // response transport as the existing computer capture method. It is intentionally
 // available to runtime callers even though the web UI does not call it.
 const agentInteractionMethods = [
+  "callNativeComputerTool",
+  "getNativeComputerToolReceipt",
   "captureBrowserTarget",
   "getBrowserTargetState",
   "readBrowserDom",
   "openBrowserTargetWithInventory",
+  // Recovering a browser from a copied working directory is an operator or
+  // agent action; the web console has no adoption screen yet.
+  "inspectBrowserSessionWorkingCopy",
+  "adoptBrowserSessionWorkingCopy",
+  "getBrowserSessionWorkingCopyAdoption",
+  "revertBrowserSessionWorkingCopyAdoption",
+];
+
+// Server-side integrations replace the Skills a session carries, and hosts that
+// attach their own session MCP servers manage those tools' Allow/Ask/Block
+// choices; the web console calls none of these methods.
+const integrationMethods = [
+  "getSessionMcpToolPermissions",
+  "updateSessionMcpToolPermissions",
+  "updateSessionSkills",
+  // Site Data management for hosts and scripts; the web Data tab reads,
+  // deletes and exports, and agents manage collections with tools.
+  "defineSiteDataCollection",
+  "deleteSiteDataCollection",
+  "deleteSiteDataFile",
+  "getSiteDataFileUrl",
+  "importSiteData",
+  "listSiteDataFiles",
+  "resetSiteDataCollection",
+  // Site SQL management for hosts and scripts; the web Data tab only reads
+  // the database's status and turns it on or off, and agents use tools.
+  "defineSiteSqlQuery",
+  "deleteSiteSqlQuery",
+  "executeSiteSql",
+  "exportSiteSql",
+  "importSiteSql",
+  "inspectSiteSql",
+  "migrateSiteSql",
+  "querySiteSql",
+  "resetSiteSql",
+  "runSiteSqlQuery",
+  // The workspace default limit profile for published Sites, for hosts and
+  // admin scripts; the web console sets limits per Site.
+  "getSiteLimitProfile",
+  "updateSiteLimitProfile",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push
@@ -118,6 +159,11 @@ const retiredSettingsMethods = [
   "rejectPreferenceRegistryProposal",
   "supersedePreferenceRegistry",
 ];
+
+// These browser-facing account APIs landed before their separately reviewed
+// settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
+// remove each entry when its browser consumer lands (the equality below enforces it).
+const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -181,8 +227,10 @@ describe("browser client runtime surface", () => {
       [
         ...legacyBrowserUnusedMethods,
         ...agentInteractionMethods,
+        ...integrationMethods,
         ...nativeAppMethods,
         ...retiredSettingsMethods,
+        ...pendingModelAccountMethods,
       ].sort(),
     );
   });

@@ -4,6 +4,7 @@
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
 import type { ActivityItem, TimelineGroup, ToolCallItem } from "./types";
+import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 export type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
@@ -79,24 +80,86 @@ export function isPreparingWork(group: ActivityGroup, options: ReadableWorkOptio
   );
 }
 
-/** Status of a readable turn's work row, minus the host-rendered live preview. */
-export function readableWorkStatus(
+/**
+ * Whether a readable turn's work row has anything to reveal when expanded.
+ * Unless the host shows startup phases as details, the work row's rail only
+ * renders failed or cancelled preparation steps, so a detail made only of
+ * completed or still-running steps (for example the queue phase before a turn
+ * was parked on a usage limit) renders nothing and does not make the row
+ * expandable.
+ */
+export function readableWorkHasDetails(
   group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
-): Omit<TurnSummaryStatus, "preview"> {
+  options: Pick<ReadableWorkOptions, "startupDetails">,
+): boolean {
+  return group.work.details.some(
+    (detail) =>
+      options.startupDetails ||
+      detail.kind !== "activity" ||
+      Boolean(detail.work) ||
+      !detail.items.every(
+        (item) =>
+          (item.kind === "startup-phase" &&
+            item.status !== "failed" &&
+            item.status !== "cancelled") ||
+          (item.kind === "reasoning" && !item.text.trim()),
+      ),
+  );
+}
+
+/**
+ * Status of a readable turn's work row, minus the host-rendered live preview.
+ * Time spent waiting for model capacity is not work: the worked duration and
+ * the live working clock exclude it, and the wait itself shows no clock. A
+ * wait's `detail` is its one quiet secondary line.
+ */
+export function readableWorkStatus(
+  t: OpenGeniText,
+  group: ActivityGroup & { work: NonNullable<ActivityGroup["work"]> },
+): Omit<TurnSummaryStatus, "preview"> & { detail?: string | undefined } {
   const end = group.work.endedAt;
-  return end
-    ? { kind: "worked", durationMs: durationBetween(group.work.startedAt, end) }
-    : group.work.waiting
-      ? { kind: "waiting", ...group.work.waiting }
-      : { kind: "working", since: group.work.startedAt };
+  const pausedMs = group.work.pausedMs ?? 0;
+  if (end) {
+    const durationMs = durationBetween(group.work.startedAt, end);
+    const cycles = group.work.cycles;
+    // Folded quiet cycles report their wall-clock span: waits are the point.
+    if (cycles)
+      return {
+        kind: "worked",
+        label: t("timeline.workPresentation.countUpdatesOver", { count: cycles.count }),
+        durationMs,
+      };
+    return {
+      kind: "worked",
+      durationMs: durationMs === undefined ? undefined : Math.max(0, durationMs - pausedMs),
+    };
+  }
+  if (group.work.waiting) {
+    const { untimed, since, ...waiting } = group.work.waiting;
+    return { kind: "waiting", ...waiting, ...(untimed ? {} : { since }) };
+  }
+  const started = Date.parse(group.work.startedAt);
+  return {
+    kind: "working",
+    since:
+      pausedMs > 0 && Number.isFinite(started)
+        ? new Date(started + pausedMs).toISOString()
+        : group.work.startedAt,
+  };
 }
 
 /** Whether a readable turn's work fold starts expanded. */
 export function readableWorkDefaultOpen(group: ActivityGroup): true | undefined {
-  const phases = group.items.filter((item) => item.kind === "startup-phase");
   return timelineGroupContainsPresentedImage(group) ||
     group.outcome === "failed" ||
-    phases.some((item) => item.status === "failed" || item.status === "cancelled")
+    group.items.some(
+      (item) =>
+        item.kind === "startup-phase" &&
+        (item.status === "failed" ||
+          // A cancelled phase with a blocked reason is an expected wait (for
+          // example compacting the conversation first), not an interruption.
+          (item.status === "cancelled" && !item.blockedReason)),
+    )
     ? true
     : undefined;
 }

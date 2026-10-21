@@ -13,6 +13,14 @@ import { actRun, flush, registerDom, renderComponent } from "./render-hook";
 
 registerDom();
 
+async function waitFor(condition: () => boolean, message: string): Promise<void> {
+  const deadline = Date.now() + 3_000;
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(message);
+    await flush(10);
+  }
+}
+
 const WS = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const S = "aaaaaaaa-0000-4000-8000-000000000001";
 const OTHER = "aaaaaaaa-0000-4000-8000-000000000009";
@@ -271,6 +279,7 @@ async function mountStockChat(
   props: Partial<OpenGeniChatProps> = {},
   rewriteConfig: (config: Record<string, unknown>) => Record<string, unknown> = (config) => config,
   withGoal = false,
+  beforeBrowserResponse?: (path: string) => Promise<void>,
 ): Promise<Mounted> {
   const events = conversation().map((event, index) => ({
     id: `eeeeeeee-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
@@ -546,6 +555,7 @@ async function mountStockChat(
       code = ((await response.clone().json()) as { error?: { code?: string } }).error?.code ?? "";
     }
     browser.push(`${response.status} ${init?.method ?? "GET"} ${path} ${code}`.trim());
+    await beforeBrowserResponse?.(path);
     return response;
   }) as typeof fetch;
 
@@ -683,10 +693,28 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
       [{ realtimeVoice: true }, {}],
       [{}, { conversationProps: { realtimeVoice: true } }],
     ] as const) {
-      const chat = await mountStockChat(proxy, props);
-      expect(chat.browser).toContain(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`);
-      expect(voiceButton(chat.container)).not.toBeNull();
-      await unmountChat();
+      let releaseCatalog!: () => void;
+      const catalogDelivery = new Promise<void>((resolve) => {
+        releaseCatalog = resolve;
+      });
+      try {
+        const chat = await mountStockChat(proxy, props, undefined, false, async (path) => {
+          if (path.endsWith("/realtime-model-catalog")) await catalogDelivery;
+        });
+        await waitFor(
+          () => chat.browser.includes(`200 GET /v1/workspaces/${WS}/realtime-model-catalog`),
+          "the proxy did not return the realtime model catalog",
+        );
+        // A recorded HTTP 200 precedes response delivery and the React commit.
+        // Prove both opt-in paths tolerate that gap, then await the visible control.
+        expect(voiceButton(chat.container)).toBeNull();
+        releaseCatalog();
+        await waitFor(() => voiceButton(chat.container) !== null, "live voice did not render");
+        expect(voiceButton(chat.container)).not.toBeNull();
+      } finally {
+        releaseCatalog();
+        await unmountChat();
+      }
     }
     const refused = await mountStockChat(
       { realtimeVoice: false },
@@ -739,29 +767,39 @@ describe("stock OpenGeniChat behind the default session proxy", () => {
     ).toBe(false);
   });
 
-  test("an older proxy that refuses chat creation reads as unavailable, not as an error", async () => {
-    // An older proxy reports no capability flags; its create route still refuses.
-    const chat = await mountStockChat({}, { defaultSessionId: undefined }, (config) => {
-      const { sessionCreation: _created, ...rest } = config;
-      return rest;
-    });
-    const textarea = chat.container.querySelector("textarea") as HTMLTextAreaElement;
-    await actRun(() => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
-        textarea,
-        "hello",
+  for (const unavailable of [undefined, "Starting chats is turned off."]) {
+    test(`an older proxy that refuses chat creation uses ${unavailable ? "custom" : "default"} unavailable copy`, async () => {
+      // An older proxy reports no capability flags; its create route still refuses.
+      const chat = await mountStockChat(
+        {},
+        {
+          defaultSessionId: undefined,
+          labels: unavailable ? { newChatUnavailable: unavailable } : undefined,
+        },
+        (config) => {
+          const { sessionCreation: _created, ...rest } = config;
+          return rest;
+        },
       );
-      const props = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
-      (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[
-        props
-      ]!.onChange({ target: textarea });
+      const textarea = chat.container.querySelector("textarea") as HTMLTextAreaElement;
+      await actRun(() => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")!.set!.call(
+          textarea,
+          "hello",
+        );
+        const props = Object.keys(textarea).find((key) => key.startsWith("__reactProps$"))!;
+        (textarea as unknown as Record<string, { onChange: (event: unknown) => void }>)[
+          props
+        ]!.onChange({ target: textarea });
+      });
+      await flush(50);
+      expect(await chat.click(/^Send/)).toBe(true);
+      await flush(200);
+      expect(chat.browser).toContain(`404 POST /v1/workspaces/${WS}/sessions route_not_allowed`);
+      expect(
+        [...chat.container.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
+      ).toEqual([unavailable ?? "New chats are not enabled for this product."]);
+      expect(chat.upstream.some((line) => line.startsWith("POST "))).toBe(false);
     });
-    await flush(50);
-    expect(await chat.click(/^Send/)).toBe(true);
-    await flush(200);
-    expect(chat.browser).toContain(`404 POST /v1/workspaces/${WS}/sessions route_not_allowed`);
-    expect(
-      [...chat.container.querySelectorAll('[role="alert"]')].map((alert) => alert.textContent),
-    ).toEqual(["New chats are not enabled for this product."]);
-  });
+  }
 });

@@ -15,6 +15,7 @@ import { sandboxAcceptsLiveIo } from "../lib/sandbox-liveness";
 import { terminalCanAcquirePty } from "../lib/terminal-capability";
 import { attachRenderer, type RendererLoaders, type RendererTier } from "../lib/xterm-renderer";
 import { sandboxTerminalPeers } from "../lib/workbench-peers";
+import { useOpenGeniText } from "../messages/runtime";
 
 /**
  * A COMPLETE xterm `ITheme` (subset by intent, but every field xterm colors a
@@ -250,6 +251,7 @@ export function SandboxTerminal({
   onReconnectNeeded,
   className,
 }: SandboxTerminalProps) {
+  const t = useOpenGeniText();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<XtermLike | null>(null);
   const fitRef = useRef<FitAddonLike | null>(null);
@@ -276,6 +278,8 @@ export function SandboxTerminal({
     write: ptyWrite,
     resize: resizePty,
     connected: ptyConnected,
+    inputReadiness,
+    useLegacyInput,
   } = useTerminalStream({
     // Connect only after xterm exists. This makes the renderer the sole output
     // owner from the first websocket frame and removes an otherwise unbounded
@@ -287,6 +291,8 @@ export function SandboxTerminal({
             url: ptyDescriptor ? terminalCapability!.url : null,
             token: ptyDescriptor ? terminalCapability!.token : null,
             expiresAt: ptyDescriptor ? terminalCapability!.expiresAt : null,
+            ptyCapable: terminalCapability!.ptyCapable,
+            reason: terminalCapability!.reason,
           }
         : null,
     onOutput: (data) => {
@@ -298,7 +304,8 @@ export function SandboxTerminal({
   // A pty-ws capability exclusively owns the screen even while connecting or
   // after a visible connection failure; never silently switch one terminal UI
   // between two PTYs. Input is enabled during the handshake because the stream
-  // hook buffers it strictly and flushes only after ttyd auth succeeds.
+  // hook buffers it strictly until negotiated readiness. Old servers are
+  // explicitly legacy: their transport-open state is not shell readiness.
   const ptyMode = ptyDescriptor;
   // Keep xterm stdin live for an attachable descriptor even before its URL has
   // arrived. Focus/click triggers the grant; any immediately following input is
@@ -311,11 +318,16 @@ export function SandboxTerminal({
   const acceptsInput = inputReady && (!ptyAttachable || ptyConnected);
   const inputPending = inputReady && ptyAttachable && !ptyConnected && activated;
   let terminalModeLabel: string | null;
-  if (readOnly) terminalModeLabel = "read-only";
-  else if (!ptyAttachable) terminalModeLabel = acceptsInput ? null : "output only";
-  else if (ptyStatus === "error") terminalModeLabel = "connection error";
-  else if (acceptsInput) terminalModeLabel = null;
-  else terminalModeLabel = activated ? "connecting" : "connect on input";
+  if (readOnly) terminalModeLabel = t("sandboxTerminal.readOnly");
+  else if (!ptyAttachable)
+    terminalModeLabel = acceptsInput ? null : t("sandboxTerminal.outputOnly");
+  else if (ptyStatus === "error") terminalModeLabel = t("sandboxTerminal.connectionError");
+  else if (acceptsInput)
+    terminalModeLabel = inputReadiness === "legacy" ? t("sandboxTerminal.legacyInput") : null;
+  else
+    terminalModeLabel = activated
+      ? t("sandboxTerminal.connecting")
+      : t("sandboxTerminal.connectOnInput");
 
   // Boot-in-terminal: after the user engages a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
@@ -535,13 +547,15 @@ export function SandboxTerminal({
       const s = Math.max(0, Math.round((Date.now() - start) / 1000));
       // Bright-blue dot (accent) + dim label; `\r` + clear-line keeps it on one
       // line so the counter updates in place.
-      term.write(`\r\x1b[2K\x1b[94m●\x1b[0m \x1b[2mwaking machine — ${s}s…\x1b[0m`);
+      term.write(
+        `\r\x1b[2K\x1b[94m●\x1b[0m \x1b[2m${t("sandboxTerminal.wakingMachineSeconds", { seconds: s })}\x1b[0m`,
+      );
     };
     term.write("\r\n");
     paint();
     const id = setInterval(paint, 1000);
     return () => clearInterval(id);
-  }, [ready, booting]);
+  }, [ready, booting, t]);
 
   // Write new firehose chunks incrementally — ONLY in firehose mode. In PTY mode
   // the ttyd socket owns the screen. Records that a real transcript exists so the
@@ -619,13 +633,20 @@ export function SandboxTerminal({
                 result.running ? "bg-og-status-running" : "bg-og-fg-subtle",
               )}
             />
-            <span className="truncate font-og-mono">pty: {shell ?? "shell"}</span>
+            <span className="truncate font-og-mono">
+              {t("sandboxTerminal.pty")} {shell ?? t("sandboxTerminal.shell")}
+            </span>
           </span>
           <span className="flex shrink-0 items-center gap-2">
             {terminalModeLabel && (
               <span
                 className="rounded-og-sm bg-og-surface-2 px-1.5 py-0.5 text-og-xs uppercase tracking-wide"
                 role="status"
+                title={
+                  inputReadiness === "legacy"
+                    ? t("sandboxTerminal.shellReadinessIsNotGuaranteed")
+                    : undefined
+                }
               >
                 {terminalModeLabel}
               </span>
@@ -639,9 +660,30 @@ export function SandboxTerminal({
               }}
               className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-11"
             >
-              Clear
+              {t("sandboxTerminal.clear")}
             </button>
           </span>
+        </div>
+      )}
+      {ptyAttachable && !readOnly && !showHeader && inputReadiness === "legacy" && (
+        <p role="status" className="shrink-0 px-3 py-1 text-og-xs text-og-fg-subtle">
+          {t("sandboxTerminal.legacyInputWaitForShell")}
+        </p>
+      )}
+      {ptyAttachable && !readOnly && inputReadiness === "waiting" && (
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b border-og-border px-3 py-2 text-og-xs text-og-fg-subtle">
+          <span role="status">{t("sandboxTerminal.waitingForShellReadinessManual")}</span>
+          <button
+            type="button"
+            onClick={() => {
+              useLegacyInput();
+              termRef.current?.focus();
+            }}
+            title={t("sandboxTerminal.useForStartupPromptsOr")}
+            className="shrink-0 rounded-og-sm px-2 py-1 text-og-fg hover:bg-og-surface-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-og-accent pointer-coarse:min-h-11"
+          >
+            {t("sandboxTerminal.useManualInput")}
+          </button>
         </div>
       )}
       {/* `onPointerDownCapture`/`onFocusCapture` fire on the FIRST user engagement
@@ -670,6 +712,7 @@ export function SandboxTerminal({
           data-opengeni-terminal-interactive={surfaceState === "interactive" ? "true" : "false"}
           data-opengeni-terminal-state={surfaceState}
           data-opengeni-terminal-status={ptyAttachable ? ptyStatus : "firehose"}
+          data-opengeni-terminal-input-readiness={ptyAttachable ? inputReadiness : "firehose"}
         />
       </div>
     </div>
@@ -727,9 +770,10 @@ function ensureXtermBaseCss(): void {
 }
 
 function TerminalPlaceholder() {
+  const t = useOpenGeniText();
   return (
     <div className="absolute inset-0 flex items-center justify-center text-og-sm text-og-fg-subtle">
-      Loading terminal…
+      {t("sandboxTerminal.loadingTerminal")}
     </div>
   );
 }

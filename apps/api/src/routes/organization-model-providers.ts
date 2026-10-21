@@ -26,7 +26,9 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 
-import { requireOrganizationCodexHuman, requireSameOriginBrowserMutation } from "./codex";
+import { offerClaudeDefaultModels } from "../claude-default-models";
+import { requireOrganizationCodexHuman } from "./codex";
+import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 
 const OrganizationId = z.string().uuid();
 
@@ -180,6 +182,12 @@ export function registerOrganizationModelProviderRoutes(app: Hono, deps: ApiRout
           ? {}
           : { expectedVersion: payload.expectedVersion }),
       });
+      if (kind === "anthropic")
+        await offerClaudeDefaultModels(deps, {
+          organizationId,
+          actorSubjectId: human.subjectId,
+          providerKind: kind,
+        });
       return c.json(connectionJson(connection));
     } catch (error) {
       conflict(error);

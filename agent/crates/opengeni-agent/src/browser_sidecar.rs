@@ -19,21 +19,31 @@ use std::{
 
 use async_trait::async_trait;
 use opengeni_agent_platform::{
-    BrowserControlBackend, BrowserControlEndpoint, PlatformError, PlatformResult,
+    BrowserControlBackend, BrowserControlEndpoint, PlatformError, PlatformResult, UpdateAdmission,
+    UpdateBlocker,
 };
 use opengeni_agent_proto::v1;
 use serde::Deserialize;
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncReadExt as _, BufReader},
-    process::{Child, ChildStderr, Command},
+    process::{Child, ChildStderr, ChildStdin, Command},
     sync::Mutex,
     task::JoinHandle,
+    time::Instant,
 };
 
 const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
 const AGENT_BROWSER_BINARY_ENV: &str = "OPENGENI_BROWSERD_AGENT_BROWSER_BINARY";
 const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
+/// Helper file names. People see them as process names (Activity Monitor, Task
+/// Manager), so they carry no product name: an app that runs this agent under its
+/// own name shows only that name.
+pub(crate) const BROWSERD_FILE: &str = "browserd";
+pub(crate) const COMPUTER_NATIVE_FILE: &str = "computer-native";
+/// The names installer layouts and earlier releases put beside the agent.
+const LEGACY_BROWSERD_FILE: &str = "opengeni-browserd";
+const LEGACY_COMPUTER_NATIVE_FILE: &str = "opengeni-computer-native";
 const READY_TIMEOUT: Duration = Duration::from_secs(20);
 const MAX_READY_LINE_BYTES: usize = 4_096;
 const MAX_STARTUP_DIAGNOSTIC_BYTES: usize = 4_096;
@@ -45,11 +55,31 @@ const MAX_ORIGIN_BYTES: usize = 2_048;
 const MIN_TOKEN_BYTES: usize = 32;
 const MAX_TOKEN_BYTES: usize = 2_048;
 const IDLE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const MAX_IDLE_RESPONSE_BYTES: usize = 1_024;
+/// How often the agent looks for controllers that hold nothing.
+const EMPTY_CONTROLLER_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+/// A controller that stayed empty, and was not ensured, for this long is
+/// stopped. Every scope (workspace, placement kind and placement) has its own
+/// controller; without this one per scope ever used stays resident until the
+/// agent exits. The next ensure starts a fresh one in about a second.
+const EMPTY_CONTROLLER_GRACE: Duration = Duration::from_secs(10 * 60);
+/// browserd opt-in: exit gracefully when the agent's end of stdin closes.
+const PARENT_LIFELINE_ENV: &str = "OPENGENI_BROWSERD_PARENT_LIFELINE";
+// The controller summarizes at most 32 kinds plus overflow, without IDs.
+// Keep a byte bound as well as that cardinality bound.
+const MAX_IDLE_RESPONSE_BYTES: usize = 8_192;
 
 #[derive(Debug)]
 struct Sidecar {
     child: Child,
+    /// The write end of the controller's stdin. Never written; the kernel
+    /// closes it however this process ends (crash, SIGKILL, exec), and the
+    /// controller then shuts down instead of outliving its agent in its own
+    /// process group.
+    _lifeline: ChildStdin,
+    /// Last ensure or resolve of this scope.
+    last_used: Instant,
+    /// When the controller was first seen holding nothing, if it still is.
+    empty_since: Option<Instant>,
     stderr_task: JoinHandle<()>,
     endpoint: BrowserControlEndpoint,
     scope_generation: String,
@@ -57,6 +87,30 @@ struct Sidecar {
     token_file: PathBuf,
     allowed_origins: Vec<String>,
     pending_update: Option<String>,
+    exit_reported: bool,
+    /// The controller's own process group (it is spawned as its leader).
+    process_group: Option<u32>,
+}
+
+impl Sidecar {
+    /// Polls the controller process, recording an unexpected exit and its
+    /// status once. Its stderr is already in the agent log; the status is what
+    /// tells a crash (signal) from a clean exit apart afterwards.
+    fn try_wait_logged(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if let Some(status) = status {
+            if !self.exit_reported {
+                self.exit_reported = true;
+                tracing::warn!(
+                    service = "opengeni-browserd",
+                    port = self.endpoint.port,
+                    %status,
+                    "browser controller exited unexpectedly"
+                );
+            }
+        }
+        Ok(status)
+    }
 }
 
 /// Process owner for browserd children installed beside the connected agent.
@@ -66,6 +120,16 @@ pub struct BrowserSidecarManager {
     binary: PathBuf,
     sidecars: Mutex<HashMap<String, Sidecar>>,
     update_drain: Arc<crate::uploads::update_drain::UpdateDrain>,
+    /// Process groups of controllers that ended without a clean cooperative
+    /// stop. Updates wait until nothing remains in them; see
+    /// `record_unclean_exit`.
+    unclean_exits: std::sync::Mutex<Vec<u32>>,
+    /// The local attached-Chrome inventory, once the bridge is listening.
+    attached: std::sync::OnceLock<crate::browser_bridge::BrowserBridgeInventory>,
+    /// Pooled loopback client for controller requests.
+    http_client: reqwest::Client,
+    /// Remainders of controller responses too large for one reply.
+    http_spool: std::sync::Mutex<crate::browser_control_http::ResponseSpool>,
 }
 
 impl BrowserSidecarManager {
@@ -100,6 +164,10 @@ impl BrowserSidecarManager {
             binary,
             sidecars: Mutex::new(HashMap::new()),
             update_drain: Arc::default(),
+            unclean_exits: std::sync::Mutex::default(),
+            attached: std::sync::OnceLock::new(),
+            http_client: crate::browser_control_http::client()?,
+            http_spool: std::sync::Mutex::default(),
         })
     }
 
@@ -110,6 +178,73 @@ impl BrowserSidecarManager {
     ) -> Self {
         self.update_drain = drain;
         self
+    }
+
+    /// Records a controller that ended without a clean cooperative stop
+    /// (crashed, killed, timed out or failed to start). It may have left
+    /// helpers behind, so updates wait until its private process group is
+    /// empty. The browsers it launched run in their own sessions and are meant
+    /// to outlive it (its successor adopts them), so they never count. Where
+    /// a process group cannot be observed, the host stays unsettled.
+    fn record_unclean_exit(&self, process_group: Option<u32>) {
+        #[cfg(unix)]
+        if let Some(group) = process_group {
+            if let Ok(mut groups) = self.unclean_exits.lock() {
+                if !groups.contains(&group) {
+                    groups.push(group);
+                }
+                return;
+            }
+        }
+        let _ = process_group;
+        self.update_drain.mark_unsettled(format!(
+            "browser controller {process_group:?} exited without observable process-group cleanup"
+        ));
+    }
+
+    /// Whether nothing remains of any controller that ended uncleanly.
+    fn unclean_exits_settled(&self) -> bool {
+        let Ok(mut groups) = self.unclean_exits.lock() else {
+            return false;
+        };
+        groups.retain(|group| process_group_is_alive(*group));
+        groups.is_empty()
+    }
+
+    /// Removes controllers that already exited from the map, recording each
+    /// as an unclean exit. Only an unreadable process state is unprovable.
+    fn retire_exited_sidecars(
+        &self,
+        sidecars: &mut HashMap<String, Sidecar>,
+    ) -> PlatformResult<()> {
+        let mut exited = Vec::new();
+        for (scope_id, sidecar) in sidecars.iter_mut() {
+            match sidecar.try_wait_logged() {
+                Ok(None) => {}
+                Ok(Some(_)) => exited.push(scope_id.clone()),
+                Err(_) => {
+                    return Err(PlatformError::os(
+                        "browser controller process state unavailable",
+                    ));
+                }
+            }
+        }
+        for scope_id in exited {
+            if let Some(sidecar) = sidecars.remove(&scope_id) {
+                sidecar.stderr_task.abort();
+                self.record_unclean_exit(sidecar.process_group);
+            }
+        }
+        Ok(())
+    }
+
+    /// Lets the update gate see which attached-Chrome placements would not
+    /// survive a restart of this process.
+    pub fn observe_attached_inventory(
+        &self,
+        inventory: crate::browser_bridge::BrowserBridgeInventory,
+    ) {
+        let _ = self.attached.set(inventory);
     }
 
     /// Gracefully stops every scoped browser controller so it can terminate
@@ -128,9 +263,77 @@ impl BrowserSidecarManager {
         futures::future::join_all(
             sidecars
                 .into_iter()
-                .map(|sidecar| stop_sidecar(sidecar, &self.update_drain)),
+                .map(|sidecar| stop_sidecar(sidecar, self)),
         )
         .await;
+    }
+
+    #[cfg(test)]
+    async fn sidecar_pid(&self, scope_id: &str) -> Option<u32> {
+        self.sidecars.lock().await.get(scope_id)?.child.id()
+    }
+
+    /// Stops controllers that hold nothing in the background, checking every
+    /// minute. The task ends with the manager.
+    pub fn spawn_empty_controller_reaper(self: &Arc<Self>) {
+        let manager = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(EMPTY_CONTROLLER_CHECK_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let Some(manager) = manager.upgrade() else {
+                    return;
+                };
+                manager
+                    .retire_empty_controllers(EMPTY_CONTROLLER_GRACE)
+                    .await;
+            }
+        });
+    }
+
+    /// Stops each controller that has reported holding no session for at least
+    /// `grace` and has not been ensured or resolved within it. A controller
+    /// with any session, retained browser, in-flight work or pending update is
+    /// kept. Returns how many were stopped.
+    async fn retire_empty_controllers(&self, grace: Duration) -> usize {
+        if self.update_drain.is_draining() {
+            return 0;
+        }
+        let Ok(client) = runtime_client() else {
+            return 0;
+        };
+        // Hold the map across the decision and the stop, so an ensure for the
+        // same scope cannot start a second controller on its state root.
+        let mut sidecars = self.sidecars.lock().await;
+        let now = Instant::now();
+        let mut retiring = Vec::new();
+        for (scope_id, sidecar) in sidecars.iter_mut() {
+            let empty = sidecar.pending_update.is_none()
+                && matches!(sidecar.try_wait_logged(), Ok(None))
+                && sidecar_is_empty(&client, sidecar).await.unwrap_or(false);
+            if !empty {
+                sidecar.empty_since = None;
+                continue;
+            }
+            let since = *sidecar.empty_since.get_or_insert(now);
+            if now.duration_since(since) >= grace && now.duration_since(sidecar.last_used) >= grace
+            {
+                retiring.push(scope_id.clone());
+            }
+        }
+        for scope_id in &retiring {
+            if let Some(sidecar) = sidecars.remove(scope_id) {
+                tracing::info!(
+                    service = "opengeni-browserd",
+                    port = sidecar.endpoint.port,
+                    "stopping a browser controller that holds no sessions"
+                );
+                stop_sidecar(sidecar, self).await;
+            }
+        }
+        retiring.len()
     }
 
     async fn start(
@@ -153,7 +356,8 @@ impl BrowserSidecarManager {
         let mut command = Command::new(&self.binary);
         command
             .kill_on_drop(true)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
+            .env(PARENT_LIFELINE_ENV, "stdin")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .env("OPENGENI_BROWSERD_ROOT", root.join("state"))
@@ -178,13 +382,9 @@ impl BrowserSidecarManager {
         let mut child = command
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            self.update_drain.mark_unsettled();
-            PlatformError::os("browser controller sidecar stdout was not captured")
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            self.update_drain.mark_unsettled();
-            PlatformError::os("browser controller sidecar stderr was not captured")
+        let process_group = child.id();
+        let (lifeline, stdout, stderr) = take_sidecar_pipes(&mut child).inspect_err(|_| {
+            self.record_unclean_exit(process_group);
         })?;
         let stderr_diagnostic = Arc::new(Mutex::new(Vec::new()));
         let stderr_task = tokio::spawn(drain_bounded_stderr(
@@ -201,7 +401,7 @@ impl BrowserSidecarManager {
         let ready = match ready {
             Ok(ready) => ready,
             Err(error) => {
-                self.update_drain.mark_unsettled();
+                self.record_unclean_exit(process_group);
                 return Err(stop_with_startup_diagnostic(
                     child,
                     stderr_task,
@@ -213,7 +413,7 @@ impl BrowserSidecarManager {
             }
         };
         if let Some(mismatches) = ready_document_mismatches(&ready, admin_token) {
-            self.update_drain.mark_unsettled();
+            self.record_unclean_exit(process_group);
             return Err(stop_with_startup_diagnostic(
                 child,
                 stderr_task,
@@ -227,6 +427,9 @@ impl BrowserSidecarManager {
         }
         Ok(Sidecar {
             child,
+            _lifeline: lifeline,
+            last_used: Instant::now(),
+            empty_since: None,
             stderr_task,
             endpoint: BrowserControlEndpoint {
                 port: ready.port,
@@ -237,24 +440,44 @@ impl BrowserSidecarManager {
             token_file,
             allowed_origins: allowed_origins.to_vec(),
             pending_update: None,
+            exit_reported: false,
+            process_group,
         })
     }
 }
 
+fn take_sidecar_pipes(
+    child: &mut Child,
+) -> PlatformResult<(ChildStdin, tokio::process::ChildStdout, ChildStderr)> {
+    let missing = |pipe: &str| {
+        PlatformError::os(format!(
+            "browser controller sidecar {pipe} was not captured"
+        ))
+    };
+    Ok((
+        child.stdin.take().ok_or_else(|| missing("lifeline"))?,
+        child.stdout.take().ok_or_else(|| missing("stdout"))?,
+        child.stderr.take().ok_or_else(|| missing("stderr"))?,
+    ))
+}
+
 fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
-    for (environment, name) in [
-        (AGENT_BROWSER_BINARY_ENV, companion_name("agent-browser")),
-        (LIGHTPANDA_BINARY_ENV, companion_name("lightpanda")),
+    for (environment, names) in [
+        (AGENT_BROWSER_BINARY_ENV, &["agent-browser"][..]),
+        (LIGHTPANDA_BINARY_ENV, &["lightpanda"][..]),
         (
             COMPUTER_NATIVE_BINARY_ENV,
-            companion_name("opengeni-computer-native"),
+            &[COMPUTER_NATIVE_FILE, LEGACY_COMPUTER_NATIVE_FILE][..],
         ),
     ] {
         // Explicit operator overrides remain authoritative. Release and local
         // app bundles need no configuration: companions installed beside
         // browserd are forwarded privately to the child.
         if std::env::var_os(environment).is_none() {
-            if let Some(path) = discover_companion_binary(browserd_binary, &name) {
+            if let Some(path) = names
+                .iter()
+                .find_map(|name| discover_companion_binary(browserd_binary, &companion_name(name)))
+            {
                 command.env(environment, path);
             }
         }
@@ -290,7 +513,7 @@ async fn add_allowed_origins(
 
 #[async_trait]
 impl BrowserControlBackend for BrowserSidecarManager {
-    async fn begin_update(&self, operation_id: &str) -> PlatformResult<bool> {
+    async fn begin_update(&self, operation_id: &str) -> PlatformResult<UpdateAdmission> {
         sidecars_update_admission(self, operation_id, true).await
     }
 
@@ -306,6 +529,10 @@ impl BrowserControlBackend for BrowserSidecarManager {
         // one endpoint between observation and the update decision.
         tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
             let mut sidecars = self.sidecars.lock().await;
+            self.retire_exited_sidecars(&mut sidecars)?;
+            if !self.unclean_exits_settled() {
+                return Ok(false);
+            }
             if sidecars.is_empty() {
                 return Ok(true);
             }
@@ -316,21 +543,15 @@ impl BrowserControlBackend for BrowserSidecarManager {
                 .build()
                 .map_err(|_| PlatformError::os("browser controller idle probe unavailable"))?;
             for sidecar in sidecars.values_mut() {
-                if sidecar
-                    .child
-                    .try_wait()
-                    .map_err(|_| {
-                        self.update_drain.mark_unsettled();
-                        PlatformError::os("browser controller process state unavailable")
-                    })?
-                    .is_some()
-                {
-                    self.update_drain.mark_unsettled();
-                    // A crashed controller may have left children behind. It
-                    // cannot prove idle; ordinary scoped recovery owns cleanup.
-                    return Err(PlatformError::os("browser controller is no longer running"));
-                }
                 if !sidecar_is_idle(&client, sidecar).await? {
+                    return Ok(false);
+                }
+                // A controller bound to an older extension's per-port
+                // placement would see it change when the bridge restarts,
+                // ending that profile's sessions. Wait for idle instead.
+                if self.attached.get().is_some_and(|attached| {
+                    attached.placement_ends_on_reconnect(&sidecar.scope_generation)
+                }) {
                     return Ok(false);
                 }
             }
@@ -358,21 +579,19 @@ impl BrowserControlBackend for BrowserSidecarManager {
         let mut sidecars = self.sidecars.lock().await;
         if let Some(existing) = sidecars.get_mut(scope_id) {
             let live = existing
-                .child
-                .try_wait()
+                .try_wait_logged()
                 .map_err(|error| {
-                    self.update_drain.mark_unsettled();
                     PlatformError::from_io("inspect browser controller sidecar", &error)
                 })?
                 .is_none();
-            if !live {
-                self.update_drain.mark_unsettled();
-            }
+            // An exited controller is replaced below; stopping it records the
+            // unclean exit.
             if live
                 && existing.scope_generation == scope_generation
                 && existing.token_digest == token_digest
             {
                 recover_update_admission(existing, &self.update_drain).await?;
+                existing.last_used = Instant::now();
                 let additions = allowed_origins
                     .iter()
                     .filter(|origin| !existing.allowed_origins.contains(origin))
@@ -393,7 +612,7 @@ impl BrowserControlBackend for BrowserSidecarManager {
             ));
         }
         if let Some(stale) = sidecars.remove(scope_id) {
-            stop_sidecar(stale, &self.update_drain).await;
+            stop_sidecar(stale, self).await;
         }
         let sidecar = self
             .start(scope_id, scope_generation, admin_token, &allowed_origins)
@@ -424,28 +643,76 @@ impl BrowserControlBackend for BrowserSidecarManager {
             ));
         }
         if sidecar
-            .child
-            .try_wait()
-            .map_err(|error| {
-                self.update_drain.mark_unsettled();
-                PlatformError::from_io("inspect browser controller sidecar", &error)
-            })?
+            .try_wait_logged()
+            .map_err(|error| PlatformError::from_io("inspect browser controller sidecar", &error))?
             .is_some()
         {
-            self.update_drain.mark_unsettled();
             sidecar.stderr_task.abort();
+            let process_group = sidecar.process_group;
             sidecars.remove(scope_id);
+            self.record_unclean_exit(process_group);
             return Err(PlatformError::NotFound(
                 "browser controller sidecar is no longer running".to_string(),
             ));
         }
         recover_update_admission(sidecar, &self.update_drain).await?;
+        sidecar.last_used = Instant::now();
         Ok(sidecar.endpoint.clone())
+    }
+
+    fn http_supported(&self) -> bool {
+        true
+    }
+
+    async fn http(
+        &self,
+        req: &v1::BrowserControlHttpRequest,
+        inline_limit: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpResponse> {
+        let checked = crate::browser_control_http::check(req)?;
+        // A replaced generation means the caller's controller is gone; like a
+        // missing one, nothing was sent, so it may ensure and send again.
+        let endpoint = self
+            .resolve(&req.scope_id, &req.scope_generation)
+            .await
+            .map_err(|error| match error {
+                PlatformError::Unsupported(message) => PlatformError::NotFound(message),
+                other => other,
+            })?;
+        crate::browser_control_http::send(
+            &self.http_client,
+            endpoint.port,
+            req,
+            checked,
+            inline_limit,
+            &self.http_spool,
+        )
+        .await
+    }
+
+    async fn http_read(
+        &self,
+        req: &v1::BrowserControlHttpReadRequest,
+        max_bytes: Option<usize>,
+    ) -> PlatformResult<v1::BrowserControlHttpReadResponse> {
+        self.http_spool
+            .lock()
+            .map_err(|_| PlatformError::os("browser controller response spool is unavailable"))?
+            .read(req, max_bytes)
     }
 }
 
 async fn sidecar_is_idle(client: &reqwest::Client, sidecar: &Sidecar) -> PlatformResult<bool> {
-    sidecar_runtime_request(client, sidecar, None).await
+    Ok(sidecar_runtime_request(client, sidecar, None).await?.idle)
+}
+
+/// Whether the controller reports that it holds no session at all. A
+/// controller from before this report never counts as empty.
+async fn sidecar_is_empty(client: &reqwest::Client, sidecar: &Sidecar) -> PlatformResult<bool> {
+    Ok(sidecar_runtime_request(client, sidecar, None)
+        .await?
+        .empty
+        .unwrap_or(false))
 }
 
 fn runtime_client() -> PlatformResult<reqwest::Client> {
@@ -486,18 +753,24 @@ async fn sidecars_update_admission(
     manager: &BrowserSidecarManager,
     operation_id: &str,
     begin: bool,
-) -> PlatformResult<bool> {
+) -> PlatformResult<UpdateAdmission> {
     tokio::time::timeout(IDLE_PROBE_TIMEOUT, async {
         let mut sidecars = manager.sidecars.lock().await;
+        manager.retire_exited_sidecars(&mut sidecars)?;
         let client = runtime_client()?;
-        let mut idle = true;
+        // A controller that ended uncleanly holds the update back (busy, not
+        // failed) until nothing of it remains.
+        let mut idle = manager.unclean_exits_settled();
+        let mut blockers = Vec::new();
+        if !idle {
+            blockers.push(UpdateBlocker {
+                kind: "controller_process_cleanup".into(),
+                resource_id: String::new(),
+                count: 1,
+            });
+        }
         let mut failure = None;
         for sidecar in sidecars.values_mut() {
-            if !matches!(sidecar.child.try_wait(), Ok(None)) {
-                manager.update_drain.mark_unsettled();
-                failure = Some(PlatformError::os("browser controller is no longer running"));
-                continue;
-            }
             if let Some(previous) = sidecar.pending_update.clone() {
                 if previous != operation_id {
                     if !begin {
@@ -517,8 +790,16 @@ async fn sidecars_update_admission(
                 sidecar.pending_update = Some(operation_id.to_owned());
             }
             match sidecar_runtime_request(&client, sidecar, Some((operation_id, begin))).await {
-                Ok(scope_idle) => {
-                    idle &= scope_idle;
+                Ok(state) => {
+                    idle &= state.idle;
+                    if !state.idle && state.blockers.is_empty() {
+                        blockers.push(UpdateBlocker {
+                            kind: "controller_unknown".into(),
+                            resource_id: String::new(),
+                            count: 1,
+                        });
+                    }
+                    blockers.extend(state.blockers);
                     if !begin {
                         sidecar.pending_update = None;
                     }
@@ -528,7 +809,7 @@ async fn sidecars_update_admission(
         }
         match failure {
             Some(error) => Err(error),
-            None => Ok(idle),
+            None => Ok(UpdateAdmission { idle, blockers }),
         }
     })
     .await
@@ -539,7 +820,7 @@ async fn sidecar_runtime_request(
     client: &reqwest::Client,
     sidecar: &Sidecar,
     update: Option<(&str, bool)>,
-) -> PlatformResult<bool> {
+) -> PlatformResult<RuntimeIdleState> {
     // Read the existing owner-only authority instead of keeping another bearer
     // in the manager's printable state. Refuse mutable authority drift.
     let file = tokio::fs::File::open(&sidecar.token_file)
@@ -609,7 +890,7 @@ async fn sidecar_runtime_request(
             "browser controller idle proof incompatible",
         ));
     }
-    Ok(proof.data.idle)
+    Ok(proof.data)
 }
 
 #[derive(Deserialize)]
@@ -625,12 +906,16 @@ struct RuntimeIdleResponse {
 struct RuntimeIdleState {
     idle: bool,
     #[serde(default)]
+    blockers: Vec<UpdateBlocker>,
+    #[serde(default)]
+    empty: Option<bool>,
+    #[serde(default)]
     operation_id: Option<String>,
     #[serde(default)]
     released: Option<bool>,
 }
 
-async fn stop_sidecar(mut sidecar: Sidecar, drain: &crate::uploads::update_drain::UpdateDrain) {
+async fn stop_sidecar(mut sidecar: Sidecar, manager: &BrowserSidecarManager) {
     let cooperative = matches!(sidecar.child.try_wait(), Ok(None))
         && signal_sidecar_termination(&mut sidecar.child);
     match tokio::time::timeout(
@@ -643,11 +928,11 @@ async fn stop_sidecar(mut sidecar: Sidecar, drain: &crate::uploads::update_drain
     {
         Ok(Ok(status)) if cooperative && status.success() => {}
         result => {
-            drain.mark_unsettled();
             if result.is_err() {
                 let _ = sidecar.child.kill().await;
                 let _ = sidecar.child.wait().await;
             }
+            manager.record_unclean_exit(sidecar.process_group);
         }
     }
     if tokio::time::timeout(Duration::from_secs(1), &mut sidecar.stderr_task)
@@ -678,6 +963,28 @@ fn signal_sidecar_termination(child: &mut Child) -> bool {
 #[cfg(windows)]
 fn signal_sidecar_termination(child: &mut Child) -> bool {
     let _ = child.start_kill();
+    false
+}
+
+/// Whether any process of ours remains in `group`. A group owned by another
+/// user can only be an unrelated reuse of the id, so it does not count.
+#[cfg(unix)]
+fn process_group_is_alive(group: u32) -> bool {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    let Ok(group) = i32::try_from(group) else {
+        return false;
+    };
+    !matches!(
+        killpg(Pid::from_raw(group), None),
+        Err(Errno::ESRCH | Errno::EPERM)
+    )
+}
+
+#[cfg(not(unix))]
+fn process_group_is_alive(_group: u32) -> bool {
     false
 }
 
@@ -866,6 +1173,9 @@ fn append_platform_error(error: PlatformError, diagnostic: &str) -> PlatformErro
             message: format!("{message}; {diagnostic}"),
             retryable,
         },
+        PlatformError::RunAsUnknownUser(message) => {
+            PlatformError::RunAsUnknownUser(format!("{message}; {diagnostic}"))
+        }
     }
 }
 
@@ -890,16 +1200,17 @@ fn discover_browserd_binary() -> PlatformResult<PathBuf> {
         let executable = std::env::current_exe()
             .map_err(|error| PlatformError::from_io("resolve running agent path", &error))?;
         let parent = executable.parent().unwrap_or_else(|| Path::new("."));
-        let name = if cfg!(windows) {
-            "opengeni-browserd.exe"
-        } else {
-            "opengeni-browserd"
-        };
-        vec![
-            parent.join(name),
-            parent.join("../Helpers").join(name),
-            parent.join("../Resources").join(name),
-        ]
+        [BROWSERD_FILE, LEGACY_BROWSERD_FILE]
+            .into_iter()
+            .map(companion_name)
+            .flat_map(|name| {
+                [
+                    parent.join(&name),
+                    parent.join("../Helpers").join(&name),
+                    parent.join("../Resources").join(&name),
+                ]
+            })
+            .collect()
     };
     candidates
         .into_iter()
@@ -1113,6 +1424,320 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    fn process_is_gone(pid: u32) -> bool {
+        // An exited child of a dead parent may linger briefly as a zombie
+        // until its new parent reaps it; it no longer runs either way.
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat
+                .rsplit_once(") ")
+                .is_some_and(|(_, rest)| rest.starts_with('Z')),
+            Err(_) => true,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn http_resolves_the_exact_scope_and_never_guesses_a_port() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        assert!(manager.http_supported());
+        let request = |scope: &str, generation: &str| v1::BrowserControlHttpRequest {
+            scope_id: scope.into(),
+            scope_generation: generation.into(),
+            method: "GET".into(),
+            path: "/v1/runtime".into(),
+            bearer_token: "p".repeat(32),
+            body: prost::bytes::Bytes::new(),
+            has_body: false,
+            timeout_ms: 5_000,
+            max_response_bytes: 4_096,
+        };
+        // Nothing ensured yet: the caller learns to ensure, and nothing is sent.
+        let absent = manager
+            .http(&request("scope-http", "fixture-generation"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(absent, PlatformError::NotFound(_)), "{absent:?}");
+
+        ensure_idle_fixture(&manager, "scope-http").await;
+        let stale = manager
+            .http(&request("scope-http", "older-generation"), None)
+            .await
+            .unwrap_err();
+        assert!(matches!(stale, PlatformError::NotFound(_)), "{stale:?}");
+
+        let body = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(listener, vec![(200, body.into())]));
+        let response = manager
+            .http(&request("scope-http", "fixture-generation"), Some(16))
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.total_bytes, body.len() as u64);
+        assert_eq!(&response.body[..], &body.as_bytes()[..16]);
+        let rest = manager
+            .http_read(
+                &v1::BrowserControlHttpReadRequest {
+                    spool_id: response.spool_id,
+                    offset: 16,
+                },
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(rest.done);
+        assert_eq!(&rest.data[..], &body.as_bytes()[16..]);
+        assert!(response
+            .headers
+            .iter()
+            .any(|header| header.name == "content-type" && header.value == "application/json"));
+        manager.shutdown().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_empty_controller_is_stopped_after_its_grace_and_restarts_on_demand() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        let empty = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true,"empty":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(
+            listener,
+            vec![(200, empty.into()), (200, empty.into())],
+        ));
+        ensure_idle_fixture(&manager, "unused").await;
+        let pid = manager.sidecar_pid("unused").await.unwrap();
+        let grace = Duration::from_millis(300);
+        assert_eq!(
+            manager.retire_empty_controllers(grace).await,
+            0,
+            "the first empty report only starts the grace period"
+        );
+        tokio::time::sleep(grace + Duration::from_millis(50)).await;
+        assert_eq!(manager.retire_empty_controllers(grace).await, 1);
+        assert!(manager.sidecars.lock().await.is_empty());
+        assert!(
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+                None
+            )
+            .is_err(),
+            "the retired controller process was stopped and reaped"
+        );
+        ensure_idle_fixture(&manager, "unused").await;
+        assert_ne!(manager.sidecar_pid("unused").await.unwrap(), pid);
+        manager.shutdown().await;
+        server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn controllers_with_sessions_older_reports_or_recent_use_are_kept() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        // A retained live browser is idle (a restart preserves it) but not empty.
+        let retained = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true,"empty":false}}"#;
+        // A controller from before the `empty` report.
+        let older = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let empty = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true,"empty":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(
+            listener,
+            vec![
+                (200, retained.into()),
+                (200, older.into()),
+                (200, empty.into()),
+                (200, empty.into()),
+            ],
+        ));
+        ensure_idle_fixture(&manager, "first").await;
+        ensure_idle_fixture(&manager, "second").await;
+        assert_eq!(manager.retire_empty_controllers(Duration::ZERO).await, 0);
+        assert_eq!(manager.sidecars.lock().await.len(), 2);
+        manager.shutdown().await;
+
+        ensure_idle_fixture(&manager, "busy").await;
+        let grace = Duration::from_millis(300);
+        assert_eq!(manager.retire_empty_controllers(grace).await, 0);
+        tokio::time::sleep(grace + Duration::from_millis(50)).await;
+        // An ensure is about to create a session; the controller stays.
+        ensure_idle_fixture(&manager, "busy").await;
+        assert_eq!(manager.retire_empty_controllers(grace).await, 0);
+        assert_eq!(manager.sidecars.lock().await.len(), 1);
+        manager.shutdown().await;
+        server.await.unwrap();
+    }
+
+    const REAL_BROWSERD_ENTRYPOINT_ENV: &str = "OPENGENI_REAL_BROWSERD_ENTRYPOINT";
+    const LIFELINE_CHILD_ENV: &str = "OPENGENI_TEST_LIFELINE_AGENT_CONFIG";
+
+    #[cfg(unix)]
+    fn real_browserd_manager(config: &Path) -> BrowserSidecarManager {
+        use std::os::unix::fs::PermissionsExt as _;
+        let entrypoint = std::env::var(REAL_BROWSERD_ENTRYPOINT_ENV)
+            .expect("set OPENGENI_REAL_BROWSERD_ENTRYPOINT to packages/browserd/src/main.ts");
+        let wrapper = config.join("browserd");
+        std::fs::create_dir_all(config).unwrap();
+        // `exec` keeps the controller's PID and inherited stdin.
+        std::fs::write(&wrapper, format!("#!/bin/sh\nexec bun '{entrypoint}'\n")).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        BrowserSidecarManager::with_binary(config.join("config"), wrapper).unwrap()
+    }
+
+    /// Re-executed as the "agent" process by the lifeline test below.
+    #[cfg(unix)]
+    #[ignore = "needs bun and the browserd source (OPENGENI_REAL_BROWSERD_ENTRYPOINT)"]
+    #[tokio::test]
+    async fn real_controller_agent_process() {
+        let Some(config) = std::env::var_os(LIFELINE_CHILD_ENV) else {
+            return;
+        };
+        let manager = real_browserd_manager(Path::new(&config));
+        ensure_idle_fixture(&manager, "lifeline").await;
+        println!(
+            "browserd-pid={}",
+            manager.sidecar_pid("lifeline").await.unwrap()
+        );
+        tokio::time::sleep(Duration::from_secs(120)).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[ignore = "needs bun and the browserd source (OPENGENI_REAL_BROWSERD_ENTRYPOINT)"]
+    #[test]
+    fn a_real_controller_ends_with_its_killed_agent() {
+        use std::io::BufRead as _;
+        let directory = tempfile::tempdir().unwrap();
+        let mut agent = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "browser_sidecar::tests::real_controller_agent_process",
+                "--ignored",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(LIFELINE_CHILD_ENV, directory.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut lines = std::io::BufReader::new(agent.stdout.take().unwrap()).lines();
+        let pid = loop {
+            let line = lines
+                .next()
+                .expect("agent printed the controller pid")
+                .unwrap();
+            // libtest prints the test name on the same line.
+            if let Some((_, pid)) = line.split_once("browserd-pid=") {
+                break pid.trim().parse::<u32>().unwrap();
+            }
+        };
+        assert!(!process_is_gone(pid), "the controller is running");
+        // An abrupt agent death: no destructor or shutdown path runs.
+        agent.kill().unwrap();
+        agent.wait().unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !process_is_gone(pid) {
+            if std::time::Instant::now() > deadline {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+                panic!("the controller outlived its killed agent");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(unix)]
+    #[ignore = "needs bun and the browserd source (OPENGENI_REAL_BROWSERD_ENTRYPOINT)"]
+    #[tokio::test]
+    async fn a_real_empty_controller_is_retired_gracefully() {
+        let directory = tempfile::tempdir().unwrap();
+        let manager = real_browserd_manager(directory.path());
+        ensure_idle_fixture(&manager, "unused").await;
+        let pid = manager.sidecar_pid("unused").await.unwrap();
+        let grace = Duration::from_millis(200);
+        assert_eq!(manager.retire_empty_controllers(grace).await, 0);
+        tokio::time::sleep(grace + Duration::from_millis(50)).await;
+        assert_eq!(manager.retire_empty_controllers(grace).await, 1);
+        assert!(nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(i32::try_from(pid).unwrap()),
+            None
+        )
+        .is_err());
+        assert!(
+            manager.update_drain.snapshot().is_some(),
+            "the controller stopped cooperatively"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_older_extensions_attached_controller_holds_back_an_update() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let manager = idle_fixture_manager(directory.path(), listener.local_addr().unwrap().port());
+        let idle = r#"{"protocolVersion":1,"ok":true,"data":{"idle":true}}"#;
+        let server = tokio::spawn(serve_idle_proofs(
+            listener,
+            vec![(200, idle.into()), (200, idle.into()), (200, idle.into())],
+        ));
+        ensure_idle_fixture(&manager, "attached").await;
+        let bridge_directory = tempfile::tempdir().unwrap();
+        let bridge = crate::browser_bridge::BrowserBridgeServer::start(bridge_directory.path())
+            .await
+            .unwrap();
+        manager.observe_attached_inventory(bridge.inventory());
+        let device = "11111111-1111-4111-8111-111111111111";
+        // An older extension: its placement is the port the controller is
+        // bound to, which a restart replaces.
+        let legacy = crate::browser_bridge::test_support::connect_extension(
+            bridge_directory.path(),
+            device,
+            "fixture-generation",
+            None,
+        )
+        .await;
+        while bridge.inventory().snapshot().devices.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(
+            !manager.is_idle().await.unwrap(),
+            "a restart would end the older extension's sessions"
+        );
+        drop(legacy);
+        while !bridge.inventory().snapshot().devices.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // A current extension keeps its placement across reconnects.
+        let current = crate::browser_bridge::test_support::connect_extension(
+            bridge_directory.path(),
+            device,
+            "port-2",
+            Some("fixture-generation"),
+        )
+        .await;
+        while bridge.inventory().snapshot().devices.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(manager.is_idle().await.unwrap());
+        drop(current);
+        manager.shutdown().await;
+        bridge.shutdown().await.unwrap();
+        server.abort();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn update_idle_proof_checks_all_scopes_without_stopping_children() {
@@ -1255,7 +1880,7 @@ mod tests {
             .pending_update
             .is_none());
         assert_eq!(drain.reserve_update(&next), UpdateReservation::Started);
-        assert!(manager.begin_update(&next).await.unwrap());
+        assert!(manager.begin_update(&next).await.unwrap().idle);
         manager.release_update(&next).await.unwrap();
         drain.release_update(&next);
         server.await.unwrap();
@@ -1265,15 +1890,25 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn replacing_a_crashed_controller_does_not_erase_host_uncertainty() {
+    async fn a_crashed_controller_holds_updates_only_until_its_process_group_is_gone() {
         use crate::uploads::update_drain::{UpdateDrain, UpdateReservation};
         let directory = tempfile::tempdir().unwrap();
         let drain = Arc::new(UpdateDrain::default());
         let manager = idle_fixture_manager(directory.path(), 1).with_update_drain(drain.clone());
         ensure_idle_fixture(&manager, "scope").await;
+        // A helper the controller started in its own process group outlives
+        // the crash for a moment, like an orphaned child would.
+        let group = manager.sidecar_pid("scope").await.unwrap();
         {
             let mut sidecars = manager.sidecars.lock().await;
             let old = sidecars.get_mut("scope").unwrap();
+            let mut helper = Command::new("sh")
+                .args(["-c", "exec sleep 2"])
+                .process_group(i32::try_from(group).unwrap())
+                .spawn()
+                .unwrap();
+            // Reaped when it exits, like an orphan adopted by init.
+            tokio::spawn(async move { helper.wait().await });
             old.child.kill().await.unwrap();
             old.child.wait().await.unwrap();
         }
@@ -1282,19 +1917,31 @@ mod tests {
             .await
             .is_err());
         assert!(manager.sidecars.lock().await.is_empty());
-        assert_eq!(
-            drain.reserve_update("other-link"),
-            UpdateReservation::Unavailable
-        );
-        // Ordinary scoped recovery still works, but is not descendant-exit proof.
+        // The crash is not a permanent host failure: the update is accepted
+        // and waits (busy) while anything of the controller remains.
+        assert!(drain.snapshot().is_some());
+        assert_eq!(drain.reserve_update("update"), UpdateReservation::Started);
+        assert!(!manager.begin_update("update").await.unwrap().idle);
+        assert!(!manager.is_idle().await.unwrap());
+        manager.release_update("update").await.unwrap();
+        drain.release_update("update");
+        // Once the group is empty, the same host proves idle again.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !manager.is_idle().await.unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "crashed controller never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(drain.reserve_update("later"), UpdateReservation::Started);
+        assert!(manager.begin_update("later").await.unwrap().idle);
+        manager.release_update("later").await.unwrap();
+        drain.release_update("later");
+        // Ordinary scoped recovery still works afterwards.
         ensure_idle_fixture(&manager, "scope").await;
-        assert_eq!(drain.snapshot(), None);
-        assert_eq!(
-            drain.reserve_update("other-link"),
-            UpdateReservation::Unavailable
-        );
         manager.shutdown().await;
-        assert_eq!(drain.snapshot(), None);
+        assert!(drain.snapshot().is_some());
     }
 
     #[cfg(unix)]
@@ -1342,10 +1989,17 @@ mod tests {
         sidecar.child.start_kill().unwrap();
         sidecar.child.wait().await.unwrap();
         drop(sidecars);
-        assert!(
-            manager.is_idle().await.is_err(),
-            "crashed sidecar cannot prove child cleanup"
-        );
+        // A crashed controller is retired from the map and holds idle back
+        // only while something of its own process group remains.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !manager.is_idle().await.unwrap() {
+            assert!(
+                Instant::now() < deadline,
+                "crashed controller never settled"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(manager.sidecars.lock().await.is_empty());
         manager.shutdown().await;
     }
 
@@ -1441,7 +2095,7 @@ mod tests {
         let environment = command.as_std().get_envs().collect::<HashMap<_, _>>();
         for (key, name) in [
             (AGENT_BROWSER_BINARY_ENV, "agent-browser"),
-            (COMPUTER_NATIVE_BINARY_ENV, "opengeni-computer-native"),
+            (COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE),
         ] {
             let expected = runtime.join(companion_name(name));
             assert_eq!(
@@ -1646,9 +2300,7 @@ mod tests {
         let environment_capture = temporary.path().join("sidecar-environment");
         let agent_browser = temporary.path().join(companion_name("agent-browser"));
         let lightpanda = temporary.path().join(companion_name("lightpanda"));
-        let computer_native = temporary
-            .path()
-            .join(companion_name("opengeni-computer-native"));
+        let computer_native = temporary.path().join(companion_name(COMPUTER_NATIVE_FILE));
         for companion in [&agent_browser, &lightpanda, &computer_native] {
             std::fs::write(companion, "companion").expect("write sidecar companion");
             std::fs::set_permissions(companion, std::fs::Permissions::from_mode(0o700))

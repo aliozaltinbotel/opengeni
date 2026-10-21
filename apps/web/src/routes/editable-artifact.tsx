@@ -1,3 +1,4 @@
+import { t } from "@/lib/console-text";
 import { ArtifactSessionPage } from "@/components/session/artifact-session-page";
 import { editableArtifactKernelRuntime as documentRuntime } from "@opengeni/artifact-kernel-wasm-document";
 import { editableArtifactKernelRuntime as presentationRuntime } from "@opengeni/artifact-kernel-wasm-presentation";
@@ -22,6 +23,7 @@ import {
   resolveConsoleEditableArtifactWorkerUrl,
 } from "@/lib/editable-artifact-browser";
 import { editableArtifactClient } from "@/lib/editable-artifact-client";
+import { downloadEditableArtifact } from "@/lib/editable-artifact-download";
 
 const absoluteApiBaseUrl = new URL(apiBaseUrl || "/", window.location.origin);
 
@@ -71,6 +73,9 @@ function EditableArtifactContent({
           context.accessContext,
         ])}
         showHeader={!embedded}
+        downloadArtifact={(opened, signal) =>
+          downloadEditableArtifact(editableArtifactClient, workspaceId, opened, signal)
+        }
         describeError={(error): ArtifactLoadErrorView =>
           isArtifactReadDenied(error, context.accessContext, workspaceId)
             ? {
@@ -78,7 +83,7 @@ function EditableArtifactContent({
                 message: ARTIFACT_ACCESS_REQUIRED,
                 retryable: false,
               }
-            : artifactLoadErrorView(error, "editable")
+            : artifactLoadErrorView(t, error, "editable")
         }
         open={() =>
           loadArtifact({

@@ -248,13 +248,22 @@ function siteAuthConnection(
     origins: ["https://accounts.google.com"],
     loginUrl: "https://accounts.google.com/",
     verificationUrlPrefixes: ["https://myaccount.google.com/"],
-    authorities: [{ id: "human", kind: "human", label: "Human", fields: [] }],
+    authorities: [
+      {
+        id: "kernel-managed",
+        kind: "external_provider",
+        label: "Kernel",
+        adapterId: "kernel",
+        connectionId: "managed-auth-1",
+        credential: null,
+      },
+    ],
     methods: [
       {
         id: "passkey",
         kind: "passkey",
         label: "Passkey",
-        authorityIds: ["human"],
+        authorityIds: ["kernel-managed"],
       },
     ],
     preferredIdentityId: identity.id,
@@ -679,9 +688,9 @@ describe("BrowserSession React resources", () => {
   test("uses each completed action observation immediately for the next fence", async () => {
     const calls: Array<{
       targetId: string;
-      expectedTargetGeneration: string;
-      expectedDocumentGeneration: string | null;
-      expectedFrameId: string | null;
+      expectedTargetGeneration: string | undefined;
+      expectedDocumentGeneration: string | null | undefined;
+      expectedFrameId: string | null | undefined;
     }> = [];
     const firstTarget = target();
     const firstObservation = observation(BROWSER_SESSION_ID, firstTarget);

@@ -25,9 +25,16 @@ import { toast } from "sonner";
 
 import { RailHeader } from "@/components/rail/rail-header";
 import { RailFooter } from "@/components/rail/rail-footer";
+import { useDesktopWorkspace } from "@/components/desktop/desktop-rail";
+import { DesktopThisComputerOffer } from "@/components/desktop/this-computer";
 import { WorkspacePausedBanner } from "@/components/rail/workspace-paused-banner";
+import { OpenInAppBanner } from "@/components/rail/open-in-app-banner";
 import { SessionHeader } from "@/components/rail/session-header";
 import { SessionStartupProvider } from "@/lib/session-startup";
+import {
+  requestSessionUsageLimitEditor,
+  sessionUsageLimitCapability,
+} from "@/lib/session-usage-limit";
 import {
   RAIL_DEFAULT_WIDTH,
   RAIL_MAX_WIDTH,
@@ -42,9 +49,10 @@ import {
   sessionSupportsFleetSwitching,
 } from "@/components/session/sandbox-switcher";
 import { CodexAccountIndicator } from "@/components/session/codex-account-indicator";
-import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@/components/ui/sheet";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { ModelAccountIndicator } from "@/components/session/model-account-indicator";
+import { Button } from "@opengeni/react/ui/button";
+import { Sheet, SheetContent, SheetDescription, SheetTitle } from "@opengeni/react/ui/sheet";
+import { TooltipProvider } from "@opengeni/react/ui/tooltip";
 import { matchesShortcut, NEW_SESSION_SHORTCUT } from "@/lib/keyboard-shortcuts";
 import { useWorkspaceModelCatalog } from "@/lib/use-workspace-model-catalog";
 import { useAppContext } from "@/context";
@@ -52,10 +60,13 @@ import { PrivateSessionIndicator } from "@/components/session/private-session-in
 import { isPersonalWorkspace } from "@/lib/managed-self-context";
 import { isCodexProductModel } from "@/lib/session-model";
 import { isIntelligenceEffort } from "@/lib/session-tools";
+import { useSessionRepliesMute } from "@/lib/inbox";
+import { useSessionAdminAccess } from "@/components/session/session-admin-access";
 import { applySessionArchiveProjection } from "@/lib/session-pagination";
 import { notifySessionListChanged } from "@/lib/session-list-invalidation";
 import type { Session } from "@/types";
 import { cn } from "@/lib/utils";
+import { windowControlsInPage } from "@/lib/desktop";
 
 const LazySessionTenancyRouteControl = lazy(() =>
   import("@/components/session/session-tenancy-control").then(({ SessionTenancyRouteControl }) => ({
@@ -64,7 +75,7 @@ const LazySessionTenancyRouteControl = lazy(() =>
 );
 
 /** The rail body — shared between the fixed desktop column and the mobile drawer. */
-function RailBody() {
+export function RailBody() {
   const rail = useRail();
   const [mobileSection, setMobileSection] = useState<"sessions" | "workspace">("sessions");
   const sessionsTabRef = useRef<HTMLButtonElement>(null);
@@ -83,14 +94,21 @@ function RailBody() {
       data-rail
       className="og-rail-glow isolate flex h-full min-h-0 flex-col overflow-hidden pt-[env(safe-area-inset-top)]"
     >
+      {/* Native macOS controls sit over this row. Keep it outside the clipped
+          viewport so navigation cannot scroll underneath them. */}
+      {windowControlsInPage ? (
+        <div data-rail-window-controls className="relative z-10 shrink-0 pb-3">
+          <RailHeader showSwitcher={false} />
+        </div>
+      ) : null}
       <div
         data-rail-scroll-viewport
         className="relative z-0 min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain"
       >
         <div className="flex min-h-full flex-col">
-          <RailHeader />
+          {!windowControlsInPage ? <RailHeader /> : null}
 
-          {rail.collapsed ? <SwitcherBlock /> : null}
+          {rail.collapsed || windowControlsInPage ? <SwitcherBlock /> : null}
 
           {rail.isMobile ? (
             <>
@@ -186,6 +204,7 @@ function RailBody() {
           sibling of the clipped viewport, so it can stay transparent and let
           the rail glow run to the bottom edge. */}
       <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
+        {!rail.collapsed ? <DesktopThisComputerOffer className="mx-2 mt-2" /> : null}
         <RailFooter />
       </div>
     </div>
@@ -232,6 +251,7 @@ function RailResizeHandle({
 export function RailShell({ children }: { children: ReactNode }) {
   const rail = useRail();
   const context = useAppContext();
+  useDesktopWorkspace(rail.workspaceId);
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
@@ -360,6 +380,7 @@ export function RailShell({ children }: { children: ReactNode }) {
           <SessionStartupProvider session={context.session}>
             <CanvasTopStrip hamburgerRef={hamburgerRef} />
             <WorkspacePausedBanner workspaceId={rail.workspaceId} />
+            <OpenInAppBanner />
             <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">{children}</div>
           </SessionStartupProvider>
         </div>
@@ -477,6 +498,7 @@ function SessionRouteHeader({
   const lastStarted = useLastStartedTurnPolicy(session.id, {
     events,
     pollIntervalMs: 15_000,
+    includeServingModel: true,
   });
   const lastStartedModel = lastStarted.policy?.model;
   const lastStartedReasoningEffort = isIntelligenceEffort(lastStarted.policy?.reasoningEffort)
@@ -491,6 +513,11 @@ function SessionRouteHeader({
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
+  const credentialSource = selectedRow?.catalog.credentialSource;
+  const subscriptionProvider =
+    credentialSource?.kind === "connected_subscription" ? credentialSource.provider : null;
+  const repliesMute = useSessionRepliesMute(session);
+  const adminAccess = useSessionAdminAccess(session);
   const archiveInFlight = useRef(false);
   const onArchive = useCallback(
     async (target: Session, archived: boolean) => {
@@ -557,6 +584,13 @@ function SessionRouteHeader({
         context.updateSessionPin(target.workspaceId, target.id, pinned, target.pinVersion ?? 0)
       }
       onArchive={onArchive}
+      repliesMute={repliesMute}
+      adminAccess={adminAccess}
+      onOpenUsageLimit={
+        sessionUsageLimitCapability(context.clientConfig) === "absent"
+          ? null
+          : requestSessionUsageLimitEditor
+      }
       leading={hamburger}
       lastStartedModel={lastStartedModel}
       lastStartedReasoningEffort={lastStartedReasoningEffort}
@@ -591,6 +625,18 @@ function SessionRouteHeader({
             sessionId={session.id}
             model={displayModelId}
             modelReady={policyReady}
+            events={events}
+          />
+        ) : policyReady && subscriptionProvider ? (
+          <ModelAccountIndicator
+            workspaceId={session.workspaceId}
+            sessionId={session.id}
+            organizationId={
+              context.workspaces.find((candidate) => candidate.id === session.workspaceId)
+                ?.accountId ?? null
+            }
+            provider={subscriptionProvider}
+            servingTurnId={lastStarted.policy?.turnId}
             events={events}
           />
         ) : null

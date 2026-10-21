@@ -32,7 +32,16 @@ export type OpenGeniContextValue = {
     key: string,
     reconcile: () => Promise<void>,
   ) => () => void;
-  reconcileSession: (sessionId: string) => Promise<void>;
+  /**
+   * Repair every registered projection of a session when its live stream
+   * (re)opens. `initialOpen` marks the first open after a fresh tail load, when
+   * each projection was just read alongside that tail: only the API-contract
+   * check runs then.
+   */
+  reconcileSession: (
+    sessionId: string,
+    options?: { initialOpen?: boolean | undefined },
+  ) => Promise<void>;
 };
 
 export const OpenGeniContext = createContext<OpenGeniContextValue | null>(null);
@@ -193,7 +202,6 @@ const BROWSER_INTERACTION_METHODS = [
   "getAuthRun",
   "startBrowserAuthRun",
   "reportBrowserAuthRun",
-  "protectedBrowserAuthFill",
   "verifyBrowserAuthRun",
   "listInteractionInterventions",
   "getInteractionIntervention",

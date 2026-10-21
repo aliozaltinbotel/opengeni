@@ -14,7 +14,6 @@ import {
   submitHumanPromptInTransaction,
   transitionSessionVisibility,
   updateOrganizationPrivateSessionSettings,
-  updateSessionVariableSets,
   withWorkspaceSubjectSessionActivityRls,
   type DbClient,
 } from "../src/index";
@@ -125,6 +124,25 @@ async function receiptCount(f: Fixture): Promise<number> {
   return row!.count;
 }
 
+// Completed settlement now consumes settled receipts (migration 0673), so a
+// stranded receipt only exists as data left behind by earlier releases.
+// Snapshot the receipts before settlement and restore them afterwards to
+// reproduce that legacy state.
+async function snapshotReceipts(f: Fixture): Promise<string[]> {
+  const rows = await shared.admin<Array<{ row: string }>>`
+    select to_jsonb(p)::text as row from session_pending_tool_calls p
+    where session_id = ${f.sessionId}`;
+  return rows.map((r) => r.row);
+}
+
+async function restoreStrandedReceipts(rows: string[]): Promise<void> {
+  for (const row of rows) {
+    await shared.admin`insert into session_pending_tool_calls
+      select * from jsonb_populate_record(null::session_pending_tool_calls, (${row}::text)::jsonb)
+      on conflict do nothing`;
+  }
+}
+
 function transition(f: Fixture) {
   return transitionSessionVisibility(client.db, {
     workspaceId: f.workspaceId,
@@ -154,12 +172,12 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       callType: "function_call",
       callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
     });
-    // While the turn runs, access stays frozen; the earlier turn blocker
-    // reports it before the receipt clause is reached.
+    // While the turn runs, access stays frozen: since 0768 the running
+    // attempt is reported as work to stop before any receipt clause.
     await expect(transition(f)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "nonterminal_turn",
+      name: "SessionVisibilityWorkConflictError",
+      reason: "active_work",
+      liveAttemptCount: 1,
     });
     await recordPendingSessionToolCallResult(client.db, {
       ...identity,
@@ -198,6 +216,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
         ],
       }),
     ).toBe(true);
+    const stranded = await snapshotReceipts(f);
     await applySessionTurnSettlement(client.db, f.workspaceId, {
       sessionId: f.sessionId,
       turnId: f.turn.id,
@@ -211,19 +230,10 @@ describe("tenancy quiescence and stranded tool receipts", () => {
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
     });
-    // Completion does not consume the receipt, so it is stranded: nothing can
-    // resume it and the user has nothing to resolve.
+    // Before migration 0673 completion left the receipt behind, stranded:
+    // nothing can resume it and the user has nothing to resolve.
+    await restoreStrandedReceipts(stranded);
     expect(await receiptCount(f)).toBe(1);
-
-    expect(
-      await updateSessionVariableSets(client.db, {
-        accountId: f.accountId,
-        workspaceId: f.workspaceId,
-        sessionId: f.sessionId,
-        subjectId: f.subjectId,
-        variableSets: [],
-      }),
-    ).toEqual({ status: "unchanged" });
 
     const fork = await forkSessionContent(client.db, {
       sourceWorkspaceId: f.workspaceId,
@@ -244,7 +254,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
     expect(await receiptCount(f)).toBe(1);
   }, 180_000);
 
-  test("a receipt whose settled attempt still owes its interruption receipt keeps blocking", async () => {
+  test("a receipt whose settled attempt still owes its interruption receipt blocks forks, not Only me", async () => {
     const f = await fixture();
     const callId = `call-${crypto.randomUUID()}`;
     await registerPendingSessionToolCall(client.db, {
@@ -258,6 +268,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       callType: "function_call",
       callItem: { type: "function_call", callId, name: "exec_command", arguments: "{}" },
     });
+    const stranded = await snapshotReceipts(f);
     await applySessionTurnSettlement(client.db, f.workspaceId, {
       sessionId: f.sessionId,
       turnId: f.turn.id,
@@ -271,6 +282,7 @@ describe("tenancy quiescence and stranded tool receipts", () => {
         { type: "session.status.changed", payload: { status: "idle" } },
       ],
     });
+    await restoreStrandedReceipts(stranded);
     expect(await receiptCount(f)).toBe(1);
     // A settled interruption whose physical quiescence receipt is still
     // missing: the attempt may still own tool effects, so the receipt is live.
@@ -285,22 +297,15 @@ describe("tenancy quiescence and stranded tool receipts", () => {
       (account_id, workspace_id, session_id, operation_id, attempt_id, kind, control_revision, state)
       values (${f.accountId}, ${f.workspaceId}, ${f.sessionId}, ${operation!.id},
         ${f.attemptId}, 'steer', 1, 'settled')`;
-    await expect(transition(f)).rejects.toMatchObject({
-      name: "SessionTenancyConflictError",
-      reason: "not_quiescent",
-      blocker: "pending_tool_receipt",
-    });
-    const variableSets = () =>
-      updateSessionVariableSets(client.db, {
-        accountId: f.accountId,
-        workspaceId: f.workspaceId,
-        sessionId: f.sessionId,
-        subjectId: f.subjectId,
-        variableSets: [],
-      });
-    expect(await variableSets()).toEqual({ status: "blocked", reason: "turn_in_flight" });
-    await shared.admin`update session_turn_attempts set quiesced_at = now() where id = ${f.attemptId}`;
-    expect(await variableSets()).toEqual({ status: "unchanged" });
+    // Whole-session forks and Variable Set changes keep the full predicate.
+    const failure = await shared.admin`select assert_session_tenancy_quiescent(
+        ${f.accountId}::uuid, ${f.workspaceId}::uuid, ${f.sessionId}::uuid, false)`.then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(failure).toMatchObject({ code: "55P03", detail: "pending_tool_receipt" });
+    // Since 0769 nothing refuses Only me: the turn is over and its attempt is
+    // closed, so the receipt cannot carry anyone's authority into the chat.
     expect((await transition(f)).visibility).toBe("user_private");
   }, 180_000);
 });

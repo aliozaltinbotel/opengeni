@@ -8,7 +8,7 @@
 // the compute target and everything it gates live in one consistent state.
 //
 // Wire fields are unchanged (PR-1, no contract change): a managed sandbox still
-// sends `sandboxBackend`/`variableSetId`; a connected machine still sends the
+// sends `sandboxBackend`/`rigId`; a connected machine still sends the
 // top-level `targetSandboxId` (+ Stage A's `workingDir`). Only the form shape and
 // the gating change.
 import {
@@ -107,11 +107,6 @@ export type SessionDraft = {
   visibility: "private" | "workspace";
   // PROMOTED — the parent that gates the compute-dependent band.
   compute: ComputeTarget;
-  // Injected at start on a managed sandbox; ignored when compute.kind==="machine"
-  // (a connected machine uses its own variable set & git credentials — D2).
-  variableSetIds: string[];
-  /** @deprecated local compatibility alias for older saved drafts/tests. */
-  variableSetId: string;
   // The rig the session materializes (managed sandbox only; a connected machine
   // is the user's own box, so it never rides a rig). "" ⇒ the workspace default
   // rig, resolved server-side.
@@ -132,12 +127,17 @@ export type SessionDraft = {
    * signup setup chat). Not edited in the composer; sent as `agent.instructions`.
    */
   agentInstructions?: string;
+  /**
+   * The chat's "+" > Secrets choice. Undefined means every vault the person
+   * can reach (no narrowing); sent as `agent.vaultPolicy`.
+   */
+  vaultPolicy?: import("@opengeni/sdk").VaultPolicy;
 };
 
 /**
  * Label for the composer's empty Sandbox Environment choice. The empty choice
- * sends no rigId, so the server binds the workspace default and the default
- * Variable Sets it carries. Name that default so people can see what they
+ * sends no rigId, so the server binds the workspace default. Name that
+ * default so people can see what they
  * would replace by picking another environment; say "None" when the
  * workspace has no default, because the empty choice then means no
  * environment at all.
@@ -161,8 +161,6 @@ export function emptySessionDraft(
       defaultSandboxBackend === "selfhosted"
         ? { kind: "machine", sandboxId: null, folder: { kind: "root" } }
         : { kind: "sandbox", backend: "" },
-    variableSetIds: [],
-    variableSetId: "",
     rigId: "",
     goalText: "",
     goalSuccessCriteria: "",
@@ -282,6 +280,12 @@ export type BuildCreateSessionRequestInput = {
   channelId?: string | null;
   expectedNewSessionDraftRevision?: number;
   agentLearning?: import("@opengeni/sdk").AgentLearningOverrides;
+  /**
+   * Per-task usage limit in USD micros. Only sent when the server advertises
+   * `sessionUsageLimits.enabled` and a limit was chosen; null or omitted sends
+   * nothing (no limit), so older servers never see the field.
+   */
+  usageLimitMicros?: number | null;
   /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
   workspaceDefaultMcpServerIds?: string[];
   /** Prevent a partially hydrated capability catalog from becoming a pin. */
@@ -381,14 +385,6 @@ export function buildCreateSessionRequest(
     clientEventId: input.clientEventId,
     idempotencyKey: input.idempotencyKey,
     ...(input.submission.sandboxBackend ? { sandboxBackend: input.submission.sandboxBackend } : {}),
-    ...(input.submission.variableSetIds?.length
-      ? {
-          variableSetIds: input.submission.variableSetIds,
-          variableSetId: input.submission.variableSetIds.at(-1),
-        }
-      : input.submission.variableSetId
-        ? { variableSetId: input.submission.variableSetId }
-        : {}),
     ...(input.submission.rigId ? { rigId: input.submission.rigId } : {}),
     ...(input.submission.goal ? { goal: input.submission.goal } : {}),
     ...(input.submission.firstPartyMcpPermissions
@@ -411,6 +407,9 @@ export function buildCreateSessionRequest(
     ...(input.channelId ? { channelId: input.channelId } : {}),
     ...(input.agentLearning && Object.keys(input.agentLearning).length
       ? { agentLearning: input.agentLearning }
+      : {}),
+    ...(typeof input.usageLimitMicros === "number"
+      ? { usageLimitMicros: input.usageLimitMicros }
       : {}),
     ...(input.expectedNewSessionDraftRevision !== undefined
       ? {
@@ -479,8 +478,8 @@ export function submissionFromSessionDraft(
 
   if (draft.compute.kind === "machine") {
     return {
-      // No sandboxBackend (forced `selfhosted` server-side) and no variable set
-      // injection — the machine's own env & git auth apply (D2).
+      // No sandboxBackend (forced `selfhosted` server-side); the machine's own
+      // env and git auth apply (D2). Secrets arrive per command by reference.
       extras: {
         ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
         ...(goal ? { goal } : {}),
@@ -500,14 +499,6 @@ export function submissionFromSessionDraft(
   return {
     extras: {
       ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-      ...(draft.variableSetIds.length
-        ? {
-            variableSetIds: draft.variableSetIds,
-            variableSetId: draft.variableSetIds.at(-1),
-          }
-        : draft.variableSetId
-          ? { variableSetId: draft.variableSetId }
-          : {}),
       ...(draft.rigId ? { rigId: draft.rigId } : {}),
       ...(personalResourceAttachment ? { personalResourceAttachment } : {}),
       ...(goal ? { goal } : {}),
@@ -562,14 +553,6 @@ export function newSessionDraftOptionsFromSessionDraft(
     visibility: effectiveVisibility,
     ...(draft.agentLearning ? { agentLearning: draft.agentLearning } : {}),
     ...(draft.compute.backend ? { sandboxBackend: draft.compute.backend } : {}),
-    ...(draft.variableSetIds.length
-      ? {
-          variableSetIds: draft.variableSetIds,
-          variableSetId: draft.variableSetIds.at(-1),
-        }
-      : draft.variableSetId
-        ? { variableSetId: draft.variableSetId }
-        : {}),
     ...(draft.rigId ? { rigId: draft.rigId } : {}),
     ...(goal ? { goal } : {}),
     ...permissions,
@@ -579,11 +562,19 @@ export function newSessionDraftOptionsFromSessionDraft(
 }
 
 function agentExtras(draft: SessionDraft): { agent?: AgentConfigRequest } {
-  if (draft.agentCapabilities === undefined && draft.agentInstructions === undefined) return {};
+  const vaultPolicy = draft.vaultPolicy?.mode === "selected" ? draft.vaultPolicy : undefined;
+  if (
+    draft.agentCapabilities === undefined &&
+    draft.agentInstructions === undefined &&
+    vaultPolicy === undefined
+  ) {
+    return {};
+  }
   return {
     agent: {
       ...(draft.agentCapabilities !== undefined ? { capabilities: draft.agentCapabilities } : {}),
       ...(draft.agentInstructions !== undefined ? { instructions: draft.agentInstructions } : {}),
+      ...(vaultPolicy !== undefined ? { vaultPolicy } : {}),
     },
   };
 }
@@ -615,13 +606,12 @@ export function sessionDraftFromNewSessionDraftOptions(
         }
       : {
           kind: "sandbox",
-          // Ignore persisted managed-backend overrides — the create UI no longer
-          // offers that control; always use the deployment default.
-          backend: "",
+          // Preserve an explicit managed choice when the workspace defaults to a machine.
+          backend:
+            options.sandboxBackend && options.sandboxBackend !== "selfhosted"
+              ? options.sandboxBackend
+              : "",
         },
-    variableSetIds:
-      options.variableSetIds ?? (options.variableSetId ? [options.variableSetId] : []),
-    variableSetId: options.variableSetId ?? options.variableSetIds?.at(-1) ?? "",
     rigId: options.rigId ?? "",
     goalText: options.goal?.text ?? "",
     goalSuccessCriteria: options.goal?.successCriteria ?? "",
@@ -643,6 +633,9 @@ export function sessionDraftFromNewSessionDraftOptions(
       : {}),
     ...(options.agent?.instructions !== undefined
       ? { agentInstructions: options.agent.instructions }
+      : {}),
+    ...(options.agent?.vaultPolicy?.mode === "selected"
+      ? { vaultPolicy: options.agent.vaultPolicy }
       : {}),
   };
 }
@@ -698,6 +691,7 @@ const MANAGED_BACKEND_LABELS: Partial<Record<SandboxBackend, string>> = {
   cloudflare: "Cloudflare",
   vercel: "Vercel",
   opensandbox: "OpenSandbox",
+  compute: "Opengeni compute",
 };
 
 function backendLabel(backend: SandboxBackend): string {

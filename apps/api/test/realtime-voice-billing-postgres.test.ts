@@ -32,7 +32,7 @@ import type { ControlActivityServices } from "../../worker/src/activities/types"
 import { InteractionFrameProxyTransport } from "../src/interaction-frame-proxy";
 import { createRealtimeUsageProxyLifecycle } from "../src/realtime-usage-proxy";
 import type { ApiWebSocketConnection } from "../src/api-websocket";
-import * as gatewayProvider from "../src/gateway-realtime";
+import * as gatewayProvider from "../src/realtime-websocket";
 
 const DELEGATION_SECRET = "realtime-voice-billing-secret-with-32-bytes";
 const AZURE_MODEL = "opengeni-azure/gpt-live-1";
@@ -443,7 +443,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     expect(first.stop?.code ?? second.stop?.code).toBe("insufficient_credits");
   });
 
-  test("a heartbeat at zero balance tells the client to stop, keeps the lease, and refuses re-mint", async () => {
+  test.each(["gateway", "websocket"])("%s settles before responding and retains actual provider relay custody", async (route) => {
     const app = appFor(pricedSettings);
     const value = await fixture(MINUTE);
     const started = await begin(app, value, "opengeni-gateway/openai/gpt-realtime-2.1");
@@ -456,13 +456,13 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     const proof = started.proof;
     // Override only the installed broker's upstream test transport. Its real
     // mint, canonical request authority, sealed connection and relay stay live.
-    const originalBroker = gatewayProvider.createGatewayRealtimeConnectionSecret;
+    const originalBroker = gatewayProvider.createRealtimeWebsocketConnection;
     const upstream = Bun.serve({ hostname: "127.0.0.1", port: 0,
       fetch(request, server) { return server.upgrade(request, { headers: { "sec-websocket-protocol": "ai-gateway-realtime.v1" } })
         ? undefined : new Response(null, { status: 400 }); },
       websocket: { open(socket) { socket.send(JSON.stringify({ type: "session-started", sessionId: `gateway-session-${crypto.randomUUID()}` })); },
         message() {} } });
-    const broker = spyOn(gatewayProvider, "createGatewayRealtimeConnectionSecret").mockImplementation(async input => ({
+    const broker = spyOn(gatewayProvider, "createRealtimeWebsocketConnection").mockImplementation(async input => ({
       ...await originalBroker(input), url: upstream.url.toString().replace(/^http/, "ws"),
     }));
     let relay: ApiWebSocketConnection | undefined;
@@ -470,7 +470,7 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
     const closedReceipt = Promise.withResolvers<void>();
     void closedReceipt.promise.catch(() => undefined);
     try {
-      const minted = await app.request(`${value.base}/gateway`, {
+      const minted = await app.request(`${value.base}/${route}`, {
         method: "POST",
         headers: value.headers,
         body: JSON.stringify({
@@ -484,8 +484,10 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
         }),
       });
       expect(minted.status).toBe(200);
-      expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(MINUTE);
-      const attachment = await minted.json() as { url: string; token: string; connectionId: string };
+      // No heartbeat or polling wait is needed to persist the first-minute debit.
+      expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
+      const attachment = await minted.json() as { url: string; token: string; connectionId: string; protocols: string[] };
+      expect(attachment.protocols).toEqual(["opengeni-realtime.v1", `opengeni-frame-proxy.${attachment.token}`]);
       const deps = appDeps.get(app)!;
       const lifecycle = createRealtimeUsageProxyLifecycle(deps);
       const transport = new InteractionFrameProxyTransport(DELEGATION_SECRET, Date.now, { ...lifecycle,
@@ -523,10 +525,9 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       expect(body.mode.state).toBe("active");
       expect(body.mode.version).toBe(mode.version);
       expect(body.mode.leaseExpiresAt).toBe(mode.leaseExpiresAt);
-      expect((await getBillingBalance(client.db, value.accountId)).balanceMicros).toBe(0);
 
       const calls = providerCalls;
-      const rotated = await app.request(`${value.base}/gateway`, {
+      const rotated = await app.request(`${value.base}/${route}`, {
         method: "POST",
         headers: value.headers,
         body: JSON.stringify({
@@ -547,18 +548,19 @@ describe("deployment-funded realtime voice credits (real PostgreSQL)", () => {
       if (providerObserved) await closedReceipt.promise;
     }
 
-    const ended = await app.request(`${value.base}/${mode.id}`, {
-      method: "DELETE",
-      headers: value.headers,
-      body: JSON.stringify({
-        browserInstanceId: proof.browserInstanceId,
-        ownerKey: proof.ownerKey,
-        expectedVersion: mode.version,
-        reason: "user_stop",
-      }),
-    });
-    expect(ended.status).toBe(200);
-    // One connection, observed for under a minute: exactly one minute billed.
-    expect(await costEvents(value)).toHaveLength(1);
-  });
+      const ended = await app.request(`${value.base}/${mode.id}`, {
+        method: "DELETE",
+        headers: value.headers,
+        body: JSON.stringify({
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: mode.version,
+          reason: "user_stop",
+        }),
+      });
+      expect(ended.status).toBe(200);
+      // One connection, observed for under a minute: exactly one minute billed.
+      expect(await costEvents(value)).toHaveLength(1);
+    },
+  );
 });

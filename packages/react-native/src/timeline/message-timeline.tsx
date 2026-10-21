@@ -53,6 +53,7 @@ import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
 import { NativeActivityOptionsProvider, type NativeActivityOptions } from "./activity";
 import { Icon } from "./icon";
 import { ReleaseFollowProvider, withAlpha } from "./primitives";
+import { humanInputAnswerLines } from "./secret-field-model";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import {
   ActivityRail,
@@ -65,7 +66,9 @@ import {
   type NativeTurnStatus,
   type PreparingProps,
 } from "./turn";
+import { useOpenGeniText, type OpenGeniText } from "@opengeni/react/messages";
 import { useNativeTimelineMessages } from "./messages";
+import { collectLiveNotes, foldedLiveNotes, liveFoldShift } from "./live-notes";
 
 /* ----------------------------------------------------------------------------
    Native MessageTimeline: the web MessageTimeline (components/message-timeline)
@@ -82,6 +85,8 @@ export type NativeMarkdownRenderer = (
 const OLDER_HISTORY_PREFETCH_PX = 600;
 /** Web's phone clamp for long user messages (max-h-56). */
 const USER_MESSAGE_COLLAPSED_PX = 224;
+/** The vertical gap between top-level rows (the scroll content's `gap`). */
+const ROW_GAP_PX = 20;
 
 export interface NativeMessageTimelineProps extends NativeActivityOptions {
   /** Projected items (preferred) or raw durable events. */
@@ -125,11 +130,12 @@ export interface NativeMessageTimelineProps extends NativeActivityOptions {
 export function MessageTimeline(props: NativeMessageTimelineProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const items = useMemo(
-    () => props.items ?? buildTimeline(props.events ?? []),
-    [props.items, props.events],
+    () => props.items ?? buildTimeline(t, props.events ?? []),
+    [t, props.items, props.events],
   );
-  const groups = useMemo(() => groupTimeline(items, { readableTurns: true }), [items]);
+  const groups = useMemo(() => groupTimeline(t, items, { readableTurns: true }), [t, items]);
   const foldMemory = useRef(new Map<string, "open" | "closed">()).current;
   const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   // Opening on a moment starts away from the tip; the landing decides where.
@@ -167,6 +173,41 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
   const releaseFollow = useCallback(() => {
     following.current = false;
   }, []);
+  // Live progress notes fold away above an open work row (see live-notes.ts).
+  const liveNotes = useMemo(() => collectLiveNotes(groups), [groups]);
+  const liveNotesRef = useRef(liveNotes);
+  liveNotesRef.current = liveNotes;
+  const [openLiveWork, setOpenLiveWork] = useState<ReadonlySet<string>>(() => new Set());
+  const openLiveWorkRef = useRef(openLiveWork);
+  // Last laid-out height of each live note row, and the scroll correction owed
+  // once folding or restoring them changes the content above the work row.
+  const liveNoteHeights = useRef(new Map<string, number>()).current;
+  const liveFoldOffset = useRef(0);
+  const reportLiveFold = useCallback(
+    (workId: string, open: boolean) => {
+      const current = openLiveWorkRef.current;
+      if (current.has(workId) === open) return;
+      const next = new Set(current);
+      if (open) next.add(workId);
+      else next.delete(workId);
+      openLiveWorkRef.current = next;
+      // The notes sit above the row the reader just toggled: keep that row
+      // where it is by moving the offset with the folded height.
+      liveFoldOffset.current += liveFoldShift(
+        liveNotesRef.current,
+        workId,
+        open,
+        liveNoteHeights,
+        ROW_GAP_PX,
+      );
+      setOpenLiveWork(next);
+    },
+    [liveNoteHeights],
+  );
+  const foldedNotes = useMemo(
+    () => foldedLiveNotes(liveNotes, openLiveWork),
+    [liveNotes, openLiveWork],
+  );
   // Older history: latest values for scroll callbacks without re-binding them.
   const history = useRef({
     hasOlder: false,
@@ -209,7 +250,8 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
         // Collapsing from the pinned copy leaves the reader on that turn's row.
         following.current = false;
         setPinned(null);
-        scrollRef.current?.scrollTo({ y: Math.max(0, top - 8), animated: false });
+        scrollY.current = Math.max(0, top - 8);
+        scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
       },
     }),
     [stickyHeaders],
@@ -258,6 +300,14 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
           scrollY.current += added;
           scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
           return;
+        }
+      }
+      if (liveFoldOffset.current !== 0) {
+        const shift = liveFoldOffset.current;
+        liveFoldOffset.current = 0;
+        if (!following.current) {
+          scrollY.current = Math.max(0, scrollY.current + shift);
+          scrollRef.current?.scrollTo({ y: scrollY.current, animated: false });
         }
       }
       if (following.current) scrollRef.current?.scrollToEnd({ animated: false });
@@ -319,6 +369,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
     renderMessageActions: props.renderMessageActions,
     renderUserAttachments: props.renderUserAttachments,
     onCopy: props.onCopy,
+    reportLiveFold,
   };
   return (
     <NativeActivityOptionsProvider value={activityOptions}>
@@ -350,7 +401,7 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                   paddingTop: props.contentInsetTop ?? 16,
                   paddingHorizontal: 16,
                   paddingBottom: props.contentInsetBottom ?? 24,
-                  gap: 20,
+                  gap: ROW_GAP_PX,
                   flexGrow: 1,
                 }}
               >
@@ -364,14 +415,26 @@ export function MessageTimeline(props: NativeMessageTimelineProps) {
                 {groups.map((group, index) => {
                   const key = groupKey(group);
                   const prompt = group.kind === "item" && group.item.kind === "user-message";
+                  // Agent messages keep one wrapper so a progress note can fold
+                  // (stay mounted, out of layout) without remounting.
+                  const noteId =
+                    group.kind === "item" && group.item.kind === "agent-message"
+                      ? group.item.id
+                      : null;
+                  const liveNote = noteId !== null && liveNotes.notes.has(noteId);
+                  const folded = noteId !== null && foldedNotes.has(noteId);
                   // The landing row keeps one wrapper for its life, so landing never remounts it.
                   const landing = focusSequence !== null && index === focusIndex;
-                  return prompt || landing ? (
+                  return prompt || landing || noteId !== null ? (
                     <View
                       key={key}
+                      style={folded ? { display: "none" } : undefined}
                       onLayout={(event) => {
                         const { y, height } = event.nativeEvent.layout;
                         if (prompt) promptFrames.set(key, { top: y, bottom: y + height });
+                        if (liveNote && !folded && height > 0) {
+                          liveNoteHeights.set(noteId, height);
+                        }
                         if (landing && landed.current !== focusSequence) {
                           groupTops.set(key, y);
                           setLayoutPass((pass) => pass + 1);
@@ -504,7 +567,22 @@ type GroupContext = {
   renderMessageActions?: ((item: AgentMessageItem | UserMessageItem) => ReactNode) | undefined;
   renderUserAttachments?: ((item: UserMessageItem) => ReactNode) | undefined;
   onCopy?: ((text: string) => void) | undefined;
+  /** A live work row reports its open state, so its progress notes above fold. */
+  reportLiveFold?: ((workId: string, open: boolean) => void) | undefined;
 };
+
+/** A wait's one quiet secondary line under its work row. */
+function WaitDetail({ text }: { text: string }) {
+  const theme = useNativeTimelineTheme();
+  return (
+    <Text
+      numberOfLines={2}
+      style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: theme.colors["fg-subtle"] }}
+    >
+      {text}
+    </Text>
+  );
+}
 
 function groupKey(group: TimelineGroup): string {
   switch (group.kind) {
@@ -526,6 +604,7 @@ function TimelineGroupView({
   context: GroupContext;
   insideTurn?: boolean;
 }) {
+  const t = useOpenGeniText();
   switch (group.kind) {
     case "activity": {
       if (group.work) {
@@ -538,7 +617,7 @@ function TimelineGroupView({
             />
           );
         }
-        const base = readableWorkStatus({ ...group, work: group.work });
+        const base = readableWorkStatus(t, { ...group, work: group.work });
         const status: NativeTurnStatus =
           base.kind === "working"
             ? {
@@ -550,7 +629,12 @@ function TimelineGroupView({
                 ) : undefined,
               }
             : base.kind === "waiting"
-              ? { kind: "waiting", since: base.since, label: base.label }
+              ? {
+                  kind: "waiting",
+                  since: base.since,
+                  label: base.label,
+                  preview: base.detail ? <WaitDetail text={base.detail} /> : undefined,
+                }
               : { kind: "worked", durationMs: base.durationMs, label: base.label };
         return (
           <TurnSummary
@@ -562,6 +646,13 @@ function TimelineGroupView({
             defaultOpen={readableWorkDefaultOpen(group)}
             facets={context.facets}
             contextCompactionCount={compactedLandmarkCount(group.work.details)}
+            onOpenStateChange={
+              // Always wired at the top level: a row opened before its first
+              // note arrives must still fold that note when it does.
+              !insideTurn && context.reportLiveFold
+                ? (open) => context.reportLiveFold?.(group.id, open)
+                : undefined
+            }
           >
             <TurnRailFrame compact>
               <FoldedGroups groups={group.work.details} context={context} />
@@ -660,6 +751,7 @@ function FoldedGroups({
 
 function TimelineRow({ item, context }: { item: TimelineItem; context: GroupContext }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   switch (item.kind) {
     case "user-message":
       return <UserMessageRow item={item} context={context} />;
@@ -668,11 +760,11 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
     case "human-input":
       return <HumanInputRow item={item} onCopy={context.onCopy} />;
     case "session-status": {
-      const meta = SESSION_STATUS_PRESENTATION[item.status];
+      const meta = SESSION_STATUS_PRESENTATION(t)[item.blocked ? "blocked" : item.status];
       return (
         <SeparatorRow
           dot={item.resolvedAt ? undefined : theme.colors[`status-${meta.tone}`]}
-          text={`${item.resolvedAt ? "work resumed" : meta.label.toLowerCase()} · ${formatRelativeTime(item.resolvedAt ?? item.occurredAt)}`}
+          text={`${item.resolvedAt ? t("messageTimeline.workResumed") : meta.label.toLowerCase()} · ${formatRelativeTime(t, item.resolvedAt ?? item.occurredAt)}`}
         />
       );
     }
@@ -699,7 +791,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
           <Text
             style={{ ...fontStyle(theme, 500), fontSize: theme.size.base, color: theme.colors.fg }}
           >
-            Worker reported back
+            {t("native.timeline.messageTimeline.workerReportedBack")}
           </Text>
           <Text
             numberOfLines={3}
@@ -728,7 +820,7 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
           <Text
             style={{ ...fontStyle(theme, 500), fontSize: theme.size.md, color: theme.colors.fg }}
           >
-            Connection needed
+            {t("native.timeline.messageTimeline.connectionNeeded")}
           </Text>
           <Text
             style={{
@@ -738,7 +830,9 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
               color: theme.colors["fg-muted"],
             }}
           >
-            {item.providerDomain} needs to be reconnected before the agent can continue.
+            {t("native.timeline.messageTimeline.providerdomainNeedsToBeReconnected", {
+              providerDomain: item.providerDomain,
+            })}
           </Text>
         </View>
       );
@@ -751,12 +845,13 @@ function TimelineRow({ item, context }: { item: TimelineItem; context: GroupCont
  * The web footer stamp. Hermes/iOS ICU joins date and time with " at " where the
  * browser's ICU uses ", "; normalize to the web form.
  */
-function nativeClockTime(iso: string): string {
-  return formatClockTime(iso).replace(" at ", ", ");
+function nativeClockTime(t: OpenGeniText, iso: string): string {
+  return formatClockTime(t, iso).replace(" at ", ", ");
 }
 
 function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const c = theme.colors;
   const [open, setOpen] = useState(false);
   // An agent's own wait is ordinary progress, not a warning: a quiet line that
@@ -774,7 +869,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
             <Icon name="chevron-right" size={14} color={c["fg-muted"]} />
           </View>
           <Text style={{ ...fontStyle(theme), fontSize: theme.size.sm, color: c["fg-muted"] }}>
-            {recordedWaitSummaryText(item).replace(" at ", ", ")}
+            {recordedWaitSummaryText(t, item).replace(" at ", ", ")}
           </Text>
         </View>
         {open ? (
@@ -820,7 +915,7 @@ function NoticeRow({ item }: { item: Extract<TimelineItem, { kind: "notice" }> }
         <Icon name="triangle-alert" size={16} color={accent} />
       </View>
       <Text style={{ ...fontStyle(theme), flex: 1, fontSize: 14, lineHeight: 20, color: accent }}>
-        {noticeDisplayText(item)}
+        {noticeDisplayText(t, item)}
       </Text>
     </View>
   );
@@ -868,6 +963,7 @@ function MessageFooter({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const [copied, setCopied] = useState(false);
   return (
     <View
@@ -908,7 +1004,7 @@ function MessageFooter({
           fontVariant: ["tabular-nums"],
         }}
       >
-        {nativeClockTime(occurredAt)}
+        {nativeClockTime(t, occurredAt)}
       </Text>
     </View>
   );
@@ -975,6 +1071,7 @@ function CollapsibleUserText({ children }: { children: ReactNode }) {
 
 /** Top of the loaded window: a spinner while older history loads, else a manual control. */
 function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () => void }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   return (
@@ -990,7 +1087,7 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
               color: theme.colors["fg-muted"],
             }}
           >
-            Load earlier messages
+            {t("native.timeline.messageTimeline.loadEarlierMessages")}
           </Text>
         </Pressable>
       )}
@@ -999,6 +1096,7 @@ function OlderHistoryRow({ loading, onPress }: { loading: boolean; onPress: () =
 }
 
 function UserMessageRow({ item, context }: { item: UserMessageItem; context: GroupContext }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const failed = item.delivery?.state === "failed";
@@ -1072,7 +1170,7 @@ function UserMessageRow({ item, context }: { item: UserMessageItem; context: Gro
                     textDecorationLine: "underline",
                   }}
                 >
-                  Retry
+                  {t("native.timeline.messageTimeline.retry")}
                 </Text>
               </Pressable>
             ) : null}
@@ -1122,6 +1220,7 @@ function HumanInputRow({
   item: HumanInputItem;
   onCopy?: ((text: string) => void) | undefined;
 }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
   const multiple = Math.max(item.questions.length, item.answers.length) > 1;
@@ -1133,9 +1232,18 @@ function HumanInputRow({
         : item.response.outcome === "expired"
           ? m.humanInputOutcome.expired
           : m.humanInputOutcome.cancelled;
-  const answerText = item.answers
-    .map((answer) => `${multiple ? `${answer.label}: ` : ""}${answer.values.join(", ")}`)
+  const lines = humanInputAnswerLines(
+    item.answers,
+    item.response,
+    m.humanInputSecretSaved,
+    multiple,
+  );
+  const answerText = lines
+    .filter((line) => !line.secret)
+    .map((line) => line.text)
     .join("\n");
+  const savedLines = lines.filter((line) => line.secret);
+  const copyText = lines.map((line) => line.text).join("\n");
   return (
     <View style={{ gap: 10 }}>
       <View
@@ -1176,7 +1284,7 @@ function HumanInputRow({
               color: theme.colors["fg-subtle"],
             }}
           >
-            Agent asked
+            {t("native.timeline.messageTimeline.agentAsked")}
           </Text>
           <View style={{ marginTop: 6, gap: 12 }}>
             {item.questions.map((question, index) => (
@@ -1246,9 +1354,28 @@ function HumanInputRow({
               {answerText}
             </Text>
           ) : null}
+          {savedLines.map((line) => (
+            <View
+              key={line.questionId}
+              style={{ marginTop: 4, flexDirection: "row", alignItems: "center", gap: 6 }}
+            >
+              <Icon name="key-round" size={14} color={theme.colors["fg-muted"]} />
+              <Text
+                style={{
+                  ...fontStyle(theme),
+                  flexShrink: 1,
+                  fontSize: theme.size.sm,
+                  lineHeight: 20,
+                  color: theme.colors.fg,
+                }}
+              >
+                {line.text}
+              </Text>
+            </View>
+          ))}
         </View>
         <MessageFooter
-          text={answerText || settled}
+          text={copyText || settled}
           occurredAt={item.occurredAt}
           align="end"
           onCopy={onCopy}

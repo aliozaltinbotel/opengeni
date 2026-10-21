@@ -30,6 +30,25 @@ export type {
 } from "./embedded-session-client";
 
 export { useSession, isTitleEvent } from "./hooks/use-session";
+export { useRetainedReads } from "./hooks/shared-query";
+export { readClientConfig } from "./lib/client-config-read";
+export { useSessionConversation } from "./hooks/use-session-conversation";
+export {
+  useSessionReadAcknowledgement,
+  type SessionAttentionClientLike,
+  type UseSessionReadAcknowledgementInput,
+} from "./hooks/use-session-read-acknowledgement";
+export { useNewConversation } from "./hooks/use-new-conversation";
+export type {
+  NewConversationController,
+  UseNewConversationOptions,
+  NewConversationCreateOptions,
+  CreatedConversation,
+} from "./hooks/use-new-conversation";
+export type {
+  SessionConversationController,
+  UseSessionConversationOptions,
+} from "./hooks/use-session-conversation";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {
@@ -47,8 +66,10 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type {
+  ComposerBusySend,
   ComposerControllerState,
   ComposerPolicy,
+  InitialComposerDraft,
   ComposerSendExtras,
   ComposerState,
   UseComposerOptions,
@@ -120,6 +141,7 @@ export type {
   ReasoningItem,
   SandboxItem,
   SessionStatusItem,
+  SessionUsageLimitStop,
   TimelineGroup,
   TimelineItem,
   TurnOutcome,

@@ -2,14 +2,14 @@ import type { ActivityItem, TurnOutcome } from "@opengeni/react/session";
 import {
   createTurnSummaryContext,
   formatElapsed,
-  GENIE_PREPARING_PHRASES,
-  GENIE_WAITING_PHRASES,
   resolveTurnSummaryFacets,
   rollingActivityItem,
   selectTurnSummaryFacets,
   toolDisplayName,
   type TurnSummaryFacetConfiguration,
 } from "@opengeni/react/timeline-model";
+import { useOpenGeniText } from "@opengeni/react/messages";
+import { nativeLoadingPhrases } from "./composer-state";
 import {
   createContext,
   useContext,
@@ -87,13 +87,14 @@ export function useLiveNow(active: boolean): number {
 }
 
 function LiveElapsed({ since, style }: { since: string; style: TextStyle }) {
+  const t = useOpenGeniText();
   const startedAt = Date.parse(since);
   const now = useLiveNow(true);
   if (!Number.isFinite(startedAt)) return null;
   return (
     <Text
       style={[style, { fontVariant: ["tabular-nums"] }]}
-    >{` · ${formatElapsed(Math.max(0, now - startedAt))}`}</Text>
+    >{` · ${formatElapsed(t, Math.max(0, now - startedAt))}`}</Text>
   );
 }
 
@@ -109,6 +110,11 @@ export interface TurnSummaryProps {
   foldKey?: string | undefined;
   contextCompactionCount?: number | undefined;
   status?: NativeTurnStatus | undefined;
+  /**
+   * Reports the disclosure's open state: once on mount when it starts open,
+   * then on every change, in the same update as the change itself.
+   */
+  onOpenStateChange?: ((open: boolean) => void) | undefined;
   children: ReactNode;
 }
 
@@ -124,10 +130,12 @@ export function TurnSummary({
   foldKey,
   contextCompactionCount,
   status,
+  onOpenStateChange,
   children,
 }: TurnSummaryProps) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const foldMemory = useContext(FoldMemoryContext);
   const registerSticky = useContext(StickyWorkHeaderContext);
   const releaseFollow = useReleaseFollow();
@@ -141,25 +149,41 @@ export function TurnSummary({
     remembered === "closed" ? false : remembered === "open" ? true : (defaultOpen ?? false),
   );
   const readerOwnsOpen = useRef(remembered !== undefined);
+  const reportOpen = useRef(onOpenStateChange);
+  reportOpen.current = onOpenStateChange;
+  const openRef = useRef(open);
+  const changeOpen = (next: boolean) => {
+    if (openRef.current === next) return;
+    openRef.current = next;
+    setOpen(next);
+    reportOpen.current?.(next);
+  };
+  // oxlint-disable-next-line react-hooks/exhaustive-deps -- report the starting state once
   useEffect(() => {
-    if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current) setOpen(true);
+    if (openRef.current) reportOpen.current?.(true);
+  }, []);
+  useEffect(() => {
+    if (status && defaultOpen && remembered === undefined && !readerOwnsOpen.current)
+      changeOpen(true);
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- changeOpen only touches refs and state
   }, [status, defaultOpen, remembered]);
   const toggle = (next: boolean) => {
     releaseFollow();
     readerOwnsOpen.current = true;
     if (foldKey !== undefined) foldMemory?.set(foldKey, next ? "open" : "closed");
-    setOpen(next);
+    changeOpen(next);
   };
   const context = useMemo(
     () =>
       createTurnSummaryContext(
+        t,
         items,
         outcome,
         failureText,
         durationMs,
         contextCompactionCount ?? 0,
       ),
-    [items, outcome, failureText, durationMs, contextCompactionCount],
+    [t, items, outcome, failureText, durationMs, contextCompactionCount],
   );
   const definitions = useMemo(
     () => resolveTurnSummaryFacets(facetConfiguration),
@@ -201,7 +225,7 @@ export function TurnSummary({
       statusNode = (
         <Text
           style={text}
-        >{`${status.label ?? m.workedFor} ${formatElapsed(status.durationMs)}`}</Text>
+        >{`${status.label ?? m.workedFor} ${formatElapsed(t, status.durationMs)}`}</Text>
       );
     }
   } else if (status) {
@@ -466,7 +490,11 @@ export function PreparingState({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
-  const phrases = phase === "waiting" ? GENIE_WAITING_PHRASES : GENIE_PREPARING_PHRASES;
+  const t = useOpenGeniText();
+  const phrases = useMemo(
+    () => nativeLoadingPhrases(t, m.loadingPhrases, phase),
+    [t, m.loadingPhrases, phase],
+  );
   const [index, setIndex] = useState(() => Math.floor(Math.random() * phrases.length));
   const [slow, setSlow] = useState(false);
   useEffect(() => {
@@ -522,6 +550,7 @@ export function RollingActivity({
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const selected = rollingActivityItem(items, previousItem, mounted);
@@ -532,7 +561,7 @@ export function RollingActivity({
       style={{ flexDirection: "row", alignItems: "center", gap: 12, minWidth: 0, flex: 1 }}
       accessibilityLabel={
         item.kind === "tool-call"
-          ? toolDisplayName(item.name, item.display)
+          ? toolDisplayName(t, item.name, item.display)
           : item.kind === "reasoning"
             ? m.thinking
             : m.working

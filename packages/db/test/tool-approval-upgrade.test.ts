@@ -15,6 +15,12 @@ import {
 } from "../src";
 import { executeMigrationFile, migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
+import {
+  dropConnectionAccountIntentColumns,
+  stageConnectionAccountIntentColumns,
+  stageSiteSessionAudienceColumns,
+  dropSiteSessionAudienceColumns,
+} from "./vault-policy-column-fixture";
 
 const directory = new URL("../drizzle/", import.meta.url);
 const additions = [
@@ -45,6 +51,17 @@ beforeAll(async () => {
     });
     await owner`insert into schema_migrations(name) values(${file}) on conflict do nothing`;
   }
+  // Current session writers use the additive 0834 activity xid column and
+  // trigger instead of the legacy workspace commit gate. Apply that real,
+  // independent expand migration so the previous ledger accepts today's writers.
+  const activityXid = "0834_session_activity_xid.sql";
+  await executeMigrationFile(
+    owner,
+    activityXid,
+    await readFile(new URL(activityXid, directory), "utf8"),
+    { preinstalledVector: true },
+  );
+  await owner`insert into schema_migrations(name) values(${activityXid})`;
   appRole = `approval_app_${crypto.randomUUID().replaceAll("-", "")}`;
   await provisionRoles(owned.adminUrl, { appRole, appPassword: owned.appPassword });
   const url = new URL(owned.adminUrl);
@@ -89,6 +106,21 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     // Cendra fork 0666 (model-call source receipts) adds this history column after the
     // upstream ledger, so the current history writer needs it on this older ledger too.
     await owner`alter table session_history_items add column source_basis jsonb`;
+    // The current turn adapter also selects the nullable M3 authority snapshot
+    // while this fixture is intentionally stopped before that migration.
+    await owner`alter table session_turns add column subscription_authority jsonb`;
+    // ...and the M3 PR 3b slots on internal updates and their outbox rows.
+    await owner`alter table session_system_updates add column subscription_authority jsonb`;
+    await owner`alter table session_system_update_outbox add column subscription_authority jsonb`;
+    // ...and the 0739 vault policy on sessions and schedules.
+    await owner`alter table sessions add column vault_policy jsonb not null default '{"mode":"all"}'::jsonb`;
+    await owner`alter table scheduled_tasks add column vault_policy jsonb not null default '{"mode":"all"}'::jsonb`;
+    // ...and the 0755 connection-account intent columns.
+    await stageConnectionAccountIntentColumns(owned.ownerUrl);
+    await stageSiteSessionAudienceColumns(owned.ownerUrl);
+    // The current event adapter projects 0810's nullable key. Only stage the
+    // reader column for seeding; the real migration must create/backfill it.
+    await owner`alter table session_events add column usage_source_key text`;
     const session = await createSession(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -213,6 +245,19 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
       drop column content_archive,
       drop column content_archive_purged_at`;
     await owner`alter table session_history_items drop column source_basis`;
+    await owner`alter table session_turns drop column subscription_authority`;
+    await owner`alter table session_system_updates drop column subscription_authority`;
+    await owner`alter table session_system_update_outbox drop column subscription_authority`;
+    await owner`alter table sessions drop column vault_policy`;
+    await owner`alter table scheduled_tasks drop column vault_policy`;
+    await dropConnectionAccountIntentColumns(owned.ownerUrl);
+    await dropSiteSessionAudienceColumns(owned.ownerUrl);
+    await owner`alter table session_events drop column usage_source_key`;
+    expect(
+      await owner`select column_name from information_schema.columns
+      where table_schema=current_schema() and table_name='session_events'
+        and column_name='usage_source_key'`,
+    ).toHaveLength(0);
     // The real runner commits one file at a time: the rolling default may
     // succeed, but activation must refuse a still-connected runtime login.
     await expect(
@@ -250,6 +295,11 @@ test("a populated previous ledger refuses live writers, rolls back failed activa
     const afterRequests = [
       ...(await owned.admin`select to_jsonb(r) - 'review_arguments' - 'review_context' as row from connector_action_requests r order by id`),
     ];
+    expect([
+      ...(await owner`select data_type from information_schema.columns
+      where table_schema=current_schema() and table_name='session_events'
+        and column_name='usage_source_key'`),
+    ]).toEqual([{ data_type: "text" }]);
     const afterCalls = [
       ...(await owned.admin`select to_jsonb(c) - 'durable_approval' - 'approval_request_id' - 'effect_digest' - 'execution_attempt_id' - 'execution_attempt_generation' - 'execution_catalog_digest' as row from session_attempt_codemode_calls c order by operation_id`),
     ];

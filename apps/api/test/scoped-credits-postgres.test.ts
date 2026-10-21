@@ -57,6 +57,12 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
       })),
     );
     restores.push(
+      spyOn(Object.getPrototypeOf(fakeStripe.customers), "update").mockImplementation(async () => ({
+        id: "cus_review",
+        email: null,
+      })),
+    );
+    restores.push(
       spyOn(Object.getPrototypeOf(fakeStripe.checkout.sessions), "create").mockImplementation(
         async (params: any) => {
           createdParams.push(params);
@@ -288,7 +294,7 @@ test("scoped checkout through first use, policy changes and paid top-ups stays c
         countsTowardTokenCap: true,
         initiatingHumanSubjectId: null,
       }),
-      /insufficient Opengeni credits/,
+      /insufficient workspace credits/,
     );
     const usage = { inputTokens: 100, outputTokens: 10, totalTokens: 110 };
     const common = {

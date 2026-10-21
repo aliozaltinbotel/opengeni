@@ -3,7 +3,6 @@ import {
   SESSION_SCOPE_HEADER,
   type ClientVoiceInputConfig,
   type OpenGeniClient,
-  type SendMessageInput,
 } from "@opengeni/sdk";
 import {
   lazy,
@@ -17,30 +16,29 @@ import {
   type CSSProperties,
 } from "react";
 import type { SiteSnapshotClient } from "./artifacts/chat-interactive-block";
-import { useOpenGeni, type ClientOverride } from "../session-context";
-import { useWorkspaceModelCatalog } from "../hooks/use-available-models";
+import type { ClientOverride } from "../session-context";
 import { ModelPolicyPicker, type ModelPolicyPickerProps } from "./model-policy-picker";
-import { useSessionEvents } from "../hooks/use-session-events";
-import { useSession } from "../hooks/use-session";
-import { useTurnQueue } from "../hooks/use-turn-queue";
-import { useComposer } from "../hooks/use-composer";
-import { useHumanInputRequests } from "../hooks/use-human-input";
-import { useFileAttachments } from "../hooks/use-file-attachments";
-import { useSessionControl } from "../hooks/use-session-control";
+import { ConversationRenderBoundary } from "./conversation-render-boundary";
+import {
+  useSessionConversation,
+  type SessionConversationController,
+  type UseSessionConversationOptions,
+} from "../hooks/use-session-conversation";
 import { useGoal, type UseGoalOptions } from "../hooks/use-goal";
-import { useClientConfigFlags } from "../hooks/use-client-config-flags";
+import { useDocumentForeground, useElementOnScreen } from "../hooks/use-foreground-visibility";
+import { useSessionReadAcknowledgement } from "../hooks/use-session-read-acknowledgement";
 import {
   createSessionRetainedScreenshotLoader,
   createWorkspaceRetainedArtifactLoader,
   createWorkspaceRetainedVideoLoader,
 } from "../timeline/retained-loaders";
 import { useRealtimeVoiceModels } from "../hooks/use-realtime-voice-models";
+import type { SessionRealtimeControl } from "../realtime/realtime-control";
 import { EMBEDDED_GENIE_LOADING, type GenieLoadingOptions } from "../timeline/genie-loading";
-import { projectPendingApprovals } from "../approvals";
 import { ApprovalSurface } from "./approval-surface";
 import { ChatComposer, type ChatComposerProps } from "./chat-composer";
 import type { ComposerTranscriptionControlProps } from "./composer-transcription-control";
-import { SessionChrome } from "./session-chrome";
+import { SessionChrome, type SessionChromeProps } from "./session-chrome";
 import { HumanInputSurface, type HumanInputSurfaceProps } from "./human-input-surface";
 import { MessageTimeline, type MessageTimelineProps } from "./message-timeline";
 import { ProviderRecoveryNotice } from "./provider-recovery-notice";
@@ -54,7 +52,6 @@ import {
   type OpenGeniViewerTarget,
 } from "./open-geni-links";
 import type { UserMessageDisclosureLabels } from "./user-message-body";
-import { conversationTimeline } from "../conversation-timeline";
 import { cn } from "../lib/cn";
 import { SessionProxyScope, type SessionProxyBaseUrl } from "./session-proxy-scope";
 import { useErrorMessage } from "../lib/error-message";
@@ -63,6 +60,8 @@ import {
   type HostSurfacePreference,
   type HostThemePreference,
 } from "../lib/host-theme";
+import { SingleSendWording, useOpenGeniText, type OpenGeniText } from "../messages/runtime";
+import { ThisComputerCard, type ThisComputerCardProps } from "./this-computer/this-computer-card";
 
 export type SessionConversationLabels = {
   /** Banner action after a refresh failure; the conversation stays mounted. */
@@ -73,15 +72,17 @@ export type SessionConversationLabels = {
   sitePreviewUnavailable: string;
 };
 
-const DEFAULT_CONVERSATION_LABELS: SessionConversationLabels = {
-  retry: "Retry",
-  tryAgain: "Try again",
-  sitePreviewUnavailable: "Site preview unavailable",
-};
+const DEFAULT_CONVERSATION_LABELS = (t: OpenGeniText): SessionConversationLabels => ({
+  retry: t("sessionConversation.retry"),
+  tryAgain: t("sessionConversation.tryAgain"),
+  sitePreviewUnavailable: t("sessionConversation.sitePreviewUnavailable"),
+});
 
 export type SessionConversationProps = ClientOverride &
   SessionProxyBaseUrl & {
     sessionId: string;
+    /** Product-owned desktop connection flow for computer offers. No console URLs or shell commands are assumed. */
+    computerConnection?: Omit<ThisComputerCardProps, "rationale">;
     /** Host-owned artifact links, previews and other message presentation. */
     renderMessageText?: MessageTimelineProps["renderMessageText"];
     /**
@@ -118,6 +119,13 @@ export type SessionConversationProps = ClientOverride &
     renderInteractiveBlock?: MessageTimelineProps["renderInteractiveBlock"] | false;
     /** Product-specific tool-call renderers; defaults to the built-in registry. */
     toolRegistry?: MessageTimelineProps["toolRegistry"];
+    /** Host presentation without replacing native history, navigation or annotations. */
+    timelineProps?:
+      | Pick<
+          MessageTimelineProps,
+          "turnSummary" | "renderAuthNeeded" | "emptyState" | "renderMessageSender"
+        >
+      | undefined;
     /**
      * Replace the "usage limit reached" row for an `allowance_exhausted`
      * refusal, for example to link your own plan or admin page.
@@ -147,6 +155,20 @@ export type SessionConversationProps = ClientOverride &
      * proxy has not turned voice off (`realtimeVoice: false`).
      */
     realtimeVoice?: boolean | undefined;
+    /** Optional connection/voice handoff; the stock control owns call lifecycle and admission. */
+    realtimeVoiceProps?:
+      | Partial<
+          Pick<
+            ComponentProps<typeof SessionRealtimeControl>,
+            | "codexConnected"
+            | "realtimeAutostartModel"
+            | "onRealtimeAutostartConsumed"
+            | "onVoiceActiveChange"
+            | "modelMenu"
+            | "voiceSettings"
+          >
+        >
+      | undefined;
     /**
      * Copy and visual for the "working" indicator before the first reply.
      * Defaults to neutral copy ("Thinking…"); omitted fields keep those
@@ -168,6 +190,18 @@ export type SessionConversationProps = ClientOverride &
     /** Defaults to filling the host. The host owns available height. */
     height?: CSSProperties["height"];
     /**
+     * Mark the conversation read while the person can see it. Defaults to
+     * true: whenever the timeline is on screen, the page is visible and the
+     * window focused, each delivered reply, question or failure is
+     * acknowledged for the signed-in person (once per reply, not per streamed
+     * token). Unread state, and notifications a host derives from it (for
+     * example from `turn.completed` webhooks that check `session.unread`),
+     * then skip replies the person already watched. A hidden or collapsed
+     * timeline, a background tab, or an unfocused window acknowledges nothing.
+     * Set `false` when viewing must not count as reading.
+     */
+    readAcknowledgement?: boolean | undefined;
+    /**
      * Light or dark. Defaults to `auto`: follow the host page (an enclosing
      * `data-og-theme`, `class="dark"`/`data-theme` on <html> or <body>, the
      * host's `color-scheme`, then its background), not the OS setting alone.
@@ -186,7 +220,39 @@ export type SessionConversationProps = ClientOverride &
       ChatComposerProps,
       "composer" | "effectiveControl" | "queuedAheadCount" | "attachments"
     >;
+    /** Optional host context and notifications; stock delivery remains authoritative. */
+    composerOptions?: UseSessionConversationOptions["composerOptions"];
+    /** Extra status panels without replacing stock queue/goal behavior. */
+    chromeProps?: Omit<
+      SessionChromeProps,
+      "queue" | "composer" | "goal" | "sessionStatus" | "readOnly" | "onComposerFocus"
+    >;
+    /** Localized questions and presentation; responses remain stock. */
+    humanInputProps?: Pick<
+      HumanInputSurfaceProps,
+      "messages" | "autoFocus" | "decisionButtons" | "allowedSaveTo" | "className"
+    >;
+    /** Product approval presentation; permission decisions remain stock. */
+    approvalProps?: Omit<
+      ComponentProps<typeof ApprovalSurface>,
+      "approvals" | "onApprove" | "onReject" | "responding" | "error"
+    >;
   };
+
+export type SessionConversationViewProps = Omit<
+  SessionConversationProps,
+  | "sessionId"
+  | "client"
+  | "workspaceId"
+  | "baseUrl"
+  | "headers"
+  | "fetch"
+  | "attachments"
+  | "modelPicker"
+  | "composerOptions"
+> & {
+  conversation: SessionConversationController;
+};
 
 /** Complete existing-session conversation. Uses the provider's normal SDK client
  * (including Site clients), one shared event feed, and authoritative queue state.
@@ -198,18 +264,26 @@ export function SessionConversation({
   fetch,
   ...props
 }: SessionConversationProps) {
-  if (baseUrl === undefined) return <RetryingConversation {...props} />;
+  const resetKey = `${props.workspaceId ?? ""}:${props.sessionId}`;
+  if (baseUrl === undefined)
+    return (
+      <ConversationRenderBoundary resetKey={resetKey}>
+        <RetryingConversation {...props} />
+      </ConversationRenderBoundary>
+    );
   const { client, workspaceId, ...rest } = props;
   return (
-    <SessionProxyScope
-      baseUrl={baseUrl}
-      workspaceId={workspaceId}
-      client={client}
-      headers={headers}
-      fetch={fetch}
-    >
-      <RetryingConversation {...rest} />
-    </SessionProxyScope>
+    <ConversationRenderBoundary resetKey={resetKey}>
+      <SessionProxyScope
+        baseUrl={baseUrl}
+        workspaceId={workspaceId}
+        client={client}
+        headers={headers}
+        fetch={fetch}
+      >
+        <RetryingConversation {...rest} />
+      </SessionProxyScope>
+    </ConversationRenderBoundary>
   );
 }
 
@@ -225,8 +299,24 @@ function RetryingConversation(props: Omit<SessionConversationProps, "baseUrl">) 
   );
 }
 
-function Conversation({
-  sessionId,
+function Conversation(props: SessionConversationProps & { onRetry: () => void }) {
+  const conversation = useSessionConversation(props.sessionId, props);
+  return <ConversationView {...props} conversation={conversation} />;
+}
+
+/** Stock view for a controller mounted in a stable host. No second event feed or draft. */
+export function SessionConversationView(props: SessionConversationViewProps) {
+  return (
+    <ConversationView
+      key={`${props.conversation.workspaceId}:${props.conversation.sessionId}`}
+      {...props}
+      onRetry={() => void props.conversation.retry()}
+    />
+  );
+}
+
+function ConversationView({
+  conversation,
   renderMessageText,
   resolveLink,
   onOpenArtifact,
@@ -234,75 +324,83 @@ function Conversation({
   resolveSessionTitle,
   renderInteractiveBlock,
   toolRegistry,
+  timelineProps,
+  computerConnection,
   renderAllowanceExhausted,
   allowanceExhaustedLabels,
-  attachments: attachmentsRequested = true,
   voiceInput: voiceInputRequested = true,
   realtimeVoice: realtimeVoiceProp,
+  realtimeVoiceProps,
   genieLoading,
-  modelPicker,
   modelPickerProps,
   userMessageDisclosureLabels,
   loadSkillReview,
-  client,
-  workspaceId,
   className,
   height = "100%",
+  readAcknowledgement = true,
   theme,
   surface,
   labels: labelOverrides,
   composerProps,
+  chromeProps,
+  humanInputProps,
+  approvalProps,
   onRetry,
-}: SessionConversationProps & { onRetry: () => void }) {
-  const scope = { client, workspaceId };
-  const context = useOpenGeni(scope);
+}: SessionConversationViewProps & { onRetry: () => void }) {
+  const t = useOpenGeniText();
+  const {
+    sessionId,
+    config,
+    showModelPicker,
+    catalog,
+    feed,
+    detail,
+    queue,
+    human,
+    control,
+    approvals,
+    files,
+    uploadsEnabled,
+    status,
+    terminal,
+    importedArchive,
+    composer,
+    running,
+    error,
+    loadFailed,
+  } = conversation;
+  const context = conversation;
   const formatError = useErrorMessage();
-  const config = useClientConfigFlags(context.client);
-  const showModelPicker = modelPicker ?? config.modelSelection;
-  const catalog = useWorkspaceModelCatalog({
-    client: context.client,
-    workspaceId: context.workspaceId,
-    enabled: showModelPicker,
-  });
-  const feed = useSessionEvents(sessionId, scope);
-  const options = { ...scope, events: feed.events };
-  const detail = useSession(sessionId, options);
-  const queue = useTurnQueue(sessionId, options);
-  const human = useHumanInputRequests(sessionId, options);
-  const control = useSessionControl(sessionId, scope);
-  const approvals = useMemo(() => projectPendingApprovals(feed.events), [feed.events]);
-  const files = useFileAttachments(scope);
-  const uploadsEnabled = attachmentsRequested && config.uploads;
-  const status = feed.sessionStatus ?? detail.session?.status;
-  const terminal = status === "cancelled";
-  const importedArchive = detail.session?.importedArchive?.readOnly === true;
-  const releaseSentFiles = (input: SendMessageInput) =>
-    files.removeReadyFiles(
-      (input.resources ?? []).flatMap((resource) =>
-        resource.kind === "file" ? [resource.fileId] : [],
-      ),
-    );
-  const composer = useComposer(sessionId, {
-    ...options,
-    effectiveControl: queue.effectiveControl ?? detail.session?.effectiveControl,
-    sendDestination: () => (queue.queue.length > 0 || status === "running" ? "queue" : "chat"),
-    ...(uploadsEnabled
-      ? {
-          sendExtras: () => ({ resources: files.readyResources }),
-          sendBlocked: () => files.hasUnresolved,
-          onSubmitted: (_text, input) => releaseSentFiles(input),
-          onSent: (_text, input) => releaseSentFiles(input),
-        }
-      : {}),
-  });
   const region = useRef<HTMLDivElement>(null);
   const hostTheme = useHostTheme(region, { theme, surface });
+  // Read means seen: the timeline itself must be on screen (hosts may hide it
+  // while keeping the composer), in a visible, focused page, showing the live
+  // end of the conversation rather than an older page of history.
+  const foreground = useDocumentForeground();
+  const timelineOnScreen = useElementOnScreen(
+    () => region.current?.querySelector("[data-og-timeline-scroller]") ?? null,
+    loadFailed,
+  );
+  useSessionReadAcknowledgement({
+    client: context.client,
+    workspaceId: context.workspaceId,
+    sessionId,
+    session: detail.session,
+    events: feed.events,
+    active:
+      readAcknowledgement &&
+      foreground &&
+      timelineOnScreen &&
+      feed.initialHistoryReady &&
+      !loadFailed &&
+      !feed.hasNewer,
+  });
   const defaultInteractiveBlock = useDefaultInteractiveBlock(
     context.client,
     context.workspaceId,
     sessionId,
     config.artifacts,
-    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS.sitePreviewUnavailable,
+    labelOverrides?.sitePreviewUnavailable ?? DEFAULT_CONVERSATION_LABELS(t).sitePreviewUnavailable,
   );
   const retainedLoaders = useRetainedLoaders(context.client, context.workspaceId, sessionId);
   const transcription = useComposerTranscription(
@@ -313,13 +411,13 @@ function Conversation({
   const inheritedLinks = useOpenGeniLinkResolver();
   const defaultLinks = useMemo(
     () =>
-      sessionLinkResolver({
+      sessionLinkResolver(t, {
         client: context.client,
         workspaceId: context.workspaceId,
         sessionId,
         sandboxFiles: config.sandboxFiles,
       }),
-    [context.client, context.workspaceId, sessionId, config.sandboxFiles],
+    [context.client, context.workspaceId, sessionId, config.sandboxFiles, t],
   );
   const onOpenArtifactRef = useRef(onOpenArtifact);
   onOpenArtifactRef.current = onOpenArtifact;
@@ -338,19 +436,10 @@ function Conversation({
     () => chainLinkResolvers(resolveLink, viewerLinks, inheritedLinks, defaultLinks) ?? undefined,
     [resolveLink, viewerLinks, inheritedLinks, defaultLinks],
   );
-  const labels = { ...DEFAULT_CONVERSATION_LABELS, ...labelOverrides };
-  const error = detail.error ?? feed.error ?? human.error;
-  // Only an event feed that never loaded replaces the timeline; anything else
-  // is a refresh failure shown above a conversation that stays usable.
-  const loadFailed = Boolean(feed.error) && feed.events.length === 0;
-  const retryInPlace = () => {
-    if (detail.error) void detail.refresh();
-    if (human.error) void human.refresh();
-    if (feed.error) void feed.jumpToLatest();
-  };
-  const running = status === "running" || status === "recovering" || status === "waiting_capacity";
+  const labels = { ...DEFAULT_CONVERSATION_LABELS(t), ...labelOverrides };
+  const retryInPlace = () => void conversation.retry();
   const realtimeVoiceRequested = realtimeVoiceProp ?? config.realtimeVoiceOffered;
-  const loadingOptions = useMemo(() => embeddedGenieLoading(genieLoading), [genieLoading]);
+  const loadingOptions = useMemo(() => embeddedGenieLoading(t, genieLoading), [genieLoading, t]);
   const providerRecovery = useMemo(
     () =>
       detail.session
@@ -373,238 +462,279 @@ function Conversation({
     realtimeVoiceRequested && config.realtimeVoice && !importedArchive,
   );
   const [voiceActive, setVoiceActive] = useState(false);
+  const notifyVoiceActive = realtimeVoiceProps?.onVoiceActiveChange;
+  const onVoiceActiveChange = useCallback(
+    (active: boolean) => {
+      setVoiceActive(active);
+      notifyVoiceActive?.(active);
+    },
+    [notifyVoiceActive],
+  );
   const voiceControl =
     composer.effectiveControl ?? queue.effectiveControl ?? detail.session?.effectiveControl;
   const voice =
     voiceModels.length > 0 && status && !terminal && voiceControl ? (
       <Suspense fallback={null}>
         <LazyEmbeddedRealtimeVoice
-          client={context.client}
+          {...realtimeVoiceProps}
+          client={
+            context.client as unknown as ComponentProps<typeof SessionRealtimeControl>["client"]
+          }
           workspaceId={context.workspaceId}
-          models={voiceModels}
+          codexConnected={realtimeVoiceProps?.codexConnected ?? false}
           sessionId={sessionId}
           sessionStatus={status}
           effectiveControl={voiceControl}
           events={feed.events}
           eventsReady={!feed.initialLoading}
-          onVoiceActiveChange={setVoiceActive}
+          getModelContext={conversation.getModelContext}
+          onVoiceActiveChange={onVoiceActiveChange}
         />
       </Suspense>
     ) : null;
   return (
-    <div
-      className={cn(
-        "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-base text-og-fg",
-        className,
-      )}
-      ref={region}
-      style={{ ...hostTheme.style, height }}
-      data-og-theme={hostTheme.attribute}
-      data-og-host-theme=""
-      data-og-conversation=""
-    >
-      {error && !loadFailed ? (
-        <div
-          role="alert"
-          className="mx-auto flex w-full max-w-3xl shrink-0 items-center gap-3 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-fg"
-          data-og-conversation-error=""
-        >
-          <span className="min-w-0 flex-1">{formatError(error)}</span>
-          <button
-            type="button"
-            onClick={retryInPlace}
-            className="shrink-0 rounded-og-sm px-2 py-1 font-medium text-og-fg hover:bg-og-hover"
-          >
-            {labels.retry}
-          </button>
-        </div>
-      ) : null}
-      {loadFailed ? (
-        <div
-          role="alert"
-          className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
-          data-og-conversation-error=""
-        >
-          <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(feed.error)}</p>
-          <button
-            type="button"
-            onClick={onRetry}
-            className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
-          >
-            {labels.tryAgain}
-          </button>
-        </div>
-      ) : (
-        <MessageTimeline
-          renderMessageText={renderMessageText}
-          resolveLink={links}
-          renderInteractiveBlock={
-            renderInteractiveBlock === false
-              ? undefined
-              : (renderInteractiveBlock ?? defaultInteractiveBlock)
-          }
-          userMessageDisclosureLabels={userMessageDisclosureLabels}
-          genieLoading={loadingOptions}
-          renderAllowanceExhausted={renderAllowanceExhausted}
-          allowanceExhaustedLabels={allowanceExhaustedLabels}
-          // Isolated and clipped: floating navigation stays inside the timeline.
-          className="isolate min-h-0 flex-1 overflow-hidden"
-          {...(toolRegistry ? { toolRegistry } : {})}
-          {...retainedLoaders}
-          {...(onOpenSession ? { onOpenSession } : {})}
-          {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
-          events={feed.events}
-          items={conversationTimeline(feed.timeline, queue, composer)}
-          turnSummary={{ rolling: true }}
-          status={status}
-          hasOlder={feed.hasOlder}
-          loadingOlder={feed.loadingOlder}
-          onLoadOlder={feed.loadOlder}
-          hasNewer={feed.hasNewer}
-          loadingNewer={feed.loadingNewer}
-          onLoadNewer={feed.loadNewer}
-          onJumpToStart={async () => {
-            await feed.loadOldest();
-          }}
-          loadingOldest={feed.loadingOldest}
-          onJumpToLatest={feed.jumpToLatest}
-          onAnnotate={importedArchive ? undefined : composer.addAnnotation}
-          // A narrow embed above a decision card has no room for the pill.
-          questionNavMinViewportHeight={320}
-        />
-      )}
-      {importedArchive ? (
-        <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
-          Archived conversation · Read only
-        </p>
-      ) : (
-        <>
+    <SingleSendWording enabled={composer.singleSend === true}>
+      <div
+        className={cn(
+          "og-root flex min-h-0 min-w-0 flex-col gap-2 overflow-hidden bg-og-bg text-og-base text-og-fg",
+          className,
+        )}
+        ref={region}
+        style={{ ...hostTheme.style, height }}
+        data-og-theme={hostTheme.attribute}
+        data-og-host-theme=""
+        data-og-conversation=""
+      >
+        {error && !loadFailed ? (
           <div
-            // Above the timeline's floating navigation, which may never paint
-            // over a decision card.
-            className="relative z-20 min-h-0 max-h-[40%] shrink-0 overflow-y-auto empty:hidden"
-            data-og-conversation-inputs=""
+            role="alert"
+            className="mx-auto flex w-full max-w-3xl shrink-0 items-center gap-3 rounded-og-md border border-og-status-failed/30 bg-og-status-failed/10 px-3 py-2 text-og-sm text-og-fg"
+            data-og-conversation-error=""
           >
-            {approvals.length > 0 && !terminal ? (
-              <ApprovalSurface
-                className="mx-auto max-w-3xl"
-                approvals={approvals}
-                onApprove={async (approval) => {
-                  await control.approve(approval.id);
-                }}
-                onReject={async (approval) => {
-                  await control.reject(approval.id);
-                }}
-                responding={control.responding}
-                error={control.error}
+            <span className="min-w-0 flex-1">{formatError(error)}</span>
+            <button
+              type="button"
+              onClick={retryInPlace}
+              className="shrink-0 rounded-og-sm px-2 py-1 font-medium text-og-fg hover:bg-og-hover"
+            >
+              {labels.retry}
+            </button>
+          </div>
+        ) : null}
+        {loadFailed ? (
+          <div
+            role="alert"
+            className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-6 text-center"
+            data-og-conversation-error=""
+          >
+            <p className="max-w-sm text-og-base text-og-fg-muted">{formatError(feed.error)}</p>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="inline-flex min-h-9 items-center rounded-og-md border border-og-border bg-og-surface-1 px-3 py-1.5 text-og-sm font-medium text-og-fg hover:bg-og-surface-2"
+            >
+              {labels.tryAgain}
+            </button>
+          </div>
+        ) : (
+          <MessageTimeline
+            renderMessageText={renderMessageText}
+            resolveLink={links}
+            renderInteractiveBlock={
+              renderInteractiveBlock === false
+                ? undefined
+                : (renderInteractiveBlock ?? defaultInteractiveBlock)
+            }
+            userMessageDisclosureLabels={userMessageDisclosureLabels}
+            genieLoading={loadingOptions}
+            renderAllowanceExhausted={renderAllowanceExhausted}
+            allowanceExhaustedLabels={allowanceExhaustedLabels}
+            // Isolated and clipped: floating navigation stays inside the timeline.
+            className="isolate min-h-0 flex-1 overflow-hidden"
+            {...(toolRegistry ? { toolRegistry } : {})}
+            {...retainedLoaders}
+            {...(onOpenSession ? { onOpenSession } : {})}
+            {...(resolveSessionTitle ? { resolveSessionTitle } : {})}
+            events={feed.events}
+            items={conversation.timeline}
+            turnSummary={timelineProps?.turnSummary ?? { rolling: true }}
+            renderAuthNeeded={(item) =>
+              timelineProps?.renderAuthNeeded?.(item) ??
+              (item.capability?.id === "api:connected-machine" && computerConnection ? (
+                <ThisComputerCard {...computerConnection} rationale={item.capability.rationale} />
+              ) : undefined)
+            }
+            emptyState={timelineProps?.emptyState}
+            renderMessageSender={timelineProps?.renderMessageSender}
+            status={status}
+            hasOlder={feed.hasOlder}
+            loadingOlder={feed.loadingOlder}
+            onLoadOlder={feed.loadOlder}
+            hasNewer={feed.hasNewer}
+            loadingNewer={feed.loadingNewer}
+            onLoadNewer={feed.loadNewer}
+            onJumpToStart={async () => {
+              await feed.loadOldest();
+            }}
+            loadingOldest={feed.loadingOldest}
+            onJumpToLatest={feed.jumpToLatest}
+            onAnnotate={importedArchive ? undefined : composer.addAnnotation}
+            // A narrow embed above a decision card has no room for the pill.
+            questionNavMinViewportHeight={320}
+          />
+        )}
+        {importedArchive ? (
+          <p className="shrink-0 px-4 py-2 text-center text-sm text-og-muted" role="status">
+            {t("sessionConversation.archivedConversationReadOnly")}
+          </p>
+        ) : (
+          <>
+            <div
+              // Above the timeline's floating navigation, which may never paint
+              // over a decision card.
+              className="relative z-20 min-h-0 max-h-[40%] shrink-0 overflow-y-auto empty:hidden"
+              data-og-conversation-inputs=""
+            >
+              {approvals.length > 0 && !terminal ? (
+                <ApprovalSurface
+                  className="mx-auto max-w-3xl"
+                  {...approvalProps}
+                  approvals={approvals}
+                  onApprove={async (approval) => {
+                    await control.approve(approval.id);
+                  }}
+                  onReject={async (approval) => {
+                    await control.reject(approval.id);
+                  }}
+                  responding={control.responding}
+                  error={control.error}
+                />
+              ) : null}
+              <ProviderRecoveryNotice
+                className="mx-auto max-w-3xl px-1"
+                recovery={providerRecovery}
               />
-            ) : null}
-            <ProviderRecoveryNotice
-              className="mx-auto max-w-3xl px-1"
-              recovery={providerRecovery}
-            />
-            <HumanInputSurface
-              className="mx-auto max-w-3xl"
-              loadSkillReview={loadSkillReview}
-              requests={human.requests}
-              onSubmit={async (id, response) => {
-                await human.respond(id, response);
-              }}
-              respondingRequestId={human.respondingRequestId}
-              error={human.mutationError ? formatError(human.mutationError) : null}
-              autoFocus={false}
-              decisionButtons
-            />
-            <ConversationChrome
-              sessionId={sessionId}
-              client={context.client}
-              workspaceId={context.workspaceId}
-              events={feed.events}
-              chrome={
-                terminal
-                  ? { queue, sessionStatus: status, readOnly: true, onOpenSession }
-                  : {
-                      queue,
-                      composer,
-                      sessionStatus: status,
-                      onOpenSession,
-                      onComposerFocus: () =>
-                        region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(),
-                    }
-              }
-            />
-          </div>
-          <div
-            className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
-            data-og-conversation-composer=""
-          >
-            <ChatComposer
-              runControl="stop"
-              running={running}
-              {...composerProps}
-              {...(transcription && composerProps?.transcription === undefined
-                ? { transcription }
-                : {})}
-              actionsStart={
-                voice ? (
-                  <>
-                    {composerProps?.actionsStart}
-                    {voice}
-                  </>
-                ) : (
-                  composerProps?.actionsStart
-                )
-              }
-              transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
-              composer={composer}
-              attachments={uploadsEnabled ? files : undefined}
-              disabled={terminal || composerProps?.disabled}
-              controlsStart={
-                composerProps?.controlsStart ??
-                (showModelPicker && composer.policy && (
-                  <ModelPolicyPicker
-                    groupPresentation={modelPickerProps?.groupPresentation}
-                    messages={modelPickerProps?.messages}
-                    rows={catalog.rows}
-                    model={composer.policy.model}
-                    effort={composer.policy.reasoningEffort}
-                    latencyMode={composer.policy.latencyMode}
-                    loading={catalog.loading}
-                    error={catalog.error?.message}
-                    disabled={terminal}
-                    sessionKey={sessionId}
-                    onOpenChange={(open) => {
-                      if (open) void catalog.refresh();
-                    }}
-                    onModelChange={(model) => composer.setModel?.(model)}
-                    onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
-                    onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
-                  />
-                ))
-              }
-              responsiveBasis={composerProps?.responsiveBasis ?? "container"}
-              effectiveControl={
-                composer.effectiveControl ??
-                queue.effectiveControl ??
-                detail.session?.effectiveControl
-              }
-              queuedAheadCount={queue.queue.length}
-            />
-          </div>
-        </>
-      )}
-    </div>
+              <HumanInputSurface
+                className="mx-auto max-w-3xl"
+                autoFocus={false}
+                decisionButtons
+                {...humanInputProps}
+                loadSkillReview={loadSkillReview}
+                requests={human.requests}
+                onSubmit={async (id, response) => {
+                  // `respond` reports a failed send as null. Reject so the card
+                  // keeps what was typed (including a secret) for a retry.
+                  if (!(await human.respond(id, response))) {
+                    throw new Error(t("sessionConversation.yourAnswerWasnTSent"));
+                  }
+                }}
+                respondingRequestId={human.respondingRequestId}
+                error={human.mutationError ? formatError(human.mutationError) : null}
+              />
+              <ConversationChrome
+                sessionId={sessionId}
+                client={context.client}
+                workspaceId={context.workspaceId}
+                events={feed.events}
+                chrome={
+                  terminal
+                    ? {
+                        ...chromeProps,
+                        queue,
+                        sessionStatus: status,
+                        readOnly: true,
+                        onOpenSession,
+                      }
+                    : {
+                        ...chromeProps,
+                        queue,
+                        composer,
+                        sessionStatus: status,
+                        onOpenSession,
+                        onComposerFocus: () =>
+                          region.current?.querySelector<HTMLTextAreaElement>("textarea")?.focus(),
+                      }
+                }
+              />
+            </div>
+            <div
+              className="relative z-20 mx-auto w-full max-w-3xl shrink-0"
+              data-og-conversation-composer=""
+            >
+              <ChatComposer
+                runControl="stop"
+                running={running}
+                {...composerProps}
+                {...(transcription && composerProps?.transcription === undefined
+                  ? { transcription }
+                  : {})}
+                actionsStart={
+                  voice ? (
+                    <>
+                      {composerProps?.actionsStart}
+                      {voice}
+                    </>
+                  ) : (
+                    composerProps?.actionsStart
+                  )
+                }
+                transcriptionSuppressed={composerProps?.transcriptionSuppressed ?? voiceActive}
+                composer={composer}
+                attachments={uploadsEnabled ? files : undefined}
+                disabled={terminal || composerProps?.disabled}
+                controlsStart={
+                  composerProps?.controlsStart ??
+                  (showModelPicker && composer.policy && (
+                    <ModelPolicyPicker
+                      groupPresentation={modelPickerProps?.groupPresentation}
+                      messages={modelPickerProps?.messages}
+                      rows={catalog.rows}
+                      model={composer.policy.model}
+                      effort={composer.policy.reasoningEffort}
+                      latencyMode={composer.policy.latencyMode}
+                      loading={catalog.loading}
+                      error={catalog.error?.message}
+                      disabled={terminal}
+                      // A session frozen on Codex remote compaction refuses
+                      // other providers' models; offer them only as disabled.
+                      codexOnly={detail.session?.codexCompactionMode === "remote_v2"}
+                      sessionKey={sessionId}
+                      onOpenChange={(open) => {
+                        if (open) void catalog.refresh();
+                      }}
+                      onModelChange={(model) => composer.setModel?.(model)}
+                      onEffortChange={(effort) => composer.setReasoningEffort?.(effort)}
+                      onLatencyModeChange={(mode) => composer.setLatencyMode?.(mode)}
+                    />
+                  ))
+                }
+                responsiveBasis={composerProps?.responsiveBasis ?? "container"}
+                effectiveControl={
+                  composer.effectiveControl ??
+                  queue.effectiveControl ??
+                  detail.session?.effectiveControl
+                }
+                queuedAheadCount={queue.queue.length}
+              />
+            </div>
+          </>
+        )}
+      </div>
+    </SingleSendWording>
   );
 }
 
 /** Neutral embedded defaults under the host's overrides; an empty phrase list keeps them. */
-function embeddedGenieLoading(options: GenieLoadingOptions | undefined): GenieLoadingOptions {
-  if (!options) return EMBEDDED_GENIE_LOADING;
+function embeddedGenieLoading(
+  t: OpenGeniText,
+  options: GenieLoadingOptions | undefined,
+): GenieLoadingOptions {
+  if (!options) return EMBEDDED_GENIE_LOADING(t);
   return {
-    ...EMBEDDED_GENIE_LOADING,
+    ...EMBEDDED_GENIE_LOADING(t),
     ...options,
-    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING.phrases,
-    messages: { ...EMBEDDED_GENIE_LOADING.messages, ...options.messages },
+    phrases: options.phrases?.length ? options.phrases : EMBEDDED_GENIE_LOADING(t).phrases,
+    messages: { ...EMBEDDED_GENIE_LOADING(t).messages, ...options.messages },
   };
 }
 
@@ -658,6 +788,7 @@ function useDefaultInteractiveBlock(
   sitesAvailable: boolean,
   sitePreviewUnavailable: string,
 ): NonNullable<MessageTimelineProps["renderInteractiveBlock"]> {
+  const t = useOpenGeniText();
   // Scope lazily: only a rendered preview reads, and some clients (a Site's
   // own client) cannot add headers.
   const scoped = useMemo((): SiteSnapshotClient => {
@@ -685,11 +816,11 @@ function useDefaultInteractiveBlock(
           {sitePreviewUnavailable}
         </div>
       ) : (
-        <Suspense fallback={<span role="status">Loading preview…</span>}>
+        <Suspense fallback={<span role="status">{t("sessionConversation.loadingPreview")}</span>}>
           <LazyChatInteractiveBlock workspaceId={workspaceId} client={scoped} {...block} />
         </Suspense>
       ),
-    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable],
+    [scoped, workspaceId, sitesAvailable, sitePreviewUnavailable, t],
   );
 }
 

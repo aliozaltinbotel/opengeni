@@ -25,7 +25,7 @@ The implementation lives in:
 
 - `packages/runtime/src/context-compaction.ts`: thresholds, portable rebuild,
   remote v2 retain/rebuild helpers, and the typed compaction signal.
-- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings.
+- `packages/runtime/src/prepared-compaction-request.ts`: retains the actual prepared request prefix at the model dispatch boundary. Responses and Claude pre-turn/operator and mid-turn compaction stop there before ordinary inference; no prefix is rebuilt from the original Agent. A missing prepared request fails closed. Remote v2 preserves all prepared model settings; portable Responses preserves the prepared tools and instructions while applying its summary-specific output limit and provider safety settings; Claude preserves every cache-relevant field (see below).
 - `apps/worker/src/activities/run-input.ts`: operator compaction loads canonical history through ordinary input preparation without a synthetic message or required update batch.
 - `packages/runtime/src/index.ts`: portable summarizer + `requestRemoteCompactionV2`.
 - `apps/worker/src/activities/context-compaction.ts`: mode branch, summarizer
@@ -49,14 +49,21 @@ If a model has no explicit automatic limit, Opengeni uses
 0.9 and is clamped to 0.3–0.9. An explicit limit is capped at 90% of the raw
 window, matching Codex core.
 
-### Workspace preferences
+### Organization and workspace preferences
 
-Open **Organization settings → Models → your workspace → Context & compaction**
-(including your Personal workspace). Pick the model and enter an input-token
-threshold, or leave it empty / choose **Use model default**. The page shows the
-model default, saved workspace override and effective value. Only workspace
-settings administrators can save; readers can inspect. Selecting a model here
-does not change any session's model or reasoning effort.
+Organization owners and admins set limits once for every workspace under
+**Organization settings → Models → Defaults for every workspace → Context &
+compaction**. An empty field there follows the model's default. Each workspace
+follows the organization's limit for a model until its own admins set one under
+**Organization settings → Models → your workspace → Context & compaction**
+(including your Personal workspace). On a workspace's page an empty field shows
+what it follows (the organization's limit, labeled with the organization's name,
+or the model's default) as its placeholder; a number is the workspace's own limit
+(`300k` and `300,000` both work), with what it replaces and a way back to it
+under it. The Models row says "Model defaults", the organization's limits, or how
+many models have a custom limit. A saved limit above the model's current maximum
+says which value is used. Only the respective administrators can save; readers can
+inspect. Setting a limit does not change any session's model or reasoning effort.
 
 Preferences apply when a subsequent turn attempt prepares its model, including
 existing sessions. An in-flight model call is unchanged. They never change the
@@ -67,17 +74,19 @@ does not restore stale usage or cause an immediate compaction loop.
 
 The setting is `modelCompactionThresholds`, keyed by the exact product model ID
 (so API and subscription routes can differ). PATCH `/v1/workspaces/:workspaceId/settings`
-merges model keys atomically. Omission preserves a model; `null` removes only its
+merges a workspace's model keys atomically, and PATCH
+`/v1/organizations/:organizationId/model-defaults` merges the organization's.
+The workspace's value wins, then the organization's, then the model default. Omission preserves a model; `null` removes only its
 override. Writes require whole numbers of at least 16,000 tokens. The effective
 value is bounded by both 90% of the raw window and the provider-safe input window.
 If a model's limits change, the saved preference remains visible but is clamped
 at execution. Malformed read values are ignored per model, not by resetting the
 whole workspace settings bag. The model catalog exposes `compactionPolicy` with
-default/override/effective/minimum/maximum tokens, separately from immutable model
+default/override/organization/effective/minimum/maximum tokens, separately from immutable model
 execution metadata.
 
-Haiku 5.5 defaults to 95,000 tokens; Opus 5.5 retains its 800,000-token default
-unless overridden (for example, to 250,000). These are proactive thresholds, not
+Haiku 5.5 defaults to 95,000 tokens and Opus 5.5 (native Claude and Opper) to
+300,000, unless overridden (for example, to 250,000). These are proactive thresholds, not
 hard spending caps: checks run between steps and include provider-accounted
 context, so newly appended content or a large response may cross a price boundary.
 The independent request-byte guard described below always remains active.
@@ -220,6 +229,15 @@ The compaction model receives:
 3. for Responses providers, the exact prepared system instructions and
    model-visible tool schemas from the ordinary agent request; portable
    compaction sets `tool_choice:none` and cannot execute returned tool calls.
+   Claude caches `tools` → `system` → `messages`, and its thinking mode,
+   `output_config.effort` and `tool_choice` are part of the cache key, so a
+   Claude checkpoint keeps the prepared tools, instructions, thinking, effort
+   and tool choice unchanged, changes only `max_tokens`, and appends a
+   text-only instruction after the checkpoint prompt in the same user turn.
+   Its history is the same projected prefix, so the call reads the warm cache.
+   If the model still calls a tool, one retry sets `tool_choice:none` (tools
+   and instructions stay cached); a reply with a tool call never becomes the
+   checkpoint.
    Chat providers still use a tool-less transcript request and composed
    instructions because their protocol differs;
 4. no provider-side context-management policy.
@@ -351,6 +369,12 @@ rewrite of the chat transcript. The React timeline projects a first-class
 | `session.context.compacted` | `compacted` with optional `~before → ~after estimated history tokens` |
 | `session.context.compaction.skipped` | `skipped` with a short reason |
 
+A `skipped` landmark with `reason="interrupted"` means the attempt itself was
+cancelled while the checkpoint request was in flight (typically a worker
+draining during a deploy). It renders as "Compaction interrupted" with retry
+copy rather than as a failure; the recovered attempt compacts again if the
+history still needs it.
+
 Start and finish for the same turn settle in place (one landmark). The landmark
 is a turn boundary, so mid-turn auto-compact stays visible between collapsed
 pre/post activity instead of vanishing inside a chevron. Copy always reminds
@@ -406,6 +430,12 @@ with silently trimmed input and does not install a mechanical fallback summary.
 Retryable provider failures instead recover the same accepted turn through the
 ordinary provider/capacity path; they do not create another goal continuation,
 and an explicit `/compact` request remains pending for that same-turn retry.
+The attempt's own cancellation (worker shutdown or another activity
+cancellation) is neither: it records
+`session.context.compaction.skipped(reason="interrupted")` when the attempt can
+still write, keeps any `/compact` request pending, and propagates the
+cancellation to the ordinary same-turn recovery path (see
+[`run-lifecycle.md`](run-lifecycle.md)).
 When a terminal failure belongs to an explicit `/compact`, one attempt-fenced
 database settlement records
 `session.context.compaction.skipped(reason="summarization_failed")`, clears that
@@ -430,13 +460,27 @@ bounded status/code/request identifiers, never the provider message or model
 input.
 
 When the latest finished inference has `code="context_compaction_failed"`, an
-active goal remains active and ordinary pending system/child/schedule updates
-remain durable, but neither may start another inference against the unchanged
-history. A queued human/API prompt or Agent Steer instruction remains runnable
-and receives the pending updates at its normal boundary. Explicit `/compact`
-also remains runnable; it does not consume those updates, but a successful
-checkpoint supplies newer finished-turn truth so the existing pending batch can
-run next. This gate neither creates queue work nor consumes a goal
+active goal remains active and the machine inputs that were already pending at
+that failure remain durable, but neither may start another inference against
+the unchanged history. The hold is bounded by the exact `turn.failed` event
+sequence (`compactionFailureHoldSequenceTx` in
+`packages/db/src/compaction-failure-hold.ts`): an input whose own
+`system.update.pending` event is newer than that sequence is genuinely new
+truth. Under the ordinary wake-class rules it makes one new attempt, and the
+held backlog rides along in canonical order (a batch that cannot coalesce
+claims first and the newer input follows). A queued human/API prompt or Agent
+Steer instruction, of any age, remains runnable and receives the pending
+updates at its normal boundary. Explicit `/compact` also remains runnable; it
+does not consume those updates, but a successful checkpoint supplies newer
+finished-turn truth so the existing pending batch can run next. Every reader
+of runnable work applies the same hold: work peek, claim, pre-claim failure,
+goal materialization, final idle settlement, the workflow-wake delivery ACK and
+the child-result wake repair. Held-only input therefore neither keeps a wake
+revision open (the dispatcher would otherwise re-signal a closed workflow
+forever) nor wakes a session, while a sender's new message after the failure
+always wakes it. A further compaction failure starts a new hold at its own
+sequence, so every retry needs another external input and there is no
+self-sustaining loop. This gate neither creates queue work nor consumes a goal
 continuation counter.
 
 Manual `/compact` sets one durable idempotent request. During active inference,

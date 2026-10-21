@@ -38,6 +38,7 @@ import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@ope
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
 
 /* ----------------------------------------------------------------------------
    The web session page body at phone width: timeline (with the question card
@@ -63,6 +64,7 @@ export interface NativeSessionScreenProps extends Omit<
           | "messages"
           | "onActionFeedback"
           | "voice"
+          | "call"
         >
       >
     | undefined;
@@ -111,25 +113,29 @@ export function NativeSessionScreen({
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: NativeSessionScreenProps) {
+  // One Send (`busySend: "steer"` without `offerQueue`): waiting messages,
+  // not a queue, and no Steer to learn.
   return (
-    <NativeTimelineMessagesProvider messages={timelineMessages}>
-      <SessionScreenBody
-        controller={controller}
-        composer={composerSlots}
-        trailing={trailing}
-        topBar={topBar}
-        bottomInset={bottomInset}
-        keyboardBottomOffset={keyboardBottomOffset}
-        feedback={feedback}
-        humanInputMessages={humanInputMessages}
-        approvalMessages={approvalMessages}
-        client={client}
-        models={models}
-        renderComposer={renderComposer}
-        renderMessageActions={hostMessageActions}
-        {...timelineProps}
-      />
-    </NativeTimelineMessagesProvider>
+    <SingleSendWording enabled={controller.composer.singleSend === true}>
+      <NativeTimelineMessagesProvider messages={timelineMessages}>
+        <SessionScreenBody
+          controller={controller}
+          composer={composerSlots}
+          trailing={trailing}
+          topBar={topBar}
+          bottomInset={bottomInset}
+          keyboardBottomOffset={keyboardBottomOffset}
+          feedback={feedback}
+          humanInputMessages={humanInputMessages}
+          approvalMessages={approvalMessages}
+          client={client}
+          models={models}
+          renderComposer={renderComposer}
+          renderMessageActions={hostMessageActions}
+          {...timelineProps}
+        />
+      </NativeTimelineMessagesProvider>
+    </SingleSendWording>
   );
 }
 
@@ -233,6 +239,22 @@ function SessionScreenBody({
         }
         trailing={
           <>
+            {controller.admissionBlocked && !paused ? (
+              <StuckCard
+                needsAccess={
+                  controller.session.session?.admissionBlock?.reason ===
+                    "initiator_membership_required" ||
+                  controller.session.session?.admissionBlock?.reason ===
+                    "personal_resource_grant_required"
+                }
+                busy={composer.resuming || control.controlling}
+                onRetry={async () => {
+                  const result = await control.resume();
+                  await Promise.all([controller.session.refresh(), queue.refresh()]);
+                  if (!result) throw new Error("Resume was not accepted");
+                }}
+              />
+            ) : null}
             {waitingOnInput ? (
               <HumanInputCard
                 requests={humanInput.requests}
@@ -255,6 +277,12 @@ function SessionScreenBody({
         value: composer.value,
         onChangeText: composer.setValue,
         onSend: () => void composer.send(),
+        // The other choice beside Send while the agent works: Queue when
+        // Send steers, Steer when Send queues.
+        alternateSend: composer.alternateSend ?? null,
+        ...(composer.sendAlternate
+          ? { onAlternateSend: () => void composer.sendAlternate?.() }
+          : {}),
         canSend: composer.canSend && !busy,
         sending: composer.sending,
         running: controller.runActive,
@@ -272,6 +300,7 @@ function SessionScreenBody({
         inputRef: composerInput,
         messages: composerSlots?.messages,
         voice: composerSlots?.voice,
+        call: composerSlots?.call,
         below: composer.draftConflict ? (
           <DraftConflictStrip
             messages={composerSlots?.messages}
@@ -289,6 +318,7 @@ function SessionScreenBody({
             <QueueDock
               queue={queue}
               composer={composer}
+              singleSend={composer.singleSend === true}
               onComposerFocus={() => composerInput.current?.focus()}
               leading={
                 <SessionSignals
@@ -387,8 +417,80 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
   );
 }
 
+/**
+ * The runtime could not start this session's next step. It is not waiting on
+ * the person, so it says so plainly and offers one recheck (Resume), which
+ * starts the kept work again.
+ */
+function StuckCard({
+  busy,
+  needsAccess,
+  onRetry,
+}: {
+  busy: boolean;
+  needsAccess: boolean;
+  onRetry: () => Promise<void>;
+}) {
+  const theme = useNativeTimelineTheme();
+  const m = useNativeTimelineMessages();
+  const [failed, setFailed] = useState(false);
+  const c = theme.colors;
+  return (
+    <View
+      accessibilityRole="summary"
+      style={{
+        gap: 10,
+        padding: 14,
+        borderRadius: 14,
+        borderWidth: 1,
+        borderColor: withAlpha(c["status-failed"], 0.3),
+        backgroundColor: withAlpha(c["status-failed"], 0.08),
+      }}
+    >
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+        <Icon name="circle-alert" size={16} color={c["status-failed"]} />
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg }}>{m.stuckTitle}</Text>
+      </View>
+      <Text
+        style={{
+          ...fontStyle(theme),
+          fontSize: 14,
+          lineHeight: 20,
+          color: c["fg-muted"],
+        }}
+      >
+        {needsAccess ? m.stuckAccessBody : m.stuckBody}
+      </Text>
+      {failed ? (
+        <Text
+          accessibilityLiveRegion="polite"
+          style={{
+            ...fontStyle(theme),
+            fontSize: 13,
+            color: c["status-failed"],
+          }}
+        >
+          {m.stuckRetryFailed}
+        </Text>
+      ) : null}
+      <Button
+        label={m.stuckRetry}
+        variant="primary"
+        busy={busy}
+        disabled={busy}
+        style={{ alignSelf: "flex-start" }}
+        onPress={() => {
+          setFailed(false);
+          onRetry().catch(() => setFailed(true));
+        }}
+      />
+    </View>
+  );
+}
+
 /** Composer attachment chips: name, upload state, tap to retry a failure, remove. */
 export function AttachmentChips({ attachments }: { attachments: NativeFileAttachmentsResult }) {
+  const t = useOpenGeniText();
   const theme = useNativeTimelineTheme();
   const c = theme.colors;
   if (attachments.attachments.length === 0) return null;
@@ -411,7 +513,11 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
             <View key={item.id} style={{ width: 56, height: 56 }}>
               <Pressable
                 accessibilityRole={failed ? "button" : "image"}
-                accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+                accessibilityLabel={
+                  failed
+                    ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+                    : item.name
+                }
                 disabled={!failed}
                 onPress={() => void attachments.retry(item.id)}
                 style={{
@@ -454,7 +560,9 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
               </Pressable>
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Remove ${item.name}`}
+                accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
+                  name: item.name,
+                })}
                 onPress={() => attachments.remove(item.id)}
                 hitSlop={8}
                 style={{
@@ -491,7 +599,11 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
           >
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={failed ? `Retry ${item.name}` : item.name}
+              accessibilityLabel={
+                failed
+                  ? t("native.timeline.sessionScreen.retryName", { name: item.name })
+                  : item.name
+              }
               disabled={!failed}
               onPress={() => void attachments.retry(item.id)}
               style={{ flexDirection: "row", alignItems: "center", gap: 6, paddingVertical: 4 }}
@@ -507,12 +619,14 @@ export function AttachmentChips({ attachments }: { attachments: NativeFileAttach
                 }}
               >
                 {item.name}
-                {failed ? " · tap to retry" : ""}
+                {failed ? t("native.timeline.sessionScreen.tapToRetrySuffix") : ""}
               </Text>
             </Pressable>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel={`Remove ${item.name}`}
+              accessibilityLabel={t("native.timeline.sessionScreen.removeName", {
+                name: item.name,
+              })}
               onPress={() => attachments.remove(item.id)}
               hitSlop={6}
               style={{ width: 28, height: 28, alignItems: "center", justifyContent: "center" }}
@@ -532,8 +646,9 @@ function DraftConflictStrip(props: {
   onResolve: (choice: "keep_mine" | "use_remote") => void;
 }) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const c = theme.colors;
-  const messages = { ...defaultChatComposerMessages, ...props.messages };
+  const messages = { ...defaultChatComposerMessages(t), ...props.messages };
   const text = { ...fontStyle(theme), fontSize: theme.size.xs, color: c["status-failed"] };
   return (
     <View

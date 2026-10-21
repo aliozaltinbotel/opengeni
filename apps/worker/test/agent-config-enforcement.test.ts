@@ -170,6 +170,10 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
   const persistence = [
+    spyOn(db, "requireWorkspace").mockResolvedValue({
+      id: SCOPE.workspaceId,
+      settings: {},
+    } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
     spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
       schemaVersion: 1,
@@ -332,6 +336,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   } as BuildTurnAgentDeps["trigger"];
   let turnExecutionPolicy = {
     providerId: "openai",
+    reasoningEffort: "low",
     productModelId: "scripted-model",
     upstreamModelId: "scripted-model",
     latencyMode: "standard",
@@ -445,10 +450,34 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
               )
                 ? "fixture-xai-media-id"
                 : null,
-              xaiRequestContext:
-                options.subscription === "xai-subscription" || options.foreignMediaCredential
-                  ? {}
-                  : null,
+              xaiRequestContext: null,
+              // SuperGrok's only media credential is its shared-core placement
+              // (its legacy credential path was deleted after the cutover).
+              xaiSubscriptionCore: (
+                options.subscription === "xai-subscription"
+                  ? options.localMediaCredential
+                  : options.foreignMediaCredential
+              )
+                ? {
+                    identity: {
+                      accountId: SCOPE.accountId,
+                      workspaceId: SCOPE.workspaceId,
+                      sessionId: SCOPE.sessionId,
+                      turnId: "fixture-turn",
+                      sessionOwnerSubjectId: "user:fixture",
+                      sessionOwnerMembershipId: null,
+                      initiatingHumanSubjectId: "user:fixture",
+                      acceptedAuthorityV2: { version: 2, personal: [] },
+                    },
+                    connectionId: "fixture-xai-media-id",
+                    placedRefreshGeneration: 1,
+                    personal: false,
+                  }
+                : null,
+            },
+            leases: {
+              codex: { generation: null },
+              xai: { generation: 1, assertCurrentForDispatch: async () => {} },
             },
           }
         : {}),

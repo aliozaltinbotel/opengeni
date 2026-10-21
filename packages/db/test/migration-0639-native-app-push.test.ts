@@ -13,6 +13,8 @@ import {
   enqueueNativePush,
   getNativePushDevice,
   registerNativePushDevice,
+  setInboxSettings,
+  setSessionRepliesMuted,
   settleNativePushDelivery,
   unregisterNativePushDevice,
   type DbClient,
@@ -142,8 +144,8 @@ describe("0639 native app push", () => {
       from pg_proc procedure
       join pg_namespace namespace on namespace.oid = procedure.pronamespace
       where namespace.nspname = 'opengeni_private' and procedure.proname like '%native_push%'`;
-    // Eight from 0639, plus enqueue_native_push_v2 (0664).
-    expect(rows.length).toBe(9);
+    // Eight from 0639, plus enqueue_native_push_v2 (0664) and enqueue_native_push_v3 (0708).
+    expect(rows.length).toBe(10);
     for (const row of rows) {
       expect(row.securityDefiner).toBe(true);
       expect(row.publicExecute).toBe(false);
@@ -224,6 +226,140 @@ describe("0639 native app push", () => {
     });
     // Someone else's devices never receive this session's events.
     expect(await pendingFor(other.authSessionId)).toHaveLength(0);
+  });
+
+  test("a sub-agent's turns end with its parent; only its questions alert the person (0675)", async () => {
+    if (!client) return;
+    const person = await personWithAppSession("sub-agent");
+    await registerNativePushDevice(db(), {
+      authSessionId: person.authSessionId,
+      platform: "ios",
+      appId: "ai.opengeni.app",
+      environment: "development",
+      token: "9".repeat(64),
+      rules: ["needs_input", "reply_ready", "failed"],
+    });
+    const child = await createSession(db(), {
+      ...person.scope,
+      initialMessage: "child",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      reasoningEffort: "medium" as const,
+      latencyMode: "standard" as const,
+      sandboxBackend: "none",
+      parentSessionId: person.session.id,
+      createdBy: { kind: "subject", subjectId: person.subjectId, label: "User sub-agent" },
+      createdByContext: { label: "User sub-agent" },
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, child.id, [
+      { type: "turn.completed", payload: {} },
+      { type: "turn.failed", payload: { error: "boom" } },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { questions: [{ prompt: "Which region?" }] } },
+      },
+    ]);
+    const pending = await pendingFor(person.authSessionId);
+    expect(pending.map((row) => [row.rule, row.payload.sessionId])).toEqual([
+      ["needs_input", child.id],
+    ]);
+    // The person's own session still alerts when its turn ends.
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      { type: "turn.completed", payload: {} },
+    ]);
+    expect((await pendingFor(person.authSessionId)).map((row) => row.rule)).toEqual([
+      "needs_input",
+      "reply_ready",
+    ]);
+  });
+
+  test("a session whose replies the person muted still asks them questions (0678)", async () => {
+    if (!client) return;
+    const person = await personWithAppSession("muted");
+    await registerNativePushDevice(db(), {
+      authSessionId: person.authSessionId,
+      platform: "ios",
+      appId: "ai.opengeni.app",
+      environment: "development",
+      token: "8".repeat(64),
+      rules: ["needs_input", "reply_ready", "failed"],
+    });
+    await setSessionRepliesMuted(db(), {
+      workspaceId: person.scope.workspaceId,
+      sessionId: person.session.id,
+      subjectId: person.subjectId,
+      muted: true,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      { type: "turn.completed", payload: {} },
+      {
+        type: "session.humanInput.requested",
+        payload: { request: { questions: [{ prompt: "Which region?" }] } },
+      },
+      { type: "turn.failed", payload: { error: "boom" } },
+    ]);
+    expect((await pendingFor(person.authSessionId)).map((row) => row.rule)).toEqual([
+      "needs_input",
+      "failed",
+    ]);
+  });
+
+  test("questions and approvals arrive time-sensitive only for a person who asked (0718)", async () => {
+    if (!client) return;
+    const person = await personWithAppSession("time-sensitive");
+    await registerNativePushDevice(db(), {
+      authSessionId: person.authSessionId,
+      platform: "ios",
+      appId: "ai.opengeni.app",
+      environment: "development",
+      token: "7".repeat(64),
+      rules: ["needs_input", "reply_ready", "failed"],
+    });
+    const question = {
+      type: "session.humanInput.requested",
+      payload: { request: { questions: [{ prompt: "Which region?" }] } },
+    } as const;
+    const approval = {
+      type: "session.requiresAction",
+      payload: { approvals: [{ id: "approval-1", name: "deploy" }] },
+    } as const;
+    // Off by default: ordinary alerts.
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [question]);
+    expect((await pendingFor(person.authSessionId))[0]!.payload.urgency).toBeUndefined();
+
+    const owner = { accountId: person.scope.accountId, subjectId: person.subjectId };
+    expect(await setInboxSettings(db(), { ...owner, timeSensitiveNeedsYou: true })).toEqual({
+      tidyPolicy: "own_sessions",
+      pausedGoals: false,
+      replies: false,
+      timeSensitiveNeedsYou: true,
+    });
+    // A partial change keeps it.
+    expect(await setInboxSettings(db(), { ...owner, replies: true })).toMatchObject({
+      replies: true,
+      timeSensitiveNeedsYou: true,
+    });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [
+      question,
+      approval,
+      { type: "turn.completed", payload: {} },
+      { type: "turn.failed", payload: { error: "boom" } },
+    ]);
+    const pending = await pendingFor(person.authSessionId);
+    expect(pending.map((row) => [row.rule, row.payload.urgency ?? null])).toEqual([
+      ["needs_input", null],
+      ["needs_input", "time_sensitive"],
+      ["needs_input", "time_sensitive"],
+      // Replies and failures stay ordinary.
+      ["reply_ready", null],
+      ["failed", null],
+    ]);
+
+    // Turned off, the next question is ordinary again.
+    await setInboxSettings(db(), { ...owner, timeSensitiveNeedsYou: false });
+    await appendSessionEvents(db(), person.scope.workspaceId, person.session.id, [question]);
+    expect((await pendingFor(person.authSessionId)).at(-1)!.payload.urgency).toBeUndefined();
   });
 
   test("claims, settles, and forgets a device the provider no longer knows", async () => {

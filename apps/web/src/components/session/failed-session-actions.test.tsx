@@ -38,6 +38,22 @@ const failure = {
 };
 const actions = { onRetry: async () => true, retryBlocker: null };
 
+test("an incompatible accepted Knowledge scope offers a new message, never Retry", async () => {
+  const reason =
+    "This turn's Knowledge scope no longer matches this chat. Send a new message to continue with the current settings.";
+  const scopedFailure = { ...failure, failureCode: "knowledge_learning_scope_changed", reason };
+  const container = await render(<FailedSessionBanner failure={scopedFailure} actions={actions} />);
+  expect(container.textContent).toContain(reason);
+  expect(container.querySelector("button")).toBeNull();
+  await act(async () =>
+    root!.render(
+      <FailedSessionBanner failure={scopedFailure} actions={actions} modelChanged canChooseModel />,
+    ),
+  );
+  expect(container.textContent).toContain(reason);
+  expect(container.querySelector("button")).toBeNull();
+});
+
 test("compact row offers one ghost Retry without duplicate controls or guidance", async () => {
   const container = await render(<FailedSessionBanner failure={failure} actions={actions} />);
   expect(container.querySelectorAll("button")).toHaveLength(1);
@@ -348,7 +364,6 @@ test("all draft, delivery, work, permission and deliberate pause guards hide Ret
     "upload",
     "repository",
     "policy",
-    "variable_sets",
     "personal_decision",
     "personal_loading",
   ] as const) {
@@ -646,6 +661,31 @@ test("definitive unsafe retry rejection removes the action", async () => {
   );
 });
 
+test("a permanently unknown tool outcome says what to do instead of still settling", async () => {
+  let sends = 0;
+  const container = await render(
+    <FailedSessionActions
+      {...actions}
+      onRetry={async () => {
+        sends += 1;
+        throw new OpenGeniApiError(409, "Unknown tool outcome", {
+          code: "RETRY_TOOL_OUTCOME_UNKNOWN",
+        });
+      }}
+    />,
+  );
+  await act(async () => container.querySelector("button")!.click());
+  expect(sends).toBe(1);
+  // Permanent: the action is removed rather than inviting a retry that can
+  // never succeed, and the copy names the person's next step.
+  expect(container.querySelector("button")).toBeNull();
+  const alert = container.querySelector('[role="alert"]')!.textContent!;
+  expect(alert).not.toContain("settling");
+  expect(alert).toBe(
+    "A tool may already have run, so Retry could repeat it. Check its result, then send a message to continue.",
+  );
+});
+
 for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
   test(`${code} allows explicit retry after the same failure's transient blocker clears`, async () => {
     let sends = 0;
@@ -658,7 +698,9 @@ for (const code of ["RETRY_PAUSED", "RETRY_EXECUTION_UNRESOLVED"] as const) {
     );
     await act(async () => container.querySelector("button")!.click());
     expect(container.querySelector('[role="alert"]')!.textContent).toBe(
-      code === "RETRY_PAUSED" ? "This session is paused." : "Earlier work is still settling.",
+      code === "RETRY_PAUSED"
+        ? "This session is paused."
+        : "Earlier work is still settling. Try again in a moment.",
     );
     await act(async () =>
       root!.render(
@@ -742,6 +784,62 @@ test("billing offers at most one authorized action and never Retry", async () =>
   }
 });
 
+test("free credit for other models offers a covered model before buying credits", async () => {
+  const chosen: string[] = [];
+  const gap = {
+    modelLabel: "Claude Opus 5.5",
+    covered: [
+      { id: "azure-sol/gpt-6.1-sol", label: "GPT-6.1 Sol" },
+      { id: "gpt-6-luna", label: "GPT-6 Luna" },
+    ],
+    selectionUsable: false,
+  };
+  const banner = (props: {
+    modelChanged?: boolean;
+    selectionUsable?: boolean;
+    canBuyCredits?: boolean;
+  }) => (
+    <FailedSessionBanner
+      failure={{ ...failure, reason: "insufficient Opengeni credits" }}
+      creditExhausted
+      freeCreditGap={{ ...gap, selectionUsable: props.selectionUsable ?? false }}
+      onChooseModel={(model) => chosen.push(model)}
+      workspaceId="workspace-a"
+      canBuyCredits={props.canBuyCredits ?? true}
+      canChooseModel
+      modelChanged={props.modelChanged}
+      actions={actions}
+    />
+  );
+  const container = await render(banner({}));
+  const headline = container.querySelector('[data-testid="failed-session-banner"] span')!;
+  expect(headline.textContent).toBe(
+    "Your free credits don't cover Claude Opus 5.5. Switch to a model they cover, such as GPT-6.1 Sol or GPT-6 Luna, or add credits.",
+  );
+  expect(container.textContent).not.toMatch(/out of Opengeni credits/i);
+  const switchButton = container.querySelector("button")!;
+  expect(switchButton.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.querySelector("a")!.textContent).toBe("Buy credits");
+  await act(async () => switchButton.click());
+  expect(chosen).toEqual(["azure-sol/gpt-6.1-sol"]);
+
+  await act(async () => root!.render(banner({ canBuyCredits: false })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.querySelector("a")).toBeNull();
+
+  // Another uncovered model selected: the switch stays on offer.
+  await act(async () => root!.render(banner({ modelChanged: true })));
+  expect(container.querySelector("button")!.textContent).toBe("Use GPT-6.1 Sol");
+  expect(container.textContent).toContain("Switch to a model they cover");
+
+  // A usable model selected: the copy says how to continue and no switch is offered.
+  await act(async () => root!.render(banner({ modelChanged: true, selectionUsable: true })));
+  expect(container.textContent).toContain(
+    "Your free credits don't cover Claude Opus 5.5. Send a message to continue with the selected model.",
+  );
+  expect(container.querySelector("button")).toBeNull();
+});
+
 test("unknown provider evidence never invents expiry, reset or connection classification", async () => {
   const container = await render(
     <FailedSessionBanner
@@ -771,4 +869,64 @@ test("unavailable recovery chunk preserves error and composer draft", async () =
   );
   expect(container.querySelector('[role="alert"]')!.textContent).toBe("Connection failed.");
   expect(container.querySelector("textarea")!.value).toBe("My draft");
+});
+
+test("a compaction failure the timeline already shows keeps only its recovery action", async () => {
+  const recorded =
+    "compaction summarization failed: 400 Missing required parameter: 'input[116].status'.";
+  const compaction = {
+    ...failure,
+    reason: recorded,
+    recordedDetail: recorded,
+    failureCode: "context_compaction_failed",
+  };
+  const shown = await render(
+    <FailedSessionBanner failure={compaction} actions={actions} shownInTimeline />,
+  );
+  // No second headline or Details: the timeline landmark owns both.
+  expect(shown.querySelector('[data-testid="failed-session-banner"]')).toBeNull();
+  expect(shown.querySelector("details")).toBeNull();
+  expect(shown.textContent).not.toContain("Couldn’t compact");
+  expect(shown.querySelector("button")!.textContent).toBe("Retry");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Nothing to offer: nothing renders.
+  const empty = await render(<FailedSessionBanner failure={compaction} shownInTimeline />);
+  expect(empty.innerHTML).toBe("");
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+
+  // Absent from the visible timeline (e.g. a cleared view), the banner keeps it.
+  const absent = await render(<FailedSessionBanner failure={compaction} actions={actions} />);
+  expect(absent.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "Couldn’t compact conversation history. If the next message fails too, start a new session.",
+  );
+  expect(absent.querySelector("details p")!.textContent).toBe(recorded);
+});
+
+test("the timeline flag never hides a failure the timeline cannot own", async () => {
+  // Another failure kind keeps its banner even if the caller claims ownership.
+  const container = await render(
+    <FailedSessionBanner failure={failure} actions={actions} shownInTimeline />,
+  );
+  expect(container.querySelector('[data-testid="failed-session-banner"] span')!.textContent).toBe(
+    "The session stopped unexpectedly.",
+  );
+  await act(async () => root?.unmount());
+  document.body.replaceChildren();
+  // A compaction failure on an exhausted quota keeps its limit headline.
+  const quota = await render(
+    <FailedSessionBanner
+      failure={{
+        ...failure,
+        reason: "compaction summarization failed: 429",
+        failureCode: "context_compaction_failed",
+        quotaScope: "daily",
+      }}
+      shownInTimeline
+    />,
+  );
+  expect(quota.querySelector('[data-testid="failed-session-banner"]')).not.toBeNull();
+  expect(quota.textContent).toContain("daily limit");
 });

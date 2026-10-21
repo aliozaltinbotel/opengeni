@@ -1,10 +1,12 @@
 import { sql } from "drizzle-orm";
+import { evaluateWorkspaceModelPolicy, SubscriptionPersonalAuthorityV2 } from "@opengeni/contracts";
 import {
-  evaluateWorkspaceModelPolicy,
-  SubscriptionPersonalAuthorityV2,
-  subscriptionPersonalAuthorityForProviderV2,
-} from "@opengeni/contracts";
-import type { ModelDescriptor, PlacementInput, ReselectionPoint } from "@opengeni/subscriptions";
+  declaredCacheLifetimeMs,
+  subscriptionCoreModelPolicyProviderIds,
+  type ModelDescriptor,
+  type PlacementInput,
+  type ReselectionPoint,
+} from "@opengeni/subscriptions";
 import { rawRows, withRlsContext, withSessionRlsActorContext, type Database } from "./database";
 import {
   assertSubscriptionTurnLeaseCurrent,
@@ -12,6 +14,11 @@ import {
   readSubscriptionEffectiveSettings,
   readSubscriptionSessionBinding,
 } from "./subscription-core-repository";
+import {
+  subscriptionCoreConnectionKind,
+  subscriptionCoreProviderId,
+  type SubscriptionCoreProvider,
+} from "./subscription-core/provider";
 
 const CORE_SUBSCRIPTION_SUBJECT = "service:subscription-core";
 
@@ -30,6 +37,14 @@ export type SubscriptionCorePlacementWorldRequest = {
   models: readonly ModelDescriptor[];
   reselectionPoints: readonly ReselectionPoint[];
   now: Date;
+  /**
+   * Read the session binding under its row lock (`FOR UPDATE`), held until
+   * the transaction ends: placement decides from, and commits to, the
+   * binding no pin or other placement can change meanwhile (SUB-STICK-02).
+   * Taken before any per-connection lock (lease, request), the order a pin
+   * also uses: binding row, then the connection.
+   */
+  lockBinding?: boolean;
 };
 
 export type SubscriptionCorePlacementWorldResult<T> =
@@ -51,33 +66,46 @@ export type SubscriptionCoreAcceptedTurnAccessResult<T> =
   | { status: "not_visible" }
   | { status: "completed"; value: T };
 
-export type SubscriptionCoreCodexRefreshResult<T> =
+export type SubscriptionCoreRefreshResult<T> =
   | { status: "not_visible" }
   | { status: "lease_lost" }
+  | { status: "refused" }
   | { status: "completed"; value: T };
+
+/** The credential a refresh callback rotates, read under the refresh lock. */
+export type SubscriptionCoreRefreshCredential = {
+  refreshGeneration: number;
+  credentialEncrypted: string;
+  expiresAt: Date | null;
+};
 
 type SessionPlacementRow = {
   owner_subject_id: string | null;
   owner_membership_id: string | null;
   initiating_human_subject_id: string | null;
   visibility: string;
-  codex_compaction_mode: string;
+  compaction_locked: boolean;
   workspace_kind: string;
   allowed_providers: string[] | null;
   allowed_models: string[] | null;
 };
 
 /**
- * Load a single Codex placement world and run the caller's placement/lease
+ * Load one provider's placement world and run the caller's placement/lease
  * operation in the same tenant- and session-scoped transaction. Database
  * authorization functions establish access from the exact accepted turn;
  * callers cannot use this as a general account or session reader.
  */
-export async function withSubscriptionCorePlacementWorld<T>(
+export async function withSubscriptionCoreProviderPlacementWorld<T>(
   db: Database,
+  provider: SubscriptionCoreProvider,
   request: SubscriptionCorePlacementWorldRequest,
   operation: (tx: Database, input: PlacementInput) => Promise<T>,
 ): Promise<SubscriptionCorePlacementWorldResult<T>> {
+  const providerId = subscriptionCoreProviderId(provider);
+  // A declaration that is not a positive lifetime fails placement closed
+  // instead of reading as always cold or always warm (SUB-STICK-04).
+  declaredCacheLifetimeMs(provider.adapter.cacheFacts);
   const acceptedAuthority = SubscriptionPersonalAuthorityV2.parse(request.acceptedAuthorityV2);
   return await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const [session] = await rawRows<SessionPlacementRow>(
@@ -86,15 +114,21 @@ export async function withSubscriptionCorePlacementWorld<T>(
                 session.owner_organization_membership_id::text as owner_membership_id,
                 turn.initiating_human_subject_id,
                 session.visibility,
-                session.codex_compaction_mode,
+                ${provider.sessionCompactionLock ?? sql`false`} as compaction_locked,
                 get_workspace_kind(workspace.account_id, workspace.id) as workspace_kind,
-                policy.allowed_providers, policy.allowed_models
+                -- The workspace's own policy, else its organization's default.
+                case when policy.workspace_id is not null then policy.allowed_providers
+                  else organization_defaults.allowed_providers end as allowed_providers,
+                case when policy.workspace_id is not null then policy.allowed_models
+                  else organization_defaults.allowed_models end as allowed_models
               from sessions session
               join session_turns turn on turn.account_id = session.account_id
                 and turn.workspace_id = session.workspace_id and turn.session_id = session.id
               join workspaces workspace on workspace.account_id = session.account_id
                 and workspace.id = session.workspace_id
               left join workspace_model_policies policy on policy.workspace_id = workspace.id
+              left join organization_model_defaults organization_defaults
+                on organization_defaults.account_id = workspace.account_id
               where session.account_id = ${request.accountId}::uuid
                 and session.workspace_id = ${request.workspaceId}::uuid
                 and session.id = ${request.sessionId}::uuid
@@ -104,22 +138,21 @@ export async function withSubscriptionCorePlacementWorld<T>(
     if (!session) {
       throw new Error("Accepted subscription session disappeared during placement");
     }
-    const personalAuthority = subscriptionPersonalAuthorityForProviderV2(
-      acceptedAuthority,
-      "codex",
-    );
+    const personalAuthority =
+      acceptedAuthority.personal.find((authority) => authority.provider === providerId) ?? null;
     let personalAuthorityAuthorized = false;
     if (
       personalAuthority &&
       session.owner_subject_id &&
-      session.owner_membership_id === personalAuthority.ownerMembershipId &&
+      (session.owner_membership_id === personalAuthority.ownerMembershipId ||
+        personalAuthority.sharedSessionChoice?.sessionId === request.sessionId) &&
       request.initiatingHumanSubjectId
     ) {
       const [authorization] = await rawRows<{ authorized: boolean }>(
         tx,
         sql`select opengeni_private.authorize_subscription_personal_placement_access(
                 ${request.accountId}::uuid, ${request.workspaceId}::uuid,
-                ${request.sessionId}::uuid, ${request.turnId}::uuid, 'codex',
+                ${request.sessionId}::uuid, ${request.turnId}::uuid, ${providerId},
                 ${personalAuthority.ownerMembershipId}::uuid,
                 ${personalAuthority.authorityGeneration}::bigint,
                 ${session.owner_subject_id}, ${request.initiatingHumanSubjectId}
@@ -133,6 +166,8 @@ export async function withSubscriptionCorePlacementWorld<T>(
       readSubscriptionSessionBinding(tx, {
         workspaceId: request.workspaceId,
         sessionId: request.sessionId,
+        provider: providerId,
+        forUpdate: request.lockBinding === true,
       }),
       {
         allowedProviders: session.allowed_providers,
@@ -141,7 +176,10 @@ export async function withSubscriptionCorePlacementWorld<T>(
       listSubscriptionConnectionsForPlacement(tx, {
         accountId: request.accountId,
         workspaceId: request.workspaceId,
-        provider: "codex",
+        provider: providerId,
+        kind: subscriptionCoreConnectionKind(provider),
+        now: request.now,
+        health: "stored",
       }),
     ]);
 
@@ -168,19 +206,44 @@ export async function withSubscriptionCorePlacementWorld<T>(
       ];
     }
 
+    if (
+      personalAuthorityAuthorized &&
+      personalAuthority &&
+      personalAuthority.ownerMembershipId !== session.owner_membership_id
+    ) {
+      // The personal-access SQL gate proved this accepting human's live
+      // membership. Do not replace the independently verified chat owner.
+      people = [
+        ...people,
+        {
+          membershipId: personalAuthority.ownerMembershipId,
+          active: true,
+          personalFallbackOptIn: false,
+        },
+      ];
+    }
     const workspaceKind = session.workspace_kind === "personal" ? "personal" : "shared";
     const workspaceAllowedModelIds =
       workspacePolicy.allowedProviders === null && workspacePolicy.allowedModels === null
         ? null
         : request.models
-            .filter(
-              (model) =>
-                evaluateWorkspaceModelPolicy(workspacePolicy, {
-                  // Workspace model policy uses the resolved provider identity;
-                  // the subscription core's provider key is intentionally neutral.
-                  providerId: model.provider === "codex" ? "codex-subscription" : model.provider,
-                  modelId: model.id,
-                }).allowed,
+            .filter((model) =>
+              // Workspace model policy uses the resolved provider identity;
+              // the subscription core's provider key is intentionally
+              // neutral, and a provider may name a model under more than one
+              // identity, every one of which must be allowed.
+              (model.provider === providerId
+                ? subscriptionCoreModelPolicyProviderIds(provider.adapter, model.id)
+                : [model.provider]
+              ).every(
+                (policyProviderId) =>
+                  evaluateWorkspaceModelPolicy(workspacePolicy, {
+                    providerId: policyProviderId,
+                    modelId: model.id,
+                    // Subscription placement: these models never spend Opengeni credits.
+                    chargesCredits: false,
+                  }).allowed,
+              ),
             )
             .map((model) => model.id);
     const input: PlacementInput = {
@@ -215,18 +278,25 @@ export async function withSubscriptionCorePlacementWorld<T>(
                 {
                   provider: personalAuthority.provider,
                   ownerMembershipId: personalAuthority.ownerMembershipId,
+                  ...(personalAuthority.sharedSessionChoice
+                    ? { sharedSessionChoice: personalAuthority.sharedSessionChoice }
+                    : {}),
                 },
               ]
             : [],
-        compactionProviderLock: session.codex_compaction_mode === "remote_v2" ? "codex" : null,
+        compactionProviderLock: session.compaction_locked ? providerId : null,
       },
       settings: effectiveSettings.values,
       people,
       // Keep the complete catalog so a disallowed preferred model does not
       // erase provider metadata needed to evaluate same-provider fallback.
       models: request.models,
-      connections: connectionRows,
-      cacheFacts: { codex: { kind: "measured_idle_cutoff", cutoffMs: null } },
+      // Credit consent counts only for a provider whose adapter declares
+      // extra credits; any other provider's stored flag is ignored.
+      connections: provider.adapter.capabilities.extraCredits
+        ? connectionRows
+        : connectionRows.map((row) => ({ ...row, extraCreditsEnabled: false })),
+      cacheFacts: { [providerId]: provider.adapter.cacheFacts },
     };
     return await operation(tx, input);
   });
@@ -244,13 +314,14 @@ export async function assertSubscriptionCoreAcceptedTurn(
 ): Promise<boolean> {
   const [authorization] = await rawRows<{ authorized: boolean }>(
     tx,
+    // An ownerless session is shared-only whoever started the turn: a person's
+    // turn there (for example a scheduled run that opens a new session) gets
+    // the same shared-scope access as a service turn and no personal access.
     !request.sessionOwnerSubjectId
-      ? request.initiatingHumanSubjectId !== null
-        ? sql`select false as authorized`
-        : sql`select opengeni_private.authorize_subscription_ownerless_session_access(
-            ${request.accountId}::uuid, ${request.workspaceId}::uuid,
-            ${request.sessionId}::uuid, ${request.turnId}::uuid
-          ) as authorized`
+      ? sql`select opengeni_private.authorize_subscription_ownerless_session_access(
+          ${request.accountId}::uuid, ${request.workspaceId}::uuid,
+          ${request.sessionId}::uuid, ${request.turnId}::uuid
+        ) as authorized`
       : request.initiatingHumanSubjectId
         ? sql`select opengeni_private.authorize_subscription_session_access(
             ${request.accountId}::uuid, ${request.workspaceId}::uuid,
@@ -331,26 +402,35 @@ export async function withSubscriptionCoreAcceptedTurn<T>(
 }
 
 /**
- * Serialize one Codex connection's rotating OAuth refresh token under the
- * canonical connection lock, while requiring both exact accepted-turn access
- * and its live lease generation in the same RLS transaction.
+ * Serialize one connection's credential refresh under the canonical
+ * per-connection lock, while requiring both exact accepted-turn access and
+ * its live lease generation in the same RLS transaction.
+ *
+ * Authorization happens once, before the callback's provider call, through
+ * begin_subscription_core_refresh. The callback receives the credential to
+ * rotate and must call persistSubscriptionCoreRefresh as soon as the
+ * provider returns, before any other fallible work: a rolled-back
+ * transaction discards the rotated credential. Persistence no longer depends
+ * on the lease or visibility surviving the provider call.
  */
-export async function withSubscriptionCoreCodexRefreshLock<T>(
+export async function withSubscriptionCoreRefreshLock<T>(
   db: Database,
+  provider: SubscriptionCoreProvider,
   request: SubscriptionCoreAcceptedTurnIdentity & {
     connectionId: string;
     holderId: string;
     generation: number;
   },
-  operation: (tx: Database) => Promise<T>,
-): Promise<SubscriptionCoreCodexRefreshResult<T>> {
+  operation: (tx: Database, credential: SubscriptionCoreRefreshCredential) => Promise<T>,
+): Promise<SubscriptionCoreRefreshResult<T>> {
+  const providerId = subscriptionCoreProviderId(provider);
   const access = await withSubscriptionCoreAcceptedTurn(db, request, async (tx) => {
     const leaseIsCurrent = await assertSubscriptionTurnLeaseCurrent(tx, {
       accountId: request.accountId,
       workspaceId: request.workspaceId,
       sessionId: request.sessionId,
       turnId: request.turnId,
-      provider: "codex",
+      provider: providerId,
       connectionId: request.connectionId,
       holderId: request.holderId,
       generation: request.generation,
@@ -367,15 +447,38 @@ export async function withSubscriptionCoreCodexRefreshLock<T>(
       workspaceId: request.workspaceId,
       sessionId: request.sessionId,
       turnId: request.turnId,
-      provider: "codex",
+      provider: providerId,
       connectionId: request.connectionId,
       holderId: request.holderId,
       generation: request.generation,
     });
     if (!leaseStillCurrent) return { status: "lease_lost" } as const;
-    return { status: "locked", value: await operation(tx) } as const;
+    const [credential] = await rawRows<{
+      refresh_generation: number | string;
+      credential_encrypted: string;
+      expires_at: Date | string | null;
+    }>(
+      tx,
+      sql`select refresh_generation, credential_encrypted, expires_at
+        from opengeni_private.begin_subscription_core_refresh(${providerId},
+          ${request.accountId}::uuid, ${request.workspaceId}::uuid,
+          ${request.sessionId}::uuid, ${request.turnId}::uuid,
+          ${request.sessionOwnerSubjectId}, ${request.initiatingHumanSubjectId},
+          ${request.connectionId}::uuid, ${request.holderId}, ${request.generation}::bigint
+        )`,
+    );
+    if (!credential) return { status: "refused" } as const;
+    return {
+      status: "locked",
+      value: await operation(tx, {
+        refreshGeneration: Number(credential.refresh_generation),
+        credentialEncrypted: credential.credential_encrypted,
+        expiresAt: credential.expires_at === null ? null : new Date(credential.expires_at),
+      }),
+    } as const;
   });
   if (access.status === "not_visible") return access;
   if (access.value.status === "lease_lost") return access.value;
+  if (access.value.status === "refused") return access.value;
   return { status: "completed", value: access.value.value };
 }

@@ -14,7 +14,7 @@
 //   * the configuration, the session and the workspace model policy admit the fallback model.
 // A declared fallback that cannot run is named (`providerTurn.fallbackNotRun`), and the turn ends FALLBACK_REFUSED.
 // The switch is recorded durably and fenced BEFORE the fallback's first call (switchSessionTurnToDeclaredFallback).
-import { assertTurnExecutionPolicyMatchesConfigV1, type Settings } from "@opengeni/config";
+import { assertTurnExecutionPolicyMatchesConfigV1, policyChargesCreditsForModel, type Settings } from "@opengeni/config";
 import {
   evaluateWorkspaceModelPolicy,
   type TurnExecutionPolicyV1,
@@ -110,6 +110,7 @@ export async function prepareDeclaredFallbackInAttempt<
     const verdict = evaluateWorkspaceModelPolicy(deps.workspaceModelPolicy, {
       providerId: verified.policy.providerId,
       modelId: verified.policy.productModelId,
+      chargesCredits: policyChargesCreditsForModel(deps.capabilitySettings, verified.policy.productModelId),
     });
     if (!verdict.allowed) return notRun("fallback_model_blocked_by_workspace_policy");
   }

@@ -414,6 +414,56 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
+    "definitively deleted sessions close without idle settlement or an observer timer",
+    async () => {
+      const taskQueue = `deleted-session-${crypto.randomUUID()}`;
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      let peeks = 0;
+      let settlements = 0;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async (input: { includeDeletion?: boolean }) => {
+          expect(input.includeDeletion).toBe(true);
+          peeks += 1;
+          return { kind: "deleted" };
+        },
+        markSessionIdle: async () => {
+          settlements += 1;
+        },
+        maybeContinueGoal: async () => {
+          throw new Error("Deleted session continued its goal");
+        },
+        runAgentTurn: async () => {
+          throw new Error("Deleted session dispatched a turn");
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...workflowScope(), sessionId: crypto.randomUUID() }],
+        });
+        await handle.result();
+        const history = await handle.fetchHistory();
+        expect(peeks).toBe(1);
+        expect(settlements).toBe(0);
+        expect(history.events?.some((event) => !!event.timerStartedEventAttributes)).toBe(false);
+        expect(patchIds(history)).toContain("session-close-deleted-v1");
+        await Worker.runReplayHistory(
+          { workflowsPath: workflowDefinitionsPath },
+          history,
+          workflowId,
+        );
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
     "safe control observations wait without settlement and re-read after a wake with replay-safe history",
     async () => {
       for (const kind of ["unavailable", "attempt-owned"] as const) {
@@ -1912,6 +1962,118 @@ describe("Temporal workflow integration", () => {
           sessionId,
           workflowId,
         });
+      } finally {
+        worker.shutdown();
+        await run;
+      }
+    },
+    goalContinuationTestTimeoutMs,
+  );
+
+  // The activities are scripted with the production contract:
+  // a claim refused by the task usage limit settles a completed stop and
+  // returns `idle` without model work, and goal materialization pauses an
+  // active goal (reason `session_usage_limit`) instead of continuing it. The
+  // real Temporal server proves that wakes after exhaustion stay bounded and
+  // that raising the limit never restarts work by itself.
+  test(
+    "session usage limit: one stop per wake, a paused goal, and no restart on raise",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const queuedTurns = [queuedTurn("event-1")];
+      let limitReached = false;
+      let goal: "active" | "paused" = "active";
+      const modelDispatches: string[] = [];
+      const stops: string[] = [];
+      const goalDecisions: string[] = [];
+      const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
+        if (limitReached) {
+          // Claim-time refusal: typed non-failure stop, session stays usable.
+          stops.push(turn.triggerEventId);
+          return { status: "idle" };
+        }
+        // This admitted call settles past the limit (overshoot is allowed).
+        modelDispatches.push(turn.triggerEventId);
+        limitReached = true;
+        return { status: "idle" };
+      });
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({
+          action: "continue" as const,
+        }),
+        maybeContinueGoal: async () => {
+          if (goal === "active" && limitReached) {
+            goal = "paused";
+            goalDecisions.push("paused:session_usage_limit");
+            return { action: "none" };
+          }
+          if (goal === "active") {
+            goalDecisions.push("continue");
+            queuedTurns.push(queuedTurn(`goal-event-${goalDecisions.length}`));
+            return { action: "continue" };
+          }
+          goalDecisions.push("none");
+          return { action: "none" };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const workflowId = `wf-${crypto.randomUUID()}`;
+        const options = {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: "event-1" }],
+        };
+        await (await client.workflow.start("sessionWorkflow", options)).result();
+        expect(modelDispatches).toEqual(["event-1"]);
+        expect(goal).toBe("paused");
+
+        // A child result or an existing-session schedule queued work before the
+        // edge could refuse it: the claim stops once and the run closes.
+        queuedTurns.push(queuedTurn("child-result-1"));
+        await (
+          await client.workflow.signalWithStart("sessionWorkflow", {
+            ...options,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE",
+            signal: "userMessage",
+            signalArgs: ["child-result-1"],
+          })
+        ).result();
+        // Repeated wakes with nothing admitted run no turn at all.
+        for (let wake = 0; wake < 3; wake += 1) {
+          await (
+            await client.workflow.signalWithStart("sessionWorkflow", {
+              ...options,
+              workflowIdReusePolicy: "ALLOW_DUPLICATE",
+              signal: "userMessage",
+              signalArgs: [`wake-${wake}`],
+            })
+          ).result();
+        }
+        // Raising the limit does not resume the paused goal or queue work.
+        limitReached = false;
+        await (
+          await client.workflow.signalWithStart("sessionWorkflow", {
+            ...options,
+            workflowIdReusePolicy: "ALLOW_DUPLICATE",
+            signal: "userMessage",
+            signalArgs: ["after-raise"],
+          })
+        ).result();
+
+        expect(modelDispatches).toEqual(["event-1"]);
+        expect(stops).toEqual(["child-result-1"]);
+        expect(goal).toBe("paused");
+        expect(goalDecisions[0]).toBe("paused:session_usage_limit");
+        expect(goalDecisions.filter((decision) => decision === "continue")).toEqual([]);
+        expect(goalDecisions.filter((decision) => decision.startsWith("paused"))).toHaveLength(1);
+        expect(queuedTurns).toEqual([]);
       } finally {
         worker.shutdown();
         await run;

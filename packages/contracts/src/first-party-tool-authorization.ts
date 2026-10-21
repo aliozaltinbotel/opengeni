@@ -3,6 +3,11 @@ import type { Permission } from "./permissions";
 
 export type FirstPartyToolAuthorization = {
   sessionRequired?: true;
+  /**
+   * Registered only while the session has admin access (live, per request),
+   * whatever its tool selection; the tool then acts as the person who gave it.
+   */
+  adminAccessRequired?: true;
   allOf?: readonly Permission[];
   anyOf?: readonly Permission[];
 };
@@ -99,6 +104,7 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   sandbox_provision: { sessionRequired: true, allOf: ["sessions:control"] },
   connected_machine_remove: { allOf: ["enrollments:manage"] },
   connected_machine_enroll_token: { allOf: ["enrollments:manage"] },
+  connected_machine_enable_screen_control: { allOf: ["enrollments:manage"] },
   rig_list: { allOf: ["rigs:use"] },
   rig_get: { allOf: ["rigs:use"] },
   rig_propose_change: { allOf: ["rigs:use"] },
@@ -115,6 +121,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   command_read: { sessionRequired: true, allOf: ["sessions:read"] },
   session_create: { allOf: ["sessions:create"] },
   session_send_message: { allOf: ["sessions:control"] },
+  session_message_status: { sessionRequired: true, allOf: ["sessions:read"] },
+  session_target_get: { sessionRequired: true, allOf: ["sessions:read"] },
+  session_target_set: { sessionRequired: true, allOf: ["sessions:read", "sessions:control"] },
   session_pause: { allOf: ["sessions:control"] },
   session_resume: { allOf: ["sessions:control"] },
   session_steer: { sessionRequired: true, allOf: ["sessions:control"] },
@@ -136,6 +145,10 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
     sessionRequired: true,
     allOf: ["sessions:control", "files:upload"],
   },
+  browser_record: {
+    sessionRequired: true,
+    allOf: ["sessions:control", "files:upload"],
+  },
   browser_auth: { sessionRequired: true, allOf: ["sessions:control"] },
   interaction_request_human: {
     sessionRequired: true,
@@ -149,7 +162,15 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   computer_observe: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_clipboard: { sessionRequired: true, allOf: ["sessions:read"] },
   computer_act: { sessionRequired: true, allOf: ["sessions:control"] },
+  excel_run: { sessionRequired: true, allOf: ["sessions:control"] },
   computer_lifecycle: { sessionRequired: true, allOf: ["sessions:control"] },
+  secret_search: { sessionRequired: true, allOf: ["secrets:list"] },
+  secret_save: { sessionRequired: true, allOf: ["secrets:write"] },
+  // Plaintext read: registered only for a literal `secrets:read` grant.
+  secret_get: { sessionRequired: true, allOf: ["secrets:read"] },
+  secret_move: { sessionRequired: true, allOf: ["secrets:write"] },
+  secret_delete: { sessionRequired: true, allOf: ["secrets:write"] },
+  // Retired (RETIRED_SECRET_TOOL_NAMES): never registered; kept for stored selections.
   variable_set_list: { allOf: ["variable-sets:list", "secrets:list"] },
   environment_list: { allOf: ["variable-sets:list", "secrets:list"] },
   variable_set_get_variable: {
@@ -250,6 +271,30 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   artifacts_rollback: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_archive: { sessionRequired: true, allOf: ["artifacts:publish"] },
   artifacts_restore: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_data_describe: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_data_define_collection: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_data_query: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_data_write: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_data_import: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_data_export: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_data_reset: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_files_list: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_files_upload: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_files_delete: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_publication_get: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_publication_update: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_publication_apply_fix: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_hostname_check: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_sql_inspect: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_sql_enable: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_sql_migrate: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_sql_define_query: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_sql_query: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_sql_run: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_sql_execute: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_sql_export: { sessionRequired: true, allOf: ["artifacts:read"] },
+  site_sql_import: { sessionRequired: true, allOf: ["artifacts:publish"] },
+  site_sql_reset: { sessionRequired: true, allOf: ["artifacts:publish"] },
   sandbox_file_publish: {
     sessionRequired: true,
     allOf: ["files:read", "files:upload"],
@@ -287,6 +332,9 @@ export const FIRST_PARTY_TOOL_AUTHORIZATION = {
   project_reorder: { allOf: ["sessions:create"] },
   project_delete: { allOf: ["sessions:create"] },
   session_set_project: { allOf: ["sessions:control"] },
+  admin_actions_search: { sessionRequired: true, adminAccessRequired: true },
+  admin_action_describe: { sessionRequired: true, adminAccessRequired: true },
+  admin_action_call: { sessionRequired: true, adminAccessRequired: true },
 } satisfies Record<FirstPartyMcpToolName, FirstPartyToolAuthorization>;
 
 /**

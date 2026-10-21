@@ -135,6 +135,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/storage",
   ],
   "test/integration/db.integration.ts": ["@opengeni/db"],
+  "test/integration/subscription-core-codex-wait.integration.ts": [
+    "@opengeni/worker-bundle",
+    "@opengeni/db",
+    "@opengeni/events",
+    "@opengeni/testing",
+  ],
   "test/integration/durable-queue-control.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -170,6 +176,13 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/db",
     "@opengeni/events",
   ],
+  "test/integration/session-usage-limit-restart.integration.ts": [
+    "@opengeni/api-router",
+    "@opengeni/worker-bundle",
+    "@opengeni/runtime",
+    "@opengeni/db",
+    "@opengeni/testing",
+  ],
   "test/integration/workspace-capture.integration.ts": [
     "@opengeni/api-router",
     "@opengeni/worker-bundle",
@@ -191,6 +204,11 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/artifact-desktop.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
     "@opengeni/testing",
   ],
   "test/e2e/embedded-artifact-viewer.browser.e2e.ts": [
@@ -224,6 +242,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/sdk",
     "@opengeni/testing",
   ],
+  "test/e2e/codex-account.browser.e2e.ts": ["opengeni-web", "@opengeni/sdk", "@opengeni/testing"],
   "test/e2e/code-editor.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/composer-responsive.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/workspace-pause-timers.browser.e2e.ts": [
@@ -310,6 +329,23 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/testing",
   ],
   "test/e2e/react-compiled-css.browser.e2e.ts": ["@opengeni/react"],
+  "test/e2e/secrets-fake-login-suite.browser.e2e.ts": ["@opengeni/testing"],
+  "test/e2e/external-vaults.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/config",
+    "@opengeni/contracts",
+    "@opengeni/core",
+    "@opengeni/db",
+    "@opengeni/sdk",
+    "@opengeni/vaults",
+  ],
+  "test/e2e/secrets-fake-login.browser.e2e.ts": [
+    "@opengeni/api-router",
+    "@opengeni/browserd",
+    "@opengeni/contracts",
+    "@opengeni/testing",
+    "@opengeni/vaults",
+  ],
   "test/e2e/preview-loading.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/restored-attachment-preview.browser.e2e.ts": [
     "opengeni-web",
@@ -379,6 +415,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/browser-account-request-observation.browser.e2e.ts": [],
   "test/e2e/managed-actor-response.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/member-connection-access.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/onepassword-catalog.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/browser-account-read-diagnostics.test.ts": [],
   "test/e2e/personal-workspace-accessibility.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/appearance.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
@@ -391,6 +428,7 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   "test/e2e/session-rail-row-metadata.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/project-rename.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/session-sidebar.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
+  "test/e2e/desktop-rail.browser.e2e.ts": ["opengeni-web", "@opengeni/testing"],
   "test/e2e/error-branding.browser.e2e.ts": [
     "@opengeni/react",
     "@opengeni/sdk",
@@ -398,6 +436,12 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
   ],
   "test/e2e/skill-review.browser.e2e.ts": ["@opengeni/react", "@opengeni/testing"],
   "test/e2e/session-skill-review.browser.e2e.ts": [
+    "opengeni-web",
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-usage-limit.browser.e2e.ts": [
     "opengeni-web",
     "@opengeni/react",
     "@opengeni/sdk",
@@ -423,6 +467,16 @@ const ROOT_TEST_DEPENDENCIES: Record<string, string[]> = {
     "@opengeni/react",
     "@opengeni/api-router",
     "@opengeni/db",
+    "@opengeni/testing",
+  ],
+  "test/e2e/new-conversation.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
+    "@opengeni/testing",
+  ],
+  "test/e2e/session-conversation-controller.browser.e2e.ts": [
+    "@opengeni/react",
+    "@opengeni/sdk",
     "@opengeni/testing",
   ],
   "test/e2e/session-lazy-panels.browser.e2e.ts": [
@@ -682,6 +736,12 @@ function fullPlan(
       // A migration-time backfill over a FORCE-RLS table silently matches zero
       // rows for the non-superuser owner Opengeni migrates as.
       "migration-rls-backfills",
+      // A migration that waits for an advisory fence after a table lock
+      // deadlocks with application transactions during the rollout.
+      "migration-lock-order",
+      // Rolling (expand/contract) is the default: a new maintenance migration
+      // drains the whole fleet for its release and must justify itself.
+      "migration-deployment-mode",
       // A migration missing from the release-schema forward list is framed by
       // the governed checkpoint input, so the pinned aggregate only breaks after
       // merge, on protected main.
@@ -905,7 +965,13 @@ export function createImpactPlan(
     "subscription-contract",
   ];
   if (changedFiles.some((path) => path.startsWith("packages/db/drizzle/"))) {
-    guards.push("migration-ordinals", "migration-rls-backfills", "migration-schema-contract");
+    guards.push(
+      "migration-ordinals",
+      "migration-rls-backfills",
+      "migration-lock-order",
+      "migration-deployment-mode",
+      "migration-schema-contract",
+    );
   }
   if ([...affected].some((name) => PUBLIC_API_WORKSPACES.has(name))) {
     guards.push("public-api", "sdk-compat");

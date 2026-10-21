@@ -1,7 +1,8 @@
 // The workspace shell: the Linear-style left rail (brand, org + workspace
 // switcher, workspace nav, the session list) plus a slim canvas top strip for
 // session-contextual actions around every workspace-scoped route.
-import { OpenGeniProvider, useOpenGeni } from "@opengeni/react";
+import { t } from "@/lib/console-text";
+import { OpenGeniProvider, SecretsUiProvider, useOpenGeni } from "@opengeni/react";
 import type { WorkspaceControlEvent } from "@opengeni/sdk";
 import { Link, Outlet, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
@@ -18,15 +19,18 @@ import { toast } from "sonner";
 
 import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
+import { DesktopThisComputerProvider } from "@/components/desktop/this-computer";
+import { AppShotCoordinator } from "@/components/desktop/app-shots";
 import { RailShell } from "@/components/rail/rail-shell";
+import { webSecretsUi } from "@/lib/secrets-ui";
 import { workspaceManagementLocation } from "@/lib/workspace-management-location";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
-import { Button } from "@/components/ui/button";
+import { Button } from "@opengeni/react/ui/button";
 import { WorkspaceTenantBoundary } from "@/components/workspace-tenant-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@/context";
 import { useGitHubHistoryRefresh } from "@/lib/use-github-history-refresh";
-import { userErrorText } from "@/lib/api-error";
+import { userErrorText } from "@opengeni/react/ui/api-error";
 import { isAbortError } from "@/lib/session-tools";
 import { orgLabel } from "@/lib/org";
 import { useStreamHealthTelemetry } from "@/lib/stream-health";
@@ -537,7 +541,7 @@ function AuthorizedWorkspaceShell({
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
   const organizationName = activeWorkspace
-    ? orgLabel(activeWorkspace.accountId, context.accessContext.accountGrants)
+    ? orgLabel(t, activeWorkspace.accountId, context.accessContext.accountGrants)
     : "Organization";
   useEffect(() => {
     onMount?.();
@@ -554,23 +558,30 @@ function AuthorizedWorkspaceShell({
       }}
     >
       <WorkspaceStreamHealth />
-      {/* Settings mode swaps the rail: workspace and organization settings
+      {/* Secret reference chips and the ask card's Generate use the contracts
+          tokenizer and generator. */}
+      <SecretsUiProvider value={webSecretsUi}>
+        <DesktopThisComputerProvider workspaceId={workspaceId}>
+          <AppShotCoordinator workspaceId={workspaceId} />
+          {/* Settings mode swaps the rail: workspace and organization settings
           share one settings shell that draws the settings rail, and "Back to
           sessions" returns to the main rail. */}
-      {managementLocation ? (
-        <WorkspaceManagementShell
-          workspaceId={workspaceId}
-          workspaceName={activeWorkspace?.name}
-          organizationName={organizationName}
-          location={managementLocation}
-        >
-          {children}
-        </WorkspaceManagementShell>
-      ) : (
-        <RailProvider workspaceId={workspaceId}>
-          <RailShell>{children}</RailShell>
-        </RailProvider>
-      )}
+          {managementLocation ? (
+            <WorkspaceManagementShell
+              workspaceId={workspaceId}
+              workspaceName={activeWorkspace?.name}
+              organizationName={organizationName}
+              location={managementLocation}
+            >
+              {children}
+            </WorkspaceManagementShell>
+          ) : (
+            <RailProvider workspaceId={workspaceId}>
+              <RailShell>{children}</RailShell>
+            </RailProvider>
+          )}
+        </DesktopThisComputerProvider>
+      </SecretsUiProvider>
     </OpenGeniProvider>
   );
 }

@@ -67,6 +67,22 @@ const REVIEWED_UPSTREAM_LABEL_MATCHES: Record<
   string,
   { bytes: number; sha256: string; offsets: "all" | readonly number[] }
 > = {
+  // Upstream affine matrix field names in the generated desktop schema.
+  "packages/contracts/src/cua-desktop-tools.gen.json": {
+    bytes: 221_280,
+    sha256: "fde183f489b61359b79f85bf4733df5211818191f55370e4098cb0e217ec4752",
+    offsets: "all",
+  },
+  "packages/contracts/src/cua-desktop-tools.linux.gen.json": {
+    bytes: 226_780,
+    sha256: "e3473c595e4bbfb3c33ceb610a2f8b9ad07d97db5066497aa47db3d587e0f88c",
+    offsets: "all",
+  },
+  "packages/contracts/src/cua-desktop-tools.windows.gen.json": {
+    bytes: 226_208,
+    sha256: "9366eef711e512307eaaba1ef8260b459126c5c999fb3250ccfffea03df814a4",
+    offsets: "all",
+  },
   "agent/vendor/async-nats/tests/configs/digests/digester_test_bytes_010000.txt": {
     bytes: 10_000,
     sha256: "460689f95489b6336f81772e8c2288bda85e897ffa19109c7dd4589c0715cb7f",
@@ -94,7 +110,7 @@ const REVIEWED_UPSTREAM_LICENSE_CONTACT_MATCHES: Record<
 > = {
   "packages/runtime/THIRD_PARTY_NOTICES": {
     bytes: 153_257,
-    sha256: "4991c2e3d229c8d15d548abc85ed773e29dd66885efc835aa7c98510d47ca0a0",
+    sha256: "9707320e0eb9229ed6689610215129d10463c91a79e15d8a65ad748265e62870",
     offsets: [84_593, 101_439, 102_325, 124_221],
   },
 };
@@ -136,6 +152,15 @@ const LEGACY_MIGRATION_REFERENCE_ALLOWLIST = new Set([
   "packages/db/drizzle/0074_session_activity_revisions.sql",
   "packages/db/drizzle/0120_durable_goal_wake.sql",
 ]);
+// This already-released migration cannot be rewritten. Retain only its exact
+// historical issue marker; edited bytes, other paths and all other rules remain
+// checked. Unlike the older filename allowlist, this grants no future exemption.
+const FROZEN_MIGRATION_ISSUE = {
+  file: "packages/db/drizzle/0691_subscription_core_codex_disconnect.sql",
+  bytes: 16960,
+  sha256: "663c19d4e7935d043f3483d76363085ed188dec133817cc295a2c0f6c02a37f3",
+  offset: 35,
+};
 const CATALOG_SNAPSHOT = "data/catalog/integrations-snapshot.json";
 const PUBLIC_FITNESS_DOMAIN = ["one", "pelo", "ton", ".com"].join("");
 const PUBLIC_FITNESS_NAME = ["Pelo", "ton"].join("");
@@ -178,7 +203,18 @@ export function auditPublicText(file: string, source: string): Finding[] {
   }
 
   if (!LEGACY_MIGRATION_REFERENCE_ALLOWLIST.has(file)) {
-    collectMatches(file, source, INTERNAL_ISSUE_REFERENCE, "internal issue reference", findings);
+    const frozenMigrationMatches =
+      file === FROZEN_MIGRATION_ISSUE.file &&
+      Buffer.byteLength(source, "utf8") === FROZEN_MIGRATION_ISSUE.bytes &&
+      createHash("sha256").update(source, "utf8").digest("hex") === FROZEN_MIGRATION_ISSUE.sha256;
+    collectMatches(
+      file,
+      source,
+      INTERNAL_ISSUE_REFERENCE,
+      "internal issue reference",
+      findings,
+      (match) => frozenMigrationMatches && match.index === FROZEN_MIGRATION_ISSUE.offset,
+    );
     collectMatches(file, source, PRIVATE_AGENT_DOC, "private .agent document reference", findings);
     collectMatches(
       file,
@@ -204,7 +240,8 @@ export function auditPublicText(file: string, source: string): Finding[] {
   HOME_PATH.lastIndex = 0;
   for (const match of source.matchAll(HOME_PATH)) {
     const account = match[1]?.toLowerCase();
-    if (!account || GENERIC_HOME_NAMES.has(account)) continue;
+    // Dot segments such as /Users/.. name no account.
+    if (!account || GENERIC_HOME_NAMES.has(account) || /^\.+$/.test(account)) continue;
     // A nested HTTP resource path containing a home directory segment is not
     // a machine filesystem root. Keep root paths, file URLs, and query values
     // subject to the normal check; do not exempt the surrounding line.

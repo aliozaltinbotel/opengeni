@@ -92,15 +92,16 @@ export async function renderHook<T, P = void>(
       });
       // The point of this helper is to expose the layout-to-passive interval
       // that `act` deliberately hides. Disable only the warning classifier for
-      // this one scheduled render; callers must return to `act` for settlement.
+      // this one scheduled render, until it commits (the render itself runs
+      // after scheduling); callers must return to `act` for settlement.
       const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
       globalThis.IS_REACT_ACT_ENVIRONMENT = false;
       try {
         root.render(<Harness props={lastProps} />);
+        await committed;
       } finally {
         globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
       }
-      await committed;
     },
     unmount: async () => {
       await act(async () => {
@@ -125,6 +126,29 @@ export async function actRun<T>(run: () => T | Promise<T>): Promise<T> {
     result = await run();
   });
   return result;
+}
+
+/**
+ * Mount `node` with real browser scheduling instead of `act`, which holds every
+ * update until its scope ends. Use it to measure when a render actually commits;
+ * `unmount` returns to `act` for cleanup.
+ */
+export function mountWithRealScheduling(node: ReactNode): { unmount: () => Promise<void> } {
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+  const root = createRoot(container);
+  root.render(node);
+  return {
+    unmount: async () => {
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
 }
 
 export type RenderedComponent = {

@@ -81,7 +81,26 @@ export function connectionCapacity(
   input: PlacementInput,
   connection: SubscriptionConnection,
 ): QuotaCapacity {
-  return quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider]);
+  const capacity = quotaCapacity(
+    connection.quota,
+    input.now,
+    input.quotaStaleAfterMs?.[connection.provider],
+  );
+  if (connectionUsesExtraCredits(input, connection)) return { kind: "available" };
+  return capacity;
+}
+
+/** Only included-window exhaustion is eligible for opted-in credit fallback. */
+export function connectionUsesExtraCredits(
+  input: PlacementInput,
+  connection: SubscriptionConnection,
+): boolean {
+  return (
+    connection.extraCreditsEnabled === true &&
+    !(connection.quota?.exhaustedUntil != null && connection.quota.exhaustedUntil > input.now) &&
+    quotaCapacity(connection.quota, input.now, input.quotaStaleAfterMs?.[connection.provider])
+      .kind === "exhausted"
+  );
 }
 
 function findModel(input: PlacementInput, modelId: ModelId): ModelDescriptor | undefined {
@@ -147,16 +166,21 @@ export function authorizationIneligibility(
     const owner = ownership.ownerMembershipId;
     if (!input.settings.personalConnectionsAllowed) reasons.push("personal_connections_disabled");
     if (!findPerson(input, owner)?.active) reasons.push("personal_owner_inactive");
-    const ownersOwnWork =
-      session.ownerMembershipId === owner &&
-      (session.visibility === "private" ||
-        (workspace.kind === "personal" && workspace.ownerMembershipId === owner));
-    if (!ownersOwnWork) reasons.push("personal_not_owners_work");
-    const frozen = session.personalAuthority.some(
-      (authority) =>
-        authority.provider === connection.provider && authority.ownerMembershipId === owner,
+    const authority = session.personalAuthority.find(
+      (entry) => entry.provider === connection.provider && entry.ownerMembershipId === owner,
     );
-    if (!frozen) reasons.push("personal_authority_missing");
+    // A new shared-chat entry is a restriction, never a pool-wide grant and
+    // never an alias for the chat owner's identity. Historical entries keep
+    // their private-work eligibility unchanged.
+    const ownersOwnWork = authority?.sharedSessionChoice
+      ? session.ownerMembershipId !== null &&
+        authority.sharedSessionChoice.sessionId === session.id &&
+        authority.sharedSessionChoice.connectionId === connection.id
+      : session.ownerMembershipId === owner &&
+        (session.visibility === "private" ||
+          (workspace.kind === "personal" && workspace.ownerMembershipId === owner));
+    if (!ownersOwnWork) reasons.push("personal_not_owners_work");
+    if (!authority) reasons.push("personal_authority_missing");
     return reasons;
   }
   if (!sharedConnectionMatchesSource(input, connection)) {
@@ -273,16 +297,27 @@ export function servableAgainAt(
   const capacity = connectionCapacity(input, connection);
   const cooldown = modelCooldownUntil(connection.quota, modelId, input.now);
   if (capacity.kind !== "exhausted" && cooldown === null) return undefined;
-  if (capacity.kind === "exhausted" && capacity.resetsAt === null) return null;
-  const capacityAt = capacity.kind === "exhausted" ? (capacity.resetsAt as number) : input.now;
-  return Math.max(capacityAt, cooldown ?? input.now);
+  // A refusal can expire before an exhausted allowance resets. At that
+  // point credit consent may make the account usable, even without a known
+  // allowance reset. Evaluate every observed transition using the same policy.
+  const transitions = [
+    cooldown,
+    connection.quota?.exhaustedUntil,
+    ...(connection.quota?.windows.map((window) => window.resetsAt) ?? []),
+  ]
+    .filter((at): at is number => at != null && at > input.now)
+    .sort((a, b) => a - b);
+  return transitions.find((now) => canServe({ ...input, now }, connection, modelId)) ?? null;
 }
 
-/** The owner opted in and the effective setting allows personal fallback (SUB-SEL-02, D-12). */
+/** Own Personal workspaces use connected accounts directly; elsewhere fallback requires consent. */
 export function personalFallbackActive(input: PlacementInput): boolean {
   if (input.session.ownerMembershipId === null) return false;
+  if (input.workspace.kind === "shared" && input.session.visibility === "shared") return false;
   return (
-    input.settings.personalFallbackAllowed &&
-    !!findPerson(input, input.session.ownerMembershipId)?.personalFallbackOptIn
+    (input.workspace.kind === "personal" &&
+      input.workspace.ownerMembershipId === input.session.ownerMembershipId) ||
+    (input.settings.personalFallbackAllowed &&
+      !!findPerson(input, input.session.ownerMembershipId)?.personalFallbackOptIn)
   );
 }

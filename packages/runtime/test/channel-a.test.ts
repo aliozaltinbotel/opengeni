@@ -36,6 +36,7 @@ import {
   ChannelAFileSystemRouteChangedError,
   ChannelANotFoundError,
   ChannelAConflictError,
+  ChannelAValidationError,
   ChannelAUnavailableError,
   createMockSelfhostedOpStream,
   MockAgentResponder,
@@ -1716,6 +1717,54 @@ describe("Workspace file import (real local box)", () => {
     }
   });
 
+  test("creates missing destination folders inside the workspace only", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    const outside = mkdtempSync(join(tmpdir(), "opengeni-import-outside-"));
+    temporaryRoots.push(outside);
+    symlinkSync(outside, join(root, "linked"));
+    const bytes = Buffer.from("report bytes");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const server = Bun.serve({ port: 0, fetch: () => new Response(bytes) });
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    const source = {
+      url: server.url.toString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    };
+    try {
+      const saved = await service.importWorkspaceFile({
+        operationId: "00000000-0000-4000-8000-000000000086",
+        destinationPath: "reports/2026/report.pdf",
+        overwrite: false,
+        mayReplaceExisting: false,
+        createParents: true,
+        sizeBytes: bytes.byteLength,
+        sha256,
+        source,
+      });
+      expect(saved.destinationPath).toBe("reports/2026/report.pdf");
+      expect(readFileSync(join(root, "reports/2026/report.pdf"))).toEqual(bytes);
+      await expect(
+        service.importWorkspaceFile({
+          operationId: "00000000-0000-4000-8000-000000000087",
+          destinationPath: "linked/new/escape.pdf",
+          overwrite: false,
+          mayReplaceExisting: false,
+          createParents: true,
+          sizeBytes: bytes.byteLength,
+          sha256,
+          source,
+        }),
+      ).rejects.toThrow(/outside workspace/);
+      expect(existsSync(join(outside, "new"))).toBeFalse();
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("rejects corrupt source bytes without publishing a target", async () => {
     const { session, root } = await makeBox();
     const placement = withPlacementPrivateStaging(session);
@@ -1742,6 +1791,82 @@ describe("Workspace file import (real local box)", () => {
         }),
       ).rejects.toBeInstanceOf(ChannelAUnavailableError);
       expect(existsSync(join(root, "downloads/corrupt.bin"))).toBeFalse();
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("Workspace file export (real local box)", () => {
+  test("digests in place and uploads exact bytes with signed headers kept out of commands", async () => {
+    const { session, root } = await makeBox();
+    const placement = withPlacementPrivateStaging(session);
+    mkdirSync(join(root, "build"));
+    const bytes = Buffer.alloc(3 * 1024 * 1024 + 7, 0x5a);
+    bytes.write("signed bundle", 0);
+    writeFileSync(join(root, "build/app.aab"), bytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const received: Array<{ method: string; type: string | null; body: Buffer }> = [];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        received.push({
+          method: request.method,
+          type: request.headers.get("content-type"),
+          body: Buffer.from(await request.arrayBuffer()),
+        });
+        return new Response(null, { status: 200 });
+      },
+    });
+    const service = new SandboxChannelAService({
+      session: placement.session,
+      workspaceRoot: root,
+    });
+    try {
+      const digest = await service.digestWorkspaceFile("build/app.aab");
+      expect(digest).toEqual({ path: "build/app.aab", sizeBytes: bytes.byteLength, sha256 });
+
+      const exported = await service.exportWorkspaceFile({
+        ...digest,
+        upload: {
+          url: `${server.url}object?X-Amz-Signature=must-not-leak`,
+          requiredHeaders: { "content-type": "application/octet-stream" },
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+      });
+      expect(exported).toEqual(digest);
+      expect(received).toHaveLength(1);
+      expect(received[0]!.method).toBe("PUT");
+      expect(received[0]!.type).toBe("application/octet-stream");
+      expect(received[0]!.body.equals(bytes)).toBeTrue();
+      expect(placement.staged[0]!.content).toContain("must-not-leak");
+      expect(placement.commands.join("\n")).not.toContain("must-not-leak");
+      expect(existsSync(placement.staged[0]!.path)).toBeFalse();
+
+      // A file that no longer matches its digest is never uploaded.
+      writeFileSync(join(root, "build/app.aab"), "changed");
+      await expect(
+        service.exportWorkspaceFile({
+          ...digest,
+          upload: {
+            url: `${server.url}object`,
+            requiredHeaders: {},
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          },
+        }),
+      ).rejects.toBeInstanceOf(ChannelAConflictError);
+      expect(received).toHaveLength(1);
+
+      await expect(service.digestWorkspaceFile("build/missing.aab")).rejects.toBeInstanceOf(
+        ChannelANotFoundError,
+      );
+      await expect(service.digestWorkspaceFile("build")).rejects.toBeInstanceOf(
+        ChannelAValidationError,
+      );
+      symlinkSync("/etc/hosts", join(root, "build/escape"));
+      await expect(service.digestWorkspaceFile("build/escape")).rejects.toBeInstanceOf(
+        ChannelAValidationError,
+      );
     } finally {
       server.stop(true);
     }

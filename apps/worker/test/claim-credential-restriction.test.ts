@@ -101,13 +101,7 @@ describe("worker accepted-turn credential restriction installation", () => {
       } as Awaited<ReturnType<typeof db.requireSession>>),
       spyOn(db, "workspaceCodexSubscriptionActive").mockResolvedValue(false),
       spyOn(capabilities, "settingsWithEnabledCapabilityMcpServers").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithCodexCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithWorkspaceGatewayCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithWorkspaceOpenRouterCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithWorkspaceOpperCredential").mockResolvedValue(settings),
-      spyOn(capabilities, "settingsWithOrganizationProviderCredentials").mockResolvedValue(
-        settings,
-      ),
+      spyOn(core, "settingsWithModelProviderCredentials").mockResolvedValue(settings),
       spyOn(db, "installOrReadTurnExecutionPolicyForAttempt").mockImplementation(
         async (_db, input) => {
           expect(input).toMatchObject({
@@ -182,7 +176,6 @@ describe("worker accepted-turn credential restriction installation", () => {
         groupBoxBackend: "selfhosted",
         sandboxCreationBackend: "selfhosted",
         effectiveRunCredentialBackend: "selfhosted",
-        sandboxWorkspaceEnvironmentValues: {},
         connectionScope: scope,
       } as PrepareRunCredentialsDeps);
       try {

@@ -9,8 +9,12 @@ import type {
   SessionHumanInputRequest,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
-import { HumanInputForm } from "@opengeni/react/session-ui";
-import { parseNotificationText, type NotificationSpan } from "@opengeni/react/timeline-model";
+import { HumanInputForm, SecretRefText } from "@opengeni/react/session-ui";
+import {
+  notificationPlainText,
+  parseNotificationText,
+  type NotificationSpan,
+} from "@opengeni/react/timeline-model";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -20,6 +24,7 @@ import {
   CirclePauseIcon,
   InboxIcon,
   MessageCircleQuestionIcon,
+  MessageSquareTextIcon,
   MoreHorizontalIcon,
   ShieldCheckIcon,
   XIcon,
@@ -27,39 +32,40 @@ import {
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
-import { Button } from "@/components/ui/button";
-import { ContentPage } from "@/components/ui/content-layout";
+import { Button } from "@opengeni/react/ui/button";
+import { ContentPage } from "@opengeni/react/ui/content-layout";
 import {
   Dialog,
   DialogContent,
   DialogDescription,
   DialogHeader,
   DialogTitle,
-} from "@/components/ui/dialog";
-import { Disclosure } from "@/components/ui/disclosure";
+} from "@opengeni/react/ui/dialog";
+import { Disclosure } from "@opengeni/react/ui/disclosure";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { ChoiceCard, ChoiceCards } from "@/components/ui/choice-cards";
-import { EmptyState } from "@/components/ui/empty-state";
-import { LogoTile } from "@/components/ui/logo-tile";
-import { Notice } from "@/components/ui/notice";
-import { RowButton } from "@/components/ui/page-actions";
-import { PageHeader } from "@/components/ui/page-header";
-import { RelativeTime } from "@/components/ui/relative-time";
-import { Section, SectionStack } from "@/components/ui/section";
-import { SegmentedControl } from "@/components/ui/segmented-control";
-import { SettingRow, SettingRowGroup } from "@/components/ui/setting-row";
-import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
-import { Toolbar } from "@/components/ui/toolbar";
+} from "@opengeni/react/ui/dropdown-menu";
+import { ChoiceCard, ChoiceCards } from "@opengeni/react/ui/choice-cards";
+import { EmptyState } from "@opengeni/react/ui/empty-state";
+import { LogoTile } from "@opengeni/react/ui/logo-tile";
+import { Notice } from "@opengeni/react/ui/notice";
+import { RowButton } from "@opengeni/react/ui/page-actions";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { RelativeTime } from "@opengeni/react/ui/relative-time";
+import { Section, SectionStack } from "@opengeni/react/ui/section";
+import { SegmentedControl } from "@opengeni/react/ui/segmented-control";
+import { SettingRow, SettingRowGroup } from "@opengeni/react/ui/setting-row";
+import { Skeleton } from "@opengeni/react/ui/skeleton";
+import { Switch } from "@opengeni/react/ui/switch";
+import { Toolbar } from "@opengeni/react/ui/toolbar";
 import { useAppContext } from "@/context";
-import { apiErrorFacts, userErrorText } from "@/lib/api-error";
-import { useInbox } from "@/lib/inbox";
+import { apiErrorFacts, userErrorText } from "@opengeni/react/ui/api-error";
+import { secretSaveTargets } from "@/lib/secrets-ui";
+import { hasInbox, isNeedsYouKind, useInbox } from "@/lib/inbox";
 import { cn } from "@/lib/utils";
 
 const KIND_WORD: Record<InboxItem["kind"], string> = {
@@ -67,12 +73,14 @@ const KIND_WORD: Record<InboxItem["kind"], string> = {
   approval: "Approval",
   goal_paused: "Goal paused",
   notification: "",
+  reply: "Reply",
 };
 
 function KindIcon({ item }: { item: InboxItem }) {
   if (item.kind === "question") return <MessageCircleQuestionIcon />;
   if (item.kind === "approval") return <ShieldCheckIcon />;
   if (item.kind === "goal_paused") return <CirclePauseIcon />;
+  if (item.kind === "reply") return <MessageSquareTextIcon />;
   return item.urgency === "time_sensitive" ? (
     <BellRingIcon className="text-status-waiting" />
   ) : (
@@ -81,9 +89,12 @@ function KindIcon({ item }: { item: InboxItem }) {
 }
 
 function Spans({ spans }: { spans: NotificationSpan[] }) {
+  // Spans are the positional pieces of one parsed message and never reorder,
+  // so their index is their identity.
   return spans.map((span, index) => {
     if (span.kind === "bold") {
       return (
+        // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
         <strong key={index} className="font-medium text-fg">
           {span.text}
         </strong>
@@ -92,6 +103,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
     if (span.kind === "code") {
       return (
         <code
+          // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
           key={index}
           className="rounded-[4px] bg-surface-2 px-1 py-px font-mono text-[0.8125rem] text-fg"
         >
@@ -102,6 +114,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
     if (span.kind === "link") {
       return (
         <a
+          // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
           key={index}
           href={span.href}
           target="_blank"
@@ -112,6 +125,7 @@ function Spans({ spans }: { spans: NotificationSpan[] }) {
         </a>
       );
     }
+    // oxlint-disable-next-line react/no-array-index-key -- positional span of one message
     return <span key={index}>{span.text}</span>;
   });
 }
@@ -129,12 +143,15 @@ function NotificationContent({ item }: { item: InboxItem }) {
         <div className="flex min-w-0 flex-col gap-1.5 text-sm leading-5 text-fg-muted break-words">
           {blocks.map((block, index) =>
             block.kind === "paragraph" ? (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <p key={index} className="m-0 whitespace-pre-line">
                 <Spans spans={block.spans} />
               </p>
             ) : (
+              // oxlint-disable-next-line react/no-array-index-key -- positional block of one message
               <ul key={index} className="m-0 flex list-none flex-col gap-0.5 p-0">
                 {block.items.map((spans, bullet) => (
+                  // oxlint-disable-next-line react/no-array-index-key -- positional bullet of one list
                   <li key={bullet} className="relative pl-3.5">
                     <span
                       aria-hidden="true"
@@ -215,7 +232,11 @@ function InboxRow(props: {
   when: string;
   actions?: ReactNode;
   menu: ReactNode;
+  /** One-click removal, shown on hover or focus (always on touch). */
+  dismiss?: { label: string; pending: boolean; onDismiss: () => void };
   onOpen: () => void;
+  /** False when the person can't open the session (another member's private one). */
+  canOpen?: boolean;
 }) {
   return (
     <li className="relative min-w-0">
@@ -228,7 +249,7 @@ function InboxRow(props: {
         <button
           type="button"
           data-row-open
-          aria-label={`${props.title}. Open session`}
+          aria-label={props.canOpen === false ? props.title : `${props.title}. Open session`}
           className="absolute inset-0 z-0 cursor-pointer rounded-[10px] outline-none"
           onClick={props.onOpen}
         />
@@ -271,7 +292,19 @@ function InboxRow(props: {
             </div>
           ) : null}
         </div>
-        <div className="relative z-10 -mr-1.5 -mt-1 shrink-0 self-start">
+        <div className="relative z-10 -mr-1.5 -mt-1 flex shrink-0 items-center self-start">
+          {props.dismiss ? (
+            <button
+              type="button"
+              aria-label={`${props.dismiss.label}: ${props.title}`}
+              title={props.dismiss.label}
+              disabled={props.dismiss.pending}
+              onClick={props.dismiss.onDismiss}
+              className="grid size-8 place-items-center rounded-[10px] text-fg-subtle opacity-0 transition-[opacity,color,background-color] duration-[120ms] hover:bg-surface-3 hover:text-fg focus-visible:opacity-100 focus-visible:outline-2 focus-visible:outline-brand/55 group-hover/row:opacity-100 group-focus-within/row:opacity-100 disabled:pointer-events-none disabled:opacity-50 pointer-coarse:size-11 pointer-coarse:opacity-100"
+            >
+              <XIcon aria-hidden="true" className="size-4" />
+            </button>
+          ) : null}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -331,12 +364,17 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   const showScope = workspacesWithItems.size > 1 || !workspacesWithItems.has(workspaceId);
   const scoped = items.filter((item) => scope === "all" || item.workspaceId === workspaceId);
   const awake = scoped.filter((item) => !isSnoozed(item, now));
-  const needsYou = awake.filter((item) => item.kind !== "notification");
+  // Most important first: what waits on the person, then what agents wanted
+  // them to know, then replies.
+  const needsYou = awake.filter((item) => isNeedsYouKind(item.kind));
   const fromAgents = awake.filter((item) => item.kind === "notification");
+  const replies = awake.filter((item) => item.kind === "reply");
   const snoozed = scoped.filter((item) => isSnoozed(item, now));
 
   useEffect(() => {
-    const unseen = items.filter((item) => item.unread);
+    // An agent's note is read once shown in full; a reply shows only its start,
+    // so it is read once opened (here or in its session).
+    const unseen = items.filter((item) => item.unread && item.kind !== "reply");
     if (unseen.length === 0) return;
     for (const item of unseen) unreadThisVisit.current.add(item.id);
     const timer = window.setTimeout(() => {
@@ -353,12 +391,20 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
   }, [items, context.client, patchItems]);
 
   // Opens on the moment the item was raised, not just the latest message.
-  const openSession = (item: InboxItem) =>
+  const openSession = (item: InboxItem) => {
+    if (item.unread) {
+      patchItems((current) =>
+        current.map((each) => (each.id === item.id ? { ...each, unread: false } : each)),
+      );
+      void context.client.updateInboxItem(item.id, { seen: true }).catch(() => undefined);
+    }
+    if (item.sessionAvailable === false) return;
     void navigate({
       to: "/workspaces/$workspaceId/sessions/$sessionId",
       params: { workspaceId: item.workspaceId, sessionId: item.sessionId },
       search: item.eventSequence ? { at: item.eventSequence } : {},
     });
+  };
 
   const leave = (item: InboxItem) =>
     inbox.patchItems((current) => current.filter((candidate) => candidate.id !== item.id));
@@ -436,22 +482,27 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     if (item.kind === "approval") {
       return (
         <code className="my-0.5 inline-block max-w-full truncate rounded-[6px] bg-surface-2 px-1.5 py-0.5 align-top font-mono text-xs text-fg">
-          {item.body}
+          <SecretRefText text={item.body} linkable={false} />
         </code>
       );
     }
+    if (item.kind === "reply") return notificationPlainText(item.body) || undefined;
     return undefined;
   };
 
   // Where it comes from. The kind word is left out where the row already says it.
   const meta = (item: InboxItem): string[] => {
     const parts: string[] = [];
+    // Another member's agent sent it: say who, first.
+    if (item.sender) parts.push(`From ${item.sender.label}`);
     if (item.kind === "notification" && item.urgency === "time_sensitive") {
       parts.push("Time-sensitive");
     }
-    if (item.kind === "goal_paused" || item.kind === "question") parts.push(KIND_WORD[item.kind]);
+    if (item.kind === "goal_paused" || item.kind === "question" || item.kind === "reply") {
+      parts.push(KIND_WORD[item.kind]);
+    }
     if (item.kind === "approval" && !item.body) parts.push(KIND_WORD.approval);
-    parts.push(item.sessionTitle ?? "Untitled session");
+    if (item.sessionAvailable !== false) parts.push(item.sessionTitle ?? "Untitled session");
     if (scope === "all" && workspacesWithItems.size > 1) {
       const name = workspaceNames.get(item.workspaceId);
       if (name) parts.push(name);
@@ -514,7 +565,7 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
       <InboxRow
         key={item.id}
         item={item}
-        unread={item.kind === "notification" && unread}
+        unread={(item.kind === "notification" || item.kind === "reply") && unread}
         title={item.title}
         subtitle={item.subtitle || undefined}
         body={description(item)}
@@ -523,10 +574,24 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         when={item.updatedAt}
         actions={control(item)}
         onOpen={() => openSession(item)}
+        canOpen={item.sessionAvailable !== false}
+        dismiss={
+          item.kind === "notification" || item.kind === "reply"
+            ? {
+                label: "Dismiss",
+                pending: Boolean(busy[item.id]),
+                onDismiss: () => dismiss(item),
+              }
+            : undefined
+        }
         menu={
           <>
-            <DropdownMenuItem onSelect={() => openSession(item)}>Open session</DropdownMenuItem>
-            <DropdownMenuSeparator />
+            {item.sessionAvailable !== false ? (
+              <>
+                <DropdownMenuItem onSelect={() => openSession(item)}>Open session</DropdownMenuItem>
+                <DropdownMenuSeparator />
+              </>
+            ) : null}
             {isSnoozed(item, now) ? (
               <DropdownMenuItem onSelect={() => snooze(item, null)}>Unsnooze</DropdownMenuItem>
             ) : (
@@ -540,7 +605,9 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
               </>
             )}
             <DropdownMenuItem onSelect={() => dismiss(item)}>
-              {item.kind === "notification" ? "Dismiss" : "Remove from inbox"}
+              {item.kind === "notification" || item.kind === "reply"
+                ? "Dismiss"
+                : "Remove from inbox"}
             </DropdownMenuItem>
           </>
         }
@@ -548,8 +615,18 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
     );
   };
 
+  const personal = hasInbox(context.accessContext);
   let body: ReactNode;
-  if (inbox.loading && !inbox.data) {
+  if (!personal) {
+    body = (
+      <EmptyState
+        variant="page"
+        icon={<InboxIcon />}
+        title="Only people have an inbox"
+        description="Sign in as yourself to see what your agents are waiting on you for. API keys and services act through sessions instead."
+      />
+    );
+  } else if (inbox.loading && !inbox.data) {
     body = <InboxSkeleton />;
   } else if (inbox.error && !inbox.data) {
     body = (
@@ -585,6 +662,11 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
         {fromAgents.length > 0 ? (
           <Section title="From your agents">
             <InboxList label="From your agents">{fromAgents.map(row)}</InboxList>
+          </Section>
+        ) : null}
+        {replies.length > 0 ? (
+          <Section title="Replies">
+            <InboxList label="Replies">{replies.map(row)}</InboxList>
           </Section>
         ) : null}
         {awake.length === 0 ? (
@@ -630,7 +712,12 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
           ) : null}
           <SectionStack>
             {body}
-            <InboxSettingsSections />
+            {personal ? (
+              <InboxSettingsSections
+                workspaceId={workspaceId}
+                workspaceName={workspaceNames.get(workspaceId) ?? "this workspace"}
+              />
+            ) : null}
           </SectionStack>
         </div>
       </div>
@@ -652,10 +739,17 @@ export function InboxRoute({ workspaceId }: { workspaceId: string }) {
  * session. The tidy policy decides which agents may remove items; answering
  * and approving stay with the person either way.
  */
-function InboxSettingsSections() {
+function InboxSettingsSections({
+  workspaceId,
+  workspaceName,
+}: {
+  workspaceId: string;
+  workspaceName: string;
+}) {
   const context = useAppContext();
   const [settings, setSettings] = useState<InboxSettings | null>(null);
   const [saving, setSaving] = useState(false);
+  const members = useMemberNotifications(workspaceId);
   useEffect(() => {
     let current = true;
     void context.client
@@ -664,7 +758,13 @@ function InboxSettingsSections() {
         if (current) setSettings(loaded);
       })
       .catch(() => {
-        if (current) setSettings({ tidyPolicy: "own_sessions", pausedGoals: false });
+        if (current)
+          setSettings({
+            tidyPolicy: "own_sessions",
+            pausedGoals: false,
+            replies: false,
+            timeSensitiveNeedsYou: false,
+          });
       });
     return () => {
       current = false;
@@ -707,12 +807,60 @@ function InboxSettingsSections() {
                 />
               }
             />
+            <SettingRow
+              label="Replies"
+              description="Each session's latest reply, below what needs you. It stays, read or not, until you dismiss it."
+              control={
+                <Switch
+                  checked={settings.replies ?? false}
+                  pending={saving}
+                  onCheckedChange={(checked) => void change({ replies: checked })}
+                />
+              }
+            />
+            {members.shared ? (
+              <SettingRow
+                label="From teammates' agents"
+                description={`Let agents working for other members of ${workspaceName} notify you. You'll see who each one is from.`}
+                control={
+                  <Switch
+                    checked={members.allowOthers ?? false}
+                    pending={members.saving || members.allowOthers === null}
+                    onCheckedChange={(checked) => void members.change(checked)}
+                  />
+                }
+              />
+            ) : null}
           </SettingRowGroup>
         )}
       </Section>
       <Section
-        title="Who can tidy your inbox"
-        description="Agents never answer or approve for you. This only decides who may remove items."
+        title="Phone alerts"
+        description="For the Opengeni app on your phone. Choose which alerts it sends in the app's settings."
+      >
+        {settings === null ? (
+          <div className="grid gap-3 pt-1" aria-busy="true">
+            <Skeleton className="h-5 w-1/2" />
+          </div>
+        ) : (
+          <SettingRowGroup>
+            <SettingRow
+              label="Questions and approvals are time-sensitive"
+              description="They break through Focus on iPhone, since the agent waits until you answer."
+              control={
+                <Switch
+                  checked={settings.timeSensitiveNeedsYou ?? false}
+                  pending={saving}
+                  onCheckedChange={(checked) => void change({ timeSensitiveNeedsYou: checked })}
+                />
+              }
+            />
+          </SettingRowGroup>
+        )}
+      </Section>
+      <Section
+        title="What agents can do here"
+        description="Agents never answer or approve for you. This decides what they may see, snooze and clear."
       >
         {settings === null ? (
           <div className="grid gap-3 pt-1" aria-busy="true">
@@ -722,26 +870,85 @@ function InboxSettingsSections() {
         ) : (
           <ChoiceCards
             variant="list"
-            aria-label="Who can tidy your inbox"
+            aria-label="What agents can do here"
             value={settings.tidyPolicy}
             disabled={saving}
             onValueChange={(value) => void change({ tidyPolicy: value as InboxTidyPolicy })}
           >
             <ChoiceCard
               value="own_sessions"
-              title="The agent that posted it"
-              description="Or the sessions that started that agent."
+              title="Clear their own notes"
+              description="An agent's notes can be cleared by it or the sessions that started it."
             />
             <ChoiceCard
               value="any_agent"
-              title="Any agent working for you"
-              description="Lets one agent look after your inbox and clear what's done."
+              title="Tidy any agent's notes"
+              description="Any agent working for you can clear notes that are done."
+            />
+            <ChoiceCard
+              value="full_access"
+              title="Full access"
+              description="Any agent working for you can see everything here, including questions and replies, and snooze or clear it. Ask one to catch you up."
             />
           </ChoiceCards>
         )}
       </Section>
     </>
   );
+}
+
+/**
+ * The person's own choice, per workspace, to let other members' agents notify
+ * them (off by default). Only offered where there are other members to hear from.
+ */
+function useMemberNotifications(workspaceId: string) {
+  const context = useAppContext();
+  const [state, setState] = useState<{
+    workspaceId: string;
+    shared: boolean;
+    allowOthers: boolean | null;
+  } | null>(null);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let current = true;
+    void Promise.all([
+      context.client
+        .listWorkspaceMembers(workspaceId)
+        .then((members) => members.length > 1)
+        // Unknown membership: still offer the setting.
+        .catch(() => true),
+      context.client
+        .getMemberNotifications(workspaceId)
+        .then((setting) => setting.allowOthers)
+        .catch(() => null),
+    ]).then(([shared, allowOthers]) => {
+      if (current) setState({ workspaceId, shared: shared && allowOthers !== null, allowOthers });
+    });
+    return () => {
+      current = false;
+    };
+  }, [context.client, workspaceId]);
+  const loaded = state?.workspaceId === workspaceId ? state : null;
+  const change = async (allowOthers: boolean) => {
+    if (!loaded) return;
+    setState({ ...loaded, allowOthers });
+    setSaving(true);
+    try {
+      const saved = await context.client.updateMemberNotifications(workspaceId, { allowOthers });
+      setState({ ...loaded, allowOthers: saved.allowOthers });
+    } catch (error) {
+      setState(loaded);
+      toast.error(userErrorText(error, "Couldn't save that. Try again."));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return {
+    shared: loaded?.shared ?? false,
+    allowOthers: loaded?.allowOthers ?? null,
+    saving,
+    change,
+  };
 }
 
 /** Answer a question without leaving the inbox: the same form as in the session. */
@@ -823,6 +1030,7 @@ function AnswerDialog({
             onSubmit={submit}
             submitting={submitting}
             error={submitError}
+            allowedSaveTo={secretSaveTargets(context.accessContext, request.workspaceId)}
             decisionButtons
           />
         ) : (

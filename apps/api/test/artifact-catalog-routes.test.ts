@@ -52,11 +52,14 @@ function fixture(
     file?: Record<string, unknown>;
     image?: Record<string, unknown>;
     pinUnavailable?: boolean;
+    /** The pinned Site is someone else's Only me Site, so the viewer cannot see it. */
+    hiddenSite?: boolean;
   } = {},
 ) {
   const reads: Array<Parameters<EditableArtifactApplicationPort["readArtifact"]>[0]> = [];
   const queries: Array<{ sql: string; params: unknown[] }> = [];
   const selectedTables: string[] = [];
+  const siteVisibilityChecks: Array<{ sql: string; params: unknown[] }> = [];
   const db = {
     transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(db),
     execute: async (query: SQL) => {
@@ -68,12 +71,37 @@ function fixture(
         return [];
       }
       if (compiled.sql.includes("WITH candidates AS")) return pages.shift() ?? [];
+      if (compiled.sql.includes("target.id as target_id")) {
+        expect(compiled.params).toContain(workspaceId);
+        expect(compiled.params).toContain(sessionId);
+        // The consolidated authorization read returns target facts even when
+        // no caller attempt is present. Missing/RLS-hidden targets stay absent;
+        // missing caller/turn facts must not grant an agent live authority.
+        return options.absentSession
+          ? []
+          : [
+              {
+                target_id: sessionId,
+                target_account_id: accountId,
+                target_root_session_id: sessionId,
+                target_visibility: options.privateSession ? "user_private" : "workspace_shared",
+                target_authority_epoch: 1,
+                target_owner_subject_id: options.privateSession ? "user:someone-else" : null,
+                target_agent_access: "workspace",
+                target_memory_scope: "workspace",
+                caller_account_id: null,
+                caller_root_session_id: null,
+                turn_id: null,
+              },
+            ];
+      }
       if (
         compiled.sql.includes("current_setting('opengeni.account_id'") ||
         compiled.sql.includes("current_setting('opengeni.subject_id'")
       )
         return [
           {
+            resolved_account_id: accountId,
             account_id: accountId,
             workspace_id: workspaceId,
             subject_id: "user:catalog",
@@ -83,7 +111,6 @@ function fixture(
             personal_resource_actor_subject_id: "",
           },
         ];
-      if (compiled.sql.includes('session.root_session_id as "rootSessionId"')) return [];
       if (
         compiled.sql.includes("set_config") ||
         compiled.sql.includes("pg_advisory_xact_lock_shared")
@@ -99,7 +126,11 @@ function fixture(
           selectedTables.push(tableName);
           return builder;
         },
-        where: () => builder,
+        where: (condition?: SQL) => {
+          if (tableName === "workspace_artifacts" && condition)
+            siteVisibilityChecks.push(new PgDialect().sqlToQuery(condition));
+          return builder;
+        },
         innerJoin: () => builder,
         leftJoin: () => builder,
         then: (resolve: (value: unknown[]) => unknown, reject?: (error: unknown) => unknown) =>
@@ -109,10 +140,14 @@ function fixture(
           ),
         limit: async () => {
           if (tableName === "workspaces") return [{ accountId }];
+          if (tableName === "workspace_artifacts")
+            return options.hiddenSite ? [] : [{ id: "40000000-0000-4000-8000-000000000004" }];
           if (tableName === "generated_image_artifacts")
             return options.image && options.file
               ? [{ artifact: options.image, file: options.file, uploadStatus: "uploaded" }]
               : [];
+          // Catalog provenance also checks the exact source projection after
+          // session authorization; keep its RLS-hidden case independent.
           if (tableName === "sessions" && options.absentSession) return [];
           if (tableName === "sessions" && fields)
             return [
@@ -178,7 +213,7 @@ function fixture(
       },
       body: JSON.stringify(body),
     });
-  return { app, request, pin, reads, queries, selectedTables };
+  return { app, request, pin, reads, queries, selectedTables, siteVisibilityChecks };
 }
 
 test("pin mutations require publish plus target-domain read authority and validate closed input", async () => {
@@ -210,6 +245,16 @@ test("pin/unpin returns compact state and maps scoped missing/foreign/hidden tar
     expect(response.headers.get("cache-control")).toBe("private, no-store");
     expect(await response.json()).toEqual({ kind: "site", artifactId: target, pinned });
   }
+  // The Site is looked up as this person: shared Sites or their own Only me ones.
+  const check = visible.siteVisibilityChecks[0]!;
+  expect(check.sql).toContain('"visibility"');
+  expect(check.sql).toContain('"owner_subject_id"');
+  expect(check.params).toContain("user:catalog");
+  const hidden = fixture([], { hiddenSite: true });
+  const hiddenResponse = await hidden.pin("site", target);
+  expect(hiddenResponse.status).toBe(404);
+  expect(await hiddenResponse.json()).toEqual({ message: "Artifact not found" });
+  expect(hidden.queries.some(({ sql }) => sql.includes("update_artifact_pin("))).toBe(false);
   const absent = fixture([], { pinUnavailable: true });
   expect((await absent.pin("site", target)).status).toBe(404);
   const file = fixture([]);
@@ -311,7 +356,12 @@ test("catalog projection and encrypted frontiers retain pins across the global p
 });
 
 test("catalog is read-only and redacts unauthorized provenance before projection", async () => {
-  const { request, queries } = fixture([[candidate("site-one")]]);
+  const { request, queries } = fixture([
+    [
+      candidate("site-one", "site", { site_visibility: "workspace_shared" }),
+      candidate("site-two", "site", { site_visibility: "user_private" }),
+    ],
+  ]);
   const response = await request();
   expect(response.status, await response.clone().text()).toBe(200);
   expect(response.headers.get("cache-control")).toBe("private, no-store");
@@ -324,12 +374,25 @@ test("catalog is read-only and redacts unauthorized provenance before projection
         status: "active",
         createdAt,
         updatedAt: createdAt,
+        visibility: "workspace",
+      },
+      {
+        id: "site-two",
+        kind: "site",
+        title: "Report",
+        status: "active",
+        createdAt,
+        updatedAt: createdAt,
+        visibility: "private",
       },
     ],
     nextCursor: null,
   });
   const query = queries.find((entry) => entry.sql.includes("WITH candidates AS"))!;
   expect(query.sql).toContain("workspace_artifacts");
+  // Sites are limited to the workspace's and the viewer's own Only me ones.
+  expect(query.sql).toContain("a.owner_subject_id");
+  expect(query.params).toContain("user:catalog");
   expect(query.sql).not.toContain("generated_image_artifacts");
   expect(query.sql).not.toContain("sandbox_file_publications");
   expect(query.sql).not.toContain("editable_artifacts");

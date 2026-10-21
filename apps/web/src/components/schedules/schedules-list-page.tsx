@@ -8,21 +8,28 @@ import { Link } from "@tanstack/react-router";
 import {
   CalendarClockIcon,
   GitPullRequestIcon,
+  LockIcon,
   PlayIcon,
   PlusIcon,
   SunriseIcon,
   TrendingUpIcon,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-import { EmptyState, EmptyStateTemplate, EmptyStateTemplates } from "@/components/ui/empty-state";
-import { ErrorMessage } from "@/components/ui/error-message";
-import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@/components/ui/list-row";
-import { Notice } from "@/components/ui/notice";
-import { PageHeader } from "@/components/ui/page-header";
-import { StatusBadge } from "@/components/ui/status-badge";
+import { Button } from "@opengeni/react/ui/button";
+import {
+  EmptyState,
+  EmptyStateTemplate,
+  EmptyStateTemplates,
+} from "@opengeni/react/ui/empty-state";
+import { ErrorMessage } from "@opengeni/react/ui/error-message";
+import { ListRow, ListRowSkeleton, RowList, type RowListColumn } from "@opengeni/react/ui/list-row";
+import { MetaChip } from "@opengeni/react/ui/meta-chip";
+import { Notice } from "@opengeni/react/ui/notice";
+import { PageHeader } from "@opengeni/react/ui/page-header";
+import { StatusBadge } from "@opengeni/react/ui/status-badge";
 import { markScheduledTaskAttentionSeen } from "@/components/rail/use-scheduled-task-attention";
 import { useAppContext } from "@/context";
+import { hasWorkspacePermission } from "@/lib/permissions";
 import { listViewState } from "@/lib/load-state";
 import { sessionDisplayTitle } from "@/lib/session-rename";
 import { scheduledTaskDriftDismissal } from "@/lib/scheduled-task-drift-dismissals";
@@ -55,6 +62,7 @@ import {
   useScheduleNavigation,
 } from "./schedule-parts";
 import { scheduledTaskAttentionText } from "./schedule-access-notices";
+import { PrivateScheduleSummaries } from "./private-schedule-summaries";
 import { useScheduleActions } from "./use-schedule-actions";
 import {
   CreateWithOpenGeniButton,
@@ -143,8 +151,9 @@ export function SchedulesListPage({
   /** Show only the schedules that post into this chat (from the chat header). */
   targetSessionId?: string;
 }) {
-  const { client } = useAppContext();
+  const { client, accessContext } = useAppContext();
   const access = useScheduleAccess(workspaceId);
+  const isAdmin = hasWorkspacePermission(accessContext, workspaceId, "workspace:admin");
   const go = useScheduleNavigation(workspaceId);
   const [list, setList] = useState<ScheduleListSnapshot>(EMPTY_LIST);
   const [loading, setLoading] = useState(true);
@@ -375,6 +384,11 @@ export function SchedulesListPage({
                   leading={<ScheduleTile task={task} />}
                   // Titles stay in fg; a paused schedule says so in its tile and Next run.
                   title={task.name}
+                  titleAddon={
+                    task.visibility === "private" ? (
+                      <MetaChip icon={<LockIcon />}>Only me</MetaChip>
+                    ) : undefined
+                  }
                   status={accessBadge({
                     task,
                     attention: list.attention[task.id] ?? null,
@@ -444,6 +458,9 @@ export function SchedulesListPage({
           </RowList>
         )}
       </div>
+      {isAdmin && !targetSessionId ? (
+        <PrivateScheduleSummaries workspaceId={workspaceId} now={clock} />
+      ) : null}
       {actions.dialogs}
       {ask.dialog}
     </>

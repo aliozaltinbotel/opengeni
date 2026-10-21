@@ -9,11 +9,24 @@
 export type ProviderId = string;
 export type ModelId = string;
 
+/**
+ * A model's capability tier, declared by its provider's adapter
+ * (`SubscriptionCoreAdapter.modelTier`, D-35). A closed set that names no
+ * provider. Placement compares tiers for equality only: a derived fallback
+ * order never moves to a higher or a lower tier (Q-04).
+ */
+export type ModelTier = "frontier" | "standard" | "fast";
+
 /** A provider model and the reasoning levels it supports, lowest first. */
 export type ModelDescriptor = {
   id: ModelId;
   provider: ProviderId;
   reasoningLevels: readonly string[];
+  /**
+   * The tier the provider's adapter declares for the model (D-35). Absent or
+   * null: none, so no fallback order is derived for or to this model.
+   */
+  tier?: ModelTier | null;
 };
 
 // Connections and scope (design 3.1)
@@ -50,12 +63,23 @@ export type SubscriptionConnection = {
   kind: ConnectionKind;
   ownership: ConnectionOwnership;
   health: ConnectionHealth;
+  /**
+   * Explicit consent to spend credits after the included allowance. Set only
+   * for a provider whose adapter declares the `extraCredits` capability (the
+   * database placement world clears it for any other provider).
+   */
+  extraCreditsEnabled?: boolean;
   allocatorEnabled: boolean;
   /**
    * Models the plan entitles, as reported by the adapter. Null means every
    * model of the provider.
    */
   entitledModelIds: readonly ModelId[] | null;
+  /** Fresh adapter catalog; the chat adapter maps the accepted upstream model to its product id. */
+  observedModelSlugs?: readonly string[] | null;
+  /** Observation times for the fresh catalog above; never extended by a read. */
+  modelCatalogObservedAt?: number | null;
+  modelCatalogExpiresAt?: number | null;
   /** Entitlement exclusions observed by the adapter (SUB-ELIG-03). */
   excludedModelIds: readonly ModelId[];
   /** Administrator access policy; null allows every entitled model. */
@@ -80,12 +104,34 @@ export type QuotaWindow = {
 
 export type QuotaSource = "usage_endpoint" | "response_headers" | "refusal";
 
+/**
+ * Which reported limits one stored block (a model cooldown, or the quota
+ * exhaustion deadline) came from: the provider's own window ids, as the
+ * observation that set the block named them, tied to that block's exact
+ * deadline. A block whose deadline no longer equals `until` (a later write
+ * extended it without evidence) has no claim. A block without a claim (an
+ * unrecognized or missing limit, or a refusal without usage evidence) never
+ * ends before its own deadline.
+ */
+export type QuotaBlockClaim = {
+  /** The deadline of the block this claim explains. */
+  until: number;
+  /** When the observation that set the block was made. */
+  observedAt: number;
+  /** The provider window ids whose limit set the block (never empty). */
+  windowIds: readonly string[];
+};
+
 export type SubscriptionQuota = {
   windows: readonly QuotaWindow[];
-  /** Per-model cooldowns (for example Claude model-specific limits). */
+  /** Per-model cooldowns (model-specific limits some providers report). */
   modelCooldowns: Readonly<Record<ModelId, number>>;
+  /** Optional evidence per model cooldown (see `QuotaBlockClaim`); absent: none. */
+  modelCooldownClaims?: Readonly<Record<ModelId, QuotaBlockClaim>>;
   exhaustedUntil: number | null;
   exhaustedKind: "quota" | "rate_limit" | null;
+  /** Optional evidence for `exhaustedUntil` (see `QuotaBlockClaim`); absent: none. */
+  exhaustedClaim?: QuotaBlockClaim | null;
   revision: number;
   observedAt: number | null;
   observedRefreshGeneration: number | null;
@@ -164,6 +210,16 @@ export type EffectiveSubscriptionSettings = {
   };
 };
 
+/** A setting's source in a view: `locked` is an organization value a workspace cannot override. */
+export type EffectiveSettingSource = SettingSource | "locked";
+
+/** One workspace's effective settings, one source per setting (SUB-SET-03, SUB-SET-05). */
+export type SubscriptionSettingsView = {
+  values: SubscriptionSettingValues;
+  sources: Readonly<Record<SubscriptionSettingKey, EffectiveSettingSource>>;
+  entrySources: { [K in KeyedSettingKey]: Readonly<Record<string, SettingSource>> };
+};
+
 // Placement context
 
 export type PlacementWorkspace = {
@@ -193,14 +249,19 @@ export type SessionBinding = {
   lastModelCallAt: number;
   /**
    * The exact prompt-cache lifetime Opengeni sent with the latest request on
-   * this binding (Claude: 5 minutes or 1 hour). Overrides the provider's cache
+   * this binding (for example 5 minutes or 1 hour). Overrides the provider's cache
    * facts when set (SUB-STICK-04).
    */
   cacheTtlMs?: number | null;
 };
 
 /** Personal authority frozen on accepted work (design 3.7). */
-export type PersonalAuthority = { provider: ProviderId; ownerMembershipId: string };
+export type PersonalAuthority = {
+  provider: ProviderId;
+  ownerMembershipId: string;
+  /** SQL has verified the accepting human and live owner independently of the chat owner. */
+  sharedSessionChoice?: { sessionId: string; connectionId: string };
+};
 
 /** A re-selection point since the last placement (SUB-STICK-05). */
 export type ReselectionPoint = "compaction_completed" | "model_changed";
@@ -219,15 +280,15 @@ export type PlacementSession = {
   reselectionPoints: readonly ReselectionPoint[];
   personalAuthority: readonly PersonalAuthority[];
   /**
-   * Set while the session's compaction mode ties it to one provider (Codex
-   * remote compaction, SUB-FAIL-09): models of other providers are excluded.
+   * Set while the session's compaction mode ties it to one provider (remote
+   * history compaction, SUB-FAIL-09): models of other providers are excluded.
    */
   compactionProviderLock: ProviderId | null;
 };
 
 /** How the provider prompt cache expires (SUB-STICK-04, design 6.1). */
 export type CacheFacts =
-  /** Exact lifetime Opengeni sent with the request (Claude). */
+  /** Exact cache lifetime Opengeni sent with the request (exact-TTL providers). */
   | { kind: "exact_ttl"; ttlMs: number }
   /** Idle cut-off measured from model-call facts; null until measured. */
   | { kind: "measured_idle_cutoff"; cutoffMs: number | null };
@@ -279,6 +340,8 @@ export type AccountSwitchReason =
 
 export type WaitReason =
   | "pinned_account_unavailable"
+  /** Allocation was explicitly switched off; a person must enable it or change the pin. */
+  | "pinned_account_disabled"
   /** The explicit choice can never serve this work until a person changes something (D-24). */
   | "pinned_account_ineligible"
   | "no_eligible_capacity"
@@ -288,7 +351,14 @@ export type WaitReason =
    * The session's compaction mode keeps it on its provider until it converts,
    * and that is what keeps a usable model away (SUB-FAIL-09).
    */
-  | "compaction_provider_locked";
+  | "compaction_provider_locked"
+  /**
+   * The work's accepted authority cannot be used (design 5.3 decision 4): it
+   * was accepted before its provider's account move and its access could not
+   * be carried. It ends at the capacity-wait deadline; the remedy is to send
+   * the work again.
+   */
+  | "accepted_authority_unavailable";
 
 export type PlacementDecision =
   | {

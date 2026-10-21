@@ -37,8 +37,8 @@ export async function createRealtimeUsageProxyAttachment(input: {
   deps: ApiRouteDeps; authorization: AccessGrantAuthorization; request: Request;
   sessionId: string; connectionId: string; connectionEpoch: number;
   provider: "ai-gateway" | "xai-subscription"; model: string;
-  secret: { url: string; token: string; upstreamModelId: string; expiresAt: number | null };
-}): Promise<{ url: string; token: string }> {
+  secret: { url: string; token: string; upstreamModelId: string; expiresAt: number | null; protocols?: readonly string[] };
+}): Promise<{ url: string; token: string; protocols: readonly string[] }> {
   const { deps, secret, authorization } = input;
   const rootSecret = realtimeProxyRootSecret(deps);
   if (!rootSecret) throw new Error("REALTIME_PROXY_AUTHORITY_UNAVAILABLE");
@@ -52,14 +52,14 @@ export async function createRealtimeUsageProxyAttachment(input: {
   const attachment = createInteractionFrameProxyAttachment({ requestUrl: input.request.url,
     publicBaseUrl: deps.settings.publicBaseUrl, webBaseUrl: deps.settings.webBaseUrl,
     rootSecret, upstreamUrl: secret.url,
-    upstreamProtocols: input.provider === "ai-gateway" ? ["ai-gateway-realtime.v1", `ai-gateway-auth.${secret.token}`]
-      : [`xai-client-secret.${secret.token}`],
+    upstreamProtocols: secret.protocols ?? (input.provider === "ai-gateway" ? ["ai-gateway-realtime.v1", `ai-gateway-auth.${secret.token}`]
+      : [`xai-client-secret.${secret.token}`]),
     origin: input.request.headers.get("origin"),
     // This is only the native attachment grant's lifetime. Mint is not occurrence.
     expiresAt: new Date(Math.min(secret.expiresAt ?? Date.now() + 60_000, Date.now() + 60_000)).toISOString(),
     realtime: source,
   });
-  return { url: attachment.url, token: attachment.protocols[1]!.slice(INTERACTION_FRAME_PROXY_PROTOCOL_PREFIX.length) };
+  return { url: attachment.url, token: attachment.protocols[1]!.slice(INTERACTION_FRAME_PROXY_PROTOCOL_PREFIX.length), protocols: attachment.protocols };
 }
 
 /** Actual provider messages on the one owned socket supply occurrence/final

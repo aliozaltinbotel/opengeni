@@ -42,6 +42,11 @@ async function organizationFixture() {
     email: `${userId}@example.test`,
     name: "Subscription core fixture",
   });
+  // Migration 0680 seeds every organization's settings row; these contracts
+  // write the organization row themselves.
+  await shared!.admin`
+    delete from subscription_settings
+    where account_id = ${access.workspaceGrants[0]!.accountId}::uuid and workspace_id is null`;
   return {
     accountId: access.workspaceGrants[0]!.accountId,
     workspaceId: access.workspaceGrants[0]!.workspaceId!,
@@ -74,6 +79,33 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       await tx.unsafe(
         `grant execute on function opengeni_private.subscription_organization_admin(uuid) to ${probeRole}`,
       );
+      // Every SELECT on the table evaluates the refresh-only read policy too.
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid) to ${probeRole}`,
+      );
+      // ... and the owner-only Codex writer policy (M3 PR 3b).
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean) to ${probeRole}`,
+      );
+      // ... and their provider-neutral equivalents (migration 0707).
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_core_refresh_write_allowed(text,uuid,uuid,uuid) to ${probeRole}`,
+      );
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_core_owner_capability_held(text,uuid,text[],text,uuid,boolean) to ${probeRole}`,
+      );
+      // ... and the people-picker read policy (migration 0757), which reads
+      // the person's own assignments under that table's own read policies.
+      await tx.unsafe(`grant select on subscription_connection_people to ${probeRole}`);
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_own_person_membership_id(uuid) to ${probeRole}`,
+      );
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_people_assignment_visible(uuid,uuid,uuid,text,text) to ${probeRole}`,
+      );
+      await tx.unsafe(
+        `grant execute on function opengeni_private.subscription_people_designation_visible(uuid,uuid,uuid) to ${probeRole}`,
+      );
       await tx.unsafe(`set local role ${probeRole}`);
       await tx.unsafe("set local search_path = pg_catalog, public, opengeni_private, pg_temp");
       const [attributes] = await tx<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
@@ -99,6 +131,28 @@ async function verifySubscriptionLifecycleRlsAsNonBypassOwner(connectionId: stri
       );
       await tx.unsafe(
         `revoke execute on function opengeni_private.subscription_organization_admin(uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_codex_refresh_write_allowed(uuid,uuid,uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_codex_owner_capability_held(uuid,text[],text,uuid,boolean) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_core_refresh_write_allowed(text,uuid,uuid,uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_core_owner_capability_held(text,uuid,text[],text,uuid,boolean) from ${probeRole}`,
+      );
+      await tx.unsafe(`revoke select on subscription_connection_people from ${probeRole}`);
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_own_person_membership_id(uuid) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_people_assignment_visible(uuid,uuid,uuid,text,text) from ${probeRole}`,
+      );
+      await tx.unsafe(
+        `revoke execute on function opengeni_private.subscription_people_designation_visible(uuid,uuid,uuid) from ${probeRole}`,
       );
       await tx.unsafe(
         `alter function finalize_organization_retention_deletion(uuid,uuid,uuid,text) owner to ${owners!.function_owner}`,
@@ -155,16 +209,21 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
         false, ${shared!.admin.json(organizationFallbackOrder)}::jsonb, true, false,
         ARRAY['personalFallbackAllowed']::text[]
       )`;
-      await shared!.admin`
-      insert into subscription_settings (
-        account_id, workspace_id, codex_primary_connection_id, rotation, providers,
-        cross_provider_failover, fallback_order, personal_fallback_allowed
-      ) values (
-        ${fixture.accountId}, ${fixture.workspaceId}, ${connection!.id}::uuid,
-        ${shared!.admin.json({ codex: { mode: "primary_first" } })}::jsonb,
-        ${shared!.admin.json(workspaceProviders)}::jsonb, true,
-        ${shared!.admin.json(workspaceFallbackOrder)}::jsonb, true
-      )`;
+      // A locked workspace override stored before 0724's guard existed (the
+      // guard refuses it now): the resolver must still ignore it.
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+        insert into subscription_settings (
+          account_id, workspace_id, codex_primary_connection_id, rotation, providers,
+          cross_provider_failover, fallback_order, personal_fallback_allowed
+        ) values (
+          ${fixture.accountId}, ${fixture.workspaceId}, ${connection!.id}::uuid,
+          ${shared!.admin.json({ codex: { mode: "primary_first" } })}::jsonb,
+          ${shared!.admin.json(workspaceProviders)}::jsonb, true,
+          ${shared!.admin.json(workspaceFallbackOrder)}::jsonb, true
+        )`;
+      });
 
       const policy: SubscriptionSettingsPolicy = {
         organization: {
@@ -327,15 +386,19 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
           ${shared!.admin.json(organization.providers)}::jsonb, false,
           ${shared!.admin.json(organization.fallbackOrder)}::jsonb, true, false, ${locked}
         )`;
-      await shared!.admin`
-        insert into subscription_settings (
-          account_id, workspace_id, rotation, providers, fallback_order
-        ) values (
-          ${fixture.accountId}, ${fixture.workspaceId},
-          ${shared!.admin.json(workspace.rotation)}::jsonb,
-          ${shared!.admin.json(workspace.providers)}::jsonb,
-          ${shared!.admin.json(workspace.fallbackOrder)}::jsonb
-        )`;
+      // Locked overrides stored before 0724's guard existed (it refuses them now).
+      await shared!.admin.begin(async (tx) => {
+        await tx`set local session_replication_role = replica`;
+        await tx`
+          insert into subscription_settings (
+            account_id, workspace_id, rotation, providers, fallback_order
+          ) values (
+            ${fixture.accountId}, ${fixture.workspaceId},
+            ${shared!.admin.json(workspace.rotation)}::jsonb,
+            ${shared!.admin.json(workspace.providers)}::jsonb,
+            ${shared!.admin.json(workspace.fallbackOrder)}::jsonb
+          )`;
+      });
 
       const expected = effectiveSettings(
         {
@@ -806,7 +869,7 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
   );
 
   test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1")(
-    "SUB-OWN-04 and SUB-APPS-01: delegated managers cannot widen model scope and can clear out-of-scope Apps designations",
+    "SUB-OWN-04 and SUB-APPS-01: delegated managers change only the models, only from the managing workspace, and can clear out-of-scope Apps designations",
     async () => {
       const fixture = await organizationFixture();
       const managerSubject = `user:subscription-manager-${crypto.randomUUID()}`;
@@ -834,31 +897,65 @@ describe("shared subscription core M2 PostgreSQL contracts", () => {
       await shared!.admin`
       insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
       values (${fixture.accountId}, ${connection!.id}::uuid, ${fixture.workspaceId}::uuid)`;
-      let error: unknown;
-      try {
-        await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
-          withRlsContext(
-            client!.db,
-            {
-              accountId: fixture.accountId,
-              workspaceId: fixture.workspaceId,
-            },
-            (db) =>
+      // Runs one update as the delegated manager in a workspace context and
+      // returns the PostgreSQL error code, or null when it was admitted.
+      const asManager = async (workspaceId: string, assignment: ReturnType<typeof sql>) => {
+        try {
+          await withSessionRlsActorContext({ subjectId: managerSubject }, () =>
+            withRlsContext(client!.db, { accountId: fixture.accountId, workspaceId }, (db) =>
               rawRows(
                 db,
-                sql`update subscription_connections
-          set allowed_model_ids = ARRAY['model-b']::text[]
-          where id = ${connection!.id}::uuid`,
+                sql`update subscription_connections set ${assignment}
+                  where id = ${connection!.id}::uuid`,
               ),
-          ),
-        );
-      } catch (caught) {
-        error = caught;
-      }
-      const pgCode =
-        (error as { code?: string; cause?: { code?: string } } | undefined)?.code ??
-        (error as { cause?: { code?: string } } | undefined)?.cause?.code;
-      expect(pgCode).toBe("42501");
+            ),
+          );
+          return null;
+        } catch (caught) {
+          const failure = caught as { code?: string; cause?: { code?: string } };
+          return failure.code ?? failure.cause?.code ?? "unknown";
+        }
+      };
+      const current = async () => {
+        const [row] = await shared!.admin<
+          { allowed_model_ids: string[] | null; scope_kind: string; allow_personal: boolean }[]
+        >`select allowed_model_ids, scope_kind, allow_personal_workspaces as allow_personal
+          from subscription_connections where id = ${connection!.id}::uuid`;
+        return row!;
+      };
+
+      // The managing workspace's admin chooses the models of its own account,
+      // as workspace accounts allowed before the shared core.
+      expect(
+        await asManager(fixture.workspaceId, sql`allowed_model_ids = ARRAY['model-b']::text[]`),
+      ).toBeNull();
+      expect((await current()).allowed_model_ids).toEqual(["model-b"]);
+      // Scope stays an organization administrator's decision.
+      expect(await asManager(fixture.workspaceId, sql`scope_kind = 'organization'`)).toBe("42501");
+      expect(await asManager(fixture.workspaceId, sql`allow_personal_workspaces = false`)).toBe(
+        "42501",
+      );
+      // The same person acting from another workspace cannot change the models.
+      const elsewhere = await asManager(
+        personalWorkspace!.id,
+        sql`allowed_model_ids = ARRAY['model-c']::text[]`,
+      );
+      expect(elsewhere === null || elsewhere === "42501").toBe(true);
+      // Nor can a member of the managing workspace who is not its admin.
+      await shared!.admin`update workspace_memberships set role = 'member'
+        where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${managerSubject}`;
+      const member = await asManager(
+        fixture.workspaceId,
+        sql`allowed_model_ids = ARRAY['model-d']::text[]`,
+      );
+      expect(member === null || member === "42501").toBe(true);
+      await shared!.admin`update workspace_memberships set role = 'admin'
+        where workspace_id = ${fixture.workspaceId}::uuid and subject_id = ${managerSubject}`;
+      expect(await current()).toEqual({
+        allowed_model_ids: ["model-b"],
+        scope_kind: "workspaces",
+        allow_personal: true,
+      });
 
       await shared!.admin`
         insert into subscription_apps_designations (account_id, workspace_id, connection_id, updated_by_subject_id)
