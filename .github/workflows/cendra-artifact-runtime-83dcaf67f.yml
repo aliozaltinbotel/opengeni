@@ -1,0 +1,14 @@
+name: Cendra artifact runtime for 83dcaf67f
+
+# Build-only caller; every target checks out the qualified source, not this caller commit.
+on:
+  push:
+    branches:
+      - cendra/artifact-runtime-83dcaf67f
+permissions:
+  contents: read
+jobs:
+  artifact-runtime:
+    uses: ./.github/workflows/artifact-runtime.yml
+    with:
+      source_sha: 83dcaf67fbe62fef5b742c5e2deea12588324bb4
