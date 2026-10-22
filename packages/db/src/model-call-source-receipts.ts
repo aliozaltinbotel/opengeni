@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { canonicalModelSourceJson, readNativeSkillCatalogDescriptors, sessionTitleGenerationInput, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
+import { AttemptToolResult, canonicalModelSourceJson, readNativeSkillCatalogDescriptors, sessionTitleGenerationInput, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
+import { loadVerifiedAttemptToolCatalogTx } from "./attempt-tool-catalogs";
 import { listSkillDescriptors, skillSelectionSourceRef } from "./skills";
 import { resolveCompanyBrainContextSelection } from "./company-brain-context-selection";
 
@@ -62,6 +63,52 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
         .from(schema.sessionHistoryItems).where(and(eq(schema.sessionHistoryItems.accountId,identity.accountId),eq(schema.sessionHistoryItems.workspaceId,identity.workspaceId),eq(schema.sessionHistoryItems.id,id))).limit(1);
       if (row) { historyOwners.set(id, row); work.sourceNodes++; work.sourceEdges += row.basis?.parents.length ?? 0; }
       return row;
+    };
+    // Authenticate the original producer/call/catalog before interpreting a legacy
+    // result. Visible names or body shapes alone never establish native identity.
+    const missingKnowledgeOrigin = async (row: HistoryOwner, source: NonNullable<Basis["rawToolSource"]>, producer: typeof schema.modelCallSourceReceipts.$inferSelect): Promise<boolean> => {
+      if (source.retainedSources.some(ref => ref.owner === "native.knowledge.selection.v2")) return false;
+      const catalog = await loadVerifiedAttemptToolCatalogTx(tx, { workspaceId: identity.workspaceId, attemptId: producer.attemptId });
+      if (!catalog) return false; // Pre-catalog third-party history keeps its existing admission rules.
+      if (catalog.accountId !== identity.accountId || catalog.workspaceId !== identity.workspaceId || catalog.sessionId !== row.sessionId || catalog.turnId !== row.turnId || catalog.executionGeneration !== producer.executionGeneration) return true;
+      const callId = row.item.callId ?? row.item.call_id;
+      if (row.item.type !== "function_call_result" || typeof callId !== "string" || callId !== source.sourceCallId) return true;
+      const calls = await tx.select({ id: schema.sessionHistoryItems.id }).from(schema.sessionHistoryItems).where(and(
+        eq(schema.sessionHistoryItems.accountId, identity.accountId), eq(schema.sessionHistoryItems.workspaceId, identity.workspaceId),
+        eq(schema.sessionHistoryItems.sessionId, row.sessionId), eq(schema.sessionHistoryItems.turnId, producer.turnId),
+        sql`${schema.sessionHistoryItems.position} < ${row.position}`,
+        sql`${schema.sessionHistoryItems.item}->>'type' = 'function_call'`,
+        sql`coalesce(${schema.sessionHistoryItems.item}->>'callId', ${schema.sessionHistoryItems.item}->>'call_id') = ${callId}`,
+      )).limit(2);
+      if (calls.length !== 1) return true;
+      const call = await historyById(calls[0]!.id);
+      const parent = { owner: "model_call_source_receipts", id: producer.id, sha256: producer.digest };
+      if (!call || call.basis?.kind !== "HISTORY_ROW" || canonicalModelSourceJson(call.basis.parents) !== canonicalModelSourceJson([parent])) return true;
+      const selected = catalog.entries.find(entry => entry.modelName === call.item.name);
+      if (!selected || !["opengeni", "docs"].includes(selected.identity.serverId) || selected.identity.toolName !== "knowledge_get") return false;
+      // The native SDK stores text blocks rather than the MCP envelope. An exact
+      // raw-result digest permits only genuine no-entry/error outcomes without a
+      // selected revision; it cannot bless a successful legacy read retroactively.
+      const output = row.item.output;
+      const blocks = Array.isArray(output) ? output : [output];
+      const content: Array<{ type: "text"; text: string }> = [];
+      for (const block of blocks) {
+        if (!block || typeof block !== "object" || !("type" in block) || !("text" in block) || !["text", "input_text"].includes(String(block.type)) || typeof block.text !== "string") return true;
+        content.push({ type: "text", text: block.text });
+      }
+      // mcpResultModelContent prepends this notice for an isError envelope.
+      // The notice grants nothing: the original MCP envelope digest must match.
+      const errorContent = content[0]?.text === "The tool reported an error." ? content.slice(1) : content;
+      const error = AttemptToolResult.parse({ content: errorContent, isError: true });
+      if (modelSourceContentDigest(error) === source.rawSourceRef.sha256) return false;
+      if (content.length === 1) {
+        let value: unknown;
+        try { value = JSON.parse(content[0]!.text); } catch { return true; }
+        if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && "found" in value && value.found === false) {
+          return ![AttemptToolResult.parse({ content }), AttemptToolResult.parse({ content, isError: false })].some(result => modelSourceContentDigest(result) === source.rawSourceRef.sha256);
+        }
+      }
+      return true;
     };
     // These native producers carried instruction text before retained origins were installed.
     // Preserve their transcript, but never invent origins from the visible body on a later call.
@@ -312,6 +359,9 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           if(!sourceReceipt) return false;
           const producerRef={owner:"model_call_source_receipts",id:sourceReceipt.id,sha256:sourceReceipt.digest};
           if(!await closure(producerRef,next,depth+1,"AGENT"))return false;
+          if (row.item.type === "function_call_result" && await missingKnowledgeOrigin(row, raw, sourceReceipt)) {
+            reasons.add("NATIVE_KNOWLEDGE_ORIGIN_MISSING"); return false;
+          }
           setClosureNode(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[producerRef],retainedSources:raw.retainedSources});
         } else if (!await closure(parent,next,depth+1,row.basis.kind==="HISTORY_ROW"?"AGENT":"COMPACTION")) return false;
       }

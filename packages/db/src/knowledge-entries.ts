@@ -15,6 +15,7 @@ import {
   KnowledgeEntryBatchReviewRequest,
   KnowledgeTaskNotePromotionRequest,
   KnowledgeEntryRecord,
+  KnowledgeSelectionSourceVersion,
   KnowledgeEntryReviewRequest,
   KnowledgeEntryRestoreRequest,
   KnowledgeEntrySaveRequest,
@@ -486,19 +487,12 @@ export async function knowledgeSelectionSourceIsCurrent(
   context: KnowledgeContext,
   ref: import("@opengeni/contracts").ModelSourceRef,
 ): Promise<boolean> {
-  let version: unknown;
+  let version: ReturnType<typeof KnowledgeSelectionSourceVersion.parse>;
   try {
-    version = JSON.parse(ref.version ?? "null");
+    version = KnowledgeSelectionSourceVersion.parse(JSON.parse(ref.version ?? "null"));
   } catch {
     return false;
   }
-  if (
-    !Array.isArray(version) ||
-    version.length !== 4 ||
-    !["published", "pending"].includes(version[2]) ||
-    !["full", "summary"].includes(version[3])
-  )
-    return false;
   const rows = await read(db, context, {
     operation: "get",
     entryId: ref.id,
@@ -506,19 +500,17 @@ export async function knowledgeSelectionSourceIsCurrent(
     limit: 1,
   });
   if (!rows[0]) return false;
-  const selected =
-    version[3] === "full" ? decodeProjection(rows[0], true) : decodeProjection(rows[0], false);
-  return (
-    !selected.archived &&
-    ref.version ===
-      JSON.stringify([
-        selected.revision.id,
-        selected.version,
-        selected.revision.outcome,
-        version[3],
-      ]) &&
-    ref.sha256 === createHash("sha256").update(JSON.stringify(selected.revision)).digest("hex")
-  );
+  const selected = version[3] === "summary" ? decodeProjection(rows[0], false) : decodeProjection(rows[0], true);
+  let revision = selected.revision;
+  if (version[3] === "range") {
+    const [, , , , start, end, total] = version;
+    if (!("entry" in revision) || revision.entry.content.length !== total) return false;
+    revision = { ...revision, entry: { ...revision.entry, content: revision.entry.content.slice(start, end) } };
+  }
+  const descriptor = [revision.id, selected.version, revision.outcome,
+    ...(version[3] === "range" ? ["range", version[4], version[5], version[6]] : [version[3]])];
+  return !selected.archived && ref.version === JSON.stringify(descriptor)
+    && ref.sha256 === createHash("sha256").update(JSON.stringify(revision)).digest("hex");
 }
 
 /**

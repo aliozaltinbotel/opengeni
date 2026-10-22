@@ -5,6 +5,7 @@ import {
   ModelSourceRef,
   WorkspaceMemorySearchResponse,
   KnowledgeEntryRecord,
+  KnowledgeEntryGetResponse,
   KnowledgeEntryListResponse,
   KnowledgeSavePreparationResponse,
   ToolResultSpilledReceipt,
@@ -131,10 +132,31 @@ export function wrapAttemptToolDefinitions(
 function nativeKnowledgeSources(result:AttemptToolResultValue,identity?:AttemptToolIdentity):import("@opengeni/contracts").ModelSourceRef[] {
   if(!identity || !["opengeni","docs"].includes(identity.serverId) || !(identity.toolName.startsWith("knowledge_") || identity.toolName==="memory_search")) return [];
   let value:unknown=result.structuredContent;
-  if(value===undefined && result.content.length===1 && result.content[0]?.type==="text") {try{value=JSON.parse(result.content[0].text);}catch{return [];}}
+  if(value===undefined && result.content.length===1 && result.content[0]?.type==="text") {
+    try { value=JSON.parse(result.content[0].text); }
+    catch {
+      if (identity.toolName === "knowledge_get" && result.isError !== true) throw new Error("MODEL_KNOWLEDGE_GET_SOURCE_UNAVAILABLE");
+      return [];
+    }
+  }
   if(identity.toolName==="memory_search") {
     const parsed=WorkspaceMemorySearchResponse.safeParse(value);if(!parsed.success)return [];
     return parsed.data.results.map(({memory})=>({owner:"native.memory.selection",id:memory.id,version:memory.updatedAt,sha256:createHash("sha256").update(JSON.stringify(memory)).digest("hex")}));
+  }
+  if (identity.toolName === "knowledge_get") {
+    if (result.isError === true) return [];
+    if (typeof value === "object" && value !== null && Object.keys(value).length === 1 && "found" in value && value.found === false) return [];
+    const parsed = KnowledgeEntryGetResponse.safeParse(value);
+    if (parsed.success) {
+      const selection = parsed.data;
+      const range = selection.contentRange;
+      return [{ owner: "native.knowledge.selection.v2", id: selection.id,
+        version: JSON.stringify([selection.revision.id, selection.version, selection.revision.outcome, "range", range.start, range.end, range.total]),
+        sha256: createHash("sha256").update(JSON.stringify(selection.revision)).digest("hex") }];
+    }
+    // Preserve the existing complete-record contract, but never strip an
+    // invalid GET envelope into a seemingly complete revision.
+    if (!KnowledgeEntryRecord.safeParse(value).success) throw new Error("MODEL_KNOWLEDGE_GET_SOURCE_UNAVAILABLE");
   }
   const list=KnowledgeEntryListResponse.safeParse(value);const entry=KnowledgeEntryRecord.safeParse(value);const prepared=KnowledgeSavePreparationResponse.safeParse(value);
   const selections=list.success?list.data.entries:entry.success?[entry.data]:prepared.success?[...prepared.data.matches.published.entries,...prepared.data.matches.needs_review.entries]:[];
