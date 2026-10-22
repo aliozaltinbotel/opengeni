@@ -3,6 +3,7 @@ import { OrganizationMember } from "@opengeni/contracts";
 import { PgDialect } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import type { Database } from "../src/database";
+import * as database from "../src/database";
 import * as memberships from "../src/organization-membership-lifecycle";
 import * as authority from "../src/workspace-authority";
 import { namedSubjectPersonalWorkspaceId } from "../src/slack-routing-personal-workspace";
@@ -41,7 +42,30 @@ function fixture(subjectId = externalSubjectId) {
   );
   const execute = mock(async (_query: SQL) => []);
   const db = { execute } as unknown as Database;
-  return { member, lookup, previous, execute, db };
+  let accountScoped = false;
+  const scope = track(
+    spyOn(database, "withRlsContext").mockImplementation(async (caller, context, run) => {
+      expect(caller).toBe(db);
+      expect(context).toEqual({ accountId, workspaceId: null });
+      accountScoped = true;
+      try {
+        return await run(db);
+      } finally {
+        accountScoped = false;
+      }
+    }),
+  );
+  return {
+    member,
+    lookup,
+    previous,
+    execute,
+    db,
+    scope,
+    get accountScoped() {
+      return accountScoped;
+    },
+  };
 }
 function expectRestored(execute: ReturnType<typeof fixture>["execute"]) {
   expect(execute).toHaveBeenCalledTimes(1);
@@ -96,4 +120,19 @@ test("a live membership guard failure restores scope and preserves its diagnosti
     namedSubjectPersonalWorkspaceId(db, { accountId, subjectId: externalSubjectId }),
   ).rejects.toBe(denied);
   expectRestored(execute);
+});
+
+test("external Personal lookup installs its account scope before the native membership guard", async () => {
+  const f = fixture();
+  f.lookup.mockImplementation(async () => {
+    if (!f.accountScoped)
+      throw Object.assign(new Error("managed human subject authority required"), { code: "42501" });
+    return [f.member];
+  });
+  expect(
+    await namedSubjectPersonalWorkspaceId(f.db, { accountId, subjectId: externalSubjectId }),
+  ).toBe(workspaceId);
+  expect(f.scope).toHaveBeenCalledTimes(1);
+  expect(f.accountScoped).toBe(false);
+  expectRestored(f.execute);
 });
