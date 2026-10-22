@@ -18,6 +18,12 @@ const peoplePageSource = await Bun.file(
 ).text();
 
 describe("managed self-context surfaces", () => {
+  test("passes the exact route workspace kind to the Skills editor", async () => {
+    const source = await Bun.file(`${import.meta.dir}/routes/capabilities.tsx`).text();
+    expect(source).toContain("context.workspaces.find((workspace) => workspace.id === workspaceId)");
+    expect(source).toContain("isPersonalWorkspace(activeWorkspace, context.managedSelfContext)");
+    expect(source.match(/<SkillsPanel\b[^>]*>/s)?.[0]).toContain("personalWorkspace={personal}");
+  });
   test("loads the managed-only projection behind the credential/principal identity fence", () => {
     expect(contextSource).toContain("client.listOrganizationMemberships()");
     expect(contextSource).toContain("loadCurrentManagedSelfContext({");

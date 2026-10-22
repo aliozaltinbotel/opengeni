@@ -39,7 +39,7 @@ type SkillsFailure = { title: string; cause: unknown };
 /** Both product destinations use this catalog and the same folder write API. */
 export function SkillsPanel({
   workspaceId,
-  personalWorkspace = false,
+  personalWorkspace,
   query = "",
   onFindSkill,
   onImportSkill,
@@ -49,7 +49,7 @@ export function SkillsPanel({
   openSkillRef,
 }: {
   workspaceId: string;
-  personalWorkspace?: boolean;
+  personalWorkspace: boolean;
   query?: string;
   onFindSkill?: (() => void) | undefined;
   onImportSkill?: (() => void) | undefined;

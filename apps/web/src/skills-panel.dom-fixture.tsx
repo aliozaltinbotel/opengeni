@@ -74,13 +74,13 @@ function fixture(overrides: Record<string, unknown> = {}, admin = true) {
   return { context, calls };
 }
 
-async function mount(context: AppContextValue) {
+async function mount(context: AppContextValue, personalWorkspace = false) {
   const container = document.createElement("div");
   document.body.append(container);
   const root = createRoot(container);
   const render = async (workspaceId: string) =>
     act(async () => {
-      root.render(<SkillsPanelContent context={context} workspaceId={workspaceId} />);
+      root.render(<SkillsPanelContent context={context} workspaceId={workspaceId} personalWorkspace={personalWorkspace} />);
     });
   await render("one");
   const click = async (label: string) => {
@@ -580,3 +580,24 @@ test("read-only viewers cannot remove skills", async () => {
     await view.dispose();
   }
 });
+
+for (const personalWorkspace of [true, false]) {
+  test(`${personalWorkspace ? "Personal" : "Shared"} new Skills keep their native destination on save`, async () => {
+    const { context, calls } = fixture();
+    const view = await mount(context, personalWorkspace);
+    try {
+      await view.click("New skill");
+      const scope = view.container.querySelector<HTMLSelectElement>('[aria-label="Skill scope"]');
+      expect(scope?.value).toBe(personalWorkspace ? "user" : "workspace");
+      await view.edit("---\nname: local-fixture\ndescription: Use only for synthetic QA.\n---\nReturn the synthetic fixture label when asked.");
+      await view.click("Save skill");
+      expect(calls.find((call) => call.method === "save")?.request).toMatchObject({
+        scope: personalWorkspace ? "user" : "workspace",
+        expectedScopeVersion: 1,
+        expectedRevisionId: null,
+      });
+    } finally {
+      await view.dispose();
+    }
+  });
+}
