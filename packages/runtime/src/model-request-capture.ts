@@ -187,6 +187,30 @@ export function recordModelToolProjection(callId:string|undefined,modelName:stri
   tool.modelName=modelName;
 }
 
+/** The generic search producer owns this actual result, not an input replay. */
+export async function recordModelGenericSearchSource(call: unknown, output: string): Promise<void> {
+  const capture = modelRequestCapture.getStore();
+  if (!capture?.beforeCall) return;
+  const callId = toolCallIdFromSdkItem(call);
+  restoreProducedSourceBindings([call], capture);
+  const binding = modelSourceInputBinding(call);
+  const sourceKey = callId ? capture.toolSourceKeys?.get(callId) : undefined;
+  if (typeof call !== "object" || call === null || !("type" in call) || call.type !== "function_call"
+    || !("name" in call) || call.name !== "tool_search" || !callId || !sourceKey
+    || binding?.nativeProducerSourceKey !== sourceKey || binding.sourceRef.sha256 !== inputDigest(call)) {
+    throw new Error("MODEL_TOOL_SEARCH_CALL_UNBOUND");
+  }
+  if (sourceState(capture).tools.has(callId)) throw new Error("MODEL_TOOL_SEARCH_CALL_COLLISION");
+  const sha256 = inputDigest(output);
+  await recordModelToolSource({sourceCallId: callId, nativeModelSourceKey: sourceKey,
+    rawSourceRef: {owner: "native.tool.result", id: `tool-search:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
+  const captured = sourceState(capture).tools.get(callId);
+  if (!captured) throw new Error("MODEL_TOOL_SEARCH_RESULT_UNAVAILABLE");
+  // Generic SDK function results preserve this returned string verbatim.
+  captured.projection = output;
+  captured.modelName = "tool_search";
+}
+
 /** Native client discovery produces these exact schemas, not model-authored
  * instructions. Keep its existing raw-tool owner and producing call; the SDK
  * supplies the envelope. No serialized input can register this ownership. */

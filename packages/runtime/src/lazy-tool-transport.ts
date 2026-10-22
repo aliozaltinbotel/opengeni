@@ -21,7 +21,7 @@ import {
   parseSearchArgs,
   toolsNamedInQuery,
 } from "./codex-tool-search";
-import { ModelRequestCaptureModel, recordModelToolSearchSource } from "./model-request-capture";
+import { ModelRequestCaptureModel, recordModelGenericSearchSource, recordModelToolSearchSource } from "./model-request-capture";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
@@ -840,7 +840,9 @@ export class LazyToolRuntime {
         const marker = details?.toolCall?.providerData?.[SEARCH_MARKER_KEY] as
           | GenericSearchMarker
           | undefined;
-        return marker?.output ?? (await this.prepareSearch(input, details?.signal)).output;
+        const output = marker?.output ?? (await this.prepareSearch(input, details?.signal)).output;
+        await recordModelGenericSearchSource(details?.toolCall, output);
+        return output;
       },
     }) as unknown as Tool;
   }
