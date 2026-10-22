@@ -80,11 +80,12 @@ const producedSources = new WeakMap<ModelRequestCapture, {
   restoreHistorySources: (items:readonly unknown[])=>void;
   outputs: Map<string,InputBinding|null>;
   outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
-  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
+  toolBindingOwners: WeakMap<InputBinding,{callId:string;identity:string}>;
+  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; genericSearchTextProjection?:unknown; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
-  if(!state) {state={restoreHistorySources:items=>restoreProducedSourceBindings(items,capture),outputs:new Map(),outputOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
+  if(!state) {state={restoreHistorySources:items=>restoreProducedSourceBindings(items,capture),outputs:new Map(),outputOwners:new WeakMap(),toolBindingOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
   return state;
 }
 const inputDigest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -206,8 +207,11 @@ export async function recordModelGenericSearchSource(call: unknown, output: stri
     rawSourceRef: {owner: "native.tool.result", id: `tool-search:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
   const captured = sourceState(capture).tools.get(callId);
   if (!captured) throw new Error("MODEL_TOOL_SEARCH_RESULT_UNAVAILABLE");
-  // Generic SDK function results preserve this returned string verbatim.
+  // Lazy dispatch exposes the string to its provider. The native outer
+  // admission seam can see the SDK text envelope before that restoration.
+  // Both projections derive here from this exact owning producer result.
   captured.projection = output;
+  captured.genericSearchTextProjection = protocol.ToolOutputText.parse({type: "text", text: output});
   captured.modelName = "tool_search";
 }
 
@@ -267,8 +271,15 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
       // capture and the same raw output's unambiguous exact projection.
       const owner=state.outputOwners.get(carried),projection=projectionBinding?state.outputOwners.get(projectionBinding):undefined;
       if(projectionBinding && owner && projection && owner.outputId===projection.outputId
-        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(projectionBinding))bindModelSourceInput(item,projectionBinding);
-      continue;
+        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(projectionBinding)) {
+        bindModelSourceInput(item,projectionBinding);
+        continue;
+      }
+      // Lazy history restoration spreads an authentic tool binding when it
+      // changes only the SDK envelope. Recheck the same capture-owned call and
+      // exact producer projections below; copied/altered bindings cannot enter.
+      const toolOwner=state.toolBindingOwners.get(carried);
+      if(!toolOwner || toolOwner.callId!==item.callId || toolOwner.identity!==canonicalModelSourceJson(carried))continue;
     }
     if(model) {bindModelSourceInput(item,model);continue;}
     if(state.outputs.has(sha256))throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
@@ -276,9 +287,13 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
     if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName
-      || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.projection))continue;
-    bindModelSourceInput(item,{kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
-      parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult});
+      || (canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.projection)
+        && (tool.genericSearchTextProjection===undefined
+          || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.genericSearchTextProjection))))continue;
+    const binding:InputBinding={kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
+      parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult};
+    state.toolBindingOwners.set(binding,{callId:item.callId,identity:canonicalModelSourceJson(binding)});
+    bindModelSourceInput(item,binding);
   }
 }
 
