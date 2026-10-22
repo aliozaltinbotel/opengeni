@@ -1,3 +1,9 @@
+/** The exact bounded opener sent by native automatic-title generation. */
+export const SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS = 4_000;
+export function sessionTitleGenerationInput(prompt: string): string {
+  return Array.from(prompt.trim()).slice(0, SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS).join("");
+}
+
 /** Human-authored session titles keep the existing public API ceiling. */
 export const SESSION_TITLE_MAX_CHARACTERS = 200;
 

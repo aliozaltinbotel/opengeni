@@ -15,6 +15,7 @@ import {
   replayPortableSkillInstall,
   listSkillDescriptors,
   skillSelectionSourceRef,
+  skillArtifactSelectionSourceRef,
   SkillLifecycleRefusedError,
   type Database,
   type InstallPortableSkillInput,
@@ -322,6 +323,7 @@ export function createWorkspaceSkillTools(input: {
             : {}),
         })),
         ...input.selected.map((entry) => ({
+          modelSourceRef: skillArtifactSelectionSourceRef(entry.id, entry.artifact),
           id: entry.id,
           name: entry.artifact.name,
           description: entry.artifact.description || entry.artifact.name,
@@ -463,6 +465,7 @@ function selectedSkillContent(
     selectedArtifactDigests.set(artifact, digest);
   }
   return {
+    modelSourceRef: skillArtifactSelectionSourceRef(id, artifact),
     files: artifact.files,
     origin: {
       id,

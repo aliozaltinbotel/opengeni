@@ -93,6 +93,7 @@ export type BuildTurnAgentDeps = {
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
   skillCatalog: NonNullable<BuildAgentOptions["skillCatalog"]>;
+  nativeSkillArtifactSources?: readonly import("@opengeni/contracts").ModelSourceRef[];
   mcpServers: Settings["mcpServers"];
   input: RunAgentTurnInput;
   db: ActivityServices["db"];
@@ -612,6 +613,7 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     expectedExecutionGeneration: turn.executionGeneration,
     expectedAttemptId: input.attemptId,
     catalog: skillCatalogText,
+    nativeArtifactSources: preparedTools.skillCatalog === undefined ? (deps.nativeSkillArtifactSources ?? []) : [],
     retainedSources: skillCatalog.filter(entry => skillCatalogEntryIds(skillCatalogText).has(entry.id)).flatMap(entry => entry.modelSourceRefs ?? []),
   });
   if (

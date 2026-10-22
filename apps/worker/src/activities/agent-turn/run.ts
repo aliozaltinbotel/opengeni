@@ -1844,6 +1844,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const agentBuildInput = {
             vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
+            nativeSkillArtifactSources: toolRuntime.nativeSkillArtifactSources,
             mcpServers: toolRuntime.mcpServers,
             input,
             db,

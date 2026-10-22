@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { canonicalModelSourceJson, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
+import { canonicalModelSourceJson, readNativeSkillCatalogDescriptors, sessionTitleGenerationInput, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
+import { listSkillDescriptors, skillSelectionSourceRef } from "./skills";
 import { resolveCompanyBrainContextSelection } from "./company-brain-context-selection";
 
 export const modelSourceContentDigest = (value: unknown): string => { canonicalModelSourceJson(value); return createHash("sha256").update(JSON.stringify(value)).digest("hex"); };
@@ -69,12 +70,39 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       // A native copy inherits through its authenticated durable parents; the closure below checks each origin.
       if (basis?.kind === "COPIED" && basis.parents?.some(parent => parent.owner === "session_history_items")) return false;
       const catalog = item && typeof item === "object" ? readSkillCatalogContext(item as Record<string,unknown>) : null;
-      if (catalog !== null && catalog.split("\n").some(line => line.startsWith("- {"))) return true;
+      if (catalog !== null) {
+        const entries = readNativeSkillCatalogDescriptors(catalog);
+        if (entries === null) return true;
+        if (entries.length === 0) return (basis?.retainedSources?.length ?? 0) !== 0;
+        const refs = basis?.retainedSources ?? [];
+        if (refs.length !== entries.length) return true;
+        const [turn] = await tx.select({human:schema.sessionTurns.initiatingHumanSubjectId,kind:schema.sessionTurns.initiatorKind,subject:schema.sessionTurns.initiatorSubjectId}).from(schema.sessionTurns)
+          .where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
+        const human = turn?.human ?? (turn?.kind === "subject" ? turn.subject : null);
+        const descriptors = human ? await listSkillDescriptors(tx,{...identity,subjectId:human}) : [];
+        const seen = new Set<string>();
+        for (const entry of entries) {
+          if (seen.has(entry.id)) return true;
+          seen.add(entry.id);
+          const matches = refs.filter(ref => ref.id === entry.id);
+          if (matches.length !== 1) return true;
+          const ref = matches[0];
+          if (!ref) return true;
+          if (ref.owner === "native.skill.artifact") {
+            const descriptorHash = createHash("sha256").update(canonicalModelSourceJson({name:entry.name,description:entry.description})).digest("hex");
+            if (ref.version !== descriptorHash) return true;
+          } else if (ref.owner === "native.skill.selection") {
+            const selected = descriptors.find(descriptor => descriptor.id === entry.id && descriptor.activationMode === "workspace_managed");
+            if (!selected || selected.title !== entry.name || selected.description !== entry.description || canonicalModelSourceJson(skillSelectionSourceRef(selected)) !== canonicalModelSourceJson(ref)) return true;
+          } else return true;
+        }
+        return false;
+      }
       const value = item as { type?: string; callId?: string; call_id?: string; name?: string };
       if (value?.type !== "function_call_result") return false;
       // Current native Skill tools attach exact installed-revision refs; the retained
       // validator rechecks availability and visibility before every later model call.
-      if (basis?.retainedSources?.some(ref => ref.owner === "native.skill.selection")) return false;
+      if (basis?.retainedSources?.some(ref => (ref.owner === "native.skill.selection" || ref.owner === "native.skill.artifact"))) return false;
       if (value.name === "skill_read") return true;
       const callId = value.callId ?? value.call_id;
       if (!callId) return false;
@@ -375,13 +403,21 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           } else if(raw || binding.parents.length!==0 || binding.retainedSources.length!==0)reasons.add("UNRESOLVED_PARENT");
         }
       }
-      if(typeof value==="string" && request.purpose==="TITLE") {
-        const [turn]=await tx.select({prompt:schema.sessionTurns.prompt,metadata:schema.sessionTurns.metadata}).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
-        if(turn) {
+      if(request.purpose==="TITLE") {
+        const [turn]=await tx.select({prompt:schema.sessionTurns.prompt,metadata:schema.sessionTurns.metadata,
+          initialMessage:schema.sessions.initialMessage,sessionMetadata:schema.sessions.metadata}).from(schema.sessionTurns)
+          .innerJoin(schema.sessions,and(eq(schema.sessions.accountId,identity.accountId),eq(schema.sessions.workspaceId,identity.workspaceId),eq(schema.sessions.id,identity.sessionId)))
+          .where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
+        // Mirror the worker's opener choice before matching the bounded model projection.
+        const origin = !turn ? null : turn.initialMessage.trim()
+          ? {prompt:turn.initialMessage,owner:"sessions.initial_message",id:identity.sessionId,refs:turn.sessionMetadata?.nativeInitialMessageModelSourceRefs}
+          : {prompt:turn.prompt,owner:"session_turns",id:identity.turnId,refs:turn.metadata?.nativeMessageModelSourceRefs};
+        const titleInput = origin ? sessionTitleGenerationInput(origin.prompt) : "";
+        if(origin && titleInput.length > 0 && (value === titleInput || canonicalModelSourceJson(value) === canonicalModelSourceJson({role:"user",content:[{type:"input_text",text:titleInput}]}))) {
           sourceRef={owner:"native.runtime.artifact",id:`title-input:${contentSha256}`,sha256:contentSha256};
-          const parent={owner:"session_turns",id:identity.turnId,sha256:modelSourceContentDigest(turn.prompt)};parents.push(parent);
-          retainedSources=ModelSourceRef.array().max(16384).parse(turn.metadata?.nativeMessageModelSourceRefs ?? []);
-          setClosureNode(`turn:${identity.turnId}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
+          const parent={owner:origin.owner,id:origin.id,sha256:modelSourceContentDigest(origin.prompt)};parents.push(parent);
+          retainedSources=ModelSourceRef.array().max(16384).parse(origin.refs ?? []);
+          setClosureNode(`title-origin:${origin.owner}:${origin.id}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
         }
       }
       if(sourceRef?.owner==="native.runtime.artifact") {for(const parent of parents) if(!await closure(parent,new Set())) reasons.add("UNRESOLVED_PARENT");}

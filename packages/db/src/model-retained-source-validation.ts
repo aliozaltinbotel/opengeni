@@ -1,10 +1,11 @@
 import {knowledgeSelectionSourceIsCurrent} from "./knowledge-entries";
-import {listSkillDescriptors, skillSelectionSourceRef} from "./skills";
+import {listSkillDescriptors, skillSelectionSourceRef, skillArtifactSelectionSourceRef} from "./skills";
 import { and, eq, sql } from "drizzle-orm";
 import {
   canonicalModelSourceJson,
   ModelCallSourceReceipt,
-  type ModelSourceRef,
+  ModelSourceRef,
+  SkillArtifactDefinition,
 } from "@opengeni/contracts";
 import { rawRows, withRlsContext, type Database } from "./database";
 import {
@@ -122,6 +123,7 @@ export async function validateRetainedModelSourcesWithFence(
     if (!receipt.complete || receipt.incompleteReasons.length) return refused("RECEIPT_INCOMPLETE");
     const [turn] = await tx
       .select({
+        metadata: schema.sessionTurns.metadata,
         human: schema.sessionTurns.initiatingHumanSubjectId,
         kind: schema.sessionTurns.initiatorKind,
         subject: schema.sessionTurns.initiatorSubjectId,
@@ -275,6 +277,21 @@ export async function validateRetainedModelSourcesWithFence(
             status: "HOST_AUTHORITY_REQUIRED",
             reason: "HOST_AUTHORITY_REQUIRED",
           });
+          continue;
+        }
+        if (ref.owner === "native.skill.artifact") {
+          // The existing per-turn catalog owner freezes every configured artifact, including
+          // selections omitted from the bounded model-visible descriptor index.
+          const frozen = ModelSourceRef.array().safeParse(turn?.metadata.opengeniSkillArtifactSources);
+          let available = frozen.success && frozen.data.some(selected => key(selected) === key(ref));
+          if (available && ref.id.startsWith(`session:${receipt.sessionId}:`)) {
+            const [session] = await tx.select({skills: schema.sessions.skills}).from(schema.sessions)
+              .where(and(eq(schema.sessions.accountId, receipt.accountId), eq(schema.sessions.workspaceId, receipt.workspaceId), eq(schema.sessions.id, receipt.sessionId))).limit(1);
+            const artifacts = SkillArtifactDefinition.array().safeParse(session?.skills);
+            available = artifacts.success && artifacts.data.some(artifact =>
+              key(skillArtifactSelectionSourceRef(`session:${receipt.sessionId}:${artifact.name}`, artifact)) === key(ref));
+          } else if (!ref.id.startsWith("builtin:")) available = false;
+          sources.push({sourceRef:ref,status:available ? "AVAILABLE" : "REFUSED",reason:available ? null : "NATIVE_SOURCE_UNAVAILABLE_OR_INEXACT"});
           continue;
         }
         if (ref.owner === "native.knowledge.selection.v2" || ref.owner === "native.skill.selection") {

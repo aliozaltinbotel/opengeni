@@ -9,7 +9,7 @@ import { installLazyToolRuntime, LazyToolModelProvider } from "../../../packages
 import { createObservability } from "@opengeni/observability";
 import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
 import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, canonicalModelSourceJson, ModelSourceRef } from "@opengeni/contracts";
-import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput } from "@opengeni/runtime";
+import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput, generateSessionTitle } from "@opengeni/runtime";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
@@ -22,12 +22,12 @@ let shared:SharedTestDatabase;
 let app:ReturnType<typeof createDb>;
 beforeAll(async()=>{const external=process.env.OPENGENI_MODEL_SOURCE_TEST_APP_URL;if(external){const adminUrl=process.env.OPENGENI_MODEL_SOURCE_TEST_ADMIN_URL;if(!adminUrl)throw Error("External source receipt fixture requires its exact admin URL");const admin=postgres(adminUrl,{max:1});shared={appUrl:external,adminUrl,admin,release:async()=>{await admin.end();}};app=createDb(external,{max:4});return;}const acquired=await acquireSharedTestDatabase("model-call-source-receipts");if(!acquired)throw Error("PostgreSQL required");shared=acquired;app=createDb(shared.appUrl,{max:4});},180_000);
 afterAll(async()=>{await app?.close();await shared?.release();},60_000);
-async function fixture(options:{metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean}={}){
+async function fixture(options:{initialMessage?:string;metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean}={}){
  const suffix=crypto.randomUUID();
  const userId=`native-source-${suffix}`;const subjectId=options.managed?`user:${userId}`:suffix;
  const access=options.managed?await ensureManagedAccessForUser(app.db,{userId,email:`${userId}@example.test`,name:"Synthetic owner"}):await bootstrapWorkspace(app.db,{accountExternalSource:"source-receipt",accountExternalId:suffix,accountName:"Test",workspaceExternalSource:"source-receipt",workspaceExternalId:suffix,workspaceName:"Test",subjectId:suffix});
  const {accountId,workspaceId}=access.workspaceGrants[0]!;if(!workspaceId)throw Error("workspace");
- const session=await createSession(app.db,{accountId,workspaceId,initialMessage:"Synthetic request",...(options.initialMessageModelSourceRefs?{initialMessageModelSourceRefs:options.initialMessageModelSourceRefs}:{}),createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
+ const session=await createSession(app.db,{accountId,workspaceId,initialMessage:options.initialMessage??"Synthetic request",...(options.initialMessageModelSourceRefs?{initialMessageModelSourceRefs:options.initialMessageModelSourceRefs}:{}),createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
  await initializeSessionStartAtomically(app.db,{accountId,workspaceId,sessionId:session.id,reasoningEffortFallback:"low",createdEventPayload:{}});
  const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(app.db,workspaceId,{sessionId:session.id,workflowId:`session-${session.id}`,workflowRunId:crypto.randomUUID(),dispatchId:suffix,attemptId,trigger:{kind:"next"}});
  if(claim.action!=="claimed")throw Error("claim");
@@ -520,7 +520,7 @@ test("portable/remote compaction and title each record their actual ordered sour
  const {identity}=await fixture();const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);const input=rows.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]}));
  const requests=[buildCompactionPromptInput(input),buildRemoteCompactionV2PromptInput(input)];
  for(const [index,prepared] of requests.entries()){const receipt=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:index+1},{purpose:"COMPACTION",input:prepared,sourceBindings:modelSourceBindings(prepared)});expect(receipt.complete).toBe(true);expect(receipt.inputs.at(-1)!.sourceRef!.owner).toBe("native.runtime.artifact");expect(receipt.inputs[0]!.sourceRef!.id).toBe(rows[0]!.id);}
- const title=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:3},{purpose:"TITLE",input:"Synthetic request",instructions:"Synthetic title instruction"});expect(title.complete).toBe(true);expect(title.inputs.at(-1)!.parents[0]!.id).toBe(identity.turnId);
+ const title=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:3},{purpose:"TITLE",input:"Synthetic request",instructions:"Synthetic title instruction"});expect(title.complete).toBe(true);expect(title.inputs.at(-1)!.parents[0]!).toMatchObject({owner:"sessions.initial_message",id:identity.sessionId});
 });
 
 
@@ -878,4 +878,52 @@ test("a dispatch refused before bytes is settled and leaves the quiesced-intent 
   await shared.admin`UPDATE session_turn_attempts SET state='closed', outcome='failed', closed_at=now(), quiesced_at=now() WHERE id=${identity.attemptId}::uuid`;
   const observed=await reconcileQuiescedModelCallReceipts(app.db,{workspaceId:identity.workspaceId});
   expect(observed).toMatchObject({settled:0,observed:1,truncated:false});
+});
+
+
+test("actual title model projection retains its durable native opener source",async()=>{
+ const {identity}=await fixture();
+ let receipt:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>|undefined;
+ await expect(generateSessionTitle(testSettings({sandboxBackend:"none"}),"Synthetic request",{
+  model:new ScriptedModel([]),
+  beforeModelCallSourceReceipt:async titleRequest=>{
+   receipt=await persistModelCallSourceReceipt(app.db,identity,{purpose:"TITLE",instructions:titleRequest.systemInstructions,input:titleRequest.input,tools:titleRequest.tools});
+   throw Error("TITLE_SOURCE_CAPTURED");
+  },
+ })).rejects.toThrow("TITLE_SOURCE_CAPTURED");
+ expect(receipt?.complete).toBe(true);
+ expect(receipt?.incompleteReasons).toEqual([]);
+ expect(receipt?.inputs.at(-1)?.parents).toContainEqual(expect.objectContaining({owner:"sessions.initial_message",id:identity.sessionId}));
+});
+
+
+test("native title source refuses arbitrary text and preserves the exact bounded Unicode opener", async () => {
+ const opener = `  ${"🪷".repeat(4_001)} trailing  `;
+ const {identity} = await fixture({initialMessage: opener});
+ const input = {role:"user",content:[{type:"input_text",text:"🪷".repeat(4_000)}]};
+ const accepted = await persistModelCallSourceReceipt(app.db, identity, {purpose:"TITLE",input:[input]});
+ expect(accepted.complete).toBe(true);
+ expect(accepted.inputs.at(-1)?.parents).toContainEqual(expect.objectContaining({owner:"sessions.initial_message",id:identity.sessionId}));
+ for (const [index, value] of ["Arbitrary title input", "🪷".repeat(4_001), {role:"user",content:[{type:"input_text",text:"🪷".repeat(4_000)}, {type:"input_text",text:"extra"}]}].entries()) {
+  const rejected = await persistModelCallSourceReceipt(app.db, {...identity,sourceKey:crypto.randomUUID(),requestIndex:index+2}, {purpose:"TITLE",input:[value]});
+  expect(rejected.complete).toBe(false);
+  expect(rejected.incompleteReasons).toContain("UNKNOWN_SOURCE");
+ }
+});
+
+test("native title source keeps the initial opener after a different accepted turn", async () => {
+ const original = await fixture();
+ const {identity} = original;
+ await applySessionTurnSettlement(app.db,identity.workspaceId,{sessionId:identity.sessionId,turnId:identity.turnId,triggerEventId:original.triggerEventId,attemptId:identity.attemptId,turnStatus:"completed",sessionStatus:"idle",activeTurnId:null,events:[{type:"turn.completed",payload:{}}]});
+ await withWorkspaceSubjectSessionActivityRls(app.db,identity.workspaceId,original.subjectId,db=>submitHumanPromptInTransaction(db,{accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,subjectId:original.subjectId,actor:{type:"human",subjectId:original.subjectId},operationKey:crypto.randomUUID(),delivery:"send",text:"Different accepted turn",modelContext:null,resources:[],reasoningEffort:"low",reasoningEffortFallback:"low",source:"user"}));
+ const attemptId=crypto.randomUUID();
+ const claim=await claimSessionWorkForAttempt(app.db,identity.workspaceId,{sessionId:identity.sessionId,workflowId:`session-${identity.sessionId}`,workflowRunId:crypto.randomUUID(),attemptId,dispatchId:crypto.randomUUID(),trigger:{kind:"next"}});
+ if(claim.action!=="claimed") throw Error("Expected next accepted turn");
+ const current={...identity,turnId:claim.turn.id,attemptId,executionGeneration:claim.turn.executionGeneration};
+ const accepted=await persistModelCallSourceReceipt(app.db,current,{purpose:"TITLE",input:"Synthetic request"});
+ expect(accepted.complete).toBe(true);
+ expect(accepted.inputs.at(-1)?.parents).toContainEqual(expect.objectContaining({owner:"sessions.initial_message",id:identity.sessionId}));
+ const rejected=await persistModelCallSourceReceipt(app.db,{...current,sourceKey:crypto.randomUUID(),requestIndex:2},{purpose:"TITLE",input:"Different accepted turn"});
+ expect(rejected.complete).toBe(false);
+ expect(rejected.incompleteReasons).toContain("UNKNOWN_SOURCE");
 });

@@ -7,6 +7,8 @@ import {
   getSessionTurnForAttempt,
   getWorkspaceVideoGenerationPolicy,
   listSkillDescriptors,
+  skillSelectionSourceRef,
+  skillArtifactSelectionSourceRef,
   completeConnectorActionExecution,
   persistAttemptToolCatalog,
   requireWorkspace,
@@ -618,11 +620,13 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
             id: entry.id,
             name: entry.title,
             description: entry.description,
+            modelSourceRefs: [skillSelectionSourceRef(entry)],
           })),
           ...selectedSkills.map((entry) => ({
             id: entry.id,
             name: entry.artifact.name,
             description: entry.artifact.description || entry.artifact.name,
+            modelSourceRefs: [skillArtifactSelectionSourceRef(entry.id, entry.artifact)],
           })),
         ];
   const skillTools = createWorkspaceSkillTools({
@@ -1239,6 +1243,7 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     codeSearchAvailable: codeSearchTools.length > 0,
     promptToolAvailability,
     skillCatalog,
+    nativeSkillArtifactSources: toolFamilies.skills === false ? [] : selectedSkills.map(entry => skillArtifactSelectionSourceRef(entry.id, entry.artifact)),
   };
 }
 
