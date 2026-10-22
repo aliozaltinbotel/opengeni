@@ -16,7 +16,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Agent, tool, Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { appendSessionEventsForTurnAttempt, listSessionEvents, ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
-import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
+import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, modelSourceInputBinding, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
 let app:ReturnType<typeof createDb>;
@@ -927,3 +927,145 @@ test("native title source keeps the initial opener after a different accepted tu
  expect(rejected.complete).toBe(false);
  expect(rejected.incompleteReasons).toContain("UNKNOWN_SOURCE");
 });
+
+test("fresh turn hydrates authenticated generic disclosure through the installed history owner", async () => {
+  const { turnInput } = await import("../src/activities/run-input");
+  const { getSessionEvent } = await import("@opengeni/db");
+  const { buildOpenGeniAgent, prepareAgentTools, prepareRunInput } = await import("@opengeni/runtime");
+  const { callModelInputFilterForSettings } = await import("../../../packages/runtime/src/model-input");
+  const { OpenGeniResponsesModel } = await import("../../../packages/runtime/src/model-provider-routing");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js");
+  const { default: OpenAI } = await import("openai");
+  const f = await fixture();
+  let identity = f.identity;
+  let write = f.write;
+  let triggerEventId = f.triggerEventId;
+  let executions = 0;
+  const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const mcp = new McpServer({ name: "durable-disclosure", version: "1.0.0" });
+    mcp.registerTool("status_read", { description: "Read synthetic status", inputSchema: {} }, async () => {
+      executions++;
+      return { content: [{ type: "text" as const, text: "Synthetic status" }] };
+    });
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    transports.push(transport);
+    await mcp.connect(transport);
+    return transport.handleRequest(request);
+  } });
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: "strip", mcpServers: [{ id: "connected", url: `http://127.0.0.1:${server.port}/mcp`, cacheToolsList: false }] });
+  const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "connected" }], identity);
+  const entry = prepared.attemptToolEnvironment?.catalog.entries.find(candidate => candidate.identity.toolName === "status_read");
+  if (!entry) throw Error("ACTUAL_CATALOG_ENTRY_REQUIRED");
+  let requests = 0;
+  const client = new OpenAI({ apiKey: "synthetic-key", maxRetries: 0, fetch: async () => {
+    requests++;
+    const output = requests < 3 ? [{ type: "function_call", id: `fc_${requests}`, call_id: `call_${requests}`, name: requests === 1 ? "tool_search" : "tool_invoke", status: "completed", arguments: JSON.stringify(requests === 1 ? { query: "", names: [entry.modelName] } : { name: entry.modelName, arguments: {} }) }]
+      : [{ type: "message", id: `msg_${requests}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: "Synthetic status read", annotations: [], logprobs: [] }] }];
+    return new Response(JSON.stringify({ id: `response_${requests}`, status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } });
+  } });
+  const hydratedRequests: ModelRequest[] = [];
+  try {
+    for (let turn = 0; turn < 2; turn++) {
+      const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+      const lazy = installLazyToolRuntime(agent, "generic_dispatch", new Set(["connected"]));
+      const model = lazy.wrapModel(new OpenGeniResponsesModel(client, "synthetic-model", { id: "synthetic", label: "Synthetic", kind: "api-key", api: "responses", builtin: true }));
+      const selected = agent.clone({ model });
+      const trigger = await getSessionEvent(app.db, identity.workspaceId, triggerEventId);
+      const hydrated = await turnInput(app.db, { prepareInput: prepareRunInput } as import("@opengeni/runtime").OpenGeniRuntime, selected, trigger, {
+        turnId: identity.turnId, providerApi: "responses", fileAuthority: { accountId: identity.accountId, subjectId: f.subjectId },
+      });
+      if (!Array.isArray(hydrated.input.input)) throw Error("HYDRATED_INPUT_REQUIRED");
+      const input = hydrated.input.input;
+      let index = 0;
+      const sources = new Map<string, import("@opengeni/contracts").NativeModelToolSource>();
+      const capture: ModelRequestCapture = () => {};
+      capture.onModelToolSource = async source => { sources.set(source.sourceCallId, source); };
+      capture.beforeCall = async sent => {
+        hydratedRequests.push(sent);
+        const receipt = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: ++index }, { input: sent.input, sourceBindings: modelSourceBindings(sent.input) });
+        expect(receipt.incompleteReasons).toEqual([]);
+        expect(receipt.complete).toBe(true);
+        expect((await validateRetainedModelSources(app.db, { identity: { ...identity, sourceKey: receipt.sourceKey, requestIndex: index }, receipt })).complete).toBe(true);
+        if (turn === 1) {
+          const schema = receipt.inputs.find(item => item.sourceRef?.id.startsWith("retained-tool-disclosure:"));
+          expect(schema).toBeDefined();
+          expect(schema?.parents.map(parent => parent.owner)).toEqual(["session_history_items", "session_history_items"]);
+          expect(receipt.closure.some(node => node.sourceRef.owner === "native.tool.result")).toBe(true);
+        }
+        return receipt.sourceKey;
+      };
+      if (turn === 1) await withModelRequestCapture(capture, async () => {
+        const { expandInteractionFamilyDisclosures } = await import("../../../packages/runtime/src/lazy-tool-transport");
+        const original = expandInteractionFamilyDisclosures(input);
+        const disclosure = original.find(item => item.type === "message" && item.role === "developer");
+        if (!disclosure) throw Error("RETAINED_DISCLOSURE_REQUIRED");
+        const genuine = modelSourceInputBinding(disclosure);
+        if (!genuine || genuine.kind !== "INSTRUCTION") throw Error("DURABLE_DISCLOSURE_SOURCE_REQUIRED");
+        const callIndex = input.findIndex(item => item.type === "function_call" && item.name === "tool_search");
+        const resultIndex = input.findIndex(item => item.type === "function_call_result" && item.name === "tool_search");
+        const call = input[callIndex];
+        const result = input[resultIndex];
+        if (!call || call.type !== "function_call" || !result || result.type !== "function_call_result") throw Error("LOADED_SEARCH_PAIR_REQUIRED");
+        const alteredSchema = { ...call, providerData: structuredClone(call.providerData) };
+        const marker = alteredSchema.providerData?.["opengeni.lazy_search.v1"] as { tools: Array<Record<string, unknown>> } | undefined;
+        if (!marker?.tools[0]) throw Error("LOADED_SCHEMA_REQUIRED");
+        marker.tools[0].description = "Changed schema instructions";
+        const mutants = [
+          { index: callIndex, value: { ...call, arguments: "{}" } },
+          { index: callIndex, value: alteredSchema },
+          { index: resultIndex, value: { ...result, output: "Changed result" } },
+        ];
+        for (const [offset, mutant] of mutants.entries()) {
+          const changed = input.map((item, index) => index === mutant.index ? mutant.value : item);
+          const projected = expandInteractionFamilyDisclosures(changed);
+          const refused = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 100 + offset }, { input: projected, sourceBindings: modelSourceBindings(projected) });
+          expect(refused.complete).toBe(false);
+          expect(refused.incompleteReasons).toContain("UNKNOWN_SOURCE");
+        }
+        const replayed = expandInteractionFamilyDisclosures(structuredClone(input));
+        const replay = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 110 }, { input: replayed, sourceBindings: modelSourceBindings(replayed) });
+        expect(replay.complete).toBe(false);
+        expect(replay.incompleteReasons).toContain("UNKNOWN_SOURCE");
+        const foreign = await fixture();
+        const [foreignRow] = await getActiveSessionHistoryItemsPaged(app.db, foreign.identity.workspaceId, foreign.identity.sessionId);
+        if (!foreignRow?.sourceSha256) throw Error("ACTUAL_FOREIGN_ROW_REQUIRED");
+        for (const parent of [
+          { owner: "session_history_items", id: foreignRow.id, sha256: foreignRow.sourceSha256 },
+          { ...genuine.parents[0]!, id: crypto.randomUUID() },
+        ]) {
+          const forged = bindModelSourceInput({ ...disclosure }, { ...genuine, parents: [parent, ...genuine.parents.slice(1)] });
+          const refused = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 120 }, { input: [forged], sourceBindings: modelSourceBindings([forged]) });
+          expect(refused.complete).toBe(false);
+          expect(refused.incompleteReasons).toContain("UNRESOLVED_PARENT");
+        }
+      });
+      const result = await withModelRequestCapture(capture, () => new Runner({ tracingDisabled: true, callModelInputFilter: callModelInputFilterForSettings(settings) }).run(selected, input as ModelRequest["input"], { historyOwnership: "external" }));
+      const stored = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+      const appended = historyRowsToAppend(result.history as Array<Record<string, unknown>>, hydrated.persistedHistoryCount, Math.max(...stored.map(row => row.position)) + 1);
+      expect(await appendSessionHistoryItems(app.db, { ...write, items: appended.rows.map(row => {
+        const callId = typeof row.item.callId === "string" ? row.item.callId : undefined;
+        const source = callId ? sources.get(callId) : undefined;
+        return { ...row, ...(source && row.item.type === "function_call_result" ? { sourceBasis: { kind: "TOOL_RESULT" as const, parents: [source.rawSourceRef], retainedSources: source.retainedSources, rawToolSource: source } } : {}) };
+      }) })).toBe(true);
+      expect((await applySessionTurnSettlement(app.db, identity.workspaceId, { sessionId: identity.sessionId, turnId: identity.turnId, triggerEventId, attemptId: identity.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: {} }] })).action).toBe("settled");
+      if (turn === 0) {
+        await withWorkspaceSubjectSessionActivityRls(app.db, identity.workspaceId, f.subjectId, db => submitHumanPromptInTransaction(db, { accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, subjectId: f.subjectId, actor: { type: "human", subjectId: f.subjectId }, operationKey: crypto.randomUUID(), delivery: "send", text: "Synthetic follow-up", modelContext: null, resources: [], reasoningEffort: "low", reasoningEffortFallback: "low", source: "user" }));
+        const attemptId = crypto.randomUUID();
+        const claim = await claimSessionWorkForAttempt(app.db, identity.workspaceId, { sessionId: identity.sessionId, workflowId: `session-${identity.sessionId}`, workflowRunId: crypto.randomUUID(), attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" } });
+        if (claim.action !== "claimed") throw Error("NEXT_TURN_CLAIM_REQUIRED");
+        identity = { ...identity, turnId: claim.turn.id, attemptId, executionGeneration: claim.turn.executionGeneration, requestIndex: 1, sourceKey: crypto.randomUUID() };
+        write = { ...write, turnId: identity.turnId, expectedAttemptId: attemptId, expectedExecutionGeneration: identity.executionGeneration };
+        triggerEventId = claim.turn.triggerEventId;
+      }
+    }
+    expect(executions).toBe(1);
+    expect(requests).toBe(4);
+    expect(hydratedRequests).toHaveLength(4);
+  } finally {
+    await prepared.close();
+    for (const transport of transports) await transport.close();
+    server.stop(true);
+  }
+}, 180_000);

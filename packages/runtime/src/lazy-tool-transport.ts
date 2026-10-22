@@ -1361,12 +1361,12 @@ const STEP_RESULT_ITEM_TYPES = new Set([
  * later request reproduces the identical prefix.
  */
 export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
-  const pending = new Map<string, { tools: Record<string, unknown>[]; viaToolInvoke: boolean }>();
+  const pending = new Map<string, { call: object; tools: Record<string, unknown>[]; viaToolInvoke: boolean }>();
   const disclosed = new Set<string>();
   let ready: Record<string, unknown>[] = [];
   let readyViaToolInvoke = false;
   let readyAfter: object | null = null;
-  let readySelections: { result: object; tools: Record<string, unknown>[] }[] = [];
+  let readySelections: { call: object; result: object; tools: Record<string, unknown>[] }[] = [];
   let expanded = null as T[] | null;
   const flush = (index: number) => {
     if (!readyAfter || ready.length === 0) return;
@@ -1399,12 +1399,12 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
         } else if (searchMarker.version === 2 && Array.isArray(searchMarker.tools)) {
           const id = callId(candidate);
           if (id)
-            pending.set(id, { tools: searchMarker.tools.filter(isRecord), viaToolInvoke: true });
+            pending.set(id, { call: candidate, tools: searchMarker.tools.filter(isRecord), viaToolInvoke: true });
         }
       }
       const id = callId(candidate);
       const disclosure = familyDisclosure(candidate);
-      if (id && disclosure) pending.set(id, disclosure);
+      if (id && disclosure) pending.set(id, { call: candidate, ...disclosure });
       continue;
     }
     if (candidate.type !== "function_call_result") continue;
@@ -1425,7 +1425,7 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
       readyViaToolInvoke ||= disclosure.viaToolInvoke;
     }
     readyAfter = candidate;
-    if (selected.length) readySelections.push({ result: candidate, tools: selected });
+    if (selected.length) readySelections.push({ call: disclosure.call, result: candidate, tools: selected });
   }
   flush(input.length);
   return expanded ?? input;

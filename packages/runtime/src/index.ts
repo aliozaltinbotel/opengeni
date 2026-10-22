@@ -8,6 +8,7 @@ import {
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
 export {
+  bindDurableModelHistoryRows,
   bindModelSourceInput,
   omitModelSourceInputBinding,
   modelSourceInputBinding,

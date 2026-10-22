@@ -12,7 +12,7 @@ import {
   REMOTE_COMPACTION_V2_IMPLEMENTATION,
   compactionSummaryOutputTokens,
   buildSummaryItem,
-  bindModelSourceInput,
+  bindDurableModelHistoryRows,
   modelSourceInputBinding,
   omitModelSourceInputBinding,
   buildCompactionPromptInput,
@@ -193,7 +193,7 @@ export async function maybeCompactContext(
     };
   }
 
-  for(const row of active) if(row.sourceSha256) bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256},parents:[],retainedSources:[]});
+  bindDurableModelHistoryRows(active);
   const sourceIdsByItem = new Map<CompactionItem,string>();
   const canonicalItems = active.flatMap(row=>{
     const projected=projectRejectedProviderArtifacts([row]) as CompactionItem[];

@@ -95,6 +95,22 @@ export function bindModelSourceInput<T extends object>(item:T,binding:Omit<Model
   Object.defineProperty(item,nativeSourceBinding,{value:binding,enumerable:true,configurable:true});
   return item;
 }
+const durableHistoryOwners = new WeakMap<InputBinding, { contentSha256: string; identity: string; cohort: object }>();
+
+/** Called by the durable history hydration owner, before request projections.
+ * A copied/serialized binding or changed row never registers itself on replay. */
+export function bindDurableModelHistoryRows(
+  rows: readonly { id: string; sourceSha256?: string; item: Record<string, unknown> }[],
+): void {
+  const cohort = {};
+  for (const row of rows) {
+    if (!row.sourceSha256) continue;
+    const binding: InputBinding = { kind: "HISTORY_ROW", sourceRef: { owner: "session_history_items", id: row.id, sha256: row.sourceSha256 }, parents: [], retainedSources: [] };
+    durableHistoryOwners.set(binding, { contentSha256: inputDigest(row.item), identity: canonicalModelSourceJson(binding), cohort });
+    bindModelSourceInput(row.item, binding);
+  }
+}
+
 /** Remove only this owner's non-wire binding after durable source refs have been captured. */
 export function omitModelSourceInputBinding<T extends object>(item:T):T {
   const persisted:T & {[nativeSourceBinding]?:Omit<ModelSourceBinding,"ordinal">}=Object.create(Object.getPrototypeOf(item),Object.getOwnPropertyDescriptors(item));
@@ -237,10 +253,14 @@ async function recordModelGenericControlSource(
  * independently attributed raw search result remains a TOOL_RESULT. */
 export function bindModelGenericToolDisclosure(
   item: Record<string, unknown>,
-  selections: readonly { result: object; tools: Record<string, unknown>[] }[],
+  selections: readonly { call: object; result: object; tools: Record<string, unknown>[] }[],
 ): void {
   const capture = modelRequestCapture.getStore();
+  // The display cache is not a source cache. Recheck this exact selection even
+  // when the same result object previously produced an authenticated item.
+  Reflect.deleteProperty(item, nativeSourceBinding);
   if (!capture?.beforeCall || selections.length === 0) return;
+  if (bindRetainedToolDisclosure(item, selections)) return;
   const state = sourceState(capture);
   let sourceKey: string | undefined;
   const schemas: Record<string, unknown>[] = [];
@@ -272,6 +292,51 @@ export function bindModelGenericToolDisclosure(
   state.outputs.set(sha256, binding);
   state.outputOwners.set(binding, { outputId: binding.sourceRef.id, identity: canonicalModelSourceJson(binding) });
   bindModelSourceInput(item, binding);
+}
+
+/** Derive only native schema instructions from unchanged, jointly loaded rows.
+ * Durable parents are re-read by the existing receipt owner in the new attempt;
+ * the previous attempt's transient producer key is deliberately not reused. */
+function bindRetainedToolDisclosure(
+  item: Record<string, unknown>,
+  selections: readonly { call: object; result: object; tools: Record<string, unknown>[] }[],
+): boolean {
+  const parents: InputBinding["parents"] = [];
+  const schemas: Record<string, unknown>[] = [];
+  let cohort: object | undefined;
+  for (const selection of selections) {
+    const callBinding = modelSourceInputBinding(selection.call);
+    const resultBinding = modelSourceInputBinding(selection.result);
+    const callOwner = callBinding ? durableHistoryOwners.get(callBinding) : undefined;
+    const resultOwner = resultBinding ? durableHistoryOwners.get(resultBinding) : undefined;
+    if (!callBinding || !resultBinding || !callOwner || !resultOwner
+      || callOwner.cohort !== resultOwner.cohort || (cohort && cohort !== callOwner.cohort)
+      || callOwner.identity !== canonicalModelSourceJson(callBinding) || resultOwner.identity !== canonicalModelSourceJson(resultBinding)
+      || callOwner.contentSha256 !== inputDigest(selection.call) || resultOwner.contentSha256 !== inputDigest(selection.result)) return false;
+    cohort = callOwner.cohort;
+    const call = selection.call as Record<string, unknown>;
+    const result = selection.result as Record<string, unknown>;
+    const providerData = call.providerData;
+    const marker = typeof providerData === "object" && providerData !== null && "opengeni.lazy_search.v1" in providerData
+      ? providerData["opengeni.lazy_search.v1"] : undefined;
+    if (call.type !== "function_call" || call.name !== "tool_search" || result.type !== "function_call_result"
+      || result.name !== "tool_search" || (result.status !== undefined && result.status !== "completed") || !toolCallIdFromSdkItem(call)
+      || toolCallIdFromSdkItem(call) !== toolCallIdFromSdkItem(result)
+      || typeof marker !== "object" || marker === null || !("version" in marker) || marker.version !== 2
+      || !("output" in marker) || typeof marker.output !== "string" || !("tools" in marker) || !Array.isArray(marker.tools)) return false;
+    if (canonicalModelSourceJson(result.output) !== canonicalModelSourceJson(marker.output)
+      && canonicalModelSourceJson(result.output) !== canonicalModelSourceJson(protocol.ToolOutputText.parse({ type: "text", text: marker.output }))) return false;
+    const registeredSchemas: unknown[] = marker.tools;
+    for (const schema of selection.tools) {
+      if (!registeredSchemas.some(registered => canonicalModelSourceJson(registered) === canonicalModelSourceJson(schema))) return false;
+      schemas.push(schema);
+    }
+    parents.push(callBinding.sourceRef, resultBinding.sourceRef);
+  }
+  if (schemas.length === 0 || inputDigest(item) !== inputDigest(toolDisclosureItem(schemas, { viaToolInvoke: true }))) return false;
+  const sha256 = inputDigest(item);
+  bindModelSourceInput(item, { kind: "INSTRUCTION", sourceRef: { owner: "native.runtime.artifact", id: `retained-tool-disclosure:${sha256}`, sha256 }, parents, retainedSources: [] });
+  return true;
 }
 
 /** Native client discovery produces these exact schemas, not model-authored
