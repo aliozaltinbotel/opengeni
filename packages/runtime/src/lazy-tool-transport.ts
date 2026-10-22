@@ -21,7 +21,7 @@ import {
   parseSearchArgs,
   toolsNamedInQuery,
 } from "./codex-tool-search";
-import { ModelRequestCaptureModel, recordModelGenericSearchSource, recordModelToolSearchSource } from "./model-request-capture";
+import { ModelRequestCaptureModel, bindModelGenericToolDisclosure, recordModelGenericSearchSource, recordModelGenericInvokeRefusal, recordModelToolSearchSource } from "./model-request-capture";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
@@ -840,9 +840,9 @@ export class LazyToolRuntime {
         const marker = details?.toolCall?.providerData?.[SEARCH_MARKER_KEY] as
           | GenericSearchMarker
           | undefined;
-        const output = marker?.output ?? (await this.prepareSearch(input, details?.signal)).output;
-        await recordModelGenericSearchSource(details?.toolCall, output);
-        return output;
+        const selection = marker ?? await this.prepareSearch(input, details?.signal);
+        await recordModelGenericSearchSource(details?.toolCall, selection.output, selection.tools ?? []);
+        return selection.output;
       },
     }) as unknown as Tool;
   }
@@ -911,7 +911,11 @@ export class LazyToolRuntime {
       // Reaching this executor therefore means the requested tool is absent or
       // the dispatcher arguments were malformed; never bypass approval/guardrails
       // by invoking a real tool from inside this control tool.
-      execute: (input: unknown) => unavailableToolResult(input),
+      execute: async (input: unknown, _context: unknown, details) => {
+        const output = unavailableToolResult(input);
+        await recordModelGenericInvokeRefusal(details?.toolCall, output);
+        return output;
+      },
     }) as unknown as Tool;
   }
 }
@@ -1362,14 +1366,18 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
   let ready: Record<string, unknown>[] = [];
   let readyViaToolInvoke = false;
   let readyAfter: object | null = null;
+  let readySelections: { result: object; tools: Record<string, unknown>[] }[] = [];
   let expanded = null as T[] | null;
   const flush = (index: number) => {
     if (!readyAfter || ready.length === 0) return;
     expanded ??= input.slice(0, index);
-    expanded.push(cachedToolDisclosureItem(readyAfter, ready, readyViaToolInvoke) as T);
+    const item = cachedToolDisclosureItem(readyAfter, ready, readyViaToolInvoke);
+    if (readyViaToolInvoke) bindModelGenericToolDisclosure(item, readySelections);
+    expanded.push(item as T);
     ready = [];
     readyViaToolInvoke = false;
     readyAfter = null;
+    readySelections = [];
   };
   for (let index = 0; index < input.length; index += 1) {
     const original = input[index]!;
@@ -1407,14 +1415,17 @@ export function expandInteractionFamilyDisclosures<T>(input: T[]): T[] {
     const disclosure = id ? pending.get(id) : undefined;
     if (!id || !disclosure) continue;
     pending.delete(id);
+    const selected: Record<string, unknown>[] = [];
     for (const tool of disclosure.tools) {
       const name = String(tool.name);
       if (disclosed.has(name)) continue;
       disclosed.add(name);
       ready.push(tool);
+      selected.push(tool);
       readyViaToolInvoke ||= disclosure.viaToolInvoke;
     }
     readyAfter = candidate;
+    if (selected.length) readySelections.push({ result: candidate, tools: selected });
   }
   flush(input.length);
   return expanded ?? input;
@@ -1435,7 +1446,7 @@ function cachedToolDisclosureItem(
   tools: Record<string, unknown>[],
   viaToolInvoke: boolean,
 ): Record<string, unknown> {
-  const key = `${viaToolInvoke}\u0000${tools.map((tool) => String(tool.name)).join("\u0000")}`;
+  const key = `${viaToolInvoke}\u0000${JSON.stringify(tools)}`;
   const cached = toolDisclosureItemCache.get(after);
   if (cached?.key === key) return cached.item;
   const item = toolDisclosureItem(tools, { viaToolInvoke });

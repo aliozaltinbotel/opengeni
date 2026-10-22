@@ -10,6 +10,7 @@ import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import { streamWithPreemption } from "./model-preemption";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ResponsesStreamingTerminalError } from "./responses-terminal-error";
+import { toolDisclosureItem } from "./provider-history-adapter";
 import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
 /** One exact source producer; the optional dispatch callback rechecks that same
@@ -81,7 +82,7 @@ const producedSources = new WeakMap<ModelRequestCapture, {
   outputs: Map<string,InputBinding|null>;
   outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
   toolBindingOwners: WeakMap<InputBinding,{callId:string;identity:string}>;
-  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; genericSearchTextProjection?:unknown; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
+  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; genericSearchTextProjection?:unknown; disclosureSchemas?:readonly Record<string,unknown>[]; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
@@ -189,7 +190,21 @@ export function recordModelToolProjection(callId:string|undefined,modelName:stri
 }
 
 /** The generic search producer owns this actual result, not an input replay. */
-export async function recordModelGenericSearchSource(call: unknown, output: string): Promise<void> {
+export async function recordModelGenericSearchSource(call: unknown, output: string, schemas: readonly Record<string, unknown>[] = []): Promise<void> {
+  await recordModelGenericControlSource(call, output, "tool_search", schemas);
+}
+
+/** The dispatcher owns this refusal only when no authorized tool was invoked. */
+export async function recordModelGenericInvokeRefusal(call: unknown, output: string): Promise<void> {
+  await recordModelGenericControlSource(call, output, "tool_invoke", []);
+}
+
+async function recordModelGenericControlSource(
+  call: unknown,
+  output: string,
+  modelName: "tool_search" | "tool_invoke",
+  schemas: readonly Record<string, unknown>[],
+): Promise<void> {
   const capture = modelRequestCapture.getStore();
   if (!capture?.beforeCall) return;
   const callId = toolCallIdFromSdkItem(call);
@@ -197,14 +212,14 @@ export async function recordModelGenericSearchSource(call: unknown, output: stri
   const binding = modelSourceInputBinding(call);
   const sourceKey = callId ? capture.toolSourceKeys?.get(callId) : undefined;
   if (typeof call !== "object" || call === null || !("type" in call) || call.type !== "function_call"
-    || !("name" in call) || call.name !== "tool_search" || !callId || !sourceKey
+    || !("name" in call) || call.name !== modelName || !callId || !sourceKey
     || binding?.nativeProducerSourceKey !== sourceKey || binding.sourceRef.sha256 !== inputDigest(call)) {
     throw new Error("MODEL_TOOL_SEARCH_CALL_UNBOUND");
   }
   if (sourceState(capture).tools.has(callId)) throw new Error("MODEL_TOOL_SEARCH_CALL_COLLISION");
   const sha256 = inputDigest(output);
   await recordModelToolSource({sourceCallId: callId, nativeModelSourceKey: sourceKey,
-    rawSourceRef: {owner: "native.tool.result", id: `tool-search:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
+    rawSourceRef: {owner: "native.tool.result", id: `${modelName === "tool_search" ? "tool-search" : "tool-invoke-refusal"}:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
   const captured = sourceState(capture).tools.get(callId);
   if (!captured) throw new Error("MODEL_TOOL_SEARCH_RESULT_UNAVAILABLE");
   // Lazy dispatch exposes the string to its provider. The native outer
@@ -212,7 +227,51 @@ export async function recordModelGenericSearchSource(call: unknown, output: stri
   // Both projections derive here from this exact owning producer result.
   captured.projection = output;
   captured.genericSearchTextProjection = protocol.ToolOutputText.parse({type: "text", text: output});
-  captured.modelName = "tool_search";
+  captured.modelName = modelName;
+  captured.disclosureSchemas = structuredClone(schemas);
+}
+
+/** The input filter may disclose only schemas frozen by actual search execution.
+ * Serialized history markers select presentation, never establish ownership.
+ * This native artifact roots to the existing complete producer receipt; the
+ * independently attributed raw search result remains a TOOL_RESULT. */
+export function bindModelGenericToolDisclosure(
+  item: Record<string, unknown>,
+  selections: readonly { result: object; tools: Record<string, unknown>[] }[],
+): void {
+  const capture = modelRequestCapture.getStore();
+  if (!capture?.beforeCall || selections.length === 0) return;
+  const state = sourceState(capture);
+  let sourceKey: string | undefined;
+  const schemas: Record<string, unknown>[] = [];
+  for (const selection of selections) {
+    restoreProducedSourceBindings([selection.result], capture);
+    const binding = modelSourceInputBinding(selection.result);
+    const owner = binding ? state.toolBindingOwners.get(binding) : undefined;
+    const tool = owner ? state.tools.get(owner.callId) : undefined;
+    if (!binding || !owner || !tool?.disclosureSchemas
+      || owner.identity !== canonicalModelSourceJson(binding)
+      || binding.sourceRef.sha256 !== inputDigest(selection.result)
+      || tool.source.nativeModelSourceKey !== capture.toolSourceKeys?.get(owner.callId)
+      || (sourceKey !== undefined && sourceKey !== tool.source.nativeModelSourceKey)) return;
+    sourceKey = tool.source.nativeModelSourceKey;
+    for (const schema of selection.tools) {
+      if (!tool.disclosureSchemas.some(registered => canonicalModelSourceJson(registered) === canonicalModelSourceJson(schema))) return;
+      schemas.push(schema);
+    }
+  }
+  if (!sourceKey || schemas.length === 0
+    || inputDigest(item) !== inputDigest(toolDisclosureItem(schemas, { viaToolInvoke: true }))) return;
+  const sha256 = inputDigest(item);
+  const binding: InputBinding = {
+    kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: `tool-disclosure:${sourceKey}:${sha256}`, sha256 },
+    parents: [], retainedSources: [], nativeProducerSourceKey: sourceKey,
+  };
+  const prior = state.outputs.get(sha256);
+  if (state.outputs.has(sha256) && prior?.nativeProducerSourceKey !== sourceKey) throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
+  state.outputs.set(sha256, binding);
+  state.outputOwners.set(binding, { outputId: binding.sourceRef.id, identity: canonicalModelSourceJson(binding) });
+  bindModelSourceInput(item, binding);
 }
 
 /** Native client discovery produces these exact schemas, not model-authored
