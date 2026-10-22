@@ -8,6 +8,7 @@ import {
   deferCompactionToModelBoundary,
 } from "./prepared-compaction-request";
 export {
+  bindDurableModelHistoryRows,
   bindModelSourceInput,
   omitModelSourceInputBinding,
   modelSourceInputBinding,
@@ -45,6 +46,7 @@ import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
+  sessionTitleGenerationInput,
   mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
   toolPolicyActionName,
@@ -1138,7 +1140,7 @@ export type GenerateSessionTitleOptions = {
   signal?: AbortSignal;
 };
 
-export const SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS = 4_000;
+export { SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS } from "@opengeni/contracts";
 // Reasoning models spend output tokens on reasoning before the visible title.
 // The budget leaves room for that; the title itself is bounded afterwards by
 // the automatic-title normalizer. Reasoning can still use the whole budget, in
@@ -1196,9 +1198,7 @@ export async function generateSessionTitle(
   prompt: string,
   options: GenerateSessionTitleOptions = {},
 ): Promise<GeneratedSessionTitle> {
-  const boundedPrompt = Array.from(prompt.trim())
-    .slice(0, SESSION_TITLE_GENERATION_INPUT_MAX_CHARACTERS)
-    .join("");
+  const boundedPrompt = sessionTitleGenerationInput(prompt);
   if (!boundedPrompt) {
     return { title: null, usage: null };
   }

@@ -1,4 +1,5 @@
 import type { SkillSummary } from "@opengeni/sdk";
+import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
 import { useLocation, useNavigate } from "@tanstack/react-router";
@@ -264,6 +265,8 @@ export function CapabilitiesRoute(props: CapabilitiesRouteProps) {
 
 function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: CapabilitiesRouteProps) {
   const context = useAppContext();
+  const activeWorkspace = context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const personal = isPersonalWorkspace(activeWorkspace, context.managedSelfContext);
 
   const client = context.client;
   const onRuntimeChanged = useCallback(
@@ -2064,6 +2067,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                     hidden={activeTab !== "skills"}
                   >
                     <SkillsPanel
+                      personalWorkspace={personal}
                       refreshRevision={skillsRevision}
                       onSkillsChange={setCanonicalSkills}
                       onRemoved={() => {

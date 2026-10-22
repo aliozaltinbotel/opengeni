@@ -40281,9 +40281,14 @@ export async function ensureSessionSkillCatalog(
     expectedAttemptId: string;
     catalog: string;
     retainedSources?: readonly import("@opengeni/contracts").ModelSourceRef[];
+    nativeArtifactSources?: readonly import("@opengeni/contracts").ModelSourceRef[];
   },
 ): Promise<string> {
   const retainedSources = (input.retainedSources ?? []).map((ref) => ModelSourceRef.parse(ref));
+  const nativeArtifactSources = (input.nativeArtifactSources ?? []).map((ref) => ModelSourceRef.parse(ref));
+  if (nativeArtifactSources.some(ref => ref.owner !== "native.skill.artifact") ||
+      new Set(nativeArtifactSources.map(ref => ref.id)).size !== nativeArtifactSources.length)
+    throw new Error("SKILL_CATALOG_ARTIFACT_SOURCES_INVALID");
   const catalogItem = skillCatalogContextItem(input.catalog);
   const digest = createHash("sha256").update(JSON.stringify(catalogItem)).digest("hex");
   const sourceBasis: import("@opengeni/contracts").ModelHistorySourceBasis = {
@@ -40346,6 +40351,9 @@ export async function ensureSessionSkillCatalog(
             !isDeepStrictEqual(previous?.sourceBasis?.retainedSources, retainedSources)
           )
             throw new Error("SKILL_CATALOG_RETAINED_SOURCES_CHANGED");
+          if (input.nativeArtifactSources !== undefined &&
+              !isDeepStrictEqual(fence.turn.metadata.opengeniSkillArtifactSources, nativeArtifactSources))
+            throw new Error("SKILL_CATALOG_ARTIFACT_SOURCES_CHANGED");
           return previousCatalog;
         }
         let historyId = previous?.id;
@@ -40410,7 +40418,8 @@ export async function ensureSessionSkillCatalog(
         await tx
           .update(schema.sessionTurns)
           .set({
-            metadata: { ...fence.turn.metadata, opengeniSkillCatalogHistoryId: historyId },
+            metadata: { ...fence.turn.metadata, opengeniSkillCatalogHistoryId: historyId,
+              ...(input.nativeArtifactSources !== undefined ? {opengeniSkillArtifactSources: nativeArtifactSources} : {}) },
             updatedAt: new Date(),
           })
           .where(

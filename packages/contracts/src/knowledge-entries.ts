@@ -301,6 +301,39 @@ export const KnowledgeEntryRecord = /* @__PURE__ */ defineSchema(() =>
 );
 export type KnowledgeEntryRecord = z.infer<typeof KnowledgeEntryRecord>;
 
+/** The existing MCP GET projection, including its exact UTF-16 content slice. */
+export const KnowledgeEntryGetResponse = /* @__PURE__ */ defineSchema(() =>
+  KnowledgeEntryRecord.extend({
+    // A read slice may be empty at EOF even when the complete admitted note
+    // must be nonempty. Keep the stored field contract, not write admission.
+    revision: KnowledgeEntryRevision.extend({ entry: z.object(StoredKnowledgeEntryContent.shape).strict() }),
+    found: z.literal(true).optional(),
+    contentRange: z.object({
+      start: z.number().int().nonnegative(),
+      end: z.number().int().nonnegative(),
+      total: z.number().int().nonnegative(),
+      nextOffset: z.number().int().nonnegative().nullable(),
+    }).strict(),
+  }).strict().refine(value => {
+    const range = value.contentRange;
+    const entry = value.revision.entry;
+    return (entry.kind !== "source" || entry.source !== undefined)
+      && new Set(entry.groupIds).size === entry.groupIds.length
+      && Math.min(range.start, range.total) <= range.end && range.end <= range.total
+      && Math.max(0, range.end - range.start) === value.revision.entry.content.length
+      && range.nextOffset === (range.end < range.total ? range.end : null);
+  }, "Knowledge GET content range is inconsistent"),
+);
+
+/** Range selections never claim to contain the complete revision. */
+export const KnowledgeSelectionSourceVersion = /* @__PURE__ */ defineSchema(() =>
+  z.union([
+    z.tuple([z.uuid(), z.number().int().positive(), z.enum(["published", "pending"]), z.enum(["full", "summary"])]),
+    z.tuple([z.uuid(), z.number().int().positive(), z.enum(["published", "pending"]), z.literal("range"), z.number().int().nonnegative(), z.number().int().nonnegative(), z.number().int().nonnegative()])
+      .refine(value => Math.min(value[4], value[6]) <= value[5] && value[5] <= value[6], "Knowledge selection range is invalid"),
+  ]),
+);
+
 export const KnowledgeEntryListRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

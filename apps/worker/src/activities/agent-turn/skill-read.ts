@@ -43,6 +43,7 @@ export type SkillReadContent = Readonly<{
 
 /** A selected built-in or session artifact: no ledger identity, and none is synthesized. */
 export type SelectedSkillReadContent = Readonly<{
+  modelSourceRef?: import("@opengeni/contracts").ModelSourceRef;
   files: readonly SkillTextFile[];
   origin: SkillReadOrigin;
 }>;

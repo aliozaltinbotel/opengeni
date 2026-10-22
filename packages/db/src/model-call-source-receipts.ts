@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
-import { canonicalModelSourceJson, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
+import { AttemptToolResult, canonicalModelSourceJson, readNativeSkillCatalogDescriptors, sessionTitleGenerationInput, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
 import type { Database } from "./database";
 import { withRlsContext } from "./database";
 import * as schema from "./schema";
+import { loadVerifiedAttemptToolCatalogTx } from "./attempt-tool-catalogs";
+import { listSkillDescriptors, skillSelectionSourceRef } from "./skills";
 import { resolveCompanyBrainContextSelection } from "./company-brain-context-selection";
 
 export const modelSourceContentDigest = (value: unknown): string => { canonicalModelSourceJson(value); return createHash("sha256").update(JSON.stringify(value)).digest("hex"); };
@@ -62,6 +64,52 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       if (row) { historyOwners.set(id, row); work.sourceNodes++; work.sourceEdges += row.basis?.parents.length ?? 0; }
       return row;
     };
+    // Authenticate the original producer/call/catalog before interpreting a legacy
+    // result. Visible names or body shapes alone never establish native identity.
+    const missingKnowledgeOrigin = async (row: HistoryOwner, source: NonNullable<Basis["rawToolSource"]>, producer: typeof schema.modelCallSourceReceipts.$inferSelect): Promise<boolean> => {
+      if (source.retainedSources.some(ref => ref.owner === "native.knowledge.selection.v2")) return false;
+      const catalog = await loadVerifiedAttemptToolCatalogTx(tx, { workspaceId: identity.workspaceId, attemptId: producer.attemptId });
+      if (!catalog) return false; // Pre-catalog third-party history keeps its existing admission rules.
+      if (catalog.accountId !== identity.accountId || catalog.workspaceId !== identity.workspaceId || catalog.sessionId !== row.sessionId || catalog.turnId !== row.turnId || catalog.executionGeneration !== producer.executionGeneration) return true;
+      const callId = row.item.callId ?? row.item.call_id;
+      if (row.item.type !== "function_call_result" || typeof callId !== "string" || callId !== source.sourceCallId) return true;
+      const calls = await tx.select({ id: schema.sessionHistoryItems.id }).from(schema.sessionHistoryItems).where(and(
+        eq(schema.sessionHistoryItems.accountId, identity.accountId), eq(schema.sessionHistoryItems.workspaceId, identity.workspaceId),
+        eq(schema.sessionHistoryItems.sessionId, row.sessionId), eq(schema.sessionHistoryItems.turnId, producer.turnId),
+        sql`${schema.sessionHistoryItems.position} < ${row.position}`,
+        sql`${schema.sessionHistoryItems.item}->>'type' = 'function_call'`,
+        sql`coalesce(${schema.sessionHistoryItems.item}->>'callId', ${schema.sessionHistoryItems.item}->>'call_id') = ${callId}`,
+      )).limit(2);
+      if (calls.length !== 1) return true;
+      const call = await historyById(calls[0]!.id);
+      const parent = { owner: "model_call_source_receipts", id: producer.id, sha256: producer.digest };
+      if (!call || call.basis?.kind !== "HISTORY_ROW" || canonicalModelSourceJson(call.basis.parents) !== canonicalModelSourceJson([parent])) return true;
+      const selected = catalog.entries.find(entry => entry.modelName === call.item.name);
+      if (!selected || !["opengeni", "docs"].includes(selected.identity.serverId) || selected.identity.toolName !== "knowledge_get") return false;
+      // The native SDK stores text blocks rather than the MCP envelope. An exact
+      // raw-result digest permits only genuine no-entry/error outcomes without a
+      // selected revision; it cannot bless a successful legacy read retroactively.
+      const output = row.item.output;
+      const blocks = Array.isArray(output) ? output : [output];
+      const content: Array<{ type: "text"; text: string }> = [];
+      for (const block of blocks) {
+        if (!block || typeof block !== "object" || !("type" in block) || !("text" in block) || !["text", "input_text"].includes(String(block.type)) || typeof block.text !== "string") return true;
+        content.push({ type: "text", text: block.text });
+      }
+      // mcpResultModelContent prepends this notice for an isError envelope.
+      // The notice grants nothing: the original MCP envelope digest must match.
+      const errorContent = content[0]?.text === "The tool reported an error." ? content.slice(1) : content;
+      const error = AttemptToolResult.parse({ content: errorContent, isError: true });
+      if (modelSourceContentDigest(error) === source.rawSourceRef.sha256) return false;
+      if (content.length === 1) {
+        let value: unknown;
+        try { value = JSON.parse(content[0]!.text); } catch { return true; }
+        if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && "found" in value && value.found === false) {
+          return ![AttemptToolResult.parse({ content }), AttemptToolResult.parse({ content, isError: false })].some(result => modelSourceContentDigest(result) === source.rawSourceRef.sha256);
+        }
+      }
+      return true;
+    };
     // These native producers carried instruction text before retained origins were installed.
     // Preserve their transcript, but never invent origins from the visible body on a later call.
     const missingSkillOrigin = async (item: unknown, basis: {kind?:string;parents?:readonly ModelSourceRef[];retainedSources?:readonly ModelSourceRef[]} | null, sessionId: string): Promise<boolean> => {
@@ -69,12 +117,39 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       // A native copy inherits through its authenticated durable parents; the closure below checks each origin.
       if (basis?.kind === "COPIED" && basis.parents?.some(parent => parent.owner === "session_history_items")) return false;
       const catalog = item && typeof item === "object" ? readSkillCatalogContext(item as Record<string,unknown>) : null;
-      if (catalog !== null && catalog.split("\n").some(line => line.startsWith("- {"))) return true;
+      if (catalog !== null) {
+        const entries = readNativeSkillCatalogDescriptors(catalog);
+        if (entries === null) return true;
+        if (entries.length === 0) return (basis?.retainedSources?.length ?? 0) !== 0;
+        const refs = basis?.retainedSources ?? [];
+        if (refs.length !== entries.length) return true;
+        const [turn] = await tx.select({human:schema.sessionTurns.initiatingHumanSubjectId,kind:schema.sessionTurns.initiatorKind,subject:schema.sessionTurns.initiatorSubjectId}).from(schema.sessionTurns)
+          .where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
+        const human = turn?.human ?? (turn?.kind === "subject" ? turn.subject : null);
+        const descriptors = human ? await listSkillDescriptors(tx,{...identity,subjectId:human}) : [];
+        const seen = new Set<string>();
+        for (const entry of entries) {
+          if (seen.has(entry.id)) return true;
+          seen.add(entry.id);
+          const matches = refs.filter(ref => ref.id === entry.id);
+          if (matches.length !== 1) return true;
+          const ref = matches[0];
+          if (!ref) return true;
+          if (ref.owner === "native.skill.artifact") {
+            const descriptorHash = createHash("sha256").update(canonicalModelSourceJson({name:entry.name,description:entry.description})).digest("hex");
+            if (ref.version !== descriptorHash) return true;
+          } else if (ref.owner === "native.skill.selection") {
+            const selected = descriptors.find(descriptor => descriptor.id === entry.id && descriptor.activationMode === "workspace_managed");
+            if (!selected || selected.title !== entry.name || selected.description !== entry.description || canonicalModelSourceJson(skillSelectionSourceRef(selected)) !== canonicalModelSourceJson(ref)) return true;
+          } else return true;
+        }
+        return false;
+      }
       const value = item as { type?: string; callId?: string; call_id?: string; name?: string };
       if (value?.type !== "function_call_result") return false;
       // Current native Skill tools attach exact installed-revision refs; the retained
       // validator rechecks availability and visibility before every later model call.
-      if (basis?.retainedSources?.some(ref => ref.owner === "native.skill.selection")) return false;
+      if (basis?.retainedSources?.some(ref => (ref.owner === "native.skill.selection" || ref.owner === "native.skill.artifact"))) return false;
       if (value.name === "skill_read") return true;
       const callId = value.callId ?? value.call_id;
       if (!callId) return false;
@@ -284,6 +359,9 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           if(!sourceReceipt) return false;
           const producerRef={owner:"model_call_source_receipts",id:sourceReceipt.id,sha256:sourceReceipt.digest};
           if(!await closure(producerRef,next,depth+1,"AGENT"))return false;
+          if (row.item.type === "function_call_result" && await missingKnowledgeOrigin(row, raw, sourceReceipt)) {
+            reasons.add("NATIVE_KNOWLEDGE_ORIGIN_MISSING"); return false;
+          }
           setClosureNode(`tool:${parent.id}`,{sourceRef:parent,kind:"TOOL_RESULT",parents:[producerRef],retainedSources:raw.retainedSources});
         } else if (!await closure(parent,next,depth+1,row.basis.kind==="HISTORY_ROW"?"AGENT":"COMPACTION")) return false;
       }
@@ -375,13 +453,21 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
           } else if(raw || binding.parents.length!==0 || binding.retainedSources.length!==0)reasons.add("UNRESOLVED_PARENT");
         }
       }
-      if(typeof value==="string" && request.purpose==="TITLE") {
-        const [turn]=await tx.select({prompt:schema.sessionTurns.prompt,metadata:schema.sessionTurns.metadata}).from(schema.sessionTurns).where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
-        if(turn) {
+      if(request.purpose==="TITLE") {
+        const [turn]=await tx.select({prompt:schema.sessionTurns.prompt,metadata:schema.sessionTurns.metadata,
+          initialMessage:schema.sessions.initialMessage,sessionMetadata:schema.sessions.metadata}).from(schema.sessionTurns)
+          .innerJoin(schema.sessions,and(eq(schema.sessions.accountId,identity.accountId),eq(schema.sessions.workspaceId,identity.workspaceId),eq(schema.sessions.id,identity.sessionId)))
+          .where(and(eq(schema.sessionTurns.accountId,identity.accountId),eq(schema.sessionTurns.workspaceId,identity.workspaceId),eq(schema.sessionTurns.sessionId,identity.sessionId),eq(schema.sessionTurns.id,identity.turnId))).limit(1);
+        // Mirror the worker's opener choice before matching the bounded model projection.
+        const origin = !turn ? null : turn.initialMessage.trim()
+          ? {prompt:turn.initialMessage,owner:"sessions.initial_message",id:identity.sessionId,refs:turn.sessionMetadata?.nativeInitialMessageModelSourceRefs}
+          : {prompt:turn.prompt,owner:"session_turns",id:identity.turnId,refs:turn.metadata?.nativeMessageModelSourceRefs};
+        const titleInput = origin ? sessionTitleGenerationInput(origin.prompt) : "";
+        if(origin && titleInput.length > 0 && (value === titleInput || canonicalModelSourceJson(value) === canonicalModelSourceJson({role:"user",content:[{type:"input_text",text:titleInput}]}))) {
           sourceRef={owner:"native.runtime.artifact",id:`title-input:${contentSha256}`,sha256:contentSha256};
-          const parent={owner:"session_turns",id:identity.turnId,sha256:modelSourceContentDigest(turn.prompt)};parents.push(parent);
-          retainedSources=ModelSourceRef.array().max(16384).parse(turn.metadata?.nativeMessageModelSourceRefs ?? []);
-          setClosureNode(`turn:${identity.turnId}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
+          const parent={owner:origin.owner,id:origin.id,sha256:modelSourceContentDigest(origin.prompt)};parents.push(parent);
+          retainedSources=ModelSourceRef.array().max(16384).parse(origin.refs ?? []);
+          setClosureNode(`title-origin:${origin.owner}:${origin.id}`,{sourceRef:parent,kind:"HISTORY_ROW",parents:[],retainedSources});
         }
       }
       if(sourceRef?.owner==="native.runtime.artifact") {for(const parent of parents) if(!await closure(parent,new Set())) reasons.add("UNRESOLVED_PARENT");}

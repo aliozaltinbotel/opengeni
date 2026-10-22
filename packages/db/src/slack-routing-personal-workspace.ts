@@ -2,9 +2,10 @@
 //
 // Both the Slack routing resolvers and the Slack access-request path need it,
 // and this keeps that from becoming an import cycle between them.
+import { SessionScopeSubjectId } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 
-import { type Database } from "./database";
+import { type Database, withRlsContext } from "./database";
 import { listSelfOrganizationMemberships } from "./organization-membership-lifecycle";
 import { rlsSubjectIdOrEmpty } from "./workspace-authority";
 
@@ -15,8 +16,8 @@ import { rlsSubjectIdOrEmpty } from "./workspace-authority";
  * `personalWorkspaceId` pointer is read - never a default workspace, a
  * `created_by`, or current access.
  *
- * Non-`user:` subjects (API keys, delegated service principals, configured and
- * local principals) can never own an organization membership, so they
+ * Only canonical human subjects (`user:` and `external_user:`) can own an
+ * organization membership. API keys, service and configured principals
  * short-circuit rather than tripping `list_self_organization_memberships`'
  * `42501` guard.
  *
@@ -30,7 +31,7 @@ export async function namedSubjectPersonalWorkspaceId(
   db: Database,
   input: { accountId: string; subjectId: string },
 ): Promise<string | null> {
-  if (!input.subjectId.startsWith("user:")) return null;
+  if (!SessionScopeSubjectId.safeParse(input.subjectId).success) return null;
   // `listSelfOrganizationMemberships` opens its own scope and sets
   // `opengeni.subject_id` to the probed subject. Under drizzle a nested
   // transaction is a SAVEPOINT, and releasing a savepoint does NOT undo a
@@ -39,29 +40,33 @@ export async function namedSubjectPersonalWorkspaceId(
   // `namedSubjectHasLiveWorkspaceAuthority` guards the same hazard the same
   // way; empty string is the canonical "unset" because `current_subject_id()`
   // is `nullif(current_setting(...), '')`.
-  const priorSubjectId = await rlsSubjectIdOrEmpty(db);
-  let completed = false;
-  try {
-    const memberships = await listSelfOrganizationMemberships(db, input.subjectId);
-    const membership = memberships.find(
-      (candidate) =>
-        candidate.status === "active" &&
-        candidate.organizationId === input.accountId &&
-        candidate.personalWorkspaceId !== null,
-    );
-    completed = true;
-    return membership?.personalWorkspaceId ?? null;
-  } finally {
-    const restore = db.execute(
-      sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
-    );
-    if (completed) {
-      await restore;
-    } else {
-      // A failed statement can leave a caller-owned transaction aborted.
-      // Preserve the original diagnostic rather than replacing it with the
-      // restore's `25P02`.
-      await restore.catch(() => undefined);
+  // External owning subjects are account-bound by the native SQL guard. Do not
+  // rely on a caller having left an account scope on a pooled database handle.
+  return withRlsContext(db, { accountId: input.accountId, workspaceId: null }, async (scopedDb) => {
+    const priorSubjectId = await rlsSubjectIdOrEmpty(scopedDb);
+    let completed = false;
+    try {
+      const memberships = await listSelfOrganizationMemberships(scopedDb, input.subjectId);
+      const membership = memberships.find(
+        (candidate) =>
+          candidate.status === "active" &&
+          candidate.organizationId === input.accountId &&
+          candidate.personalWorkspaceId !== null,
+      );
+      completed = true;
+      return membership?.personalWorkspaceId ?? null;
+    } finally {
+      const restore = scopedDb.execute(
+        sql`select set_config('opengeni.subject_id', ${priorSubjectId}, true)`,
+      );
+      if (completed) {
+        await restore;
+      } else {
+        // A failed statement can leave a caller-owned transaction aborted.
+        // Preserve the original diagnostic rather than replacing it with the
+        // restore's `25P02`.
+        await restore.catch(() => undefined);
+      }
     }
-  }
+  });
 }

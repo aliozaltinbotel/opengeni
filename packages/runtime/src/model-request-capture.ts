@@ -10,6 +10,7 @@ import { canonicalizePersistedHistoryItem } from "@opengeni/codex";
 import { streamWithPreemption } from "./model-preemption";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { ResponsesStreamingTerminalError } from "./responses-terminal-error";
+import { toolDisclosureItem } from "./provider-history-adapter";
 import type { AgentInputItem, Model, ModelProvider, ModelRequest, StreamEvent } from "@openai/agents";
 
 /** One exact source producer; the optional dispatch callback rechecks that same
@@ -80,11 +81,12 @@ const producedSources = new WeakMap<ModelRequestCapture, {
   restoreHistorySources: (items:readonly unknown[])=>void;
   outputs: Map<string,InputBinding|null>;
   outputOwners: WeakMap<InputBinding,{outputId:string;identity:string}>;
-  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
+  toolBindingOwners: WeakMap<InputBinding,{callId:string;identity:string}>;
+  tools: Map<string,{source:NativeModelToolSource; rawResult?:unknown; projection?:unknown; genericSearchTextProjection?:unknown; disclosureSchemas?:readonly Record<string,unknown>[]; modelName?:string; searchOutputs?:Map<string,InputBinding>}>;
 }>();
 function sourceState(capture:ModelRequestCapture) {
   let state=producedSources.get(capture);
-  if(!state) {state={restoreHistorySources:items=>restoreProducedSourceBindings(items,capture),outputs:new Map(),outputOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
+  if(!state) {state={restoreHistorySources:items=>restoreProducedSourceBindings(items,capture),outputs:new Map(),outputOwners:new WeakMap(),toolBindingOwners:new WeakMap(),tools:new Map()};producedSources.set(capture,state);}
   return state;
 }
 const inputDigest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -93,6 +95,22 @@ export function bindModelSourceInput<T extends object>(item:T,binding:Omit<Model
   Object.defineProperty(item,nativeSourceBinding,{value:binding,enumerable:true,configurable:true});
   return item;
 }
+const durableHistoryOwners = new WeakMap<InputBinding, { contentSha256: string; identity: string; cohort: object }>();
+
+/** Called by the durable history hydration owner, before request projections.
+ * A copied/serialized binding or changed row never registers itself on replay. */
+export function bindDurableModelHistoryRows(
+  rows: readonly { id: string; sourceSha256?: string; item: Record<string, unknown> }[],
+): void {
+  const cohort = {};
+  for (const row of rows) {
+    if (!row.sourceSha256) continue;
+    const binding: InputBinding = { kind: "HISTORY_ROW", sourceRef: { owner: "session_history_items", id: row.id, sha256: row.sourceSha256 }, parents: [], retainedSources: [] };
+    durableHistoryOwners.set(binding, { contentSha256: inputDigest(row.item), identity: canonicalModelSourceJson(binding), cohort });
+    bindModelSourceInput(row.item, binding);
+  }
+}
+
 /** Remove only this owner's non-wire binding after durable source refs have been captured. */
 export function omitModelSourceInputBinding<T extends object>(item:T):T {
   const persisted:T & {[nativeSourceBinding]?:Omit<ModelSourceBinding,"ordinal">}=Object.create(Object.getPrototypeOf(item),Object.getOwnPropertyDescriptors(item));
@@ -187,6 +205,140 @@ export function recordModelToolProjection(callId:string|undefined,modelName:stri
   tool.modelName=modelName;
 }
 
+/** The generic search producer owns this actual result, not an input replay. */
+export async function recordModelGenericSearchSource(call: unknown, output: string, schemas: readonly Record<string, unknown>[] = []): Promise<void> {
+  await recordModelGenericControlSource(call, output, "tool_search", schemas);
+}
+
+/** The dispatcher owns this refusal only when no authorized tool was invoked. */
+export async function recordModelGenericInvokeRefusal(call: unknown, output: string): Promise<void> {
+  await recordModelGenericControlSource(call, output, "tool_invoke", []);
+}
+
+async function recordModelGenericControlSource(
+  call: unknown,
+  output: string,
+  modelName: "tool_search" | "tool_invoke",
+  schemas: readonly Record<string, unknown>[],
+): Promise<void> {
+  const capture = modelRequestCapture.getStore();
+  if (!capture?.beforeCall) return;
+  const callId = toolCallIdFromSdkItem(call);
+  restoreProducedSourceBindings([call], capture);
+  const binding = modelSourceInputBinding(call);
+  const sourceKey = callId ? capture.toolSourceKeys?.get(callId) : undefined;
+  if (typeof call !== "object" || call === null || !("type" in call) || call.type !== "function_call"
+    || !("name" in call) || call.name !== modelName || !callId || !sourceKey
+    || binding?.nativeProducerSourceKey !== sourceKey || binding.sourceRef.sha256 !== inputDigest(call)) {
+    throw new Error("MODEL_TOOL_SEARCH_CALL_UNBOUND");
+  }
+  if (sourceState(capture).tools.has(callId)) throw new Error("MODEL_TOOL_SEARCH_CALL_COLLISION");
+  const sha256 = inputDigest(output);
+  await recordModelToolSource({sourceCallId: callId, nativeModelSourceKey: sourceKey,
+    rawSourceRef: {owner: "native.tool.result", id: `${modelName === "tool_search" ? "tool-search" : "tool-invoke-refusal"}:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
+  const captured = sourceState(capture).tools.get(callId);
+  if (!captured) throw new Error("MODEL_TOOL_SEARCH_RESULT_UNAVAILABLE");
+  // Lazy dispatch exposes the string to its provider. The native outer
+  // admission seam can see the SDK text envelope before that restoration.
+  // Both projections derive here from this exact owning producer result.
+  captured.projection = output;
+  captured.genericSearchTextProjection = protocol.ToolOutputText.parse({type: "text", text: output});
+  captured.modelName = modelName;
+  captured.disclosureSchemas = structuredClone(schemas);
+}
+
+/** The input filter may disclose only schemas frozen by actual search execution.
+ * Serialized history markers select presentation, never establish ownership.
+ * This native artifact roots to the existing complete producer receipt; the
+ * independently attributed raw search result remains a TOOL_RESULT. */
+export function bindModelGenericToolDisclosure(
+  item: Record<string, unknown>,
+  selections: readonly { call: object; result: object; tools: Record<string, unknown>[] }[],
+): void {
+  const capture = modelRequestCapture.getStore();
+  // The display cache is not a source cache. Recheck this exact selection even
+  // when the same result object previously produced an authenticated item.
+  Reflect.deleteProperty(item, nativeSourceBinding);
+  if (!capture?.beforeCall || selections.length === 0) return;
+  if (bindRetainedToolDisclosure(item, selections)) return;
+  const state = sourceState(capture);
+  let sourceKey: string | undefined;
+  const schemas: Record<string, unknown>[] = [];
+  for (const selection of selections) {
+    restoreProducedSourceBindings([selection.result], capture);
+    const binding = modelSourceInputBinding(selection.result);
+    const owner = binding ? state.toolBindingOwners.get(binding) : undefined;
+    const tool = owner ? state.tools.get(owner.callId) : undefined;
+    if (!binding || !owner || !tool?.disclosureSchemas
+      || owner.identity !== canonicalModelSourceJson(binding)
+      || binding.sourceRef.sha256 !== inputDigest(selection.result)
+      || tool.source.nativeModelSourceKey !== capture.toolSourceKeys?.get(owner.callId)
+      || (sourceKey !== undefined && sourceKey !== tool.source.nativeModelSourceKey)) return;
+    sourceKey = tool.source.nativeModelSourceKey;
+    for (const schema of selection.tools) {
+      if (!tool.disclosureSchemas.some(registered => canonicalModelSourceJson(registered) === canonicalModelSourceJson(schema))) return;
+      schemas.push(schema);
+    }
+  }
+  if (!sourceKey || schemas.length === 0
+    || inputDigest(item) !== inputDigest(toolDisclosureItem(schemas, { viaToolInvoke: true }))) return;
+  const sha256 = inputDigest(item);
+  const binding: InputBinding = {
+    kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: `tool-disclosure:${sourceKey}:${sha256}`, sha256 },
+    parents: [], retainedSources: [], nativeProducerSourceKey: sourceKey,
+  };
+  const prior = state.outputs.get(sha256);
+  if (state.outputs.has(sha256) && prior?.nativeProducerSourceKey !== sourceKey) throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
+  state.outputs.set(sha256, binding);
+  state.outputOwners.set(binding, { outputId: binding.sourceRef.id, identity: canonicalModelSourceJson(binding) });
+  bindModelSourceInput(item, binding);
+}
+
+/** Derive only native schema instructions from unchanged, jointly loaded rows.
+ * Durable parents are re-read by the existing receipt owner in the new attempt;
+ * the previous attempt's transient producer key is deliberately not reused. */
+function bindRetainedToolDisclosure(
+  item: Record<string, unknown>,
+  selections: readonly { call: object; result: object; tools: Record<string, unknown>[] }[],
+): boolean {
+  const parents: InputBinding["parents"] = [];
+  const schemas: Record<string, unknown>[] = [];
+  let cohort: object | undefined;
+  for (const selection of selections) {
+    const callBinding = modelSourceInputBinding(selection.call);
+    const resultBinding = modelSourceInputBinding(selection.result);
+    const callOwner = callBinding ? durableHistoryOwners.get(callBinding) : undefined;
+    const resultOwner = resultBinding ? durableHistoryOwners.get(resultBinding) : undefined;
+    if (!callBinding || !resultBinding || !callOwner || !resultOwner
+      || callOwner.cohort !== resultOwner.cohort || (cohort && cohort !== callOwner.cohort)
+      || callOwner.identity !== canonicalModelSourceJson(callBinding) || resultOwner.identity !== canonicalModelSourceJson(resultBinding)
+      || callOwner.contentSha256 !== inputDigest(selection.call) || resultOwner.contentSha256 !== inputDigest(selection.result)) return false;
+    cohort = callOwner.cohort;
+    const call = selection.call as Record<string, unknown>;
+    const result = selection.result as Record<string, unknown>;
+    const providerData = call.providerData;
+    const marker = typeof providerData === "object" && providerData !== null && "opengeni.lazy_search.v1" in providerData
+      ? providerData["opengeni.lazy_search.v1"] : undefined;
+    if (call.type !== "function_call" || call.name !== "tool_search" || result.type !== "function_call_result"
+      || result.name !== "tool_search" || (result.status !== undefined && result.status !== "completed") || !toolCallIdFromSdkItem(call)
+      || toolCallIdFromSdkItem(call) !== toolCallIdFromSdkItem(result)
+      || typeof marker !== "object" || marker === null || !("version" in marker) || marker.version !== 2
+      || !("output" in marker) || typeof marker.output !== "string" || !("tools" in marker) || !Array.isArray(marker.tools)) return false;
+    if (canonicalModelSourceJson(result.output) !== canonicalModelSourceJson(marker.output)
+      && canonicalModelSourceJson(result.output) !== canonicalModelSourceJson(protocol.ToolOutputText.parse({ type: "text", text: marker.output }))) return false;
+    const registeredSchemas: unknown[] = marker.tools;
+    for (const schema of selection.tools) {
+      if (!registeredSchemas.some(registered => canonicalModelSourceJson(registered) === canonicalModelSourceJson(schema))) return false;
+      schemas.push(schema);
+    }
+    parents.push(callBinding.sourceRef, resultBinding.sourceRef);
+  }
+  if (schemas.length === 0 || inputDigest(item) !== inputDigest(toolDisclosureItem(schemas, { viaToolInvoke: true }))) return false;
+  const sha256 = inputDigest(item);
+  bindModelSourceInput(item, { kind: "INSTRUCTION", sourceRef: { owner: "native.runtime.artifact", id: `retained-tool-disclosure:${sha256}`, sha256 }, parents, retainedSources: [] });
+  return true;
+}
+
 /** Native client discovery produces these exact schemas, not model-authored
  * instructions. Keep its existing raw-tool owner and producing call; the SDK
  * supplies the envelope. No serialized input can register this ownership. */
@@ -243,8 +395,15 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
       // capture and the same raw output's unambiguous exact projection.
       const owner=state.outputOwners.get(carried),projection=projectionBinding?state.outputOwners.get(projectionBinding):undefined;
       if(projectionBinding && owner && projection && owner.outputId===projection.outputId
-        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(projectionBinding))bindModelSourceInput(item,projectionBinding);
-      continue;
+        && owner.identity===canonicalModelSourceJson(carried) && projection.identity===canonicalModelSourceJson(projectionBinding)) {
+        bindModelSourceInput(item,projectionBinding);
+        continue;
+      }
+      // Lazy history restoration spreads an authentic tool binding when it
+      // changes only the SDK envelope. Recheck the same capture-owned call and
+      // exact producer projections below; copied/altered bindings cannot enter.
+      const toolOwner=state.toolBindingOwners.get(carried);
+      if(!toolOwner || toolOwner.callId!==item.callId || toolOwner.identity!==canonicalModelSourceJson(carried))continue;
     }
     if(model) {bindModelSourceInput(item,model);continue;}
     if(state.outputs.has(sha256))throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
@@ -252,9 +411,13 @@ function restoreProducedSourceBindings(input:readonly unknown[],capture:ModelReq
     if(item.type!=="function_call_result" || item.status!=="completed" || typeof item.callId!=="string")continue;
     const tool=state.tools.get(item.callId);
     if(!tool?.source.nativeModelSourceKey || tool.rawResult===undefined || tool.projection===undefined || item.name!==tool.modelName
-      || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.projection))continue;
-    bindModelSourceInput(item,{kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
-      parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult});
+      || (canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.projection)
+        && (tool.genericSearchTextProjection===undefined
+          || canonicalModelSourceJson(item.output)!==canonicalModelSourceJson(tool.genericSearchTextProjection))))continue;
+    const binding:InputBinding={kind:"TOOL_RESULT",sourceRef:{owner:"native.runtime.artifact",id:`tool-projection:${tool.source.rawSourceRef.id}:${sha256}`,sha256},
+      parents:[tool.source.rawSourceRef],retainedSources:tool.source.retainedSources,nativeProducerSourceKey:tool.source.nativeModelSourceKey,rawToolSource:tool.source,rawToolResult:tool.rawResult};
+    state.toolBindingOwners.set(binding,{callId:item.callId,identity:canonicalModelSourceJson(binding)});
+    bindModelSourceInput(item,binding);
   }
 }
 

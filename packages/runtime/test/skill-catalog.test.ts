@@ -1,3 +1,4 @@
+import { readNativeSkillCatalogDescriptors } from "@opengeni/contracts";
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import { inspectPersistentAgentInstructions } from "../src/index";
@@ -108,4 +109,34 @@ describe("sandbox-independent Skill catalog", () => {
     const next = inspectPersistentAgentInstructions(settings, options);
     expect(next.layers.find((layer) => layer.id === "skill_catalog")?.content).toContain("Updated");
   });
+});
+
+test("native catalog grammar accepts actual bounded output and refuses extra instructions", () => {
+  const entries = Array.from({ length: SKILL_CATALOG_MAX_ENTRIES + 3 }, (_, index) => ({
+    id: `builtin:skill-${index}`,
+    name: `skill-${index}`,
+    description: "Selected instructions",
+  }));
+  for (const catalog of [
+    formatSkillCatalog([]),
+    formatSkillCatalog(entries),
+    formatSkillCatalog([
+      {
+        id: "builtin:skill-management",
+        name: "skill-management",
+        description: "x".repeat(SKILL_CATALOG_MAX_BYTES),
+      },
+    ]),
+  ]) {
+    expect(readNativeSkillCatalogDescriptors(catalog)).not.toBeNull();
+  }
+  const catalog = formatSkillCatalog(entries);
+  for (const changed of [
+    `extra instructions\n${catalog}`,
+    `${catalog}\nextra instructions`,
+    catalog.replace("3 additional", "3 arbitrary additional"),
+    catalog.replace('"name":', '"instructions":"unproven","name":'),
+  ]) {
+    expect(readNativeSkillCatalogDescriptors(changed)).toBeNull();
+  }
 });

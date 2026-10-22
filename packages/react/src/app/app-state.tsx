@@ -47,6 +47,7 @@ import { toast } from "./lib/toast";
 import type { AnalyticsEventName, AnalyticsProperties } from "./lib/analytics-types";
 import { bootstrapErrorPresentation, type BootstrapErrorPresentation } from "./lib/bootstrap-error";
 import { readBootstrap } from "./lib/bootstrap-read";
+import { hydrateWorkspaceAccessContext } from "./lib/workspace-scope-context";
 import { startDeploymentRefresh } from "./lib/deployment-refresh";
 import {
   ManagedAuthSessionUnavailableError,
@@ -792,7 +793,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       readAccess(() => client.listWorkspaces()),
       selfContextPromise,
     ])
-      .then(([context, nextWorkspaces, nextManagedSelfContext]) => {
+      .then(async ([context, nextWorkspaces, nextManagedSelfContext]) => {
         if (
           cancelled ||
           !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
@@ -808,6 +809,26 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         ) {
           throw new Error("managed self context did not match the authenticated subject");
         }
+        context = await hydrateWorkspaceAccessContext({
+          context,
+          workspaces: nextWorkspaces,
+          readGrant: (workspaceId) =>
+            readAccess(() =>
+              client.requestJson(
+                "GET",
+                `/v1/workspaces/${encodeURIComponent(workspaceId)}/access/grant`,
+              ),
+            ),
+          isCurrent: () =>
+            !cancelled &&
+            ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal),
+          signal: controller.signal,
+        });
+        if (
+          cancelled ||
+          !ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal)
+        )
+          return;
         if (
           accessPrincipalIdRef.current !== null &&
           accessPrincipalIdRef.current !== context.subjectId
@@ -2295,7 +2316,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
           request: () => client.listOrganizationMemberships(),
         })
       : Promise.resolve(null);
-    const [nextAccessContext, nextWorkspaces, nextManagedSelfContext] = await Promise.all([
+    let [nextAccessContext, nextWorkspaces, nextManagedSelfContext] = await Promise.all([
       client.getAccessContext(),
       client.listWorkspaces(),
       selfContextPromise,
@@ -2310,6 +2331,16 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     ) {
       throw new Error("managed self context did not match the authenticated subject");
     }
+    nextAccessContext = await hydrateWorkspaceAccessContext({
+      context: nextAccessContext,
+      workspaces: nextWorkspaces,
+      readGrant: (workspaceId) =>
+        client.requestJson("GET", `/v1/workspaces/${encodeURIComponent(workspaceId)}/access/grant`),
+      isCurrent: () =>
+        ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal),
+    });
+    if (!ownsPrincipalTransition(principalTransitionIdentity.current, acceptedPrincipal))
+      return false;
     if (
       accessPrincipalIdRef.current !== null &&
       accessPrincipalIdRef.current !== nextAccessContext.subjectId

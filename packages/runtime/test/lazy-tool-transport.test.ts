@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   Agent,
   MemorySession,
+  OpenAIResponsesModel,
   RunState,
   Runner,
   Usage,
@@ -15,6 +16,8 @@ import {
   type StreamEvent,
   type Tool,
 } from "@openai/agents";
+import OpenAI from "openai";
+import {protocol, withTrace, NoopTrace} from "@openai/agents-core";
 import { SandboxAgent } from "@openai/agents/sandbox";
 import {
   LazyToolModelProvider,
@@ -31,6 +34,7 @@ import { restoreInterruptedRunState } from "../src/index";
 import { formatSkillCatalog } from "../src/skill-catalog";
 import { loadSkillManagementSkill, readSkillFiles } from "../src/skill-library";
 import {
+  ModelRequestCaptureModel,
   modelSourceInputBinding,
   bindModelSourceInput,
   omitModelSourceInputBinding,
@@ -44,6 +48,97 @@ const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
 
 describe("lazy model source admission", () => {
+  for (const transport of ["custom", "responses"] as const) for (const streaming of [false, true]) test(`generic search ${transport} ${streaming ? "streaming" : "ordinary"} preserves the actual SDK result source before continuation`, async () => {
+    const agent = agentWith(weatherTool());
+    const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
+    let modelCalls = 0;
+    let receipts = 0;
+    const inner: Model = {
+      async getResponse() {
+        modelCalls++;
+        return { usage: new Usage(), output: modelCalls === 1 ? [{
+          type: "function_call", callId: "generic-source-search", name: "tool_search",
+          arguments: JSON.stringify({query: "", names: [WEATHER_TOOL]}), status: "completed",
+        }] : [finalMessage("searched")] };
+      },
+      async *getStreamedResponse(request) {
+        const response = await this.getResponse(request);
+        yield responseDone("generic-search-response", response.output);
+      },
+    };
+    const client = new OpenAI({apiKey: "synthetic-key", maxRetries: 0, fetch: async (_url, init) => {
+      const streamed = (JSON.parse(String(init?.body)) as {stream?: boolean}).stream === true;
+      modelCalls++;
+      const output = modelCalls === 1
+        ? [{type: "function_call", id: "fc_generic_source", call_id: "generic-source-search", name: "tool_search", status: "completed", arguments: JSON.stringify({query: "", names: [WEATHER_TOOL]})}]
+        : [{type: "message", id: "msg_generic_source", role: "assistant", status: "completed", content: [{type: "output_text", text: "searched", annotations: [], logprobs: []}]}];
+      const response = {id: `response-${modelCalls}`, status: "completed", output, usage: {input_tokens: 1, output_tokens: 1, total_tokens: 2}};
+      const events = [{type: "response.created", response: {id: response.id, status: "in_progress", output: []}}, ...output.map((item, output_index) => ({type: "response.output_item.done", item, output_index})), {type: "response.completed", response}];
+      return new Response(streamed ? events.map(event => `data: ${JSON.stringify(event)}\n\n`).join("") : JSON.stringify(response), {headers: {"content-type": streamed ? "text/event-stream" : "application/json"}});
+    }});
+    const selectedModel = transport === "responses" ? new OpenAIResponsesModel(client, "synthetic-model") : inner;
+    const capture: ModelRequestCapture = () => {};
+    capture.beforeCall = async request => {
+      for (const item of request.input) {
+        if (typeof item !== "object" || item.type !== "function_call_result") continue;
+        const binding = modelSourceInputBinding(item);
+        if (!binding || binding.sourceRef.sha256 !== modelSourceContentDigest(omitModelSourceInputBinding(item))) {
+          throw new Error("UNKNOWN_SOURCE");
+        }
+        expect(binding.kind).toBe("TOOL_RESULT");
+        expect(binding.nativeProducerSourceKey).toBe("generic-receipt-1");
+        expect(binding.rawToolSource?.rawSourceRef.owner).toBe("native.tool.result");
+      }
+      return `generic-receipt-${++receipts}`;
+    };
+    await withModelRequestCapture(capture, async () => {
+      const runner = new Runner({tracingDisabled: true, modelProvider: new LazyToolModelProvider(providerFor(selectedModel), runtime)});
+      const result = streaming
+        ? await runner.run(agent, "Synthetic search", {stream: true, historyOwnership: "external"})
+        : await runner.run(agent, "Synthetic search", {historyOwnership: "external"});
+      if ("toStream" in result) { for await (const _event of result.toStream()) {} await result.completed; }
+      expect(result.finalOutput).toBe("searched");
+      const searchResult = result.history.find(item => item.type === "function_call_result");
+      expect(searchResult).toBeDefined();
+      if (!searchResult) throw new Error("SEARCH_RESULT_REQUIRED");
+      // The native admission wrapper sees the SDK text envelope BEFORE lazy
+      // history restoration projects it back to its provider string.
+      const textProjection = {...structuredClone(searchResult), output: typeof searchResult.output === "string" ? {type: "text", text: searchResult.output} : structuredClone(searchResult.output)};
+      const nativeBoundary = new ModelRequestCaptureModel(runtime.wrapModel(selectedModel));
+      await withTrace(new NoopTrace(), () => nativeBoundary.getResponse({...baseRequest([]), input: [textProjection]}));
+      const ownedBinding = modelSourceInputBinding(textProjection);
+      if (!ownedBinding) throw new Error("OWNED_TEXT_PROJECTION_REQUIRED");
+      const copiedBinding = {...textProjection, output: protocol.ToolOutputText.parse(textProjection.output).text};
+      bindModelSourceInput(copiedBinding, {...ownedBinding});
+      for (const mutation of [
+        {...textProjection, output: {type: "text", text: "changed schemas"}},
+        {...textProjection, output: {type: "foreign", text: typeof searchResult.output === "string" ? searchResult.output : ""}},
+        {...textProjection, callId: "another-call"},
+        {...textProjection, name: "another-tool"},
+        copiedBinding,
+      ]) {
+        await expect(nativeBoundary.getResponse({...baseRequest([]), input: [mutation]})).rejects.toThrow("UNKNOWN_SOURCE");
+      }
+      for (const mutation of [
+        {...structuredClone(searchResult), output: "changed schemas"},
+        {...structuredClone(searchResult), output: {type: "text", text: "changed schemas"}},
+        {...structuredClone(searchResult), output: {type: "text", text: typeof searchResult.output === "string" ? searchResult.output : "", extra: "unowned"}},
+        {...structuredClone(searchResult), callId: "another-call"},
+        {...structuredClone(searchResult), name: "another-tool"},
+      ]) {
+        await expect(runtime.wrapModel(selectedModel).getResponse({...baseRequest([]), input: [mutation]})).rejects.toThrow("UNKNOWN_SOURCE");
+      }
+      const unrelated: ModelRequestCapture = () => {};
+      unrelated.beforeCall = async request => {
+        if (request.input.some(item => typeof item === "object" && !modelSourceInputBinding(item))) throw new Error("UNKNOWN_SOURCE");
+        return "unrelated";
+      };
+      await expect(withModelRequestCapture(unrelated, () => runtime.wrapModel(selectedModel).getResponse({
+        ...baseRequest([]), input: [structuredClone(searchResult)],
+      }))).rejects.toThrow("UNKNOWN_SOURCE");
+    });
+    expect(modelCalls).toBe(3);
+  });
   for(const streaming of [false,true]) {
     test(`actual SDK native search ${streaming?"streaming":"ordinary"} binds declared schemas and rejects changed or unowned outputs`,async()=>{
       const selected=tool({name:WEATHER_TOOL,description:"Read synthetic weather",parameters:{type:"object",properties:{city:{type:"string"}},required:["city"],additionalProperties:false},strict:true,

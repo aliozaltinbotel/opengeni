@@ -35,7 +35,7 @@ export const ModelCallSourceReceipt = z.object({
   inputs: z.array(ModelSourceInput).max(MODEL_CALL_SOURCE_MAX_INPUTS),
   closure: z.array(ModelSourceClosureNode).max(16384),
   complete: z.boolean(),
-  incompleteReasons: z.array(z.enum(["EMPTY_BASIS", "UNKNOWN_SOURCE", "UNRESOLVED_PARENT", "CAP_EXCEEDED", "UNAVAILABLE_INPUT", "UNATTRIBUTED_IMPORT"])),
+  incompleteReasons: z.array(z.enum(["EMPTY_BASIS", "UNKNOWN_SOURCE", "UNRESOLVED_PARENT", "CAP_EXCEEDED", "UNAVAILABLE_INPUT", "UNATTRIBUTED_IMPORT", "NATIVE_KNOWLEDGE_ORIGIN_MISSING"])),
   digest: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 export type ModelCallSourceReceipt = z.infer<typeof ModelCallSourceReceipt>;

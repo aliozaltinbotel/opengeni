@@ -9,25 +9,25 @@ import { installLazyToolRuntime, LazyToolModelProvider } from "../../../packages
 import { createObservability } from "@opengeni/observability";
 import { persistAndAuthorizeModelCallSource } from "../src/activities/agent-turn/run";
 import { IMPORTED_HISTORY_CONTEXT_HEADER,MODEL_CALL_SOURCE_MAX_INPUTS, canonicalModelSourceJson, ModelSourceRef } from "@opengeni/contracts";
-import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput } from "@opengeni/runtime";
+import { buildSummaryItem, buildCompactionPromptInput, buildRemoteCompactionV2PromptInput, generateSessionTitle } from "@opengeni/runtime";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Agent, tool, Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
 import { appendSessionEventsForTurnAttempt, listSessionEvents, ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
-import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
+import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, modelSourceInputBinding, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
 let app:ReturnType<typeof createDb>;
 beforeAll(async()=>{const external=process.env.OPENGENI_MODEL_SOURCE_TEST_APP_URL;if(external){const adminUrl=process.env.OPENGENI_MODEL_SOURCE_TEST_ADMIN_URL;if(!adminUrl)throw Error("External source receipt fixture requires its exact admin URL");const admin=postgres(adminUrl,{max:1});shared={appUrl:external,adminUrl,admin,release:async()=>{await admin.end();}};app=createDb(external,{max:4});return;}const acquired=await acquireSharedTestDatabase("model-call-source-receipts");if(!acquired)throw Error("PostgreSQL required");shared=acquired;app=createDb(shared.appUrl,{max:4});},180_000);
 afterAll(async()=>{await app?.close();await shared?.release();},60_000);
-async function fixture(options:{metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean}={}){
+async function fixture(options:{initialMessage?:string;metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean}={}){
  const suffix=crypto.randomUUID();
  const userId=`native-source-${suffix}`;const subjectId=options.managed?`user:${userId}`:suffix;
  const access=options.managed?await ensureManagedAccessForUser(app.db,{userId,email:`${userId}@example.test`,name:"Synthetic owner"}):await bootstrapWorkspace(app.db,{accountExternalSource:"source-receipt",accountExternalId:suffix,accountName:"Test",workspaceExternalSource:"source-receipt",workspaceExternalId:suffix,workspaceName:"Test",subjectId:suffix});
  const {accountId,workspaceId}=access.workspaceGrants[0]!;if(!workspaceId)throw Error("workspace");
- const session=await createSession(app.db,{accountId,workspaceId,initialMessage:"Synthetic request",...(options.initialMessageModelSourceRefs?{initialMessageModelSourceRefs:options.initialMessageModelSourceRefs}:{}),createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
+ const session=await createSession(app.db,{accountId,workspaceId,initialMessage:options.initialMessage??"Synthetic request",...(options.initialMessageModelSourceRefs?{initialMessageModelSourceRefs:options.initialMessageModelSourceRefs}:{}),createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
  await initializeSessionStartAtomically(app.db,{accountId,workspaceId,sessionId:session.id,reasoningEffortFallback:"low",createdEventPayload:{}});
  const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(app.db,workspaceId,{sessionId:session.id,workflowId:`session-${session.id}`,workflowRunId:crypto.randomUUID(),dispatchId:suffix,attemptId,trigger:{kind:"next"}});
  if(claim.action!=="claimed")throw Error("claim");
@@ -520,7 +520,7 @@ test("portable/remote compaction and title each record their actual ordered sour
  const {identity}=await fixture();const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);const input=rows.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]}));
  const requests=[buildCompactionPromptInput(input),buildRemoteCompactionV2PromptInput(input)];
  for(const [index,prepared] of requests.entries()){const receipt=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:index+1},{purpose:"COMPACTION",input:prepared,sourceBindings:modelSourceBindings(prepared)});expect(receipt.complete).toBe(true);expect(receipt.inputs.at(-1)!.sourceRef!.owner).toBe("native.runtime.artifact");expect(receipt.inputs[0]!.sourceRef!.id).toBe(rows[0]!.id);}
- const title=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:3},{purpose:"TITLE",input:"Synthetic request",instructions:"Synthetic title instruction"});expect(title.complete).toBe(true);expect(title.inputs.at(-1)!.parents[0]!.id).toBe(identity.turnId);
+ const title=await persistModelCallSourceReceipt(app.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:3},{purpose:"TITLE",input:"Synthetic request",instructions:"Synthetic title instruction"});expect(title.complete).toBe(true);expect(title.inputs.at(-1)!.parents[0]!).toMatchObject({owner:"sessions.initial_message",id:identity.sessionId});
 });
 
 
@@ -879,3 +879,405 @@ test("a dispatch refused before bytes is settled and leaves the quiesced-intent 
   const observed=await reconcileQuiescedModelCallReceipts(app.db,{workspaceId:identity.workspaceId});
   expect(observed).toMatchObject({settled:0,observed:1,truncated:false});
 });
+
+
+test("actual title model projection retains its durable native opener source",async()=>{
+ const {identity}=await fixture();
+ let receipt:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>|undefined;
+ await expect(generateSessionTitle(testSettings({sandboxBackend:"none"}),"Synthetic request",{
+  model:new ScriptedModel([]),
+  beforeModelCallSourceReceipt:async titleRequest=>{
+   receipt=await persistModelCallSourceReceipt(app.db,identity,{purpose:"TITLE",instructions:titleRequest.systemInstructions,input:titleRequest.input,tools:titleRequest.tools});
+   throw Error("TITLE_SOURCE_CAPTURED");
+  },
+ })).rejects.toThrow("TITLE_SOURCE_CAPTURED");
+ expect(receipt?.complete).toBe(true);
+ expect(receipt?.incompleteReasons).toEqual([]);
+ expect(receipt?.inputs.at(-1)?.parents).toContainEqual(expect.objectContaining({owner:"sessions.initial_message",id:identity.sessionId}));
+});
+
+
+test("native title source refuses arbitrary text and preserves the exact bounded Unicode opener", async () => {
+ const opener = `  ${"🪷".repeat(4_001)} trailing  `;
+ const {identity} = await fixture({initialMessage: opener});
+ const input = {role:"user",content:[{type:"input_text",text:"🪷".repeat(4_000)}]};
+ const accepted = await persistModelCallSourceReceipt(app.db, identity, {purpose:"TITLE",input:[input]});
+ expect(accepted.complete).toBe(true);
+ expect(accepted.inputs.at(-1)?.parents).toContainEqual(expect.objectContaining({owner:"sessions.initial_message",id:identity.sessionId}));
+ for (const [index, value] of ["Arbitrary title input", "🪷".repeat(4_001), {role:"user",content:[{type:"input_text",text:"🪷".repeat(4_000)}, {type:"input_text",text:"extra"}]}].entries()) {
+  const rejected = await persistModelCallSourceReceipt(app.db, {...identity,sourceKey:crypto.randomUUID(),requestIndex:index+2}, {purpose:"TITLE",input:[value]});
+  expect(rejected.complete).toBe(false);
+  expect(rejected.incompleteReasons).toContain("UNKNOWN_SOURCE");
+ }
+});
+
+test("native title source keeps the initial opener after a different accepted turn", async () => {
+ const original = await fixture();
+ const {identity} = original;
+ await applySessionTurnSettlement(app.db,identity.workspaceId,{sessionId:identity.sessionId,turnId:identity.turnId,triggerEventId:original.triggerEventId,attemptId:identity.attemptId,turnStatus:"completed",sessionStatus:"idle",activeTurnId:null,events:[{type:"turn.completed",payload:{}}]});
+ await withWorkspaceSubjectSessionActivityRls(app.db,identity.workspaceId,original.subjectId,db=>submitHumanPromptInTransaction(db,{accountId:identity.accountId,workspaceId:identity.workspaceId,sessionId:identity.sessionId,subjectId:original.subjectId,actor:{type:"human",subjectId:original.subjectId},operationKey:crypto.randomUUID(),delivery:"send",text:"Different accepted turn",modelContext:null,resources:[],reasoningEffort:"low",reasoningEffortFallback:"low",source:"user"}));
+ const attemptId=crypto.randomUUID();
+ const claim=await claimSessionWorkForAttempt(app.db,identity.workspaceId,{sessionId:identity.sessionId,workflowId:`session-${identity.sessionId}`,workflowRunId:crypto.randomUUID(),attemptId,dispatchId:crypto.randomUUID(),trigger:{kind:"next"}});
+ if(claim.action!=="claimed") throw Error("Expected next accepted turn");
+ const current={...identity,turnId:claim.turn.id,attemptId,executionGeneration:claim.turn.executionGeneration};
+ const accepted=await persistModelCallSourceReceipt(app.db,current,{purpose:"TITLE",input:"Synthetic request"});
+ expect(accepted.complete).toBe(true);
+ expect(accepted.inputs.at(-1)?.parents).toContainEqual(expect.objectContaining({owner:"sessions.initial_message",id:identity.sessionId}));
+ const rejected=await persistModelCallSourceReceipt(app.db,{...current,sourceKey:crypto.randomUUID(),requestIndex:2},{purpose:"TITLE",input:"Different accepted turn"});
+ expect(rejected.complete).toBe(false);
+ expect(rejected.incompleteReasons).toContain("UNKNOWN_SOURCE");
+});
+
+test("fresh turn hydrates authenticated generic disclosure through the installed history owner", async () => {
+  const { turnInput } = await import("../src/activities/run-input");
+  const { getSessionEvent } = await import("@opengeni/db");
+  const { buildOpenGeniAgent, prepareAgentTools, prepareRunInput } = await import("@opengeni/runtime");
+  const { callModelInputFilterForSettings } = await import("../../../packages/runtime/src/model-input");
+  const { OpenGeniResponsesModel } = await import("../../../packages/runtime/src/model-provider-routing");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js");
+  const { default: OpenAI } = await import("openai");
+  const f = await fixture();
+  let identity = f.identity;
+  let write = f.write;
+  let triggerEventId = f.triggerEventId;
+  let executions = 0;
+  const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const mcp = new McpServer({ name: "durable-disclosure", version: "1.0.0" });
+    mcp.registerTool("status_read", { description: "Read synthetic status", inputSchema: {} }, async () => {
+      executions++;
+      return { content: [{ type: "text" as const, text: "Synthetic status" }] };
+    });
+    const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+    transports.push(transport);
+    await mcp.connect(transport);
+    return transport.handleRequest(request);
+  } });
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: "strip", mcpServers: [{ id: "connected", url: `http://127.0.0.1:${server.port}/mcp`, cacheToolsList: false }] });
+  const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "connected" }], identity);
+  const entry = prepared.attemptToolEnvironment?.catalog.entries.find(candidate => candidate.identity.toolName === "status_read");
+  if (!entry) throw Error("ACTUAL_CATALOG_ENTRY_REQUIRED");
+  let requests = 0;
+  const client = new OpenAI({ apiKey: "synthetic-key", maxRetries: 0, fetch: async () => {
+    requests++;
+    const output = requests < 3 ? [{ type: "function_call", id: `fc_${requests}`, call_id: `call_${requests}`, name: requests === 1 ? "tool_search" : "tool_invoke", status: "completed", arguments: JSON.stringify(requests === 1 ? { query: "", names: [entry.modelName] } : { name: entry.modelName, arguments: {} }) }]
+      : [{ type: "message", id: `msg_${requests}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: "Synthetic status read", annotations: [], logprobs: [] }] }];
+    return new Response(JSON.stringify({ id: `response_${requests}`, status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } });
+  } });
+  const hydratedRequests: ModelRequest[] = [];
+  try {
+    for (let turn = 0; turn < 2; turn++) {
+      const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+      const lazy = installLazyToolRuntime(agent, "generic_dispatch", new Set(["connected"]));
+      const model = lazy.wrapModel(new OpenGeniResponsesModel(client, "synthetic-model", { id: "synthetic", label: "Synthetic", kind: "api-key", api: "responses", builtin: true }));
+      const selected = agent.clone({ model });
+      const trigger = await getSessionEvent(app.db, identity.workspaceId, triggerEventId);
+      const hydrated = await turnInput(app.db, { prepareInput: prepareRunInput } as import("@opengeni/runtime").OpenGeniRuntime, selected, trigger, {
+        turnId: identity.turnId, providerApi: "responses", fileAuthority: { accountId: identity.accountId, subjectId: f.subjectId },
+      });
+      if (!Array.isArray(hydrated.input.input)) throw Error("HYDRATED_INPUT_REQUIRED");
+      const input = hydrated.input.input;
+      let index = 0;
+      const sources = new Map<string, import("@opengeni/contracts").NativeModelToolSource>();
+      const capture: ModelRequestCapture = () => {};
+      capture.onModelToolSource = async source => { sources.set(source.sourceCallId, source); };
+      capture.beforeCall = async sent => {
+        hydratedRequests.push(sent);
+        const receipt = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: ++index }, { input: sent.input, sourceBindings: modelSourceBindings(sent.input) });
+        expect(receipt.incompleteReasons).toEqual([]);
+        expect(receipt.complete).toBe(true);
+        expect((await validateRetainedModelSources(app.db, { identity: { ...identity, sourceKey: receipt.sourceKey, requestIndex: index }, receipt })).complete).toBe(true);
+        if (turn === 1) {
+          const schema = receipt.inputs.find(item => item.sourceRef?.id.startsWith("retained-tool-disclosure:"));
+          expect(schema).toBeDefined();
+          expect(schema?.parents.map(parent => parent.owner)).toEqual(["session_history_items", "session_history_items"]);
+          expect(receipt.closure.some(node => node.sourceRef.owner === "native.tool.result")).toBe(true);
+        }
+        return receipt.sourceKey;
+      };
+      if (turn === 1) await withModelRequestCapture(capture, async () => {
+        const { expandInteractionFamilyDisclosures } = await import("../../../packages/runtime/src/lazy-tool-transport");
+        const original = expandInteractionFamilyDisclosures(input);
+        const disclosure = original.find(item => item.type === "message" && item.role === "developer");
+        if (!disclosure) throw Error("RETAINED_DISCLOSURE_REQUIRED");
+        const genuine = modelSourceInputBinding(disclosure);
+        if (!genuine || genuine.kind !== "INSTRUCTION") throw Error("DURABLE_DISCLOSURE_SOURCE_REQUIRED");
+        const callIndex = input.findIndex(item => item.type === "function_call" && item.name === "tool_search");
+        const resultIndex = input.findIndex(item => item.type === "function_call_result" && item.name === "tool_search");
+        const call = input[callIndex];
+        const result = input[resultIndex];
+        if (!call || call.type !== "function_call" || !result || result.type !== "function_call_result") throw Error("LOADED_SEARCH_PAIR_REQUIRED");
+        const alteredSchema = { ...call, providerData: structuredClone(call.providerData) };
+        const marker = alteredSchema.providerData?.["opengeni.lazy_search.v1"] as { tools: Array<Record<string, unknown>> } | undefined;
+        if (!marker?.tools[0]) throw Error("LOADED_SCHEMA_REQUIRED");
+        marker.tools[0].description = "Changed schema instructions";
+        const mutants = [
+          { index: callIndex, value: { ...call, arguments: "{}" } },
+          { index: callIndex, value: alteredSchema },
+          { index: resultIndex, value: { ...result, output: "Changed result" } },
+        ];
+        for (const [offset, mutant] of mutants.entries()) {
+          const changed = input.map((item, index) => index === mutant.index ? mutant.value : item);
+          const projected = expandInteractionFamilyDisclosures(changed);
+          const refused = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 100 + offset }, { input: projected, sourceBindings: modelSourceBindings(projected) });
+          expect(refused.complete).toBe(false);
+          expect(refused.incompleteReasons).toContain("UNKNOWN_SOURCE");
+        }
+        const replayed = expandInteractionFamilyDisclosures(structuredClone(input));
+        const replay = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 110 }, { input: replayed, sourceBindings: modelSourceBindings(replayed) });
+        expect(replay.complete).toBe(false);
+        expect(replay.incompleteReasons).toContain("UNKNOWN_SOURCE");
+        const foreign = await fixture();
+        const [foreignRow] = await getActiveSessionHistoryItemsPaged(app.db, foreign.identity.workspaceId, foreign.identity.sessionId);
+        if (!foreignRow?.sourceSha256) throw Error("ACTUAL_FOREIGN_ROW_REQUIRED");
+        for (const parent of [
+          { owner: "session_history_items", id: foreignRow.id, sha256: foreignRow.sourceSha256 },
+          { ...genuine.parents[0]!, id: crypto.randomUUID() },
+        ]) {
+          const forged = bindModelSourceInput({ ...disclosure }, { ...genuine, parents: [parent, ...genuine.parents.slice(1)] });
+          const refused = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 120 }, { input: [forged], sourceBindings: modelSourceBindings([forged]) });
+          expect(refused.complete).toBe(false);
+          expect(refused.incompleteReasons).toContain("UNRESOLVED_PARENT");
+        }
+      });
+      const result = await withModelRequestCapture(capture, () => new Runner({ tracingDisabled: true, callModelInputFilter: callModelInputFilterForSettings(settings) }).run(selected, input as ModelRequest["input"], { historyOwnership: "external" }));
+      const stored = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+      const appended = historyRowsToAppend(result.history as Array<Record<string, unknown>>, hydrated.persistedHistoryCount, Math.max(...stored.map(row => row.position)) + 1);
+      expect(await appendSessionHistoryItems(app.db, { ...write, items: appended.rows.map(row => {
+        const callId = typeof row.item.callId === "string" ? row.item.callId : undefined;
+        const source = callId ? sources.get(callId) : undefined;
+        return { ...row, ...(source && row.item.type === "function_call_result" ? { sourceBasis: { kind: "TOOL_RESULT" as const, parents: [source.rawSourceRef], retainedSources: source.retainedSources, rawToolSource: source } } : {}) };
+      }) })).toBe(true);
+      expect((await applySessionTurnSettlement(app.db, identity.workspaceId, { sessionId: identity.sessionId, turnId: identity.turnId, triggerEventId, attemptId: identity.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: {} }] })).action).toBe("settled");
+      if (turn === 0) {
+        await withWorkspaceSubjectSessionActivityRls(app.db, identity.workspaceId, f.subjectId, db => submitHumanPromptInTransaction(db, { accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, subjectId: f.subjectId, actor: { type: "human", subjectId: f.subjectId }, operationKey: crypto.randomUUID(), delivery: "send", text: "Synthetic follow-up", modelContext: null, resources: [], reasoningEffort: "low", reasoningEffortFallback: "low", source: "user" }));
+        const attemptId = crypto.randomUUID();
+        const claim = await claimSessionWorkForAttempt(app.db, identity.workspaceId, { sessionId: identity.sessionId, workflowId: `session-${identity.sessionId}`, workflowRunId: crypto.randomUUID(), attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" } });
+        if (claim.action !== "claimed") throw Error("NEXT_TURN_CLAIM_REQUIRED");
+        identity = { ...identity, turnId: claim.turn.id, attemptId, executionGeneration: claim.turn.executionGeneration, requestIndex: 1, sourceKey: crypto.randomUUID() };
+        write = { ...write, turnId: identity.turnId, expectedAttemptId: attemptId, expectedExecutionGeneration: identity.executionGeneration };
+        triggerEventId = claim.turn.triggerEventId;
+      }
+    }
+    expect(executions).toBe(1);
+    expect(requests).toBe(4);
+    expect(hydratedRequests).toHaveLength(4);
+  } finally {
+    await prepared.close();
+    for (const transport of transports) await transport.close();
+    server.stop(true);
+  }
+}, 180_000);
+
+test("actual native Knowledge GET envelopes retain exact range provenance and live authority", async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+  const { registerKnowledgeEntryTools } = await import("../../api/src/mcp/knowledge-entries");
+  const { buildDocumentsMcpServer } = await import("../../api/src/mcp/documents");
+  const { wrapAttemptToolExecute } = await import("../../../packages/runtime/src/tool-result-spill");
+  const { withModelRequestCapture } = await import("../../../packages/runtime/src/model-request-capture");
+  const { AttemptToolResult, KnowledgeEntryGetResponse } = await import("@opengeni/contracts");
+  const { saveKnowledgeEntry, getKnowledgeEntry, archiveKnowledgeEntry } = await import("@opengeni/db");
+  const retainedReceipt = async (owner: Awaited<ReturnType<typeof fixture>>, refs: import("@opengeni/contracts").ModelSourceRef[]) => {
+    const identity = { ...owner.identity, sourceKey: crypto.randomUUID() };
+    const value = { type: "message", role: "user", content: "Synthetic transformed artifact" };
+    const sha256 = createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const receipt = await persistModelCallSourceReceipt(app.db, identity, { input: [value], sourceBindings: [{ ordinal: 0, kind: "INSTRUCTION", sourceRef: { owner: "native.runtime.artifact", id: `test:${sha256}`, sha256 }, parents: [], retainedSources: refs }] });
+    expect(receipt.complete).toBe(true);
+    return { identity, receipt };
+  };
+  const f = await fixture();
+  const human = { ...f.identity, actor: { kind: "human" as const, subjectId: f.subjectId, principalKind: "human_session" as const, writeScopes: ["workspace" as const], settingsScopes: ["workspace" as const], review: true } };
+  const content = "Synthetic durable passage 🟦.\n".repeat(900);
+  const saved = await saveKnowledgeEntry(app.db, human, { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace", entry: { kind: "note", title: "Synthetic range provenance", content } });
+  const empty = await saveKnowledgeEntry(app.db, human, { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace", entry: { kind: "source", title: "Synthetic empty source", content: "", source: { kind: "manual" } } });
+  let sampleResult: import("@opengeni/contracts").AttemptToolResult | undefined;
+  const agent = { ...f.identity, actor: { kind: "agent" as const, ...f.identity } };
+  const receipts: Awaited<ReturnType<typeof retainedReceipt>>[] = [];
+  const extracted: import("@opengeni/contracts").ModelSourceRef[] = [];
+  for (const serverId of ["opengeni", "docs"] as const) {
+    const server = serverId === "docs"
+      ? buildDocumentsMcpServer(app.db, f.identity.accountId, f.identity.workspaceId, {} as import("@opengeni/documents").DocumentServices, { knowledge: agent })
+      : new McpServer({ name: "native-knowledge-source-test", version: "1" });
+    if (serverId === "opengeni") registerKnowledgeEntryTools(server, { db: app.db } as import("@opengeni/core").ApiRouteDeps, {
+      accountId: f.identity.accountId, workspaceId: f.identity.workspaceId, subjectId: "worker:retained-test", principalKind: "agent_attempt", permissions: ["documents:search"], metadata: { sessionId: f.identity.sessionId, turnId: f.identity.turnId, attemptId: f.identity.attemptId, executionGeneration: f.identity.executionGeneration },
+    }, f.identity.sessionId);
+    const client = new Client({ name: "native-range-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const pages = [
+        ...[0, 7, content.length - 7, content.length, content.length + 7, content.indexOf("🟦") + 1].map(offset => ({ entry: saved, content, offset, maxChars: offset === 0 ? 16000 : offset === content.indexOf("🟦") + 1 ? 1 : 20 })),
+        { entry: empty, content: "", offset: 0, maxChars: 20 },
+      ];
+      for (const page of pages) {
+        const raw = AttemptToolResult.parse(await client.callTool({ name: "knowledge_get", arguments: { entryId: page.entry.entryId, offset: page.offset, maxChars: page.maxChars } }));
+        sampleResult ??= raw;
+        expect(raw.isError).not.toBe(true);
+        let refs: readonly import("@opengeni/contracts").ModelSourceRef[] = [];
+        const capture: import("../../../packages/runtime/src/model-request-capture").ModelRequestCapture = () => {};
+        capture.onModelToolSource = async source => { refs = source.retainedSources; };
+        const execute = wrapAttemptToolExecute(async () => raw, undefined, { serverId, toolName: "knowledge_get" });
+        await withModelRequestCapture(capture, () => execute({}, { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "worker:retained-test" }, sourceCallId: crypto.randomUUID(), nativeModelSourceKey: f.identity.sourceKey }));
+        expect(refs).toHaveLength(1);
+        const ref = refs[0];
+        if (!ref) throw Error("ACTUAL_GET_SELECTION_REQUIRED");
+        expect(ref.owner).toBe("native.knowledge.selection.v2");
+        expect(JSON.parse(ref.version ?? "null")).toEqual([page.entry.revisionId, page.entry.version, "published", "range", page.offset, Math.min(page.content.length, page.offset + page.maxChars), page.content.length]);
+        const exact = await retainedReceipt(f, [...refs]);
+        expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(true);
+        receipts.push(exact);
+        extracted.push(ref);
+      }
+    } finally { await client.close(); await server.close(); }
+  }
+  if (!sampleResult || sampleResult.content[0]?.type !== "text") throw Error("ACTUAL_GET_ENVELOPE_REQUIRED");
+  const envelope = KnowledgeEntryGetResponse.parse(JSON.parse(sampleResult.content[0].text));
+  const range = envelope.contentRange;
+  for (const malformed of [
+    { ...envelope, found: false },
+    { ...envelope, extra: "Unregistered wrapper field" },
+    { ...envelope, revision: { ...envelope.revision, entry: { ...envelope.revision.entry, kind: "source", source: undefined } } },
+    { ...envelope, revision: { ...envelope.revision, entry: { ...envelope.revision.entry, groupIds: [envelope.id, envelope.id] } } },
+    { ...envelope, contentRange: { ...range, start: -1 } },
+    { ...envelope, contentRange: { ...range, end: range.total + 1 } },
+    { ...envelope, contentRange: { ...range, nextOffset: null } },
+    { ...envelope, revision: { ...envelope.revision, entry: { ...envelope.revision.entry, content: envelope.revision.entry.content.slice(1) } } },
+  ]) {
+    const raw = { ...sampleResult, content: [{ type: "text" as const, text: JSON.stringify(malformed) }] };
+    const execute = wrapAttemptToolExecute(async () => raw, undefined, { serverId: "opengeni", toolName: "knowledge_get" });
+    await expect(execute({}, { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "worker:retained-test" }, sourceCallId: crypto.randomUUID(), nativeModelSourceKey: f.identity.sourceKey })).rejects.toThrow("MODEL_KNOWLEDGE_GET_SOURCE_UNAVAILABLE");
+  }
+  const invalidJson = { ...sampleResult, content: [{ type: "text" as const, text: "not JSON" }] };
+  await expect(wrapAttemptToolExecute(async () => invalidJson, undefined, { serverId: "opengeni", toolName: "knowledge_get" })({}, { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "worker:retained-test" }, sourceCallId: crypto.randomUUID(), nativeModelSourceKey: f.identity.sourceKey })).rejects.toThrow("MODEL_KNOWLEDGE_GET_SOURCE_UNAVAILABLE");
+  const reference = extracted[0];
+  if (!reference) throw Error("EXTRACTED_RANGE_REQUIRED");
+  const descriptor: unknown[] = JSON.parse(reference.version ?? "null");
+  for (const mutation of [
+    { ...reference, sha256: "0".repeat(64) },
+    { ...reference, version: JSON.stringify(descriptor.map((value, index) => index === 4 ? -1 : value)) },
+    { ...reference, version: JSON.stringify(descriptor.map((value, index) => index === 5 ? content.length + 1 : value)) },
+    { ...reference, version: JSON.stringify(descriptor.map((value, index) => index === 6 ? content.length + 1 : value)) },
+    { ...reference, version: JSON.stringify(descriptor.map((value, index) => index === 3 ? "full" : value)) },
+  ]) expect((await validateRetainedModelSources(app.db, await retainedReceipt(f, [mutation]))).complete).toBe(false);
+  const foreign = await fixture();
+  expect((await validateRetainedModelSources(app.db, await retainedReceipt(foreign, [reference]))).complete).toBe(false);
+  const [membership] = await shared.admin`select permissions from workspace_memberships where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and subject_id=${f.subjectId}`;
+  if (!membership) throw Error("ACTUAL_MEMBERSHIP_REQUIRED");
+  try {
+    await shared.admin`update workspace_memberships set permissions='["goals:manage"]'::jsonb where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and subject_id=${f.subjectId}`;
+    expect((await validateRetainedModelSources(app.db, receipts[0]!)).complete).toBe(false);
+  } finally {
+    await shared.admin`update workspace_memberships set permissions=${membership.permissions === null ? null : shared.admin.json(membership.permissions)}::jsonb where account_id=${f.identity.accountId} and workspace_id=${f.identity.workspaceId} and subject_id=${f.subjectId}`;
+  }
+  expect((await validateRetainedModelSources(app.db, receipts[0]!)).complete).toBe(true);
+  const current = await getKnowledgeEntry(app.db, human, saved.entryId);
+  if (!current) throw Error("CURRENT_ENTRY_REQUIRED");
+  const corrected = await saveKnowledgeEntry(app.db, human, { operationId: crypto.randomUUID(), entryId: saved.entryId, expectedVersion: current.version, scope: "workspace", entry: { ...current.revision.entry, content: content + "Changed" } });
+  expect((await validateRetainedModelSources(app.db, receipts[0]!)).complete).toBe(false);
+  await archiveKnowledgeEntry(app.db, human, { operationId: crypto.randomUUID(), entryId: saved.entryId, expectedVersion: corrected.version });
+  expect((await validateRetainedModelSources(app.db, receipts[0]!)).complete).toBe(false);
+}, 180_000);
+
+test("Knowledge GET provenance survives the real sink and fresh-turn hydration; legacy native reads refuse", async () => {
+  const { turnInput } = await import("../src/activities/run-input");
+  const { getSessionEvent, persistAttemptToolCatalog, saveKnowledgeEntry } = await import("@opengeni/db");
+  const { buildOpenGeniAgent, prepareAgentTools, prepareRunInput } = await import("@opengeni/runtime");
+  const { callModelInputFilterForSettings } = await import("../../../packages/runtime/src/model-input");
+  const { OpenGeniResponsesModel } = await import("../../../packages/runtime/src/model-provider-routing");
+  const { registerKnowledgeEntryTools } = await import("../../api/src/mcp/knowledge-entries");
+  const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
+  const { WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js");
+  const { default: OpenAI } = await import("openai");
+  for (const variant of ["current", "legacy", "not-found", "error", "third-party"] as const) {
+    const f = await fixture();
+    let identity = f.identity;
+    const human = { ...identity, actor: { kind: "human" as const, subjectId: f.subjectId, principalKind: "human_session" as const, writeScopes: ["workspace" as const], settingsScopes: ["workspace" as const], review: true } };
+    const saved = await saveKnowledgeEntry(app.db, human, { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace", entry: { kind: "note", title: "Synthetic retained page", content: "Synthetic authorized content 🟦" } });
+    const serverId = variant === "third-party" ? "cendra-pms" : "opengeni";
+    const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
+    const http = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+      const server = new McpServer({ name: "retained-knowledge", version: "1" });
+      if (variant === "error") server.registerTool("knowledge_get", { inputSchema: {} }, async () => { throw Error("Synthetic unavailable read"); });
+      else registerKnowledgeEntryTools(server, { db: app.db } as import("@opengeni/core").ApiRouteDeps, {
+        accountId: identity.accountId, workspaceId: identity.workspaceId, subjectId: "worker:retained-test", principalKind: "agent_attempt", permissions: ["documents:search"], metadata: { sessionId: identity.sessionId, turnId: identity.turnId, attemptId: identity.attemptId, executionGeneration: identity.executionGeneration },
+      }, identity.sessionId);
+      const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+      transports.push(transport); await server.connect(transport); return transport.handleRequest(request);
+    } });
+    const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: "strip", mcpServers: [{ id: serverId, url: `http://127.0.0.1:${http.port}/mcp`, cacheToolsList: false }] });
+    const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], { ...identity, onAttemptToolCatalog: async catalog => { await persistAttemptToolCatalog(app.db, catalog); } });
+    try {
+      const entry = prepared.attemptToolEnvironment?.catalog.entries.find(candidate => candidate.identity.toolName === "knowledge_get");
+      if (!entry) throw Error("REAL_KNOWLEDGE_CATALOG_REQUIRED");
+      let requests = 0;
+      const client = new OpenAI({ apiKey: "synthetic-key", maxRetries: 0, fetch: async () => {
+        requests++;
+        const output = requests < 3 ? [{ type: "function_call", id: `fc_${requests}`, call_id: `call_${requests}`, name: requests === 1 ? "tool_search" : "tool_invoke", status: "completed", arguments: JSON.stringify(requests === 1 ? { query: "", names: [entry.modelName] } : { name: entry.modelName, arguments: variant === "error" ? {} : { entryId: variant === "not-found" ? crypto.randomUUID() : saved.entryId, offset: 3, maxChars: 8 } }) }]
+          : [{ type: "message", id: `msg_${requests}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: "Synthetic grounded response", annotations: [], logprobs: [] }] }];
+        return new Response(JSON.stringify({ id: `response_${requests}`, status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } });
+      } });
+      const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+      const lazy = installLazyToolRuntime(agent, "generic_dispatch", new Set([serverId]));
+      const model = lazy.wrapModel(new OpenGeniResponsesModel(client, "synthetic-model", { id: "synthetic", label: "Synthetic", kind: "api-key", api: "responses", builtin: true }));
+      const selected = agent.clone({ model });
+      const trigger = await getSessionEvent(app.db, identity.workspaceId, f.triggerEventId);
+      const hydrated = await turnInput(app.db, { prepareInput: prepareRunInput } as import("@opengeni/runtime").OpenGeniRuntime, selected, trigger, { turnId: identity.turnId, providerApi: "responses", fileAuthority: { accountId: identity.accountId, subjectId: f.subjectId } });
+      if (!Array.isArray(hydrated.input.input)) throw Error("REAL_HYDRATED_INPUT_REQUIRED");
+      const rows = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+      let result: Awaited<ReturnType<Runner["run"]>> | undefined;
+      const sink = createTurnHistorySink({ db: app.db, accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, attemptId: identity.attemptId,
+        getTurnId: () => identity.turnId, getExecutionGeneration: () => identity.executionGeneration, getStream: () => result, getModelRunSettings: () => settings,
+        media: { retainNativeGeneratedImagesFromHistory: async () => {}, retainedScreenshotReceiptsByCallId: new Map(), generatedImageReceiptsByProviderItemId: new Map() },
+      } as unknown as Parameters<typeof createTurnHistorySink>[0]);
+      sink.seedHistory(hydrated.input.input, hydrated.persistedHistoryCount); sink.nextHistoryPosition = Math.max(...rows.map(row => row.position)) + 1;
+      const capture: ModelRequestCapture = () => {};
+      let index = 0;
+      capture.beforeCall = async sent => {
+        const receipt = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: ++index }, { input: sent.input, sourceBindings: modelSourceBindings(sent.input) });
+        expect(receipt.incompleteReasons).toEqual([]); return receipt.sourceKey;
+      };
+      capture.callCompleted = (_key, _id, _response, restore) => sink.recordModelSourceRestorer(restore);
+      // Emulate precisely the pre-fix sink metadata omission; raw result/call/catalog remain genuine.
+      capture.onModelToolSource = async source => { sink.recordModelToolSource(variant === "legacy" ? { ...source, retainedSources: [] } : source); };
+      result = await withModelRequestCapture(capture, () => new Runner({ tracingDisabled: true, callModelInputFilter: callModelInputFilterForSettings(settings) }).run(selected, hydrated.input.input as ModelRequest["input"], { historyOwnership: "external" }));
+      await sink.reconcileConversationTruth({ requireDurable: true });
+      const persisted = await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId);
+      const call = persisted.find(row => row.item.type === "function_call" && row.item.name === entry.modelName);
+      const read = persisted.find(row => row.item.type === "function_call_result" && row.item.callId === "call_2");
+      expect(call).toBeDefined(); expect(read).toBeDefined();
+      const [storedRead] = await shared.admin`select source_basis from session_history_items where id=${read!.id}`;
+      const basis = storedRead!.source_basis as import("@opengeni/contracts").ModelHistorySourceBasis;
+      expect(basis.rawToolSource?.nativeModelSourceKey).toBeDefined();
+      expect(basis.retainedSources?.filter(ref => ref.owner === "native.knowledge.selection.v2")).toHaveLength(variant === "current" ? 1 : 0);
+      expect((await applySessionTurnSettlement(app.db, identity.workspaceId, { sessionId: identity.sessionId, turnId: identity.turnId, triggerEventId: f.triggerEventId, attemptId: identity.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: {} }] })).action).toBe("settled");
+      await withWorkspaceSubjectSessionActivityRls(app.db, identity.workspaceId, f.subjectId, db => submitHumanPromptInTransaction(db, { accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, subjectId: f.subjectId, actor: { type: "human", subjectId: f.subjectId }, operationKey: crypto.randomUUID(), delivery: "send", text: "Synthetic follow-up", modelContext: null, resources: [], reasoningEffort: "low", reasoningEffortFallback: "low", source: "user" }));
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(app.db, identity.workspaceId, { sessionId: identity.sessionId, workflowId: `session-${identity.sessionId}`, workflowRunId: crypto.randomUUID(), attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" } });
+      if (claimed.action !== "claimed") throw Error("REAL_FOLLOWUP_CLAIM_REQUIRED");
+      identity = { ...identity, turnId: claimed.turn.id, attemptId, executionGeneration: claimed.turn.executionGeneration, requestIndex: 1, sourceKey: crypto.randomUUID() };
+      const nextTrigger = await getSessionEvent(app.db, identity.workspaceId, claimed.turn.triggerEventId);
+      const next = await turnInput(app.db, { prepareInput: prepareRunInput } as import("@opengeni/runtime").OpenGeniRuntime, selected, nextTrigger, { turnId: identity.turnId, providerApi: "responses", fileAuthority: { accountId: identity.accountId, subjectId: f.subjectId } });
+      const replay = await persistModelCallSourceReceipt(app.db, identity, { input: next.input.input, sourceBindings: modelSourceBindings(next.input.input) });
+      expect(replay.complete).toBe(variant !== "legacy");
+      if (variant === "legacy") expect(replay.incompleteReasons).toContain("NATIVE_KNOWLEDGE_ORIGIN_MISSING");
+      else {
+        expect((await validateRetainedModelSources(app.db, { identity, receipt: replay })).complete).toBe(true);
+        if (variant === "current") {
+          expect(replay.closure.flatMap(node => node.retainedSources).some(ref => ref.owner === "native.knowledge.selection.v2" && JSON.parse(ref.version!)[3] === "range")).toBe(true);
+          const [membership] = await shared.admin`select permissions from workspace_memberships where account_id=${identity.accountId} and workspace_id=${identity.workspaceId} and subject_id=${f.subjectId}`;
+          try {
+            await shared.admin`update workspace_memberships set permissions='["goals:manage"]'::jsonb where account_id=${identity.accountId} and workspace_id=${identity.workspaceId} and subject_id=${f.subjectId}`;
+            expect((await validateRetainedModelSources(app.db, { identity, receipt: replay })).complete).toBe(false);
+          } finally {
+            await shared.admin`update workspace_memberships set permissions=${membership!.permissions === null ? null : shared.admin.json(membership!.permissions)}::jsonb where account_id=${identity.accountId} and workspace_id=${identity.workspaceId} and subject_id=${f.subjectId}`;
+          }
+        }
+      }
+      expect(await getActiveSessionHistoryItemsPaged(app.db, identity.workspaceId, identity.sessionId)).toHaveLength(persisted.length + 1);
+    } finally { await prepared.close(); for (const transport of transports) await transport.close(); http.stop(true); }
+  }
+}, 180_000);

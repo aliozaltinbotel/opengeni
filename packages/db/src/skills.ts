@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
-import { readSkillMetadata } from "@opengeni/contracts";
+import { canonicalModelSourceJson, readSkillMetadata } from "@opengeni/contracts";
 import type {
   SkillFile,
   SkillRecord,
@@ -17,6 +17,27 @@ export function skillFilesContentHash(files: readonly SkillFile[]): string {
     .map(({ path, content }) => [path, Buffer.from(content, "utf8").toString("base64")] as const)
     .sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
   return createHash("sha256").update(JSON.stringify(manifest), "utf8").digest("hex");
+}
+
+/** Exact selected artifact evidence; a built-in or session Skill has no ledger revision. */
+export function skillArtifactSelectionSourceRef(
+  id: string,
+  artifact: Readonly<{
+    name: string;
+    description?: string | null | undefined;
+    files: readonly SkillFile[];
+  }>,
+): import("@opengeni/contracts").ModelSourceRef {
+  const descriptor = canonicalModelSourceJson({
+    name: artifact.name,
+    description: artifact.description || artifact.name,
+  });
+  return {
+    owner: "native.skill.artifact",
+    id,
+    sha256: skillFilesContentHash(artifact.files),
+    version: createHash("sha256").update(descriptor, "utf8").digest("hex"),
+  };
 }
 
 /**

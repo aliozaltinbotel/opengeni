@@ -217,3 +217,75 @@ describe("bootstrap error surface", () => {
     }
   });
 });
+
+test("external bootstrap reads the canonical workspace grant before publishing its inventory", async () => {
+  const { registerExternalAccessTokenSource } = await import("./api");
+  const unregister = registerExternalAccessTokenSource(async () => "synthetic-host-session");
+  const originalFetch = globalThis.fetch;
+  const workspaceId = "11111111-1111-4111-8111-111111111111",
+    accountId = "22222222-2222-4222-8222-222222222222";
+  const grantPath = `/v1/workspaces/${workspaceId}/access/grant`;
+  const paths: string[] = [];
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const path = new URL(
+      typeof input === "string" ? input : input instanceof Request ? input.url : String(input),
+      window.location.href,
+    ).pathname;
+    paths.push(path);
+    if (path === grantPath)
+      return await new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (signal?.aborted) reject(signal.reason);
+        else signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    if (path === "/v1/config/client")
+      return Response.json({
+        apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+        deploymentRevision: "",
+        managedAuthSessionSetMode: "legacy",
+        defaultModel: "gpt-5.6-sol",
+        allowedModels: ["gpt-5.6-sol"],
+        models: [],
+        defaultReasoningEffort: "none",
+        allowedReasoningEfforts: ["none"],
+        mcpServers: [],
+        fileUploads: { enabled: false, maxSizeBytes: 0 },
+        productAccessMode: "configured",
+        auth: { mode: "configuredToken", headerName: "authorization", scheme: "bearer" },
+        analytics: { consentRequired: true, providers: {} },
+        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+      });
+    if (path === "/v1/access/me")
+      return Response.json({
+        mode: "configured",
+        subjectId: `external_user:${accountId}`,
+        accountGrants: [{ accountId, subjectId: `external_user:${accountId}`, permissions: [] }],
+        workspaceGrants: [],
+        defaultAccountId: accountId,
+        defaultWorkspaceId: null,
+      });
+    if (path === "/v1/workspaces")
+      return Response.json([
+        { id: workspaceId, accountId, kind: "personal", name: "Personal workspace" },
+      ]);
+    throw new Error(`Unexpected request: ${path}`);
+  }) as typeof fetch;
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <StrictMode>
+          <App />
+        </StrictMode>,
+      );
+    });
+    expect(paths).toContain(grantPath);
+    expect(container.textContent).not.toContain("No workspace access");
+  } finally {
+    await act(async () => root.unmount());
+    unregister();
+    globalThis.fetch = originalFetch;
+  }
+});

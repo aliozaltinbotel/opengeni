@@ -33,6 +33,12 @@ setting the existing authentication and console flow are unchanged. The configur
 API base still owns authentication and authorization; this browser bridge grants
 no native workspace or session authority.
 
+External-actor workspace inventory is separate from its lazy scoped grants. Before
+publishing console navigation, the bootstrap and access refresh read missing
+grants through `/v1/workspaces/:workspaceId/access/grant`, validate their current
+subject/account/workspace tuple, and preserve cancellation and principal fences.
+Inventory alone never grants workspace authority.
+
 
 Preflight: `scripts/run-development-stack.ts`; ownership: `scripts/dev-stack-lock.ts`; readiness: `scripts/dev-stack.sh`.
 
@@ -66,7 +72,17 @@ retain those references. Native validation names exact Cendra Skill origins as
 `HOST_AUTHORITY_REQUIRED`, never native permission; the host checks current
 availability before dispatch. Legacy native Skill catalogs/results without
 origins remain visible as historical transcripts but refuse a complete source
-receipt. See [embedding](embedding.md).
+receipt. Native workspace descriptors now retain their actual lifecycle revision;
+built-in and session artifacts retain their selected file hash and canonical descriptor
+hash through the same catalog, search and read paths. The existing per-turn catalog
+owner freezes the complete selected-artifact inventory separately from the bounded
+model-visible index, so an omitted selection can still be searched/read. Retry changes
+are refused. Current validation checks that frozen selection and, for session artifacts,
+the current durable session files; native workspace revisions still require current
+visibility. The catalog formatter and exact text grammar share the contracts owner:
+arbitrary descriptor fields or surrounding instructions cannot borrow a valid origin.
+Automatic-title receipts use the worker's actual initial-opener choice and bounded
+Unicode projection, retaining that durable opener's sources. See [embedding](embedding.md).
 
 `mcpApprovalPolicies` requires session-control authority. Frozen policies
 retain catalog floors, granting no capabilities/credentials.

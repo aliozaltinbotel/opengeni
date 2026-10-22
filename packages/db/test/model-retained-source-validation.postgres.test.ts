@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import postgres from "postgres";
+import { loadConfiguredBundledSkills } from "../../../apps/worker/src/activities/agent-turn/skill-selection";
+import { loadSkillManagementSkill } from "@opengeni/runtime/skill-library";
+import { formatSkillCatalog } from "@opengeni/runtime";
 import { buildSummaryItem } from "@opengeni/runtime";
-import { readSkillCatalogContext, type ModelSourceRef } from "@opengeni/contracts";
+import { SkillArtifactDefinition, readSkillCatalogContext, type ModelSourceRef } from "@opengeni/contracts";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -41,6 +44,7 @@ import {
   applySkillLifecycle,
   listSkillDescriptors,
   skillSelectionSourceRef,
+  skillArtifactSelectionSourceRef,
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
   type ModelCallSourceIdentity,
@@ -77,7 +81,7 @@ afterAll(async () => {
   else await admin?.end({ timeout: 5 });
 }, 60_000);
 
-async function fixture(managed = false, existing?: {accountId: string; workspaceId: string; subjectId: string}, learningMode?: "automatic" | "review_first" | "off") {
+async function fixture(managed = false, existing?: {accountId: string; workspaceId: string; subjectId: string}, learningMode?: "automatic" | "review_first" | "off", skills: NonNullable<Parameters<typeof createSession>[1]["skills"]> = []) {
   const unique = crypto.randomUUID();
   const suffix = existing?.subjectId ?? (managed ? `user:retained-${unique}` : unique);
   const access = existing ? {workspaceGrants: [existing]} : managed
@@ -103,6 +107,7 @@ async function fixture(managed = false, existing?: {accountId: string; workspace
     accountId,
     workspaceId,
     initialMessage: "Synthetic task",
+    skills,
     createdBy: { kind: "subject", subjectId: suffix },
     resources: [],
     metadata: {},
@@ -640,3 +645,96 @@ test.each(["automatic", "review_first", "off"] as const)("native learning %s gov
     expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
   }
 });
+
+
+test("native selected artifact catalog retains complete origins and freezes omitted selections", async () => {
+ const f = await fixture();
+ const artifact = loadSkillManagementSkill();
+ const ref = skillArtifactSelectionSourceRef(`builtin:${artifact.name}`, artifact);
+ const catalog = formatSkillCatalog([{id:ref.id,name:artifact.name,description:artifact.description,modelSourceRefs:[ref]}]);
+ const other = loadConfiguredBundledSkills({firstPartyTools:[],videoGenerationEnabled:false}).find(entry => entry.id !== ref.id);
+ if (!other) throw Error("Expected another actual configured native artifact");
+ const omitted = skillArtifactSelectionSourceRef(other.id, other.artifact);
+ const write = {...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,catalog,retainedSources:[ref],nativeArtifactSources:[ref,omitted]};
+ await ensureSessionSkillCatalog(app.db, write);
+ const rows = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+ const identity = {...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2};
+ const receipt = await persistModelCallSourceReceipt(app.db,identity,{input:rows.map(row=>row.item),instructionSelections:f.instructionSelections});
+ expect(receipt.complete).toBe(true);
+ expect((await validateRetainedModelSources(app.db,{identity,receipt})).complete).toBe(true);
+ // A selected Skill omitted from the bounded index can still be found/read later.
+ expect((await validateRetainedModelSources(app.db,await retainedReceipt(f,[omitted]))).complete).toBe(true);
+ const foreign = await fixture();
+ expect((await validateRetainedModelSources(app.db,await retainedReceipt(foreign,[ref]))).complete).toBe(false);
+ await expect(ensureSessionSkillCatalog(app.db,{...write,nativeArtifactSources:[{...ref,sha256:"0".repeat(64)},omitted]})).rejects.toThrow("SKILL_CATALOG_ARTIFACT_SOURCES_CHANGED");
+ await expect(ensureSessionSkillCatalog(app.db,{...write,nativeArtifactSources:[]})).rejects.toThrow("SKILL_CATALOG_ARTIFACT_SOURCES_CHANGED");
+},60_000);
+
+test("native catalog cannot borrow one valid origin for another unproven entry", async () => {
+ const f = await fixture();
+ const artifact = loadSkillManagementSkill();
+ const ref = skillArtifactSelectionSourceRef(`builtin:${artifact.name}`,artifact);
+ const catalog = formatSkillCatalog([{id:ref.id,name:artifact.name,description:artifact.description},{id:"builtin:unproven",name:"Unproven",description:"Synthetic unproven guidance"}]);
+ await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,catalog,retainedSources:[ref],nativeArtifactSources:[ref]});
+ const rows = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+ const receipt = await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2},{input:rows.map(row=>row.item)});
+ expect(receipt.complete).toBe(false);
+ expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
+},60_000);
+
+test("native catalog refuses extra model-visible descriptor fields", async () => {
+ const f = await fixture();
+ const artifact = loadSkillManagementSkill();
+ const ref = skillArtifactSelectionSourceRef(`builtin:${artifact.name}`,artifact);
+ const catalog = `## Skills\n- ${JSON.stringify({id:ref.id,name:artifact.name,description:artifact.description,instructions:"Unattributed extra guidance"})}`;
+ await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,catalog,retainedSources:[ref],nativeArtifactSources:[ref]});
+ const rows = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+ const receipt = await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2},{input:rows.map(row=>row.item)});
+ expect(receipt.complete).toBe(false);
+ expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
+},60_000);
+
+
+test("native session artifact sources require the actual durable selected files", async () => {
+ const artifact = SkillArtifactDefinition.parse(loadSkillManagementSkill());
+ for (const changed of [false,true]) {
+  const f = await fixture(false,undefined,undefined,[artifact]);
+  const id = `session:${f.identity.sessionId}:${artifact.name}`;
+  const ref = skillArtifactSelectionSourceRef(id, changed ? {...artifact,files:artifact.files.map(file=>({...file,content:`${file.content}\nChanged guidance`}))} : artifact);
+  await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,catalog:formatSkillCatalog([]),retainedSources:[],nativeArtifactSources:[ref]});
+  const result = await validateRetainedModelSources(app.db,await retainedReceipt(f,[ref]));
+  expect(result.complete).toBe(!changed);
+  expect(result.sources.find(source=>source.sourceRef.owner==="native.skill.artifact")?.status).toBe(changed?"REFUSED":"AVAILABLE");
+ }
+},60_000);
+
+
+test.each(["header","footer"] as const)("native catalog refuses unattributed %s instructions", async placement => {
+ const f = await fixture();
+ const artifact = loadSkillManagementSkill();
+ const ref = skillArtifactSelectionSourceRef(`builtin:${artifact.name}`,artifact);
+ const original = formatSkillCatalog([{id:ref.id,name:artifact.name,description:artifact.description}]);
+ const catalog = placement === "header" ? `Unattributed guidance\n${original}` : `${original}\nUnattributed guidance`;
+ await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,catalog,retainedSources:[ref],nativeArtifactSources:[ref]});
+ const rows = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+ const receipt = await persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2},{input:rows.map(row=>row.item)});
+ expect(receipt.complete).toBe(false);
+ expect(receipt.incompleteReasons).toContain("UNRESOLVED_PARENT");
+},60_000);
+
+test("native workspace catalog derives its descriptor from the installed lifecycle revision", async () => {
+ const f = await fixture();
+ const skillId = crypto.randomUUID();
+ const saved = await applySkillLifecycle(app.db,{...f.identity,actor:{kind:"human",subjectId:f.suffix,principalKind:"human_session"}},{operation:"save",operationId:crypto.randomUUID(),skillId,expectedRevisionId:null,expectedScopeVersion:1,stableKey:`catalog-${skillId}`,files:[{path:"SKILL.md",content:"---\nname: catalog-guidance\ndescription: Synthetic installed catalog guidance\n---\nRead the current records."}],reason:"Synthetic catalog proof"});
+ const descriptor = (await listSkillDescriptors(app.db,{...f.identity,subjectId:f.suffix})).find(entry=>entry.id===skillId);
+ if (!descriptor) throw Error("Expected installed native Skill");
+ const ref = skillSelectionSourceRef(descriptor);
+ await ensureSessionSkillCatalog(app.db,{...f.identity,expectedAttemptId:f.identity.attemptId,expectedExecutionGeneration:f.identity.executionGeneration,catalog:formatSkillCatalog([{id:descriptor.id,name:descriptor.title,description:descriptor.description}]),retainedSources:[ref],nativeArtifactSources:[]});
+ const rows = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+ const identity = {...f.identity,sourceKey:crypto.randomUUID(),requestIndex:2};
+ const receipt = await persistModelCallSourceReceipt(app.db,identity,{input:rows.map(row=>row.item),instructionSelections:f.instructionSelections});
+ expect(receipt.complete).toBe(true);
+ expect((await validateRetainedModelSources(app.db,{identity,receipt})).complete).toBe(true);
+ await applySkillLifecycle(app.db,{...f.identity,actor:{kind:"human",subjectId:f.suffix,principalKind:"human_session"}},{operation:"remove",operationId:crypto.randomUUID(),skillId,expectedRevisionId:saved.revisionId,expectedScopeVersion:descriptor.scopeVersion,reason:"Synthetic withdrawal"});
+ expect((await validateRetainedModelSources(app.db,{identity,receipt})).complete).toBe(false);
+},60_000);
