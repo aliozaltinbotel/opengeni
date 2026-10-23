@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { Runner, MCPServerStreamableHttp, OpenAIResponsesModel, Usage as SDKUsage, type MCPServer, type ModelRequest, type AgentInputItem, type StreamEvent } from "@openai/agents";
+import { Agent, RunContext, Runner, MCPServerStreamableHttp, OpenAIResponsesModel, Usage as SDKUsage, type MCPServer, type ModelRequest, type AgentInputItem, type StreamEvent } from "@openai/agents";
+import { Manifest, type SandboxSessionLike } from "@openai/agents-core/sandbox";
 import { protocol, withTrace, NoopTrace } from "@openai/agents-core";
 import OpenAI from "openai";
 import { createHash } from "node:crypto";
 import { ScriptedModel, functionCall, testSettings } from "@opengeni/testing";
-import { buildOpenGeniAgent, prepareAgentTools, createProductionAgentRuntime } from "../src/index";
+import { buildAgentCapabilities, buildOpenGeniAgent, prepareAgentTools, createProductionAgentRuntime } from "../src/index";
 import { bindModelSourceInput, modelSourceInputBinding, modelSourceBindings, ModelRequestCaptureModel, withModelRequestCapture, type ModelRequestCapture } from "../src/model-request-capture";
 import { stripProviderItemId, stripProviderItemIdsFilter } from "../src/model-input";
 
@@ -657,5 +658,169 @@ test("only the installed id projection of genuine output can restore a producer 
     const extended: Record<string, unknown> = { ...structuredClone(projected), extra: "unsupported" };
     await expect(model.getResponse(requestWith("Synthetic instruction", [extended] as ModelRequest["input"]))).rejects.toThrow("UNKNOWN_SOURCE");
     expect(calls).toBe(2);
+  });
+});
+
+for (const streaming of [false, true]) {
+  test(`actual SDK builtin shell ${streaming ? "streaming" : "ordinary"} continuation retains exact output provenance through clone and runAs`, async () => {
+    const raw = "Exit code: 0\nOutput:\n391\n";
+    const calls: string[] = [];
+    const session: SandboxSessionLike = {
+      state: { manifest: new Manifest({ root: "/workspace" }) },
+      execCommand: async args => { calls.push(args.runAs ?? ""); return raw; },
+    };
+    const shell = buildAgentCapabilities(testSettings({ sandboxBackend: "none", webSearchEnabled: false }))
+      .find(capability => capability.type === "shell");
+    if (!shell) throw Error("Builtin shell capability missing");
+    const tools = shell.clone().bind(session).bindRunAs("synthetic-runner").tools();
+    expect(Array.isArray(tools)).toBe(true);
+    const command = tools.find(tool => tool.type === "function" && tool.name === "exec_command");
+    if (!command || command.type !== "function") throw Error("Builtin exec_command missing");
+    let requests = 0;
+    const sources: unknown[] = [];
+    const capture: ModelRequestCapture = () => {};
+    capture.onModelToolSource = async source => { sources.push(source); };
+    capture.beforeCall = async request => {
+      requests++;
+      if (requests === 2) {
+        const binding = modelSourceBindings(request.input).find(value => value.kind === "TOOL_RESULT");
+        expect(binding).toBeDefined();
+        expect(binding?.nativeProducerSourceKey).toBe("builtin-source-1");
+        expect(binding?.rawToolSource?.sourceCallId).toBe("synthetic-exec-call");
+        expect(binding?.rawToolSource?.rawSourceRef.sha256).toBe(digest(raw));
+        expect(binding?.rawToolResult).toBe(raw);
+        expect(binding?.retainedSources).toEqual([]);
+      }
+      return `builtin-source-${requests}`;
+    };
+    const model = new ModelRequestCaptureModel(new ScriptedModel([
+      { output: [functionCall("exec_command", { cmd: "synthetic-calculation" }, "synthetic-exec-call")] },
+      { outputText: "391" },
+    ]));
+    const agent = new Agent({ name: "builtin-source-regression", model, tools: [command] }).clone({ model });
+    const initial = { type: "message" as const, role: "user" as const, content: "Run the synthetic calculation." };
+    bindModelSourceInput(initial, { kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: "initial", sha256: digest(initial) }, parents: [], retainedSources: [] });
+    await withModelRequestCapture(capture, async () => {
+      const runner = new Runner({ tracingDisabled: true });
+      if (streaming) { const stream = await runner.run(agent, [initial], { stream: true, historyOwnership: "external" }); for await (const _event of stream) {} await stream.completed; }
+      else await runner.run(agent, [initial], { historyOwnership: "external" });
+    });
+    expect(requests).toBe(2);
+    expect(calls).toEqual(["synthetic-runner"]);
+    expect(sources).toHaveLength(1);
+  });
+}
+
+test("actual SDK parallel Knowledge and builtin shell results keep distinct exact producer sources", async () => {
+  const retained = { owner: "native.knowledge.selection.v2", id: crypto.randomUUID(), version: "synthetic-current-revision", sha256: digest("synthetic Knowledge revision") };
+  const raw = { content: [{ type: "text" as const, text: "Synthetic Knowledge result" }] };
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, mcpServers: [{ id: "docs", url: "https://synthetic.invalid/mcp", cacheToolsList: false }] });
+  const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "docs" }], {
+    accountId: crypto.randomUUID(), workspaceId: crypto.randomUUID(), sessionId: crypto.randomUUID(), turnId: crypto.randomUUID(), attemptId: crypto.randomUUID(), executionGeneration: 1,
+    localMcpServers: [{ id: "docs", server: {
+      name: "docs", cacheToolsList: false, connect: async () => {}, close: async () => {}, invalidateToolsCache: async () => {},
+      listTools: async () => [{ name: "knowledge_search", inputSchema: { type: "object", properties: {}, required: [], additionalProperties: false } }],
+      callTool: async () => raw.content, callToolResult: async () => raw,
+    } satisfies MCPServer, modelSourceRefs: () => [retained] }],
+  });
+  try {
+    const knowledgeAgent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+    const knowledge = (await knowledgeAgent.getMcpTools(new RunContext())).find(tool => tool.type === "function" && tool.name.endsWith("__knowledge_search"));
+    const session: SandboxSessionLike = { state: { manifest: new Manifest({ root: "/workspace" }) }, execCommand: async () => "391" };
+    const shell = buildAgentCapabilities(settings).find(capability => capability.type === "shell");
+    if (!shell || !knowledge || knowledge.type !== "function") throw Error("Parallel native tools missing");
+    const command = shell.clone().bind(session).tools().find(tool => tool.type === "function" && tool.name === "exec_command");
+    if (!command || command.type !== "function") throw Error("Builtin exec_command missing");
+    let requests = 0;
+    const capture: ModelRequestCapture = () => {};
+    capture.beforeCall = async request => {
+      requests++;
+      if (requests === 2) {
+        expect(modelSourceBindings(request.input)).toHaveLength(request.input.length);
+        const results = modelSourceBindings(request.input).filter(binding => binding.kind === "TOOL_RESULT");
+        expect(results).toHaveLength(2);
+        expect(results.find(binding => binding.rawToolSource?.sourceCallId === "parallel-knowledge")?.retainedSources).toEqual([retained]);
+        expect(results.find(binding => binding.rawToolSource?.sourceCallId === "parallel-exec")?.rawToolResult).toBe("391");
+        expect(results.every(binding => binding.nativeProducerSourceKey === "parallel-source-1")).toBe(true);
+      }
+      return `parallel-source-${requests}`;
+    };
+    const model = new ModelRequestCaptureModel(new ScriptedModel([
+      { output: [functionCall(knowledge.name, {}, "parallel-knowledge"), functionCall("exec_command", { cmd: "synthetic-calculation" }, "parallel-exec")] },
+      { outputText: "391 and retained Knowledge" },
+    ]));
+    const agent = new Agent({ name: "parallel-source-regression", model, tools: [knowledge, command] });
+    const initial = { type: "message" as const, role: "user" as const, content: "Read synthetic Knowledge and calculate." };
+    bindModelSourceInput(initial, { kind: "HISTORY_ROW", sourceRef: { owner: "native.runtime.artifact", id: "initial", sha256: digest(initial) }, parents: [], retainedSources: [] });
+    await withModelRequestCapture(capture, () => new Runner({ tracingDisabled: true }).run(agent, [initial], { historyOwnership: "external" }));
+    expect(requests).toBe(2);
+  } finally { await prepared.close(); }
+});
+
+test("builtin capability output cannot invent a producer from absent, foreign or mismatched invocation context", async () => {
+  const session: SandboxSessionLike = { state: { manifest: new Manifest({ root: "/workspace" }) }, execCommand: async () => "synthetic output" };
+  const shell = buildAgentCapabilities(testSettings()).find(capability => capability.type === "shell");
+  if (!shell) throw Error("Builtin shell missing");
+  const command = shell.clone().bind(session).tools().find(tool => tool.type === "function" && tool.name === "exec_command");
+  if (!command || command.type !== "function") throw Error("Builtin command missing");
+  const sources: unknown[] = [];
+  const capture: ModelRequestCapture = () => {};
+  capture.toolSourceKeys = new Map([["current-shell-call", "current-source"]]);
+  capture.onModelToolSource = async source => { sources.push(source); };
+  await withModelRequestCapture(capture, async () => {
+    await command.invoke(new RunContext({}), JSON.stringify({ cmd: "synthetic-command" }));
+    for (const call of [functionCall("exec_command", {}, "foreign-call"), functionCall("foreign-tool", {}, "current-shell-call")]) {
+      await command.invoke(new RunContext({}), JSON.stringify({ cmd: "synthetic-command" }), { toolCall: protocol.FunctionCallItem.parse(call) });
+    }
+  });
+  expect(sources).toEqual([]);
+});
+
+for (const failureAt of ["authority", "source-recording"] as const) {
+  test(`builtin capability ${failureAt} refusal preserves the exact failure without returning an attributed result`, async () => {
+    const failure = new Error("SYNTHETIC_CURRENT_SOURCE_REFUSED");
+    let executions = 0;
+    const session: SandboxSessionLike = { state: { manifest: new Manifest({ root: "/workspace" }) }, execCommand: async () => { executions++; return "synthetic output"; } };
+    const shell = buildAgentCapabilities(testSettings(), [], { authorizeAttemptExecution: async () => { if (failureAt === "authority") throw failure; } }).find(capability => capability.type === "shell");
+    if (!shell) throw Error("Builtin shell missing");
+    const command = shell.clone().bind(session).tools().find(tool => tool.type === "function" && tool.name === "exec_command");
+    if (!command || command.type !== "function") throw Error("Builtin command missing");
+    let recordings = 0;
+    const capture: ModelRequestCapture = () => {};
+    capture.toolSourceKeys = new Map([["current-shell-call", "current-source"]]);
+    capture.onModelToolSource = async () => { recordings++; throw failure; };
+    await expect(withModelRequestCapture(capture, () => command.invoke(new RunContext({}), JSON.stringify({ cmd: "synthetic-command" }), { toolCall: protocol.FunctionCallItem.parse(functionCall("exec_command", {}, "current-shell-call")) }))).rejects.toBe(failure);
+    expect(executions).toBe(failureAt === "authority" ? 0 : 1);
+    expect(recordings).toBe(failureAt === "authority" ? 0 : 1);
+  });
+}
+
+test("builtin capability provenance refuses altered output, tool name and foreign call projections", async () => {
+  const session: SandboxSessionLike = { state: { manifest: new Manifest({ root: "/workspace" }) }, execCommand: async () => "391" };
+  const shell = buildAgentCapabilities(testSettings()).find(capability => capability.type === "shell");
+  if (!shell) throw Error("Builtin shell missing");
+  const command = shell.clone().bind(session).tools().find(tool => tool.type === "function" && tool.name === "exec_command");
+  if (!command || command.type !== "function") throw Error("Builtin command missing");
+  const capture: ModelRequestCapture = () => {};
+  capture.toolSourceKeys = new Map([["current-shell-call", "current-source"]]);
+  capture.beforeCall = async request => {
+    // Object-spread history may carry an authentic old symbol. As in the receipt
+    // producer, attribution also requires its exact current input digest.
+    const bindings = modelSourceBindings(request.input);
+    if (bindings.length !== request.input.length || bindings.some(binding => binding.sourceRef.sha256 !== digest(request.input[binding.ordinal]))) throw Error("MODEL_SOURCE_INEXACT");
+    return "next-source";
+  };
+  const model = new ModelRequestCaptureModel(new ScriptedModel("synthetic answer"));
+  const requestWith = (input: ModelRequest["input"]): ModelRequest => ({ systemInstructions: "Synthetic instruction", input, modelSettings: {}, tools: [], handoffs: [], outputType: "text", tracing: false });
+  await withModelRequestCapture(capture, async () => {
+    await command.invoke(new RunContext({}), JSON.stringify({ cmd: "synthetic-command" }), { toolCall: protocol.FunctionCallItem.parse(functionCall("exec_command", {}, "current-shell-call")) });
+    const original = protocol.FunctionCallResultItem.parse({ type: "function_call_result", name: "exec_command", callId: "current-shell-call", status: "completed", output: { type: "text", text: "391" } });
+    await model.getResponse(requestWith([original]));
+    expect(modelSourceInputBinding(original)?.kind).toBe("TOOL_RESULT");
+    for (const altered of [
+      { ...original, output: { type: "text" as const, text: "altered output" } },
+      { ...original, name: "foreign-tool" },
+      { ...original, callId: "foreign-call" },
+    ]) await expect(model.getResponse(requestWith([altered]))).rejects.toThrow("MODEL_SOURCE_INEXACT");
   });
 });

@@ -46,6 +46,7 @@ import { instrumentedModelFetch } from "./model-provider-client";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
+  canonicalModelSourceJson,
   sessionTitleGenerationInput,
   mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
@@ -536,6 +537,7 @@ import {
   type BeforeModelCallSourceReceipt,
   nativeModelSourceKeyForToolCall,
   recordModelToolProjection,
+  recordModelToolSource,
   recordModelToolErrorSource,
   bindModelSourceInput,
   modelSourceBindings,
@@ -4878,7 +4880,30 @@ function buildAgentCapabilitiesFromComposition(
         return {
           ...tool,
           invoke: (context, input, details) =>
-            withRoutingMutationOutputRejectionFence(() => invoke(context, input, details)),
+            withRoutingMutationOutputRejectionFence(async () => {
+              const output = await invoke(context, input, details);
+              const call = details?.toolCall;
+              const sourceKey = nativeModelSourceKeyForToolCall(call?.callId);
+              // Builtin sandbox capabilities do not pass through the MCP source producer.
+              // Only this captured model call may attribute its exact returned output.
+              if (call && call.name === tool.name && sourceKey) {
+                canonicalModelSourceJson(output);
+                const serialized = JSON.stringify(output);
+                if (serialized === undefined) throw new Error("MODEL_NATIVE_TOOL_SOURCE_UNAVAILABLE");
+                await recordModelToolSource({
+                  sourceCallId: call.callId,
+                  nativeModelSourceKey: sourceKey,
+                  rawSourceRef: {
+                    owner: "native.tool.result",
+                    id: `native-capability:${tool.name}:${sourceKey}:${call.callId}`,
+                    sha256: createHash("sha256").update(serialized).digest("hex"),
+                  },
+                  retainedSources: [],
+                }, output);
+                recordModelToolProjection(call.callId, tool.name, output);
+              }
+              return output;
+            }),
         };
       });
     };
