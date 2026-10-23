@@ -1,5 +1,6 @@
 import { describe, expect, jest, test } from "bun:test";
-import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
+import { OPENGENI_API_CONTRACT_REVISION, streamSessionEvents } from "@opengeni/sdk";
+import { bytesStream, makeEvent, sseBlock } from "../../../packages/sdk/test/helpers";
 import "./app-host";
 import {
   AuthApiError,
@@ -31,6 +32,54 @@ import {
 import { resetSignupAttributionForTests, retainSignupAttribution } from "./lib/signup-attribution";
 
 describe("web API auth helpers", () => {
+  test("a browser-owned bounded timeout reconnects the session feed without cancelling its caller", async () => {
+    const originalFetch = globalThis.fetch;
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, "window");
+    const entriesDescriptor = Object.getOwnPropertyDescriptor(performance, "getEntriesByType");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: new URL("https://api.example.test/workspaces/current") },
+    });
+    Object.defineProperty(performance, "getEntriesByType", {
+      configurable: true,
+      value: (type: string) => type === "navigation" ? [{ nextHopProtocol: "http/1.1" }] : [],
+    });
+    globalThis.fetch = ((_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+      })) as typeof fetch;
+    const caller = new AbortController();
+    let events: ReturnType<typeof streamSessionEvents> | undefined;
+    try {
+      configureManagedActorEpoch("bounded-recovery");
+      const failure: unknown = await managedActorFetch(
+        "https://api.example.test/v1/workspaces/current/sessions/session/events/stream",
+        { headers: { accept: "text/event-stream" } },
+      ).catch((error: unknown) => error);
+      let opens = 0;
+      const event = makeEvent(1);
+      events = streamSessionEvents({
+        openStream: async () => {
+          opens += 1;
+          if (opens === 1) throw failure;
+          return bytesStream([sseBlock(event)]);
+        },
+        listEvents: async () => [],
+      }, { signal: caller.signal, reconnectDelayMs: 1, reconnectJitterRatio: 0 });
+      expect(caller.signal.aborted).toBe(false);
+      expect(await events.next()).toEqual({ done: false, value: event });
+      expect(opens).toBe(2);
+    } finally {
+      caller.abort();
+      await events?.return();
+      configureManagedActorEpoch(null);
+      globalThis.fetch = originalFetch;
+      if (windowDescriptor) Object.defineProperty(globalThis, "window", windowDescriptor);
+      else Reflect.deleteProperty(globalThis, "window");
+      if (entriesDescriptor) Object.defineProperty(performance, "getEntriesByType", entriesDescriptor);
+      else Reflect.deleteProperty(performance, "getEntriesByType");
+    }
+  }, 20_000);
   test("deployment checks wait for a foreground read response body before settling", async () => {
     const originalFetch = globalThis.fetch;
     let foregroundBody!: ReadableStreamDefaultController<Uint8Array>;
@@ -368,7 +417,7 @@ describe("web API auth helpers", () => {
       jest.advanceTimersByTime(11_000);
       await expect(stream).rejects.toMatchObject({
         message: "The bounded HTTP/1 stream did not complete its native response in time",
-        name: "AbortError",
+        name: "TypeError",
       });
     } finally {
       configureManagedActorEpoch(null);
@@ -424,7 +473,7 @@ describe("web API auth helpers", () => {
       jest.advanceTimersByTime(11_000);
       await expect(stream).rejects.toMatchObject({
         message: "The bounded HTTP/1 stream did not complete its native response in time",
-        name: "AbortError",
+        name: "TypeError",
       });
     } finally {
       configureManagedActorEpoch(null);
@@ -555,7 +604,7 @@ describe("web API auth helpers", () => {
       jest.advanceTimersByTime(11_000);
       await expect(stream).rejects.toMatchObject({
         message: "The bounded HTTP/1 stream did not complete its native response in time",
-        name: "AbortError",
+        name: "TypeError",
       });
       expect(streamDispatches).toBe(0);
       finiteController.enqueue(new TextEncoder().encode("[]"));

@@ -380,10 +380,9 @@ export async function managedActorFetch(
     if (boundedHttp1Sse) {
       boundedRequestTimer = setTimeout(() => {
         controller.abort(
-          new DOMException(
-            "The bounded HTTP/1 stream did not complete its native response in time",
-            "AbortError",
-          ),
+          // This browser-owned deadline is a transient transport failure. Keep
+          // AbortError reserved for the caller or an actor-scope cancellation.
+          new TypeError("The bounded HTTP/1 stream did not complete its native response in time"),
         );
       }, nativeLifetimeMs);
       await waitForManagedActorForegroundIdle(controller.signal);
