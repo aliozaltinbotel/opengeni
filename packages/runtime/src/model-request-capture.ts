@@ -210,6 +210,11 @@ export async function recordModelGenericSearchSource(call: unknown, output: stri
   await recordModelGenericControlSource(call, output, "tool_search", schemas);
 }
 
+/** The listing producer owns only descriptors from its current authorized catalog. */
+export async function recordModelGenericListSource(call: unknown, output: string): Promise<void> {
+  await recordModelGenericControlSource(call, output, "tool_list", []);
+}
+
 /** The dispatcher owns this refusal only when no authorized tool was invoked. */
 export async function recordModelGenericInvokeRefusal(call: unknown, output: string): Promise<void> {
   await recordModelGenericControlSource(call, output, "tool_invoke", []);
@@ -218,7 +223,7 @@ export async function recordModelGenericInvokeRefusal(call: unknown, output: str
 async function recordModelGenericControlSource(
   call: unknown,
   output: string,
-  modelName: "tool_search" | "tool_invoke",
+  modelName: "tool_search" | "tool_list" | "tool_invoke",
   schemas: readonly Record<string, unknown>[],
 ): Promise<void> {
   const capture = modelRequestCapture.getStore();
@@ -234,8 +239,13 @@ async function recordModelGenericControlSource(
   }
   if (sourceState(capture).tools.has(callId)) throw new Error("MODEL_TOOL_SEARCH_CALL_COLLISION");
   const sha256 = inputDigest(output);
+  const sourcePrefix = {
+    tool_search: "tool-search",
+    tool_list: "tool-list",
+    tool_invoke: "tool-invoke-refusal",
+  }[modelName];
   await recordModelToolSource({sourceCallId: callId, nativeModelSourceKey: sourceKey,
-    rawSourceRef: {owner: "native.tool.result", id: `${modelName === "tool_search" ? "tool-search" : "tool-invoke-refusal"}:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
+    rawSourceRef: {owner: "native.tool.result", id: `${sourcePrefix}:${sourceKey}:${callId}:${sha256}`, sha256}, retainedSources: []}, output);
   const captured = sourceState(capture).tools.get(callId);
   if (!captured) throw new Error("MODEL_TOOL_SEARCH_RESULT_UNAVAILABLE");
   // Lazy dispatch exposes the string to its provider. The native outer

@@ -21,7 +21,7 @@ import {
   parseSearchArgs,
   toolsNamedInQuery,
 } from "./codex-tool-search";
-import { ModelRequestCaptureModel, bindModelGenericToolDisclosure, recordModelGenericSearchSource, recordModelGenericInvokeRefusal, recordModelToolSearchSource } from "./model-request-capture";
+import { ModelRequestCaptureModel, bindModelGenericToolDisclosure, recordModelGenericSearchSource, recordModelGenericListSource, recordModelGenericInvokeRefusal, recordModelToolSearchSource } from "./model-request-capture";
 import { ToolSearchIndex } from "./tool-discovery-ranking";
 import { decisionCandidate, type ToolSelector } from "./tool-discovery-decision";
 import { toolDescriptor, toolGroup, toolGroups } from "./tool-discovery-catalog";
@@ -712,121 +712,127 @@ export class LazyToolRuntime {
         additionalProperties: false,
       } as never,
       strict: false,
-      execute: async (input: unknown) => {
-        await this.ensurePrepared();
-        const args = isRecord(input) ? input : {};
-        const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
-        const group = typeof args.group === "string" ? args.group : undefined;
-        const serverIds = this.modelMcpServerIds();
-        const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
-        const limit =
-          typeof args.limit === "number" && Number.isFinite(args.limit)
-            ? Math.max(1, Math.min(40, Math.floor(args.limit)))
-            : 20;
-        const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
-          .filter(isFunctionTool)
-          .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-        const tools = authorizedTools.filter(
-          (tool) =>
-            tool.name.startsWith(prefix) &&
-            (group === undefined || toolGroup(tool.name, serverIds) === group),
-        );
-        if (args.view === "groups") {
-          const groups = toolGroups(tools, serverIds);
-          const cursorIndex =
-            cursor === undefined ? -1 : groups.findIndex((entry) => entry.group === cursor);
-          if (cursor !== undefined && cursorIndex === -1)
-            return JSON.stringify({
-              error: "invalid_cursor",
-              message: "Restart listing without a cursor in the current authorized catalog.",
-            });
-          const page: typeof groups = [];
-          let index = cursorIndex + 1;
-          for (; index < groups.length && page.length < limit; index++) {
-            const entry = groups[index]!;
-            if (
-              Buffer.byteLength(
-                JSON.stringify({
-                  groups: [...page, entry],
-                  total: groups.length,
-                  nextCursor: entry.group,
-                }),
-              ) >
-              16 * 1024
-            ) {
-              if (!page.length)
-                return JSON.stringify({
-                  error: "descriptor_too_large",
-                  message: "A tool group exceeds the listing budget.",
-                });
-              break;
-            }
-            page.push(entry);
-          }
-          return JSON.stringify({
-            groups: page,
-            total: groups.length,
-            nextCursor: index < groups.length ? page.at(-1)!.group : null,
-          });
-        }
-        const cursorIndex =
-          cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
-        if (cursor !== undefined && cursorIndex === -1) {
-          return JSON.stringify({
-            error: "invalid_cursor",
-            message: "Restart listing without a cursor in the current authorized catalog.",
-          });
-        }
-        const descriptors: { name: string; description: string }[] = [];
-        let index = cursorIndex + 1;
-        for (; index < tools.length && descriptors.length < limit; index++) {
-          const tool = tools[index]!;
-          const descriptor = toolDescriptor(tool);
-          const candidate = {
-            tools: [...descriptors, descriptor],
-            total: tools.length,
-            nextCursor: tool.name,
-          };
-          if (Buffer.byteLength(JSON.stringify(candidate)) > 16 * 1024) {
-            if (descriptors.length === 0) {
-              return JSON.stringify({
-                error: "descriptor_too_large",
-                message: "A tool name exceeds the listing budget.",
-              });
-            }
-            break;
-          }
-          descriptors.push(descriptor);
-        }
-        const result = {
-          tools: descriptors,
-          total: tools.length,
-          nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
-        };
-        if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
-
-        // Preserve literal-prefix pagination. Recovery hints are descriptors
-        // from the same authorized deferred pool, never schemas or new grants.
-        const recovery = {
-          ...result,
-          message:
-            "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
-          suggestions: [] as { name: string; description: string }[],
-        };
-        for (const candidate of authorizedTools) {
-          if (!candidate.name.includes(prefix)) continue;
-          const suggestion = {
-            name: candidate.name,
-            description: Array.from(candidate.description).slice(0, 160).join(""),
-          };
-          const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
-          if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
-          recovery.suggestions.push(suggestion);
-          if (recovery.suggestions.length >= Math.min(limit, 8)) break;
-        }
-        return JSON.stringify(recovery);
+      execute: async (input: unknown, _context: unknown, details) => {
+        const output = await this.listAuthorizedTools(input);
+        await recordModelGenericListSource(details?.toolCall, output);
+        return output;
       },
     }) as unknown as Tool;
+  }
+
+  private async listAuthorizedTools(input: unknown): Promise<string> {
+    await this.ensurePrepared();
+    const args = isRecord(input) ? input : {};
+    const prefix = typeof args.namePrefix === "string" ? args.namePrefix : "";
+    const group = typeof args.group === "string" ? args.group : undefined;
+    const serverIds = this.modelMcpServerIds();
+    const cursor = typeof args.cursor === "string" ? args.cursor : undefined;
+    const limit =
+      typeof args.limit === "number" && Number.isFinite(args.limit)
+        ? Math.max(1, Math.min(40, Math.floor(args.limit)))
+        : 20;
+    const authorizedTools = [...new Set(this.searchableTools(this.currentTools))]
+      .filter(isFunctionTool)
+      .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    const tools = authorizedTools.filter(
+      (tool) =>
+        tool.name.startsWith(prefix) &&
+        (group === undefined || toolGroup(tool.name, serverIds) === group),
+    );
+    if (args.view === "groups") {
+      const groups = toolGroups(tools, serverIds);
+      const cursorIndex =
+        cursor === undefined ? -1 : groups.findIndex((entry) => entry.group === cursor);
+      if (cursor !== undefined && cursorIndex === -1)
+        return JSON.stringify({
+          error: "invalid_cursor",
+          message: "Restart listing without a cursor in the current authorized catalog.",
+        });
+      const page: typeof groups = [];
+      let index = cursorIndex + 1;
+      for (; index < groups.length && page.length < limit; index++) {
+        const entry = groups[index]!;
+        if (
+          Buffer.byteLength(
+            JSON.stringify({
+              groups: [...page, entry],
+              total: groups.length,
+              nextCursor: entry.group,
+            }),
+          ) >
+          16 * 1024
+        ) {
+          if (!page.length)
+            return JSON.stringify({
+              error: "descriptor_too_large",
+              message: "A tool group exceeds the listing budget.",
+            });
+          break;
+        }
+        page.push(entry);
+      }
+      return JSON.stringify({
+        groups: page,
+        total: groups.length,
+        nextCursor: index < groups.length ? page.at(-1)!.group : null,
+      });
+    }
+    const cursorIndex =
+      cursor === undefined ? -1 : tools.findIndex((tool) => tool.name === cursor);
+    if (cursor !== undefined && cursorIndex === -1) {
+      return JSON.stringify({
+        error: "invalid_cursor",
+        message: "Restart listing without a cursor in the current authorized catalog.",
+      });
+    }
+    const descriptors: { name: string; description: string }[] = [];
+    let index = cursorIndex + 1;
+    for (; index < tools.length && descriptors.length < limit; index++) {
+      const tool = tools[index]!;
+      const descriptor = toolDescriptor(tool);
+      const candidate = {
+        tools: [...descriptors, descriptor],
+        total: tools.length,
+        nextCursor: tool.name,
+      };
+      if (Buffer.byteLength(JSON.stringify(candidate)) > 16 * 1024) {
+        if (descriptors.length === 0) {
+          return JSON.stringify({
+            error: "descriptor_too_large",
+            message: "A tool name exceeds the listing budget.",
+          });
+        }
+        break;
+      }
+      descriptors.push(descriptor);
+    }
+    const result = {
+      tools: descriptors,
+      total: tools.length,
+      nextCursor: index < tools.length ? descriptors.at(-1)!.name : null,
+    };
+    if (!prefix || tools.length > 0 || group !== undefined) return JSON.stringify(result);
+
+    // Preserve literal-prefix pagination. Recovery hints are descriptors
+    // from the same authorized deferred pool, never schemas or new grants.
+    const recovery = {
+      ...result,
+      message:
+        "No tool names match this literal prefix. This does not establish capability absence. Load any suggested exact names with tool_search, or retry tool_list without namePrefix to browse the authorized catalog.",
+      suggestions: [] as { name: string; description: string }[],
+    };
+    for (const candidate of authorizedTools) {
+      if (!candidate.name.includes(prefix)) continue;
+      const suggestion = {
+        name: candidate.name,
+        description: Array.from(candidate.description).slice(0, 160).join(""),
+      };
+      const next = { ...recovery, suggestions: [...recovery.suggestions, suggestion] };
+      if (Buffer.byteLength(JSON.stringify(next)) > 16 * 1024) continue;
+      recovery.suggestions.push(suggestion);
+      if (recovery.suggestions.length >= Math.min(limit, 8)) break;
+    }
+    return JSON.stringify(recovery);
   }
 
   private buildGenericSearchTool(): Tool {

@@ -48,7 +48,7 @@ const SERVER_ID = "connected_tools";
 const WEATHER_TOOL = `${SERVER_ID}__weather_lookup`;
 
 describe("lazy model source admission", () => {
-  for (const transport of ["custom", "responses"] as const) for (const streaming of [false, true]) test(`generic search ${transport} ${streaming ? "streaming" : "ordinary"} preserves the actual SDK result source before continuation`, async () => {
+  for (const discovery of ["tool_search", "tool_list"] as const) for (const transport of ["custom", "responses"] as const) for (const streaming of [false, true]) test(`generic ${discovery} ${transport} ${streaming ? "streaming" : "ordinary"} preserves the actual SDK result source before continuation`, async () => {
     const agent = agentWith(weatherTool());
     const runtime = installLazyToolRuntime(agent, "generic_dispatch", new Set([SERVER_ID]));
     let modelCalls = 0;
@@ -57,8 +57,8 @@ describe("lazy model source admission", () => {
       async getResponse() {
         modelCalls++;
         return { usage: new Usage(), output: modelCalls === 1 ? [{
-          type: "function_call", callId: "generic-source-search", name: "tool_search",
-          arguments: JSON.stringify({query: "", names: [WEATHER_TOOL]}), status: "completed",
+          type: "function_call", callId: "generic-source-search", name: discovery,
+          arguments: JSON.stringify(discovery === "tool_search" ? {query: "", names: [WEATHER_TOOL]} : {view: "groups"}), status: "completed",
         }] : [finalMessage("searched")] };
       },
       async *getStreamedResponse(request) {
@@ -70,7 +70,7 @@ describe("lazy model source admission", () => {
       const streamed = (JSON.parse(String(init?.body)) as {stream?: boolean}).stream === true;
       modelCalls++;
       const output = modelCalls === 1
-        ? [{type: "function_call", id: "fc_generic_source", call_id: "generic-source-search", name: "tool_search", status: "completed", arguments: JSON.stringify({query: "", names: [WEATHER_TOOL]})}]
+        ? [{type: "function_call", id: "fc_generic_source", call_id: "generic-source-search", name: discovery, status: "completed", arguments: JSON.stringify(discovery === "tool_search" ? {query: "", names: [WEATHER_TOOL]} : {view: "groups"})}]
         : [{type: "message", id: "msg_generic_source", role: "assistant", status: "completed", content: [{type: "output_text", text: "searched", annotations: [], logprobs: []}]}];
       const response = {id: `response-${modelCalls}`, status: "completed", output, usage: {input_tokens: 1, output_tokens: 1, total_tokens: 2}};
       const events = [{type: "response.created", response: {id: response.id, status: "in_progress", output: []}}, ...output.map((item, output_index) => ({type: "response.output_item.done", item, output_index})), {type: "response.completed", response}];
@@ -88,6 +88,8 @@ describe("lazy model source admission", () => {
         expect(binding.kind).toBe("TOOL_RESULT");
         expect(binding.nativeProducerSourceKey).toBe("generic-receipt-1");
         expect(binding.rawToolSource?.rawSourceRef.owner).toBe("native.tool.result");
+        expect(binding.retainedSources).toEqual([]);
+        expect(binding.rawToolSource?.rawSourceRef.id.startsWith(discovery === "tool_list" ? "tool-list:" : "tool-search:")).toBe(true);
       }
       return `generic-receipt-${++receipts}`;
     };
