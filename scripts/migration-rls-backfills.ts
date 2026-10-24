@@ -396,7 +396,8 @@ function catalogRoutineReadBindings(statement: string): ReadonlyMap<string, Cata
       }
     }
     const targets = select[2].split(/\s*,\s*/);
-    if (quote || depth !== 0 || columns.length !== targets.length) continue;
+    const uniqueTargets = new Set(targets.map((target) => target.toLowerCase()));
+    if (quote || depth !== 0 || columns.length !== targets.length || uniqueTargets.size !== targets.length) continue;
     const definitionColumns = columns.flatMap((column, index) =>
       /^(?:pg_catalog\s*\.\s*)?pg_get_functiondef\s*\(\s*(?:[a-z_]\w*\s*\.\s*)?[a-z_]\w*\s*\)$/i.test(column)
         ? [index] : [],

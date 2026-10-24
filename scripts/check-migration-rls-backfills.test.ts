@@ -319,6 +319,22 @@ END $patch$;`;
     );
     expect(analyze(directOverwrite)).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
   });
+  test("refuses duplicate catalog INTO targets that overwrite the routine definition", () => {
+    for (const duplicateTarget of ["definition", "DEFINITION"]) {
+      const patch = `DO $patch$ DECLARE definition text;
+anchor text := $old$old body$old$;
+replacement text := $new$UPDATE widgets SET id = id;$new$;
+BEGIN
+SELECT pg_catalog.pg_get_functiondef(p.oid), 'old body'
+INTO definition, ${duplicateTarget} FROM pg_catalog.pg_proc p WHERE p.oid = target;
+EXECUTE replace(definition, anchor, replacement);
+END $patch$;`;
+      expect(analyzeMigrationRlsBackfills(fixture({
+        "0001_base.sql": FORCED_TABLE,
+        "0002_patch.sql": patch,
+      })), duplicateTarget).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+    }
+  });
   test("keeps delimiter and function-header escapes visible in both publication paths", () => {
     const analyze = (sql: string) => analyzeMigrationRlsBackfills(
       fixture({ "0001_base.sql": FORCED_TABLE, "0002_patch.sql": sql }),
