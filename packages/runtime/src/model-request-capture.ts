@@ -1,3 +1,4 @@
+import { generatedImageHistoryModelMessage, GeneratedImageReceiptSchema } from "@opengeni/contracts";
 import { canonicalModelSourceJson, type ModelSourceBinding, type NativeModelToolSource } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { toSmartString } from "@openai/agents-core/utils";
@@ -109,6 +110,20 @@ export function bindDurableModelHistoryRows(
     durableHistoryOwners.set(binding, { contentSha256: inputDigest(row.item), identity: canonicalModelSourceJson(binding), cohort });
     bindModelSourceInput(row.item, binding);
   }
+}
+
+/** Only this unchanged hydrated row may own its generated-image projection. */
+export function bindGeneratedImageHistoryProjection(source: Record<string, unknown>, projected: Record<string, unknown>): void {
+  const binding = modelSourceInputBinding(source);
+  const owner = binding ? durableHistoryOwners.get(binding) : undefined;
+  const expected = generatedImageHistoryModelMessage(source);
+  const receipt = GeneratedImageReceiptSchema.safeParse(source.output);
+  if (!binding || !owner || !expected || !receipt.success
+    || owner.identity !== canonicalModelSourceJson(binding) || owner.contentSha256 !== inputDigest(source)
+    || canonicalModelSourceJson(expected) !== canonicalModelSourceJson(projected)) return;
+  const sha256 = inputDigest(projected);
+  bindModelSourceInput(projected, {kind: "HISTORY_ROW", sourceRef: {owner: "native.runtime.artifact", id: `generated-image-history:${binding.sourceRef.id}:${sha256}`, sha256},
+    parents: [binding.sourceRef], retainedSources: [{owner: "files", id: receipt.data.artifact.artifactId, sha256: receipt.data.artifact.sha256}], nativeHistoryProjection: "GENERATED_IMAGE"});
 }
 
 /** Remove only this owner's non-wire binding after durable source refs have been captured. */

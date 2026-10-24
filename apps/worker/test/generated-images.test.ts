@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { bindDurableModelHistoryRows, modelSourceInputBinding } from "../../../packages/runtime/src/model-request-capture";
+import { createHash } from "node:crypto";
 import { Agent, RunContext, RunState } from "@openai/agents-core";
 import {
   assertGeneratedImageHistoryRetained,
@@ -394,6 +396,21 @@ describe("generated image retention boundary", () => {
     expect(encoded).not.toContain("/workspace/generated-images/");
     expect(encoded).not.toContain("provider-secret-id");
     expect(encoded).not.toContain("providerData");
+  });
+
+  test("binds generated image facts to unchanged durable history without reusing the row digest", () => {
+    const item: Record<string, unknown> = {type: "hosted_tool_call", name: "image_generation_call", id: "image-call", status: "completed", output: receipt};
+    const parent = {owner: "session_history_items", id: "55555555-5555-4555-8555-555555555555", sha256: "d".repeat(64)};
+    bindDurableModelHistoryRows([{id: parent.id, sourceSha256: parent.sha256, item}]);
+    const [projected] = projectGeneratedImageHistoryForModel([item]);
+    const binding = modelSourceInputBinding(projected);
+    expect(binding?.parents).toEqual([parent]);
+    expect(binding?.sourceRef.sha256).toBe(createHash("sha256").update(JSON.stringify(projected)).digest("hex"));
+    expect(binding?.sourceRef.sha256).not.toBe(parent.sha256);
+    expect(binding?.retainedSources).toEqual([{owner: "files", id: receipt.artifact.artifactId, sha256: receipt.artifact.sha256}]);
+    for (const mutant of [structuredClone(item), {...item, output: {...receipt, artifact: {...receipt.artifact, dimensions: {width: 2, height: 1}}}}, {...item, id: "changed"}]) {
+      expect(modelSourceInputBinding(projectGeneratedImageHistoryForModel([mutant])[0])).toBeUndefined();
+    }
   });
 
   test("uses durable provider or tool identities, never transient attempt identity", () => {

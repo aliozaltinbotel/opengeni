@@ -1,8 +1,10 @@
+import { bindGeneratedImageHistoryProjection } from "@opengeni/runtime";
 import {
   COMPUTER_SCREENSHOT_MAX_DIMENSION,
   COMPUTER_SCREENSHOT_MAX_PIXELS,
   GENERATED_IMAGE_MAX_BYTES,
   GeneratedImageReceiptSchema,
+  generatedImageHistoryModelMessage,
   retainedGeneratedImageReferenceFromFile,
   sandboxShellPath,
   type GeneratedImageReceipt,
@@ -485,13 +487,14 @@ export function projectGeneratedImageHistoryForModel(
       projected.push(item);
       continue;
     }
-    const receipt = generatedImageReceiptFromUnknown(item.output);
-    if (!receipt) {
+    const message = generatedImageHistoryModelMessage(item);
+    if (!message) {
       projected.push(item);
       continue;
     }
     changed = true;
-    projected.push(generatedImageModelMessage(receipt, "history"));
+    bindGeneratedImageHistoryProjection(item, message);
+    projected.push(message);
   }
   return changed ? projected : history;
 }

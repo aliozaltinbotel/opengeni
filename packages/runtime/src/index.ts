@@ -9,6 +9,7 @@ import {
 } from "./prepared-compaction-request";
 export {
   bindDurableModelHistoryRows,
+  bindGeneratedImageHistoryProjection,
   bindModelSourceInput,
   omitModelSourceInputBinding,
   modelSourceInputBinding,

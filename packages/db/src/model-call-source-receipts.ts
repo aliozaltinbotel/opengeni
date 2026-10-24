@@ -1,3 +1,4 @@
+import { generatedImageHistoryModelMessage, GeneratedImageReceiptSchema } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { AttemptToolResult, canonicalModelSourceJson, readNativeSkillCatalogDescriptors, sessionTitleGenerationInput, SKILL_CATALOG_CONTEXT_PREFIX, readSkillCatalogContext, ModelCallSourceReceipt, MODEL_CALL_SOURCE_MAX_INPUTS, ImportedMessageOrigin, IMPORTED_HISTORY_CONTEXT_HEADER, ModelSourceRef, type ModelSourceInput, type ModelSourceBinding, type ModelHistorySourceBasis, type ModelSourceClosureNode, type ModelCallSourceBasisResponse } from "@opengeni/contracts";
@@ -409,7 +410,22 @@ export async function persistModelCallSourceReceiptWithFence(db: Database, ident
       let sourceRef=binding?.sourceRef ?? (row?{owner:"session_history_items",id:row.id,sha256:row.rowSha}:null);
       const parents=[...(basis?.parents??binding?.parents??[])];
       let retainedSources=basis?.retainedSources ?? binding?.retainedSources ?? [];
-      if(sourceRef?.owner==="native.runtime.artifact" && (binding?.kind==="HISTORY_ROW" || binding?.kind==="TOOL_RESULT") && !binding.nativeProducerSourceKey)
+      let validImageProjection = false;
+      if (binding?.nativeHistoryProjection === "GENERATED_IMAGE" || sourceRef?.id.startsWith("generated-image-history:")) {
+        const parent = binding?.parents.length === 1 ? binding.parents[0] : undefined;
+        const original = parent?.owner === "session_history_items" ? await historyById(parent.id) : undefined;
+        const expected = original ? generatedImageHistoryModelMessage(original.item) : null;
+        const image = GeneratedImageReceiptSchema.safeParse(original?.item.output);
+        validImageProjection = Boolean(binding?.nativeHistoryProjection === "GENERATED_IMAGE" && binding.kind === "HISTORY_ROW"
+          && !binding.nativeProducerSourceKey && original && original.sessionId === identity.sessionId && original.rowSha === parent?.sha256
+          && original.basis?.kind === "HISTORY_ROW" && original.basis.parents.length === 1 && original.basis.parents[0]?.owner === "model_call_source_receipts"
+          && expected && canonicalModelSourceJson(expected) === canonicalModelSourceJson(value)
+          && sourceRef?.owner === "native.runtime.artifact" && sourceRef.sha256 === contentSha256
+          && sourceRef.id === `generated-image-history:${parent?.id}:${contentSha256}` && image.success
+          && canonicalModelSourceJson(binding.retainedSources) === canonicalModelSourceJson([{owner:"files",id:image.data.artifact.artifactId,sha256:image.data.artifact.sha256}]));
+        if (!validImageProjection) reasons.add("UNRESOLVED_PARENT");
+      }
+      if(sourceRef?.owner==="native.runtime.artifact" && (binding?.kind==="HISTORY_ROW" || binding?.kind==="TOOL_RESULT") && !binding.nativeProducerSourceKey && !validImageProjection)
         reasons.add("UNRESOLVED_PARENT");
       if(binding?.nativeProducerSourceKey) {
         // Transient SDK output is admitted only against its exact committed call,

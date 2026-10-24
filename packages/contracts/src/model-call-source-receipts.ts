@@ -66,7 +66,7 @@ export function canonicalModelSourceJson(value: unknown): string {
 /** Trusted producer binding attached before model-input transformation; never an HTTP input. */
 export type ModelSourceBinding = {ordinal:number;sourceRef:ModelSourceRef;kind:z.infer<typeof ModelSourceKind>;parents:ModelSourceRef[];retainedSources:ModelSourceRef[];
   /** Native-only transient output owner. The DB re-reads this exact completed call's basis. */
-  nativeProducerSourceKey?:string; rawToolSource?:NativeModelToolSource; rawToolResult?:unknown};
+  nativeHistoryProjection?: "GENERATED_IMAGE"; nativeProducerSourceKey?:string; rawToolSource?:NativeModelToolSource; rawToolResult?:unknown};
 
 export type NativeModelToolSource = {
   sourceCallId:string; nativeModelSourceKey?:string; rawSourceRef:ModelSourceRef;

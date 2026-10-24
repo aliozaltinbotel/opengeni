@@ -1,3 +1,5 @@
+import { projectGeneratedImageHistoryForModel } from "../src/activities/generated-images";
+import { bindDurableModelHistoryRows } from "../../../packages/runtime/src/model-request-capture";
 import { createTurnHistorySink } from "../src/activities/agent-turn/history-sink";
 import { createRuntimeBatcher } from "../src/activities/streaming";
 import { normalizeSdkEvent } from "../../../packages/runtime/src/run-events";
@@ -1281,3 +1283,73 @@ test("Knowledge GET provenance survives the real sink and fresh-turn hydration; 
     } finally { await prepared.close(); for (const transport of transports) await transport.close(); http.stop(true); }
   }
 }, 180_000);
+
+test("generated image durable projection authenticates exact ancestry and current file authority", async () => {
+  const f = await fixture();
+  const imageReceipt = {
+  type: "generated_image",
+  artifact: {
+    available: true,
+    artifactId: "33333333-3333-4333-8333-333333333333",
+    kind: "generated_image",
+    contentType: "image/png",
+    originalBytes: 68,
+    sha256: "c".repeat(64),
+    retainedAt: "2026-08-08T00:00:00.000Z",
+    dimensions: { width: 1, height: 1 },
+    retention: { policy: "workspace_file", expiresAt: null },
+    retrieval: {
+      method: "GET",
+      path: "/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/33333333-3333-4333-8333-333333333333/content",
+      acceptRanges: "bytes",
+      maxRangeBytes: 1024 * 1024,
+    },
+  },
+  sandboxPath:
+    "/workspace/generated-images/generated-image-33333333-3333-4333-8333-333333333333.png",
+};
+  const fileId = crypto.randomUUID();
+  imageReceipt.artifact.artifactId = fileId;
+  imageReceipt.artifact.retrieval.path = `/v1/workspaces/${f.identity.workspaceId}/artifacts/${fileId}/content`;
+  imageReceipt.sandboxPath = `/workspace/generated-images/generated-image-${fileId}.png`;
+  await shared.admin`insert into files (id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+    values (${fileId},${f.identity.accountId},${f.identity.workspaceId},'ready','synthetic.png','synthetic.png','image/png',68,${imageReceipt.artifact.sha256},'synthetic',${fileId},ARRAY[${f.subjectId}],${f.subjectId})`;
+  const original = {type: "hosted_tool_call", name: "image_generation_call", id: "synthetic-image", status: "completed", output: imageReceipt};
+  const before = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  const producer = await persistModelCallSourceReceipt(app.db,f.identity,{input:before.map(row=>row.item),instructionSelections:f.instructionSelections});
+  expect(producer.complete).toBe(true);
+  await appendSessionHistoryItems(app.db,{...f.write,items:[{position:Math.max(...before.map(row=>row.position))+1,item:original,nativeProducerSourceKey:f.identity.sourceKey}]});
+  const loaded = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
+  const row = loaded.find(row=>row.item.id === "synthetic-image")!;
+  bindDurableModelHistoryRows([row]);
+  const [projected] = projectGeneratedImageHistoryForModel([row.item]);
+  const bindings = modelSourceBindings([projected]);
+  let index = 0;
+  const persist = (item: unknown, sourceBindings = bindings) => persistModelCallSourceReceipt(app.db,{...f.identity,sourceKey:crypto.randomUUID(),requestIndex:++index},{input:[item],sourceBindings,instructionSelections:f.instructionSelections});
+  const accepted = await persist(projected);
+  expect(accepted.complete).toBe(true);
+  expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(true);
+  for (const mutant of [
+    {item:{...projected,content:"forged"},bindings},
+    {item:projected,bindings:bindings.map(binding=>({...binding,parents:[]}))},
+    {item:projected,bindings:bindings.map(binding=>({...binding,parents:binding.parents.map(parent=>({...parent,sha256:"f".repeat(64)}))}))},
+    {item:projected,bindings:bindings.map(binding=>({...binding,retainedSources:[]}))},
+    {item:projected,bindings:bindings.map(binding=>({...binding,parents:binding.parents.map(parent=>({...parent,id:crypto.randomUUID()}))}))},
+    {item:projected,bindings:bindings.map(binding=>({...binding,nativeHistoryProjection:undefined}))},
+  ]) expect((await persist(mutant.item,mutant.bindings)).complete).toBe(false);
+  await shared.admin`update files set sha256 = ${"e".repeat(64)} where id = ${fileId}`;
+  expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(false);
+  await shared.admin`update files set sha256 = ${imageReceipt.artifact.sha256} where id = ${fileId}`;
+  await shared.admin`update files set status = 'pending_upload' where id = ${fileId}`;
+  expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(false);
+  await shared.admin`delete from files where id = ${fileId}`;
+  await shared.admin`insert into files (id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+    values (${fileId},${f.identity.accountId},${f.identity.workspaceId},'ready','synthetic.png','synthetic.png','image/png',68,${imageReceipt.artifact.sha256},'synthetic',${fileId},ARRAY['foreign-subject'],'foreign-subject')`;
+  expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(false);
+  await shared.admin`delete from files where id = ${fileId}`;
+  await shared.admin`insert into files (id,account_id,workspace_id,status,filename,safe_filename,content_type,size_bytes,sha256,bucket,object_key,private_owner_subject_ids,owner_subject_id)
+    values (${fileId},${f.identity.accountId},${f.identity.workspaceId},'ready','synthetic.png','synthetic.png','image/png',68,${imageReceipt.artifact.sha256},'synthetic',${fileId},ARRAY[${f.subjectId}],${f.subjectId})`;
+  expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(true);
+  await shared.admin`delete from workspace_memberships where workspace_id=${f.identity.workspaceId} and subject_id=${f.subjectId}`;
+  expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(false);
+}, 60_000);

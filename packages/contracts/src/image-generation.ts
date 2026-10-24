@@ -119,3 +119,19 @@ export const GeneratedImageReceiptSchema = /* @__PURE__ */ defineSchema(() =>
     }),
 );
 export type GeneratedImageReceipt = z.infer<typeof GeneratedImageReceiptSchema>;
+
+/** Exact provider-neutral history projection; shared by the producer and receipt verifier. */
+export function generatedImageHistoryModelMessage(item: unknown): Record<string, unknown> | null {
+  if (!item || typeof item !== "object" || !("type" in item) || item.type !== "hosted_tool_call"
+    || !("name" in item) || item.name !== "image_generation_call" || !("output" in item)) return null;
+  const parsed = GeneratedImageReceiptSchema.safeParse(item.output);
+  if (!parsed.success) return null;
+  const receipt = parsed.data;
+  return {type: "message", role: "assistant", content: [
+    "Generated image artifact:",
+    `Artifact ID: ${receipt.artifact.artifactId}`,
+    `Sandbox path: ${receipt.sandboxPath.replace(/^\/workspace\//, "")}`,
+    `Format: ${receipt.artifact.contentType}`,
+    `Dimensions: ${receipt.artifact.dimensions?.width ?? "?"}x${receipt.artifact.dimensions?.height ?? "?"}`,
+  ].join("\n")};
+}

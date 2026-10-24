@@ -7,7 +7,7 @@ import {
   ModelSourceRef,
   SkillArtifactDefinition,
 } from "@opengeni/contracts";
-import { rawRows, withRlsContext, type Database } from "./database";
+import { rawRows, withRlsContext, withSessionRlsActorContext, currentSessionRlsActorContext, type Database } from "./database";
 import {
   validatedStoredModelCallSourceReceipt,
   type ModelCallSourceIdentity,
@@ -277,6 +277,17 @@ export async function validateRetainedModelSourcesWithFence(
             status: "HOST_AUTHORITY_REQUIRED",
             reason: "HOST_AUTHORITY_REQUIRED",
           });
+          continue;
+        }
+        if (ref.owner === "files") {
+          const [file] = /^[a-f0-9-]{36}$/.test(ref.id) && ref.version === undefined ? await withSessionRlsActorContext(
+            {...currentSessionRlsActorContext(),subjectId:human,privateFileOwnerSubjectId:human},
+            () => withRlsContext(tx,input.identity,scoped => scoped.select({sha256:schema.files.sha256,status:schema.files.status}).from(schema.files).where(and(
+            eq(schema.files.accountId, receipt.accountId), eq(schema.files.workspaceId, receipt.workspaceId), eq(schema.files.id, ref.id),
+            sql`google_drive_file_authorized(${receipt.accountId}::uuid, ${receipt.workspaceId}::uuid, ${human}::text, ${ref.id}::uuid)`,
+          )).limit(1))) : [];
+          const available = file?.status === "ready" && file.sha256 === ref.sha256;
+          sources.push({sourceRef:ref,status:available ? "AVAILABLE" : "REFUSED",reason:available ? null : "NATIVE_SOURCE_UNAVAILABLE_OR_INEXACT"});
           continue;
         }
         if (ref.owner === "native.skill.artifact") {
