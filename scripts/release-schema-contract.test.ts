@@ -37,6 +37,22 @@ async function buildSchemaContract(directory?: string) {
 }
 
 describe("release schema contract", () => {
+  test("materializer projection repair is a forward rolling schema addition", async () => {
+    const contract = await buildCompleteSchemaContract();
+    expect(
+      contract.migrations.some(
+        (migration) => migration.path === "0896_editable_artifact_materializer_projection.sql",
+      ),
+    ).toBe(true);
+    expect(contract.migrations.find((migration) =>
+      migration.path === "0896_editable_artifact_materializer_projection.sql",
+    )).toMatchObject({
+      path: "0896_editable_artifact_materializer_projection.sql",
+      deploymentMode: "rolling",
+    });
+    expect(contract.latestMigration).toBe(contract.migrations.at(-1)?.path);
+    expect(contract.fileCount).toBe(contract.migrations.length);
+  });
   test("model fact reconciliation adds rolling state and concurrent paging indexes", async () => {
     const contract = await buildCompleteSchemaContract();
     for (const path of [
@@ -2340,6 +2356,7 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
+      "0896_editable_artifact_materializer_projection.sql",
       "0895_private_child_membership_authority.sql",
       "0894_model_fact_reconciliation_arrivals.sql",
       "0893_model_fact_ledger_source.sql",
