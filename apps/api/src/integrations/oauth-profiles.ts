@@ -57,6 +57,8 @@ export type PinnableAuthorizationServer = {
 };
 
 export type AuthorizationServerPins = {
+  /** Optional exact identity for both issuer fields; built-in profiles only. */
+  exactIssuer?: string;
   /** Origins `issuer` and `authorizationServer` must both belong to. */
   issuerOrigins: readonly string[];
   /** Origins the authorization endpoint must belong to. */
@@ -284,9 +286,37 @@ const OFFICIAL_GMAIL_PROFILE: OAuthProviderProfile = {
   },
 };
 
+const CENDRA_MCP_URL = "https://agentic.cendra.ai/v1/mcp";
+const CENDRA_OAUTH_ISSUER = "https://wealthy-bee-2.clerk.accounts.dev";
+
+const CENDRA_READ_PROFILE: OAuthProviderProfile = {
+  key: "cendra-single-mcp-read",
+  match: { mcpUrls: [CENDRA_MCP_URL] },
+  canonicalProviderDomain: "agentic.cendra.ai",
+  requireExactMcpUrl: {
+    url: CENDRA_MCP_URL,
+    message: `Cendra OAuth must use ${CENDRA_MCP_URL}`,
+  },
+  defaultOwnership: "personal",
+  requiredOwnership: { ownership: "personal", message: "Cendra connections must be personal-owned" },
+  exactMcpBinding: true,
+  connectionSelection: "first_active",
+  authorizationServer: {
+    exactIssuer: CENDRA_OAUTH_ISSUER,
+    issuerOrigins: [CENDRA_OAUTH_ISSUER],
+    authorizationEndpointOrigins: [CENDRA_OAUTH_ISSUER],
+    tokenEndpointOrigins: [CENDRA_OAUTH_ISSUER],
+    message: "Cendra MCP authorization metadata did not remain bound to its reviewed Clerk issuer",
+    skipInLocalTest: false,
+  },
+  sendResourceParameter: true,
+  requestedScopes: ["user:org:read", "cendra:operations:read"],
+};
+
 const BUILT_IN_OAUTH_PROFILES: readonly OAuthProviderProfile[] = [
   HOSTED_SLACK_PROFILE,
   OFFICIAL_GMAIL_PROFILE,
+  CENDRA_READ_PROFILE,
 ];
 
 /** Exact built-in profile by its stable key; throws on an unknown key. */
@@ -390,13 +420,15 @@ export function assertAuthorizationServerPins(
   as: PinnableAuthorizationServer,
   pins: Pick<
     AuthorizationServerPins,
-    "issuerOrigins" | "authorizationEndpointOrigins" | "tokenEndpointOrigins" | "message"
+    "exactIssuer" | "issuerOrigins" | "authorizationEndpointOrigins" | "tokenEndpointOrigins" | "message"
   >,
 ): void {
   const issuerOrigins = [as.issuer, as.authorizationServer].map((value) => new URL(value).origin);
   const authorizationOrigin = new URL(as.authorizationEndpoint).origin;
   const tokenOrigin = new URL(as.tokenEndpoint).origin;
   if (
+    (pins.exactIssuer !== undefined &&
+      (as.issuer !== pins.exactIssuer || as.authorizationServer !== pins.exactIssuer)) ||
     issuerOrigins.some((origin) => !pins.issuerOrigins.includes(origin)) ||
     !pins.authorizationEndpointOrigins.includes(authorizationOrigin) ||
     !pins.tokenEndpointOrigins.includes(tokenOrigin)
