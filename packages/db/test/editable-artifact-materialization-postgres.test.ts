@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import {
+  acquireOwnerMigratedTestDatabase,
+  type OwnerMigratedTestDatabase,
+} from "@opengeni/testing";
 import { sql } from "drizzle-orm";
 
 import { createDb, type DbClient } from "../src/database";
@@ -10,12 +13,13 @@ import {
 } from "../src/editable-artifact-materialization";
 import { PostgresEditableArtifactStore } from "../src/editable-artifacts";
 import { provisionRoles } from "../src/provision-roles";
+import { migrate } from "../src/migrate";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 const materializerRole = "opengeni_artifact_materializer";
 const materializerPassword = "artifact-materializer-test-password";
 
-let shared: SharedTestDatabase | null = null;
+let shared: OwnerMigratedTestDatabase | null = null;
 let appClient: DbClient | null = null;
 let materializerClient: DbClient | null = null;
 let available = true;
@@ -26,7 +30,7 @@ let forbiddenAppMaterializer: PostgresEditableArtifactMaterializationRepository;
 let idCounter = 1n;
 
 beforeAll(async () => {
-  shared = await acquireSharedTestDatabase("editable-artifact-materialization-postgres");
+  shared = await acquireOwnerMigratedTestDatabase("editable-artifact-materialization-postgres");
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error("[artifact-materializer] real PostgreSQL harness is unavailable");
@@ -34,26 +38,38 @@ beforeAll(async () => {
     available = false;
     return;
   }
+  // Production migrations run as a non-superuser owner: FORCE RLS must also
+  // constrain SECURITY DEFINER projection checks reached by the global worker.
+  await migrate(shared.ownerUrl);
+  const [migrationOwner] = await shared.admin`
+    select rolsuper as superuser, rolbypassrls as "bypassRls"
+    from pg_roles where rolname = ${shared.ownerRole}`;
+  expect(migrationOwner).toEqual({ superuser: false, bypassRls: false });
   await provisionRoles(shared.adminUrl, {
-    rlsStrategy: "scoped",
+    rlsStrategy: "force",
+    appPassword: shared.appPassword,
     artifactMaterializerRole: materializerRole,
     artifactMaterializerPassword: materializerPassword,
   });
   await provisionRoles(shared.adminUrl, {
-    rlsStrategy: "scoped",
+    rlsStrategy: "force",
+    appPassword: shared.appPassword,
     artifactMaterializerRole: materializerRole,
     artifactMaterializerPassword: materializerPassword,
   });
   const materializerUrl = new URL(shared.adminUrl);
   materializerUrl.username = materializerRole;
   materializerUrl.password = materializerPassword;
-  appClient = createDb(shared.appUrl, { max: 4 });
+  const appUrl = new URL(shared.ownerUrl);
+  appUrl.username = "opengeni_app";
+  appUrl.password = shared.appPassword;
+  appClient = createDb(appUrl.toString(), { max: 4, rlsStrategy: "force" });
   materializerClient = createDb(materializerUrl.toString(), { max: 4 });
   appStore = new PostgresEditableArtifactStore(appClient.db);
   durableExports = new PostgresEditableArtifactDurableExportStore(appClient.db);
   materializer = new PostgresEditableArtifactMaterializationRepository(materializerClient.db);
   forbiddenAppMaterializer = new PostgresEditableArtifactMaterializationRepository(appClient.db);
-}, 180_000);
+}, 900_000);
 
 afterAll(async () => {
   await appClient?.close();

@@ -225,7 +225,9 @@ const ROUTINE_AS_DOLLAR = /\bAS\s+(\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$)/i;
  * backfill. `EXECUTE format($ddl$ UPDATE ... $ddl$)` still looks like a write.
  */
 export function stripRoutineBodies(statement: string): string {
-  statement = stripCatalogRoutinePatchLiterals(statement);
+  const publication = stripCatalogRoutinePatchLiterals(statement);
+  if (publication.ambiguous) return statement;
+  statement = publication.source;
   let out = "";
   let index = 0;
   while (index < statement.length) {
@@ -258,7 +260,163 @@ export function stripRoutineBodies(statement: string): string {
 /** A quoted replacement used only to patch pg_get_functiondef is routine
  * source, not an executed migration query. Keep arbitrary EXECUTE strings and
  * every actual query outside the replacement visible to the guard. */
-function stripCatalogRoutinePatchLiterals(statement: string): string {
+type CatalogRoutineRead = Readonly<{ bodyVariables: readonly string[]; statement: string }>;
+
+function ambiguousRoutineFragment(fragment: string): boolean {
+  return /\$(?:[a-z_]\w*)?\$|\b(?:CREATE\s+(?:OR\s+REPLACE\s+)?|ALTER\s+|DROP\s+)(?:FUNCTION|PROCEDURE)\b|\b(?:RETURNS|LANGUAGE\s+[a-z_]\w*|SECURITY\s+(?:DEFINER|INVOKER)|SET\s+(?:search_path|row_security))\b/i.test(fragment);
+}
+
+function inlineRoutinePatch(expression: string, definition: string, constants: ReadonlyMap<string, string> = new Map()): Readonly<{ ambiguous: boolean; closed: boolean; replacementValue: string }> {
+  const literals = /(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\1|\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/gi;
+  if (constants.size > 0) {
+    const tokens = new RegExp(`${literals.source}|\\b[a-z_]\\w*\\b`, "gi");
+    expression = expression.replace(tokens, (token) => {
+      const value = constants.get(token);
+      return value === undefined ? token : `'${value.replace(/'/g, "''")}'`;
+    });
+  }
+  let unknownEscape = false;
+  const literalMatches = [...expression.matchAll(literals)];
+  const fragments = literalMatches.map((match) => {
+    if (match[2] !== undefined) return match[2];
+    const value = match[0].replace(/^[Ee]?'|'$/g, "").replace(/''/g, "'");
+    if (!/^[Ee]'/.test(match[0])) {
+      if (value.includes("\\")) unknownEscape = true;
+      return value;
+    }
+    // Only the existing constant newline/tab/backslash forms are admitted.
+    // Hex, octal, Unicode and every unknown escape stay visible to analysis.
+    return value.replace(/\\([\s\S])/g, (_whole, escape: string) => {
+      if (escape === "n") return "\n";
+      if (escape === "r") return "\r";
+      if (escape === "t") return "\t";
+      if (escape === "\\") return "\\";
+      unknownEscape = true;
+      return escape;
+    });
+  });
+  const joined = fragments.reduce((result, fragment, index) => {
+    const previous = literalMatches[index - 1];
+    const current = literalMatches[index];
+    const between = previous?.index !== undefined && current?.index !== undefined
+      ? expression.slice(previous.index + previous[0].length, current.index) : "";
+    return result + (/^\s*\|\|\s*$/.test(between) ? "" : "\n") + fragment;
+  }, "");
+  const ambiguous = unknownEscape || ambiguousRoutineFragment(joined);
+  const skeleton = expression.replace(literals, "''");
+  const constant = "''(?:\\s*\\|\\|\\s*'')*";
+  const closed = new RegExp(`^\\s*${definition}\\s*:=\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\(\\s*${definition}\\s*,\\s*${constant}\\s*,\\s*${constant}\\s*\\)\\s*;\\s*$`, "i").test(skeleton);
+  return { ambiguous, closed, replacementValue: fragments.slice(1).join("") };
+}
+
+function constantRoutinePatchBindings(statement: string, definition: string): ReadonlyMap<string, string> {
+  const values = new Map<string, string>();
+  const block = /^\s*DO\s+(\$[a-z_]\w*\$|\$\$)([\s\S]*)\1\s*;?\s*$/i.exec(statement);
+  if (!block?.[2]) return values;
+  const parts = splitStatements(block[2]);
+  const candidates = new Map<string, { value: string; assignment: string }>();
+  const duplicates = new Set<string>();
+  for (const part of parts) {
+    const assignment = /^\s*(?:DECLARE\s+|BEGIN\s+)?([a-z_]\w*)(?:\s+text)?\s*:=\s*([\s\S]+?)\s*;?\s*$/i.exec(part);
+    if (!assignment?.[1] || !assignment[2] || assignment[1] === definition) continue;
+    const name = assignment[1];
+    if (candidates.has(name)) duplicates.add(name);
+    const value = inlineRoutinePatch(`source := replace(source, '', ${assignment[2]});`, "source");
+    if (value.closed && !value.ambiguous) candidates.set(name, { value: value.replacementValue, assignment: part });
+  }
+  for (const [name, candidate] of candidates) {
+    if (duplicates.has(name)) continue;
+    let flow = block[2].replace(candidate.assignment, "");
+    for (const part of parts) if (new RegExp(`^\\s*${definition}\\s*:=\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\(`, "i").test(part)) flow = flow.replace(part, "");
+    flow = flow
+      .replace(new RegExp(`\\b${name}\\s+text\\s*;`, "gi"), "")
+      .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?length\\(\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\(\\s*${definition}\\s*,\\s*${name}\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
+      .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?length\\(\\s*${name}\\s*\\)`, "gi"), "")
+      .replace(/(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\1|\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/gi, "''");
+    if (!new RegExp(`\\b${name}\\b`, "i").test(flow)) values.set(name, candidate.value);
+  }
+  return values;
+}
+
+function closedRoutineDefinitionUses(statement: string, definition: string, admitted: readonly string[]): boolean {
+  const block = /^\s*DO\s+(\$[a-z_]\w*\$|\$\$)([\s\S]*)\1\s*;?\s*$/i.exec(statement);
+  if (!block?.[2]) return false;
+  let flow = block[2];
+  for (const part of admitted) flow = flow.replace(part, "");
+  flow = flow
+    .replace(/(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\1|\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/gi, "''")
+    .replace(new RegExp(`\\b${definition}\\s+text\\s*;`, "gi"), "")
+    .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?length\\(\\s*(?:pg_catalog\\s*\\.\\s*)?replace\\(\\s*${definition}\\s*,\\s*(?:[a-z_]\\w*|'')\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
+    .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?(?:length|md5)\\(\\s*${definition}\\s*\\)`, "gi"), "")
+    .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?strpos\\(\\s*${definition}\\s*,\\s*(?:[a-z_]\\w*|'')\\s*\\)`, "gi"), "")
+    .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?position\\(\\s*(?:[a-z_]\\w*|'')\\s+IN\\s+${definition}\\s*\\)`, "gi"), "")
+    .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?cardinality\\(\\s*(?:pg_catalog\\s*\\.\\s*)?string_to_array\\(\\s*${definition}\\s*,\\s*(?:[a-z_]\\w*|'')\\s*\\)\\s*\\)`, "gi"), "")
+    .replace(new RegExp(`\\b${definition}\\s+IS\\s+(?:NOT\\s+)?NULL\\b`, "gi"), "");
+  // Existing migrations compare a read-only copy before/after replace. A copy
+  // is a witness only when it is used exclusively by that scalar IF check.
+  const witnesses = new Set([...flow.matchAll(new RegExp(`\\b([a-z_]\\w*)\\s*:=\\s*${definition}\\s*;`, "gi"))].map((match) => match[1]));
+  for (const witness of witnesses) {
+    if (!witness || witness === definition) return false;
+    const declaration = new RegExp(`\\b${witness}\\s+text\\s*;`, "gi");
+    const copy = new RegExp(`\\b${witness}\\s*:=\\s*${definition}\\s*;`, "gi");
+    const comparison = new RegExp(`\\bIF\\s+${definition}\\s*=\\s*${witness}\\s+THEN\\b`, "gi");
+    const remaining = flow.replace(declaration, "").replace(copy, "").replace(comparison, "");
+    if (new RegExp(`\\b${witness}\\b`, "i").test(remaining)) return false;
+    flow = remaining;
+  }
+  return !new RegExp(`\\b${definition}\\b`, "i").test(flow);
+}
+
+function catalogRoutineReadBindings(statement: string): ReadonlyMap<string, CatalogRoutineRead> {
+  const bindings = new Map<string, CatalogRoutineRead>();
+  const block = /^\s*DO\s+(\$[a-z_]\w*\$|\$\$)([\s\S]*)\1\s*;?\s*$/i.exec(statement);
+  if (!block?.[2]) return bindings;
+  for (const part of splitStatements(block[2])) {
+    const select = /^\s*(?:BEGIN\s+)?SELECT\s+([\s\S]+?)\s+INTO\s+([a-z_]\w*(?:\s*,\s*[a-z_]\w*)*)\s+FROM\s+(?:pg_catalog\s*\.\s*)?pg_proc\b[\s\S]*$/i.exec(part);
+    if (!select?.[1] || !select[2]) continue;
+    // Split only top-level SELECT columns; commas in catalog metadata builders
+    // and quoted keys are not INTO positions.
+    const columns: string[] = [];
+    let depth = 0;
+    let quote = "";
+    let start = 0;
+    for (let index = 0; index <= select[1].length; index += 1) {
+      const char = select[1][index];
+      if (quote) {
+        if (char === quote && select[1][index + 1] === quote) index += 1;
+        else if (char === quote) quote = "";
+        continue;
+      }
+      if (char === "'" || char === '"') quote = char;
+      else if (char === "(") depth += 1;
+      else if (char === ")") depth -= 1;
+      else if ((char === "," && depth === 0) || char === undefined) {
+        columns.push(select[1].slice(start, index).trim());
+        start = index + 1;
+      }
+    }
+    const targets = select[2].split(/\s*,\s*/);
+    if (quote || depth !== 0 || columns.length !== targets.length) continue;
+    const definitionColumns = columns.flatMap((column, index) =>
+      /^(?:pg_catalog\s*\.\s*)?pg_get_functiondef\s*\(\s*(?:[a-z_]\w*\s*\.\s*)?[a-z_]\w*\s*\)$/i.test(column)
+        ? [index] : [],
+    );
+    if (definitionColumns.length !== 1) continue;
+    const definitionIndex = definitionColumns[0];
+    if (definitionIndex === undefined) continue;
+    const definition = targets[definitionIndex];
+    if (!definition || bindings.has(definition)) continue;
+    const bodyVariables = columns.flatMap((column, index) => {
+      const target = targets[index];
+      return target && /^(?:[a-z_]\w*\s*\.\s*)?prosrc$/i.test(column) ? [target] : [];
+    });
+    bindings.set(definition, { bodyVariables, statement: part });
+  }
+  return bindings;
+}
+
+function stripCatalogRoutinePatchLiterals(statement: string): Readonly<{ source: string; ambiguous: boolean }> {
+  let ambiguous = false;
   // Chained replacements of a pg_get_functiondef result are also routine
   // source, provided the resulting definition is the block's sole dynamic
   // execution. Keep every other statement visible to the backfill analyzer.
@@ -268,6 +426,7 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
   const sources = [...statement.matchAll(source)];
   if (sources.length === 1) {
     const variable = sources[0]![1]!;
+    const constants = constantRoutinePatchBindings(statement, variable);
     const execution = new RegExp(`\\bEXECUTE\\s+${variable}\\s*;`, "gi");
     const executions = [...statement.matchAll(execution)];
     const otherExecutions = [...statement.matchAll(/\bEXECUTE\b/gi)].length;
@@ -298,11 +457,21 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
           else if (!quoted && char === ";" && depth === 0) break;
         }
         if (depth !== 0 || quoted || statement[end] !== ";") break;
+        const publication = inlineRoutinePatch(statement.slice(match.index, end + 1), variable, constants);
+        if (publication.ambiguous) {
+          ambiguous = true;
+          break;
+        }
+        if (!publication.closed) break;
         replacements.push({ start: match.index, end: end + 1 });
         cursor = end + 1;
         assignment.lastIndex = cursor;
       }
       if (replacements.length > 0 && assignments.length === replacements.length + 1) {
+        const admitted = [sources[0]![0], executions[0]![0],
+          ...replacements.map((range) => statement.slice(range.start, range.end))];
+        if (!closedRoutineDefinitionUses(statement, variable, admitted))
+          return { source: statement, ambiguous: true };
         const ranges = [
           ...replacements,
           { start: executions[0]!.index!, end: executions[0]!.index! + executions[0]![0].length },
@@ -311,7 +480,7 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
         for (const range of ranges) {
           stripped = `${stripped.slice(0, range.start)}${stripped.slice(range.end)}`;
         }
-        return stripped;
+        return { source: stripped, ambiguous };
       }
     }
   }
@@ -319,16 +488,29 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
   // The literal may be assigned in the body or initialised in DECLARE
   // (`replacement text := $new$...$new$;`); both bind the same variable.
   const assignments = /\b([a-z_]\w*)(?:\s+text)?\s*:=\s*(\$[a-z_]\w*\$|\$\$)([\s\S]*?)\2\s*;/gi;
-  return statement.replace(assignments, (whole, variable: string, _tag: string) => {
+  const result = statement.replace(assignments, (whole, variable: string, _tag: string, fragment: string) => {
     const outside = statement.replace(whole, `${variable} := NULL;`);
-    const use = new RegExp(
-      `\\bEXECUTE\\s+replace\\(\\s*([a-z_]\\w*)\\s*,\\s*[a-z_]\\w*\\s*,\\s*${variable}\\s*\\)\\s*;`,
-      "i",
-    ).exec(outside);
+    const replacementArguments = "([a-z_]\\w*)\\s*,\\s*([a-z_]\\w*)";
+    const directUse = new RegExp(`\\bEXECUTE\\s+replace\\(\\s*([a-z_]\\w*)\\s*,\\s*${replacementArguments}\\s*\\)\\s*;`, "i");
+    const assignedUse = new RegExp(`\\b([a-z_]\\w*)\\s*:=\\s*replace\\(\\s*\\1\\s*,\\s*${replacementArguments}\\s*\\)\\s*;`, "i");
+    const use = [...outside.matchAll(new RegExp(directUse.source, "gi")),
+      ...outside.matchAll(new RegExp(assignedUse.source, "gi"))]
+      .find((match) => match[2] === variable || match[3] === variable);
     if (!use) return whole;
     const definition = use[1]!;
+    if (definition === variable) return whole;
+    const finalExecution = new RegExp(`\\bEXECUTE\\s+${definition}\\s*;`, "gi");
+    if (!/^EXECUTE\b/i.test(use[0]) && [...outside.matchAll(finalExecution)].length !== 1)
+      return whole;
     const writes = [...outside.matchAll(new RegExp(`\\b${definition}\\s*:=\\s*([^;]+);`, "gi"))];
-    if (!writes.some((match) => /^pg_get_functiondef\s*\(/i.test(match[1]!.trim()))) return whole;
+    const directReads = writes.filter((match) => /^pg_get_functiondef\s*\(/i.test(match[1]!.trim()));
+    const catalogBinding = directReads.length === 0
+      ? catalogRoutineReadBindings(outside).get(definition)
+      : undefined;
+    const intoWrites = [...outside.matchAll(/\bINTO\s+([a-z_]\w*(?:\s*,\s*[a-z_]\w*)*)/gi)]
+      .filter((match) => match[1]!.split(/\s*,\s*/).includes(definition));
+    if (catalogBinding ? intoWrites.length !== 1
+      : directReads.length === 0 || intoWrites.length !== 0) return whole;
     if (
       writes.some(
         (match) =>
@@ -338,15 +520,55 @@ function stripCatalogRoutinePatchLiterals(statement: string): string {
       )
     )
       return whole;
+    if (ambiguousRoutineFragment(fragment)) {
+      ambiguous = true;
+      return whole;
+    }
+    if (catalogBinding) {
+      // SELECT INTO is trusted only at the exact output position. Admit its
+      // small publication dataflow, not an open-ended PL/pgSQL write grammar.
+      // Anything left can overwrite or otherwise expose the definition.
+      let flow = outside.replace(catalogBinding.statement, "")
+        .replace(new RegExp(assignments.source, "gi"), "$1 := NULL;")
+        .replace(/\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/g, "''");
+      flow = flow
+        .replace(new RegExp(`\\b${definition}\\s+text\\s*;`, "gi"), "")
+        .replace(new RegExp(`\\b${definition}\\s*:=\\s*replace\\(\\s*${definition}\\s*,\\s*[a-z_]\\w*\\s*,\\s*[a-z_]\\w*\\s*\\)\\s*;`, "gi"), "")
+        .replace(new RegExp(`\\bEXECUTE\\s+replace\\(\\s*${definition}\\s*,\\s*[a-z_]\\w*\\s*,\\s*[a-z_]\\w*\\s*\\)\\s*;`, "gi"), "")
+        .replace(finalExecution, "")
+        .replace(new RegExp(`\\b(?:length|md5)\\(\\s*${definition}\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\blength\\(\\s*replace\\(\\s*${definition}\\s*,\\s*[a-z_]\\w*\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b${definition}\\s+IS\\s+(?:NOT\\s+)?NULL\\b`, "gi"), "");
+      if (new RegExp(`\\b${definition}\\b`, "i").test(flow)) return whole;
+    } else if (!closedRoutineDefinitionUses(outside, definition, [
+      ...writes.map((match) => match[0]), use[0],
+      ...[...outside.matchAll(finalExecution)].map((match) => match[0]),
+    ])) {
+      return whole;
+    }
     // Declaration and the one assignment/use are the only permitted references
     // to the replacement variable. Additional execution or data flow is opaque.
-    const remainder = outside
+    let remainder = outside
       .replace(use[0], "")
+      .replace(finalExecution, "")
       .replace(new RegExp(`\\b${variable}\\s*:=\\s*NULL\\s*;`, "i"), "")
       .replace(new RegExp(`\\b${variable}\\s+text\\s*;`, "i"), "");
-    if (new RegExp(`\\b${variable}\\b`, "i").test(remainder)) return whole;
+    // Anchor length/containment checks over catalog source produce only scalar
+    // metadata. Any other use, reassignment or execution remains opaque.
+    if (use[2] === variable) {
+      const sources = [definition, ...(catalogBinding?.bodyVariables ?? [])].join("|");
+      remainder = remainder
+        .replace(new RegExp(`\\blength\\(\\s*replace\\(\\s*(?:${sources})\\s*,\\s*${variable}\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\blength\\(\\s*${variable}\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?strpos\\(\\s*(?:${sources})\\s*,\\s*${variable}\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?position\\(\\s*${variable}\\s+IN\\s+(?:${sources})\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:${sources})\\s+(?:NOT\\s+)?LIKE\\s*'%'\\s*\\|\\|\\s*${variable}\\s*\\|\\|\\s*'%'`, "gi"), "");
+    }
+    const variableUses = remainder.replace(/\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/g, "''");
+    if (new RegExp(`\\b${variable}\\b`, "i").test(variableUses)) return whole;
     return `${variable} := NULL; /* catalog routine replacement omitted */`;
   });
+  return { source: result, ambiguous };
 }
 
 const DDL_ONLY =
