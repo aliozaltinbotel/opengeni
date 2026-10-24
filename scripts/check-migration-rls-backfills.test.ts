@@ -263,6 +263,156 @@ END $patch$;`;
       analyze(patch.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace")),
     ).toHaveLength(1);
   });
+  test("recognizes catalog SELECT INTO routine patches without hiding executed queries", () => {
+    const patch = `DO $patch$ DECLARE definition text; source text; facts jsonb;
+  anchor text := $old$ SELECT id INTO row FROM widgets; $old$;
+  replacement text := $new$ IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'runtime only'; END IF; $new$;
+BEGIN
+SELECT p.prosrc, pg_catalog.pg_get_functiondef(p.oid), jsonb_build_object('owner', p.proowner)
+INTO source, definition, facts FROM pg_catalog.pg_proc p WHERE p.oid = target;
+IF definition IS NULL THEN RAISE EXCEPTION 'missing catalog routine'; END IF;
+IF source NOT LIKE '%' || anchor || '%'
+ OR (length(source) - length(replace(source, anchor, ''))) / length(anchor) <> 1
+THEN RAISE EXCEPTION 'catalog anchor changed'; END IF;
+EXECUTE format('CREATE POLICY example ON widgets FOR SELECT USING (false)');
+EXECUTE replace(definition, anchor, replacement);
+END $patch$;`;
+    const analyze = (sql: string) => analyzeMigrationRlsBackfills(
+      fixture({ "0001_base.sql": FORCED_TABLE, "0002_patch.sql": sql }),
+    );
+    expect(analyze(patch)).toHaveLength(0);
+    expect(analyze(patch.replace(
+      "EXECUTE replace(definition, anchor, replacement);",
+      "definition := replace(definition, anchor, replacement); EXECUTE definition;",
+    ))).toHaveLength(0);
+    for (const mutation of [
+      (sql: string) => sql.replace("END $patch$", "UPDATE widgets SET id = id; END $patch$"),
+      (sql: string) => sql.replace("END $patch$", "EXECUTE 'DELETE FROM widgets'; END $patch$"),
+      (sql: string) => sql.replace("END $patch$", "IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'real guard'; END IF; END $patch$"),
+      (sql: string) => sql.replace("EXECUTE replace(definition, anchor, replacement);", "EXECUTE replacement;"),
+      (sql: string) => sql.replace("END $patch$", "EXECUTE anchor; END $patch$"),
+      (sql: string) => sql.replace("END $patch$", "PERFORM unknown(replacement); END $patch$"),
+      (sql: string) => sql.replace("EXECUTE replace", "definition := 'SELECT 1'; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "SELECT 'SELECT 1' INTO definition; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "SELECT '1' INTO STRICT definition; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "GET DIAGNOSTICS definition = ROW_COUNT; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "GET CURRENT DIAGNOSTICS definition = ROW_COUNT; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "GET STACKED DIAGNOSTICS definition = MESSAGE_TEXT; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "definition = '1'; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", '"definition" := \'1\'; EXECUTE replace'),
+      (sql: string) => sql.replace("EXECUTE replace", "CALL mutate(definition); EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "FOR definition IN SELECT '1' LOOP NULL; END LOOP; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "FOREACH definition IN ARRAY ARRAY['1'] LOOP NULL; END LOOP; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "FETCH cursor INTO definition; EXECUTE replace"),
+      (sql: string) => sql.replace("EXECUTE replace", "EXECUTE 'SELECT 1' INTO definition; EXECUTE replace"),
+      (sql: string) => sql.replace("INTO source, definition, facts", "INTO definition, source, facts"),
+      (sql: string) => sql.replace("pg_catalog.pg_get_functiondef", "untrusted.pg_get_functiondef"),
+    ]) expect(analyze(mutation(patch)).length).toBeGreaterThan(0);
+    const diagnosticOverwrite = patch
+      .replace("SELECT id INTO row FROM widgets;", "1")
+      .replace("IF EXISTS (SELECT 1 FROM widgets) THEN RAISE EXCEPTION 'runtime only'; END IF;", "UPDATE widgets SET id = id;")
+      .replace("EXECUTE replace", "GET DIAGNOSTICS definition = ROW_COUNT; EXECUTE replace");
+    expect(analyze(diagnosticOverwrite)).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+    const directOverwrite = diagnosticOverwrite.replace(
+      /SELECT p\.prosrc, pg_catalog\.pg_get_functiondef\(p\.oid\), jsonb_build_object\('owner', p\.proowner\)\s+INTO source, definition, facts FROM pg_catalog\.pg_proc p WHERE p\.oid = target;/,
+      "definition := pg_get_functiondef(target);",
+    );
+    expect(analyze(directOverwrite)).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+  });
+  test("refuses duplicate catalog INTO targets that overwrite the routine definition", () => {
+    for (const duplicateTarget of ["definition", "DEFINITION"]) {
+      const patch = `DO $patch$ DECLARE definition text;
+anchor text := $old$old body$old$;
+replacement text := $new$UPDATE widgets SET id = id;$new$;
+BEGIN
+SELECT pg_catalog.pg_get_functiondef(p.oid), 'old body'
+INTO definition, ${duplicateTarget} FROM pg_catalog.pg_proc p WHERE p.oid = target;
+EXECUTE replace(definition, anchor, replacement);
+END $patch$;`;
+      expect(analyzeMigrationRlsBackfills(fixture({
+        "0001_base.sql": FORCED_TABLE,
+        "0002_patch.sql": patch,
+      })), duplicateTarget).toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+    }
+  });
+  test("keeps delimiter and function-header escapes visible in both publication paths", () => {
+    const analyze = (sql: string) => analyzeMigrationRlsBackfills(
+      fixture({ "0001_base.sql": FORCED_TABLE, "0002_patch.sql": sql }),
+    );
+    for (const [anchor, replacement] of [
+      ["body anchor", "$function$; UPDATE widgets SET id = id; $function$"],
+      ["CREATE OR REPLACE FUNCTION example()", "UPDATE widgets SET id = id;"],
+      ["LANGUAGE plpgsql", "LANGUAGE plpgsql; UPDATE widgets SET id = id;"],
+    ]) {
+      const declarations = `DECLARE definition text;
+anchor text := $old$${anchor}$old$;
+replacement text := $new$${replacement}$new$;`;
+      const catalogRead = "SELECT pg_get_functiondef(p.oid) INTO definition FROM pg_proc p WHERE p.oid = target;";
+      const directRead = "definition := pg_get_functiondef(target);";
+      for (const [read, publish] of [
+        [catalogRead, "EXECUTE replace(definition, anchor, replacement);"],
+        [catalogRead, "definition := replace(definition, anchor, replacement); EXECUTE definition;"],
+        [directRead, "definition := replace(definition, anchor, replacement); EXECUTE definition;"],
+      ]) expect(analyze(`DO $patch$ ${declarations} BEGIN ${read} ${publish} END $patch$;`))
+        .toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+      expect(analyze(`DO $patch$ DECLARE definition text; BEGIN ${directRead}
+definition := replace(definition, '${anchor}', '${replacement}');
+EXECUTE definition; END $patch$;`))
+        .toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+    }
+  });
+  test("keeps encoded or concatenated publication delimiters and headers opaque", () => {
+    for (const literal of [
+      String.raw`E'\x24function\x24; UPDATE widgets SET id = id; \x24function\x24'`,
+      String.raw`E'\044function\044; UPDATE widgets SET id = id; \044function\044'`,
+      String.raw`E'\u0024function\u0024; UPDATE widgets SET id = id; \u0024function\u0024'`,
+      String.raw`'\x24function\x24; UPDATE widgets SET id = id; \x24function\x24'`,
+      "E'$fun' || E'ction$; UPDATE widgets SET id = id; $function$'",
+      "'CRE' || 'ATE FUNCTION example(); UPDATE widgets SET id = id;'",
+    ]) {
+      for (const body of [
+        `definition := pg_get_functiondef(target); definition := replace(definition, 'body anchor', ${literal}); EXECUTE definition;`,
+        `SELECT pg_get_functiondef(p.oid) INTO definition FROM pg_proc p WHERE p.oid = target; EXECUTE replace(definition, 'body anchor', ${literal});`,
+      ]) expect(analyzeMigrationRlsBackfills(fixture({
+        "0001_base.sql": FORCED_TABLE,
+        "0002_patch.sql": `DO $patch$ DECLARE definition text; BEGIN ${body} END $patch$;`,
+      })), `${literal} / ${body.startsWith("SELECT") ? "SELECT" : "assignment"}`)
+        .toMatchObject([{ kind: "write", tables: ["widgets"] }]);
+    }
+  });
+  test("admits literal constant anchors but refuses unknown anchor or definition mutations", () => {
+    const patch = `DO $patch$ DECLARE definition text; anchor text; BEGIN
+definition := pg_get_functiondef(target);
+anchor := E'old body\\n' || 'old tail';
+IF (length(definition) - length(replace(definition, anchor, ''))) / length(anchor) <> 1
+THEN RAISE EXCEPTION 'catalog source changed'; END IF;
+definition := replace(definition, anchor, E'UPDATE widgets SET id = id;\\n' || anchor);
+EXECUTE definition; END $patch$;`;
+    const analyze = (body: string) => analyzeMigrationRlsBackfills(fixture({
+      "0001_base.sql": FORCED_TABLE, "0002_patch.sql": body,
+    }));
+    expect(analyze(patch)).toHaveLength(0);
+    for (const mutation of [
+      "CALL mutate(anchor);", "GET DIAGNOSTICS anchor = ROW_COUNT;", "anchor = '1';",
+      "SELECT '1' INTO STRICT anchor;", "CALL mutate(definition);",
+      "GET DIAGNOSTICS definition = ROW_COUNT;", "definition = '1';",
+    ]) expect(analyze(patch.replace("EXECUTE definition;", mutation + " EXECUTE definition;")).length)
+      .toBeGreaterThan(0);
+  });
+  test("keeps definition snapshot witnesses read-only", () => {
+    const patch = `DO $patch$ DECLARE definition text; previous text; BEGIN
+definition := pg_get_functiondef(target); previous := definition;
+definition := replace(definition, 'old body', 'UPDATE widgets SET id = id;');
+IF definition = previous THEN RAISE EXCEPTION 'catalog source changed'; END IF;
+EXECUTE definition; END $patch$;`;
+    const analyze = (body: string) => analyzeMigrationRlsBackfills(fixture({
+      "0001_base.sql": FORCED_TABLE, "0002_patch.sql": body,
+    }));
+    expect(analyze(patch)).toHaveLength(0);
+    for (const mutation of ["CALL mutate(previous);", "previous = '1';", "EXECUTE previous;"])
+      expect(analyze(patch.replace("EXECUTE definition;", mutation + " EXECUTE definition;")).length)
+        .toBeGreaterThan(0);
+  });
   test("treats a replacement initialised in DECLARE as the same catalog routine patch", () => {
     const patch = `DO $patch$ DECLARE definition text;
   anchor text := $old$ RETURN NULL; $old$;
