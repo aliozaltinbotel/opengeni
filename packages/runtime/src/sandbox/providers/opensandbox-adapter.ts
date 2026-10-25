@@ -67,6 +67,13 @@ import {
 import { parseOpenSandboxSignedUriPath, redactOpenSandboxSignedUriPath } from "../stream-port";
 import type { RuntimeMetricsHooks } from "../../metrics";
 import {
+  secretExecCarryFor,
+  secretExecEnvironment,
+  secretScopeDirectory,
+  shellDialectFor,
+  spliceCarry,
+} from "../secret-delivery";
+import {
   SynchronousCommandOutcomeUnknownError,
   type SynchronousCommandPage,
 } from "../synchronous-command";
@@ -535,6 +542,7 @@ export class OpenSandboxSession {
   private archiveLimits: SandboxArchiveLimits | null | undefined;
   private nextSessionId = 1;
   private readonly processesBySession = new Map<number, RetainedProcess>();
+  private readonly secretScopes = new Set<string>();
   private readonly processesByOpId = new Map<string, RetainedProcess>();
   private readonly synchronousResults = new WeakMap<object, SynchronousCommandPage>();
   private readonly commandFailureCauses = new WeakMap<object, unknown>();
@@ -649,10 +657,55 @@ export class OpenSandboxSession {
       await withLifecycle(this.options, async (sandboxes) => {
         await sandboxes.deleteSandbox(this.state.sandboxId);
       });
+      this.secretScopes.clear();
     } catch (error) {
       if (!isNotFound(error)) throw error;
+      // The exact provider is absent, so its attempt files are absent too.
+      this.secretScopes.clear();
     } finally {
       await this.close();
+    }
+  }
+
+  /** Routing forwards the carry unchanged; this adapter alone materializes it. */
+  secretExecDeliveryTransport(): "native" {
+    return "native";
+  }
+
+  /** Secret bytes use the filesystem API, never command text or persisted state. */
+  async writeSecretFiles(
+    scope: string,
+    files: ReadonlyArray<{ path: string; content: Uint8Array }>,
+  ): Promise<void> {
+    if (!/^[A-Za-z0-9_-]+$/.test(scope)) throw new Error("secret delivery: invalid scope");
+    const directory = secretScopeDirectory(scope);
+    for (const file of files) {
+      if (
+        posix.dirname(file.path) !== directory ||
+        workspacePath(file.path, { allowPrivate: true }) !== file.path
+      ) {
+        throw new Error("secret delivery: invalid file path");
+      }
+    }
+    if (files.length === 0) return;
+    const provider = await this.ensureStarted();
+    // Register before the first write so partial failures remain cleanup-owned.
+    this.secretScopes.add(scope);
+    await provider.files.createDirectories([{ path: directory, mode: 0o700 }]);
+    await provider.files.setPermissions([{ path: directory, mode: 0o700 }]);
+    await provider.files.writeFiles(
+      files.map((file) => ({ path: file.path, data: file.content, mode: 0o600 })),
+    );
+  }
+
+  /** The turn controller calls this only after physical command quiescence. */
+  async clearSecretFilesForAttempt(scope?: string): Promise<void> {
+    const scopes = scope === undefined ? [...this.secretScopes] : [scope];
+    for (const entry of scopes) {
+      if (!this.secretScopes.has(entry)) continue;
+      const provider = await this.ensureStarted();
+      await provider.files.deleteDirectories([secretScopeDirectory(entry)]);
+      this.secretScopes.delete(entry);
     }
   }
 
@@ -769,13 +822,30 @@ export class OpenSandboxSession {
       .then(async () => {
         const provider = await this.ensureStarted();
         process.provider = provider;
+        const carry = secretExecCarryFor(args.cmd);
+        const spliced = carry ? spliceCarry(carry, shellDialectFor(args.shell, "linux")) : null;
+        const secretEnv =
+          carry && spliced
+            ? await secretExecEnvironment(carry, spliced, async (file) => {
+                await this.writeSecretFiles(carry.scope, [file]);
+              })
+            : null;
+        const commandArgs =
+          carry && spliced
+            ? {
+                ...args,
+                cmd: carry.spliced ? args.cmd : args.cmd.split(carry.command).join(spliced.text),
+              }
+            : args;
         commandInvoked = true;
         const execution = await withOpenSandboxCommandDispatchProof(provider.commands, () =>
           provider.commands.run(
-            commandForArgs(args),
+            commandForArgs(commandArgs),
             {
               workingDirectory: args.workdir ? workspacePath(args.workdir) : WORKSPACE_ROOT,
-              envs: this.state.environment,
+              envs: secretEnv
+                ? { ...this.state.environment, ...secretEnv }
+                : this.state.environment,
             },
             {
               onInit: (init) => {

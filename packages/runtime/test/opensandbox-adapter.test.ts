@@ -1,5 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import { shell } from "@openai/agents/sandbox";
+import type { Tool } from "@openai/agents";
+import { createHash } from "node:crypto";
+import { createStaticSecretResolver } from "@opengeni/vaults/testing";
+import {
+  createTurnToolCancellationController,
+  wrapCapabilityToolsForTurnCancellation,
+} from "../src/sandbox/turn-tool-cancellation";
+import {
+  prepareSecretExec,
+  runWithSecretCarry,
+  secretScopeDirectory,
+  secretScopeFor,
+} from "../src/sandbox/secret-delivery";
 import {
   ConnectionConfig,
   DefaultAdapterFactory,
@@ -40,11 +53,15 @@ import { join } from "node:path";
 
 const IMAGE = `registry.example.com/opengeni@sha256:${"a".repeat(64)}`;
 
-type FakeFile = { type: "file" | "directory"; data?: Uint8Array };
+type FakeFile = { type: "file" | "directory"; data?: Uint8Array; mode?: number };
 
 class FakeOpenSandbox {
   readonly calls: string[] = [];
   readonly executedCommands: string[] = [];
+  readonly commandEnvironments: Array<Record<string, string>> = [];
+  secretDigestOutput = false;
+  secretWriteFailure: Error | null = null;
+  secretFileWrites = 0;
   readonly files = new Map<string, FakeFile>();
   readonly interrupted: string[] = [];
   createdRequest: CreateSandboxRequest | null = null;
@@ -134,10 +151,18 @@ class FakeOpenSandbox {
     const commands = {
       async run(
         command: string,
-        options: { workingDirectory?: string } | undefined,
+        options: { workingDirectory?: string; envs?: Record<string, string> } | undefined,
         handlers: any,
       ) {
         self.executedCommands.push(command);
+        self.commandEnvironments.push({ ...options?.envs });
+        if (self.secretDigestOutput) {
+          const path = options?.envs?.OPENGENI_SECRET_0;
+          const bytes = path ? self.files.get(path)?.data : undefined;
+          self.commandStdout = bytes
+            ? createHash("sha256").update(bytes).digest("hex")
+            : "UNRESOLVED_SECRETFILE";
+        }
         if (command.includes("__OPENGENI_CONFINED_READ_OK__")) {
           if (!self.sandboxExists) throw self.notFound();
           const root = JSON.parse(/root = ("[^"]*")/u.exec(command)![1]!);
@@ -263,8 +288,12 @@ class FakeOpenSandbox {
           )
           .map(([candidate, value]) => ({ path: candidate, type: value.type }));
       },
-      async createDirectories(entries: Array<{ path: string }>) {
-        for (const entry of entries) self.files.set(entry.path, { type: "directory" });
+      async createDirectories(entries: Array<{ path: string; mode?: number }>) {
+        for (const entry of entries)
+          self.files.set(entry.path, {
+            type: "directory",
+            ...(entry.mode === undefined ? {} : { mode: entry.mode }),
+          });
       },
       async deleteDirectories(paths: string[]) {
         for (const path of paths) {
@@ -278,6 +307,7 @@ class FakeOpenSandbox {
         entries: Array<{
           path: string;
           data?: string | Uint8Array | ArrayBuffer;
+          mode?: number;
         }>,
       ) {
         for (const entry of entries) {
@@ -289,7 +319,14 @@ class FakeOpenSandbox {
                 : entry.data instanceof ArrayBuffer
                   ? new Uint8Array(entry.data)
                   : new Uint8Array();
-          self.files.set(entry.path, { type: "file", data });
+          self.files.set(entry.path, {
+            type: "file",
+            data,
+            ...(entry.mode === undefined ? {} : { mode: entry.mode }),
+          });
+          if (entry.path.startsWith("/tmp/opengeni-private/secrets/")) self.secretFileWrites++;
+          if (self.secretWriteFailure && entry.path.startsWith("/tmp/opengeni-private/secrets/"))
+            throw self.secretWriteFailure;
         }
       },
       async readFile(path: string) {
@@ -319,7 +356,12 @@ class FakeOpenSandbox {
       async replaceContentsDetailed() {
         return [];
       },
-      async setPermissions() {},
+      async setPermissions(entries: Array<{ path: string; mode: number }>) {
+        for (const entry of entries) {
+          const file = self.files.get(entry.path);
+          if (file) file.mode = entry.mode;
+        }
+      },
     };
     this.adapterFactory = {
       createLifecycleStack({ connectionConfig }) {
@@ -1181,6 +1223,271 @@ describe("OpenSandbox default wire proof", () => {
 });
 
 describe("OpenSandbox adapter", () => {
+  test("SDK-owned shell delivers secretfile off-command and clears the attempt directory", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.secretDigestOutput = true;
+    const session = await createClient(fake).create();
+    const syntheticValue = "synthetic-noncredential-file-fixture";
+    const resolver = createStaticSecretResolver({ Fixture: syntheticValue }, { enabled: true });
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: resolver,
+    });
+    const capability = shell();
+    wrapCapabilityToolsForTurnCancellation(capability as never, controller);
+    const tools = capability
+      .clone()
+      .bind(session as never)
+      .tools() as Tool<unknown>[];
+    const exec = tools.find(
+      (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+        tool.type === "function" && tool.name === "exec_command",
+    )!;
+    const recordedInputs: string[] = [];
+    const originalExec = session.execCommand.bind(session);
+    session.execCommand = async (args) => {
+      recordedInputs.push(args.cmd);
+      return await originalExec(args);
+    };
+    const original =
+      "node -e 'require(\"node:fs\").readFileSync(process.argv[1])' '{{secretfile:Fixture}}'";
+    try {
+      const result = await exec.invoke(
+        {} as never,
+        JSON.stringify({ cmd: original, tty: false, yield_time_ms: 30000 }),
+        { toolCall: { callId: "secretfile-sdk-owned" } } as never,
+      );
+      expect(result).toContain(createHash("sha256").update(syntheticValue).digest("hex"));
+      expect(recordedInputs).toEqual([original]);
+      expect(JSON.stringify(session.state)).not.toContain(syntheticValue);
+      expect(fake.executedCommands).toHaveLength(1);
+      expect(fake.executedCommands[0]).not.toContain("{{secretfile:");
+      expect(fake.executedCommands[0]).not.toContain(syntheticValue);
+      expect(session.state.environment).toEqual({ BASE: "base" });
+      const directory = secretScopeDirectory(secretScopeFor(resolver));
+      const path = fake.commandEnvironments[0]?.OPENGENI_SECRET_0;
+      expect(path?.startsWith(`${directory}/`)).toBe(true);
+      expect(fake.files.get(directory)?.mode).toBe(0o700);
+      expect(fake.files.get(path!)?.mode).toBe(0o600);
+      expect(resolver.calls).toHaveLength(1);
+      await controller.waitForQuiescence();
+      await controller.clearSecretFiles!();
+      expect([...fake.files.keys()].some((path) => path.startsWith(directory))).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+  test.each([null, "posix"] as const)(
+    "routed OpenSandbox has one physical secret delivery owner (%s splice)",
+    async (dialect) => {
+      const fake = new FakeOpenSandbox();
+      const session = await createClient(fake).create();
+      const backend = { session, sandboxId: "sbx-1", kind: "opensandbox", activeEpoch: 0 };
+      const route = new RoutingSandboxSession({
+        defaultResolved: backend,
+        readPointer: async () => ({ activeSandboxId: "sbx-1", activeEpoch: 0 }),
+        resolveActiveBackend: async () => backend,
+        beforeMutation: async () => "admitted",
+        afterMutation: async () => {},
+      });
+      const resolver = createStaticSecretResolver(
+        { Fixture: "synthetic-noncredential-route-fixture", Otp: "JBSWY3DPEHPK3PXP" },
+        { enabled: true },
+      );
+      let totpMaterializations = 0;
+      const resolve = resolver.resolve.bind(resolver);
+      resolver.resolve = async (refs, use) => {
+        const values = await resolve(refs, use);
+        for (const value of values.values()) {
+          if (value.material.type !== "totp") continue;
+          const params = value.material.params;
+          value.material = {
+            type: "totp",
+            get params() {
+              totpMaterializations++;
+              return params;
+            },
+          };
+        }
+        return values;
+      };
+      const command = "test -f '{{secretfile:Fixture}}'; test -n '{{secret:Otp/otp}}'";
+      const prepared = await prepareSecretExec(command, {
+        resolver,
+        dialect,
+        use: { surface: "shell", toolName: "exec_command" },
+      });
+      try {
+        const result = await runWithSecretCarry(prepared!.carry, () =>
+          route.execCommand({ cmd: prepared!.text, tty: false, yieldTimeMs: 30000 }),
+        );
+        expect(result).toContain("Process exited with code 0");
+        expect(fake.executedCommands).toHaveLength(1);
+        expect(fake.secretFileWrites).toBe(1);
+        expect(totpMaterializations).toBe(1);
+        expect(resolver.calls).toHaveLength(1);
+        expect(fake.executedCommands[0]).not.toContain("{{secret");
+        expect(fake.executedCommands[0]).not.toContain("env-");
+        expect(Object.keys(fake.commandEnvironments[0]!)).toEqual([
+          "BASE",
+          "OPENGENI_SECRET_0",
+          "OPENGENI_SECRET_1",
+        ]);
+        await route.clearSecretFilesForAttempt();
+        expect(
+          [...fake.files.keys()].some((path) =>
+            path.startsWith(secretScopeDirectory(secretScopeFor(resolver))),
+          ),
+        ).toBe(false);
+      } finally {
+        await session.close();
+      }
+    },
+  );
+
+  test("routed OpenSandbox without native delivery capability remains fail-closed", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    Object.defineProperty(session, "secretExecDeliveryTransport", { value: undefined });
+    const backend = { session, sandboxId: "sbx-1", kind: "opensandbox", activeEpoch: 0 };
+    const route = new RoutingSandboxSession({
+      defaultResolved: backend,
+      readPointer: async () => ({ activeSandboxId: "sbx-1", activeEpoch: 0 }),
+      resolveActiveBackend: async () => backend,
+      beforeMutation: async () => "admitted",
+      afterMutation: async () => {},
+    });
+    const resolver = createStaticSecretResolver(
+      { Fixture: "synthetic-noncredential-refused-route" },
+      { enabled: true },
+    );
+    const prepared = await prepareSecretExec("cat '{{secretfile:Fixture}}'", {
+      resolver,
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    try {
+      await expect(
+        runWithSecretCarry(prepared!.carry, () =>
+          route.execCommand({ cmd: prepared!.text, tty: false }),
+        ),
+      ).rejects.toMatchObject({ name: "RoutingUnsupportedError" });
+      expect(fake.executedCommands).toEqual([]);
+      expect(fake.secretFileWrites).toBe(0);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("SDK-owned shell puts ordinary secrets only in the per-command environment", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    const value = "synthetic-noncredential-environment-fixture";
+    const resolver = createStaticSecretResolver({ Fixture: value }, { enabled: true });
+    const prepared = await prepareSecretExec("test -n '{{secret:Fixture}}'", {
+      resolver,
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    try {
+      await runWithSecretCarry(prepared!.carry, () =>
+        session.exec({ cmd: prepared!.text, tty: false }),
+      );
+      expect(fake.executedCommands[0]).not.toContain("{{secret:");
+      expect(fake.executedCommands[0]).not.toContain(value);
+      expect(fake.commandEnvironments[0]?.OPENGENI_SECRET_0).toBe(value);
+      expect(session.state.environment).toEqual({ BASE: "base" });
+      await session.exec({ cmd: "printf ordinary", tty: false });
+      expect(fake.commandEnvironments[1]).toEqual({ BASE: "base" });
+      expect(JSON.stringify(session.state)).not.toContain(value);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("SDK-owned shell refuses unresolved references before provider dispatch", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    const resolver = createStaticSecretResolver({}, { enabled: true });
+    const controller = createTurnToolCancellationController(undefined, {
+      secretResolver: resolver,
+    });
+    const capability = shell();
+    wrapCapabilityToolsForTurnCancellation(capability as never, controller);
+    const tools = capability
+      .clone()
+      .bind(session as never)
+      .tools() as Tool<unknown>[];
+    const exec = tools.find(
+      (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+        tool.type === "function" && tool.name === "exec_command",
+    )!;
+    try {
+      const result = await exec.invoke(
+        {} as never,
+        JSON.stringify({ cmd: "cat '{{secretfile:Missing}}'", tty: false }),
+        { toolCall: { callId: "secretfile-refused" } } as never,
+      );
+      expect(result).toContain("secret_reference_error");
+      expect(fake.executedCommands).toEqual([]);
+      expect(fake.commandEnvironments).toEqual([]);
+      await controller.waitForQuiescence();
+      await controller.clearSecretFiles!();
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("SDK-owned secretfile partial write fails without dispatch and remains cleanup-owned", async () => {
+    const fake = new FakeOpenSandbox();
+    fake.secretWriteFailure = new Error("synthetic filesystem write refusal");
+    const session = await createClient(fake).create();
+    const resolver = createStaticSecretResolver(
+      { Fixture: "synthetic-noncredential-partial-fixture" },
+      { enabled: true },
+    );
+    const prepared = await prepareSecretExec("cat '{{secretfile:Fixture}}'", {
+      resolver,
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    try {
+      await expect(
+        runWithSecretCarry(prepared!.carry, () =>
+          session.exec({ cmd: prepared!.text, tty: false }),
+        ),
+      ).rejects.toBe(fake.secretWriteFailure);
+      expect(fake.executedCommands).toEqual([]);
+      const directory = secretScopeDirectory(secretScopeFor(resolver));
+      expect(fake.files.has(directory)).toBe(true);
+      await session.clearSecretFilesForAttempt();
+      expect([...fake.files.keys()].some((path) => path.startsWith(directory))).toBe(false);
+    } finally {
+      await session.close();
+    }
+  });
+
+  test("SDK-owned provider deletion retires only its already-deleted secret scopes", async () => {
+    const fake = new FakeOpenSandbox();
+    const session = await createClient(fake).create();
+    const resolver = createStaticSecretResolver(
+      { Fixture: "synthetic-noncredential-deletion-fixture" },
+      { enabled: true },
+    );
+    const prepared = await prepareSecretExec("cat '{{secretfile:Fixture}}'", {
+      resolver,
+      dialect: null,
+      use: { surface: "shell", toolName: "exec_command" },
+    });
+    await runWithSecretCarry(prepared!.carry, () =>
+      session.exec({ cmd: prepared!.text, tty: false }),
+    );
+    await session.delete();
+    const calls = [...fake.calls];
+    await session.clearSecretFilesForAttempt();
+    expect(fake.calls).toEqual(calls);
+    expect(fake.sandboxExists).toBe(false);
+  });
+
   test("create returns the accepted ID before endpoint, health, or manifest work", async () => {
     const fake = new FakeOpenSandbox();
     const client = createClient(fake);

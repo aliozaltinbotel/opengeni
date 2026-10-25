@@ -144,6 +144,8 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   refreshOwnedCommand?(commandId: string): Promise<boolean>;
   state?: unknown;
   commandCancellationTransport?(): Promise<"remote_operation" | "shell_session">;
+  /** Trusted adapter consumes SecretCarry at its physical command boundary. */
+  secretExecDeliveryTransport?(): "native";
   exec?(args: unknown): Promise<unknown>;
   execCommand?(args: unknown): Promise<string>;
   writeStdin?(args: unknown): Promise<string>;
@@ -154,7 +156,7 @@ export interface RoutableBackendSession extends ProviderCommandSession {
   writeFile?(args: unknown): Promise<unknown>;
   writePlacementPrivate?(args: unknown): Promise<unknown>;
   deletePlacementPrivate?(path: string, runAs?: string): Promise<void>;
-  /** Backend-native secret-file cleanup (connected machines); else `rm -rf`. */
+  /** Backend-native secret-file cleanup; else `rm -rf`. */
   clearSecretFilesForAttempt?(scope?: string): Promise<void>;
   createEditor?(runAs?: string): unknown;
   listDir?(args: unknown, runner?: SynchronousCommandRunner): Promise<unknown>;
@@ -2660,12 +2662,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         true,
         async (s, backend) => {
           notifyRemoteOperationTransportSelected(s);
-          // Secret delivery happens here, below every recorder: connected
-          // machines deliver natively in their own session; every other
-          // backend gets a sourced-then-deleted env file.
-          if (backend.kind === "selfhosted") this.noteNativeSecretScope(args);
-          const providerArgs =
-            backend.kind === "selfhosted" ? args : await this.withSecretEnvFile(s, backend, args);
+          // Secret delivery stays below every recorder. Explicit native
+          // adapters consume the carry at physical dispatch; other backends
+          // receive a sourced-then-deleted env file.
+          const nativeSecretDelivery =
+            backend.kind === "selfhosted" || s.secretExecDeliveryTransport?.() === "native";
+          if (nativeSecretDelivery) this.noteNativeSecretScope(args);
+          const providerArgs = nativeSecretDelivery
+            ? args
+            : await this.withSecretEnvFile(s, backend, args);
           if (s.execCommand) {
             return s.execCommand(providerArgs);
           }
@@ -2757,8 +2762,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
-  /** Connected machines deliver natively (their own session writes any
-   * `{{secretfile:…}}`); remember the scope so attempt-end cleanup reaches it. */
+  /** Native-delivery adapters write their own attempt-scoped secretfiles;
+   * remember the scope so attempt-end cleanup reaches the exact backend. */
   private noteNativeSecretScope(args: unknown): void {
     const cmd = args && typeof args === "object" ? (args as { cmd?: unknown }).cmd : undefined;
     const carry = secretExecCarryFor(cmd);
