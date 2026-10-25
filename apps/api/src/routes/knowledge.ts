@@ -26,6 +26,7 @@ import {
   KnowledgeVectorQueryRejectedError,
   hasPermission,
   knowledgeContextForAccess,
+  authorizeKnowledgeQueryOwner,
   requireAccessGrantAuthorization,
   requireSessionAuthorization,
   requireWorkspaceSettingsGrant,
@@ -318,12 +319,30 @@ export function registerKnowledgeRoutes(app: Hono, deps: ApiRouteDeps) {
     }),
   );
   app.post(base, (c) =>
-    run(c, true, async (context) => {
-      const result = await saveKnowledgeEntry(
-        deps.db,
-        context,
-        await parseRequestJson(c, KnowledgeEntrySaveRequest),
-      );
+    run(c, true, async (context, authorization) => {
+      const request = await parseRequestJson(c, KnowledgeEntrySaveRequest);
+      const result = context.actor.kind === "human"
+        ? await deps.db.transaction(async tx => {
+            // Resolve current native authority after body admission, inside the save transaction.
+            // The owner preserves external/managed checks and signed-delegation semantics.
+            c.req.raw.signal.throwIfAborted();
+            try {
+              await authorizeKnowledgeQueryOwner(tx, {
+                context, grant: authorization.grant,
+                externalContinuation: externalActorContinuationForAuthorization(authorization),
+                nativeContinuation: nativeAccessContinuationForAuthorization(authorization),
+              }, deps.settings, "documents:manage");
+            } catch (error) {
+              if (error instanceof Error && ["KNOWLEDGE_QUERY_AUTHORITY_UNAVAILABLE",
+                "External continuation authority unavailable", "NATIVE_ACCESS_CONTINUATION_UNAVAILABLE"].includes(error.message)) {
+                throw new HTTPException(403, {message: "This Knowledge operation is not available with your access or learning settings.", cause: error});
+              }
+              throw error;
+            }
+            c.req.raw.signal.throwIfAborted();
+            return saveKnowledgeEntry(tx, context, request);
+          })
+        : await saveKnowledgeEntry(deps.db, context, request);
       return c.json(result, result.replayed ? 200 : 201);
     }),
   );
