@@ -387,6 +387,7 @@ const ORGANIZATION_MEMBERSHIP_LIFECYCLE_ROUTINES = [
   "get_external_identity_link_reference(uuid, uuid, text)",
   "get_external_identity_link_inventory_references(uuid, uuid[])",
   "ensure_external_identity(uuid, text, text)",
+  "read_existing_external_identity(uuid, text, text)",
   "lookup_external_identity(uuid, text, text, text)",
   "prepare_external_workspace_membership_operation(jsonb)",
   "record_external_workspace_membership_operation(jsonb, jsonb)",
@@ -2422,7 +2423,6 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
-  "model_call_source_receipts",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2461,6 +2461,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  "model_call_source_receipts",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
@@ -4165,19 +4166,22 @@ export function evaluateRuntimeDatabasePosture(
     } else if (
       [
         "ensure_external_identity(uuid, text, text)",
+        "read_existing_external_identity(uuid, text, text)",
         "get_external_identity_link_reference(uuid, uuid, text)",
         "get_external_identity_link_inventory_references(uuid, uuid[])",
       ].includes(routine.name)
     ) {
       const names =
-        routine.name !== "ensure_external_identity(uuid, text, text)"
-          ? ["external_identity_links", "external_identities", "organization_memberships"]
-          : [
-              "external_identities",
-              "organization_memberships",
-              "workspaces",
-              "workspace_inference_controls",
-            ];
+        routine.name === "read_existing_external_identity(uuid, text, text)"
+          ? ["external_identities", "organization_memberships"]
+          : routine.name !== "ensure_external_identity(uuid, text, text)"
+            ? ["external_identity_links", "external_identities", "organization_memberships"]
+            : [
+                "external_identities",
+                "organization_memberships",
+                "workspaces",
+                "workspace_inference_controls",
+              ];
       const missing = names.filter((name) => !tableByName.has(name));
       if (missing.length > 0) {
         violations.push(

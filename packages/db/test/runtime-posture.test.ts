@@ -1499,6 +1499,24 @@ describe("runtime database posture evaluator", () => {
     );
   });
 
+  test("keeps 0666 exact-call source receipts in the append-only FORCE-RLS class", () => {
+    const table = "model_call_source_receipts";
+    expect(FORCE_RLS_TABLES).toContain(table);
+    expect(RUNTIME_READ_INSERT_TABLES).toContain(table);
+    expect(RUNTIME_DML_TABLES).toContain(table);
+    expect(RUNTIME_TABLE_PRIVILEGES[table]).toEqual(["SELECT", "INSERT"]);
+    for (const tables of [
+      NON_RLS_RUNTIME_TABLES,
+      RUNTIME_FULL_DML_TABLES,
+      RUNTIME_READ_ONLY_TABLES,
+      RUNTIME_READ_UPDATE_TABLES,
+      RUNTIME_READ_INSERT_UPDATE_TABLES,
+      PROTECTED_NO_DIRECT_DML_TABLES,
+    ]) {
+      expect(tables as readonly string[]).not.toContain(table);
+    }
+  });
+
   test("freezes the unique, sorted current-ledger table privilege classes", () => {
     const hasOpe121SlackPublicationLedger = FORCE_RLS_TABLES.includes("memory_slack_publications");
     if (hasOpe121SlackPublicationLedger) {
@@ -1753,6 +1771,12 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 0666 fork exact-call source receipts: append-only runtime evidence, FORCE RLS.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1798,7 +1822,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 0796 subscription operation receipts: read-only, FORCE-RLS.
         1 + // 0820 retained browser downloads: read, insert and update, FORCE-RLS.
         1 + // 0842 owner-scoped Site chat access: full-DML, FORCE-RLS.
-        1; // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
+        1 + // 0846 independently owned session title jobs: full-DML, FORCE-RLS.
+        1; // 0666 fork exact-call source receipts: append-only runtime evidence, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("session_title_operations");
       expect(RUNTIME_FULL_DML_TABLES).toContain("session_title_operations");
       expect(FORCE_RLS_TABLES).toContain("site_session_access");
@@ -2149,6 +2174,31 @@ describe("runtime database posture evaluator", () => {
           message.includes("ensure_external_identity") && message.includes("owners do not match"),
       ),
     ).toBe(true);
+  });
+
+  test("existing-only identity reader requires both authority owners without direct table privileges", () => {
+    expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+    for (const name of ["external_identities", "organization_memberships"]) {
+      const missing = safePosture();
+      missing.tables = missing.tables.filter((table) => table.name !== name);
+      expect(
+        evaluateRuntimeDatabasePosture(missing, options).some(
+          (message) =>
+            message.includes("read_existing_external_identity") && message.includes("missing"),
+        ),
+      ).toBe(true);
+      const split = safePosture();
+      split.tables = split.tables.map((table) =>
+        table.name === name ? { ...table, owner: "unrelated_owner" } : table,
+      );
+      expect(
+        evaluateRuntimeDatabasePosture(split, options).some(
+          (message) =>
+            message.includes("read_existing_external_identity") &&
+            message.includes("owners do not match"),
+        ),
+      ).toBe(true);
+    }
   });
 
   test("enforces the automatic session title fanout capability boundary", () => {

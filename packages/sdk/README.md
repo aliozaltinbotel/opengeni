@@ -476,7 +476,15 @@ this client server-side. Each request requires the intersection of the key's
 permissions and the user's workspace membership. API-key rotation does not
 change the external identity.
 
-Membership is automatic: when an `asUser` request reaches a shared workspace of
+`client.asUser(externalId, { source, existingOnly: true })` restricts implicit
+authentication to an existing active external identity and active organization
+membership. Missing, disabled or revoked identities fail with `403`; this mode
+never provisions an identity, personal workspace or first-use shared-workspace
+membership. The check runs atomically under the native membership lifecycle
+fence. Omitting `existingOnly` (or passing `false`) preserves ordinary onboarding.
+This option does not restrict explicit operations beyond normal authorization.
+
+Membership is automatic: when an ordinary `asUser` request reaches a shared workspace of
 the key's own organization and the user has no membership there, Opengeni adds
 one with conversation permissions (workspace read, session create/read/control,
 file upload/read, `mcp_servers:attach`) and continues the request. This needs

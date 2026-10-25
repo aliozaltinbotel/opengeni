@@ -217,7 +217,7 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
   /** Server-side organization-key client scoped to one host-authenticated user.
    * Does not mutate this client, provision workspace membership, or link native
    * identities. The API verifies key and membership authority on each request. */
-  asUser(externalId: string, options: { source?: string } = {}): this {
+  asUser(externalId: string, options: { source?: string; existingOnly?: boolean } = {}): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
     if (
@@ -227,6 +227,9 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
       throw new Error(
         "asUser and asService are mutually exclusive; start from the unscoped client",
       );
+    if (options.existingOnly !== undefined && typeof options.existingOnly !== "boolean") {
+      throw new Error("existingOnly must be a boolean");
+    }
     const source = options.source ?? "default";
     const validOpaqueText = (value: unknown, maxBytes: number): value is string =>
       typeof value === "string" &&
@@ -241,7 +244,11 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
     const Client = this.constructor as new (options: OpenGeniClientOptions) => this;
     const client = new Client({ ...this.options });
     client.externalActorHeader = encodeURIComponent(
-      JSON.stringify({ mode: "external", identity: { externalId, source } }),
+      JSON.stringify({
+        mode: "external",
+        identity: { externalId, source },
+        ...(options.existingOnly === true ? { existingOnly: true } : {}),
+      }),
     );
     return client;
   }

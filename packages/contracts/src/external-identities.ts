@@ -169,7 +169,14 @@ export type UpdateExternalIdentityMembershipRequest = z.infer<
 
 export const ExternalActorSelection = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("mode", [
-    z.object({ mode: z.literal("external"), identity: ExternalIdentityReference }).strict(),
+    z
+      .object({
+        mode: z.literal("external"),
+        identity: ExternalIdentityReference,
+        /** Restrictive authentication: resolve an existing active identity; never provision identity or membership. */
+        existingOnly: z.boolean().optional(),
+      })
+      .strict(),
     z
       .object({
         mode: z.literal("linked_native"),
