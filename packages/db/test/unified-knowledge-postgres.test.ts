@@ -173,6 +173,78 @@ async function fails(action: Promise<unknown>, state: string) {
   expect(nestedPostgresSqlState(error)).toBe(state);
 }
 
+describe("human review-first Knowledge proposals", () => {
+  test("personal and workspace proposals create actual pending revisions and exact retries", async () => {
+    const f = await fixture();
+    for (const scope of ["personal", "workspace"] as const) {
+      const request = {
+        operationId: crypto.randomUUID(), expectedVersion: 0, scope, reviewMode: "review_first" as const,
+        entry: { kind: "fact" as const, title: "Synthetic retained fact", content: "Synthetic retained observation." },
+      };
+      const receipt = await saveKnowledgeEntry(client.db, f.human, request);
+      expect(receipt.outcome).toBe("pending");
+      expect(receipt.version).toBe(1);
+      expect(await getKnowledgeEntry(client.db, f.human, receipt.entryId)).toBeNull();
+      const pending = await getKnowledgeEntry(client.db, f.human, receipt.entryId, { view: "needs_review" });
+      expect(pending?.scope).toBe(scope);
+      expect(pending?.revision.id).toBe(receipt.revisionId);
+      expect(pending?.publishedRevisionId).toBeNull();
+      expect(pending?.revision.entry.content).toBe(request.entry.content);
+      expect(await saveKnowledgeEntry(client.db, f.human, request)).toEqual({ ...receipt, replayed: true });
+      const { reviewMode: _reviewMode, ...changedMode } = request;
+      await fails(saveKnowledgeEntry(client.db, f.human, changedMode), "23505");
+      const approved = await reviewKnowledgeEntry(client.db, f.human, { operationId: crypto.randomUUID(), entryId: receipt.entryId,
+        revisionId: receipt.revisionId, expectedVersion: receipt.version, decision: "approve" });
+      expect(approved.outcome).toBe("published");
+      expect((await getKnowledgeEntry(client.db, f.human, receipt.entryId))?.revision.id).toBe(receipt.revisionId);
+    }
+  });
+
+  test("ordinary human save stays published and pending correction preserves its published revision", async () => {
+    const f = await fixture();
+    const original = await save(f.human, "Synthetic original content", { scope: "personal" });
+    expect(original.outcome).toBe("published");
+    const request = { operationId: crypto.randomUUID(), entryId: original.entryId, expectedVersion: original.version,
+      scope: "personal" as const, reviewMode: "review_first" as const,
+      entry: { kind: "fact" as const, title: "Synthetic correction", content: "Synthetic corrected observation." } };
+    const pending = await saveKnowledgeEntry(client.db, f.human, request);
+    expect(pending.outcome).toBe("pending");
+    expect((await getKnowledgeEntry(client.db, f.human, original.entryId))?.revision.id).toBe(original.revisionId);
+    expect((await getKnowledgeEntry(client.db, f.human, original.entryId, { view: "needs_review" }))?.revision.id).toBe(pending.revisionId);
+    expect(await saveKnowledgeEntry(client.db, f.human, request)).toEqual({ ...pending, replayed: true });
+    await fails(saveKnowledgeEntry(client.db, f.human, { ...request, operationId: crypto.randomUUID() }), "40001");
+  });
+
+  test("proposal mode does not grant write scope or expose another personal owner", async () => {
+    const f = await fixture();
+    const request = { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "personal" as const, reviewMode: "review_first" as const,
+      entry: { kind: "fact" as const, title: "Synthetic private fact", content: "Synthetic retained observation." } };
+    const noWrite: KnowledgeContext = { ...f.human, actor: { ...f.human.actor, writeScopes: [] } };
+    await fails(saveKnowledgeEntry(client.db, noWrite, request), "42501");
+    const rows = await shared!.admin<{ count: number }[]>`SELECT count(*)::integer AS count FROM knowledge_entries WHERE account_id=${f.accountId}`;
+    expect(rows[0]?.count).toBe(0);
+    const receipt = await saveKnowledgeEntry(client.db, f.human, request);
+    const other: KnowledgeContext = { ...f.human, actor: { ...f.human.actor, subjectId: `user:${crypto.randomUUID()}` } };
+    expect(await getKnowledgeEntry(client.db, other, receipt.entryId, { view: "needs_review" })).toBeNull();
+    await fails(saveKnowledgeEntry(client.db, other, { ...request, operationId: crypto.randomUUID(), entryId: receipt.entryId, expectedVersion: receipt.version }), "42501");
+    const pending = await getKnowledgeEntry(client.db, f.human, receipt.entryId, { view: "needs_review" });
+    expect(pending?.version).toBe(receipt.version);
+    expect(pending?.revision.id).toBe(receipt.revisionId);
+  });
+
+  test("human-only review mode cannot override an agent's accepted Off policy", async () => {
+    const f = await fixture();
+    const { agent } = await attempt(f, null, false, "off");
+    const request = { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace" as const, reviewMode: "review_first" as const,
+      entry: { kind: "fact" as const, title: "Synthetic fact", content: "Synthetic retained observation." } };
+    await fails(saveKnowledgeEntry(client.db, agent, request), "22023");
+    const { reviewMode: _reviewMode, ...ordinary } = request;
+    await fails(saveKnowledgeEntry(client.db, agent, ordinary), "42501");
+    const rows = await shared!.admin<{ count: number }[]>`SELECT count(*)::integer AS count FROM knowledge_entries WHERE account_id=${f.accountId}`;
+    expect(rows[0]?.count).toBe(0);
+  });
+});
+
 describe("unified Knowledge storage", () => {
   test("review reliability: schedule and learning edits commit and compensate together", async () => {
     const f = await fixture();

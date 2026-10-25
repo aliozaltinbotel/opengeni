@@ -383,6 +383,8 @@ accepted answer or instruction. Exact live-attempt and evidence access checks
 still apply.
 A correction awaiting review leaves the previous published revision available.
 
+Authorized human callers may set `reviewMode: "review_first"` on the public Knowledge save request to retain an inactive revision instead of publishing it. The option only narrows publication: the existing document-management permission, personal owner, scope, OCC and exact operation-replay checks still apply. Omitting it keeps ordinary human save behavior. Agent tools do not expose this human-only option and continue to use their accepted learning policy; an Off policy cannot be overridden.
+
 The Knowledge browser groups pending changes by chat turn or scheduled run. A
 human opens the first proposal directly in the page, with All reviews returning
 to the queue. A compact pending-item list stays beside the selected proposal,

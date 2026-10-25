@@ -27,6 +27,7 @@ test("discovered save tools route future behavior away from retrieval-only Knowl
   try {
     const { tools } = await client.listTools();
     const description = (name: string) => tools.find((tool) => tool.name === name)?.description;
+    expect(tools.find((tool) => tool.name === "knowledge_save")?.inputSchema.properties).not.toHaveProperty("reviewMode");
     for (const name of [
       "knowledge_prepare_save",
       "knowledge_save",
