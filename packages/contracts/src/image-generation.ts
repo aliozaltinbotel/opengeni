@@ -127,11 +127,12 @@ export function generatedImageHistoryModelMessage(item: unknown): Record<string,
   const parsed = GeneratedImageReceiptSchema.safeParse(item.output);
   if (!parsed.success) return null;
   const receipt = parsed.data;
-  return {type: "message", role: "assistant", content: [
+  const text = [
     "Generated image artifact:",
     `Artifact ID: ${receipt.artifact.artifactId}`,
     `Sandbox path: ${receipt.sandboxPath.replace(/^\/workspace\//, "")}`,
     `Format: ${receipt.artifact.contentType}`,
     `Dimensions: ${receipt.artifact.dimensions?.width ?? "?"}x${receipt.artifact.dimensions?.height ?? "?"}`,
-  ].join("\n")};
+  ].join("\n");
+  return {type: "message", role: "assistant", content: [{type: "output_text", text}]};
 }

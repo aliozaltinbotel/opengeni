@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { bindDurableModelHistoryRows, modelSourceInputBinding } from "../../../packages/runtime/src/model-request-capture";
 import { createHash } from "node:crypto";
-import { Agent, RunContext, RunState } from "@openai/agents-core";
+import { Agent, RunContext, RunState, type ModelRequest } from "@openai/agents-core";
+import { OpenAIResponsesModel } from "@openai/agents";
+import OpenAI from "openai";
 import {
   assertGeneratedImageHistoryRetained,
   collectGeneratedImageArtifactReceipts,
@@ -396,6 +398,32 @@ describe("generated image retention boundary", () => {
     expect(encoded).not.toContain("/workspace/generated-images/");
     expect(encoded).not.toContain("provider-secret-id");
     expect(encoded).not.toContain("providerData");
+  });
+
+  test("serializes source-bound generated image history through the actual Responses SDK", () => {
+    class ResponsesHistoryProbe extends OpenAIResponsesModel {
+      serialize(input: ModelRequest["input"]) {
+        return this._getInputItems(input);
+      }
+    }
+    const item: Record<string, unknown> = {
+      type: "hosted_tool_call", name: "image_generation_call", id: "image-call",
+      status: "completed", output: receipt,
+    };
+    const original = JSON.stringify(item);
+    const parent = {owner: "session_history_items", id: "55555555-5555-4555-8555-555555555555", sha256: "d".repeat(64)};
+    bindDurableModelHistoryRows([{id: parent.id, sourceSha256: parent.sha256, item}]);
+    const projected = projectGeneratedImageHistoryForModel([item]);
+    const before = modelSourceInputBinding(projected[0]);
+    const model = new ResponsesHistoryProbe(new OpenAI({apiKey: "synthetic-offline-unused"}), "gpt-6-astra");
+    // Exercise the SDK's actual runtime-history boundary without a normalizing test fixture or provider request.
+    const wire = model.serialize(projected as ModelRequest["input"]);
+    expect(wire).toHaveLength(1);
+    expect(wire[0]).toMatchObject({role: "assistant", content: [{type: "output_text", text: expect.stringContaining(receipt.artifact.artifactId)}]});
+    expect(modelSourceInputBinding(projected[0])).toEqual(before);
+    expect(before?.parents).toEqual([parent]);
+    expect(before?.retainedSources).toEqual([{owner: "files", id: receipt.artifact.artifactId, sha256: receipt.artifact.sha256}]);
+    expect(JSON.stringify(item)).toBe(original);
   });
 
   test("binds generated image facts to unchanged durable history without reusing the row digest", () => {
