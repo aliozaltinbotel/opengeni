@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
+import { resolveMcpOAuthDiscovery, validateHttpUrl } from "../../../packages/network/src/index";
 import { buildAuthorizationUrl, chooseMcpAuthorizeScopes } from "../src/integrations/oauth-client";
 import {
   assertAuthorizationServerPins,
@@ -18,6 +19,55 @@ function cendraProfile() {
 }
 
 describe("Cendra Single MCP read OAuth profile", () => {
+  async function discoverMetadata(overrides: Record<string, string> = {}) {
+    return await resolveMcpOAuthDiscovery({
+      resourceUrl: resource,
+      challenge: { scheme: "bearer", scope: [] },
+      canonicalizeResource: (value) => new URL(value).toString(),
+      validateEndpoint: (value, label) => validateHttpUrl(value, { label }),
+      fetchMetadata: async ({ kind, url }) => ({
+        status: "present",
+        url,
+        document: kind === "protected_resource"
+          ? { resource, authorization_servers: [issuer] }
+          : {
+              issuer,
+              authorization_endpoint: `${issuer}/oauth/authorize`,
+              token_endpoint: `${issuer}/oauth/token`,
+              code_challenge_methods_supported: ["S256"],
+              ...overrides,
+            },
+      }),
+    });
+  }
+
+  test("real discovery URL validation preserves the exact reviewed issuer identifier", async () => {
+    const discovery = await discoverMetadata();
+    const pins = cendraProfile().authorizationServer;
+    if (!pins) throw new Error("Cendra authorization server pins missing");
+    expect(discovery.authorizationServerMetadata.issuer).toBe(issuer);
+    expect(() => assertAuthorizationServerPins(discovery.authorizationServerMetadata, pins)).not.toThrow();
+  });
+
+  for (const drift of [
+    { issuer: `${issuer}/` },
+    { issuer: `${issuer}/other` },
+    { issuer: "https://other.example" },
+    { issuer: "https://user@wealthy-bee-2.clerk.accounts.dev" },
+    { issuer: "http://wealthy-bee-2.clerk.accounts.dev" },
+    { authorization_endpoint: "https://other.example/oauth/authorize" },
+    { token_endpoint: "https://other.example/oauth/token" },
+  ]) {
+    test(`discovery and the strict profile reject metadata drift ${JSON.stringify(drift)}`, async () => {
+      const pins = cendraProfile().authorizationServer;
+      if (!pins) throw new Error("Cendra authorization server pins missing");
+      await expect((async () => {
+        const discovery = await discoverMetadata(drift);
+        assertAuthorizationServerPins(discovery.authorizationServerMetadata, pins);
+      })()).rejects.toThrow();
+    });
+  }
+
   test("matches only the exact resource with a personal exact connection binding", () => {
     const profile = cendraProfile();
     expect(defaultOwnershipFor(profile)).toBe("personal");

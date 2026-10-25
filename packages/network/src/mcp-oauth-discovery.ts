@@ -399,9 +399,12 @@ async function discoverAuthorizationServerMetadata(
       "legacy MCP OAuth metadata did not include issuer",
     );
   }
-  const issuer = validateDiscoveryEndpoint(
+  const issuer = issuerValue ?? safeAuthorizationServer;
+  // An issuer is an exact identifier, not a fetch URL. Validate its destination
+  // without replacing it with URL serialization (which adds a root slash).
+  validateDiscoveryEndpoint(
     input,
-    issuerValue ?? safeAuthorizationServer,
+    issuer,
     "OAuth issuer",
     "authorization_server_metadata",
   );

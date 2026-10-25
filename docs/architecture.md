@@ -2346,6 +2346,8 @@ Canonical: [`capabilities.md`](capabilities.md),
 
 MCP OAuth redirects carry a short signed reference to encrypted, time-limited
 Postgres state under workspace RLS, then check the one-use nonce.
+Discovery validates issuer URLs without serializing their exact identifier;
+reviewed issuer pins continue to distinguish a root URL with a trailing slash.
 Gmail retains its personal MCP identity/scopes with a reviewed REST bridge.
 OAuth: `apps/api/src/integrations/oauth-profiles.ts`/`oauth-client.ts`;
 operations/scopes: `packages/runtime/src/gmail-rest-mcp.ts`/`gmail-rest-tools.ts`;
