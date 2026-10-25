@@ -1,3 +1,4 @@
+import { useExternalAuthRecovery } from "./lib/external-auth-recovery";
 import { AppContext } from "@opengeni/react/app/app-context";
 import {
   createSlackLinkPrepareController,
@@ -161,6 +162,7 @@ const webAppStateHost: AppStateHost = {
 };
 
 export function RootRouteComponent() {
+  const externalAuthRecovery = useExternalAuthRecovery();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
@@ -237,6 +239,8 @@ export function RootRouteComponent() {
     <Outlet />
   ) : !clientConfig && !configError ? (
     <LoadingPanel />
+  ) : configError?.recovery === "authentication" && externalAuthRecovery ? (
+    externalAuthRecovery
   ) : configError ? (
     <ProblemPanel
       title={configError.title}

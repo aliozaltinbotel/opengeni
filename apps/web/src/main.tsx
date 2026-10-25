@@ -7,7 +7,7 @@ import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { App, appDestinationRoutePattern, appRoutePattern } from "./App";
+import { App, appDestinationRoutePattern, appRoutePattern, resetPrincipalRoute } from "./App";
 import { apiBaseUrl, bundleDeploymentRevision } from "./api";
 import {
   CLIENT_ERRORS_PATH,
@@ -95,7 +95,10 @@ function renderApp() {
       <AppearanceProvider>
         {import.meta.env.VITE_CLERK_PUBLISHABLE_KEY?.trim() ? (
           <React.Suspense fallback={null}>
-            <ClerkConsoleAuth publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY.trim()}>
+            <ClerkConsoleAuth
+              publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY.trim()}
+              onPrincipalChange={resetPrincipalRoute}
+            >
               <App />
             </ClerkConsoleAuth>
           </React.Suspense>

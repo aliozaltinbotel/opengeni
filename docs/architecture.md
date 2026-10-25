@@ -31,7 +31,11 @@ SDK and editable-artifact transport requests, obtain a token in memory per reque
 signed-out sessions cannot fall back to a saved deployment key. Without that build
 setting the existing authentication and console flow are unchanged. The configured
 API base still owns authentication and authorization; this browser bridge grants
-no native workspace or session authority.
+no native workspace or session authority. A session, user or organization change
+retires old clients, clears routed workspace/session pointers through the console
+router, and remounts app state before new bootstrap; token renewal alone does not.
+Only Clerk configuration refusals (401/403) offer existing-membership selection
+or explicit sign-out. Those recovery controls never create membership or access.
 
 External-actor workspace inventory is separate from its lazy scoped grants. Before
 publishing console navigation, the bootstrap and access refresh read missing
