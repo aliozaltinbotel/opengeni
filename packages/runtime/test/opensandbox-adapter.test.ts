@@ -53,6 +53,14 @@ import { join } from "node:path";
 
 const IMAGE = `registry.example.com/opengeni@sha256:${"a".repeat(64)}`;
 
+// The provider's mode number carries octal digits, unlike a local filesystem bitmask.
+function permissionModeFromWire(mode: number): number {
+  if (!Number.isSafeInteger(mode) || !/^[0-7]+$/u.test(String(mode))) {
+    throw new Error(`invalid octal permission mode: ${mode}`);
+  }
+  return Number.parseInt(String(mode), 8);
+}
+
 type FakeFile = { type: "file" | "directory"; data?: Uint8Array; mode?: number };
 
 class FakeOpenSandbox {
@@ -292,7 +300,7 @@ class FakeOpenSandbox {
         for (const entry of entries)
           self.files.set(entry.path, {
             type: "directory",
-            ...(entry.mode === undefined ? {} : { mode: entry.mode }),
+            ...(entry.mode === undefined ? {} : { mode: permissionModeFromWire(entry.mode) }),
           });
       },
       async deleteDirectories(paths: string[]) {
@@ -322,7 +330,7 @@ class FakeOpenSandbox {
           self.files.set(entry.path, {
             type: "file",
             data,
-            ...(entry.mode === undefined ? {} : { mode: entry.mode }),
+            ...(entry.mode === undefined ? {} : { mode: permissionModeFromWire(entry.mode) }),
           });
           if (entry.path.startsWith("/tmp/opengeni-private/secrets/")) self.secretFileWrites++;
           if (self.secretWriteFailure && entry.path.startsWith("/tmp/opengeni-private/secrets/"))
@@ -359,7 +367,7 @@ class FakeOpenSandbox {
       async setPermissions(entries: Array<{ path: string; mode: number }>) {
         for (const entry of entries) {
           const file = self.files.get(entry.path);
-          if (file) file.mode = entry.mode;
+          if (file) file.mode = permissionModeFromWire(entry.mode);
         }
       },
     };
@@ -495,8 +503,11 @@ function wireEvent(event: Record<string, unknown>): string {
 async function wireSession(
   body: string | Uint8Array | ((command: string) => ReadableStream),
   contentType = "text/event-stream",
-  transport: { method?: string; useRequest?: boolean } = {},
+  transport: { method?: string; useRequest?: boolean; filesystem?: boolean } = {},
 ) {
+  const permissionRequests: Array<{ operation: string; path: string; mode: number }> = [];
+  const fileModes = new Map<string, number>();
+  const uploadedBytes = new Map<string, Uint8Array>();
   const starts: string[] = [];
   const statusIds: string[] = [];
   const interrupted: string[] = [];
@@ -507,6 +518,55 @@ async function wireSession(
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
+      if (transport.filesystem && request.method === "POST" &&
+          ["/directories", "/files/permissions", "/files/upload"].includes(url.pathname)) {
+        const entries: Array<{ path: string; mode?: number }> = [];
+        if (url.pathname === "/files/upload") {
+          const form = await request.formData();
+          const metadata = form.get("metadata");
+          if (!(metadata instanceof Blob)) return new Response("missing metadata", { status: 400 });
+          const entry: unknown = JSON.parse(await metadata.text());
+          if (typeof entry !== "object" || entry === null || !("path" in entry) ||
+              typeof entry.path !== "string" ||
+              ("mode" in entry && entry.mode !== undefined && typeof entry.mode !== "number")) {
+            return new Response("invalid metadata", { status: 400 });
+          }
+          entries.push({ path: entry.path, ...("mode" in entry && typeof entry.mode === "number" ? { mode: entry.mode } : {}) });
+          const file = form.get("file");
+          if (file instanceof Blob) uploadedBytes.set(entry.path, new Uint8Array(await file.arrayBuffer()));
+        } else {
+          const body: unknown = await request.json();
+          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+            return new Response("invalid permission map", { status: 400 });
+          }
+          for (const [path, permission] of Object.entries(body)) {
+            if (typeof permission !== "object" || permission === null ||
+                !("mode" in permission) || typeof permission.mode !== "number") {
+              return new Response("invalid permission", { status: 400 });
+            }
+            entries.push({ path, mode: permission.mode });
+          }
+        }
+        for (const entry of entries) {
+          if (entry.mode === undefined) continue;
+          // Execd parses the JSON number's digits in base 8, not as a numeric Unix bitmask.
+          if (!Number.isSafeInteger(entry.mode) || !/^[0-7]+$/u.test(String(entry.mode))) {
+            return Response.json({ message: `strconv.ParseUint: parsing "${entry.mode}": invalid syntax` }, { status: 400 });
+          }
+          permissionRequests.push({ operation: url.pathname, path: entry.path, mode: entry.mode });
+          fileModes.set(entry.path, Number.parseInt(String(entry.mode), 8));
+        }
+        return new Response(null, { status: 200 });
+      }
+      if (transport.filesystem && url.pathname === "/directories" && request.method === "DELETE") {
+        for (const path of url.searchParams.getAll("path")) {
+          for (const entry of fileModes.keys()) if (entry === path || entry.startsWith(`${path}/`)) {
+            fileModes.delete(entry);
+            uploadedBytes.delete(entry);
+          }
+        }
+        return new Response(null, { status: 200 });
+      }
       if (url.pathname === "/command" && request.method === "POST") {
         const { command } = (await request.json()) as { command: string };
         starts.push(command);
@@ -538,8 +598,12 @@ async function wireSession(
         ? commandFetch(new Request(input, requestInit))
         : commandFetch(input, requestInit);
     }) as typeof fetch;
+    const real = new DefaultAdapterFactory().createExecdStack({
+      ...options, execdBaseUrl: server.url.origin,
+    });
     return {
       ...originalStack(options),
+      ...(transport.filesystem ? { files: real.files } : {}),
       commands: new DefaultAdapterFactory().createExecdStack({
         ...options,
         execdBaseUrl: server.url.origin,
@@ -560,12 +624,21 @@ async function wireSession(
   const session = await createClient(fake).create();
   return {
     session,
+    permissionRequests,
+    fileModes,
+    uploadedBytes,
     starts,
     statusIds,
     interrupted,
     statuses,
     onStatus(callback: (id: string) => void) {
       onStatus = callback;
+    },
+    files() {
+      return new DefaultAdapterFactory().createExecdStack({
+        connectionConfig: new ConnectionConfig({ domain: server.url.origin }),
+        execdBaseUrl: server.url.origin,
+      }).files;
     },
     commands() {
       return withOpenSandboxCommandStreamProof(new DefaultAdapterFactory()).createExecdStack({
@@ -581,6 +654,53 @@ async function wireSession(
 }
 
 describe("OpenSandbox default wire proof", () => {
+  test("secretfile permissions use octal digits through the real filesystem HTTP adapter", async () => {
+    const wire = await wireSession(
+      wireEvent({ type: "init", text: "exec-original" }) +
+      wireEvent({ type: "execution_complete", execution_time: 1 }),
+      "text/event-stream", { filesystem: true },
+    );
+    const resolver = createStaticSecretResolver({ "id:6cc2b8aa-1a66-4df7-8ef0-6b64794b7893": "FAKEVALUE" });
+    const prepared = await prepareSecretExec("sha256sum -- '{{secretfile:id:6cc2b8aa-1a66-4df7-8ef0-6b64794b7893}}'", {
+      resolver, dialect: "posix", use: { surface: "shell", toolName: "exec_command" },
+    });
+    if (!prepared) throw new Error("the fixture must prepare the secret reference");
+    try {
+      for (const mode of [448, 384]) {
+        await expect(wire.files().createDirectories([{ path: "/tmp/invalid-mode", mode }]))
+          .rejects.toThrow(`strconv.ParseUint: parsing "${mode}": invalid syntax`);
+      }
+      const result = await runWithSecretCarry(prepared.carry, () => wire.session.exec({ cmd: prepared.text, yieldTimeMs: 1000 }));
+      expect(result.exitCode).toBe(0);
+      const directory = secretScopeDirectory(secretScopeFor(resolver));
+      expect(wire.permissionRequests.map(({ operation, mode }) => ({ operation, mode }))).toEqual([
+        { operation: "/directories", mode: 755 }, // declared workspace root, SDK default
+        { operation: "/directories", mode: 700 },
+        { operation: "/files/permissions", mode: 700 },
+        { operation: "/files/upload", mode: 600 },
+      ]);
+      expect(wire.fileModes.get(directory)).toBe(0o700);
+      const file = [...wire.uploadedBytes.keys()][0];
+      if (file === undefined) throw new Error("the fixture must upload a secret file");
+      expect(wire.fileModes.get(file)).toBe(0o600);
+      expect(new TextDecoder().decode(wire.uploadedBytes.get(file))).toBe("FAKEVALUE");
+      expect(wire.starts).toHaveLength(1);
+      expect(wire.starts[0]).not.toContain("FAKEVALUE");
+      await wire.session.clearSecretFilesForAttempt();
+      expect(wire.fileModes.has(directory)).toBe(false);
+      expect(wire.uploadedBytes.size).toBe(0);
+    } finally { await wire.close(); }
+  });
+
+  test("manifest permissions preserve Unix mode bits across the filesystem HTTP API", async () => {
+    const wire = await wireSession("", "text/event-stream", { filesystem: true });
+    try {
+      await wire.session.materializeEntry({ path: "private.txt", entry: { type: "file", content: "fixture", permissions: "-rw-r-----" } });
+      expect(wire.permissionRequests.at(-1)).toEqual({ operation: "/files/permissions", path: "/workspace/private.txt", mode: 640 });
+      expect(wire.fileModes.get("/workspace/private.txt")).toBe(0o640);
+    } finally { await wire.close(); }
+  });
+
   test.each([
     ["array exit", { ename: "CommandExecutionError", evalue: ["0"], traceback: [] }],
     ["array name", { ename: ["CommandExecutionError"], evalue: "0", traceback: [] }],

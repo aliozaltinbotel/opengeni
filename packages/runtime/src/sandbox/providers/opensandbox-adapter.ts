@@ -360,6 +360,11 @@ function commandForArgs(args: ExecCommandArgs): string {
   return `${shellQuote(requestedShell)}${args.login === false ? "" : " -l"} -c ${shellQuote(args.cmd)}`;
 }
 
+/** Execd expects octal digits as a JSON number (700), not a Unix bitmask (0o700 = 448). */
+function openSandboxPermissionMode(mode: number): number {
+  return Number(mode.toString(8));
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
@@ -691,10 +696,10 @@ export class OpenSandboxSession {
     const provider = await this.ensureStarted();
     // Register before the first write so partial failures remain cleanup-owned.
     this.secretScopes.add(scope);
-    await provider.files.createDirectories([{ path: directory, mode: 0o700 }]);
-    await provider.files.setPermissions([{ path: directory, mode: 0o700 }]);
+    await provider.files.createDirectories([{ path: directory, mode: openSandboxPermissionMode(0o700) }]);
+    await provider.files.setPermissions([{ path: directory, mode: openSandboxPermissionMode(0o700) }]);
     await provider.files.writeFiles(
-      files.map((file) => ({ path: file.path, data: file.content, mode: 0o600 })),
+      files.map((file) => ({ path: file.path, data: file.content, mode: openSandboxPermissionMode(0o600) })),
     );
   }
 
@@ -1424,7 +1429,7 @@ export class OpenSandboxSession {
     if (entry.permissions === undefined) return;
     const provider = await this.ensureStarted();
     await provider.files.setPermissions([
-      { path, mode: new Permissions(entry.permissions).toMode() & 0o777 },
+      { path, mode: openSandboxPermissionMode(new Permissions(entry.permissions).toMode() & 0o777) },
     ]);
   }
 
