@@ -292,3 +292,10 @@ describe("secret permission aliases (AX-6)", () => {
     expect(hasPermission(["workspace:admin"], "secrets:use")).toBe(true);
   });
 });
+
+test("Knowledge proposal keeps the existing document-management permission boundary", () => {
+  expect(hasPermission(["workspace:admin"], "documents:manage")).toBe(true);
+  expect(hasPermission(["documents:manage"], "documents:manage", "explicit")).toBe(true);
+  expect(hasPermission(["workspace:admin"], "documents:manage", "explicit")).toBe(false);
+  expect(hasPermission(["workspace:read", "documents:search"], "documents:manage")).toBe(false);
+});

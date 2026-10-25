@@ -94,3 +94,17 @@ test("empty facts, unidentifiable sources and duplicate membership are rejected"
     }).success,
   ).toBe(false);
 });
+
+test("human callers can narrow an authorized save to review first without selecting automatic publication", () => {
+  const request = {
+    operationId: sourceId,
+    expectedVersion: 0,
+    scope: "personal",
+    entry: { title: "Synthetic fact", kind: "fact", content: "Synthetic retained text" },
+  };
+  expect(KnowledgeEntrySaveRequest.parse({ ...request, reviewMode: "review_first" }).reviewMode).toBe("review_first");
+  expect(KnowledgeEntrySaveRequest.parse(request)).not.toHaveProperty("reviewMode");
+  for (const reviewMode of ["automatic", "off", false, true, null]) {
+    expect(KnowledgeEntrySaveRequest.safeParse({ ...request, reviewMode }).success).toBe(false);
+  }
+});

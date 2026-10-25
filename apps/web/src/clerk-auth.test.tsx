@@ -496,3 +496,49 @@ test("organization pagination rejection is shown without an unhandled promise or
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test("Clerk recovery retries an existing current organization without treating selection as new access", async () => {
+  auth = { ...auth, isLoaded: true, isSignedIn: true, sessionId: "retry-current-session", userId: "retry-current-person", orgId: "fixture-organization-one" };
+  const selected: string[] = [];
+  organizationState = { ...organizationState, isLoaded: true,
+    setActive: async ({ organization }) => { selected.push(organization); },
+    userMemberships: { ...organizationState.userMemberships,
+      data: [{ organization: { id: "fixture-organization-one", name: "Existing organization" } }],
+      isLoading: false, error: null, hasNextPage: false, isFetching: false },
+  };
+  const { App } = await import("./App");
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  const originalFetch = globalThis.fetch;
+  let configurationRequests = 0;
+  globalThis.fetch = (async (_input: Parameters<typeof fetch>[0], _init?: RequestInit) => {
+    configurationRequests++;
+    return Response.json({ code: "NOT_AUTHORIZED" }, { status: 403 });
+  }) as typeof fetch;
+  try {
+    await act(async () => root.render(<ClerkConsoleAuth publishableKey="pk_test_fixture" onPrincipalChange={noPrincipalReset}><App /></ClerkConsoleAuth>));
+    const select = container.querySelector("select")!;
+    // A disabled placeholder must remain the visible selection until an explicit choice.
+    expect(select.value).toBe("");
+    expect(select.selectedOptions[0]?.textContent).toBe("Choose an organization");
+    const continueButton = [...container.querySelectorAll("button")].find(button => button.textContent === "Continue")!;
+    expect(continueButton.disabled).toBe(true);
+    await act(async () => {
+      select.value = "fixture-organization-one";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(continueButton.disabled).toBe(false);
+    await act(async () => continueButton.click());
+    expect(selected).toEqual(["fixture-organization-one"]);
+    expect(configurationRequests).toBe(2);
+    // A retry is not authorization: the real repeated refusal must still render recovery.
+    expect(container.textContent).toContain("Choose an organization");
+    expect(container.querySelector("[data-native-app]")).toBeNull();
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    globalThis.fetch = originalFetch;
+  }
+});

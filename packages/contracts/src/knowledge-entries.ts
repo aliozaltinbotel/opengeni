@@ -155,6 +155,8 @@ export const KnowledgeEntrySaveRequest = /* @__PURE__ */ defineSchema(() =>
       entryId: KnowledgeWriteEntryId,
       expectedVersion: z.number().int().nonnegative(),
       scope: KnowledgeEntryScope.optional(),
+      /** HUMAN-only narrowing: retain a pending revision instead of publishing. Never grants write or review authority. */
+      reviewMode: z.literal("review_first").optional(),
       entry: KnowledgeEntryContent.safeExtend({ title: z.string().min(1).max(1024) }),
     })
     .strict(),

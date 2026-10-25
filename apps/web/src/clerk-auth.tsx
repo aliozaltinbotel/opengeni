@@ -9,8 +9,8 @@ import { useNavigate } from "@tanstack/react-router";
 import { ExternalAuthRecoveryProvider } from "./lib/external-auth-recovery";
 
 /** Only existing Clerk memberships are offered; this never creates access. */
-function ClerkAccountRecovery() {
-  const { orgId, signOut } = useAuth();
+function ClerkAccountRecovery({ retry }: { retry: () => void }) {
+  const { signOut } = useAuth();
   const navigate = useNavigate();
   const { isLoaded, setActive, userMemberships } = useOrganizationList({
     userMemberships: { infinite: true },
@@ -30,6 +30,7 @@ function ClerkAccountRecovery() {
     try {
       await navigate({ to: "/", search: {}, hash: "", replace: true });
       await setActive({ organization: selected });
+      retry();
     } catch {
       setActionError(true);
     } finally {
@@ -117,7 +118,7 @@ function ClerkAccountRecovery() {
               ) : null}
               <Button
                 type="button"
-                disabled={busy || selected === "" || selected === orgId}
+                disabled={busy || !memberships.some(({ organization }) => organization.id === selected)}
                 onClick={() => {
                   void chooseOrganization();
                 }}
@@ -216,7 +217,7 @@ function ClerkSessionBridge({
       </main>
     );
   return (
-    <ExternalAuthRecoveryProvider value={<ClerkAccountRecovery />}>
+    <ExternalAuthRecoveryProvider value={(retry) => <ClerkAccountRecovery retry={retry} />}>
       <Fragment key={principal}>{children}</Fragment>
     </ExternalAuthRecoveryProvider>
   );
