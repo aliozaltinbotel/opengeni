@@ -3,6 +3,8 @@ export type BootstrapErrorContext = "client_configuration" | "workspace_access";
 export type BootstrapErrorPresentation = Readonly<{
   title: string;
   description: string;
+  /** Optional host recovery; never authorizes a request or changes retry policy. */
+  recovery?: "authentication";
 }>;
 
 type ErrorMetadata = {
@@ -139,7 +141,9 @@ export function bootstrapErrorPresentation(
     return temporaryUnavailablePresentation;
   }
   if (context === "client_configuration") {
-    return clientConfigurationPresentation;
+    return metadata.status === 401 || metadata.status === 403
+      ? { ...clientConfigurationPresentation, recovery: "authentication" }
+      : clientConfigurationPresentation;
   }
   if (metadata.status !== null && metadata.status >= 500) {
     return temporaryUnavailablePresentation;

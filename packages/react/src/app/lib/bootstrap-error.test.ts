@@ -87,3 +87,17 @@ describe("bootstrap error presentation", () => {
     expect(JSON.stringify(presentation)).not.toContain("forbidden by proxy");
   });
 });
+
+test("only client-configuration authorization failures carry typed account recovery", () => {
+  for (const status of [401, 403]) {
+    expect(
+      bootstrapErrorPresentation(new ApiError(status, "private refusal"), "client_configuration"),
+    ).toMatchObject({ recovery: "authentication" });
+    expect(
+      bootstrapErrorPresentation(new ApiError(status, "private refusal"), "workspace_access"),
+    ).not.toHaveProperty("recovery");
+  }
+  expect(
+    bootstrapErrorPresentation(new ApiError(503, "private outage"), "client_configuration"),
+  ).not.toHaveProperty("recovery");
+});

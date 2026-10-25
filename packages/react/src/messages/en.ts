@@ -3,6 +3,21 @@
  * translations. Keys are grouped by the component or module that renders them.
  */
 export const englishMessages = {
+  "clerkRecovery.resetTitle": "Account change could not finish",
+  "clerkRecovery.title": "Choose an organization",
+  "clerkRecovery.description":
+    "Choose an organization you belong to, or use another account to continue.",
+  "clerkRecovery.organization": "Organization",
+  "clerkRecovery.choose": "Choose an organization",
+  "clerkRecovery.continue": "Continue",
+  "clerkRecovery.anotherAccount": "Use another account",
+  "clerkRecovery.loading": "Loading your organizations…",
+  "clerkRecovery.empty":
+    "This account has no organizations to choose from. Ask your administrator for access, or use another account.",
+  "clerkRecovery.listError": "Your organizations could not be loaded. Try again.",
+  "clerkRecovery.actionError": "The change could not be completed. Try again.",
+  "clerkRecovery.retry": "Try again",
+  "clerkRecovery.more": "Show more organizations",
   "approvalSurface.actionsToReview": "Actions to review",
   "approvalSurface.approvalNeeded": "Approval needed",
   "approvalSurface.approveAction": "Approve action",

@@ -967,6 +967,14 @@ declare module "@tanstack/react-router" {
   }
 }
 
+/** Discard workspace/session URL pointers when the external principal changes. */
+export function resetPrincipalRoute(): Promise<void> {
+  // The old RouterProvider is unmounted during a principal transition. History
+  // replacement must not await that old tree rendering a navigation commit.
+  router.history.replace(router.buildLocation({ to: "/", search: {}, hash: "" }).href);
+  return Promise.resolve();
+}
+
 export function App() {
   return <RouterProvider router={router} />;
 }
