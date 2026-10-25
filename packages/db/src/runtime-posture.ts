@@ -2423,7 +2423,6 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
-  "model_call_source_receipts",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2462,6 +2461,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_source_objects",
   "knowledge_sources",
   "knowledge_sync_runs",
+  "model_call_source_receipts",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
