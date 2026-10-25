@@ -10377,8 +10377,12 @@ async function runAgentStreamInternal(
       )
     : undefined;
   const client =
-    lifecycleClient && overrides.onSandboxSessionReady
-      ? withSandboxSessionReady(lifecycleClient, overrides.onSandboxSessionReady)
+    lifecycleClient && (overrides.onSandboxSessionReady || overrides.turnToolCancellationFence)
+      ? withSandboxSessionReady(
+          lifecycleClient,
+          overrides.onSandboxSessionReady ?? (() => {}),
+          overrides.turnToolCancellationFence,
+        )
       : lifecycleClient;
   const sandboxSessionState = prepared.sandboxSessionState;
   // Apply the built-in per-call filters (computer-call normalization, optional
@@ -11178,11 +11182,41 @@ export function withSandboxFileDownloads(
 export function withSandboxSessionReady(
   client: SandboxClient,
   callback: (session: SandboxSessionLike) => Promise<void> | void,
+  destructionFence?: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence">,
 ): SandboxClient {
   const completed = new WeakSet<object>();
   const ready = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
     if (typeof session === "object" && session !== null && !completed.has(session)) {
       await callback(session);
+      if (destructionFence) {
+        // The SDK owns these sessions and cleans them up before run() returns.
+        // Keep the exact provider alive until turn-owned commands have drained;
+        // worker finalization cannot recover physical proof after SDK deletion.
+        let quiescence: Promise<void> | undefined;
+        const drain = (): Promise<void> => {
+          quiescence ??= (async () => {
+            destructionFence.cancel(new Error("SDK_OWNED_SANDBOX_CLEANUP"));
+            await destructionFence.waitForQuiescence();
+          })();
+          return quiescence;
+        };
+        for (const method of ["stop", "shutdown", "delete"] as const) {
+          const destroy = session[method]?.bind(session);
+          if (destroy) {
+            session[method] = async (options) => {
+              await drain();
+              await destroy(options);
+            };
+          }
+        }
+        const close = session.close?.bind(session);
+        if (close) {
+          session.close = async () => {
+            await drain();
+            await close();
+          };
+        }
+      }
       completed.add(session);
     }
     return session;
