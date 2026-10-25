@@ -240,7 +240,7 @@ export function RootRouteComponent() {
   ) : !clientConfig && !configError ? (
     <LoadingPanel />
   ) : configError?.recovery === "authentication" && externalAuthRecovery ? (
-    externalAuthRecovery
+    externalAuthRecovery(retryClientConfig)
   ) : configError ? (
     <ProblemPanel
       title={configError.title}
