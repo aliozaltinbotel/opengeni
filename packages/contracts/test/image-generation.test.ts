@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   GenerateImageToolInput,
   GeneratedImageReceiptSchema,
+  generatedImageHistoryModelMessage,
   IMAGE_GENERATION_MAX_REFERENCES,
 } from "../src/image-generation";
 
@@ -116,4 +117,15 @@ describe("GeneratedImageReceiptSchema", () => {
       }).success,
     ).toBe(false);
   });
+});
+
+
+test("generated image model history uses canonical assistant output content without changing the receipt", () => {
+  const item = {type: "hosted_tool_call", name: "image_generation_call", output: receipt()};
+  const original = JSON.stringify(item);
+  expect(generatedImageHistoryModelMessage(item)).toMatchObject({
+    type: "message", role: "assistant", content: [{type: "output_text", text: expect.stringContaining(artifactId)}],
+  });
+  expect(JSON.stringify(item)).toBe(original);
+  expect(generatedImageHistoryModelMessage({...item, output: {...receipt(), sandboxPath: "/workspace/other.png"}})).toBeNull();
 });
