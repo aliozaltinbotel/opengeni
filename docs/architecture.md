@@ -966,6 +966,14 @@ and [`../AGENTS.md`](../AGENTS.md) Sandbox Notes.
 
 ### 3.9 Compute routing and sandbox ownership stay explicit
 
+SDK-owned legacy sandboxes drain the existing turn-tool cancellation fence before
+their stop, shutdown, delete or transport-close lifecycle runs. The SDK performs
+that cleanup before returning the agent run, so worker finalization alone is too
+late to prove retained-command settlement against a deleted provider. Borrowed
+lease-owned sessions retain their existing lifecycle. Unknown command status or
+failed physical quiescence never authorizes provider destruction or successful
+command output.
+
 A human owner's personal-machine move during a turn is explicit consent for
 that logical turn, independent of the initiating person. The separate turn
 receipt and attempt bindings survive recovery without rewriting accepted
