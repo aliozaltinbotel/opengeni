@@ -52,3 +52,19 @@ test("save preparation preserves query and catalog continuation on the focused r
   expect(request?.url).toEndWith("/knowledge/entries/prepare-save");
   expect(await request?.json()).toEqual(input);
 });
+
+test("Knowledge save preserves the caller's restrictive review-first mode", async () => {
+  let request: Request | undefined;
+  const id = "00000000-0000-4000-8000-000000000001";
+  const receipt = { operationId: id, entryId: id, revisionId: id, version: 1, outcome: "pending" as const, reviewBatchId: id, replayed: false };
+  const client = new OpenGeniClient({ baseUrl: "https://api.example.test", fetch: (async (url, init) => {
+    request = new Request(url, init);
+    return Response.json(receipt);
+  }) as typeof fetch });
+  const input = { operationId: id, expectedVersion: 0, scope: "personal" as const, reviewMode: "review_first" as const,
+    entry: { title: "Synthetic retained fact", kind: "fact" as const, content: "Synthetic observation" } };
+  expect(await client.saveKnowledgeEntry(id, input)).toEqual(receipt);
+  expect(request?.method).toBe("POST");
+  expect(request?.url).toEndWith(`/knowledge/entries`);
+  expect(await request?.json()).toEqual(input);
+});

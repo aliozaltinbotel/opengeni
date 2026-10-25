@@ -1841,7 +1841,9 @@ agents with frozen source selections and Agent learning policy. Attempt-bound
 source tools retain files and prepare canonical source entries; agents save the
 useful findings. Parsing and indexing remain mechanical services. Original bytes
 and search caches have separate storage jobs. Review controls
-publication, while action permissions remain independent.
+publication, while action permissions remain independent. Authorized human API saves can require an inactive
+Knowledge revision with `reviewMode: "review_first"`; this adds no write or review
+authority and leaves native agent-policy selection unchanged.
 
 Canonical: [`knowledge.md`](knowledge.md),
 [`scoped-knowledge.md`](scoped-knowledge.md),

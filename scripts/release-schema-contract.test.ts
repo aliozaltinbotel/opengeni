@@ -2947,6 +2947,7 @@ describe("release schema contract", () => {
       "0870_invitation_binding_seat_scope.sql",
       "0871_explicit_workspace_recovery.sql",
       "0872_file_app_shot.sql",
+      "0955_human_knowledge_review_first_proposals.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

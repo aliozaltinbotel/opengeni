@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Hono } from "hono";
-import { signDelegatedAccessToken, type KnowledgeEntryListResponse } from "@opengeni/contracts";
+import { signDelegatedAccessToken, KnowledgeEntryWriteReceipt, KnowledgeEntryRecord, type KnowledgeEntryListResponse } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   bootstrapWorkspace,
@@ -124,4 +124,50 @@ test("list query strings and search JSON apply the same creation cutoff, paginat
     for (const createdSince of ["invalid", "2026-10-01", "2026-10-01T00:00:00"])
       expect((await request({ ...input, createdSince })).status).toBe(422);
   }
+}, 180_000);
+
+test("human public save can require pending review without new document authority", async () => {
+  const secret = "knowledge-human-proposal-api-test";
+  const subjectId = `user:${crypto.randomUUID()}`;
+  const identity = crypto.randomUUID();
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test", accountExternalId: identity, accountName: "Synthetic proposal account",
+    workspaceExternalSource: "test", workspaceExternalId: identity, workspaceName: "Synthetic proposal workspace", subjectId,
+  });
+  const grant = access.workspaceGrants[0]!;
+  const settings = testSettings({ productAccessMode: "managed", delegationSecret: secret });
+  const app = new Hono();
+  registerKnowledgeRoutes(app, { settings, db: client.db, managedAuth: null, getDocumentServices: () => ({ embedder: null }) } as unknown as ApiRouteDeps);
+  const token = async (permissions: typeof grant.permissions) => `Bearer ${await signDelegatedAccessToken(secret, {
+    accountId: grant.accountId, workspaceId: grant.workspaceId, subjectId, principalKind: "human_session", permissions,
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}`;
+  const owner = await token(["workspace:admin"]);
+  const reader = await token(["documents:search"]);
+  const base = `http://test/v1/workspaces/${grant.workspaceId}/knowledge/entries`;
+  const request = { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "personal", reviewMode: "review_first",
+    entry: { title: "Synthetic personal proposal", kind: "fact", content: "Synthetic retained observation." } };
+  const post = (authorization: string, body: unknown) => app.request(base, {
+    method: "POST", headers: { authorization, "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  expect((await post(reader, request)).status).toBe(403);
+  const response = await post(owner, request);
+  expect(response.status).toBe(201);
+  const receipt = KnowledgeEntryWriteReceipt.parse(await response.json());
+  expect(receipt.outcome).toBe("pending");
+  expect(receipt.replayed).toBe(false);
+  expect((await app.request(`${base}/${receipt.entryId}`, { headers: { authorization: owner } })).status).toBe(404);
+  const pending = await app.request(`${base}/${receipt.entryId}?view=needs_review`, { headers: { authorization: owner } });
+  expect(pending.status).toBe(200);
+  expect(KnowledgeEntryRecord.parse(await pending.json()).revision.id).toBe(receipt.revisionId);
+  const replay = await post(owner, request);
+  expect(replay.status).toBe(200);
+  expect(KnowledgeEntryWriteReceipt.parse(await replay.json()).replayed).toBe(true);
+  const { reviewMode: _reviewMode, ...ordinary } = request;
+  expect((await post(owner, ordinary)).status).toBe(409);
+  const ordinarySave = await post(owner, { ...ordinary, operationId: crypto.randomUUID() });
+  expect(ordinarySave.status).toBe(201);
+  expect(KnowledgeEntryWriteReceipt.parse(await ordinarySave.json()).outcome).toBe("published");
+  const rows = await shared.admin<{ count: number }[]>`SELECT count(*)::integer AS count FROM knowledge_entries WHERE account_id=${grant.accountId}`;
+  expect(rows[0]?.count).toBe(2);
 }, 180_000);
