@@ -339,3 +339,54 @@ test("asUser assertion cannot be replaced by case-variant custom headers", async
   expect(() => client.asUser("nul\0id")).toThrow("Invalid");
   expect(() => client.asUser("\uD800")).toThrow("Invalid");
 });
+
+test("existing-only external reads preserve the restrictive actor selection without changing ordinary asUser", async () => {
+  const actors: unknown[] = [];
+  const client = new OpenGeniClient({
+    baseUrl: "https://fixture.invalid",
+    apiKey: "synthetic",
+    fetch: async (_url, init) => {
+      const header = new Headers(init?.headers).get("x-opengeni-external-actor");
+      actors.push(header === null ? null : JSON.parse(decodeURIComponent(header)));
+      return Response.json({});
+    },
+  });
+  await client
+    .asUser("existing-person", { source: "host", existingOnly: true })
+    .getWorkspace("workspace");
+  await client.asUser("ordinary-person", { source: "host" }).getWorkspace("workspace");
+  expect(actors).toEqual([
+    {
+      mode: "external",
+      identity: { externalId: "existing-person", source: "host" },
+      existingOnly: true,
+    },
+    { mode: "external", identity: { externalId: "ordinary-person", source: "host" } },
+  ]);
+});
+
+test("existing-only actor selection rejects malformed flags and cannot broaden linked-native mode", async () => {
+  const { ExternalActorSelection } = await import("@opengeni/contracts/external-identities");
+  const identity = { externalId: "known-person", source: "host" };
+  expect(ExternalActorSelection.parse({ mode: "external", identity, existingOnly: true })).toEqual({
+    mode: "external",
+    identity,
+    existingOnly: true,
+  });
+  expect(ExternalActorSelection.parse({ mode: "external", identity })).toEqual({
+    mode: "external",
+    identity,
+  });
+  expect(() =>
+    ExternalActorSelection.parse({ mode: "external", identity, existingOnly: "true" }),
+  ).toThrow();
+  expect(() =>
+    ExternalActorSelection.parse({
+      mode: "linked_native",
+      identity,
+      linkId: crypto.randomUUID(),
+      expectedLinkRevision: 1,
+      existingOnly: true,
+    }),
+  ).toThrow();
+});

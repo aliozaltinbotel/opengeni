@@ -2151,6 +2151,31 @@ describe("runtime database posture evaluator", () => {
     ).toBe(true);
   });
 
+  test("existing-only identity reader requires both authority owners without direct table privileges", () => {
+    expect(evaluateRuntimeDatabasePosture(safePosture(), options)).toEqual([]);
+    for (const name of ["external_identities", "organization_memberships"]) {
+      const missing = safePosture();
+      missing.tables = missing.tables.filter((table) => table.name !== name);
+      expect(
+        evaluateRuntimeDatabasePosture(missing, options).some(
+          (message) =>
+            message.includes("read_existing_external_identity") && message.includes("missing"),
+        ),
+      ).toBe(true);
+      const split = safePosture();
+      split.tables = split.tables.map((table) =>
+        table.name === name ? { ...table, owner: "unrelated_owner" } : table,
+      );
+      expect(
+        evaluateRuntimeDatabasePosture(split, options).some(
+          (message) =>
+            message.includes("read_existing_external_identity") &&
+            message.includes("owners do not match"),
+        ),
+      ).toBe(true);
+    }
+  });
+
   test("enforces the automatic session title fanout capability boundary", () => {
     const posture = safePosture();
     posture.privateTables.push({

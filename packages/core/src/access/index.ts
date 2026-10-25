@@ -27,6 +27,7 @@ import {
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
   ensureExternalIdentity,
+  readExistingExternalIdentity,
   ensureExternalWorkspaceMemberOnFirstUse,
   USER_ISOLATION_WORKSPACE_SOURCE_PREFIX,
   lockExternalWorkspaceMembershipLifecycle,
@@ -1893,6 +1894,7 @@ async function apiKeyAccessContext(
     } catch {
       throw new HTTPException(400, { message: "invalid external actor selection" });
     }
+    const existingOnly = selection.mode === "external" && selection.existingOnly === true;
     let identity: ExternalIdentity;
     try {
       identity = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
@@ -1900,7 +1902,8 @@ async function apiKeyAccessContext(
         // Claim the lifecycle prefix first so a membership-fenced session
         // writer can recheck that identity without a lock inversion.
         await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
-        return await ensureExternalIdentity(tx, {
+        const resolveIdentity = existingOnly ? readExistingExternalIdentity : ensureExternalIdentity;
+        return await resolveIdentity(tx, {
           accountId: apiKey.accountId,
           ...selection.identity,
         });
@@ -1942,7 +1945,7 @@ async function apiKeyAccessContext(
       workspaceScope: apiKey.workspaceScope ?? { kind: "all" },
       permissionMode: apiKey.permissionMode ?? "legacy",
       ...(linked ? { linked } : {}),
-      firstUseMembership: selection.mode !== "linked_native" && !linked && !service,
+      firstUseMembership: !existingOnly && selection.mode !== "linked_native" && !linked && !service,
     });
     if (organizationApiKeyAccess(apiKey.permissions) === "developer_setup") {
       developerSetupApiKeyContexts.add(context);

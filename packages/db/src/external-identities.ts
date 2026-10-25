@@ -143,3 +143,36 @@ export async function ensureExternalIdentity(
     return result;
   });
 }
+
+/** Resolve only a current active identity and organization membership.
+ * Caller authenticates the organization key/account; this never provisions or heals. */
+export async function readExistingExternalIdentity(
+  db: Database,
+  input: {
+    accountId: string;
+    externalId: string;
+    source?: string;
+  },
+): Promise<ExternalIdentity> {
+  const accountId = input.accountId;
+  const reference = ExternalIdentityReference.parse({
+    externalId: input.externalId,
+    source: input.source,
+  });
+  return withAccountRls(db, accountId, async (tx) => {
+    const [row] = await rawRows<{ result: unknown }>(
+      tx,
+      sql`select read_existing_external_identity(
+      ${accountId}::uuid, ${reference.source}, ${reference.externalId}) as result`,
+    );
+    const result = ExternalIdentity.parse(row?.result);
+    if (
+      result.accountId !== accountId ||
+      result.source !== reference.source ||
+      result.externalId !== reference.externalId
+    ) {
+      throw new Error("External identity scope mismatch");
+    }
+    return result;
+  });
+}

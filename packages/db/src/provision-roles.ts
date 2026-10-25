@@ -581,6 +581,7 @@ async function grantAppRoleIfSchemaExists(
     "maintain_session_usage_limits(integer,integer)",
     "session_usage_limit_command(jsonb)",
     "ensure_external_identity(uuid,text,text)",
+    "read_existing_external_identity(uuid,text,text)",
     "lookup_external_identity(uuid,text,text,text)",
     "prepare_external_workspace_membership_operation(jsonb)",
     "record_external_workspace_membership_operation(jsonb,jsonb)",
