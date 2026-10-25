@@ -326,9 +326,10 @@ describe("MCP OAuth discovery", () => {
     expect(result.mode).toBe("legacy_2025_03_26_metadata");
     expect(result.classification).toBe("oauth_legacy_same_origin_metadata");
     expect(result.resource).toBe(resourceUrl);
+    expect(result.authorizationServerMetadata.issuer).toBe("https://mcp.example.test");
     expect(result.protectedResourceMetadata.raw).toEqual({
       resource: resourceUrl,
-      authorization_servers: ["https://mcp.example.test/"],
+      authorization_servers: ["https://mcp.example.test"],
       scopes_supported: ["documents:read"],
     });
     expect(result.provenance.protectedResourceMetadataUrl).toBeNull();
