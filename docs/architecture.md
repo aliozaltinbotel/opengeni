@@ -1759,9 +1759,13 @@ Text-only turns need no compute provisioning/Connected Machine contact.
 Filesystem/process/Git/browser/computer tools resolve exact current targets
 and validate epochs/authority.
 
-Nothing from a vault is injected into compute. `{{secret:…}}` references in
-tool arguments resolve per call at the execution boundary, so vault and policy
-changes apply to the next command without restarting a box.
+Vault contents are not added to the sandbox manifest or ambient environment.
+`{{secret:…}}` references in tool arguments resolve per call at the execution
+boundary, so vault and policy changes apply to the next command without restarting
+a box. The OpenSandbox adapter consumes the same in-memory delivery carry for SDK-owned and routed exec:
+per-command environment bindings and private filesystem writes never enter
+serialized sandbox state. Attempt files are removed after command quiescence;
+confirmed provider deletion retires that provider's remaining file scopes.
 Connected-vault refreshes commit their mirror and status atomically against the
 pre-I/O cache epoch; late overlapping results cannot overwrite a settled check.
 Managed 1Password creation preflights canonical link policy without retaining
