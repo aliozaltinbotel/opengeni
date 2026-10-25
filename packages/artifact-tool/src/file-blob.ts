@@ -9,7 +9,7 @@ export class FileBlob extends Blob {
   static async load(path: string): Promise<FileBlob> {
     const fs = await loadNodeFileSystem();
     const bytes = await fs.readFile(path);
-    return new FileBlob([bytes], { name: path });
+    return new FileBlob([ownedBytes(bytes)], { name: path });
   }
 
   static fromBytes(

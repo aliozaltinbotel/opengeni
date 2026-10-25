@@ -199,13 +199,13 @@ async function readBaked(asset: string): Promise<ArrayBuffer | null> {
   }
   // Return a standalone ArrayBuffer (a valid Response BodyInit). `readFile`'s
   // Buffer may be a view into a larger pooled allocation, so copy out the exact
-  // byte range with `.slice` rather than handing over the backing store.
+  // byte range into an owned Uint8Array rather than handing over the backing store.
   const buf = await readFile(url).catch(() => {
     // Never redirect after selecting a baked cohort, even if a file becomes
     // unreadable between the completeness check and the byte read.
     throw new HTTPException(503, { message: "baked interaction runtime is unavailable" });
   });
-  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength);
+  return new Uint8Array(buf).buffer;
 }
 
 // `/agent/latest/<asset>` and `/agent/v<ver>/<asset>` (+ the `.sha256` / `.minisig`
@@ -248,7 +248,7 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     const committed = COMMITTED_BINARY_ASSETS[asset];
     if (committed) {
       const buf = await readFile(new URL(committed.file, INSTALL_DIR));
-      return new Response(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength), {
+      return new Response(new Uint8Array(buf).buffer, {
         status: 200,
         headers: {
           "content-type": committed.contentType,

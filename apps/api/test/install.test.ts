@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
@@ -142,7 +142,11 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/icns");
     expect(res.headers.get("x-opengeni-agent-source")).toBe("committed");
-    expect(new TextDecoder().decode((await res.arrayBuffer()).slice(0, 4))).toBe("icns");
+    const expected = await readFile(new URL("../../../agent/install/OpenGeni-Agent.icns", import.meta.url));
+    const received = new Uint8Array(await res.arrayBuffer());
+    expect(new TextDecoder().decode(received.slice(0, 4))).toBe("icns");
+    expect(received).toEqual(new Uint8Array(expected));
+    expect(res.headers.get("cache-control")).toBe("public, max-age=3600");
   });
 
   test("GET /agent/v<ver>/<unbaked-asset> redirects to the immutable agent-v<ver> tag asset", async () => {
@@ -315,6 +319,27 @@ describe("get.<domain> install routes — baked binary serving", () => {
     expect(res.headers.get("content-type")).toContain("application/octet-stream");
     expect(res.headers.get("x-opengeni-agent-source")).toBe("baked");
     expect(await res.text()).toBe("BAKED-BINARY-BYTES");
+  });
+
+  test("serves only exact non-text baked bytes without pooled-buffer padding", async () => {
+    const backing = Buffer.alloc(32, 99);
+    backing.set([0, 255, 128, 42], 7);
+    const selected = backing.subarray(7, 11);
+    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}`, selected);
+    const response = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}`);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("application/octet-stream");
+    expect(response.headers.get("cache-control")).toBe("public, max-age=3600");
+    expect(response.headers.get("x-opengeni-agent-source")).toBe("baked");
+    expect(response.headers.get("location")).toBeNull();
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(Uint8Array.of(0, 255, 128, 42));
+  });
+
+  test("keeps a zero-byte baked binary fail-closed without redirect", async () => {
+    await writeFile(`${BAKED_DIR}${BAKED_FIXTURE}`, new Uint8Array());
+    const response = await appFor(testSettings()).request(`/agent/latest/${BAKED_FIXTURE}`);
+    expect(response.status).toBe(503);
+    expect(response.headers.get("location")).toBeNull();
   });
 
   test("pinned binaries and sidecars use the requested archive release despite baked assets", async () => {
