@@ -217,6 +217,8 @@ export class OpenGeniEmbeddingClient extends OpenGeniArtifactClient {
   /** Server-side organization-key client scoped to one host-authenticated user.
    * Does not mutate this client, provision workspace membership, or link native
    * identities. The API verifies key and membership authority on each request. */
+  asUser(externalId: string, options?: { source?: string }): this;
+  asUser(externalId: string, options?: { source?: string; existingOnly?: boolean }): this;
   asUser(externalId: string, options: { source?: string; existingOnly?: boolean } = {}): this {
     if (typeof window !== "undefined")
       throw new Error("asUser is a server-side API; keep organization keys on your backend");
