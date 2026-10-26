@@ -316,8 +316,6 @@ const CENDRA_READ_PROFILE: OAuthProviderProfile = {
   },
   defaultOwnership: "personal",
   requiredOwnership: { ownership: "personal", message: "Cendra connections must be personal-owned" },
-  exactMcpBinding: true,
-  connectionSelection: "first_active",
   authorizationServer: {
     exactIssuer: CENDRA_OAUTH_ISSUER,
     issuerOrigins: [CENDRA_OAUTH_ISSUER],

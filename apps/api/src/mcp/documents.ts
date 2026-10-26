@@ -1,6 +1,6 @@
 import { searchKnowledgeEntries, type KnowledgeQueryWorkflowRequest, type SessionWorkflowClient } from "@opengeni/core";
 import type { Settings } from "@opengeni/config";
-import { KnowledgeSearchToolRequest } from "@opengeni/contracts";
+import { KnowledgeEntryListRequest, KnowledgeSearchToolRequest } from "@opengeni/contracts";
 import type { DocumentServices } from "@opengeni/documents";
 import {
   getKnowledgeEntry,

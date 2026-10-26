@@ -2,6 +2,7 @@ import {
   AgentInstructionSaveRequest,
   WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS,
   WorkspaceInstructionPolicyTarget,
+  KnowledgeEntryListRequest,
   KnowledgeSearchToolRequest,
   KnowledgeSavePreparationRequest,
   KnowledgeEntrySaveRequest,

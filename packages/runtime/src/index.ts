@@ -7027,7 +7027,7 @@ async function prepareToolGatewayDefinitionsFromServers(
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: Array<
-    ToolGatewayDefinition & { modelSourceRefs?: Parameters<typeof wrapAttemptToolExecute>[3] }
+    ToolGatewayDefinition & { modelSourceRefs?: Parameters<typeof wrapAttemptToolExecute>[4] }
   >;
 }> {
   const preparedServers = servers.map((server) => {
@@ -7048,7 +7048,7 @@ async function prepareToolGatewayDefinitionsFromServers(
       config,
     }): Promise<
       Array<
-        ToolGatewayDefinition & { modelSourceRefs?: Parameters<typeof wrapAttemptToolExecute>[3] }
+        ToolGatewayDefinition & { modelSourceRefs?: Parameters<typeof wrapAttemptToolExecute>[4] }
       >
     > => {
       const internalIdentity = callIdentity ? { ...callIdentity } : undefined;
