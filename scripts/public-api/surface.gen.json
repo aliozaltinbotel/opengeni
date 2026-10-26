@@ -8231,6 +8231,19 @@
       ]
     },
     {
+      "method": "POST",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input",
+      "sdk": [
+        "OpenGeniClient.updateGoal"
+      ],
+      "request": [
+        "UpdateSessionGoalRequest"
+      ],
+      "response": [
+        "SessionGoal"
+      ]
+    },
+    {
       "method": "GET",
       "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/revisions",
       "sdk": [
@@ -8407,6 +8420,17 @@
       "request": [],
       "response": [
         "SessionModelContextResponse"
+      ]
+    },
+    {
+      "method": "GET",
+      "path": "/v1/workspaces/:workspaceId/sessions/:sessionId/model-source-basis",
+      "sdk": [
+        "OpenGeniClient.getSessionModelSourceBasis"
+      ],
+      "request": [],
+      "response": [
+        "ModelCallSourceBasisResponse"
       ]
     },
     {
@@ -15159,9 +15183,11 @@
         "$.appShot": "ref(AppShotCapture)?",
         "$.contentType": "string!",
         "$.filename": "string!",
+        "$.requestedFileId": "string?",
         "$.scope": "ref(ConnectionOwnership)?",
         "$.sha256": "string?",
-        "$.sizeBytes": "integer!"
+        "$.sizeBytes": "integer!",
+        "$.temporaryForSessionId": "string?"
       }
     },
     "CreateFileUploadResponse": {
@@ -15586,13 +15612,18 @@
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
         "$.goal": "ref(GoalSpec)?",
         "$.idempotencyKey": "string?",
+        "$.importedHistoryOrigins": "array?",
+        "$.importedHistoryOrigins[]": "ref(ImportedMessageOrigin) null",
         "$.initialMessage": "string?",
+        "$.initialMessageModelSourceRefs": "array?",
+        "$.initialMessageModelSourceRefs[]": "ref(ModelSourceRef)",
         "$.installedSkillIds": "array?",
         "$.installedSkillIds[]": "string",
         "$.instructions": "string?",
         "$.keepLive": "boolean?",
         "$.latencyMode": "ref(LatencyMode)?",
         "$.maxNestedAgentDepth": "integer?",
+        "$.maxOutputTokens": "integer?",
         "$.mcpApprovalPolicies": "object?",
         "$.mcpApprovalPolicies{}": "ref(SessionMcpApprovalPolicy)",
         "$.mcpServers": "array?",
@@ -15686,6 +15717,7 @@
         "$.firstPartyMcpPermissions[]": "ref(Permission)",
         "$.firstPartyMcpTools": "array!",
         "$.firstPartyMcpTools[]": "ref(FirstPartyMcpToolName)",
+        "$.freshCreated": "boolean?",
         "$.hasSchedules": "boolean?",
         "$.hasUpcomingSchedules": "boolean?",
         "$.id": "string!",
@@ -17044,6 +17076,7 @@
       ],
       "shape": {
         "$": "object",
+        "$.asImage": "const?=[\"true\"]",
         "$.fileId": "string!",
         "$.kind": "const!=[\"\\\"file\\\"\"]",
         "$.mountPath": "string?"
@@ -18367,6 +18400,17 @@
         "$": "object",
         "$.operationId": "string?",
         "$.supersedesRevisionId": "string? null"
+      }
+    },
+    "ImportedMessageOrigin": {
+      "io": [
+        "input"
+      ],
+      "shape": {
+        "$": "object",
+        "$.externalId": "string!",
+        "$.sha256": "string!",
+        "$.source": "string!"
       }
     },
     "InboundEvent": {
@@ -19960,6 +20004,7 @@
         "$.entryId": "string?",
         "$.expectedVersion": "integer!",
         "$.operationId": "string!",
+        "$.reviewMode": "const?=[\"\\\"review_first\\\"\"]",
         "$.scope": "ref(KnowledgeEntryScope)?"
       }
     },
@@ -21456,6 +21501,43 @@
         "$.upstreamPayer": "enum!=[\"\\\"connected_subscription\\\"\",\"\\\"deployment\\\"\",\"\\\"organization\\\"\",\"\\\"workspace\\\"\"]"
       }
     },
+    "ModelCallSourceBasisResponse": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.receipt": "ref(ModelCallSourceReceipt)! null",
+        "$.schema": "const!=[\"\\\"cendra.native-source-basis/v1\\\"\"]"
+      }
+    },
+    "ModelCallSourceReceipt": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.accountId": "string!",
+        "$.attemptId": "string!",
+        "$.closure": "array!",
+        "$.closure[]": "ref(ModelSourceClosureNode)",
+        "$.complete": "boolean!",
+        "$.digest": "string!",
+        "$.executionGeneration": "integer!",
+        "$.id": "string!",
+        "$.incompleteReasons": "array!",
+        "$.incompleteReasons[]": "enum=[\"\\\"CAP_EXCEEDED\\\"\",\"\\\"EMPTY_BASIS\\\"\",\"\\\"NATIVE_KNOWLEDGE_ORIGIN_MISSING\\\"\",\"\\\"UNATTRIBUTED_IMPORT\\\"\",\"\\\"UNAVAILABLE_INPUT\\\"\",\"\\\"UNKNOWN_SOURCE\\\"\",\"\\\"UNRESOLVED_PARENT\\\"\"]",
+        "$.inputs": "array!",
+        "$.inputs[]": "ref(ModelSourceInput)",
+        "$.purpose": "enum!=[\"\\\"AGENT\\\"\",\"\\\"COMPACTION\\\"\",\"\\\"TITLE\\\"\"]",
+        "$.requestIndex": "integer!",
+        "$.sessionId": "string!",
+        "$.sourceKey": "string!",
+        "$.turnId": "string!",
+        "$.version": "const!=[\"1\"]",
+        "$.workspaceId": "string!"
+      }
+    },
     "ModelCapabilitiesV1": {
       "io": [
         "output"
@@ -21721,6 +21803,57 @@
         "$.inputMicrosPerMillionTokens": "integer!",
         "$.marginBps": "integer?",
         "$.outputMicrosPerMillionTokens": "integer!"
+      }
+    },
+    "ModelSourceClosureNode": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.kind": "ref(ModelSourceKind)!",
+        "$.parents": "array!",
+        "$.parents[]": "ref(ModelSourceRef)",
+        "$.retainedSources": "array!",
+        "$.retainedSources[]": "ref(ModelSourceRef)",
+        "$.sourceRef": "ref(ModelSourceRef)!"
+      }
+    },
+    "ModelSourceInput": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.contentSha256": "string!",
+        "$.kind": "ref(ModelSourceKind)!",
+        "$.ordinal": "integer!",
+        "$.parents": "array!",
+        "$.parents[]": "ref(ModelSourceRef)",
+        "$.retainedSources": "array!",
+        "$.retainedSources[]": "ref(ModelSourceRef)",
+        "$.sourceRef": "ref(ModelSourceRef)! null"
+      }
+    },
+    "ModelSourceKind": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"COPIED\\\"\",\"\\\"HISTORY_ROW\\\"\",\"\\\"IMPORTED\\\"\",\"\\\"INSTRUCTION\\\"\",\"\\\"KNOWLEDGE\\\"\",\"\\\"MEMORY\\\"\",\"\\\"SUMMARY\\\"\",\"\\\"TOOL_RESULT\\\"\"]"
+      }
+    },
+    "ModelSourceRef": {
+      "io": [
+        "input",
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.id": "string!",
+        "$.owner": "string!",
+        "$.sha256": "string!",
+        "$.version": "string?"
       }
     },
     "MoveDocumentRequest": {
@@ -26866,11 +26999,14 @@
         "$": "object",
         "$.delegationItemId": "string? null",
         "$.kind": "enum!=[\"\\\"assistant_transcript\\\"\",\"\\\"delegation_call\\\"\",\"\\\"error\\\"\",\"\\\"interruption\\\"\",\"\\\"user_transcript\\\"\"]",
+        "$.latencyMode": "ref(LatencyMode)?",
+        "$.model": "string?",
         "$.modelContext": "string?",
         "$.operationId": "string!",
         "$.payload": "object?",
         "$.payload{}": "unknown",
         "$.providerEventId": "string? null",
+        "$.reasoningEffort": "ref(ReasoningEffort)?",
         "$.role": "enum? null=[\"\\\"assistant\\\"\",\"\\\"user\\\"\"]",
         "$.text": "string? null"
       }
@@ -30251,6 +30387,13 @@
       "shape": {
         "$": "union=[\"0\",\"1\"]",
         "$|0": "object",
+        "$|0.continuationInput": "object?",
+        "$|0.continuationInput.operationKey": "string!",
+        "$|0.continuationInput.text": "string!",
+        "$|0.expectedGoal": "object?",
+        "$|0.expectedGoal.id": "string!",
+        "$|0.expectedGoal.pausedReason": "string! null",
+        "$|0.expectedGoal.version": "integer!",
         "$|0.rationale": "string?",
         "$|0.status": "enum!=[\"\\\"active\\\"\",\"\\\"paused\\\"\"]",
         "$|1": "object",
@@ -33664,6 +33807,7 @@
       "HumanInputSecretSaveTo": "type",
       "HumanInputSecretSpec": "type",
       "humanizeModelSlug": "value",
+      "ImportedMessageOrigin": "type",
       "ImportLegacyWorkspaceInstructionPolicyDraftRequest": "type",
       "InboundEvent": "type",
       "InboundEventSummary": "type",
@@ -33898,6 +34042,8 @@
       "ModelAccountUsageSnapshot": "type",
       "ModelAvailabilityV1": "type",
       "ModelBillingAttributionV1": "type",
+      "ModelCallSourceBasisResponse": "type",
+      "ModelCallSourceReceipt": "type",
       "ModelCapabilitiesV1": "type",
       "ModelCapabilityStateV1": "type",
       "ModelCapabilitySupportV1": "type",
@@ -33922,6 +34068,8 @@
       "ModelPricingScheduleV1": "type",
       "ModelPricingV1": "type",
       "modelSlug": "value",
+      "ModelSourceInput": "type",
+      "ModelSourceRef": "type",
       "modelVendor": "value",
       "ModelVendor": "type",
       "MoveDocumentRequest": "type",
@@ -39989,6 +40137,7 @@
       "getSessionMessagePreview",
       "getSessionModelAccount",
       "getSessionModelContext",
+      "getSessionModelSourceBasis",
       "getSessionRetainedArtifact",
       "getSessionRetainedArtifactContent",
       "getSessionTenancyCreateCapabilities",
@@ -40729,6 +40878,7 @@
       "getSessionMessagePreview",
       "getSessionModelAccount",
       "getSessionModelContext",
+      "getSessionModelSourceBasis",
       "getSessionRetainedArtifact",
       "getSessionRetainedArtifactContent",
       "getSessionTenancyCreateCapabilities",
@@ -41485,6 +41635,7 @@
       "getSessionMessagePreview",
       "getSessionModelAccount",
       "getSessionModelContext",
+      "getSessionModelSourceBasis",
       "getSessionRetainedArtifact",
       "getSessionRetainedArtifactContent",
       "getSessionTenancyCreateCapabilities",
@@ -42561,6 +42712,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ServiceContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "asUser": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"existingOnly\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "attachBrowserSession": [
@@ -43388,6 +43540,9 @@
       "getSessionModelContext": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionModelContextResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getSessionModelSourceBasis": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelCallSourceBasisResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getSessionRetainedArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedArtifactMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -43748,7 +43903,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntries": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntryHistory": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"entries\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"entries\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"beforeRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSNumberKeyword\"}]}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -45899,6 +46054,9 @@
       "getSessionModelContext": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionModelContextResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getSessionModelSourceBasis": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelCallSourceBasisResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getSessionRetainedArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedArtifactMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -46238,7 +46396,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntries": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntryHistory": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"entries\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"entries\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"beforeRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSNumberKeyword\"}]}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -48201,6 +48359,9 @@
       "getSessionModelContext": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionModelContextResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getSessionModelSourceBasis": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelCallSourceBasisResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getSessionRetainedArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedArtifactMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -48519,7 +48680,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntries": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntryHistory": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"entries\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"entries\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"beforeRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSNumberKeyword\"}]}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -50681,6 +50842,9 @@
       "getSessionModelContext": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionModelContextResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getSessionModelSourceBasis": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelCallSourceBasisResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getSessionRetainedArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedArtifactMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -51014,7 +51178,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntries": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntryHistory": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"entries\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"entries\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"beforeRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSNumberKeyword\"}]}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
@@ -52970,6 +53134,9 @@
       "getSessionModelContext": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"SessionModelContextResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
+      "getSessionModelSourceBasis": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ModelCallSourceBasisResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+      ],
       "getSessionRetainedArtifact": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"RetainedArtifactMetadata\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
@@ -53303,7 +53470,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"InteractionInterventionListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntries": [
-        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListRequest\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"OpenGeniRequestOptions\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
       ],
       "listKnowledgeEntryHistory": [
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSNumberKeyword\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSTypeReference\",\"typeArguments\":{\"params\":[{\"members\":[{\"computed\":false,\"key\":{\"name\":\"entries\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"indexType\":{\"literal\":{\"type\":\"Literal\",\"value\":\"entries\"},\"type\":\"TSLiteralType\"},\"objectType\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"KnowledgeEntryListResponse\",\"optional\":false,\"type\":\"Identifier\"}},\"type\":\"TSIndexedAccessType\"}},{\"computed\":false,\"key\":{\"name\":\"beforeRevision\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":false,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSUnionType\",\"types\":[{\"type\":\"TSNullKeyword\"},{\"type\":\"TSNumberKeyword\"}]}}],\"type\":\"TSTypeLiteral\"}],\"type\":\"TSTypeParameterInstantiation\"},\"typeName\":{\"name\":\"Promise\",\"optional\":false,\"type\":\"Identifier\"}}}"
