@@ -8,11 +8,7 @@ import type {
   InteractionSemanticNodeValue,
 } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import {
-  AgentBrowserDriver,
-  AgentBrowserJsonRunner,
-  resolvePinnedAgentBrowserBinary,
-} from "../src";
+import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 
 const e2e = process.env.OPENGENI_BROWSERD_E2E === "1" ? test : test.skip;
 
@@ -41,10 +37,14 @@ e2e(
           await Bun.sleep(300);
           return Response.json({ ok: true });
         }
+        if (path === "/slow") {
+          await Bun.sleep(900);
+          return Response.json({ ok: true });
+        }
         // Never answers: an open stream or a stalled server.
         if (path === "/stalled") return new Response(new ReadableStream({ start() {} }));
         return new Response(
-          '<!doctype html><title>Request settle</title><button id="save">Save</button><button id="stall">Stall</button><div role="status" id="result"></div><script>save.onclick=async()=>{const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Submitted. Thank you!":"Failed"};stall.onclick=()=>{fetch("/stalled");result.textContent="Waiting for partner"}</script>',
+          '<!doctype html><title>Request settle</title><button id="save">Save</button><button id="stall">Stall</button><button id="late">Import</button><button id="ripple">Send</button><div role="status" id="result"></div><script>save.onclick=async()=>{const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Submitted. Thank you!":"Failed"};stall.onclick=()=>{fetch("/stalled");result.textContent="Waiting for partner"};late.onclick=async()=>{await crypto.subtle.digest("SHA-256",new TextEncoder().encode("contacts"));await new Promise((r)=>setTimeout(r,0));const r=await fetch("/submit",{method:"POST"});result.textContent=(await r.json()).ok?"Imported 3 contacts":"Failed"};ripple.onclick=async()=>{ripple.animate([{opacity:1},{opacity:0.5}],{duration:400});await crypto.subtle.digest("SHA-256",new TextEncoder().encode("message"));await new Promise((r)=>setTimeout(r,0));const r=await fetch("/slow",{method:"POST"});result.textContent=(await r.json()).ok?"Message sent":"Failed"}</script>',
           { headers: { "content-type": "text/html" } },
         );
       },
@@ -52,19 +52,9 @@ e2e(
     const directory = await mkdtemp("/tmp/ogb-request-settle-");
     const browserSessionId = randomUUID();
     const controllerGeneration = `controller-${randomUUID()}`;
-    const runner = await AgentBrowserJsonRunner.create({
-      namespace: `settle_${randomUUID().slice(0, 8)}`,
-      sessionName: "s",
-      socketDirectory: join(directory, "s"),
+    const runner = await ManagedBrowserRunner.create({
       profileDirectory: join(directory, "profile"),
-      downloadDirectory: join(directory, "downloads"),
-      screenshotDirectory: join(directory, "screenshots"),
       headed: false,
-      binary: await resolvePinnedAgentBrowserBinary(
-        process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-          ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-          : {},
-      ),
       ...(process.env.OPENGENI_BROWSER_EXECUTABLE
         ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
         : {}),
@@ -102,6 +92,17 @@ e2e(
       expect(stalled.state).toBe("completed");
       expect(Date.now() - startedAt).toBeLessThan(5_000);
       expect(texts(stalled.observation)).toContain("Waiting for partner");
+
+      // A handler that awaits work before its request (reading a file,
+      // hashing) still has its response in the result.
+      const imported = await controller.run(command(stalled.observation!, "Import"));
+      expect(imported.state).toBe("completed");
+      expect(texts(imported.observation)).toContain("Imported 3 contacts");
+
+      // The same while a click animation runs as the request starts.
+      const sent = await controller.run(command(imported.observation!, "Send"));
+      expect(sent.state).toBe("completed");
+      expect(texts(sent.observation)).toContain("Message sent");
     } finally {
       await driver.close();
       server.stop(true);

@@ -9,7 +9,8 @@ import { useRail } from "./rail-context";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
-import { NEW_SESSION_SHORTCUT, shortcutLabel } from "../../lib/keyboard-shortcuts";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { TooltipWithKeys } from "../command-menu/keycaps";
 import { Link, useRouterState } from "../../lib/navigation";
 import { cn } from "../../lib/utils";
 import { windowControlsInPage } from "../../lib/desktop";
@@ -63,6 +64,7 @@ export function SessionShellSlotsProvider({
 export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) {
   const rail = useRail();
   const { switcher } = useContext(SessionShellSlotsContext);
+  const sidebarKeys = useActionShortcut("view.sidebar");
   // Without the brand (an embed, or the macOS app whose window controls sit
   // in the row), the row holds just the collapse toggle, at its end.
   const brand = useSessionUiFeature("brand");
@@ -75,6 +77,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
           variant="ghost"
           size="icon-sm"
           aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-keyshortcuts={sidebarKeys?.ariaKeys}
           onClick={rail.toggleCollapsed}
           className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-10"
         >
@@ -86,7 +89,10 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
         </Button>
       </TooltipTrigger>
       <TooltipContent side="right">
-        {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+        <TooltipWithKeys
+          label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          shortcut={sidebarKeys}
+        />
       </TooltipContent>
     </Tooltip>
   ) : null;
@@ -139,13 +145,11 @@ export function PrimaryNav() {
   const { primaryNav } = useContext(SessionShellSlotsContext);
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const newSessionActive = pathname === `/workspaces/${rail.workspaceId}/sessions`;
-  const newChatShortcut = useSessionUiFeature("newChatShortcut");
+  const newChatShortcut = useActionShortcut("chat.new");
   return (
     <div className={cn("mt-2 grid gap-0.5 px-2", rail.collapsed && "justify-center")}>
       <NewSessionLink
-        aria-label={
-          newChatShortcut ? `New session · ${shortcutLabel(NEW_SESSION_SHORTCUT)}` : "New session"
-        }
+        aria-label={newChatShortcut ? `New session · ${newChatShortcut.label}` : "New session"}
         className={cn(
           "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-hidden transition-colors pointer-coarse:h-10",
           "hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50",

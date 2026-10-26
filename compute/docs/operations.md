@@ -152,14 +152,24 @@ enabling it changes no session's backend.
    it from there; only service account key files are supported. Rotate
    the key as any long-lived credential, and delete it when the service
    moves onto Google Cloud.
-8. **Images.** Sandboxes start from stored images
-   (`computeControl.storedImages`, `name: <image id>`). Build each with
-   `compute-host build-image <oci-ref> --guest <bundle>/guest --output
-   image.ext4 --store gs://bucket/prefix` on any host (or a build machine
-   with the bundle), which prints the image id; the Opengeni sandbox and
-   desktop images (with `opengeni-agent`, ADR 21) are built this way from
-   the same Opengeni commit as the deployment. Hosts fetch an image from
-   the store on its first create.
+8. **Images.** Sandboxes start from stored images. Set
+   `computeControl.imageSources` (`name: registry/repository@sha256:<hex>`)
+   to the release's OCI images, normally the Opengeni sandbox and desktop
+   images (with `opengeni-agent`, ADR 21) of the same Opengeni commit as
+   the deployment. When a release names an OCI image no stored image was
+   built from, the service has a live host build it (a few minutes, one
+   at a time per host; the host's log says `built and stored a sandbox
+   image`), records it, and new creates of that name start from it; until
+   then they start from the image the name had before. Existing sandboxes
+   keep theirs. A host builds into its state directory's `prepare/`
+   scratch space and needs `REGISTRY_TOKEN` (and `--registry-user`) only
+   for a private registry. `computeControl.storedImages` (`name: <image
+   id>`) still pins an image by hand, and is what a name starts from
+   before anything is built for it: build one with `compute-host
+   build-image <oci-ref> --guest <bundle>/guest --output image.ext4
+   --store gs://bucket/prefix` on any host (or a build machine with the
+   bundle), which prints the image id. Hosts fetch an image from the store
+   on its first create.
 9. **Checkpoints.** A running sandbox whose create names no sleep config
    (Opengeni's never does) is checkpointed to the store after every ten
    minutes it runs: losing its host costs it what it did since its newest
@@ -203,9 +213,9 @@ computeControl:
       networking.gke.io/load-balancer-type: Internal
   archive: gs://example-compute-archive/archive
   gcpGroup: projects/example/zones/europe-west4-a/instanceGroupManagers/opengeni-compute-hosts
-  storedImages:
-    opengeni: "<image id>"
-    opengeni-desktop: "<image id>"
+  imageSources:
+    opengeni: ghcr.io/example/opengeni-sandbox@sha256:…
+    opengeni-desktop: ghcr.io/example/opengeni-desktop@sha256:…
   serviceAccount:
     annotations:
       iam.gke.io/gcp-service-account: opengeni-compute-control@example.iam.gserviceaccount.com
@@ -242,8 +252,9 @@ week's certificate for that name; a daily timer renews it when fewer than
 four days are left, with a new token, so a host whose certificate expired
 gets a new one all the same. Terraform sets the group's first size; the service sizes it
 from then on. The group has no auto-healing (the service decides when a
-host is lost and fences it), and a new template reaches hosts only as they
-are replaced.
+host is lost and fences it), and a new template reaches hosts as they are
+replaced, or, when it changes only their metadata (such as the bundle),
+as the operator refreshes them to it (Upgrades).
 
 Elsewhere, install a host by hand: a systemd Linux machine with KVM, an
 XFS state volume, a name unique among the hosts, and the bundle. With no
@@ -301,9 +312,10 @@ installs three units:
   and fails only if still short), no transparent huge pages,
   the software watchdog (3 s, `nowayout`) where the machine has no
   hardware one, and no suspend;
-- `compute-guard.service`, started once and never restarted: it stops
-  every VM when the host's lease runs out, and the watchdog resets the
-  machine if the guard itself ends;
+- `compute-guard.service`, never restarted on failure: it stops every VM
+  when the host's lease runs out, and the watchdog resets the machine if
+  the guard itself ends. An upgrade hands it over to the new release's
+  guard (below);
 - `compute-host.service`, the agent, which checks before every start that
   the mounted state volume is the recorded one and that its certificate,
   Firecracker, kernel and base image are there (`check-host`), and runs
@@ -377,15 +389,37 @@ authority alone for agent links.
   going there and hands off every sandbox on it that nothing holds awake;
   each is adopted elsewhere on its next wake (ADR 18). The answer counts
   those `moved` and those `left` (held awake, or the host did not answer):
-  drain again until none are left, or until those left are let go of by
-  their users. `POST /v1/hosts/<name>/undrain` takes the host back.
+  drain again until none are left. Some never let go: a desktop someone
+  keeps open, a program that never stops working. Once the sandboxes
+  that go to sleep have gone, drain with `{"awake": true}` as the body:
+  each sandbox still awake then has its holds and any wake asked of it
+  ended and is paused, saved and archived where it stands, memory and
+  all, and carries on where its next wake places it after a pause of
+  seconds to a minute. Its open connections end, as in any move; a
+  command still running goes on, and its output stays readable. One
+  whose VM cannot be saved (its disk may have lost writes) stays `left`:
+  deleting the host recovers it from its latest archive. A host from
+  before this option ignores it and leaves those sandboxes `left`.
+  `POST /v1/sandboxes/<id>/move` takes
+  `"awake": true` too. `POST /v1/hosts/<name>/undrain` takes the host
+  back. A drained host stays drained until then, even if it is given up
+  on meanwhile (its lease lapsed, or it was fenced) and registers again:
+  it comes back draining, so a host on its way out never takes new
+  sandboxes.
 - **Removing a host.** Drain it to zero, then delete the machine (on GCP,
   `gcloud compute instance-groups managed delete-instances` so the group
   does not replace it). Never delete a host that still owns sandboxes: the
-  service would treat it as lost and recover them, which is safe but
-  slower than a drain and wakes them from the archive.
+  service would treat it as lost and recover them from their latest
+  archive, which loses their programs and what they wrote since; drain
+  with `{"awake": true}` first.
 - **A lost host.** A host whose lease renewals stop is given up on after
-  its term and margin: the service fences it first (on GCP it resets the
+  its term and margin if it holds no sandboxes, or its instance is found
+  stopped or gone. One that holds sandboxes is waited for first, up to
+  `--give-up-after-s` (120 by default) from its last renewal, because a
+  host cut off only by the network keeps its VMs frozen and runs them on
+  once it renews again; giving up on it would end every program they
+  run. Meanwhile their wakes retry and new sandboxes go elsewhere. Then
+  the service fences it (on GCP it resets the
   instance, or finds it stopped or gone), then clears its sandboxes'
   owner with a raised epoch, and each wakes on another host from its
   latest archived copy on its next request. It boots from that copy's
@@ -399,9 +433,17 @@ authority alone for agent links.
   hand, except replacing the machine where no group does it.
   If the host comes back, its guard has already stopped its VMs (its
   lease ran out), and it registers again; the raised epochs keep it from
-  running any sandbox that moved (ADR 18). A host whose fence
-  keeps failing is not given up on: alert on hosts in state `lost` for
-  more than a few minutes and fence them by hand (stop the machine).
+  running any sandbox that moved (ADR 18). A host given up on stays in
+  `GET /v1/hosts` as `lost` for a day, then the service forgets it, so
+  machines replaced over months do not pile up there or in the metrics;
+  if it comes back after that, it registers as a new host. The database
+  refuses any write naming a forgotten host, including one from an older
+  replica during a rollout (that request gets an error instead), so the
+  control service can be rolled forward or back across this. A host whose
+  fence keeps failing is not given up on and stays `live` with a growing
+  `compute_fleet_host_renewal_age_seconds`: alert on that, or on
+  `compute_control_give_up_failures_total`, and fence it by hand (stop
+  the machine).
 
 ## Keys and certificates
 
@@ -751,6 +793,32 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   the fleet), `agent_link` (a request for its agent, a message with a
   reply subject; acknowledgements and other messages nobody waits on never
   wake one) or `guest_port` (data for the guest on a port that wakes it).
+- **Find a guest that stopped.** A guest can power off, halt or hang
+  while its VM process runs on. On a host with `--restore-notice-port`,
+  whose guests must all listen on it, the agent connects to each running
+  guest's notice port every thirty seconds. It logs a warning for each
+  check a guest takes no connection on, and after five in a row an error
+  naming the sandbox (`guest took no connection on its notice port`).
+  It then ends the VM as a crashed one: a `compute.alarm` for programs
+  lost, files kept, and the next wake boots from the disk. A host whose
+  guest image does not listen on the notice port must not set it.
+  A check counts only if the guest could run all through it: no step
+  paused it meanwhile, the guard did not freeze it, and the machine did
+  not suspend. The guard says when it freezes the VMs, which it does on
+  its own steps, when the lease is about to run out and while a suspend
+  is prepared: it keeps a count of its freezes beside its lock
+  (`/run/compute-host/guard.lock.freezes`), odd while the VMs may not
+  run and even while they do, and writes it at each of its steps with the
+  time it wrote it. On a host with a lease a check counts only if the
+  count was even when it began and the guard still writes the same after
+  it ended. A guard that cannot write the file logs `the guard could not
+  write its freeze count` once, and until it can, no check counts.
+  A guard from before the count keeps none, and then no check counts
+  until the host runs a guard that does. It also
+  needs the host to be able to ask the VMM for the connection at all: a
+  host that cannot reach a VM's vsock socket, as when it is out of
+  descriptors, logs `could not check the guest` and counts nothing
+  against it.
 
 ## Upgrades
 
@@ -763,16 +831,67 @@ What the agent reports is in [ADR 16](adr/0016-observability.md).
   a setting it silently ignores. The service ignores what it does not
   know in a host's description and capacity, so newer hosts work with
   the older service meanwhile.
+  A release that lets hosts leave out something they used to send, which
+  an older service would refuse, says so, and then the service goes
+  first.
 - **The agent** can be replaced at any time; running VMs keep running
-  ([ADR 9](adr/0009-vms-outlive-the-agent.md)). Run the new bundle's
-  `install.sh` (without `--config`, the installed configuration stays):
+  ([ADR 9](adr/0009-vms-outlive-the-agent.md)), and a host in a fleet
+  keeps its lease however many sandboxes it has: the old agent renews
+  the lease until its process exits and the new one from the moment its
+  process starts, while it takes its sandboxes back; until it has, it
+  refuses requests as unavailable, so the service places elsewhere
+  meanwhile
+  ([ADR 18](adr/0018-the-control-service-leases-and-fences.md)). Its log
+  lines `templates found`, `recovered` and `started` tell how long that
+  took and where. A VM it takes back still saves only the pages that
+  changed: `memory-base.json` in the sandbox's directory records what
+  that VM process's memory is based on. A VM saves every page the first
+  time when that record cannot vouch for its base: it is missing,
+  unreadable or names another process, or its image is gone, changed
+  (other hashes) or not wholly on local disk
+  ([ADR 6](adr/0006-memory-images-and-disks.md)). Template inputs'
+  hashes are kept under `templates/inputs/`, so a restart reads none of
+  the large files the templates depend on, such as the base image,
+  unless they changed. Run the new bundle's `install.sh` (without
+  `--config`, the installed
+  configuration stays):
   it installs the release beside the old ones, points
-  `/opt/compute/current` at it and restarts the agent alone; the guard is
-  never restarted. Old releases stay under `/opt/compute/releases`;
+  `/opt/compute/current` at it and restarts the agent; VMs keep running.
+  A guard running another binary (of another release, or one replaced
+  in this one) is handed over to this one's by restarting its service.
+  Opening or closing the watchdog feeds it (it stays armed), so the guard
+  opens it only at a step that may feed it and has systemd keep it open
+  in the service's file descriptor store (`systemd-analyze fdstore
+  compute-guard.service` shows it); it is ready only once systemd does. A
+  guard that ends, however it ends, then does not close it, and the new
+  guard takes it over from the store within milliseconds and goes on from
+  what the lease file and the freezer show (the watchdog resets the
+  machine if it does not within its 3 s). A guard of a release before
+  the store keeps the watchdog itself and would close it at whatever
+  moment it ended, so it is not handed over: it runs on until the host
+  starts again from a template naming a release with the store (see
+  below) or is replaced by a host made from one.
+  Installing such an earlier release over a later one (a rollback)
+  installs its unit, which keeps no descriptors, so systemd drops the
+  stored one; the running guard then keeps the watchdog itself, like an
+  earlier release's guard, until the host starts again.
+  Without the hand-over, a fix to the guard would reach a host only at
+  its next boot. Old releases stay under `/opt/compute/releases`;
   remove one once no pager runs from it (`fuser
   /opt/compute/releases/<version>/compute-host`). On GCP, set the new
-  bundle in Terraform and replace hosts one at a time, each drained first,
-  or run `install.sh` from the new bundle on each host in place.
+  bundle in Terraform and apply it, so hosts created from then on install
+  it. Then replace the hosts one at a time, each drained first, or upgrade
+  each in place. A running host keeps the metadata of the template it was
+  made from, and its startup script installs the bundle that metadata
+  names at every boot, so first move it to the new template:
+  `gcloud compute instance-groups managed update-instances <group>
+  --instances <host> --minimal-action refresh
+  --most-disruptive-allowed-action refresh` applies the new template
+  without stopping or restarting the VM (for a new bundle, that is its
+  metadata), and refuses a template that would need the machine
+  restarted (such as a new machine type: replace those hosts).
+  Then run `install.sh` from the new bundle on it. A host upgraded in
+  place without the refresh goes back to its old bundle when it reboots.
 - **The control service** is a Deployment: upgrade the chart with the new
   image. Replicas share the store; one leads at a time, and a new leader
   waits a whole lease term before giving up on any host, so a rollout

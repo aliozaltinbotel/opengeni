@@ -1,3 +1,4 @@
+import slackLogo from "@/assets/integration-logos/slack.png";
 import {
   hasOpenGeniSlackReactionScope,
   resolveWorkspaceSlackOrchestrationNoticeSettings,
@@ -77,8 +78,7 @@ const SLACK_BOT_OUTCOMES = [
     description: "Replies and progress stay in the Slack thread the request came from.",
   },
 ];
-export const SLACK_LOGO_URL =
-  "https://a.slack-edge.com/80588/marketing/img/meta/slack_hash_256.png";
+export const SLACK_LOGO_URL = slackLogo;
 const OPENGENI_REACTION_EMOJI = "genie" as const;
 
 /** A DEV-only connected preview so the sheet can be reviewed without real Slack rows. */
@@ -874,7 +874,7 @@ export function useSlackIntegration({
         label: "Use the bot across the organization",
         description:
           botSharingError ??
-          "Let authorized chats and scheduled tasks in this organization post as this bot. Personal Slack accounts stay separate.",
+          "Let authorized chats and automations in this organization post as this bot. Personal Slack accounts stay separate.",
         checked: botSharing?.scope === sharingScope && botSharing.enabled,
         disabled:
           !canManageOrganizationDestination ||
@@ -1258,7 +1258,7 @@ export function useSlackIntegration({
         open={botDisconnectOpen}
         onOpenChange={setBotDisconnectOpen}
         title="Disconnect the Opengeni Slack bot?"
-        description="This disconnects the bot for the whole organization, including channels routed to other workspaces. Opengeni stops answering and scheduled Slack posts stop. Existing tasks and history remain. The app stays installed in Slack until you remove it there."
+        description="This disconnects the bot for the whole organization, including channels routed to other workspaces. Opengeni stops answering and automations stop posting to Slack. Existing tasks and history remain. The app stays installed in Slack until you remove it there."
         confirmLabel="Disconnect Slack bot"
         cancelAutoFocus
         onConfirm={disconnectBot}

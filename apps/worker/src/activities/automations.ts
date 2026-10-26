@@ -6,6 +6,7 @@ import {
 } from "@opengeni/config";
 import {
   applySessionAgentConfigWriteThrough,
+  newSessionKnowledgeSearchTools,
   assertWorkspaceModelPolicyAllows,
   canonicalConfiguredModel,
   resolveSessionAgentConfigForCreate,
@@ -23,7 +24,7 @@ import {
   requireWorkspace,
 } from "@opengeni/db";
 import { SessionSkills } from "@opengeni/contracts";
-import { agentRunAdmissionDenial } from "./agent-run-admission";
+import { agentRunAdmissionDenial } from "@opengeni/core";
 import type {
   ControlActivityServices,
   DispatchAutomationRunInput,
@@ -211,7 +212,12 @@ export function createAutomationActivities(
             config: resolution.config,
             instructions: resolution.instructions,
             firstPartyMcpTools: written.firstPartyMcpTools,
-            tools: written.tools,
+            tools: newSessionKnowledgeSearchTools(
+              written.tools,
+              resolution.config,
+              written.firstPartyMcpTools,
+              catalogSettings.mcpServers,
+            ),
           };
         } catch (error) {
           if (!isUnprocessableEntity(error)) throw error;

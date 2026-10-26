@@ -9,12 +9,9 @@ import {
   listSelfOrganizationMemberships,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 
 import { createApp } from "../src/app";
 import {
@@ -212,6 +209,48 @@ async function scenario(mode: PauseMode): Promise<{
 afterEach(async () => {
   if (shared) await setRuntimeSwitch(true, "test cleanup: reopen sign-ups");
 });
+
+test("promotional review preserves password and existing OAuth sign-in and account access", async () => {
+  if (!shared || !client) return;
+  const h = await harness(true);
+  const email = `promotion-review-${crypto.randomUUID()}@example.test`;
+  const password = "promotion-review-password-1";
+  await verifiedEmailUser(h, email, password);
+  const [user] = await shared.admin<{ id: string }[]>`
+    select id from auth_users where email = ${email}`;
+  const access = await ensureManagedAccessForUserWithOrganizationMemberships(client.db, {
+    userId: user!.id,
+    email,
+    name: "Review requested",
+    emailVerified: true,
+  });
+  const accountId = access.accessContext.defaultAccountId!;
+  const googleUser = { id: crypto.randomUUID(), email };
+  await googleCallback(h, googleUser);
+  try {
+    await shared.admin`select opengeni_private.set_promotion_enforcement(true,'test','login-preserving review regression',true)`;
+    await shared.admin`select opengeni_private.set_promotion_decision(${accountId}::uuid,'verification_required','test','Review repeated promotional claims','{}'::jsonb,'operator:test',0)`;
+    const signIn = await h.app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: requestHeaders(),
+      body: JSON.stringify({ email, password }),
+    });
+    expect(signIn.status).toBe(200);
+    const cookie = cookiePairs(signIn);
+    const session = await h.app.request("/v1/auth/get-session", {
+      headers: requestHeaders(cookie),
+    });
+    expect(await session.json()).toMatchObject({ user: { email } });
+    const me = await h.app.request("/v1/access/me", { headers: requestHeaders(cookie) });
+    expect(me.status).toBe(200);
+    expect(await me.json()).toMatchObject({ defaultAccountId: accountId });
+    const social = await googleCallback(h, googleUser);
+    expect(social.headers.get("location")).toBe("http://opengeni.test/");
+    expect(cookiePairs(social)).toContain("session_token=");
+  } finally {
+    await shared.admin`select opengeni_private.set_promotion_enforcement(false,'test','review test cleanup',true)`;
+  }
+}, 180_000);
 
 describe("paused new account sign-ups", () => {
   for (const mode of PAUSE_MODES) {

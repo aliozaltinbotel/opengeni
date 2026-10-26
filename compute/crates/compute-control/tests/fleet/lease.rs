@@ -1,13 +1,15 @@
 //! Hosts' leases: when the service gives up on a host, what becomes of its
 //! sandboxes, and how a host that comes back is told what is still its.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use compute_protocol::fleet::{Envelope, Registered};
+use compute_control::view::View;
+use compute_protocol::fleet::{Capacity, Envelope, Registered};
 use compute_protocol::host::{ErrorCode, Reply, Request};
 use serde_json::json;
 
-use super::support::{Act, Fleet, counted, given_up, id, until};
+use super::support::{Act, FakeHost, Fleet, OPERATOR_KEY, counted, given_up, id, roomy, until};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_host_is_given_up_on_no_sooner_than_its_term_and_margin_after_it_stopped() {
@@ -167,4 +169,142 @@ async fn a_host_renewing_a_lost_registration_registers_again() {
         host.epoch() > old && counted(&fleet, &host).await
     })
     .await;
+}
+
+/// What `view` last heard `host` can take on.
+fn heard(view: &View, host: &FakeHost) -> Option<Capacity> {
+    view.hosts()
+        .into_iter()
+        .find(|known| known.target.host.0 == host.id())
+        .map(|known| known.capacity)
+}
+
+/// A restarted agent renews the lease it holds while it takes back its
+/// sandboxes, which can outlast the term, before it can say what it can
+/// take on, and refuses requests until then. The service keeps the host
+/// and what it last reported, so neither placement nor scaling sees a
+/// host gone empty, and a create it refuses meanwhile goes elsewhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_renewing_while_its_agent_starts_keeps_its_lease_and_last_capacity() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let reported = Capacity {
+        sandboxes: 7,
+        awake: 3,
+        ..roomy()
+    };
+    a.set_capacity(reported.clone());
+    let view = Arc::clone(fleet.running.service.view());
+    until(
+        Duration::from_secs(5),
+        "the service hears its capacity",
+        async || heard(&view, &a).as_ref() == Some(&reported),
+    )
+    .await;
+    a.starting(true);
+    a.behave(|_| {
+        Act::Reply(Reply::Error {
+            message: "this host's agent is starting".into(),
+            code: ErrorCode::Unavailable,
+        })
+    });
+    let b = fleet.host("host-b.example").await;
+    let terms = fleet.terms;
+    tokio::time::sleep(terms.term + terms.margin + terms.renew_every).await;
+    assert!(counted(&fleet, &a).await, "not given up on while it renews");
+    assert_eq!(heard(&view, &a), Some(reported));
+
+    for _ in 0..8 {
+        let sandbox = fleet.create(json!({})).await;
+        let (_, row) = fleet.get(&format!("/v1/sandboxes/{sandbox}")).await;
+        assert_eq!(row["host"], json!("host-b.example"), "{row}");
+        assert!(b.holds(id(&sandbox)).is_some());
+    }
+}
+
+/// The hosts the operator sees, by name, with their state and id.
+async fn listed(fleet: &Fleet) -> Vec<(String, String, u64)> {
+    let (status, hosts) = fleet
+        .call(reqwest::Method::GET, "/v1/hosts", Some(OPERATOR_KEY), None)
+        .await;
+    assert_eq!(status, 200, "{hosts}");
+    hosts
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|host| {
+            (
+                host["name"].as_str().unwrap().to_owned(),
+                host["state"].as_str().unwrap().to_owned(),
+                host["epoch"].as_u64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// A host given up on, as a replaced machine is, is listed as lost for a
+/// while and then forgotten, so hosts replaced over months do not pile up
+/// in the store, the listing and the metrics. Its sandboxes are unharmed,
+/// and its name, if it comes back, is a new host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_host_given_up_on_is_forgotten_in_time_and_its_name_is_a_new_host() {
+    let fleet = Fleet::start().await;
+    let a = fleet.host("host-a.example").await;
+    let sandbox = fleet.create(json!({})).await;
+    a.archive(id(&sandbox), 1).await;
+    let b = fleet.host("host-b.example").await;
+    a.renewing(false);
+    given_up(&fleet, &a).await;
+    until(Duration::from_secs(3), "it is listed as lost", async || {
+        listed(&fleet)
+            .await
+            .iter()
+            .any(|(name, state, _)| name == "host-a.example" && state == "lost")
+    })
+    .await;
+
+    // Kept a while: nothing older than a day goes.
+    let keep_a_day = 24 * 60 * 60 * 1000;
+    assert_eq!(
+        fleet.running.service.prune_hosts(keep_a_day).await.unwrap(),
+        0
+    );
+    assert_eq!(fleet.running.service.prune_hosts(0).await.unwrap(), 1);
+    until(
+        Duration::from_secs(15),
+        "the replica forgets it",
+        async || listed(&fleet).await.len() == 1,
+    )
+    .await;
+    assert_eq!(listed(&fleet).await[0].0, "host-b.example");
+    assert!(
+        !fleet.scrape().await.contains("host-a.example"),
+        "nor do its metrics stay"
+    );
+
+    // Its sandbox wakes elsewhere, from its archive.
+    let (status, woken) = fleet
+        .post(&format!("/v1/sandboxes/{sandbox}/wake"), json!({}))
+        .await;
+    assert_eq!((status, &woken["host"]), (200, &json!("host-b.example")));
+    assert!(b.holds(id(&sandbox)).is_some());
+
+    // The machine comes back under its name: a new host.
+    let old = a.id();
+    a.renewing(true);
+    until(Duration::from_secs(5), "it registers again", async || {
+        counted(&fleet, &a).await
+    })
+    .await;
+    assert_ne!(a.id(), old, "a new host");
+    until(Duration::from_secs(3), "it is listed live", async || {
+        listed(&fleet)
+            .await
+            .iter()
+            .any(|(name, state, _)| name == "host-a.example" && state == "live")
+    })
+    .await;
+    let made = fleet.create(json!({})).await;
+    let (_, row) = fleet.get(&format!("/v1/sandboxes/{made}")).await;
+    assert!(row["host"].is_string(), "{row}");
 }

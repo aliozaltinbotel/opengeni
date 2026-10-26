@@ -4,7 +4,8 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { chromium, type Browser, type Page } from "playwright";
 
-import { freePort, runCommand, startProcess, type StartedProcess } from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { runCommand, startProcess, type StartedProcess } from "@opengeni/testing/process";
 import { OPENGENI_API_CONTRACT_REVISION } from "@opengeni/sdk";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -971,7 +972,6 @@ async function expectNoCapabilitiesChunkCycle(assetsDir: string): Promise<void> 
           member.startsWith("integration-account-facets-") ||
           member.startsWith("integration-facets-panel-") ||
           member.startsWith("custom-api-setup-dialog-") ||
-          member.startsWith("google-drive-folder-dialog-") ||
           member.startsWith("google-drive-knowledge-source-dialog-"),
       )
         ? cycle

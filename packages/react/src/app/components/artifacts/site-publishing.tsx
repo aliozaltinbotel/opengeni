@@ -62,6 +62,7 @@ import {
   sentence,
   siteErrorCode,
   sitePublicationLoadFromError,
+  splitReadinessWarnings,
   suggestedLabel,
   suspendedByLabel,
   viewAsVisitorUrl,
@@ -258,6 +259,8 @@ export type SitePublishPageProps = {
    * inline, in the Site's Settings, with no back link.
    */
   layout?: "page" | "panel" | undefined;
+  /** After Publish or Save changes succeeds, for a page that then goes back. */
+  onSubmitted?: (() => void) | undefined;
 };
 
 /** The publish form's frame: its own page, or a panel in the Site's Settings. */
@@ -352,6 +355,7 @@ function SitePublishForm({
   labelSuffix,
   isAdmin,
   layout = "page",
+  onSubmitted,
 }: SitePublishPageProps & { saved: SitePublication | null }) {
   const forceNoindex = sites.forceNoindex === true;
   const [draft, setDraft] = useState<SitePublishDraft>(() =>
@@ -502,15 +506,16 @@ function SitePublishForm({
       <PublishFrame
         layout={layout}
         back={{ label: site.title, onClick: onBack }}
-        title={layout === "panel" && !publishing ? "Web address" : "Publish to web"}
+        title={publishing ? "Publish to web" : "Web address"}
         description={
-          layout === "panel" && !publishing
-            ? "Its address, who can open it and its agent."
-            : `Give “${site.title}” its own address on the web.`
+          publishing
+            ? `Give “${site.title}” its own address on the web.`
+            : "Its address, who can open it and its agent."
         }
         submitLabel={publishing ? "Publish" : "Save changes"}
         pendingLabel={publishing ? "Publishing…" : "Saving…"}
         onSubmit={submit}
+        {...(onSubmitted ? { onSubmitted } : {})}
         // In Settings there is nowhere to go back to: Discard puts the saved
         // values back, so it shows only once a saved publication has changes.
         {...(layout === "panel"
@@ -1034,7 +1039,11 @@ function OutsideModelLine({ workspaceId, model }: { workspaceId: string; model: 
   );
 }
 
-/** "2 things won't work for public visitors", opening to the list with one-click fixes. */
+/**
+ * Notices (nothing to fix, such as sign-in on a login-only deployment) as
+ * plain lines, then "2 things won't work for public visitors", opening to the
+ * list with one-click fixes.
+ */
 function SiteReadiness({
   warnings,
   access,
@@ -1045,37 +1054,48 @@ function SiteReadiness({
   onFix: (fix: SitePublishWarningFix) => Promise<void>;
 }) {
   const [fixing, setFixing] = useState<number | null>(null);
+  const { notices, problems } = splitReadinessWarnings(warnings);
   return (
-    <Disclosure title={readinessTitle(warnings, access)}>
-      <ul className="flex min-w-0 flex-col gap-3 pt-1">
-        {warnings.map((warning, index) => (
-          <li
-            key={`${warning.code}:${warning.message}`}
-            className="flex min-w-0 items-start justify-between gap-3"
-          >
-            <div className="min-w-0">
-              <p className="text-sm text-fg">{warning.message}</p>
-              <p className="text-xs leading-[18px] text-fg-muted">{warning.suggestion}</p>
-            </div>
-            {warning.fix ? (
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={fixing !== null}
-                onClick={() => {
-                  setFixing(index);
-                  void onFix(warning.fix!).finally(() => setFixing(null));
-                }}
-                className="shrink-0 rounded-[10px] pointer-coarse:h-11"
+    <div className="flex min-w-0 flex-col gap-3">
+      {notices.map((notice) => (
+        <Notice key={`${notice.code}:${notice.message}`}>
+          <p className="text-sm text-fg">{notice.message}</p>
+          <p className="text-xs leading-[18px]">{notice.suggestion}</p>
+        </Notice>
+      ))}
+      {problems.length > 0 ? (
+        <Disclosure title={readinessTitle(problems, access)}>
+          <ul className="flex min-w-0 flex-col gap-3 pt-1">
+            {problems.map((warning, index) => (
+              <li
+                key={`${warning.code}:${warning.message}`}
+                className="flex min-w-0 items-start justify-between gap-3"
               >
-                {fixing === index ? "Fixing…" : "Fix"}
-              </Button>
-            ) : null}
-          </li>
-        ))}
-      </ul>
-    </Disclosure>
+                <div className="min-w-0">
+                  <p className="text-sm text-fg">{warning.message}</p>
+                  <p className="text-xs leading-[18px] text-fg-muted">{warning.suggestion}</p>
+                </div>
+                {warning.fix ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={fixing !== null}
+                    onClick={() => {
+                      setFixing(index);
+                      void onFix(warning.fix!).finally(() => setFixing(null));
+                    }}
+                    className="shrink-0 rounded-[10px] pointer-coarse:h-11"
+                  >
+                    {fixing === index ? "Fixing…" : "Fix"}
+                  </Button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </Disclosure>
+      ) : null}
+    </div>
   );
 }
 

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { TimelineAnnotation } from "@opengeni/sdk";
+import type { SessionTurn, TimelineAnnotation } from "@opengeni/sdk";
 import { act } from "react";
 
 import {
@@ -9,9 +9,11 @@ import {
   sessionChromeGoalPillState,
   sessionChromeInitialActive,
   sessionChromeShouldOfferQueue,
+  sessionChromeWaitPresentation,
 } from "../src/components/session-chrome";
 import { formatClockTime } from "../src/lib/format";
-import type { ComposerState } from "../src/hooks/use-composer";
+import { sessionInputWait } from "../src/session-list-model";
+import type { ComposerOptimisticMessage, ComposerState } from "../src/hooks/use-composer";
 import type { UseGoalResult } from "../src/hooks/use-goal";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -1678,7 +1680,7 @@ describe("SessionChrome compact actions", () => {
     expect(edit.closest(".opacity-0")).not.toBeNull();
   });
 
-  test("goal pause/resume and clear do not open the panel", async () => {
+  test("goal pause/resume and clear live in the goal panel, not on the compact chip", async () => {
     const calls: string[] = [];
     mounted = await renderComponent(
       <SessionChrome
@@ -1695,14 +1697,24 @@ describe("SessionChrome compact actions", () => {
         }}
       />,
     );
+    expect(mounted.container.querySelector('[aria-label="Resume goal"]')).toBeNull();
+    expect(mounted.container.querySelector('[aria-label="Clear goal"]')).toBeNull();
     await act(async () =>
-      mounted!.container.querySelector<HTMLButtonElement>('[aria-label="Resume goal"]')!.click(),
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="goal"]')!
+        .click(),
     );
-    await act(async () =>
-      mounted!.container.querySelector<HTMLButtonElement>('[aria-label="Clear goal"]')!.click(),
-    );
+    await flush(50);
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="goal"]')!;
+    const button = (label: string) =>
+      Array.from(panel.querySelectorAll<HTMLButtonElement>("button")).find(
+        (candidate) => candidate.textContent?.trim() === label,
+      )!;
+    expect(button("Resume").getAttribute("aria-label")).toBe("Resume goal");
+    expect(button("Clear").getAttribute("aria-label")).toBe("Clear goal");
+    await act(async () => button("Resume").click());
+    await act(async () => button("Clear").click());
     expect(calls).toEqual(["resume", "clear"]);
-    expect(mounted.container.querySelector('[data-og-session-chrome-open="false"]')).not.toBeNull();
   });
 
   test("read-only chrome has no compact mutation actions", async () => {
@@ -2172,5 +2184,369 @@ describe("SessionChrome compact queue annotations", () => {
     expect(row.textContent).toContain("Content unavailable");
     expect(row.querySelector('button[aria-label^="Review"]')).toBeNull();
     expect(row.querySelector('[aria-label="Edit queued prompt 1"]')).not.toBeNull();
+  });
+});
+
+describe("SessionChrome wait status", () => {
+  const deadlineAt = new Date(Date.now() + 47 * 60_000).toISOString();
+  const reason = "Waiting for the Site sidebar and Site panel workers to finish.";
+
+  test("leads the single row with the reason and the next check time", async () => {
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} wait={{ reason, deadlineAt }} />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="wait"]',
+    )!;
+    const view = sessionChromeWaitPresentation(englishText, { reason, deadlineAt }, Date.now());
+    expect(chip.textContent).toBe(`${reason}${view.clock}`);
+    const label = `${reason.slice(0, -1)}. Checks again at ${view.clock} · resumes sooner if an update arrives`;
+    expect(view.label).toBe(label);
+    expect(chip.getAttribute("aria-label")).toBe(label);
+    expect(chip.getAttribute("title")).toBe(label);
+    // The chip is a button, so a polite live region announces the wait.
+    expect(
+      mounted.container.querySelector('[role="status"][aria-live="polite"]')?.textContent,
+    ).toBe(label);
+    expect(chip.closest('[role="group"]')?.getAttribute("aria-label")).toBe("Wait status");
+    await act(async () => chip.click());
+    await flush(50);
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="wait"]')!;
+    expect(panel.textContent).toContain(reason);
+    expect(panel.textContent).toContain(`Checks again at ${view.clock}`);
+  });
+
+  test("the goal chip only names itself while the wait explains the hold", async () => {
+    const held = goal({
+      continuation: {
+        state: "blocked",
+        reason: "held_for_input",
+        wakeRevision: 2,
+        observedRevision: 1,
+        nextAttemptAt: deadlineAt,
+        lastError: null,
+        holdReason: reason,
+      },
+    });
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} goal={held} wait={{ reason, deadlineAt }} />,
+    );
+    const chip = mounted.container.querySelector('[data-og-session-chrome-signal="goal"]')!;
+    expect(chip.textContent).toBe("Goal");
+    expect(chip.getAttribute("aria-label")).toBe("Goal · Held");
+    await mounted.rerender(<SessionChrome queue={queue({ queue: [] })} goal={held} />);
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="goal"]')!.textContent,
+    ).toBe("Goal · Held");
+  });
+
+  test("keeps verbose legacy notes in the panel disclosure and reports a due recheck", () => {
+    const verbose = `Internal note for 0f8a3c2e-1111-4111-8111-111111111111\nwith details`;
+    const view = sessionChromeWaitPresentation(
+      englishText,
+      { reason: verbose, deadlineAt: new Date(Date.now() - 1_000).toISOString() },
+      Date.now(),
+    );
+    expect(view.headline).toBe("Waiting for work in progress");
+    expect(view.verboseReason).toBe(verbose);
+    expect(view.due).toBe(true);
+    expect(view.detail).toBe("Recheck due · waiting to resume");
+  });
+
+  test("a due recheck shows Due on the chip and the full state in its name", async () => {
+    const wait = {
+      reason: "Waiting for CI",
+      deadlineAt: new Date(Date.now() - 60_000).toISOString(),
+    };
+    mounted = await renderComponent(<SessionChrome queue={queue({ queue: [] })} wait={wait} />);
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="wait"]',
+    )!;
+    expect(chip.textContent).toBe("Waiting for CIDue");
+    expect(chip.getAttribute("aria-label")).toBe("Waiting for CI. Recheck due · waiting to resume");
+  });
+
+  test("the panel keeps a verbose legacy note behind a closed disclosure", async () => {
+    const verbose = "Raw internal bookkeeping ".repeat(20).trim();
+    mounted = await renderComponent(
+      <SessionChrome queue={queue({ queue: [] })} wait={{ reason: verbose, deadlineAt }} />,
+    );
+    const chip = mounted.container.querySelector<HTMLButtonElement>(
+      '[data-og-session-chrome-signal="wait"]',
+    )!;
+    expect(chip.textContent).toContain("Waiting for work in progress");
+    expect(chip.textContent).not.toContain("bookkeeping");
+    await act(async () => chip.click());
+    await flush(50);
+    const panel = mounted.container.querySelector('[data-og-session-chrome-panel="wait"]')!;
+    const details = panel.querySelector("details")!;
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain(verbose);
+  });
+
+  test("only an idle, active session's declared wait reaches the chip", () => {
+    const base = {
+      status: "idle" as const,
+      effectiveControl: { state: "active" as const },
+      inputWait: { reason, deadlineAt },
+    };
+    expect(sessionInputWait(base as never)).toEqual(base.inputWait);
+    for (const next of [
+      { ...base, status: "queued" as const, inputWait: null },
+      { ...base, status: "running" as const },
+      { ...base, inputWait: null },
+      { ...base, effectiveControl: { state: "paused" as const } },
+    ]) {
+      expect(sessionInputWait(next as never)).toBeNull();
+    }
+  });
+
+  test("shows the date with the time when the next check is not today", () => {
+    const now = Date.parse("2026-10-23T09:00:00");
+    const view = sessionChromeWaitPresentation(
+      englishText,
+      { reason, deadlineAt: new Date(Date.parse("2026-10-25T09:30:00")).toISOString() },
+      now,
+    );
+    expect(view.clock).toContain("25");
+    expect(view.due).toBe(false);
+  });
+
+  test("chips keep a 44px coarse-pointer target without a taller row", async () => {
+    mounted = await renderComponent(
+      <SessionChrome
+        queue={queue({ queue: [] })}
+        wait={{ reason, deadlineAt }}
+        goal={goal()}
+        commandsCount={1}
+        commandsPanel={<div />}
+      />,
+    );
+    const targets = [
+      ...mounted.container.querySelectorAll<HTMLElement>("[data-og-session-chrome-signal]"),
+      mounted.container.querySelector<HTMLElement>('[aria-label="Session activity"]')!,
+    ];
+    expect(targets).toHaveLength(3);
+    // The clipped frame leaves room for the hit areas above and below the chips.
+    expect(targets[0]!.closest(".pointer-coarse\\:py-1\\.5")).not.toBeNull();
+    for (const target of targets) {
+      expect(target.className).toContain("pointer-coarse:before:-inset-y-1.5");
+      expect(target.className).toContain("pointer-coarse:min-h-8");
+      expect(target.className).not.toContain("pointer-coarse:min-h-11");
+    }
+  });
+});
+
+describe("Steer on a just-sent queued message", () => {
+  const SENT_TURN_ID = "33333333-3333-4333-8333-333333333333";
+  const sentTurn = fakeTurn({ id: SENT_TURN_ID, prompt: "Also check the models page" });
+
+  function sent(overrides: Partial<ComposerOptimisticMessage> = {}): ComposerOptimisticMessage {
+    return {
+      clientEventId: "client-send-steer-1",
+      delivery: "send",
+      destination: "queue",
+      text: "Also check the models page",
+      annotations: [],
+      resources: [],
+      occurredAt: new Date().toISOString(),
+      state: "sending",
+      ...overrides,
+    };
+  }
+
+  function steerButton(): HTMLButtonElement {
+    return mounted!.container.querySelector<HTMLButtonElement>('[data-analytics-action="steer"]')!;
+  }
+
+  function render(
+    message: ComposerOptimisticMessage | ComposerOptimisticMessage[],
+    turns: SessionTurn[],
+    steered: string[],
+    version = 1,
+    extra: Partial<UseTurnQueueResult> = {},
+  ) {
+    return (
+      <SessionChrome
+        queue={queue({
+          queue: turns,
+          snapshot: { version } as UseTurnQueueResult["snapshot"],
+          steerTurn: async (turnId) => {
+            steered.push(turnId);
+            return true;
+          },
+          ...extra,
+        })}
+        composer={composer({ optimisticMessages: Array.isArray(message) ? message : [message] })}
+      />
+    );
+  }
+
+  test("is usable as soon as the message shows as queued, and steers it once it lands", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    expect(
+      mounted.container.querySelector('[data-og-session-chrome-signal="queue"]')?.textContent,
+    ).toContain("1 queued");
+    expect(steerButton().disabled).toBe(false);
+    await act(async () => steerButton().click());
+    // Taken at once: the chip shows it is working, but nothing is sent yet.
+    expect(steerButton().querySelector(".animate-og-spin")).not.toBeNull();
+    expect(steered).toEqual([]);
+    // Accepted by the server, but the queue read has not caught up.
+    await mounted.rerender(
+      render(sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }), [], steered),
+    );
+    expect(steered).toEqual([]);
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID]);
+    // Never twice, even as the queue keeps re-rendering.
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID]);
+  });
+
+  test("a send that fails is never steered", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    await mounted.rerender(render(sent({ state: "failed", error: "Not sent" }), [], steered));
+    await flush();
+    expect(steered).toEqual([]);
+    await act(async () => {
+      mounted!.container
+        .querySelector<HTMLButtonElement>('[data-og-session-chrome-signal="queue"]')
+        ?.click();
+    });
+    expect(
+      mounted.container.querySelector("[data-optimistic-queue-message]")?.textContent,
+    ).toContain("Not sent");
+  });
+
+  test("a failed send offers no Steer", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent({ state: "failed" }), [], steered));
+    expect(steerButton().disabled).toBe(true);
+  });
+
+  test("a message the agent started first is not steered, and an older one is never steered instead", async () => {
+    const steered: string[] = [];
+    const older = fakeTurn({
+      id: "44444444-4444-4444-8444-444444444444",
+      prompt: "older queued prompt",
+    });
+    mounted = await renderComponent(render(sent(), [older], steered));
+    await act(async () => steerButton().click());
+    // The queue read at version 2 no longer has it: the agent took it.
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [older],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([]);
+    expect(steerButton().querySelector(".animate-og-spin")).toBeNull();
+  });
+
+  test("a message the agent started directly is not steered", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    // The agent was free, so the send went straight into the chat and runs.
+    await mounted.rerender(
+      render([sent({ destination: "chat", state: "queued", turnId: SENT_TURN_ID })], [], steered),
+    );
+    await flush();
+    expect(steered).toEqual([]);
+    expect(steerButton()).toBeNull();
+  });
+
+  test("steering a newer send keeps the earlier request, and both are steered", async () => {
+    const steered: string[] = [];
+    const NEXT_TURN_ID = "55555555-5555-4555-8555-555555555555";
+    const nextTurn = fakeTurn({ id: NEXT_TURN_ID, prompt: "And the pricing page" });
+    const next = (overrides: Partial<ComposerOptimisticMessage> = {}) =>
+      sent({ clientEventId: "client-send-steer-2", text: "And the pricing page", ...overrides });
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    // The chip now shows the newer send, and its Steer is usable too.
+    await mounted.rerender(render([sent(), next()], [], steered));
+    expect(steerButton().disabled).toBe(false);
+    await act(async () => steerButton().click());
+    expect(steered).toEqual([]);
+    await mounted.rerender(
+      render(
+        [
+          sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+          next({ state: "queued", turnId: NEXT_TURN_ID, appliedQueueVersion: 3 }),
+        ],
+        [sentTurn, nextTurn],
+        steered,
+        3,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID, NEXT_TURN_ID]);
+  });
+
+  test("a message something else already acts on is left to that action", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    // An Up recall (the queue's Edit) on this message is already in flight.
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+        {
+          mutating: true,
+          mutationFor: (turnId) => (turnId === SENT_TURN_ID ? "edit" : null),
+        },
+      ),
+    );
+    await flush();
+    await mounted.rerender(
+      render(
+        sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 }),
+        [sentTurn],
+        steered,
+        2,
+      ),
+    );
+    await flush();
+    expect(steered).toEqual([]);
+  });
+
+  test("waits for another queue change to apply, then steers", async () => {
+    const steered: string[] = [];
+    mounted = await renderComponent(render(sent(), [], steered));
+    await act(async () => steerButton().click());
+    const landed = sent({ state: "queued", turnId: SENT_TURN_ID, appliedQueueVersion: 2 });
+    await mounted.rerender(render(landed, [sentTurn], steered, 2, { mutating: true }));
+    await flush();
+    expect(steered).toEqual([]);
+    await mounted.rerender(render(landed, [sentTurn], steered, 2));
+    await flush();
+    expect(steered).toEqual([SENT_TURN_ID]);
   });
 });

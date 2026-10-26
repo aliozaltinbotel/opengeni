@@ -46,8 +46,16 @@ type Blocker = { reason: string; text: string };
 
 const RESUME = "then resume the schedule.";
 
+/**
+ * The person a schedule runs as no longer holds the exact access it was saved
+ * with (their organization membership changed, was suspended, or they left the
+ * workspace). Every run is refused until they save it again, which approves it
+ * with the access they hold now.
+ */
+const OWNER_ACCESS_CHANGED_TEXT = `The access it was saved with has changed, so every run is refused. Its owner can open it and save it to approve it with their current access, ${RESUME}`;
+
 const NON_RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
-  scheduled_authority_unavailable: `The access it was set up with is no longer valid. Refresh the schedule's access, ${RESUME}`,
+  scheduled_authority_unavailable: OWNER_ACCESS_CHANGED_TEXT,
   machine_target_unavailable: `The machine it runs on is no longer available. Choose another machine or reconnect this one, ${RESUME}`,
   machine_enrollment_inactive: `The machine it runs on is disconnected. Reconnect the machine, ${RESUME}`,
   variable_set_unavailable: `A variable set it uses no longer exists or can't be used. Edit the schedule, ${RESUME}`,
@@ -67,9 +75,21 @@ const RETRYABLE_REFUSAL_TEXT: Record<string, string> = {
 /**
  * How many failed or skipped runs in a row the owner can afford to wait for
  * after `run`, and whether a later run is due at all. Unknown or unparseable
- * specs tell at once.
+ * specs tell at once. Repeating event triggers keep an automation running
+ * after its schedule's last run, and a run-once automation that completed has
+ * no later run whatever its schedule says.
  */
 export function scheduledTaskBlockerCadence(
+  schedule: unknown,
+  run: Pick<ScheduledTaskBlockerRun, "createdAt">,
+  events: ScheduledTaskBlockerFacts["task"]["events"] = null,
+): { streak: number; laterRuns: boolean } {
+  if (events?.once && events.completed) return { streak: 1, laterRuns: false };
+  const cadence = scheduleCadence(schedule, run);
+  return events && !events.once ? { ...cadence, laterRuns: true } : cadence;
+}
+
+function scheduleCadence(
   schedule: unknown,
   run: Pick<ScheduledTaskBlockerRun, "createdAt">,
 ): { streak: number; laterRuns: boolean } {
@@ -131,6 +151,12 @@ export function scheduledRunHardBlocker(
       };
     case "scheduled_model_unavailable":
       return { reason: run.error, text: NON_RETRYABLE_REFUSAL_TEXT.scheduled_model_unavailable! };
+    // The database admission and claim fences refuse every run of a task
+    // revision whose saved owner authority no longer holds. That stays true
+    // for every later run until a person saves the schedule again.
+    case "scheduled_run_authority_proof_rejected":
+    case "scheduled_causal_membership_changed":
+      return { reason: run.error, text: OWNER_ACCESS_CHANGED_TEXT };
     default:
       return null;
   }
@@ -257,7 +283,7 @@ export function decideScheduledTaskBlocker(
     };
   }
   if (review?.state === "notified") return none(latest.id);
-  const cadence = scheduledTaskBlockerCadence(task.schedule, latest);
+  const cadence = scheduledTaskBlockerCadence(task.schedule, latest, task.events);
   const streak: ScheduledTaskBlockerRun[] = [];
   for (const run of runs) {
     if (!SETTLED.has(run.status) || run.status === "succeeded" || !current(run)) break;

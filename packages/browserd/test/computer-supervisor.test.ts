@@ -15,6 +15,8 @@ import {
   type ComputerImageFrame,
   type ComputerSupervisorDriver,
 } from "../src";
+import { RECENT_USE_UPDATE_HOLD_MS } from "../src/update-admission";
+import { InteractionControllerError } from "@opengeni/interaction";
 
 const computerSessionId = "11111111-1111-4111-8111-111111111111";
 const controllerGeneration = "controller-1";
@@ -118,8 +120,10 @@ describe("ComputerSupervisor", () => {
         startGate = Promise.withResolvers<void>();
       const ending = Promise.withResolvers<void>(),
         endGate = Promise.withResolvers<void>();
+      let clock = 1_000_000;
       const supervisor = await ComputerSupervisor.open({
         rootDirectory,
+        now: () => clock,
         displaceExistingSessions,
         environmentAllocator: fixtureEnvironmentAllocator(),
         createDriver: async (context) => {
@@ -148,7 +152,12 @@ describe("ComputerSupervisor", () => {
         expect(supervisor.isIdle()).toBe(false);
         startGate.resolve();
         await creating;
-        // An open, quiescent session on the physical seat survives a restart.
+        // An open, quiescent session on the physical seat survives a restart,
+        // once its agent has paused.
+        expect(supervisor.updateBlockers()).toEqual([
+          { kind: "computer_recent_use", resourceId: options().computerSessionId, count: 1 },
+        ]);
+        clock += RECENT_USE_UPDATE_HOLD_MS;
         expect(supervisor.isIdle()).toBe(true);
         const closing = supervisor.endSession(options());
         await ending.promise;
@@ -171,8 +180,10 @@ describe("ComputerSupervisor", () => {
     const dispatched = Promise.withResolvers<void>(),
       release = Promise.withResolvers<void>();
     let virtualSeat = false;
+    let clock = 1_000_000;
     const supervisor = await ComputerSupervisor.open({
       rootDirectory,
+      now: () => clock,
       environmentAllocator: {
         async allocate() {
           return {
@@ -200,6 +211,7 @@ describe("ComputerSupervisor", () => {
     });
     try {
       await supervisor.createSession(options());
+      clock += RECENT_USE_UPDATE_HOLD_MS;
       expect(supervisor.isIdle()).toBe(true);
       const running = supervisor.action(command());
       await dispatched.promise;
@@ -208,6 +220,9 @@ describe("ComputerSupervisor", () => {
       expect(await running).toMatchObject({ state: "completed" });
       // The target queue releases its tail just after the receipt settles.
       await Bun.sleep(1);
+      // Just used: mid-task, so the update waits for a pause.
+      expect(supervisor.isIdle()).toBe(false);
+      clock += RECENT_USE_UPDATE_HOLD_MS;
       expect(supervisor.isIdle()).toBe(true);
       await supervisor.endSession(options());
       virtualSeat = true;
@@ -215,6 +230,38 @@ describe("ComputerSupervisor", () => {
       expect(supervisor.isIdle()).toBe(false);
     } finally {
       release.resolve();
+      await supervisor.close();
+      await rm(rootDirectory, { recursive: true, force: true });
+    }
+  });
+
+  test("a computer opened while its screen is locked stays open and alive", async () => {
+    const rootDirectory = await mkdtemp("/tmp/og-computer-supervisor-");
+    let driver: FixtureComputerDriver | null = null;
+    const supervisor = await ComputerSupervisor.open({
+      rootDirectory,
+      environmentAllocator: fixtureEnvironmentAllocator(),
+      createDriver: async (context) => {
+        driver = new FixtureComputerDriver(context.computerSessionId, context.controllerGeneration);
+        driver.locked = true;
+        return driver;
+      },
+    });
+    try {
+      // Opened while the screen is locked, the computer stays open with no
+      // targets, and its heartbeat keeps it alive.
+      expect(await supervisor.createSession(options())).toMatchObject({
+        computerSessionId,
+        targets: [],
+      });
+      await supervisor.heartbeat(options());
+      // Listing it says why it has none.
+      await expect(supervisor.listTargets(options())).rejects.toMatchObject({
+        code: "machine_locked",
+      });
+      driver!.locked = false;
+      expect(await supervisor.listTargets(options())).toHaveLength(1);
+    } finally {
       await supervisor.close();
       await rm(rootDirectory, { recursive: true, force: true });
     }
@@ -554,6 +601,8 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
   };
   dispatches = 0;
   listTargetCalls = 0;
+  /** Listing fails as a locked screen's does. */
+  locked = false;
   closed = false;
 
   constructor(
@@ -563,6 +612,8 @@ class FixtureComputerDriver implements ComputerSupervisorDriver {
 
   async listTargets(): Promise<ComputerTarget[]> {
     this.listTargetCalls += 1;
+    if (this.locked)
+      throw new InteractionControllerError("machine_locked", "This Mac's screen is locked.");
     return [this.targetValue()];
   }
 

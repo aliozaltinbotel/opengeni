@@ -1,3 +1,4 @@
+import { isIntegrationDefinitionEnabled, type IntegrationDefinition } from "@opengeni/capabilities";
 import { isDeepStrictEqual } from "node:util";
 import { withLockedCapabilityInstallation } from "@opengeni/db/capability-reconciliation";
 import {
@@ -7,11 +8,8 @@ import {
   type Settings,
 } from "@opengeni/config";
 import { pinnedFetch } from "@opengeni/network";
-import {
-  connectMcpStreamableHttpClient,
-  legacyMcpClientError,
-  type McpStreamableHttpClient,
-} from "./mcp-streamable-http-client";
+import { legacyMcpClientError, withMcpStreamableHttpClient } from "./mcp-streamable-http-client";
+import { storeMcpServerLogo, type McpServerLogoStorage } from "./mcp-server-logo";
 import {
   CapabilityCatalogItem,
   capabilityCatalogItemIsTrustedForExposure,
@@ -25,10 +23,16 @@ import {
   type ConnectionMetadata,
   type CreateCapabilityCatalogItemRequest,
   type EnableCapabilityRequest,
+  type OrganizationIntegrationPolicy,
   type McpServerConnectionRef,
   type McpPersonalConnectionDelegation,
   assertOrganizationIntegrationAllowed,
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
   type SocialConnection,
+  ToolAuthNeededPayload,
+  type UserSetupBlocker,
 } from "@opengeni/contracts";
 import {
   CODEX_APPS_MCP_SERVER_ID,
@@ -62,12 +66,14 @@ import {
   listSocialConnections,
   mcpServerIdForCapability,
   upsertCapabilityCatalogItem,
+  setWorkspaceCapabilityCatalogItemLogo,
   type Database,
   type ApiIntegrationRuntime,
   type EnabledMcpCapabilityServer,
   type InstalledSkillSummary,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import { isPersonalIntegrationSetupCandidate } from "@opengeni/contracts/personal-integration-setup";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -166,6 +172,7 @@ export async function buildCapabilityCatalog(input: {
     ...providerIntegrationCatalogItems(socialConnections),
     fikenCatalogItem(workspaceConnections.filter(isFikenConnection)),
     onePasswordCatalogItem(workspaceConnections.filter(isOnePasswordConnection)),
+    excelAddinCatalogItem(excelAddin(input.settings)),
     ...curatedLibrarySkills.filter((item) => installedSkillById.has(item.id)),
     ...installedSkills
       .filter(
@@ -214,7 +221,10 @@ export async function buildCapabilityCatalog(input: {
             }
           : projected;
       return applyCapabilityLifecycle(
-        applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+        applyGoogleConnectorSetupAvailability(
+          applyOperatorOAuthClientRequirement(runtimeProjected, operatorOAuthClientConfigured),
+          input.settings,
+        ),
       );
     })
     .sort(compareCatalogItems);
@@ -238,7 +248,36 @@ function operatorOAuthClientResolver(settings: Settings): (issuer: string) => bo
   } catch {
     // Startup validates this setting; a malformed value can configure nothing.
   }
-  return (issuer) => findIntegrationsOauthClient(configured, [issuer]) !== null;
+  return (issuer) =>
+    (issuer !== "https://accounts.google.com" || settings.googleConnectorSetupEnabled) &&
+    findIntegrationsOauthClient(configured, [issuer]) !== null;
+}
+
+export function applyGoogleConnectorSetupAvailability(
+  item: CapabilityCatalogItem,
+  settings: Settings,
+): CapabilityCatalogItem {
+  const url = item.mcpUrl ?? item.endpointUrl;
+  const drive = url === "https://drivemcp.googleapis.com/mcp/v1";
+  const gmail = url === "https://gmailmcp.googleapis.com/mcp/v1";
+  const calendar = url === "https://calendarmcp.googleapis.com/mcp/v1";
+  if (
+    item.kind !== "mcp" ||
+    (!drive && !gmail && !calendar) ||
+    (settings.googleConnectorSetupEnabled &&
+      (!drive || settings.googleDriveMcpEnabled) &&
+      (!calendar || settings.googleCalendarEnabled))
+  )
+    return item;
+  return {
+    ...item,
+    runtime: {
+      ...item.runtime,
+      operatorOAuthClient: { configured: false },
+      notes:
+        "New connections are unavailable until Google data-access verification and provider setup are complete.",
+    },
+  };
 }
 
 export function applyOperatorOAuthClientRequirement(
@@ -331,8 +370,16 @@ type EnableCapabilityInput = {
   workspaceId: string;
   settings: Settings;
   capabilityId: string;
+  /**
+   * The caller holds only the personal setup permission: turn a reviewed
+   * OAuth integration on for personal accounts if it is not on yet, and
+   * change nothing else. See {@link assertPersonalIntegrationSetupRequest}.
+   */
+  personalSetup?: boolean;
   payload: EnableCapabilityRequest;
   probeMcpServer?: McpCapabilityProbe;
+  /** Where a workspace MCP server's advertised icon is stored as its catalog logo. */
+  mcpServerLogoStorage?: McpServerLogoStorage | null;
   /** Server-owned receipt from a just-verified native Connect credential.
    * Never projected into EnableCapabilityRequest or accepted from a client. */
   verifiedConnection?: {
@@ -347,7 +394,51 @@ export async function enableCapability(
   input: EnableCapabilityInput,
 ): Promise<CapabilityInstallation> {
   const prepared = await prepareCapabilityEnable(input);
-  return prepared.commit(input.db);
+  const installation = await prepared.commit(input.db);
+  // Personal setup never turns back on what an admin turned off.
+  if (input.personalSetup && installation.status !== "active")
+    throw new HTTPException(409, {
+      message: "An admin turned this integration off; ask them to turn it back on",
+    });
+  return installation;
+}
+
+/**
+ * What the personal setup permission may enable: a reviewed catalog OAuth
+ * integration (never a custom MCP server or an API-key integration), for
+ * personal accounts only (each person signs in to their own account: no
+ * shared connection, credential headers, config or metadata).
+ */
+function assertPersonalIntegrationSetupRequest(
+  item: CapabilityCatalogItem,
+  payload: EnableCapabilityRequest,
+): void {
+  if (!isPersonalIntegrationSetupCandidate(item))
+    throw new HTTPException(403, { message: "Only an admin can turn on this integration" });
+  const ref = payload.connectionRef;
+  if (
+    !ref ||
+    ref.subjectScope !== "subject" ||
+    ref.kind !== "oauth2" ||
+    ref.connectionId ||
+    ref.authoritySource === "host" ||
+    ref.accountSelection ||
+    ref.selectedResources ||
+    Object.keys(payload.headers ?? {}).length > 0 ||
+    Object.keys(payload.config ?? {}).length > 0 ||
+    Object.keys(payload.metadata ?? {}).length > 0
+  )
+    throw new HTTPException(403, {
+      message:
+        "Without integration admin rights, an integration can only be turned on for personal accounts",
+    });
+}
+
+function assertPersonalIntegrationSetupAllowed(policy: OrganizationIntegrationPolicy): void {
+  if (policy.personalIntegrationSetup !== "members")
+    throw new HTTPException(403, {
+      message: "Your organization lets only admins turn on integrations",
+    });
 }
 
 /** Probe outside a durable Connect commit; persist the exact prepared settings
@@ -385,6 +476,11 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       message: "MCP capabilities need a remote streamable HTTP endpoint before they can be enabled",
     });
   }
+  if (input.personalSetup) {
+    assertPersonalIntegrationSetupRequest(item, input.payload);
+    // Create-only: an existing installation is returned unchanged.
+    input.payload.onlyIfUninstalled = true;
+  }
   let installationMetadata = input.payload.metadata;
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
@@ -394,14 +490,19 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
+  let mcpServerLogoAssetPath: string | null = null;
   if (item.kind === "mcp") {
     if (
-      item.endpointUrl?.replace(/\/+$/u, "") === "https://gmailmcp.googleapis.com/mcp/v1" &&
+      [
+        "https://gmailmcp.googleapis.com/mcp/v1",
+        "https://drivemcp.googleapis.com/mcp/v1",
+        "https://calendarmcp.googleapis.com/mcp/v1",
+      ].includes(item.endpointUrl?.replace(/\/+$/u, "") ?? "") &&
       (input.payload.connectionRef?.subjectScope !== "subject" ||
         Object.keys(input.payload.headers ?? {}).length > 0)
     ) {
       throw new HTTPException(422, {
-        message: "Gmail requires a personal-owned connection reference",
+        message: "Google connector requires a personal-owned connection reference",
       });
     }
     // This generic, potentially workspace-authored catalog is not proof of a
@@ -410,6 +511,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       input.db,
       input,
       async (tx, policy) => {
+        if (input.personalSetup) assertPersonalIntegrationSetupAllowed(policy);
         const existing = await unchangedMcpInstallation(
           { ...input, db: tx },
           item,
@@ -446,6 +548,7 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
       : null;
     assertRequiredMcpCredentialHeaders(item, headers, connectionRef);
     if (input.verifiedConnection) await validateVerifiedMcpConnection(input, item);
+    let serverInfo: unknown;
     installationMetadata = {
       ...installationMetadata,
       ...(input.verifiedConnection
@@ -457,8 +560,12 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
               input.probeMcpServer,
               headers ?? undefined,
               input.settings,
+              (info) => {
+                serverInfo = info;
+              },
             )),
     };
+    mcpServerLogoAssetPath = await workspaceMcpServerLogo(input, item, serverInfo);
     if (connectionRef) {
       installationConfig.connectionRef = connectionRef;
     }
@@ -478,16 +585,55 @@ export async function prepareCapabilityEnable(input: EnableCapabilityInput) {
     metadata: installationMetadata,
     ...(input.payload.onlyIfUninstalled ? { onlyIfUninstalled: true } : {}),
   };
+  const withServerLogo = async (tx: Database, enabled: CapabilityInstallation) => {
+    if (mcpServerLogoAssetPath)
+      await setWorkspaceCapabilityCatalogItemLogo(tx, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        id: item.id,
+        logoAssetPath: mcpServerLogoAssetPath,
+      });
+    return enabled;
+  };
   return {
     commit: (db: Database) =>
-      item.kind === "mcp"
-        ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
-            if (input.verifiedConnection)
-              await validateVerifiedMcpConnection({ ...input, db: tx }, item);
-            return enableCapabilityInstallation(tx, installation);
+      item.kind === "mcp" && input.personalSetup
+        ? withOrganizationIntegrationPolicyFence(db, installation, async (tx, policy) => {
+            assertPersonalIntegrationSetupAllowed(policy);
+            assertOrganizationIntegrationAllowed(policy, "custom:mcp");
+            return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
           })
-        : enableCapabilityInstallation(db, installation),
+        : item.kind === "mcp"
+          ? withOrganizationIntegrationAcquisition(db, installation, ["custom:mcp"], async (tx) => {
+              if (input.verifiedConnection)
+                await validateVerifiedMcpConnection({ ...input, db: tx }, item);
+              return withServerLogo(tx, await enableCapabilityInstallation(tx, installation));
+            })
+          : enableCapabilityInstallation(db, installation),
   };
+}
+
+/**
+ * The stored logo for a workspace's own MCP server, from the icon it just
+ * advertised during verification. Shared registry entries keep their curated
+ * catalog logo.
+ */
+export async function workspaceMcpServerLogo(
+  input: { settings: Settings; mcpServerLogoStorage?: McpServerLogoStorage | null | undefined },
+  item: Pick<CapabilityCatalogItem, "source" | "endpointUrl">,
+  serverInfo: unknown,
+): Promise<string | null> {
+  if (item.source !== "manual" || !item.endpointUrl || serverInfo === undefined) return null;
+  return await storeMcpServerLogo({
+    serverInfo,
+    endpointUrl: item.endpointUrl,
+    objectStorage: input.mcpServerLogoStorage,
+    fetch: (url, init) =>
+      pinnedFetch(url, init, input.settings, {
+        label: "MCP server icon",
+        requireHttpsOutsideLocalTest: true,
+      }),
+  });
 }
 
 async function validateVerifiedMcpConnection(
@@ -820,6 +966,8 @@ export type McpCapabilityProbeInput = {
 
 export type McpCapabilityProbeResult = {
   toolCount: number;
+  /** The server's `initialize` Implementation (serverInfo), when the probe saw it. */
+  serverInfo?: unknown;
 };
 
 export type McpCapabilityProbe = (
@@ -831,6 +979,7 @@ export async function validateMcpCapabilityConnection(
   probe: McpCapabilityProbe = probeStreamableHttpMcpServer,
   headers?: Record<string, string>,
   settings?: Settings,
+  onServerInfo?: (serverInfo: unknown) => void,
 ): Promise<Record<string, unknown>> {
   if (item.kind !== "mcp") {
     return {};
@@ -849,6 +998,7 @@ export async function validateMcpCapabilityConnection(
       ...(headers ? { headers } : {}),
       ...(settings ? { settings } : {}),
     });
+    if (result.serverInfo !== undefined) onServerInfo?.(result.serverInfo);
     return {
       mcpConnectivity: {
         status: "ok",
@@ -870,35 +1020,37 @@ async function probeStreamableHttpMcpServer(
   if (!settings) throw new Error("Network policy is unavailable for MCP validation");
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs);
-  let client: McpStreamableHttpClient | undefined;
   try {
-    client = await connectMcpStreamableHttpClient({
-      url: input.url,
-      clientName: "opengeni-capability-probe",
-      clientVersion: "0.1.0",
-      timeoutMs: input.timeoutMs,
-      requestInit: {
-        signal: controller.signal,
-        ...(input.headers ? { headers: input.headers } : {}),
+    return await withMcpStreamableHttpClient(
+      {
+        url: input.url,
+        clientName: "opengeni-capability-probe",
+        clientVersion: "0.1.0",
+        timeoutMs: input.timeoutMs,
+        requestInit: {
+          signal: controller.signal,
+          ...(input.headers ? { headers: input.headers } : {}),
+        },
+        fetch: (url, init) =>
+          pinnedFetch(url, init, settings, {
+            label: "MCP capability probe",
+            requireHttpsOutsideLocalTest: true,
+          }),
       },
-      fetch: (url, init) =>
-        pinnedFetch(url, init, settings, {
-          label: "MCP capability probe",
-          requireHttpsOutsideLocalTest: true,
-        }),
-    });
-    const tools = await client
-      .listTools(undefined, {
-        timeout: input.timeoutMs,
-        maxTotalTimeout: input.timeoutMs,
-      })
-      .catch((error: unknown) => {
-        throw legacyMcpClientError(error);
-      });
-    return { toolCount: tools.tools.length };
+      async (client) => {
+        const tools = await client
+          .listTools(undefined, {
+            timeout: input.timeoutMs,
+            maxTotalTimeout: input.timeoutMs,
+          })
+          .catch((error: unknown) => {
+            throw legacyMcpClientError(error);
+          });
+        return { toolCount: tools.tools.length, serverInfo: client.getServerVersion() };
+      },
+    );
   } finally {
     clearTimeout(timeout);
-    await client?.close().catch(() => undefined);
   }
 }
 
@@ -1022,12 +1174,16 @@ export async function settingsWithEnabledCapabilityMcpServers(
       readCodexAppsDesignation(),
     ]);
   }
+  apiIntegrations = apiIntegrations.filter((integration) =>
+    apiIntegrationIsExecutable(integration, settings, workspaceId),
+  );
   options?.onResolvedApiIntegrations?.(apiIntegrations);
   options?.onResolvedCapabilityServers?.(enabled);
   return settingsWithCodexAppsMcpServer(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
+      workspaceId,
     ),
     codexAppsDesignation !== null,
   );
@@ -1065,9 +1221,9 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     })
   ).filter((server) => serverIds.has(server.id));
   options.signal?.throwIfAborted();
-  const apiIntegrations = await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [
-    ...serverIds,
-  ]);
+  const apiIntegrations = (
+    await listInstalledApiIntegrations(db, workspaceId, options.subjectId, [...serverIds])
+  ).filter((integration) => apiIntegrationIsExecutable(integration, settings, workspaceId));
   options.signal?.throwIfAborted();
   const codexAppsDesignation =
     settings.codexConnectedAppsEnabled && serverIds.has(CODEX_APPS_MCP_SERVER_ID)
@@ -1078,6 +1234,7 @@ export async function settingsWithEnabledCapabilityMcpServersForTargets(
     settingsWithApiIntegrationServers(
       settingsWithMcpCapabilityServers(settings, enabled),
       apiIntegrations,
+      workspaceId,
     ),
     codexAppsDesignation !== null,
   );
@@ -1133,14 +1290,34 @@ async function listInstalledApiIntegrationsForDelegations(
   return [...byServerId.values()];
 }
 
+function apiIntegrationIsExecutable(
+  integration: ApiIntegrationRuntime,
+  settings: Settings,
+  workspaceId?: string,
+): boolean {
+  return (
+    isIntegrationDefinitionEnabled(integration.definitionId, {
+      teamsEnabled: settings.microsoftTeamsToolsEnabled,
+      teamsAllowedWorkspaceIds: settings.microsoftTeamsAllowedWorkspaceIds,
+      ...(workspaceId ? { workspaceId } : {}),
+    }) &&
+    !(integration.definitionProvenance === "curated" && integration.definitionId === "google-drive")
+  );
+}
+
 export function settingsWithApiIntegrationServers(
   settings: Settings,
   integrations: readonly ApiIntegrationRuntime[],
+  workspaceId?: string,
 ): Settings {
   if (integrations.length === 0) return settings;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const dynamicServers = integrations
-    .filter((integration) => !existingIds.has(integration.serverId))
+    .filter(
+      (integration) =>
+        apiIntegrationIsExecutable(integration, settings, workspaceId) &&
+        !existingIds.has(integration.serverId),
+    )
     .map((integration) => ({
       id: integration.serverId,
       name: integration.name,
@@ -1667,6 +1844,93 @@ function onePasswordCatalogItem(connections: ConnectionMetadata[]): CapabilityCa
   });
 }
 
+/** How people and agents name the deployment's Chrome extension, and where it is installed. */
+export type BrowserExtension = { name: string; installUrl: string };
+
+/** The deployment's configured Chrome extension, else Opengeni Browser. */
+export function browserExtension(settings: {
+  browserExtensionName?: string | undefined;
+  browserExtensionInstallUrl?: string | undefined;
+}): BrowserExtension {
+  return {
+    name: settings.browserExtensionName ?? "Opengeni Browser",
+    installUrl: settings.browserExtensionInstallUrl ?? OPENGENI_BROWSER_EXTENSION_URL,
+  };
+}
+
+/** The catalog id of the Excel add-in tile and its in-chat install card. */
+export const EXCEL_ADDIN_CAPABILITY_ID = "api:excel-addin";
+
+/** How people and agents name the deployment's Excel add-in, and where it is installed. */
+export type ExcelAddin = { name: string; installUrl: string | null };
+
+/** The deployment's configured add-in, else this web app's own /excel install page. */
+export function excelAddin(settings: {
+  officeAddinName?: string | undefined;
+  officeAddinInstallUrl?: string | undefined;
+  webBaseUrl?: string | undefined;
+  publicBaseUrl?: string | undefined;
+}): ExcelAddin {
+  const web = settings.webBaseUrl ?? settings.publicBaseUrl;
+  return {
+    name: settings.officeAddinName ?? "Opengeni",
+    installUrl:
+      settings.officeAddinInstallUrl ?? (web ? `${web.replace(/\/+$/u, "")}/excel` : null),
+  };
+}
+
+/**
+ * The Excel add-in tile. The add-in is installed in each person's own Excel
+ * and connects whichever workbook they open its pane in, so there is nothing
+ * to enable for the workspace: the tile explains it and links to the install
+ * page, and `excel_run` reaches the person's connected workbooks.
+ */
+export function excelAddinCatalogItem(addin: ExcelAddin): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: EXCEL_ADDIN_CAPABILITY_ID,
+    kind: "api",
+    source: "built_in",
+    name: "Microsoft Excel",
+    description: `Add the ${addin.name} add-in to Excel (web, Windows or Mac) and open it in a workbook: you can chat there, and agents in any chat can read and change that workbook live.`,
+    category: "productivity",
+    tags: [
+      "excel",
+      "microsoft",
+      "office",
+      "microsoft-365",
+      "spreadsheet",
+      "spreadsheets",
+      "workbook",
+      "xlsx",
+      "add-in",
+      "finance",
+      "budget",
+      "model",
+    ],
+    homepageUrl: addin.installUrl,
+    providerDomain: "microsoft.com",
+    authModel: "office_addin",
+    authKind: "none",
+    surfaceType: "first_party_excel_addin",
+    tools: [],
+    runtime: {
+      available: addin.installUrl !== null,
+      notes:
+        addin.installUrl !== null
+          ? `Agents use excel_run in workbooks people have open with the ${addin.name} add-in.`
+          : "This deployment has no Excel add-in install page configured.",
+    },
+    enabled: false,
+    enabledReason: null,
+    metadata: {
+      connectorMode: "first_party_excel_addin",
+      addinName: addin.name,
+      installUrl: addin.installUrl,
+      firstPartyMcpTools: ["excel_run"],
+    },
+  });
+}
+
 function providerIntegrationCatalogItems(
   socialConnections: SocialConnection[],
 ): CapabilityCatalogItem[] {
@@ -1718,9 +1982,131 @@ export const CONNECTED_MACHINE_CAPABILITY_ID = "api:connected-machine";
 
 export { OPENGENI_BROWSER_EXTENSION_URL };
 
-export function nativeConnectionCapabilityRecommendations(
-  options: { connectedMachines?: boolean } = {},
+export {
+  INTEGRATION_DEFINITION_CAPABILITY_PREFIX,
+  integrationDefinitionCapabilityId,
+  integrationDefinitionIdFromCapabilityId,
+};
+
+/**
+ * What people call each reviewed definition when they ask for it. Someone asks
+ * for "my Hotmail" or "Outlook", not "Microsoft Graph mail", so the names of
+ * the consumer and work mail services are search tags here. Beyond each
+ * definition's own name, tags are only names that mean Microsoft: generic
+ * words (email, inbox, chat, meetings, files) would outrank Gmail, Google
+ * Calendar, Slack or Google Drive for requests that never mention Microsoft.
+ * Search splits "live.com" into the bare word "live", so Live addresses are
+ * named in the description only.
+ */
+const INTEGRATION_DEFINITION_DISCOVERY: Readonly<
+  Record<string, { description: string; category: string; tags: readonly string[] }>
+> = {
+  "microsoft-outlook-mail": {
+    description:
+      "Read, search, send and organize email in the person's own Microsoft mailbox: an Outlook.com, Hotmail, Live.com or MSN address, or a work or school Microsoft 365 (Exchange) account.",
+    category: "communication",
+    tags: [
+      "outlook",
+      "hotmail",
+      "outlook.com",
+      "hotmail.com",
+      "msn.com",
+      "exchange",
+      "microsoft",
+      "microsoft-365",
+      "office-365",
+    ],
+  },
+  "microsoft-outlook-calendar": {
+    description:
+      "Read and manage events, meetings and availability in the person's own Outlook calendar (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "calendar", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-outlook-contacts": {
+    description:
+      "Read and manage contacts and people in the person's own Outlook address book (Outlook.com, Hotmail, Live or a work or school Microsoft 365 account).",
+    category: "productivity",
+    tags: ["outlook", "contacts", "exchange", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-onedrive": {
+    description:
+      "Find, read, upload and share files in the person's own OneDrive (personal, or work or school Microsoft 365), including files shared with them.",
+    category: "productivity",
+    tags: ["onedrive", "sharepoint", "microsoft", "microsoft-365", "office-365"],
+  },
+  "microsoft-teams": {
+    description:
+      "Read the person's teams, channels and chats, and send messages as them, with a work or school Microsoft 365 account. Personal Microsoft accounts are not supported.",
+    category: "communication",
+    tags: ["teams", "microsoft-teams", "microsoft", "microsoft-365", "office-365"],
+  },
+};
+
+/**
+ * The catalog category chosen for a reviewed integration definition, if one
+ * was. Its catalog entry shows "productivity" when none was chosen.
+ */
+export function integrationDefinitionCategory(definitionId: string): string | undefined {
+  return INTEGRATION_DEFINITION_DISCOVERY[definitionId]?.category;
+}
+
+/**
+ * Agent-facing entries for the reviewed API integration definitions this
+ * deployment can connect. Like the GitHub App and Connected Machine entries,
+ * these are recommendations for the native Connect flow, not rows in the
+ * Capabilities UI catalog (which shows these definitions as their own rows).
+ * Each person connects their own account; the card installs the definition's
+ * reviewed tools for that account.
+ */
+export function integrationDefinitionCapabilityRecommendations(
+  definitions: readonly IntegrationDefinition[],
 ): CapabilityCatalogItem[] {
+  return definitions.map((definition) => {
+    const discovery = INTEGRATION_DEFINITION_DISCOVERY[definition.id];
+    const provider = definition.provider.id === "microsoft" ? "Microsoft" : "Google";
+    return CapabilityCatalogItem.parse({
+      id: integrationDefinitionCapabilityId(definition.id),
+      kind: "api",
+      source: "built_in",
+      name: definition.name,
+      description: discovery?.description ?? definition.summary,
+      category: integrationDefinitionCategory(definition.id) ?? "productivity",
+      tags: [...(discovery?.tags ?? [definition.provider.id])],
+      homepageUrl: null,
+      providerDomain: definition.provider.id === "microsoft" ? "microsoft.com" : "google.com",
+      authModel: "oauth2_authorization_code",
+      authKind: "oauth2",
+      surfaceType: "integration_definition",
+      tools: [],
+      runtime: {
+        available: true,
+        notes: `Each person connects their own ${provider} account from the chat card.`,
+      },
+      lifecycle: {
+        status: "available",
+        readiness: "setup_required",
+        detail: "Connect an account from the chat card.",
+        managedBy: "platform",
+      },
+      actions: ["connect", "inspect"],
+      metadata: {
+        integrationDefinitionId: definition.id,
+        recommendationOnly: true,
+      },
+    });
+  });
+}
+
+export function nativeConnectionCapabilityRecommendations(
+  options: {
+    connectedMachines?: boolean;
+    browserExtension?: BrowserExtension;
+    /** Reviewed API integration definitions this deployment can connect here. */
+    integrationDefinitions?: readonly IntegrationDefinition[];
+  } = {},
+): CapabilityCatalogItem[] {
+  const extensionUrl = options.browserExtension?.installUrl ?? OPENGENI_BROWSER_EXTENSION_URL;
   const items = [
     CapabilityCatalogItem.parse({
       id: "api:github-app",
@@ -1791,7 +2177,7 @@ export function nativeConnectionCapabilityRecommendations(
         tools: [{ kind: "mcp", id: "opengeni" }],
         runtime: {
           available: true,
-          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${OPENGENI_BROWSER_EXTENSION_URL}) works only after the machine is connected.`,
+          notes: `The person sets up their machine from the chat card. The Chrome browser extension (${extensionUrl}) works only after the machine is connected.`,
         },
         lifecycle: {
           status: "available",
@@ -1808,13 +2194,51 @@ export function nativeConnectionCapabilityRecommendations(
             "connected_machine_enroll_token",
             "connected_machine_enable_screen_control",
           ],
-          browserExtensionUrl: OPENGENI_BROWSER_EXTENSION_URL,
+          browserExtensionUrl: extensionUrl,
           recommendationOnly: true,
         },
       }),
     );
   }
+  items.push(
+    ...integrationDefinitionCapabilityRecommendations(options.integrationDefinitions ?? []),
+  );
   return items;
+}
+
+/**
+ * The `tool.auth_needed` payload of the setup card that fixes a person-fixable
+ * tool refusal (see USER_SETUP_BLOCKERS). Every tool and route that hits such a
+ * refusal posts this same card in the calling turn, so the person sees the fix
+ * on the first attempt. Null when the blocker's capability is not a native
+ * card this deployment can show.
+ */
+export function userSetupCardPayload(
+  blocker: UserSetupBlocker,
+  options: { toolName: string; requestedSandboxId?: string | null },
+): ToolAuthNeededPayload | null {
+  const item = nativeConnectionCapabilityRecommendations({ connectedMachines: true }).find(
+    (candidate) => candidate.id === blocker.capabilityId,
+  );
+  if (!item) return null;
+  return ToolAuthNeededPayload.parse({
+    serverId: "opengeni",
+    toolName: options.toolName,
+    // Built-in capabilities are Opengeni's own; a blank domain must not fail the card.
+    providerDomain: item.providerDomain?.trim() || "opengeni.local",
+    reason: "missing_connection",
+    capability: {
+      id: item.id,
+      name: item.name,
+      kind: item.kind,
+      source: item.source,
+      action: "connect",
+      rationale: blocker.rationale,
+      requiredVariables: [],
+    },
+    ...(options.requestedSandboxId ? { requestedSandboxId: options.requestedSandboxId } : {}),
+    ...(blocker.purpose ? { purpose: blocker.purpose } : {}),
+  });
 }
 
 function socialConnectionCounts(

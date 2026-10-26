@@ -7,6 +7,7 @@ import { SessionHeader } from "@opengeni/react/app/components/rail/session-heade
 import type { SessionAdminAccessControl } from "@opengeni/react/app/components/session/session-admin-access";
 import { Section } from "@opengeni/react/ui/section";
 import type { Session } from "@opengeni/react/app/types";
+import { SessionShellAppContext } from "./session-shell-app-context";
 import "../src/styles.css";
 
 // Production components and styles; synthetic organization, people and session.
@@ -16,18 +17,21 @@ const organizationId = "00000000-0000-4000-8000-000000000001";
 const workspaceId = "00000000-0000-4000-8000-000000000002";
 
 let allowed = params.get("org") !== "off";
+let chatActionsAllowed = params.get("chat") !== "off";
 const client = {
   getOrganizationAgentAdminAccess: async () => ({
     organizationId,
     sessionAdminAccessAllowed: allowed,
+    chatActionsAllowed,
   }),
   updateOrganizationAgentAdminAccess: async (
     _organizationId: string,
-    request: { sessionAdminAccessAllowed: boolean },
+    request: { sessionAdminAccessAllowed?: boolean; chatActionsAllowed?: boolean },
   ) => {
     await new Promise((resolve) => setTimeout(resolve, 150));
-    allowed = request.sessionAdminAccessAllowed;
-    return { organizationId, sessionAdminAccessAllowed: allowed };
+    allowed = request.sessionAdminAccessAllowed ?? allowed;
+    chatActionsAllowed = request.chatActionsAllowed ?? chatActionsAllowed;
+    return { organizationId, sessionAdminAccessAllowed: allowed, chatActionsAllowed };
   },
 } as unknown as OpenGeniBrowserClient;
 
@@ -84,19 +88,21 @@ function Header({ active, testId }: { active: boolean; testId: string }) {
   const control = useControl(active);
   return (
     <div data-testid={testId} className="rounded-md border border-border">
-      <SessionHeader
-        session={session}
-        ancestors={[]}
-        connectionState="live"
-        status={session.status}
-        keyAuthRequired={false}
-        onForgetAccessKey={() => undefined}
-        inspectorOpen={false}
-        onToggleInspector={() => undefined}
-        onRename={async () => null}
-        onPin={async () => null}
-        adminAccess={control}
-      />
+      <SessionShellAppContext>
+        <SessionHeader
+          session={session}
+          ancestors={[]}
+          connectionState="live"
+          status={session.status}
+          keyAuthRequired={false}
+          onForgetAccessKey={() => undefined}
+          inspectorOpen={false}
+          onToggleInspector={() => undefined}
+          onRename={async () => null}
+          onPin={async () => null}
+          adminAccess={control}
+        />
+      </SessionShellAppContext>
     </div>
   );
 }
@@ -119,7 +125,7 @@ createRoot(document.getElementById("root")!).render(
         </Section>
       </div>
       <div className="flex flex-col gap-4">
-        <p className="text-sm text-fg-muted">Session header · admin access on, then off</p>
+        <p className="text-sm text-fg-muted">Session header · full access on, then off</p>
         <Header active testId="header-on" />
         <Header active={false} testId="header-off" />
       </div>

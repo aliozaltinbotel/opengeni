@@ -1,5 +1,5 @@
 import { AZURE_LIVE_MODEL_ID } from "../azure-live";
-import { realtimeVoiceOptions } from "../realtime-websocket";
+import { elevenLabsKeyAvailable, realtimeVoiceOptions } from "../realtime-websocket";
 import {
   createRealtimeVoiceBilling,
   deploymentRealtimeVoice,
@@ -11,16 +11,23 @@ import {
   workspaceProviderApiKeyConnectionMetadataFromConnections,
   listWorkspaceProviderCustomModelsByKind,
   getOrganizationModelProviderCatalogForWorkspace,
+  loadWorkspaceModelCatalogInputs,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
 import { CLAUDE_CONNECTION_KINDS, type ClaudeConnectionCatalog } from "@opengeni/config";
 import { SessionControlConflictError, WorkspacePauseTimerInputError } from "@opengeni/db";
 import { updateWorkspaceSettingsWithToolDefaults } from "@opengeni/db/workspace-tool-defaults";
 import {
+  resolveRealtimeVoiceSettings,
+  resolveWorkspaceRecordingSettings,
+  resolveWorkspaceRealtimeDefaultModel,
   resolveWorkspaceRealtimeVoiceSettings,
   WorkspacePauseTimerRequest,
 } from "@opengeni/contracts";
-import { getWorkspaceConnectionModelRestrictions } from "@opengeni/db";
+import {
+  forgetWorkspaceRecordingVoices,
+  getWorkspaceConnectionModelRestrictions,
+} from "@opengeni/db";
 import { createHash } from "node:crypto";
 import {
   AddWorkspaceMemberRequest,
@@ -103,7 +110,6 @@ import {
   listSubscriptionCoreCodexOperationCandidates,
   workspaceControlRequestLockTimeoutMs,
   workspaceVercelAiGatewayConnectionActive,
-  getWorkspaceProviderApiKeyConnectionMetadata,
   WorkspaceGatewayCustomModelHistoryLimitError,
   WorkspaceOpenRouterCustomModelHistoryLimitError,
   WorkspaceExternalIdentityConflictError,
@@ -133,6 +139,7 @@ import {
   addExternalWorkspaceMemberForRequest,
   updateExternalWorkspaceMemberPermissionsForRequest,
   requireAccessGrant,
+  requireAccessGrantAuthorization,
   requireWorkspaceMemberManagementAuthority,
   requireWorkspaceSettingsGrant,
   requireFreshAccessGrant,
@@ -158,6 +165,7 @@ import { ApiHttpError } from "../http/api-error";
 import { browserSseDeliveryOptions, sseWorkspaceControlStream } from "../http/sse";
 import { projectWorkspaceModelCatalog } from "../model-catalog";
 import { deleteWorkspaceForRequest } from "../workspace-deletion";
+import { workspaceControlEventVisibility } from "../workspace-control-visibility";
 import {
   AI_GATEWAY_REALTIME_MODELS,
   ELEVENLABS_REALTIME_MODELS,
@@ -558,20 +566,18 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/settings", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
-    const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid workspace settings patch",
-      });
-    }
-    const requestedImage = parsed.data.defaultSandboxImage;
+    const parsed = parseRequestBody(UpdateWorkspaceSettingsRequest, await c.req.json(), {
+      status: 400,
+      message: "invalid workspace settings patch",
+    });
+    const requestedImage = parsed.defaultSandboxImage;
     if (requestedImage && !sandboxImageAllowlist(deps.settings).includes(requestedImage)) {
       throw new HTTPException(422, {
         message:
           "defaultSandboxImage must be one of the images in this deployment's OPENGENI_SANDBOX_IMAGE_ALLOWLIST",
       });
     }
-    const executionTarget = parsed.data.defaultExecutionTarget;
+    const executionTarget = parsed.defaultExecutionTarget;
     if (executionTarget?.kind === "machine") {
       const machine = await getSandbox(deps.db, grant, executionTarget.targetSandboxId);
       const enrollment = machine?.enrollmentId
@@ -604,12 +610,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspace = await updateWorkspaceSettingsWithToolDefaults(
         deps.db,
         workspaceId,
-        parsed.data,
+        parsed,
         { requireWorkspace, updateWorkspaceSettings },
         {
           controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
         },
       );
+      // Meetings that stop recognizing voices forget every remembered voice.
+      if (
+        parsed.recordings !== undefined &&
+        resolveWorkspaceRecordingSettings(workspace.settings).voiceprints !== true
+      ) {
+        await forgetWorkspaceRecordingVoices(deps.db, { workspaceId, subjectId: grant.subjectId });
+      }
       return c.json(Workspace.parse(workspace));
     } catch (error) {
       if (nestedPostgresSqlState(error) === "0A000") {
@@ -646,11 +659,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       subjectId: grant.subjectId,
     });
-    const workspaceConnectionsRead =
+    // Reuse the core's one-invocation public metadata scope. Subscription
+    // readiness and live provider discovery remain separate, fresh reads.
+    const catalogInputs =
       typeof deps.db.transaction === "function" &&
       typeof (deps.db as typeof deps.db & { rollback?: unknown }).rollback !== "function"
-        ? listConnectionsMetadata(deps.db, workspaceId, null)
+        ? loadWorkspaceModelCatalogInputs(deps.db, {
+            accountId: grant.accountId,
+            workspaceId,
+            providerKinds,
+            organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+          })
         : undefined;
+    const workspaceConnectionsRead = catalogInputs?.then((inputs) => inputs.workspaceConnections);
     // The original promise remains in the catalog batch. On failure the
     // restrictions keep their standalone read rather than mask its error.
     const restrictionMetadata = workspaceConnectionsRead?.catch(() => undefined);
@@ -707,16 +728,19 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
           ),
       ),
       workspaceConnectionsRead ?? listConnectionsMetadata(deps.db, workspaceId, null),
-      listWorkspaceProviderCustomModelsByKind(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKinds,
-      }),
-      getOrganizationModelProviderCatalogForWorkspace(deps.db, {
-        accountId: grant.accountId,
-        workspaceId,
-        providerKinds,
-      }),
+      catalogInputs?.then((inputs) => inputs.workspaceCustomModels) ??
+        listWorkspaceProviderCustomModelsByKind(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          providerKinds,
+        }),
+      catalogInputs?.then((inputs) => inputs.organizationProviders) ??
+        getOrganizationModelProviderCatalogForWorkspace(deps.db, {
+          accountId: grant.accountId,
+          workspaceId,
+          // Organization Azure OpenAI has no workspace custom-model rail.
+          providerKinds: [...providerKinds, "openai", "azure_openai"],
+        }),
       getWorkspace(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
       deps.settings.billingMode === "stripe"
@@ -772,6 +796,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceOpperCustomModels: workspaceCustomModels.opper,
       organizationOpperConnectionActive: organizationProviders.opper.active,
       organizationOpperCustomModels: organizationProviders.opper.models,
+      organizationDirect: {
+        openai: {
+          active: organizationProviders.openai?.active === true,
+          models: organizationProviders.openai?.models ?? [],
+        },
+        azure_openai: {
+          active: organizationProviders.azure_openai?.active === true,
+          endpoint: organizationProviders.azure_openai?.endpoint ?? null,
+          models: organizationProviders.azure_openai?.models ?? [],
+        },
+      },
     });
     // The same precedence the server applies when a new chat, API create, or
     // scheduled occurrence names no model; published so pickers show it.
@@ -842,21 +877,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/gateway-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
-    const parsed = CreateWorkspaceGatewayCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      CreateWorkspaceGatewayCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid Gateway custom model" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid Gateway custom model" });
-    }
     const requestHash = workspaceCustomModelRequestHash({
       action: "create",
-      upstreamModelId: parsed.data.upstreamModelId,
-      label: parsed.data.label ?? null,
+      upstreamModelId: parsed.upstreamModelId,
+      label: parsed.label ?? null,
     });
     const replay = await replayWorkspaceGatewayCustomModelCreate(deps.db, {
       accountId: grant.accountId,
       workspaceId,
-      operationId: parsed.data.operationId,
+      operationId: parsed.operationId,
       requestHash,
     });
     if (replay.outcome === "conflict") {
@@ -868,12 +902,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(projectWorkspaceGatewayCustomModel(replay.model), 201);
     }
     const catalog = await deps.resolveCatalogSettings();
-    if (configuredGatewayUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
+    if (configuredGatewayUpstreamModelIds(catalog.settings).includes(parsed.upstreamModelId)) {
       throw new HTTPException(422, {
         message: "Gateway model is already included in the deployment catalog",
       });
     }
-    const customProductId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const customProductId = `${WORKSPACE_GATEWAY_MODEL_ID_PREFIX}${parsed.upstreamModelId}`;
     const deploymentProductIds = new Set([
       ...configuredModelInputIdentities(catalog.settings),
       ...configuredGatewayWorkspaceProductModelIds(catalog.settings),
@@ -887,9 +921,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       const model = await createWorkspaceGatewayCustomModel(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-        upstreamModelId: parsed.data.upstreamModelId,
-        label: parsed.data.label ?? null,
-        operationId: parsed.data.operationId,
+        upstreamModelId: parsed.upstreamModelId,
+        label: parsed.label ?? null,
+        operationId: parsed.operationId,
         requestHash,
         createdBySubjectId: grant.subjectId,
       });
@@ -928,24 +962,21 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid Gateway custom model id",
       });
     }
-    const parsed = DeleteWorkspaceGatewayCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      DeleteWorkspaceGatewayCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid Gateway custom model deletion" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid Gateway custom model deletion",
-      });
-    }
     const removed = await deleteWorkspaceGatewayCustomModel(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       customModelId,
-      expectedVersion: parsed.data.expectedVersion,
-      operationId: parsed.data.operationId,
+      expectedVersion: parsed.expectedVersion,
+      operationId: parsed.operationId,
       requestHash: workspaceCustomModelRequestHash({
         action: "delete",
         customModelId,
-        expectedVersion: parsed.data.expectedVersion,
+        expectedVersion: parsed.expectedVersion,
       }),
     });
     if (removed.outcome === "not_found") {
@@ -979,21 +1010,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/openrouter-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
-    const parsed = CreateWorkspaceOpenRouterCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      CreateWorkspaceOpenRouterCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid OpenRouter custom model" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid OpenRouter custom model" });
-    }
     const requestHash = workspaceCustomModelRequestHash({
       action: "create",
-      upstreamModelId: parsed.data.upstreamModelId,
-      label: parsed.data.label ?? null,
+      upstreamModelId: parsed.upstreamModelId,
+      label: parsed.label ?? null,
     });
     const replay = await replayWorkspaceOpenRouterCustomModelCreate(deps.db, {
       accountId: grant.accountId,
       workspaceId,
-      operationId: parsed.data.operationId,
+      operationId: parsed.operationId,
       requestHash,
     });
     if (replay.outcome === "conflict") {
@@ -1005,14 +1035,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(projectWorkspaceOpenRouterCustomModel(replay.model), 201);
     }
     const catalog = await deps.resolveCatalogSettings();
-    if (
-      configuredOpenRouterUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)
-    ) {
+    if (configuredOpenRouterUpstreamModelIds(catalog.settings).includes(parsed.upstreamModelId)) {
       throw new HTTPException(422, {
         message: "OpenRouter model is already included in the deployment catalog",
       });
     }
-    const customProductId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const customProductId = `${WORKSPACE_OPENROUTER_MODEL_ID_PREFIX}${parsed.upstreamModelId}`;
     const deploymentProductIds = new Set([
       ...configuredModelInputIdentities(catalog.settings),
       ...configuredOpenRouterWorkspaceProductModelIds(catalog.settings),
@@ -1026,9 +1054,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       const model = await createWorkspaceOpenRouterCustomModel(deps.db, {
         accountId: grant.accountId,
         workspaceId,
-        upstreamModelId: parsed.data.upstreamModelId,
-        label: parsed.data.label ?? null,
-        operationId: parsed.data.operationId,
+        upstreamModelId: parsed.upstreamModelId,
+        label: parsed.label ?? null,
+        operationId: parsed.operationId,
         requestHash,
         createdBySubjectId: grant.subjectId,
       });
@@ -1067,24 +1095,21 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid OpenRouter custom model id",
       });
     }
-    const parsed = DeleteWorkspaceOpenRouterCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      DeleteWorkspaceOpenRouterCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid OpenRouter custom model deletion" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid OpenRouter custom model deletion",
-      });
-    }
     const removed = await deleteWorkspaceOpenRouterCustomModel(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       customModelId,
-      expectedVersion: parsed.data.expectedVersion,
-      operationId: parsed.data.operationId,
+      expectedVersion: parsed.expectedVersion,
+      operationId: parsed.operationId,
       requestHash: workspaceCustomModelRequestHash({
         action: "delete",
         customModelId,
-        expectedVersion: parsed.data.expectedVersion,
+        expectedVersion: parsed.expectedVersion,
       }),
     });
     if (removed.outcome === "not_found") {
@@ -1119,22 +1144,21 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/opper-custom-models", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireWorkspaceSettingsGrant(c, deps, workspaceId);
-    const parsed = CreateWorkspaceOpperCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      CreateWorkspaceOpperCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid Opper custom model" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, { message: "invalid Opper custom model" });
-    }
     const requestHash = workspaceCustomModelRequestHash({
       action: "create",
-      upstreamModelId: parsed.data.upstreamModelId,
-      label: parsed.data.label ?? null,
+      upstreamModelId: parsed.upstreamModelId,
+      label: parsed.label ?? null,
     });
     const replay = await replayWorkspaceProviderCustomModelCreate(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       providerKind: "opper",
-      operationId: parsed.data.operationId,
+      operationId: parsed.operationId,
       requestHash,
     });
     if (replay.outcome === "conflict") {
@@ -1146,12 +1170,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       return c.json(projectWorkspaceOpenRouterCustomModel(replay.model), 201);
     }
     const catalog = await deps.resolveCatalogSettings();
-    if (configuredOpperUpstreamModelIds(catalog.settings).includes(parsed.data.upstreamModelId)) {
+    if (configuredOpperUpstreamModelIds(catalog.settings).includes(parsed.upstreamModelId)) {
       throw new HTTPException(422, {
         message: "Opper model is already included in the deployment catalog",
       });
     }
-    const customProductId = `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${parsed.data.upstreamModelId}`;
+    const customProductId = `${WORKSPACE_OPPER_MODEL_ID_PREFIX}${parsed.upstreamModelId}`;
     const deploymentProductIds = new Set([
       ...configuredModelInputIdentities(catalog.settings),
       ...configuredOpperWorkspaceProductModelIds(catalog.settings),
@@ -1166,9 +1190,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         accountId: grant.accountId,
         workspaceId,
         providerKind: "opper",
-        upstreamModelId: parsed.data.upstreamModelId,
-        label: parsed.data.label ?? null,
-        operationId: parsed.data.operationId,
+        upstreamModelId: parsed.upstreamModelId,
+        label: parsed.label ?? null,
+        operationId: parsed.operationId,
         requestHash,
         createdBySubjectId: grant.subjectId,
       });
@@ -1207,25 +1231,22 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "invalid Opper custom model id",
       });
     }
-    const parsed = DeleteWorkspaceOpperCustomModelRequest.safeParse(
+    const parsed = parseRequestBody(
+      DeleteWorkspaceOpperCustomModelRequest,
       await c.req.json().catch(() => null),
+      { status: 422, message: "invalid Opper custom model deletion" },
     );
-    if (!parsed.success) {
-      throw new HTTPException(422, {
-        message: "invalid Opper custom model deletion",
-      });
-    }
     const removed = await deleteWorkspaceProviderCustomModel(deps.db, {
       accountId: grant.accountId,
       workspaceId,
       providerKind: "opper",
       customModelId,
-      expectedVersion: parsed.data.expectedVersion,
-      operationId: parsed.data.operationId,
+      expectedVersion: parsed.expectedVersion,
+      operationId: parsed.operationId,
       requestHash: workspaceCustomModelRequestHash({
         action: "delete",
         customModelId,
-        expectedVersion: parsed.data.expectedVersion,
+        expectedVersion: parsed.expectedVersion,
       }),
     });
     if (removed.outcome === "not_found") {
@@ -1250,6 +1271,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceGatewayConnected,
       elevenLabsConnected,
       workspaceSettings,
+      organizationDefaults,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1258,10 +1280,9 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
       }),
       workspaceVercelAiGatewayConnectionActive(deps.db, workspaceId),
-      getWorkspaceProviderApiKeyConnectionMetadata(deps.db, workspaceId, "elevenlabs").then(
-        (connection) => connection !== null,
-      ),
+      elevenLabsKeyAvailable(deps.db, { accountId: grant.accountId, workspaceId }),
       getWorkspaceSettings(deps.db, workspaceId),
+      getOrganizationModelDefaults(deps.db, grant.accountId),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1351,7 +1372,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         label: model.label,
         provider: "Your ElevenLabs" as const,
         description: model.description,
-        ...availability(elevenLabsConnected, "Connect a workspace ElevenLabs key"),
+        ...availability(elevenLabsConnected, "Connect an ElevenLabs key"),
         recommended: false,
       })),
       ...gatewayModels.map((model) => ({
@@ -1364,13 +1385,20 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       })),
     ];
     // Each model lists the voice settings its provider offers, with the
-    // workspace's saved values for it.
+    // workspace's saved values for it and the organization's default, and
+    // which model each of them chose to start voice conversations with.
+    const workspaceDefaultModel = resolveWorkspaceRealtimeDefaultModel(workspaceSettings);
+    const organizationDefaultModel = organizationDefaults.realtimeDefaultModel;
     const withVoiceSettings = models.map((model) => {
       const saved = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model.id);
+      const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
       return {
         ...model,
         ...realtimeVoiceOptions(model.id),
         ...(saved ? { workspaceVoiceSettings: saved } : {}),
+        ...(inherited ? { organizationVoiceSettings: inherited } : {}),
+        ...(model.id === workspaceDefaultModel ? { workspaceDefault: true } : {}),
+        ...(model.id === organizationDefaultModel ? { organizationDefault: true } : {}),
       };
     });
     c.header("cache-control", "private, no-store");
@@ -1421,8 +1449,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
       throw new HTTPException(400, { message: "workspace-control actor is too large" });
     }
-    const parsed = WorkspacePauseTimerRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) throw new HTTPException(400, { message: "Invalid pause timer" });
+    const parsed = parseRequestBody(
+      WorkspacePauseTimerRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "Invalid pause timer" },
+    );
     try {
       await controlHumanWorkspaceTimer(
         {
@@ -1434,7 +1465,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             : {}),
         },
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-        parsed.data,
+        parsed,
       );
     } catch (error) {
       if (error instanceof SessionControlConflictError)
@@ -1456,12 +1487,11 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "workspace-control actor is too large",
       });
     }
-    const parsed = WorkspaceInferenceControlRequest.safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) {
-      throw new HTTPException(400, {
-        message: "invalid workspace inference-control request",
-      });
-    }
+    const parsed = parseRequestBody(
+      WorkspaceInferenceControlRequest,
+      await c.req.json().catch(() => null),
+      { status: 400, message: "invalid workspace inference-control request" },
+    );
     return c.json(
       await controlHumanWorkspace(
         {
@@ -1473,31 +1503,50 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
             : {}),
         },
         { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
-        parsed.data,
+        parsed,
       ),
     );
   });
 
   app.get("/v1/workspaces/:workspaceId/control-events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
     const limit = boundedLimit(c.req.query("limit"));
     const fetched = await listWorkspaceControlEvents(deps.db, workspaceId, after, limit + 1);
     const countHasMore = fetched.length > limit;
-    const page = boundWorkspaceControlHttpPage(fetched.slice(0, limit));
+    const scanned = fetched.slice(0, limit);
+    const visible = await workspaceControlEventVisibility(
+      deps,
+      workspaceId,
+      authorization,
+    )(scanned);
+    const page = boundWorkspaceControlHttpPage(visible);
     const truncated = countHasMore || page.truncated;
+    // Events this reader cannot see still advance its cursor, so a page made
+    // only of another person's private-chat events never stalls paging.
+    const nextSequence = page.truncated ? page.nextSequence : (scanned.at(-1)?.sequence ?? null);
     c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
     c.header("X-OpenGeni-Page-Truncated", String(truncated));
-    if (page.nextSequence !== null) {
-      c.header("X-OpenGeni-Next-After", String(page.nextSequence));
+    if (nextSequence !== null) {
+      c.header("X-OpenGeni-Next-After", String(nextSequence));
     }
     return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/control-events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const authorization = await requireAccessGrantAuthorization(
+      c,
+      deps,
+      workspaceId,
+      "workspace:read",
+    );
     const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
     return await sseWorkspaceControlStream(
       deps.db,
@@ -1509,6 +1558,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
+        visibleControlEvents: workspaceControlEventVisibility(deps, workspaceId, authorization),
         reauthorize: async () => {
           await requireFreshAccessGrant(c, deps, workspaceId, "workspace:read");
         },

@@ -109,7 +109,11 @@ describe("session control surface architecture", () => {
     // page gutter. Putting the gutter inside only SessionChrome makes it 48px
     // narrower than the composer at desktop widths.
     expect(route).not.toContain('className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"');
-    expect(route).toContain('className="mb-2 w-full shrink-0 px-4 sm:px-6"');
+    expect(route).toContain(
+      'className="mb-1 w-full shrink-0 px-4 has-[>div:empty]:hidden sm:px-6"',
+    );
+    // The wait status is a chip in SessionChrome, not a separate banner row.
+    expect(route).not.toContain("<LazySessionWaitStatus");
   });
 
   test("current model pacing is shown above the composer, never on an older history page", async () => {
@@ -174,7 +178,7 @@ describe("session control surface architecture", () => {
 
   test("offers failed-session model recovery to Personal workspace connection owners", async () => {
     const route = await source("../../../packages/react/src/app/routes/session.tsx");
-    const recoveryGateStart = route.indexOf("canConnectModel={hasWorkspacePermission(");
+    const recoveryGateStart = route.indexOf("const canConnectModel = hasWorkspacePermission(");
     const recoveryGate = route.slice(recoveryGateStart, recoveryGateStart + 240);
 
     expect(recoveryGateStart).toBeGreaterThan(-1);
@@ -246,12 +250,10 @@ describe("session control surface architecture", () => {
       source("../../../packages/react/src/app/lib/create-composer-focus.tsx"),
       source("../../../packages/react/src/app/routes/sessions-index-hydration.tsx"),
     ]);
-    expect(rail).toContain(
-      'props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }',
-    );
+    expect(rail).toContain('channelId === undefined ? {} : { channelId: channelId ?? "default" }');
     expect(rail).toContain("channelId={props.channelId}");
     expect(rail).not.toContain("channelId={props.channelId ?? undefined}");
-    expect(rail).toContain("requestCreateComposerFocus(windowEvents, props.channelId)");
+    expect(rail).toContain("requestCreateComposerFocus(windowEvents, channelId)");
     expect(focusRequest).toContain("new CustomEvent<CreateComposerFocusIntent>(");
     expect(route).toContain("const requestedChannelId = (");
     expect(route).toContain("nextFocusedNewSessionProjectLaunchIntent(");
@@ -348,7 +350,11 @@ describe("session control surface architecture", () => {
   });
 
   test("keeps pin and archive one click away while the full row menu stays on right-click", async () => {
-    const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
+    const [list, shared, siteRow] = await Promise.all([
+      source("../../../packages/react/src/app/components/rail/session-list.tsx"),
+      source("../../../packages/react/src/app/components/rail/rail-row-quick-actions.tsx"),
+      source("../../../packages/react/src/app/components/rail/site-session-group-heading.tsx"),
+    ]);
     const rowStart = list.indexOf("function SessionRow(");
     const quickActionsStart = list.indexOf("function RowQuickActions(");
     const overflowStart = list.indexOf("function RowActionsMenu(");
@@ -359,19 +365,32 @@ describe("session control surface architecture", () => {
       list.indexOf("function EmptySessions", overflowStart),
     );
 
-    expect(row).toContain("<ContextMenu>");
+    // The row's menu closes its hover preview when it opens (#5368), so the
+    // root takes props; match the root element, not ContextMenuTrigger etc.
+    expect(row).toMatch(/<ContextMenu[\s>]/);
     expect(row).toContain("<ContextMenuContent");
     expect(row).toContain("<RowQuickActions");
-    expect(quickActions).toContain('aria-label={session.pinned ? "Unpin session" : "Pin session"}');
-    expect(quickActions).toContain(
-      'aria-label={session.archived ? "Restore session" : "Archive session"}',
+    expect(quickActions).toContain('label={session.pinned ? "Unpin session" : "Pin session"}');
+    // Someone who cannot pause the chat only hides it for themselves (#5711).
+    expect(quickActions).toMatch(
+      /archiveLabel === "Hide for me"\s*\? "Hide for me"\s*: session\.archived\s*\? "Restore session"\s*: "Archive session"/,
     );
-    expect(quickActions).toContain("group-hover:opacity-100");
-    expect(quickActions).toContain("group-focus-within:opacity-100");
-    expect(quickActions).toContain("pointer-coarse:hidden");
+    // A spawned row archives its workstream instead of offering nothing.
+    expect(quickActions).not.toContain("parentSessionId === null");
+    expect(quickActions).toContain("onArchive(target, !target.archived");
+    // Session and Site rows share one placement and one tooltip button.
+    expect(quickActions).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
+    expect(siteRow).toContain("RAIL_ROW_QUICK_ACTIONS_CLASS");
+    expect(siteRow).toContain("<ContextMenuContent");
+    expect(siteRow).toContain("RAIL_ROW_OVERFLOW_TRIGGER_CLASS");
+    expect(shared).toContain("group-hover:opacity-100");
+    expect(shared).toContain("group-focus-within:opacity-100");
+    expect(shared).toContain("pointer-coarse:hidden");
+    expect(shared).toContain("pointer-coarse:inline-flex");
+    expect(shared).toContain("<TooltipContent");
     expect(quickActions).not.toContain("<DropdownMenu>");
     expect(overflow).toContain('data-session-actions-mode="overflow"');
-    expect(overflow).toContain("pointer-coarse:inline-flex");
+    expect(overflow).toContain("RAIL_ROW_OVERFLOW_TRIGGER_CLASS");
   });
 
   test("keeps rail optimistic pin overrides out of the header projection", async () => {
@@ -400,8 +419,8 @@ describe("session control surface architecture", () => {
 
   test("bounds rendered groups independently of cached pages and keyboard navigation", async () => {
     const list = await source("../../../packages/react/src/app/components/rail/session-list.tsx");
-    expect(list).toContain(
-      "sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId)",
+    expect(list).toMatch(
+      /sessionGroupWindowNodes\(\s*nodes,\s*visibleCountForGroup\(key\),\s*activeSessionId,/,
     );
     expect(list).toContain("visibleForestRows(visibleForest, expanded, activeSessionId)");
     expect(list).toContain("visibleNodes={visibleNodesForGroup(");
@@ -546,8 +565,10 @@ describe("session control surface architecture", () => {
     expect(list).toContain("archiveStatus: browseStatus");
     expect(list).toContain("sortBy: browseSortBy");
     expect(list).toContain("onClick={openSearchDialog}");
+    // Search opens the command menu, whose "Search messages" action leads to
+    // full-history search; the menu returns focus to its opener itself.
     expect(list).toContain(
-      "requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget)",
+      "const openSearchDialog = useCallback(() => requestCommandMenu(windowEvents), [windowEvents]);",
     );
     expect(list).not.toContain('"Selected"');
     expect(list).toContain("{ creatorLabels }");

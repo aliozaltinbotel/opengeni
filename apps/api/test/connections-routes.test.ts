@@ -47,13 +47,10 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { createSignedState, readSignedState } from "@opengeni/github";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  startTestMcpServer,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import postgres from "postgres";
 import {
@@ -3544,7 +3541,11 @@ describe("connections routes", () => {
             authorization: await bearer(workspace, "subject-a", ["connections:write"]),
             "content-type": "application/json",
           },
-          body: JSON.stringify({ providerDomain: "mcp.example.com", mcpUrl: mcp.url }),
+          body: JSON.stringify({
+            providerDomain: "mcp.example.com",
+            mcpUrl: mcp.url,
+            connectionId: loaded!.id,
+          }),
         },
       );
       expect(legacyStart.status).toBe(200);
@@ -4229,6 +4230,13 @@ describe("connections routes", () => {
   test("oauth reconnect is exact-subject and preserves the owner", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
+    const as = startFakeAuthorizationServer({
+      clientIdMetadataDocumentSupported: true,
+    });
+    const mcp = startTestMcpServer({
+      requiredAuthorization: "Bearer mcp-access-token",
+      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
+    });
     const seeded = await createConnection(client.db, {
       ...workspace,
       subjectId: "subject-a",
@@ -4238,17 +4246,10 @@ describe("connections routes", () => {
         rawKey,
         JSON.stringify({ access_token: "old", token_type: "Bearer" }),
       ),
-      metadata: { mcpUrl: "https://subject-oauth.example.com/mcp" },
+      metadata: { mcpUrl: mcp.url },
       createdBySubjectId: "subject-a",
     });
 
-    const as = startFakeAuthorizationServer({
-      clientIdMetadataDocumentSupported: true,
-    });
-    const mcp = startTestMcpServer({
-      requiredAuthorization: "Bearer mcp-access-token",
-      unauthorizedAuthenticateHeader: `Bearer resource_metadata="${as.url}/.well-known/oauth-protected-resource"`,
-    });
     const aliceHeaders = {
       authorization: await bearer(workspace, "subject-a", [
         "connections:read",
@@ -4274,6 +4275,21 @@ describe("connections routes", () => {
         },
       );
       expect(bobReconnect.status).toBe(404);
+
+      const differentResource = await app().request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: aliceHeaders,
+          body: JSON.stringify({
+            providerDomain: "subject-oauth.example.com",
+            mcpUrl: `${mcp.url}/other`,
+            connectionId: seeded.id,
+            returnPath: "/integrations",
+          }),
+        },
+      );
+      expect(differentResource.status).toBe(404);
 
       const ownershipTransfer = await app().request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
@@ -4333,7 +4349,7 @@ describe("connections routes", () => {
     }
   });
 
-  test("oauth newAccount signs in a further account without replacing the existing one", async () => {
+  test("oauth newAccount connects a different resource without replacing the existing one", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
     const seeded = await createConnection(client.db, {

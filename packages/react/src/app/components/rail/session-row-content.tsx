@@ -4,14 +4,20 @@ import {
   HourglassIcon,
   Loader2Icon,
   TriangleAlertIcon,
+  ZapIcon,
 } from "lucide-react";
 import { Children, isValidElement, useId } from "react";
 
 import { CreatorMonogram } from "../creator-monogram";
 import { type CreatorRef, creatorAnnouncement, creatorInitials } from "../../lib/creator-initials";
 import { formatWaitingSince } from "../../lib/format";
+import { t } from "../../lib/console-text";
 import { cn } from "../../lib/utils";
 import type { RailAggregateStatus } from "../../lib/sessions-group";
+import {
+  sessionAutomationWaitLabel,
+  type SessionAutomationWait,
+} from "../../../session-list-model";
 
 export function ActiveWorkMark({ className }: { className?: string | undefined }) {
   const maskId = `active-work-${useId().replaceAll(":", "")}`;
@@ -106,16 +112,51 @@ export function sessionRowAccessibleName({
   }${spokenCreator ? `. Created by ${spokenCreator}` : ""}`;
 }
 
+/**
+ * The quiet mark for a chat an automation will post into: a clock while it
+ * waits for its schedule, a bolt while it waits for an event. `label` says
+ * what exactly ("Waiting for deploy.finished from Deploys"); without it the
+ * plain wait is named.
+ */
+export function AutomationWaitIcon({
+  wait,
+  label: detail,
+  className,
+}: {
+  wait: SessionAutomationWait;
+  label?: string | undefined;
+  className?: string | undefined;
+}) {
+  const Icon = wait === "event" ? ZapIcon : CalendarClockIcon;
+  const label = detail || sessionAutomationWaitLabel(t, wait);
+  return (
+    <span role="img" aria-label={label} title={label} className="inline-flex shrink-0">
+      <Icon
+        aria-hidden="true"
+        data-automation-wait={wait}
+        className={cn("size-3.5 shrink-0 text-fg-subtle", className)}
+      />
+    </span>
+  );
+}
+
 export function RailTrailingMetadata({
   summary,
-  scheduled = false,
+  automationWait = null,
+  automationWaitLabel,
   relativeTime,
+  jumpKey,
   creator,
   quickActionSlots = 0,
 }: {
   summary: RailAggregateStatus;
-  scheduled?: boolean | undefined;
+  /** What an automation posting into this chat is waiting for; null for none. */
+  automationWait?: SessionAutomationWait | null | undefined;
+  /** That wait in words, for the mark's tooltip and accessible name. */
+  automationWaitLabel?: string | undefined;
   relativeTime?: string | undefined;
+  /** The key that opens this row ("⌘3"), shown in place of the time while ⌘ is held. */
+  jumpKey?: string | undefined;
   /** Rightmost items replaced in place by the row's desktop quick actions. */
   quickActionSlots?: number | undefined;
   /**
@@ -135,15 +176,18 @@ export function RailTrailingMetadata({
     summary.kind === "needs_attention" && summary.attentionSince
       ? formatWaitingSince(summary.attentionSince)
       : "";
-  if (!scheduled && !hasStatusMarker && !hasRelativeTime && !hasMonogram && !quickActionSlots)
+  if (
+    !automationWait &&
+    !hasStatusMarker &&
+    !hasRelativeTime &&
+    !jumpKey &&
+    !hasMonogram &&
+    !quickActionSlots
+  )
     return null;
   const items = Children.toArray([
-    scheduled ? (
-      <CalendarClockIcon
-        key="schedule"
-        aria-label="Scheduled task"
-        className="size-3.5 shrink-0 text-fg-subtle"
-      />
+    automationWait ? (
+      <AutomationWaitIcon key="automation" wait={automationWait} label={automationWaitLabel} />
     ) : null,
     hasMonogram && creator ? (
       <CreatorMonogram key="creator" createdBy={creator} showTitle={false} />
@@ -163,7 +207,15 @@ export function RailTrailingMetadata({
         <RailAggregateDot summary={summary} />
       </span>
     ) : null,
-    hasRelativeTime ? (
+    jumpKey ? (
+      <kbd
+        key="time"
+        data-session-row-jump-key
+        className="inline-flex h-4.5 min-w-9 shrink-0 items-center justify-center rounded-[4px] border border-border bg-surface-2 px-1 font-sans text-2xs leading-none font-medium whitespace-nowrap text-fg-muted"
+      >
+        {jumpKey}
+      </kbd>
+    ) : hasRelativeTime ? (
       <span
         key="time"
         className="min-w-9 shrink-0 whitespace-nowrap text-right text-2xs tabular-nums text-fg"
@@ -211,8 +263,10 @@ export function SessionRowContent({
   descendantLabel,
   mobile,
   summary,
-  scheduled = false,
+  automationWait = null,
+  automationWaitLabel,
   relativeTime,
+  jumpKey,
   creator,
   quickActionSlots = 0,
 }: {
@@ -222,8 +276,13 @@ export function SessionRowContent({
   descendantLabel?: string | null | undefined;
   mobile: boolean;
   summary: RailAggregateStatus;
-  scheduled?: boolean | undefined;
+  /** What an automation posting into this chat is waiting for; null for none. */
+  automationWait?: SessionAutomationWait | null | undefined;
+  /** See RailTrailingMetadata. */
+  automationWaitLabel?: string | undefined;
   relativeTime?: string | undefined;
+  /** See RailTrailingMetadata. */
+  jumpKey?: string | undefined;
   quickActionSlots?: number | undefined;
   /** Session creator for a top-level row, else null. See RailTrailingMetadata. */
   creator?: CreatorRef | null | undefined;
@@ -249,8 +308,10 @@ export function SessionRowContent({
       <RailTrailingMetadata
         quickActionSlots={quickActionSlots}
         summary={summary}
-        scheduled={scheduled}
+        automationWait={automationWait}
+        automationWaitLabel={automationWaitLabel}
         relativeTime={relativeTime}
+        jumpKey={jumpKey}
         creator={creator}
       />
     </>

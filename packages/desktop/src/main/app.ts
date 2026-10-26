@@ -17,6 +17,8 @@ import {
   screen,
   session,
   shell,
+  systemPreferences,
+  type CookiesSetDetails,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type WebContents,
@@ -25,8 +27,10 @@ import type { InboxItem, OpenGeniClient } from "@opengeni/sdk";
 import {
   accountForAppLink,
   normalizeServerUrl,
+  OPENGENI_WEB_PATHS,
   parseAppLink,
   parseComputerConnectLink,
+  type AppWebPaths,
   type ComputerConnectLink,
   serverLabel,
 } from "@opengeni/sdk/app-links";
@@ -36,6 +40,7 @@ import {
   computerName,
   disallowAgentsOnComputer,
   ThisComputer,
+  ThisComputerError,
 } from "@opengeni/agent-host";
 import {
   defaultPermissionGuideLabels,
@@ -47,6 +52,9 @@ import {
   type DesktopAccountsSnapshot,
   type DesktopAppShotPermissionId,
   type DesktopAppShotResult,
+  type DesktopCommand,
+  type DesktopMeetingRequest,
+  type DesktopMenuAction,
   type DesktopPlatform,
   type ThisComputerConnectOptions,
   type ThisComputerPermissionId,
@@ -54,9 +62,11 @@ import {
 } from "../contract";
 import { AccountStore, readInstalledFrom, type StoredAccount } from "./accounts";
 import { AppShots, AppShotSettingsStore, MacAppShots } from "./app-shots";
+import { ComputerCapabilities, ComputerSettingsStore } from "./computer-capabilities";
 import type { DesktopAppConfig } from "./config";
 import { InboxNotifier } from "./inbox-notifier";
 import { inboxItemPath } from "./inbox-model";
+import { reopenablePath } from "./page-paths";
 import {
   installAppImageIntegration,
   installLinuxAutostart,
@@ -64,13 +74,23 @@ import {
 } from "./linux-integration";
 import { LOCAL_ORIGIN } from "./local-pages";
 import { macLoginAgentName } from "./mac-login-agent";
+import {
+  MeetingDetection,
+  MeetingDetectionStore,
+  ownAppRoot,
+  promptText,
+  type MeetingPrompt,
+  type ShownPrompt,
+} from "./meeting-detection";
 import { registerLocalScheme, serveLocalPages } from "./local-protocol";
-import { buildApplicationMenu } from "./menu";
+import { buildApplicationMenu, readMenuActions } from "./menu";
 import { flushMarks, mark, measuring, privateMemoryMb } from "./perf";
 import { retryDelayMs } from "./reachability";
 import { nativeSignInUrl, parseSignInCallback, pkcePair, randomState } from "./pkce";
+import { handleSystemAudioIpc, SystemAudioCaptures, systemAudioUsable } from "./system-audio";
 import { AppTray } from "./tray";
 import { AppUpdates } from "./updates";
+import { refuseAllPermissions } from "./web-permissions";
 import { MainWindow, openExternalSafely } from "./window";
 import { completeComputerLink, computerLinkAccount } from "./computer-link";
 
@@ -138,14 +158,6 @@ function openedAtLogin(): boolean {
   return process.platform === "darwin" && app.getLoginItemSettings().wasOpenedAtLogin === true;
 }
 
-/** The path a person was on, when it is one the app reopens: a workspace or a session. */
-function reopenablePath(url: string): { path: string; workspaceId: string | null } | null {
-  const link = parseAppLink(url);
-  if (!link?.workspaceId) return null;
-  const parsed = new URL(link.webUrl);
-  return { path: parsed.pathname, workspaceId: link.workspaceId };
-}
-
 /**
  * The desktop app: accounts, the window, sign-in, links, notifications, this
  * computer, the menu bar item and updates. A product creates one with its own
@@ -167,6 +179,14 @@ export class DesktopShell {
   private readonly inbox: InboxNotifier;
   /** The shortcut that sends the window in front into the composer. */
   private readonly appShots: AppShots;
+  /** Other apps' audio for the web app's meeting recorder. */
+  private readonly systemAudio: SystemAudioCaptures;
+  /** Offers to record when a call starts, and to stop when it ends. */
+  private readonly meetings: MeetingDetection;
+  /** Pages that report whether they record, cleared when they navigate or close. */
+  private readonly meetingPages = new WeakSet<WebContents>();
+  /** What Opengeni may do on this computer: the This computer settings page. */
+  private readonly capabilities: ComputerCapabilities;
   private tray: AppTray | null = null;
   private updates: AppUpdates | null = null;
   private quitting = false;
@@ -174,15 +194,22 @@ export class DesktopShell {
   private quitConfirmed = false;
   private confirmingQuit = false;
   private readonly lastPaths = new Map<string, string>();
+  /** Each account page's menu bar actions, as it last reported them. */
+  private readonly pageMenuActions = new Map<
+    string,
+    { actions: DesktopMenuAction[]; key: string }
+  >();
   /** Accounts whose page didn't load, with the address to try again. */
   private readonly failedLoads = new Map<string, string>();
   private unreachable: Unreachable | null = null;
   /** The welcome page is adding an account, so an unreachable one doesn't take it over. */
   private addingAccount = false;
   private readonly redirectUri: string;
+  private readonly paths: AppWebPaths;
 
   constructor(private readonly config: DesktopAppConfig) {
     this.redirectUri = `${config.scheme}://auth/callback`;
+    this.paths = config.webPaths ?? OPENGENI_WEB_PATHS;
     // Opened on first use, so a first launch with nothing to unlock doesn't
     // ask for the keyring. Linux desktops without a keyring (minimal window
     // managers, remote desktops) still sign in: the credential is then
@@ -229,13 +256,28 @@ export class DesktopShell {
       home: homedir(),
       env: process.env,
       agentSigningKey: config.agentSigningKey,
+      ...(config.browserExtensionIds ? { browserExtensionIds: config.browserExtensionIds } : {}),
+      agentSwitches: () => {
+        const { screenControl, browserExtension } = this.capabilities.current;
+        return { screenControl, browserExtension };
+      },
+      ...(config.agentPath ? { agentPath: config.agentPath } : {}),
+      ...(config.agentConfigDir ? { agentConfigDir: config.agentConfigDir } : {}),
+      ...(config.adoptStandaloneAgent !== undefined
+        ? { adoptStandaloneAgent: config.adoptStandaloneAgent }
+        : {}),
+      // The app opens at login and keeps running in the menu bar while this
+      // computer is in use, so an adopted service agent can run as its helper
+      // and share the app's permissions.
+      hostServiceAgent: process.platform === "darwin",
       fetch: (url) => net.fetch(url),
       dataDir: app.getPath("userData"),
       systemLanguages: () => app.getPreferredSystemLanguages(),
       logDir: app.getPath("logs"),
       mintEnrollToken: async (accountId, workspaceId, screenControl) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to connect this computer.");
+        if (!client)
+          throw new ThisComputerError("signed_out", "Sign in again to connect this computer.");
         const minted = await client.mintEnrollToken(workspaceId, {
           scope: "user",
           allowScreenControl: screenControl,
@@ -244,17 +286,29 @@ export class DesktopShell {
       },
       allowAgents: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to connect this computer.");
+        if (!client)
+          throw new ThisComputerError("signed_out", "Sign in again to connect this computer.");
         await allowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
       disallowAgents: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to turn this computer off here.");
+        if (!client)
+          throw new ThisComputerError(
+            "signed_out",
+            "Sign in again to turn this computer off here.",
+          );
         await disallowAgentsOnComputer(client, workspaceId, enrollmentId);
       },
+      // Null only when the server answered without this enrollment (removed
+      // there); a sign-in or network failure rejects instead.
       readMachine: async (accountId, _baseUrl, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) return null;
+        if (!client) {
+          throw new ThisComputerError(
+            "signed_out",
+            "Sign in again to check this computer's connection.",
+          );
+        }
         const machines = await client.listMachines(workspaceId);
         const machine = machines.machines.find((entry) => entry.enrollmentId === enrollmentId);
         return machine
@@ -267,7 +321,8 @@ export class DesktopShell {
       },
       enableScreenControl: async (accountId, workspaceId, enrollmentId) => {
         const client = await this.client(accountId);
-        if (!client) throw new Error("Sign in again to connect this computer.");
+        if (!client)
+          throw new ThisComputerError("signed_out", "Sign in again to connect this computer.");
         await client.enableMachineScreenControl(workspaceId, enrollmentId);
       },
       openSystemSettings: (url) => void shell.openExternal(url),
@@ -281,7 +336,54 @@ export class DesktopShell {
         void this.refreshTray();
       },
     });
+    this.capabilities = new ComputerCapabilities({
+      platform: process.platform,
+      store: new ComputerSettingsStore(app.getPath("userData")),
+      microphoneStatus: () =>
+        process.platform === "darwin" || process.platform === "win32"
+          ? systemPreferences.getMediaAccessStatus("microphone")
+          : null,
+      askForMicrophone: () => systemPreferences.askForMediaAccess("microphone"),
+      openSystemSettings: (url) => void shell.openExternal(url),
+      agentSwitchesChanged: () => this.computer.agentSwitchesChanged(),
+      unavailable: () =>
+        this.config.thisComputer && this.computer.runsOwnAgent && !this.computer.anotherAgentServes
+          ? []
+          : ["screenControl", "browserExtension"],
+      unavailableReason: () =>
+        this.computer.anotherAgentServes
+          ? "Another Opengeni agent is serving this computer."
+          : null,
+      screenControlSwitch: () => this.computer.screenControlSwitchSupported(),
+      screenControlConnected: () => this.computer.screenControlConnected,
+      onChange: () => this.broadcast(DESKTOP_IPC.capabilitiesChanged),
+      log: (message, caught) => console.warn(message, caught),
+    });
     const appShotStore = new AppShotSettingsStore(app.getPath("userData"), process.platform);
+    this.systemAudio = new SystemAudioCaptures({
+      helperPath: config.systemAudioHelperPath ?? null,
+      excludePid: process.pid,
+      excludeBundlePrefix: config.appId,
+      channels: {
+        samples: DESKTOP_IPC.systemAudioSamples,
+        ended: DESKTOP_IPC.systemAudioEnded,
+      },
+    });
+    this.meetings = new MeetingDetection({
+      helperPath: config.systemAudioHelperPath ?? null,
+      available: systemAudioUsable(config.systemAudioHelperPath),
+      own: {
+        pid: process.pid,
+        bundlePrefix: config.appId,
+        root: ownAppRoot(process.execPath, process.platform),
+        platform: process.platform,
+      },
+      store: new MeetingDetectionStore(app.getPath("userData")),
+      notify: (prompt, act) => this.showMeetingPrompt(prompt, act),
+      request: (request) => this.deliverMeetingRequest(request),
+      onChange: () => this.broadcast(DESKTOP_IPC.meetingDetectionChanged),
+      log: (message, caught) => console.warn(message, caught ?? ""),
+    });
     this.appShots = new AppShots({
       platform:
         process.platform === "darwin"
@@ -336,8 +438,18 @@ export class DesktopShell {
     if (process.platform === "linux") {
       app.commandLine.appendSwitch("enable-features", "OverlayScrollbar");
     }
-    // Without it Windows shows no notifications for the installed app.
-    if (process.platform === "win32") app.setAppUserModelId(config.appId);
+    // No feature uses Web Bluetooth. Without it no page can start Bluetooth,
+    // which macOS would ask the person about (the app ships no Bluetooth
+    // usage description; see web-permissions.ts).
+    app.commandLine.appendSwitch("disable-blink-features", "WebBluetooth");
+    // Without it Windows shows no notifications for the installed app. A run
+    // from source gets its own ID: Electron then adds a Start-menu shortcut
+    // for its own binary, and two shortcuts with one ID make Windows show the
+    // installed app's notifications as "Electron" and open the development
+    // build when they are clicked.
+    if (process.platform === "win32") {
+      app.setAppUserModelId(app.isPackaged ? config.appId : `${config.appId}.dev`);
+    }
     if (process.defaultApp && process.argv[1]) {
       app.setAsDefaultProtocolClient(config.scheme, process.execPath, [process.argv[1]]);
     } else if (!appImagePath()) {
@@ -360,6 +472,8 @@ export class DesktopShell {
     if (launchUrl) queued.push(launchUrl);
     void app.whenReady().then(() => {
       mark("ready");
+      // The app's own local pages run in the default session and need no permissions.
+      refuseAllPermissions(session.defaultSession);
       serveLocalPages(dirname(config.welcomePagePath));
       desktop = new DesktopShell(config);
       desktop.start();
@@ -370,6 +484,7 @@ export class DesktopShell {
   start(): void {
     this.registerIpc();
     this.appShots.start();
+    this.meetings.start();
     const hidden =
       (openedAtLogin() || this.reopenedWithoutWindow()) && this.store.active() !== null;
     if (!hidden) this.openWindow();
@@ -401,6 +516,8 @@ export class DesktopShell {
     // However the app ends, its agent doesn't outlive it.
     app.on("will-quit", () => {
       this.appShots.stop();
+      this.systemAudio.stopAll();
+      this.meetings.stop();
       this.computer.shutdownNow();
     });
     app.on("window-all-closed", () => {
@@ -413,7 +530,10 @@ export class DesktopShell {
           this.config.productName,
           this.config.updates,
           app.getVersion(),
-          () => Menu.setApplicationMenu(this.menu()),
+          () => {
+            Menu.setApplicationMenu(this.menu());
+            if (this.updates) this.broadcast(DESKTOP_IPC.updatesChanged, this.updates.pageState);
+          },
           () => {
             this.quitConfirmed = true;
             this.quitting = true;
@@ -446,14 +566,20 @@ export class DesktopShell {
    * Quitting stops the agent, so agents lose this computer until the app opens
    * again. While this computer serves agents, ask first; closing the window
    * keeps it available. macOS quits the app itself to apply a new permission,
-   * so there is no question while permissions are being set up.
+   * so there is no question while permissions are being set up. An agent the
+   * app took over from its service goes back to the service, so it stays too.
    */
   private async confirmQuit(): Promise<void> {
     if (this.confirmingQuit) return;
     this.confirmingQuit = true;
     try {
       const summary = this.config.thisComputer ? await this.computer.summary() : null;
-      if (summary?.running && summary.management !== "service" && !summary.needsPermissions) {
+      if (
+        summary?.running &&
+        summary.management !== "service" &&
+        !summary.handsBackOnQuit &&
+        !summary.needsPermissions
+      ) {
         const parent = this.window?.window;
         const options: Electron.MessageBoxOptions = {
           type: "question",
@@ -523,6 +649,7 @@ export class DesktopShell {
 
   private openWindow(): void {
     const window = new MainWindow(this.config, app.getPath("userData"), {
+      connectComputer: (url) => this.handleUrl(url),
       navigated: (accountId, url) => this.rememberPath(accountId, url),
       crashed: (accountId) => this.window?.reload(accountId),
       loadFailed: (accountId, url) => this.loadFailed(accountId, url),
@@ -532,6 +659,7 @@ export class DesktopShell {
         this.failedLoads.clear();
         this.clearUnreachable();
       },
+      microphoneAllowed: () => this.capabilities.current.microphone,
       focused: () => {
         this.computer.invalidate();
         void this.inbox.poll();
@@ -561,7 +689,7 @@ export class DesktopShell {
   }
 
   private target(account: StoredAccount) {
-    const fallback = account.workspaceId ? `/workspaces/${account.workspaceId}/sessions` : "/";
+    const fallback = account.workspaceId ? this.paths.home(account.workspaceId) : "/";
     return {
       id: account.id,
       baseUrl: account.baseUrl,
@@ -570,10 +698,14 @@ export class DesktopShell {
   }
 
   private rememberPath(accountId: string, url: string): void {
-    const reopen = reopenablePath(url);
+    const reopen = reopenablePath(url, this.paths);
     if (!reopen) return;
     this.lastPaths.set(accountId, reopen.path);
-    this.store.update(accountId, { lastPath: reopen.path, workspaceId: reopen.workspaceId });
+    // A page whose address doesn't name its workspace keeps the one last known.
+    this.store.update(accountId, {
+      lastPath: reopen.path,
+      ...(reopen.workspaceId ? { workspaceId: reopen.workspaceId } : {}),
+    });
   }
 
   private showAccount(accountId: string, path?: string): void {
@@ -627,7 +759,12 @@ export class DesktopShell {
       this.unreachable.retrying = false;
     } else {
       this.clearUnreachable();
-      this.unreachable = { accountId, attempt: 0, retrying: false, timer: null };
+      this.unreachable = {
+        accountId,
+        attempt: 0,
+        retrying: false,
+        timer: null,
+      };
     }
     this.welcomeError = null;
     this.window?.showWelcome();
@@ -680,7 +817,7 @@ export class DesktopShell {
       void this.finishSignIn(callback);
       return;
     }
-    const computerLink = parseComputerConnectLink(raw, this.config.scheme);
+    const computerLink = parseComputerConnectLink(raw, this.config.scheme, this.paths);
     if (computerLink && this.config.thisComputer) {
       if (this.connectingFromLink || this.pending) return;
       const account = computerLinkAccount(computerLink, this.store.snapshot().accounts);
@@ -688,7 +825,10 @@ export class DesktopShell {
       else void this.beginSignIn(computerLink.origin, computerLink);
       return;
     }
-    const link = parseAppLink(raw);
+    const link = parseAppLink(raw, {
+      scheme: this.config.scheme,
+      paths: this.paths,
+    });
     if (!link) {
       this.reveal();
       return;
@@ -704,7 +844,18 @@ export class DesktopShell {
   }
 
   private openInboxItem(accountId: string, item: InboxItem): void {
-    this.showAccount(accountId, inboxItemPath(item));
+    this.showAccount(accountId, inboxItemPath(item, this.paths));
+  }
+
+  /**
+   * Where a menu command goes when the page doesn't handle it itself (a page
+   * from an older server): the account's workspace's page for it.
+   */
+  private commandPath(account: StoredAccount, command: DesktopCommand): string | null {
+    if (!account.workspaceId) return null;
+    if (command === "newSession") return this.paths.home(account.workspaceId);
+    if (command === "openInbox") return this.paths.inbox(account.workspaceId);
+    return null;
   }
 
   // --- Sign-in ------------------------------------------------------------------------------------
@@ -715,13 +866,23 @@ export class DesktopShell {
   ): Promise<void> {
     const baseUrl = normalizeServerUrl(serverInput);
     if (!baseUrl) {
-      this.welcomeError = "Enter the address of your server, like app.opengeni.ai.";
+      this.welcomeError = `Enter the address of your server, like ${serverLabel(this.defaultServerUrl())}.`;
+      this.pushWelcome();
+      return;
+    }
+    if (!this.allowsServer(baseUrl)) {
+      this.welcomeError = `${this.config.productName} signs in to ${serverLabel(this.defaultServerUrl())} only.`;
       this.pushWelcome();
       return;
     }
     const { verifier, challenge } = pkcePair();
     const state = randomState();
-    this.pending = { state, verifier, baseUrl, ...(computerLink ? { computerLink } : {}) };
+    this.pending = {
+      state,
+      verifier,
+      baseUrl,
+      ...(computerLink ? { computerLink } : {}),
+    };
     this.welcomeError = null;
     this.pushWelcome();
     openExternalSafely(
@@ -984,6 +1145,7 @@ export class DesktopShell {
     return {
       productName: this.config.productName,
       defaultServerUrl: this.defaultServerUrl(),
+      otherServers: this.config.allowOtherServers !== false,
       pendingServer: this.pending ? serverLabel(this.pending.baseUrl) : null,
       error: this.welcomeError,
       canCancel: this.store.snapshot().accounts.some((account) => !account.signedOut),
@@ -995,6 +1157,14 @@ export class DesktopShell {
   private defaultServerUrl(): string {
     this.installedFrom ??= readInstalledFrom(app.getPath("userData"));
     return this.installedFrom || this.config.defaultServerUrl;
+  }
+
+  /** An app made for one server signs in to that server only. */
+  private allowsServer(baseUrl: string): boolean {
+    if (this.config.allowOtherServers !== false) return true;
+    return [this.defaultServerUrl(), this.config.defaultServerUrl].some(
+      (server) => normalizeServerUrl(server) === baseUrl,
+    );
   }
 
   private unreachableState(): WelcomeState["unreachable"] {
@@ -1035,6 +1205,21 @@ export class DesktopShell {
         // Ignore messages from anything but an account's own page.
       }
     });
+    ipcMain.on(DESKTOP_IPC.menuActionsSet, (event, value: unknown) => {
+      let account: StoredAccount;
+      try {
+        account = this.senderAccount(event);
+      } catch {
+        return;
+      }
+      const actions = readMenuActions(value);
+      if (!actions) return;
+      const key = JSON.stringify(actions);
+      if ((this.pageMenuActions.get(account.id)?.key ?? "[]") === key) return;
+      if (actions.length === 0) this.pageMenuActions.delete(account.id);
+      else this.pageMenuActions.set(account.id, { actions, key });
+      if (this.store.snapshot().activeId === account.id) Menu.setApplicationMenu(this.menu());
+    });
     ipcMain.on(DESKTOP_IPC.appearanceSet, (event, appearance: unknown) => {
       try {
         this.senderAccount(event);
@@ -1072,12 +1257,58 @@ export class DesktopShell {
     handle(DESKTOP_IPC.openExternal, (_account, url) => {
       if (typeof url === "string") openExternalSafely(url);
     });
+    // A still of the asking page itself, for a feedback report: only the
+    // account page can ask, and it only ever gets its own pixels.
+    ipcMain.handle(DESKTOP_IPC.captureWindow, async (event) => {
+      this.senderAccount(event);
+      const image = await event.sender.capturePage();
+      if (image.isEmpty()) return null;
+      const { width, height } = image.getSize();
+      return {
+        contentType: "image/png",
+        base64: image.toPNG().toString("base64"),
+        width,
+        height,
+      };
+    });
     handle(DESKTOP_IPC.appShotsStatus, () => this.appShots.status());
+    handle(DESKTOP_IPC.updatesState, () => this.updates?.pageState ?? { kind: "none" });
+    handle(DESKTOP_IPC.updatesInstall, () => {
+      this.updates?.install();
+    });
     handle(DESKTOP_IPC.appShotsUpdate, (_account, change) => this.appShots.update(change));
+    handle(DESKTOP_IPC.capabilitiesStatus, () => this.capabilities.status());
+    handle(DESKTOP_IPC.capabilitiesUpdate, (_account, change) => this.capabilities.update(change));
+    handle(DESKTOP_IPC.capabilitiesRequestMicrophone, () => this.capabilities.requestMicrophone());
     handle(DESKTOP_IPC.appShotsRequestPermission, async (_account, id) => {
       if (id === "screenRecording" || id === "accessibility") {
         await this.appShots.requestPermission(id as DesktopAppShotPermissionId);
       }
+    });
+    handleSystemAudioIpc({
+      ipcMain,
+      captures: this.systemAudio,
+      allow: (event) => void this.senderAccount(event),
+    });
+    handle(DESKTOP_IPC.meetingDetectionStatus, () => this.meetings.status());
+    handle(DESKTOP_IPC.meetingDetectionUpdate, (_account, change) => this.meetings.update(change));
+    ipcMain.on(DESKTOP_IPC.meetingDetectionRecording, (event, recording: unknown) => {
+      try {
+        this.senderAccount(event);
+      } catch {
+        return;
+      }
+      const page = event.sender;
+      if (!this.meetingPages.has(page)) {
+        this.meetingPages.add(page);
+        const id = page.id;
+        const end = () => this.meetings.setRecording(id, false);
+        page.once("destroyed", end);
+        page.on("did-start-navigation", (details) => {
+          if (details.isMainFrame && !details.isSameDocument) end();
+        });
+      }
+      this.meetings.setRecording(page.id, recording === true);
     });
 
     ipcMain.handle(DESKTOP_IPC.welcomeState, (event) => {
@@ -1130,6 +1361,46 @@ export class DesktopShell {
     else send();
   }
 
+  /** A meeting notification: buttons on macOS, a click everywhere. */
+  private showMeetingPrompt(prompt: MeetingPrompt, act: () => void): ShownPrompt {
+    if (!Notification.isSupported()) return { close: () => {} };
+    const text = promptText(prompt, process.platform);
+    const banner = new Notification({
+      title: text.title,
+      body: text.body,
+      actions: [{ type: "button", text: text.action }],
+    });
+    let done = false;
+    const choose = () => {
+      if (done) return;
+      done = true;
+      act();
+    };
+    banner.on("click", choose);
+    banner.on("action", choose);
+    banner.show();
+    return {
+      close: () => {
+        done = true;
+        banner.close();
+      },
+    };
+  }
+
+  /** The person chose a meeting notification: the window comes up and the page acts. */
+  private deliverMeetingRequest(request: DesktopMeetingRequest): void {
+    app.focus({ steal: true });
+    this.reveal();
+    const accountId = this.window?.accountId;
+    const contents = accountId ? this.window?.contentsFor(accountId) : null;
+    if (!contents || contents.isDestroyed()) return;
+    const send = () => {
+      if (!contents.isDestroyed()) contents.send(DESKTOP_IPC.meetingDetectionRequest, request);
+    };
+    if (contents.isLoading()) contents.once("did-finish-load", send);
+    else send();
+  }
+
   private accountsChanged(): void {
     this.broadcast(DESKTOP_IPC.accountsChanged, this.accountsSnapshot());
     Menu.setApplicationMenu(this.menu());
@@ -1147,6 +1418,7 @@ export class DesktopShell {
   private menu(): Menu {
     const snapshot = this.store.snapshot();
     const active = this.store.active();
+    const settings = this.paths.settings?.bind(this.paths);
     return buildApplicationMenu({
       productName: this.config.productName,
       accounts: snapshot.accounts.map((account) => ({
@@ -1161,19 +1433,31 @@ export class DesktopShell {
       },
       signOut: active ? () => void this.signOut(active.id) : null,
       openSettings:
-        active?.workspaceId && !active.signedOut
-          ? () => this.showAccount(active.id, `/workspaces/${active.workspaceId}/settings`)
+        active?.workspaceId && !active.signedOut && settings
+          ? () => this.showAccount(active.id, settings(active.workspaceId!))
           : null,
       command:
         active && !active.signedOut
           ? (command) => {
               this.reveal();
               const contents = this.window?.contentsFor(active.id);
-              if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.command, command);
+              if (contents && !contents.isDestroyed())
+                contents.send(DESKTOP_IPC.command, command, this.commandPath(active, command));
             }
           : null,
+      pageActions:
+        active && !active.signedOut ? (this.pageMenuActions.get(active.id)?.actions ?? null) : null,
+      runPageAction: (id) => {
+        if (!active || active.signedOut) return;
+        this.reveal();
+        const contents = this.window?.contentsFor(active.id);
+        if (contents && !contents.isDestroyed()) contents.send(DESKTOP_IPC.menuAction, id);
+      },
       updates: this.updates
-        ? { state: this.updates.menuState, run: () => this.updates?.menuAction() }
+        ? {
+            state: this.updates.menuState,
+            run: () => this.updates?.menuAction(),
+          }
         : null,
       contents: () => {
         const id = this.window?.accountId;
@@ -1268,10 +1552,10 @@ function migrateMacLoginItem(appId: string): void {
 }
 
 /** A Set-Cookie header as Electron cookie details. */
-export function cookieFromHeader(url: string, header: string): Electron.CookiesSetDetails {
+export function cookieFromHeader(url: string, header: string): CookiesSetDetails {
   const [pair = "", ...attributes] = header.split(";");
   const separator = pair.indexOf("=");
-  const details: Electron.CookiesSetDetails = {
+  const details: CookiesSetDetails = {
     url,
     name: pair.slice(0, separator).trim(),
     value: pair.slice(separator + 1).trim(),
@@ -1295,11 +1579,4 @@ export function cookieFromHeader(url: string, header: string): Electron.CookiesS
     }
   }
   return details;
-}
-
-export function showSimpleNotification(title: string, body: string, onClick?: () => void): void {
-  if (!Notification.isSupported()) return;
-  const notification = new Notification({ title, body });
-  if (onClick) notification.on("click", onClick);
-  notification.show();
 }

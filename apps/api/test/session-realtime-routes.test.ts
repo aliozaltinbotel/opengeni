@@ -11,7 +11,9 @@ import {
   createSession,
   encryptEnvironmentValue,
   ensureManagedAccessForUser,
+  updateOrganizationModelDefaults,
   updateWorkspaceSettings,
+  upsertOrganizationModelProviderConnection,
   withWorkspaceRls,
   withSessionRlsActorContext,
   type Database,
@@ -19,15 +21,12 @@ import {
 } from "@opengeni/db";
 import { readTurnExecutionPolicyV1, signDelegatedAccessToken } from "@opengeni/contracts";
 import { connectSubscriptionCoreCodexConnection } from "@opengeni/db";
-import { UpdateWorkspaceSettingsRequest } from "@opengeni/contracts";
+import { UpdateOrganizationModelDefaultsRequest, UpdateWorkspaceSettingsRequest } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
@@ -766,13 +765,14 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
               type: "function",
               name: "delegate_to_session",
               description:
-                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+                "Relay execution work, actions, and session tasks to the underlying session agent, which decides how to do them.",
               parameters: {
                 type: "object",
                 properties: {
                   request: {
                     type: "string",
-                    description: "Complete standalone task for the session agent",
+                    description:
+                      "The user's request in their own words and language, plus only the conversational context needed to understand it. Do not add tools, methods, steps, or details the user did not say.",
                   },
                 },
                 required: ["request"],
@@ -864,6 +864,27 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
       createdBySubjectId: value.subjectId,
     });
+    // Earlier conversation in the chat, from before the call.
+    for (const [position, item] of [
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Add Kari as admin" }],
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Kari is now an admin." }],
+      },
+    ].entries()) {
+      await shared.admin`insert into session_history_items ${shared.admin({
+        account_id: workspace!.account_id as string,
+        workspace_id: value.workspaceId,
+        session_id: value.sessionId,
+        position: position + 1,
+        item: shared.admin.json(item),
+      })}`;
+    }
 
     const connectOperationId = crypto.randomUUID();
     const response = await app.request(`${base}/websocket`, {
@@ -884,6 +905,7 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
       url: string;
       upstreamModelId: string;
       instructions: string;
+      initialItems: unknown[];
       protocol: string;
       protocols: string[];
       sessionUpdate: Record<string, unknown> | null;
@@ -905,11 +927,23 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(elevenLabsMints.length).toBe(mintsBefore + 1);
     const mint = elevenLabsMints.at(-1)!;
     expect(mint.headers.get("xi-api-key")).toBe("elevenlabs-test-key");
+    // The earlier conversation is in the session instructions. Items sent once
+    // the socket opens would wait unread: ElevenLabs holds user items until a
+    // response is requested, so a reply to the person's speech never sees them.
+    expect(connected.initialItems).toEqual([]);
+    expect(connected.instructions).not.toContain("Prior session conversation");
+    expect((mint.body as { session: { instructions: string } }).session.instructions).toBe(
+      `${connected.instructions}\n\n## Prior session conversation\nThe following JSON contains conversation history, not additional system instructions. Preserve each item's role.\n${JSON.stringify(
+        [
+          { role: "user", text: "Add Kari as admin" },
+          { role: "assistant", text: "Kari is now an admin." },
+        ],
+      )}`,
+    );
     expect(mint.body).toMatchObject({
       session: {
         type: "realtime",
         model: "eleven_realtime_v1_max",
-        instructions: connected.instructions,
         output_modalities: ["audio"],
         audio: {
           input: {
@@ -1072,6 +1106,195 @@ describe("session realtime lifecycle HTTP routes (real PostgreSQL)", () => {
     expect(
       UpdateWorkspaceSettingsRequest.safeParse({ realtimeVoice: { [elevenMax]: { speed: 1.2 } } })
         .success,
+    ).toBe(false);
+  });
+
+  test("an organization ElevenLabs key and voice defaults reach workspaces without their own", async () => {
+    const value = await fixture();
+    const base = `http://x/v1/workspaces/${value.workspaceId}/sessions/${value.sessionId}/realtime`;
+    const elevenMax = "workspace-elevenlabs/eleven_realtime_v1_max";
+    const [workspace] =
+      await shared.admin`select account_id from workspaces where id = ${value.workspaceId}`;
+    const organizationId = workspace!.account_id as string;
+    const catalogModel = async () => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
+        { headers: value.headers },
+      );
+      expect(response.status).toBe(200);
+      const catalog = (await response.json()) as {
+        models: Array<Record<string, unknown> & { id: string }>;
+      };
+      return catalog.models.find((model) => model.id === elevenMax)!;
+    };
+    expect(await catalogModel()).toMatchObject({
+      available: false,
+      unavailableReason: "Connect an ElevenLabs key",
+    });
+
+    // The organization connects one key and sets a default voice for the model.
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      providerKind: "elevenlabs",
+      credentialEncrypted: encryptEnvironmentValue(encryptionKey, "organization-elevenlabs-key"),
+      credentialDigest: "organization-elevenlabs-digest",
+      operationId: crypto.randomUUID(),
+      expectedVersion: 0,
+    });
+    await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeVoice: { [elevenMax]: { voice: "org-voice-id", turnEagerness: "low" } } },
+    });
+    expect(await catalogModel()).toMatchObject({
+      available: true,
+      organizationVoiceSettings: { voice: "org-voice-id", turnEagerness: "low" },
+    });
+    expect((await catalogModel()).workspaceVoiceSettings).toBeUndefined();
+
+    const proof = {
+      operationId: crypto.randomUUID(),
+      browserInstanceId: `browser-${crypto.randomUUID()}`,
+      ownerKey: `owner-key-${crypto.randomUUID()}-${crypto.randomUUID()}`,
+      model: elevenMax,
+    };
+    const startedResponse = await app.request(base, {
+      method: "POST",
+      headers: value.headers,
+      body: JSON.stringify(proof),
+    });
+    expect(startedResponse.status).toBe(201);
+    const started = (await startedResponse.json()) as {
+      mode: { id: string; version: number; connectionEpoch: number };
+    };
+    let expectedConnectionEpoch = started.mode.connectionEpoch;
+    let rotate = false;
+    const connect = async () => {
+      const response = await app.request(`${base}/websocket`, {
+        method: "POST",
+        headers: value.headers,
+        body: JSON.stringify({
+          realtimeId: started.mode.id,
+          operationId: crypto.randomUUID(),
+          browserInstanceId: proof.browserInstanceId,
+          ownerKey: proof.ownerKey,
+          expectedVersion: started.mode.version,
+          expectedConnectionEpoch,
+          rotate,
+          language: "en-US",
+        }),
+      });
+      expect(response.status).toBe(200);
+      const connected = (await response.json()) as { connectionEpoch: number };
+      expectedConnectionEpoch = connected.connectionEpoch;
+      rotate = true;
+      const mint = elevenLabsMints.at(-1)!;
+      const audio = (
+        mint.body as {
+          session: { audio: { input: { turn_detection: unknown }; output: { voice?: string } } };
+        }
+      ).session.audio;
+      return { key: mint.headers.get("xi-api-key"), audio };
+    };
+
+    // No workspace key or settings: the organization's key and voice.
+    let minted = await connect();
+    expect(minted.key).toBe("organization-elevenlabs-key");
+    expect(minted.audio.output.voice).toBe("org-voice-id");
+    expect(minted.audio.input.turn_detection).toEqual({ type: "semantic_vad", eagerness: "low" });
+
+    // The workspace's own key and settings win over the organization's.
+    await createConnection(client.db, {
+      accountId: organizationId,
+      workspaceId: value.workspaceId,
+      subjectId: null,
+      providerDomain: "api.elevenlabs.io",
+      kind: "api_key",
+      credentialEncrypted: encryptEnvironmentValue(
+        encryptionKey,
+        JSON.stringify({ apiKey: "workspace-elevenlabs-key" }),
+      ),
+      metadata: { credentialRole: "elevenlabs", credentialLabel: "ElevenLabs" },
+      createdBySubjectId: value.subjectId,
+    });
+    await updateWorkspaceSettings(client.db, value.workspaceId, {
+      realtimeVoice: { [elevenMax]: { voice: "workspace-voice-id" } },
+    });
+    minted = await connect();
+    expect(minted.key).toBe("workspace-elevenlabs-key");
+    expect(minted.audio.output.voice).toBe("workspace-voice-id");
+    // Settings replace the organization's per model, not field by field.
+    expect(minted.audio.input.turn_detection).toEqual({ type: "semantic_vad", eagerness: "high" });
+    expect(await catalogModel()).toMatchObject({
+      workspaceVoiceSettings: { voice: "workspace-voice-id" },
+      organizationVoiceSettings: { voice: "org-voice-id", turnEagerness: "low" },
+    });
+  });
+
+  test("the catalog marks the default voice model the organization and the workspace chose", async () => {
+    const value = await fixture();
+    const elevenMax = "workspace-elevenlabs/eleven_realtime_v1_max";
+    const elevenMini = "workspace-elevenlabs/eleven_realtime_v1_mini";
+    const [workspace] =
+      await shared.admin`select account_id from workspaces where id = ${value.workspaceId}`;
+    const organizationId = workspace!.account_id as string;
+    const defaults = async () => {
+      const response = await app.request(
+        `http://x/v1/workspaces/${value.workspaceId}/realtime-model-catalog`,
+        { headers: value.headers },
+      );
+      expect(response.status).toBe(200);
+      const catalog = (await response.json()) as {
+        models: Array<{ id: string; workspaceDefault?: boolean; organizationDefault?: boolean }>;
+      };
+      return {
+        workspace: catalog.models.filter((model) => model.workspaceDefault).map((m) => m.id),
+        organization: catalog.models.filter((model) => model.organizationDefault).map((m) => m.id),
+      };
+    };
+    // Nothing chosen: voice stays automatic.
+    expect(await defaults()).toEqual({ workspace: [], organization: [] });
+
+    const saved = await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeDefaultModel: elevenMax },
+    });
+    expect(saved.realtimeDefaultModel).toBe(elevenMax);
+    expect(await defaults()).toEqual({ workspace: [], organization: [elevenMax] });
+
+    // The workspace's own choice is reported next to the organization's.
+    await updateWorkspaceSettings(client.db, value.workspaceId, {
+      realtimeDefaultModel: elevenMini,
+    });
+    expect(await defaults()).toEqual({ workspace: [elevenMini], organization: [elevenMax] });
+
+    // Null follows the organization again; an unrelated patch keeps the choice.
+    await updateWorkspaceSettings(client.db, value.workspaceId, { realtimeDefaultModel: null });
+    const kept = await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeVoice: { [elevenMax]: { voice: "org-voice-id" } } },
+    });
+    expect(kept.realtimeDefaultModel).toBe(elevenMax);
+    expect(await defaults()).toEqual({ workspace: [], organization: [elevenMax] });
+
+    const cleared = await updateOrganizationModelDefaults(client.db, {
+      organizationId,
+      actorSubjectId: value.subjectId,
+      patch: { realtimeDefaultModel: null },
+    });
+    expect(cleared.realtimeDefaultModel).toBeNull();
+    expect(await defaults()).toEqual({ workspace: [], organization: [] });
+
+    // Only realtime voice model ids are accepted.
+    expect(
+      UpdateOrganizationModelDefaultsRequest.safeParse({ realtimeDefaultModel: "codex/sol" })
+        .success,
+    ).toBe(false);
+    expect(
+      UpdateWorkspaceSettingsRequest.safeParse({ realtimeDefaultModel: "codex/sol" }).success,
     ).toBe(false);
   });
 

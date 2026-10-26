@@ -21,11 +21,8 @@ import {
   slackRestMcpToolsForScopes,
 } from "@opengeni/contracts/slack-rest-mcp";
 import * as network from "@opengeni/network";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { createApp } from "../src/app";
 import { chooseMcpAuthorizeScopes } from "../src/integrations/oauth-client";
@@ -291,10 +288,8 @@ describe("Slack API-backed personal OAuth", () => {
         provider.read(first.attempt.id),
         provider.read(second.attempt.id),
       ]);
-      expect(results.map((result) => result.state).sort()).toEqual(["complete", "failed"]);
-      expect(results.find((result) => result.state === "failed")?.error.code).toBe(
-        "account_already_connected",
-      );
+      expect(results.map((result) => result.state)).toEqual(["complete", "complete"]);
+      expect(results[0]?.account.id).toBe(results[1]?.account.id);
       const accounts = await listConnectionsMetadata(
         client.db,
         provider.identity.personalWorkspaceId,

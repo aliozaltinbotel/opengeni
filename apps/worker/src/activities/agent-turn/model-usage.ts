@@ -1,6 +1,11 @@
 import { canonicalizeConfiguredModelId, resolveModelProvider } from "@opengeni/config";
 import { createHash } from "node:crypto";
 import {
+  parsePromptCacheObservation,
+  type PromptCacheObservation,
+  type PromptCacheRequestFingerprint,
+} from "@opengeni/contracts";
+import {
   applyCreditDebitUpToBalance,
   existingUsageEventIdempotencyKeys,
   isTransactionHandle,
@@ -37,6 +42,7 @@ import {
   recordModelCacheTokens,
   recordModelCreditsCharged,
   recordModelInputTokens,
+  recordPromptCacheDiagnostics,
   recordModelResponseUsage,
 } from "../../observability-metrics";
 import {
@@ -274,6 +280,8 @@ export async function processModelResponseTerminalEvent(input: {
   contextContributions?: readonly ModelContextContributionSummary[] | null;
   /** Timing of the call this terminal response completes; read once per claimed response. */
   responseTiming?: () => ModelCallTiming | null;
+  /** Wire fingerprint of the request this response completes; read once per claimed response. */
+  promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
 }): Promise<
   | { status: "not_response" }
   | { status: "duplicate"; sourceKey: string }
@@ -317,6 +325,8 @@ export async function processModelResponseTerminalEvent(input: {
     return { status: "processed", sourceKey, authoritative: false, usageReported: false };
   }
   const timing = input.responseTiming?.() ?? null;
+  const promptCacheRequest = input.promptCacheRequest?.() ?? null;
+
   const responseUsage = terminal.usage;
 
   const normalizedUsage = normalizeModelCallUsage(responseUsage?.usage);
@@ -430,6 +440,7 @@ export async function processModelResponseTerminalEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
+          promptCache: await promptCacheObservation(responseUsage, promptCacheRequest),
         });
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
@@ -509,6 +520,8 @@ export async function processCompactionModelUsageEvent(input: {
   leaseLost: () => boolean;
   leaseLostMessage: string;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
+  /** Wire fingerprint of the compaction request this usage belongs to. */
+  promptCacheRequest?: () => Promise<PromptCacheRequestFingerprint | null> | null;
 }): Promise<
   | { status: "duplicate"; sourceKey: string }
   | { status: "processed"; sourceKey: string; authoritative: boolean }
@@ -568,6 +581,7 @@ export async function processCompactionModelUsageEvent(input: {
   }
   input.state.claimedSourceKeys.add(sourceKey);
   input.state.usageCount = usageOrdinal;
+  const promptCacheRequest = input.promptCacheRequest?.() ?? null;
 
   const accountContext = modelCallAccountContext({
     servingCredentialId: input.servingCredentialId,
@@ -646,6 +660,7 @@ export async function processCompactionModelUsageEvent(input: {
           ...(input.contextContributions !== undefined
             ? { contextContributions: input.contextContributions }
             : {}),
+          promptCache: await promptCacheObservation(input.usage, promptCacheRequest),
         });
         recordAuthoritativeModelUsageMetrics({
           observability: input.observability,
@@ -659,6 +674,18 @@ export async function processCompactionModelUsageEvent(input: {
     },
   });
   return { status: "processed", sourceKey, authoritative };
+}
+
+/** What the call itself reported plus the wire fingerprint of its request. */
+async function promptCacheObservation(
+  usage: ModelResponseUsage | null,
+  request: Promise<PromptCacheRequestFingerprint | null> | null,
+): Promise<PromptCacheObservation | null> {
+  const fingerprint = request ? await request.catch(() => null) : null;
+  return parsePromptCacheObservation({
+    ...(usage?.thinkingBlocksDropped ? { thinkingBlocksDropped: usage.thinkingBlocksDropped } : {}),
+    ...(fingerprint ? { request: fingerprint } : {}),
+  });
 }
 
 export async function processSessionTitleModelUsageEvent(
@@ -1066,6 +1093,8 @@ export async function recordAuthoritativeModelCallFact(input: {
   subscriptionConnectionId?: string | null;
   contextContributions?: readonly ModelContextContributionSummary[] | null;
   timing?: ModelCallTiming | null;
+  /** Prompt-cache observation; the fact write classifies a warm miss from it. */
+  promptCache?: PromptCacheObservation | null;
 }): Promise<void> {
   try {
     const telemetry = input.billing.normalizedUsage.telemetry;
@@ -1097,15 +1126,23 @@ export async function recordAuthoritativeModelCallFact(input: {
       ...(input.contextContributions !== undefined
         ? { contextContributions: input.contextContributions }
         : {}),
+      promptCache: input.promptCache ?? null,
     });
+    let recorded: Awaited<ReturnType<typeof recordModelCallFact>> | undefined;
     try {
-      await recordModelCallFact(input.db, fact(input.subscriptionConnectionId ?? null));
+      recorded = await recordModelCallFact(input.db, fact(input.subscriptionConnectionId ?? null));
     } catch (error) {
       // The served connection was deleted mid-turn: keep the usage fact and
       // drop only its attribution, never the whole fact.
       if (!input.subscriptionConnectionId || !isForeignKeyViolation(error)) throw error;
-      await recordModelCallFact(input.db, fact(null));
+      recorded = await recordModelCallFact(input.db, fact(null));
     }
+    recordPromptCacheDiagnostics(input.observability, {
+      provider: input.billing.upstreamProvider ?? input.provider,
+      model: input.model,
+      diagnostics: recorded?.promptCacheDiagnostics ?? null,
+      cachedTokens: telemetry.cachedTokens,
+    });
   } catch (error) {
     input.observability.warn("model call fact persist failed", {
       ...safeErrorDiagnostic(error),

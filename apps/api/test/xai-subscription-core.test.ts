@@ -9,7 +9,7 @@
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import * as realDb from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { SUPERGROK_REALTIME_MODEL_ID } from "@opengeni/config";
 
 const settings = testSettings({ supergrokSubscriptionEnabled: true });
@@ -57,6 +57,15 @@ mock.module("@opengeni/db", () => ({
   ...realDb,
   getWorkspace: async () => ({ id: WORKSPACE, accountId: ACCOUNT }),
   getWorkspaceSettings: async () => workspaceSettings,
+  getOrganizationModelDefaults: async () => ({
+    sessionDefaults: null,
+    allowedProviders: null,
+    allowedModels: null,
+    modelCompactionThresholds: {},
+    realtimeVoice: {},
+    realtimeDefaultModel: null,
+    updatedAt: null,
+  }),
   getActiveSessionHistoryItems: async () => [],
   getSessionRealtimeContinuityEntries: async () => [],
   readSubscriptionCoreProviderRouteForWorkspace: async (
@@ -146,7 +155,7 @@ mock.module("@opengeni/db", () => ({
 let upstream: (url: string, init?: RequestInit) => Promise<Response>;
 
 const { createXaiSubscriptionTranscriptionProvider } =
-  await import("../src/transcription/providers/xai-subscription");
+  await import("@opengeni/core/transcription-service");
 const { createRealtimeWebsocketConnection, RealtimeWebsocketBrokerError } =
   await import("../src/realtime-websocket");
 const { readXaiCoreStatus, workspaceXaiOperationAvailable } =
@@ -175,15 +184,22 @@ beforeEach(() => {
 });
 
 const transcribe = () =>
-  createXaiSubscriptionTranscriptionProvider({ settings, db: {} as never }).transcribe({
-    audio: new Uint8Array([1, 2, 3]),
-    mimeType: "audio/webm",
-    filename: "clip.webm",
-    workspaceId: WORKSPACE,
-    accountId: ACCOUNT,
-    subjectId: "user:caller",
-    requestId: "request-1",
-  } as never);
+  createXaiSubscriptionTranscriptionProvider({ settings, db: {} as never })
+    .transcribe(
+      {
+        audio: { bytes: new Uint8Array([1, 2, 3]), mimeType: "audio/webm", fileName: "clip.webm" },
+        model: "grok-stt",
+        diarize: false,
+        scope: {
+          workspaceId: WORKSPACE,
+          accountId: ACCOUNT,
+          subjectId: "user:caller",
+          requestId: "request-1",
+        },
+      },
+      null,
+    )
+    .then(({ text, languages }) => ({ text, languages }));
 
 describe("SuperGrok transcription by route", () => {
   test("core: a sessionless transcription lease on a shared candidate of the caller's workspace", async () => {
@@ -317,13 +333,14 @@ describe("SuperGrok realtime by route", () => {
               type: "function",
               name: "delegate_to_session",
               description:
-                "Pass execution work, actions, and session tasks to the underlying session agent. Include the complete standalone request and relevant conversational context.",
+                "Relay execution work, actions, and session tasks to the underlying session agent, which decides how to do them.",
               parameters: {
                 type: "object",
                 properties: {
                   request: {
                     type: "string",
-                    description: "Complete standalone task for the session agent",
+                    description:
+                      "The user's request in their own words and language, plus only the conversational context needed to understand it. Do not add tools, methods, steps, or details the user did not say.",
                   },
                 },
                 required: ["request"],

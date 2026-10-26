@@ -2616,10 +2616,16 @@ export class SelfhostedSession {
       // The relay's wss route (`/stream`); buildStreamUrl honors `path`.
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
+      relayChannel: { workspaceId: this.controlWorkspaceId, agentId: this.agentId, channelId },
     };
   }
 
   private relayEndpoint(channel: StreamChannel): ExposedPortEndpoint {
+    // The viewer token is minted for this channel, so it must be this machine's
+    // own: enrolled in the workspace it is addressed in, under its own id.
+    if (channel.workspaceId !== this.controlWorkspaceId || channel.agentId !== this.agentId) {
+      throw new Error("selfhosted stream channel does not belong to this machine");
+    }
     const tls = this.relay.tls ?? true;
     const routingQuery =
       `ws=${encodeURIComponent(channel.workspaceId)}` +
@@ -2634,6 +2640,11 @@ export class SelfhostedSession {
       path: this.relay.path ?? SELFHOSTED_RELAY_STREAM_PATH,
       query: routingQuery,
       protocol: kindToProtocol(channel.kind),
+      relayChannel: {
+        workspaceId: channel.workspaceId,
+        agentId: channel.agentId,
+        channelId: channel.channelId,
+      },
     };
   }
 
@@ -3221,22 +3232,4 @@ function kindToProtocol(kind: StreamKind | undefined): string {
     default:
       return "raw";
   }
-}
-
-/**
- * The selfhosted NotFound discriminator — THE load-bearing safety property
- *: for selfhosted, `agent-offline` (no responder) is NEVER a
- * provider NotFound. A user's real machine is not recreatable; if the lease saw
- * agent-offline as NotFound it would cold-create a RIVAL box (a Modal box) for
- * the user's machine. So this ALWAYS returns FALSE for selfhosted — there is no
- * "box gone, recreate it" condition. An OS-level file NotFound is an op-level
- * error the fs layer 404s; it is likewise NOT a session-recreate condition.
- *
- * `establishSandboxSessionFromEnvelope` cold-restores ONLY when the per-backend
- * NotFound discriminator returns true; returning false here guarantees the
- * selfhosted path never cold-creates a rival — the op surfaces agent_offline and
- * the caller backs off / retries.
- */
-export function isSelfhostedProviderNotFoundError(_error: unknown): false {
-  return false;
 }

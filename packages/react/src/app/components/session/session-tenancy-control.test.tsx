@@ -255,6 +255,73 @@ describe("SessionTenancyControl", () => {
     container.remove();
   });
 
+  test("keeps the access trigger a 44px touch target in a narrow title bar", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          client={{} as OpenGeniBrowserClient}
+          managedSession
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+          session={baseSession}
+        />,
+      );
+    });
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label$="Manage session access"]',
+    );
+    expect(trigger).not.toBeNull();
+    const chip = trigger!.firstElementChild as HTMLElement;
+    // A phone title bar is always narrow, so the narrow-title-bar icon width
+    // must not undercut the 44px coarse-pointer target.
+    expect(chip.className).toContain("pointer-coarse:min-h-11");
+    expect(chip.className).toContain("@max-[34rem]/titlebar:min-w-8!");
+    expect(chip.className).toContain("@max-[34rem]/titlebar:pointer-coarse:min-w-11!");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  test("names the read-only access mark with a role screen readers accept", async () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <SessionTenancyControl
+          client={{} as OpenGeniBrowserClient}
+          managedSession={false}
+          canForkPrivately
+          scopeLabel="Engineering"
+          captureWorkspaceInvocation={() => ({ workspaceId: "workspace-a", revision: 1 })}
+          ownsWorkspaceInvocation={() => true}
+          {...operationAuthority()}
+          onRefreshSession={async () => undefined}
+          onOpenSession={() => undefined}
+          session={baseSession}
+        />,
+      );
+    });
+    // Without a managed session there is nothing to change or fork: a focusable mark only.
+    expect(container.querySelector('button[aria-label*="session access"]')).toBeNull();
+    const mark = container.querySelector<HTMLElement>('[aria-label^="Workspace session access."]');
+    expect(mark).not.toBeNull();
+    expect(mark!.tabIndex).toBe(0);
+    // ARIA prohibits aria-label on a role-less span, so assistive technology may skip it.
+    expect(mark!.getAttribute("role")).toBe("img");
+
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
   test("retains one key across a blocker retry and reconciles the replay", async () => {
     const keys: string[] = [];
     let updateCalls = 0;

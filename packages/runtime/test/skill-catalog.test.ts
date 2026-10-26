@@ -1,6 +1,6 @@
 import { readNativeSkillCatalogDescriptors } from "@opengeni/contracts";
 import { describe, expect, test } from "bun:test";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../src/index";
 import {
   formatSkillCatalog,

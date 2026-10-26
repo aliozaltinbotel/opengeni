@@ -117,6 +117,7 @@ describe("image Bun stages use the distrusted Bun", () => {
     ["docker/sandbox.Dockerfile", "bun-runtime"],
     ["docker/desktop.Dockerfile", "bun-runtime"],
     ["docker/backup.Dockerfile", "bun"],
+    ["docker/merge-batcher.Dockerfile", "bun-distrusted"],
   ] as const) {
     test(file, async () => {
       const dockerfile = await readFile(join(repository, file), "utf8");
@@ -143,6 +144,25 @@ describe("image Bun stages use the distrusted Bun", () => {
   }
 });
 
+test("merge batcher ships patched Bun while retaining its nonroot portable runtime", async () => {
+  const dockerfile = await readFile(join(repository, "docker/merge-batcher.Dockerfile"), "utf8");
+  expect(dockerfile).toContain("ARG BUN_VERSION=1.4.4\n");
+  expect(dockerfile).toContain(
+    "FROM oven/bun:${BUN_VERSION}-slim AS runtime\n" +
+      "COPY --from=bun-distrusted /out/bun /usr/local/bin/bun\n",
+  );
+  const runtime = dockerfile.split(" AS runtime\n")[1]!;
+  expect(runtime.match(/^USER .+$/gmu)).toEqual(["USER root", "USER bun"]);
+  expect(runtime).toContain(
+    "ENV BATCHER_MODE=shadow BATCHER_GIT_DIR=/data/objects.git BATCHER_OUTPUT_DIR=/data/shadow PORT=8080",
+  );
+  expect(runtime).toContain('VOLUME ["/data"]');
+  expect(runtime).toContain("process.env.PORT||8080");
+  expect(runtime).toContain("STOPSIGNAL SIGTERM");
+  expect(runtime).toContain('ENTRYPOINT ["bun", "scripts/merge-batcher/main.ts"]');
+  expect(runtime).not.toContain("distrust-embedded-roots.ts");
+});
+
 describe("image Node stages use the distrusted Node", () => {
   for (const file of ["docker/sandbox.Dockerfile", "docker/desktop.Dockerfile"]) {
     test(file, async () => {
@@ -160,5 +180,68 @@ describe("image Node stages use the distrusted Node", () => {
       );
       expect(dockerfile.match(/^FROM node:/gmu)).toHaveLength(1);
     });
+  }
+});
+
+// Bun also trusts the OS store, and the oven/bun base images carry a
+// ca-certificates older than Debian's emSign G3 / Comodo AAA distrust. Every
+// published server image either upgrades ca-certificates in a package install
+// or uses the current store built in the trust-store stage.
+test("every published server image trusts the current Debian store, not its base image's", async () => {
+  const dockerfile = await readFile(join(repository, "docker/opengeni.Dockerfile"), "utf8");
+  const stages = new Map<string, { from: string; body: string }>();
+  for (const block of dockerfile.split(/^(?=FROM )/mu).filter((part) => part.startsWith("FROM "))) {
+    const header = /^FROM (?:--platform=\S+ )?(\S+) AS (\S+)\n/u.exec(block);
+    if (header) stages.set(header[2]!, { from: header[1]!, body: block });
+  }
+  expect(stages.get("trust-store")?.body).toContain(
+    "FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION}-slim AS trust-store\n" +
+      "USER root\n" +
+      "RUN apt-get update \\\n" +
+      "  && apt-get install -y --no-install-recommends ca-certificates \\\n",
+  );
+  const trustStore =
+    "COPY --from=trust-store /out-certs /etc/ssl/opengeni-certs\n" +
+    "ENV SSL_CERT_DIR=/etc/ssl/opengeni-certs SSL_CERT_FILE=/etc/ssl/opengeni-certs/ca-certificates.crt\n";
+  const upgradesStore = (body: string) =>
+    /RUN apt-get update \\\n\s+&& apt-get install -y --no-install-recommends [^\n]*\bca-certificates\b/u.test(
+      body,
+    );
+  const workflows = await Promise.all(
+    [".github/workflows/ci.yml", ".github/workflows/release-candidate.yml"].map((file) =>
+      readFile(join(repository, file), "utf8"),
+    ),
+  );
+  const published = new Set(
+    workflows.flatMap((workflow) =>
+      [
+        ...workflow.matchAll(
+          /file: docker\/opengeni\.Dockerfile\n(?:\s+[a-z-]+: .*\n)*?\s+target: (\S+)/gu,
+        ),
+      ].map((match) => match[1]!),
+    ),
+  );
+  expect([...published].sort()).toEqual(
+    ["api", "artifact-materializer", "artifact-outbox-dispatcher", "web", "worker"].sort(),
+  );
+  for (const target of published) {
+    const chain: string[] = [];
+    let name: string | undefined = target;
+    while (name && stages.has(name)) {
+      chain.push(stages.get(name)!.body);
+      name = stages.get(name)!.from;
+    }
+    expect({
+      target,
+      current: chain.some((body) => upgradesStore(body) || body.includes(trustStore)),
+    }).toEqual({
+      target,
+      current: true,
+    });
+  }
+  for (const target of ["web", "artifact-outbox-dispatcher"]) {
+    expect(stages.get(target)!.body).toContain(
+      "COPY --from=bun-distrusted /out/bun /usr/local/bin/bun\n" + trustStore,
+    );
   }
 });

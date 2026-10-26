@@ -208,9 +208,13 @@ export type VaultItemRow = {
   vaultSource: VaultSource;
   vaultMode: VaultMode;
   type: VaultItemType;
+  /** Provider-specific kind of item (0956); null for the plain type. */
+  category: string | null;
   name: string;
   nameKey: string;
   websites: string[];
+  /** Encrypted provider display hint; never a locally resolvable field value. */
+  usernameHintEncrypted?: string | null;
   expiresAt: string | null;
   archivedAt: string | null;
   lastUsedAt: string | null;
@@ -221,8 +225,21 @@ export type VaultItemRow = {
   primaryFieldId: string | null;
   passkeySignCount: number | null;
   passkeyLeasedUntil: string | null;
+  /**
+   * Passkeys a connected item holds (0986), without key material; null when it
+   * holds none or for hosted items. Absent on rows from older servers.
+   */
+  providerPasskeys?: VaultProviderPasskeyRow[] | null;
   aliases: string[];
   fields: VaultFieldRow[];
+};
+
+/** One passkey a connected item holds, as mirrored (0986). */
+export type VaultProviderPasskeyRow = {
+  /** base64url without padding. */
+  credentialId: string;
+  rpId: string;
+  userName: string | null;
 };
 
 export type VaultFieldCiphertext = {
@@ -342,6 +359,8 @@ export type VaultFieldWrite = {
 export type VaultItemWrite = {
   name?: string;
   type?: VaultItemType;
+  /** A category token, or null to clear it (0956). */
+  category?: string | null;
   websites?: string[];
   expiresAt?: string | null;
   primaryFieldName?: string;
@@ -669,6 +688,9 @@ export async function recordVaultSecretUse(
       toolName: string;
       operationId?: string;
       sourceCallId?: string;
+      destination?: string;
+      /** The approvals (0952) this use relied on. */
+      approvalIds?: string[];
     };
     items: Array<{
       itemId: string;
@@ -768,11 +790,21 @@ export async function releaseVaultPasskeyLeases(
 
 export type ProviderVaultItemMirror = {
   providerItemRef: string;
+  usernameHintEncrypted?: string | null;
   providerVersion?: string | null;
   type: Exclude<VaultItemType, "passkey">;
+  /** Provider-specific kind of item (0956); null or absent for the plain type. */
+  category?: string | null;
   name: string;
   websites?: string[];
   primaryFieldRef?: string | null;
+  /** Archived upstream by the connected account (0956); null or absent when active. */
+  archivedAt?: string | null;
+  /**
+   * The item's passkeys without key material (0986). Absent keeps the mirrored
+   * list (a provider that does not report passkeys); empty clears it.
+   */
+  passkeys?: Array<{ credentialId: string; rpId: string; userName?: string | null }>;
   fields: Array<{ providerFieldRef: string; name: string; kind: VaultFieldKind }>;
 };
 

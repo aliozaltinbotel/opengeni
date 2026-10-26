@@ -18,12 +18,172 @@
   Site service execution and limits, with an immutable Site/viewer audience on
   the native session and descendants. A guest's existing cookie/visitor principal
   supplies continuity; losing it does not grant access to another visit.
-- Site sessions are omitted from ordinary workspace lists, sidebar, pins,
-  message search and discovery snapshots, including for their owner. Explicit
-  Site history is still available through the Site's Conversations tab and
-  `originSiteId` filter, only for the authorized viewer. Hiding is presentation;
-  native authorization and restrictive RLS independently protect reads, events,
-  files, controls and agent descendants, including direct guessed URLs.
+- Site sessions are omitted from ordinary workspace lists, message search and
+  discovery snapshots, including for their owner. Explicit Site history is
+  available through the Site's Conversations tab and `originSiteId` filter,
+  only for the authorized viewer. Hiding is presentation; native authorization
+  and restrictive RLS independently protect reads, events, files, controls and
+  agent descendants, including direct guessed URLs.
+- The console sidebar opts in with the session list's `siteConversations`
+  option. `group` (a non-archived root page) keeps Site conversations out of
+  the rows and returns `siteGroups` with its first page: one complete row per
+  Site and project with the viewer's conversation count over the requested
+  archive scope, latest activity and status counts, bounded to the 200 most
+  recently active (`siteGroupsTruncated` marks more). Its continuation pages
+  are ordinary default pages. `include` lists them as ordinary rows and is
+  bound into its cursor; the sidebar uses it for search, Archived, pins and
+  work a Site conversation spawned. Both use the same viewer authorization,
+  so another viewer's private Site conversation is never counted, titled or
+  listed, and agent callers keep their own-root bound. List hints report the
+  viewer's changed Site conversations separately as `siteSessionIds`, so
+  ordinary lists ignore them. A Site row is stable: its conversations stay
+  nested under it, collapsed by default, whichever session is open. A Site's
+  title in its row refreshes with the next list read.
+- Every way into a Site opens the console's Site view
+  (`/workspaces/:workspaceId/sites/:siteId`): its sidebar row, the Artifacts
+  list (and its Copy link), a duplicated Site, links and notifications naming
+  `/artifacts/:id` without a tab (replaced, so Back leaves the Site), and the
+  Site tab of its details. The Site fills the page and a
+  chat panel sits beside it with one conversation open, the newest unless
+  `?conversation=<id>` chooses one. The panel doesn't list conversations (the
+  Site's sidebar row does); it shows the open one as a regular chat with the
+  model picker, narrower, titled in its header. It resizes from its left edge
+  (drag, or the arrow keys, Home and End on the focused handle; double-click
+  resets) between 320 and 720 px, leaving the Site at least 360 px where there
+  is room, and hides to a strip (Enter on the handle, or its button). Width
+  and hidden state are remembered per person in this browser; choosing a
+  conversation shows a hidden panel again. The conversation open without a
+  choice is fixed when the Site opens, so activity in another conversation
+  never swaps it out. A `?conversation=` that isn't one of this Site's own
+  top-level, unarchived conversations falls back to the Site. A nested row,
+  and a session's Site origin link, open that view with the conversation
+  selected; opening one also opens its Site row once per visit to the Site,
+  and closing the row again is respected. **New** starts a conversation the
+  way the Site's own chat does, sending the Site and its current version
+  (`x-opengeni-site-id`, `x-opengeni-site-version`) with only the fields a
+  Site may set, so it is private to the viewer and listed under the Site. It
+  doesn't offer voice-first start. Once open, New stays open until a
+  conversation is chosen (choosing the Site's own row again does not close
+  it). The panel follows `siteSessionIds` hints, so a conversation started in
+  the Site beside it becomes the newest when the Site is next opened. The
+  panel's menu opens the conversation as a full chat or the Site's details
+  (`/artifacts/:id?tab=settings`; Versions for people who can't manage it).
+  The details page is reached by tab (`?tab=versions|conversations|data|settings`,
+  Versions by default) and `/sessions/:id` keeps working. **Edit with
+  Opengeni** on the details page opens the Site view with `?new=true`: a new
+  conversation in the panel (shown even if it was hidden), its composer
+  focused once the Site has loaded; the address then drops `?new`, so Back or
+  a reload doesn't repeat it.
+- The Site view edits the Site live, with today's permissions: anyone who can
+  see the Site and has `artifacts:publish` can change it; visitors can't, and
+  there are no drafts or approval step.
+  - The conversation knows its Site. When a conversation is created from the
+    panel (the request carries the Site headers without the frame marker, so
+    it isn't Site code, and its caller may publish), the API attaches
+    `siteConversationContext` (`@opengeni/contracts/site-session-http`) to
+    its first message as server-authored `modelContext`: the Site's id,
+    title and the version shown, and that a change is published as a new
+    version straight away. For someone who may publish, the panel attaches
+    the same context, with the version then live, to every later message
+    (`sendExtras`); others get none, as from the API. It is
+    ordinary model-visible context, never authority; a caller still can't
+    set its own context on a Site create (403), and a published host's
+    conversations get none.
+  - The preview follows the Site. `useSiteLiveVersion` checks the Site when
+    the open conversation's tool call returns or its turn ends
+    (`SessionConversation`'s `onEvent`, which fires only for events newer
+    than the history it opened with), every five seconds while the page is
+    visible (versions published from anywhere else), and on focus, coming
+    back online or into view; overlapping checks share one. A check reads
+    only the Site and its current version (`GET
+    /v1/workspaces/:workspaceId/published-artifacts/:artifactId/current`,
+    `getWorkspaceArtifactCurrent` in the SDK, `artifacts:read`, without
+    provenance, so it needs no session reads); the history is read again
+    only when that changed. Against a server without it (404 or 405) every
+    check reads the history. A Site that is gone (403 or 404) stops the timed
+    checks. `SiteView` gets the current `versionId` and reloads in place when
+    it changes, replacing the frame once, in the same render as its HTML,
+    and keeping the version on screen until the new one has loaded; a failed
+    update tries again, waiting longer each time (up to 30 seconds), and a
+    hidden tab waits until it is shown. The frame says only what needs
+    attention (`ArtifactSandbox` `liveState`): **Updating** while a new
+    version loads, or **Reconnecting** when a check or update failed (the
+    version shown stays); on a narrow screen only its dot shows, and it is
+    still announced. The Site view never shows the frame's plain **Live**,
+    so "live" never reads as "on the web".
+  - The header's one publication control (`SitePublicationControl`, read
+    with the viewer's own `getSitePublicationLink`) says whether the Site is
+    on the web. **Published** opens a menu with the address (the primary URL
+    the API reports), **Open**, **Copy link** and, for people with
+    `artifacts:publish`, **Publishing settings**. An unpublished Site shows
+    **Publish** to those people and nothing to anyone else; a taken-down
+    Site says **Taken down**. Publish and Publishing settings open the
+    Site's own publish form (`SitePublishPage` with `useSiteManagement`,
+    exactly as its Settings tab) as a page in place of the Site, which stays
+    mounted behind it, with the chat beside it; full screen is left first.
+    A successful Publish or Save, or its back link, returns to the Site and
+    the header shows the change at once. Nothing shows while the address is
+    loading, or where publishing isn't available.
+  - The version chip in the Site's header (`SiteVersionMenu`) shows the live
+    version and its recent history (eight, then **All versions** on the
+    details page). **Undo last change** restores the version that was live
+    before the change that made the current one live (a publish or a
+    restore, so a second Undo goes forward again and reads **Undo
+    restore**), else the revision before;
+    **Restore** on any listed version does the same. Both use the existing
+    rollback with `expectedCurrentVersionId`, so a version published
+    meanwhile wins and the chip says "The Site changed meanwhile". People
+    without publish permission, and archived Sites, get the history only.
+    In full screen its menu opens inside the full-screen frame. An archived
+    Site's view links to its details, where it can be restored.
+- A Site is a sidebar row even before anyone asks it anything. Placement has
+  one rule: a Site is a top-level row in the project of the chat that created
+  it (the session tree of its first version), and new Site conversations are
+  filed in that project too, so the Site and its conversations stay together.
+  A create that names no project (omitted or `null`) files the conversation
+  with its Site; only a named project overrides that. Starting or moving
+  conversations never takes a Site out of its own project.
+  It is a row of its own rather than a child of that chat because a chat's
+  children in the sidebar are the work it spawned, and a Site outlives and is
+  used apart from its chat. The row is listed when the viewer lists that chat
+  (respecting its archive state and filters) or, with no filter or search
+  applied, has opened the Site, and only for a Site in the viewer's audience;
+  other artifacts never get rows. Opening the Site view (`/sites/:id`) in the
+  console (`POST
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/opened`,
+  `recordSiteOpened` in the SDK, `artifacts:read`) records this person's
+  latest open, which only lists the Site. A row's activity is the latest of
+  its conversations, its newest published version (creation is the first)
+  and the chats that published its versions (the one that created it and any
+  used to edit it), as far as the viewer can see them. So Sites in use rise
+  and untouched ones sort down like old sessions, without being hidden.
+  Opening a Site is not activity, just as opening a chat is not. Archiving,
+  restoring, rolling back or any other write to the Site's record is not
+  activity either. Opens are personal and never visible to anyone
+  else; a Site page cannot record one. The console records one open per page
+  (router history entry) that shows the Site view: not again when its client
+  is replaced, only once a page that loaded hidden is shown, and not again
+  when a reload, a restored tab or going Back shows a page where this tab
+  already recorded it (remembered in `sessionStorage` after the write
+  succeeds). Pages the open Site view moves to, such as choosing a
+  conversation, belong to the same open. Without a router history key, every
+  visit counts. Without
+  conversations a row has no count and nothing to disclose; it opens the
+  Site view. Conversations someone moved to another project nest under a row
+  for the Site in that project, and the Site keeps its row in its own one.
+- Every sidebar row has Pin and Archive one click away (hover or keyboard
+  focus shows them over the row's time; right-click and the touch overflow
+  menu offer them too). For a Site row both are personal sidebar state
+  (`site_sidebar_states`, `PUT
+  /v1/workspaces/:workspaceId/published-artifacts/:artifactId/sidebar`,
+  `updateSiteSidebarState` in the SDK, `artifacts:read`, refused on a Site
+  origin) and never change the Site or anyone else's sidebar. Pin moves the
+  row, with its conversations, into Pinned, once across projects. Archive
+  hides the row and its conversations from this person's sidebar only; the
+  Site stays published and others still see it. Undo, or opening the Site
+  again, restores it; a pin is kept. Archived Sites are not listed under the
+  Archived filter. Archive on a spawned chat's row archives its workstream,
+  since archive belongs to the top-level chat.
 - Disabling private sessions explicitly refuses new Site conversations. There
   is no shared fallback. Existing native privacy policy and membership checks
   remain authoritative. App code cannot choose another owner or share a session.

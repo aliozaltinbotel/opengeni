@@ -3,6 +3,10 @@
 The checked-in ruleset is **disabled**. Landing workflows does not enable queue
 enforcement. Activation needs the rollout owner's explicit go after review.
 Production branch rules and release/environment approvals are not changed here.
+This document retains the native-queue measurements and inactive configuration.
+The selected in-house batching workflow is documented in
+[`merge-batcher.md`](merge-batcher.md); do not enable native enforcement as a
+side effect of following the historical commands below.
 
 ## Two independent test lanes
 
@@ -46,11 +50,21 @@ The draft's 45-minute queue response timeout includes runner waiting and plannin
 at the worst-case job envelope it may expire before a retry finishes. Do not treat
 the retry as guaranteed under saturation; timeout remains failure, not a waiver.
 
-`ci.yml` uses a **full** plan on every admitted main push. Its existing
-`ci-main-push` concurrency group does not cancel the running build; GitHub keeps
-only the latest pending build. Weekly service/drift runs use a separate lane and
-cannot replace a pending push.
-Exact Version-PR merge and explicit rerun exceptions retain their existing lanes.
+`ci.yml` uses a **full** plan on every admitted main push. Every main push,
+Version-PR merge commit, production push, scheduled run and re-run attempt has
+its own concurrency group (`ci-<run id>-<attempt>`) and is never cancelled or
+replaced, so each exact SHA keeps its own run and receipt. A shared main-push
+group used to hold one running build and one pending push: a red run whose API
+image then waited for `public-release` approval never finished and stalled
+every later main push. Available runner capacity, not workflow concurrency,
+now decides how many main runs execute at once.
+The API image is the only job behind a protected environment. Its
+`release-image-validation` prerequisite runs the same required-results check as
+the final aggregate over every non-image lane, so a main push requests that
+approval only after tests, contracts and deployment artifacts all passed; a red
+run completes red without an approval wait. Pull-request, Version-PR and
+scheduled runs build the credential-free API image after validation settles,
+whatever its result.
 The full lane uses twelve unit shards after eight-shard run 39580448753 exhausted
 its unchanged 1200-second deadline with passing tests. This splits the same
 inventory; it does not raise budgets or suppress slow files.
@@ -74,6 +88,16 @@ main ancestry, the exact successful CI run, image receipts and its ordinary sour
 admission. Queue green alone is **not** a release candidate. A missing full-green
 receipt is an error, not permission to substitute the latest main head. Discovery
 requires the GitHub Actions bot's status linked to the exact successful run attempt.
+
+A merge-batcher landing whose exact tree already passed a trusted Batch CI attempt
+publishes the same status and receipt (`mode: "full"`) from an attested run. Its
+test lanes are skipped, while deployment artifacts, the artifact runtime, workload
+images and landed-content checks still run. The receipt's `attestation` object
+names the reused Batch run, attempt, tested head and tree. Version PR,
+control-plane and CI-definition landings, pushes without an identical-tree Batch
+attempt, schedules and dispatches run the full suite. Release admission refuses
+attested receipts. See "Main-push Batch CI attestation" in [merge-batcher.md](merge-batcher.md)
+for the proof and the explicit coverage trade-off.
 
 Every push also runs `merge-content.yml`, independently of full-run coalescing.
 It recomputes each first-parent two-parent merge with `git merge-tree` and compares
@@ -253,6 +277,24 @@ percentiles. A rolling-day p95 enqueue-to-CI-start wait over 30 minutes sets
 `stopSignal: true` and recommends true batching (option B). Reports are retained
 for 30 days; no pre-activation native stage times are invented.
 
+The in-house batcher adds `Batch CI` completion receipts and hourly reconciliation
+to the same report. `batchRows` and `batchSummary` contain exact-attempt provider
+job timing and separate cancellation/provider-red counts. A provider-red run is
+not itself a verified code-failure verdict. These rows deliberately leave ready,
+actual build and landing timestamps unknown: deterministic candidate commit dates
+are not build timestamps. The controller stage ledger owns those stages and its
+rolling-day wait signal; an unknown batch queue wait must not be read as healthy.
+Batch collection errors are recorded as unavailable and cannot suppress the
+independent full-main alert reconciliation. Provider start delay uses the selected
+attempt's `run_started_at`; a retry without that timestamp remains unknown.
+Hourly reconciliation contains only the latest attempt of each run, while event
+receipts retain each delivered completion. Do not interpret that hourly sample as
+the controller's complete retry history.
+Historical `queue/shadow-traffic/` runs are reported in separate
+`trafficShadowRows` / `trafficShadowSummary` fields; they never contribute to the
+live batch provider sample. Historical readiness proxies and reconstruction
+artifacts must not be presented as live queue capacity or culprit evidence.
+
 Landing instrumentation does **not** post public comments or issues. Explicit
 rollout opt-in `QUEUE_HEALTH_ALERTS=true` enables the hourly/manual reconciliation
 lane as the sole public writer. For red **push CI on main**, it comments on the
@@ -278,7 +320,7 @@ paging integration. A failed full run cannot prove causality alone.
    limitations, `Independent reviewer: <session>`, and findings resolved.
 4. Explicitly call out any threshold/budget increase or test skip/coverage
    reduction. Label `test-policy-change`; the reviewer must confirm it explicitly.
-5. Once enabled, `gh pr merge <number> --auto` enqueues; do not specify a conflicting
+5. For the inactive native option only, `gh pr merge <number> --auto` enqueues; do not specify a conflicting
    squash/rebase method, use `--admin`, invoke the direct merge endpoint or jump
    the queue. Observe merge-group success and the actual landed SHA.
 6. A substantive head edit invalidates the evidence: rerun affected full suites
@@ -294,6 +336,12 @@ check with the `Queue ready` name; manual dispatch is always a shadow result.
 The combined merge group still runs the ordinary fast workflow. Version
 automation opens/updates PRs; it does not auto-merge them or bypass agent evidence.
 Do not update an already reviewed/queued Version PR just to refresh its base.
+For the selected in-house batcher, Version PRs retain the real VM-test and
+independent-review evidence requirement, then use `queue-ready` with auto-merge
+off. They occupy one singleton batch. `Queue ready` from trusted Version CI is
+not a substitute for that evidence comment, nor for the batch's `Batch ready`
+result. See the before/after-activation procedure in `deployment.md`; no existing
+Version merge bot needs a bypass or a fabricated test attestation.
 
 Release source admission accepts an exact-head merge onto moving main only when
 the provider merge topology retains that head, the integration base retains the

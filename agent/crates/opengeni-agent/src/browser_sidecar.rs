@@ -33,9 +33,9 @@ use tokio::{
 };
 
 const BROWSERD_BINARY_ENV: &str = "OPENGENI_BROWSERD_BINARY";
-const AGENT_BROWSER_BINARY_ENV: &str = "OPENGENI_BROWSERD_AGENT_BROWSER_BINARY";
 const LIGHTPANDA_BINARY_ENV: &str = "OPENGENI_BROWSERD_LIGHTPANDA_BINARY";
 const COMPUTER_NATIVE_BINARY_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY";
+const COMPUTER_BACKEND_ENV: &str = "OPENGENI_BROWSERD_COMPUTER_BACKEND";
 /// Helper file names. People see them as process names (Activity Monitor, Task
 /// Manager), so they carry no product name: an app that runs this agent under its
 /// own name shows only that name.
@@ -62,6 +62,13 @@ const EMPTY_CONTROLLER_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// controller; without this one per scope ever used stays resident until the
 /// agent exits. The next ensure starts a fresh one in about a second.
 const EMPTY_CONTROLLER_GRACE: Duration = Duration::from_secs(10 * 60);
+/// Beside the admin token: the non-secret part of the scope's last ensure, so
+/// the agent can start that controller again on its own (see
+/// `resume_scopes_with_detached_browsers`).
+const SCOPE_RECORD_FILE: &str = "scope.json";
+/// browserd writes this into a session directory for a browser it left
+/// running at shutdown, for its successor to stop once idle.
+const DETACHED_BROWSER_FILE: &str = "detached-browser.json";
 /// browserd opt-in: exit gracefully when the agent's end of stdin closes.
 const PARENT_LIFELINE_ENV: &str = "OPENGENI_BROWSERD_PARENT_LIFELINE";
 // The controller summarizes at most 32 kinds plus overflow, without IDs.
@@ -130,6 +137,10 @@ pub struct BrowserSidecarManager {
     http_client: reqwest::Client,
     /// Remainders of controller responses too large for one reply.
     http_spool: std::sync::Mutex<crate::browser_control_http::ResponseSpool>,
+    /// False when screen control is turned off on this computer: controllers
+    /// then start with no computer backend, so no ComputerSession can see
+    /// the screen or send input.
+    computer_control: bool,
 }
 
 impl BrowserSidecarManager {
@@ -168,7 +179,15 @@ impl BrowserSidecarManager {
             attached: std::sync::OnceLock::new(),
             http_client: crate::browser_control_http::client()?,
             http_spool: std::sync::Mutex::default(),
+            computer_control: true,
         })
+    }
+
+    /// Start controllers without a computer backend (screen control is turned
+    /// off on this computer). Browsers keep working.
+    pub fn without_computer_control(mut self) -> Self {
+        self.computer_control = false;
+        self
     }
 
     /// Share the host's admission boundary, including lost descendant cleanup.
@@ -293,6 +312,77 @@ impl BrowserSidecarManager {
         });
     }
 
+    /// Starts, once, the controller of every scope whose previous controller
+    /// left browsers running when it shut down (this agent's restart or
+    /// update). A controller adopts such a browser only when its session is
+    /// used again, and a browser whose session never returns would otherwise
+    /// run until the machine reboots. Started here, the controller stops each
+    /// one once it has been unused for its idle release time, then holds
+    /// nothing and is retired like any empty controller.
+    pub fn spawn_detached_browser_sweep(self: &Arc<Self>) {
+        let manager = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let Some(manager) = manager.upgrade() else {
+                return;
+            };
+            let started = manager.resume_scopes_with_detached_browsers().await;
+            if started > 0 {
+                tracing::info!(
+                    service = "opengeni-browserd",
+                    controllers = started,
+                    "started browser controllers to stop browsers left running by their predecessors"
+                );
+            }
+        });
+    }
+
+    async fn resume_scopes_with_detached_browsers(&self) -> usize {
+        let scopes = self.config_dir.join("browserd").join("scopes");
+        let Ok(entries) = std::fs::read_dir(&scopes) else {
+            return 0;
+        };
+        let mut started = 0;
+        for entry in entries.flatten() {
+            let root = entry.path();
+            if !scope_has_detached_browsers(&root) {
+                continue;
+            }
+            let Some((record, admin_token)) = read_scope_authority(&root) else {
+                continue;
+            };
+            if entry.file_name().to_str() != Some(scope_storage_key(&record.scope_id).as_str()) {
+                continue;
+            }
+            if self.update_drain.is_draining() {
+                break;
+            }
+            let mut sidecars = self.sidecars.lock().await;
+            if sidecars.contains_key(&record.scope_id) || sidecars.len() >= MAX_SCOPES {
+                continue;
+            }
+            match self
+                .start(
+                    &record.scope_id,
+                    &record.scope_generation,
+                    &admin_token,
+                    &record.allowed_origins,
+                )
+                .await
+            {
+                Ok(sidecar) => {
+                    sidecars.insert(record.scope_id, sidecar);
+                    started += 1;
+                }
+                Err(error) => tracing::warn!(
+                    service = "opengeni-browserd",
+                    %error,
+                    "could not start a browser controller to stop browsers left running"
+                ),
+            }
+        }
+        started
+    }
+
     /// Stops each controller that has reported holding no session for at least
     /// `grace` and has not been ensured or resolved within it. A controller
     /// with any session, retained browser, in-flight work or pending update is
@@ -352,6 +442,7 @@ impl BrowserSidecarManager {
         let authority_dir = root.join("authority");
         let token_file = authority_dir.join("admin-token");
         write_owner_only(&token_file, format!("{admin_token}\n").as_bytes())?;
+        write_scope_record(&authority_dir, scope_id, scope_generation, allowed_origins)?;
 
         let mut command = Command::new(&self.binary);
         command
@@ -379,6 +470,9 @@ impl BrowserSidecarManager {
         // leaves its browser daemon/profile lock behind.
         command.process_group(0);
         configure_companion_binaries(&mut command, &self.binary);
+        if !self.computer_control {
+            without_computer_backend(&mut command);
+        }
         let mut child = command
             .spawn()
             .map_err(|error| PlatformError::from_io("start browser controller sidecar", &error))?;
@@ -463,7 +557,6 @@ fn take_sidecar_pipes(
 
 fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
     for (environment, names) in [
-        (AGENT_BROWSER_BINARY_ENV, &["agent-browser"][..]),
         (LIGHTPANDA_BINARY_ENV, &["lightpanda"][..]),
         (
             COMPUTER_NATIVE_BINARY_ENV,
@@ -482,6 +575,14 @@ fn configure_companion_binaries(command: &mut Command, browserd_binary: &Path) {
             }
         }
     }
+}
+
+/// No computer backend: the native backend with no native helper opens none,
+/// whatever the platform's default or an operator's override says.
+fn without_computer_backend(command: &mut Command) {
+    command
+        .env(COMPUTER_BACKEND_ENV, "native")
+        .env_remove(COMPUTER_NATIVE_BINARY_ENV);
 }
 
 async fn add_allowed_origins(
@@ -952,7 +1053,7 @@ fn signal_sidecar_termination(child: &mut Child) -> bool {
         // browserd's Bun standalone reliably runs its registered graceful
         // shutdown path for SIGINT. On macOS a SIGTERM exits the standalone at
         // the native launcher boundary before Bun dispatches the JS signal
-        // listener, orphaning its private agent-browser/Chromium daemon. SIGINT
+        // listener, skipping its graceful managed-browser shutdown. SIGINT
         // is still a cooperative termination request; the bounded wait + exact
         // child kill below remains the hard-stop fallback.
         return kill(Pid::from_raw(id), Signal::SIGINT).is_ok();
@@ -1303,6 +1404,72 @@ fn scope_storage_key(scope_id: &str) -> String {
     blake3::hash(scope_id.as_bytes()).to_hex().to_string()
 }
 
+/// The non-secret part of a scope's last ensure.
+#[derive(Debug, PartialEq, Eq, serde::Serialize, Deserialize)]
+struct ScopeRecord {
+    scope_id: String,
+    scope_generation: String,
+    allowed_origins: Vec<String>,
+}
+
+/// Record the scope a controller starts for, so a later agent can restart
+/// that controller to release browsers it left running.
+fn write_scope_record(
+    authority_dir: &Path,
+    scope_id: &str,
+    scope_generation: &str,
+    allowed_origins: &[String],
+) -> PlatformResult<()> {
+    let record = serde_json::to_vec(&ScopeRecord {
+        scope_id: scope_id.to_string(),
+        scope_generation: scope_generation.to_string(),
+        allowed_origins: allowed_origins.to_vec(),
+    })
+    .map_err(|_| PlatformError::os("browser controller scope record is unencodable"))?;
+    write_owner_only(&authority_dir.join(SCOPE_RECORD_FILE), &record)
+}
+
+/// Whether any session under this scope root holds a browser its previous
+/// controller left running.
+fn scope_has_detached_browsers(root: &Path) -> bool {
+    let Ok(sessions) = std::fs::read_dir(root.join("state").join("sessions")) else {
+        return false;
+    };
+    sessions
+        .flatten()
+        .any(|session| session.path().join(DETACHED_BROWSER_FILE).is_file())
+}
+
+/// The scope record and admin token the scope's last controller started
+/// with, when both are present and still valid.
+fn read_scope_authority(root: &Path) -> Option<(ScopeRecord, String)> {
+    let authority = root.join("authority");
+    let record = std::fs::read(authority.join(SCOPE_RECORD_FILE)).ok()?;
+    if record.len() > 64 * 1024 {
+        return None;
+    }
+    let record: ScopeRecord = serde_json::from_slice(&record).ok()?;
+    bounded_identifier(&record.scope_id, MAX_SCOPE_BYTES, "browser authority scope").ok()?;
+    bounded_identifier(
+        &record.scope_generation,
+        MAX_GENERATION_BYTES,
+        "attached browser generation",
+    )
+    .ok()?;
+    let allowed_origins = canonical_origins(&record.allowed_origins).ok()?;
+    let token = std::fs::read_to_string(authority.join("admin-token")).ok()?;
+    let token = validate_token(token.trim_end_matches('\n'))
+        .ok()?
+        .to_string();
+    Some((
+        ScopeRecord {
+            allowed_origins,
+            ..record
+        },
+        token,
+    ))
+}
+
 fn write_owner_only(destination: &Path, body: &[u8]) -> PlatformResult<()> {
     use std::io::Write as _;
 
@@ -1373,6 +1540,31 @@ static TOKEN_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screen_control_turned_off_starts_controllers_without_a_computer_backend() {
+        let mut command = Command::new("browserd");
+        command.env(COMPUTER_NATIVE_BINARY_ENV, "/opt/computer-native");
+        without_computer_backend(&mut command);
+        let environment = command
+            .as_std()
+            .get_envs()
+            .collect::<std::collections::HashMap<_, _>>();
+        assert_eq!(
+            environment
+                .get(std::ffi::OsStr::new(COMPUTER_BACKEND_ENV))
+                .copied()
+                .flatten(),
+            Some(std::ffi::OsStr::new("native"))
+        );
+        // Removed, so neither an operator's path nor a discovered helper is used.
+        assert_eq!(
+            environment
+                .get(std::ffi::OsStr::new(COMPUTER_NATIVE_BINARY_ENV))
+                .copied(),
+            Some(None)
+        );
+    }
 
     #[cfg(unix)]
     fn idle_fixture_manager(directory: &Path, port: u16) -> BrowserSidecarManager {
@@ -1535,6 +1727,51 @@ mod tests {
         assert_ne!(manager.sidecar_pid("unused").await.unwrap(), pid);
         manager.shutdown().await;
         server.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_scope_with_browsers_left_running_gets_its_controller_back_at_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let first = idle_fixture_manager(directory.path(), port);
+        ensure_idle_fixture(&first, "handed-off").await;
+        ensure_idle_fixture(&first, "nothing-left").await;
+        first.shutdown().await;
+        let scopes = directory
+            .path()
+            .join("config")
+            .join("browserd")
+            .join("scopes");
+        let session = scopes
+            .join(scope_storage_key("handed-off"))
+            .join("state")
+            .join("sessions")
+            .join("11111111-1111-4111-8111-111111111111");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join(DETACHED_BROWSER_FILE), b"{}").unwrap();
+        assert_eq!(
+            read_scope_authority(&scopes.join(scope_storage_key("handed-off")))
+                .map(|(record, token)| (record.scope_generation, token)),
+            Some(("fixture-generation".to_string(), "p".repeat(32))),
+        );
+
+        // The restarted agent starts only the scope with a browser to stop,
+        // with the authority its last controller had, and only once.
+        let second = idle_fixture_manager(directory.path(), port);
+        assert_eq!(second.resume_scopes_with_detached_browsers().await, 1);
+        assert!(second.sidecar_pid("handed-off").await.is_some());
+        assert!(second.sidecar_pid("nothing-left").await.is_none());
+        assert_eq!(second.resume_scopes_with_detached_browsers().await, 0);
+        // The control plane's own ensure reuses that controller.
+        let pid = second.sidecar_pid("handed-off").await.unwrap();
+        ensure_idle_fixture(&second, "handed-off").await;
+        assert_eq!(second.sidecar_pid("handed-off").await, Some(pid));
+        second.shutdown().await;
+        drop(listener);
     }
 
     #[cfg(unix)]
@@ -2076,11 +2313,7 @@ mod tests {
         let directory = tempfile::tempdir().expect("fixture runtime root");
         let adjacent = directory.path().join("adjacent");
         std::fs::create_dir(&adjacent).expect("adjacent fixture directory");
-        for name in [
-            "opengeni-browserd",
-            "agent-browser",
-            "opengeni-computer-native",
-        ] {
+        for name in ["opengeni-browserd", "opengeni-computer-native"] {
             std::fs::write(adjacent.join(companion_name(name)), b"stale helper")
                 .expect("stale adjacent fixture");
         }
@@ -2093,10 +2326,7 @@ mod tests {
         let mut command = Command::new(&binary);
         configure_companion_binaries(&mut command, &binary);
         let environment = command.as_std().get_envs().collect::<HashMap<_, _>>();
-        for (key, name) in [
-            (AGENT_BROWSER_BINARY_ENV, "agent-browser"),
-            (COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE),
-        ] {
+        for (key, name) in [(COMPUTER_NATIVE_BINARY_ENV, COMPUTER_NATIVE_FILE)] {
             let expected = runtime.join(companion_name(name));
             assert_eq!(
                 environment
@@ -2298,10 +2528,9 @@ mod tests {
         });
         let binary = temporary.path().join("fake-browserd");
         let environment_capture = temporary.path().join("sidecar-environment");
-        let agent_browser = temporary.path().join(companion_name("agent-browser"));
         let lightpanda = temporary.path().join(companion_name("lightpanda"));
         let computer_native = temporary.path().join(companion_name(COMPUTER_NATIVE_FILE));
-        for companion in [&agent_browser, &lightpanda, &computer_native] {
+        for companion in [&lightpanda, &computer_native] {
             std::fs::write(companion, "companion").expect("write sidecar companion");
             std::fs::set_permissions(companion, std::fs::Permissions::from_mode(0o700))
                 .expect("make sidecar companion executable");
@@ -2311,7 +2540,7 @@ mod tests {
             format!(
                 concat!(
                     "#!/bin/sh\n",
-                    "printf '%s\\n%s\\n%s\\n' \"$OPENGENI_BROWSERD_AGENT_BROWSER_BINARY\" \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
+                    "printf '%s\\n%s\\n' \"$OPENGENI_BROWSERD_LIGHTPANDA_BINARY\" \"$OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY\" > '{capture}'\n",
                     "printf '%s\\n' '{{\"service\":\"opengeni-browserd\",\"status\":\"ready\",",
                     "\"protocolVersion\":1,\"runtimeBuildId\":\"{build_id}\",\"computer\":true,\"hostname\":\"127.0.0.1\",\"port\":{port}}}'\n",
                     "exec sleep 30\n",
@@ -2341,7 +2570,7 @@ mod tests {
                 .lines()
                 .map(PathBuf::from)
                 .collect::<Vec<_>>(),
-            [agent_browser, lightpanda, computer_native],
+            [lightpanda, computer_native],
         );
         let replay = manager
             .ensure(&request)

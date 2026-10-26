@@ -1,40 +1,61 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 import { ClaudeSubscriptionUsage } from "./claude-subscription-usage";
 
+/**
+ * Who an account in the organization's list reaches: the workspace that owns
+ * it (its own account, used only there), every workspace including new ones,
+ * chosen shared workspaces, Personal workspaces, or chosen people.
+ */
+export const SubscriptionAccountReach = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      ownerWorkspaceId: primitives.nullableUuid,
+      everyWorkspace: primitives.boolean,
+      workspaceIds: z.array(primitives.uuid),
+      personalWorkspaces: primitives.boolean,
+      people: z.number().int().nonnegative().nullable(),
+    })
+    .strict(),
+);
+export type SubscriptionAccountReach = z.infer<typeof SubscriptionAccountReach>;
+
 /** Shared, secret-free account list contract for native subscription pools. */
 export const SubscriptionAccountSummary = /* @__PURE__ */ defineSchema(() =>
   z.object({
-    id: z.string().uuid(),
+    id: primitives.uuid,
     scope: z.enum(["organization", "workspace", "user"]),
-    subject: z.string().min(1),
+    subject: primitives.nonEmptyString,
     email: z.string().email().nullable(),
-    label: z.string().nullable(),
-    plan: z.string().nullable(),
+    label: primitives.nullableString,
+    plan: primitives.nullableString,
     status: z.enum(["active", "needs_relogin", "error", "disabled"]),
-    active: z.boolean(),
+    active: primitives.boolean,
     expiresAt: z.string().datetime().nullable(),
     lastRefreshAt: z.string().datetime().nullable(),
-    lastError: z.string().nullable(),
-    allocatorEnabled: z.boolean(),
-    allocatorVersion: z.number().int().positive(),
+    lastError: primitives.nullableString,
+    allocatorEnabled: primitives.boolean,
+    allocatorVersion: primitives.positiveInteger,
     allocatorUpdatedAt: z.string().datetime().nullable(),
+    /** The organization's list only. */
+    reach: SubscriptionAccountReach.optional(),
   }),
 );
 export type SubscriptionAccountSummary = z.infer<typeof SubscriptionAccountSummary>;
 export const SubscriptionPoolSettings = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      rotationEnabled: z.boolean(),
+      rotationEnabled: primitives.boolean,
       rotationStrategy: z.literal("sharded"),
-      activeCredentialId: z.string().uuid().nullable(),
+      activeCredentialId: primitives.nullableUuid,
     })
     .strict(),
 );
 export type SubscriptionPoolSettings = z.infer<typeof SubscriptionPoolSettings>;
 export const ClaudeSubscriptionAccount = /* @__PURE__ */ defineSchema(() =>
   SubscriptionAccountSummary.extend({
-    version: z.number().int().positive(),
+    version: primitives.positiveInteger,
     usage: ClaudeSubscriptionUsage.optional(),
   }).strict(),
 );
@@ -43,9 +64,9 @@ export const ClaudeSubscriptionAccountsResponse = /* @__PURE__ */ defineSchema((
   z
     .object({
       accounts: z.array(ClaudeSubscriptionAccount),
-      activeAccountId: z.string().uuid().nullable(),
+      activeAccountId: primitives.nullableUuid,
       source: z.enum(["organization", "workspace", "user"]),
-      organizationId: z.string().uuid(),
+      organizationId: primitives.uuid,
       settings: SubscriptionPoolSettings,
     })
     .strict(),

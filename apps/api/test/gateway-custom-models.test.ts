@@ -36,11 +36,8 @@ import {
   upsertWorkspaceModelPolicy,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import postgres from "postgres";
 
@@ -515,6 +512,21 @@ describe("workspace Gateway custom model API", () => {
         where account_id = ${grant.accountId}::uuid and provider = 'claude'`;
     }
   });
+  test("an access path naming no connection kind or id is a 404, never a 500", async () => {
+    if (!publicApp) throw new Error("Real database fixture required");
+    for (const route of [
+      "/model-connections/elevenlabs/current/access",
+      "/model-connections/not-a-kind/current/access",
+      "/model-connections/codex/current/access",
+      "/model-connections/openrouter/not-a-connection/access",
+    ]) {
+      const response = await request(route, {}, publicApp);
+      expect({ route, status: response.status }).toEqual({ route, status: 404 });
+      expect(await response.json()).toMatchObject({
+        error: { code: "not_found", details: { code: "invalid_path_identifier" } },
+      });
+    }
+  });
   test("disabled subscription routes fail closed while Anthropic remains accessible", async () => {
     if (!publicApp) throw new Error("Real database fixture required");
     for (const providerKind of ["anthropic", "claude_subscription"] as const) {
@@ -930,6 +942,64 @@ describe("workspace Gateway custom model API", () => {
       status: 202,
     });
     expect(body.model).toBe(model);
+  });
+
+  test("admits an organization Azure OpenAI deployment for people and services", async () => {
+    if (!client || !grant || !publicApp) throw new Error("Real database fixture required");
+    await upsertOrganizationModelProviderConnection(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "azure_openai",
+      credentialEncrypted: "metadata-only-test-credential",
+      credentialDigest: "metadata-only-test-digest",
+      endpoint: "https://contoso.openai.azure.com/openai/v1",
+      operationId: crypto.randomUUID(),
+    });
+    await createOrganizationModelProviderCustomModel(client.db, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      providerKind: "azure_openai",
+      upstreamModelId: "gpt-6.1-sol",
+      operationId: crypto.randomUUID(),
+    });
+    const model = "organization-azure-openai/gpt-6.1-sol";
+    const catalog = await request("/model-catalog", {}, publicApp);
+    expect(catalog.status).toBe(200);
+    const listed = (
+      (await catalog.json()) as { models: Array<Record<string, unknown>> }
+    ).models.find((candidate) => candidate.id === model);
+    expect(listed).toMatchObject({
+      provider: "organization-azure-openai",
+      billing: { upstreamPayer: "organization", metering: "external" },
+    });
+    const service = `Bearer ${await signDelegatedAccessToken(SECRET, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      subjectId: "service:organization-azure-openai-test",
+      permissions: ["sessions:create"],
+      principalKind: "service",
+      exp: Math.floor(Date.now() / 1_000) + 3_600,
+    })}`;
+    for (const authorization of [await bearer(["sessions:create"]), service]) {
+      const response = await publicApp.request(
+        `http://x/v1/workspaces/${grant.workspaceId}/sessions`,
+        {
+          method: "POST",
+          headers: { authorization, "content-type": "application/json" },
+          body: JSON.stringify({
+            initialMessage: "Local admission regression; no inference",
+            model,
+            sandboxBackend: "none",
+            idempotencyKey: crypto.randomUUID(),
+          }),
+        },
+      );
+      const body = await response.json();
+      expect({ status: response.status, ...(response.status === 202 ? {} : { body }) }).toEqual({
+        status: 202,
+      });
+      expect(body.model).toBe(model);
+    }
   });
 
   test("creates one exact slug, exposes it only to the workspace catalog, and deletes it", async () => {

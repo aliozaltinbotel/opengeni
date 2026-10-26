@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import * as database from "@opengeni/db";
 import * as temporal from "@temporalio/client";

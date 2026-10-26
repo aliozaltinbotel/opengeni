@@ -1,3 +1,4 @@
+import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { z } from "zod";
 
@@ -8,8 +9,7 @@ export type DirectModelProvider = z.infer<typeof DirectModelProvider>;
 
 /** Pin customer credentials to official provider origins, never arbitrary URLs. */
 export const AzureOpenAIEndpoint = /* @__PURE__ */ defineSchema(() =>
-  z
-    .string()
+  primitives.string
     .trim()
     .url()
     .superRefine((value, ctx) => {
@@ -39,16 +39,20 @@ export const AzureOpenAIEndpoint = /* @__PURE__ */ defineSchema(() =>
     .transform((value) => new URL(value).origin + "/openai/v1"),
 );
 
+/** An exact OpenAI model or Azure OpenAI deployment name. */
+export const DirectModelName = /* @__PURE__ */ defineSchema(() =>
+  primitives.string
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+);
+
 export const DirectModelProviderMetadata = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       provider: DirectModelProvider,
-      model: z
-        .string()
-        .trim()
-        .min(1)
-        .max(128)
-        .regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+      model: DirectModelName,
       endpoint: AzureOpenAIEndpoint.optional(),
     })
     .strict()

@@ -130,20 +130,28 @@ describe("attempt tool result caller projection", () => {
 });
 
 describe("spilledModelToolResult", () => {
-  test("projects the cwd-relative shell path while durable receipts stay virtual", () => {
+  test("shows the receipt the spill port resolved, and how to read it", () => {
     const filename = toolResultSpillFilename(OPERATION_ID);
-    const projected = spilledModelToolResult({
-      type: "tool_result_spilled",
-      sandboxPath: toolResultSpillSandboxPath(filename),
+    const receipt = {
+      type: "tool_result_spilled" as const,
+      sandboxPath: `/home/user/tool-results/${filename}`,
       fileId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
       byteSize: 64,
       mediaType: TOOL_RESULT_SPILL_MEDIA_TYPE,
-    });
-    expect(projected.structuredContent).toMatchObject({
-      type: "tool_result_spilled",
-      sandboxPath: `tool-results/${filename}`,
-    });
-    expect(JSON.stringify(projected)).not.toContain("/workspace/tool-results/");
+    };
+    const projected = spilledModelToolResult(receipt);
+    expect(projected.structuredContent).toEqual(receipt);
+    expect(projected.content).toEqual([
+      { type: "text", text: JSON.stringify(receipt) },
+      {
+        type: "text",
+        text: `The result was too large to show (64 bytes), so its exact JSON is saved at /home/user/tool-results/${filename} where your shell runs. With the shell, read the parts you need, for example with jq, head or grep, instead of printing it whole. If the file is not there, call files__files_get_download_url with fileId bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb and download it with the shell.`,
+      },
+    ]);
+    const withoutCopy = spilledModelToolResult({ ...receipt, sandboxPath: null });
+    expect((withoutCopy.content[1] as { text: string }).text).toBe(
+      "The result was too large to show (64 bytes), so its exact JSON is saved as a workspace file. To read it, call files__files_get_download_url with fileId bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb and download it with the shell, then read the parts you need, for example with jq, head or grep.",
+    );
   });
 });
 
@@ -151,7 +159,7 @@ describe("spilledModelToolResult", () => {
 test("native source capture preserves exact raw digest and retained refs before spill",async()=>{
  const raw=oversizedResult();const ref={owner:"fixture.retained_revision",id:OPERATION_ID,version:"1",sha256:createHash("sha256").update("Synthetic source").digest("hex")};
  const events:string[]=[];const capture:ModelRequestCapture=()=>{};capture.onModelToolSource=async source=>{events.push("capture");expect(source.nativeModelSourceKey).toBe("exact-source");expect(source.rawSourceRef.sha256).toBe(createHash("sha256").update(JSON.stringify(raw)).digest("hex"));expect(source.retainedSources).toEqual([ref]);};
- const execute=wrapAttemptToolExecute(async()=>raw,async()=>{events.push("spill");return smallResult();},undefined,()=>[ref]);
+ const execute=wrapAttemptToolExecute(async()=>raw,async()=>{events.push("spill");return smallResult();},undefined,undefined,()=>[ref]);
  await withModelRequestCapture(capture,()=>execute({}, {...context("model"),sourceCallId:"sdk-call",nativeModelSourceKey:"exact-source"}));expect(events).toEqual(["capture","spill"]);
  capture.onModelToolSource=async()=>{throw Error("source unavailable");};events.length=0;await expect(withModelRequestCapture(capture,()=>execute({}, {...context("model"),sourceCallId:"sdk-call"}))).rejects.toThrow("source unavailable");expect(events).toEqual([]);
 });

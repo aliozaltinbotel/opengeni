@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessGrant, type Permission } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { isRlsScopeSetup } from "@opengeni/testing/rls-scope-fake";
 import {
   EditableArtifactCompatibilityError,
@@ -206,6 +206,7 @@ function sessionAuthorizationDb(privateSessionOwner?: string) {
           expect(compiled.params).toContain(SESSION_ID);
           return [
             {
+              requested_session_index: 1,
               target_id: SESSION_ID,
               target_account_id: ACCOUNT_ID,
               target_root_session_id: SESSION_ID,

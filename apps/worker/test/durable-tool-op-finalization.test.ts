@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import * as admission from "../src/activities/agent-turn/admission";
@@ -125,7 +125,12 @@ for (const scenario of [
             warn() {},
           },
           attempt: { turnId: crypto.randomUUID(), executionGeneration: 1 },
-          turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "scripted-model" },
+          turn: {
+            id: crypto.randomUUID(),
+            executionGeneration: 1,
+            model: "scripted-model",
+            resources: [],
+          },
           turnExecutionPolicy: { providerId: "openai" },
           trigger: { type: "user.message" },
           eventing: {
@@ -169,6 +174,8 @@ for (const scenario of [
           },
           historySink: {
             seedHistory() {},
+            seedHistoryFootprint() {},
+            historyFootprintCompactionSignal: () => null,
             reconcileConversationTruth: async () => {
               order.push("history");
             },

@@ -3,7 +3,8 @@ import type { Settings } from "@opengeni/config";
 import * as db from "@opengeni/db";
 import { createObservability } from "@opengeni/observability";
 import { buildOpenGeniAgent, prepareAgentTools, type BuildAgentOptions } from "@opengeni/runtime";
-import { ScriptedModel, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import { createTurnContext } from "../src/activities/agent-turn/turn-context";
 
@@ -38,6 +39,9 @@ async function capturedImageGeneration(coreXai: boolean, coreLeaseGeneration: nu
       defaultModelId: null,
     }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => input.catalog),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, input) => input.governance,
+    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   );
   const options: Array<BuildAgentOptions | undefined> = [];

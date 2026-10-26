@@ -2,7 +2,10 @@ import { rawRows } from "../src/database";
 import { skillCatalogContextItem, readSkillCatalogContext } from "@opengeni/contracts";
 import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireRestrictedRuntimeTestDatabase, type RestrictedRuntimeTestDatabase } from "@opengeni/testing";
+import {
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import type postgres from "postgres";
 import {

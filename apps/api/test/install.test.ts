@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createApp } from "../src/app";
 import type { AppDependencies } from "../src/app";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import type { Settings } from "@opengeni/config";
 
 // The get.<domain> install-serving routes. These only read
@@ -29,12 +29,9 @@ function appFor(settings: Settings) {
 // build artifacts; the baked-path tests stage a throwaway file and clean it up.
 const BAKED_DIR = fileURLToPath(new URL("../../../agent/install/baked/", import.meta.url));
 const BAKED_TARGET = "x86_64-unknown-linux-musl-test-fixture";
-const BAKED_ASSETS = [
-  "opengeni-agent",
-  "opengeni-browserd",
-  "opengeni-agent-browser",
-  "opengeni-computer-native",
-].map((name) => `${name}-${BAKED_TARGET}`);
+const BAKED_ASSETS = ["opengeni-agent", "opengeni-browserd", "opengeni-computer-native"].map(
+  (name) => `${name}-${BAKED_TARGET}`,
+);
 const BAKED_FIXTURE = BAKED_ASSETS[0]!;
 const BAKED_FILES = BAKED_ASSETS.flatMap((asset) =>
   ["", ".sha256", ".minisig"].map((suffix) => `${asset}${suffix}`),
@@ -103,9 +100,10 @@ describe("get.<domain> install routes", () => {
     expect(res.status).toBe(200);
     const body = await res.text();
     expect(body.length).toBeGreaterThan(0);
-    expect(body).toContain("connect --token $enrollToken --non-interactive");
+    expect(body).toContain("'connect', '--token', $enrollToken, '--non-interactive'");
     expect(body).toContain("OPENGENI_ALLOW_DOWNGRADE");
     expect(body).toContain("Test-KeepNewerAgent");
+    expect(body).toContain("$candidateVersion = Assert-AgentStarts $staged");
     expect(body).toContain("--api-url '$quotedApiUrl' connect");
   });
 
@@ -171,6 +169,21 @@ describe("get.<domain> install routes", () => {
     expect(res.headers.get("location")).toBe(
       "https://mirror.example.com/rel/download/agent-v1.4.2/opengeni-agent-universal-apple-darwin",
     );
+  });
+
+  test("without a configured stable version, latest and the stable channel follow this build's agent release", async () => {
+    const cargo = Bun.TOML.parse(
+      await readFile(new URL("../../../agent/Cargo.toml", import.meta.url), "utf8"),
+    ) as { workspace: { package: { version: string } } };
+    const version = cargo.workspace.package.version;
+    const app = appFor(testSettings({ agentStableVersion: undefined }));
+    const latest = await app.request("/agent/latest/opengeni-agent-x86_64-pc-windows-msvc.exe");
+    expect(latest.status).toBe(302);
+    expect(latest.headers.get("location")).toBe(
+      `https://github.com/Cloudgeni-ai/opengeni/releases/download/agent-v${version}/opengeni-agent-x86_64-pc-windows-msvc.exe`,
+    );
+    const manifest = await app.request("/agent/stable/manifest.json");
+    expect(manifest.headers.get("location")).toEndWith(`/agent-v${version}/manifest.json`);
   });
 
   test("stable self-update manifest redirects to the configured immutable release", async () => {

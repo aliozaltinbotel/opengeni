@@ -5,6 +5,79 @@ const workflow = (name: string) =>
 const queue = workflow("merge-queue");
 const ci = workflow("ci");
 
+type JobResult = "success" | "failure" | "cancelled" | "skipped";
+type RunScenario = {
+  event: string;
+  ref: string;
+  workflowCancelled: boolean;
+  mode: string;
+  results: Record<string, JobResult>;
+};
+
+/** Transitive `needs` ancestry of one job in the parsed workflow. */
+function ancestry(jobs: Record<string, any>, job: string): Set<string> {
+  const seen = new Set<string>();
+  const visit = (name: string) => {
+    const needs = jobs[name]?.needs ?? [];
+    for (const need of Array.isArray(needs) ? needs : [needs]) {
+      if (!jobs[need]) throw new Error(`${name} needs unknown job ${need}`);
+      if (!seen.has(need)) {
+        seen.add(need);
+        visit(need);
+      }
+    }
+  };
+  visit(job);
+  return seen;
+}
+
+/** Top-level `&&` atoms of a job condition; anything outside the modelled grammar throws. */
+function conditionAtoms(condition: string): string[] {
+  const body = /^\$\{\{ (.+) \}\}$/su.exec(condition)?.[1];
+  if (!body) throw new Error(`Condition is not one expression: ${condition}`);
+  const unmodelled = body.replace(/!?\b(?:success|always|cancelled|failure)\(\)/gu, "");
+  if (/\|\||[()]/u.test(unmodelled)) throw new Error(`Unmodelled condition grammar: ${condition}`);
+  return body.split("&&").map((atom) => atom.trim());
+}
+
+/**
+ * Models GitHub's documented job-condition semantics for the atoms used here:
+ * without an explicit status function GitHub prepends success(), and success()
+ * requires every transitive ancestor to have succeeded, so a skipped ancestor
+ * skips the job. Unknown atoms or contexts fail the test instead of passing.
+ */
+function jobRuns(jobs: Record<string, any>, job: string, condition: string, run: RunScenario) {
+  const atoms = conditionAtoms(condition);
+  const statusAtoms = atoms.filter((atom) =>
+    /^!?(?:success|always|cancelled|failure)\(\)$/u.test(atom),
+  );
+  const effective = statusAtoms.length ? atoms : ["success()", ...atoms];
+  const value = (path: string) => {
+    if (path === "github.event_name") return run.event;
+    if (path === "github.ref") return run.ref;
+    if (path === "needs.plan.outputs.mode") return run.mode;
+    const result = /^needs\.([\w-]+)\.result$/u.exec(path)?.[1];
+    if (
+      result &&
+      (Array.isArray(jobs[job].needs) ? jobs[job].needs : [jobs[job].needs]).includes(result)
+    )
+      return run.results[result];
+    throw new Error(`Unmodelled context ${path}`);
+  };
+  return effective.every((atom) => {
+    if (atom === "!cancelled()") return !run.workflowCancelled;
+    if (atom === "always()") return true;
+    if (atom === "success()")
+      return (
+        !run.workflowCancelled &&
+        [...ancestry(jobs, job)].every((name) => run.results[name] === "success")
+      );
+    const comparison = /^([\w.-]+) == '([^']*)'$/u.exec(atom);
+    if (!comparison) throw new Error(`Unmodelled condition atom ${atom}`);
+    return value(comparison[1]!) === comparison[2];
+  });
+}
+
 test("queue checks cover PR entry and the exact combined merge group", () => {
   expect(queue.on.pull_request.branches).toEqual(["main"]);
   expect(queue.on.merge_group.types).toEqual(["checks_requested"]);
@@ -45,7 +118,9 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
     "github.event.pull_request.head.ref != 'changeset-release/main'",
   );
   expect(queue.jobs.entry.name).toContain("'PR entry (not applicable)'");
-  expect(queue.jobs.entry.steps[0].run).toContain("not test or review evidence");
+  expect(queue.jobs.entry.steps[0].run).toContain("not test evidence");
+  expect(queue.jobs.entry.steps[0].run).toContain("exact-head PR CI");
+  expect(queue.jobs.entry.steps[0].run).not.toContain("VM test evidence");
   expect(queue.jobs.plan.if).toContain("github.event_name != 'pull_request'");
   expect(queue.jobs.plan.if).toContain("queue-shadow");
   expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
@@ -53,6 +128,10 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
 
 test("ordinary PR events cannot starve reconciliation or publish public alerts", () => {
   const health = workflow("queue-health");
+  expect(health.on.workflow_run.workflows).toContain("Batch CI");
+  expect(health.jobs.report.if).toContain(
+    "github.event.workflow_run.path == '.github/workflows/batch-ci.yml'",
+  );
   expect(health.concurrency).toBeUndefined();
   expect(health.jobs.report.if).toContain("github.event.workflow_run.event == 'merge_group'");
   expect(health.jobs.report.if).toContain(
@@ -66,11 +145,9 @@ test("ordinary PR events cannot starve reconciliation or publish public alerts",
 
 test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
   expect(ci.concurrency["cancel-in-progress"]).toBe(
-    "${{ github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request' }}",
+    "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
   );
-  expect(ci.concurrency.group).toContain("ci-main-push");
-  expect(ci.concurrency.group).toContain("github.event_name == 'push' && github.ref");
-  expect(ci.concurrency.group).toContain("changeset-release/main");
+  expect(ci.concurrency.group).not.toContain("ci-main-push");
   expect(ci.concurrency.group).not.toContain("queue-");
   const plan = ci.jobs.plan.steps.find((step: any) => step.id === "plan").run;
   expect(plan).toContain(
@@ -83,13 +160,191 @@ test("main full CI cannot be cancelled by a new push and publishes only full exa
     "images",
     "merge-content",
   ]);
-  expect(ci.jobs["full-green"].if).toContain("success()");
-  expect(ci.jobs["full-green"].if).toContain("needs.plan.outputs.mode == 'full'");
-  expect(ci.jobs["full-green"].if).toContain("github.ref == 'refs/heads/main'");
   expect(ci.jobs["full-green"].permissions).toEqual({ contents: "read", statuses: "write" });
   expect(workflow("merge-content").concurrency).toBeUndefined();
   expect(ci.jobs["merge-content"].steps.at(-1).run).toContain("--since-full-green");
   expect(ci.jobs["full-green"].steps[0].run).toContain("/attempts/$GITHUB_RUN_ATTEMPT");
+});
+
+/** Evaluate the checked-in `ci.yml` concurrency expressions for one event. */
+function ciConcurrency(context: {
+  event_name: string;
+  ref: string;
+  run_id: string;
+  run_attempt: string;
+  head_commit_message?: string;
+  pull_request_number?: number;
+  automation_pr_number?: string;
+  action?: string;
+}): { group: string; cancel: boolean } {
+  const compile = (expression: string) => {
+    const body = /^\$\{\{ (.+) \}\}$/su.exec(expression)?.[1];
+    if (!body) throw new Error(`not one expression: ${expression}`);
+    // Only the grammar these two expressions use is modelled: string
+    // literals, ==, &&, || and format(). Anything else must fail loudly.
+    const unmodelled = body
+      .replace(/'[^']*'/gu, "")
+      .replace(/\b(?:github|inputs)\.[a-z_.]+/gu, "")
+      .replace(/\bformat\(/gu, "")
+      .replace(/==|&&|\|\||[(),\s]/gu, "");
+    if (unmodelled) throw new Error(`Unmodelled concurrency grammar: ${unmodelled}`);
+    return new Function(
+      "github",
+      "inputs",
+      "format",
+      `return (${body.replace(/==/gu, "===")});`,
+    ) as (...args: unknown[]) => unknown;
+  };
+  const github = {
+    event_name: context.event_name,
+    ref: context.ref,
+    run_id: context.run_id,
+    run_attempt: context.run_attempt,
+    event: {
+      action: context.action,
+      head_commit: { message: context.head_commit_message ?? "" },
+      pull_request: { number: context.pull_request_number },
+    },
+  };
+  const inputs = { automation_pr_number: context.automation_pr_number };
+  const format = (template: string, ...values: unknown[]) =>
+    template.replace(/\{(\d+)\}/gu, (_m, index: string) => String(values[Number(index)]));
+  return {
+    group: String(compile(ci.concurrency.group)(github, inputs, format)),
+    cancel: compile(ci.concurrency["cancel-in-progress"])(github, inputs, format) === true,
+  };
+}
+
+test("every main push, retry and Version merge commit runs in its own non-cancelling group", () => {
+  const push = (run_id: string, run_attempt = "1", ref = "refs/heads/main", message = "fix: x") =>
+    ciConcurrency({ event_name: "push", ref, run_id, run_attempt, head_commit_message: message });
+  // Two consecutive ordinary main pushes never share a group, so a run that
+  // stays open (for example waiting for an approval) cannot hold a later push.
+  const first = push("100");
+  const second = push("101");
+  const third = push("102");
+  expect(new Set([first.group, second.group, third.group]).size).toBe(3);
+  for (const run of [first, second, third]) expect(run.cancel).toBe(false);
+  expect(first.group).toBe("ci-100-1");
+  // An explicit re-run keeps its exact run and gets its own attempt group.
+  expect(push("100", "2")).toEqual({ group: "ci-100-2", cancel: false });
+  expect(push("100", "2").group).not.toBe(first.group);
+  // Version-PR merge commits, production pushes and scheduled coverage keep
+  // their own exact-run lanes.
+  expect(push("200", "1", "refs/heads/main", "chore: version packages")).toEqual({
+    group: "ci-200-1",
+    cancel: false,
+  });
+  expect(push("201", "1", "refs/heads/main", "Merge changeset-release/main")).toEqual({
+    group: "ci-201-1",
+    cancel: false,
+  });
+  expect(push("202", "1", "refs/heads/production")).toEqual({ group: "ci-202-1", cancel: false });
+  expect(
+    ciConcurrency({
+      event_name: "schedule",
+      ref: "refs/heads/main",
+      run_id: "203",
+      run_attempt: "1",
+    }),
+  ).toEqual({ group: "ci-203-1", cancel: false });
+  // Mutable heads keep their single newest-head lane and cancel superseded work.
+  expect(
+    ciConcurrency({
+      event_name: "pull_request",
+      ref: "refs/pull/7/merge",
+      run_id: "300",
+      run_attempt: "1",
+      pull_request_number: 7,
+      action: "synchronize",
+    }),
+  ).toEqual({ group: "ci-pr-7", cancel: true });
+  expect(
+    ciConcurrency({
+      event_name: "workflow_dispatch",
+      ref: "refs/heads/main",
+      run_id: "301",
+      run_attempt: "1",
+      automation_pr_number: "42",
+    }),
+  ).toEqual({ group: "ci-301-1", cancel: false });
+  expect(
+    ciConcurrency({
+      event_name: "workflow_dispatch",
+      ref: "refs/heads/main",
+      run_id: "302",
+      run_attempt: "2",
+      automation_pr_number: "42",
+    }).group,
+  ).toBe("ci-302-2");
+});
+
+test("full-green publishes only for a non-cancelled full main push whose direct needs all succeeded", () => {
+  const job = ci.jobs["full-green"];
+  const needs: string[] = job.needs;
+  const atoms = conditionAtoms(job.if);
+  expect(atoms).toContain("!cancelled()");
+  expect(atoms).not.toContain("success()");
+  expect(atoms).not.toContain("always()");
+  for (const need of needs) expect(atoms).toContain(`needs.${need}.result == 'success'`);
+  for (const predicate of [
+    "github.event_name == 'push'",
+    "github.ref == 'refs/heads/main'",
+    "needs.plan.outputs.mode == 'full'",
+  ])
+    expect(atoms).toContain(predicate);
+
+  // A full main push: every ancestor succeeds except the dispatch-only
+  // Version admission job, which is always skipped on push.
+  const ancestors = ancestry(ci.jobs, "full-green");
+  expect(ancestors.has("automation-admission")).toBe(true);
+  expect(ci.jobs["automation-admission"].if).toBe(
+    "${{ github.event_name == 'workflow_dispatch' }}",
+  );
+  const results = Object.fromEntries([...ancestors].map((name) => [name, "success"])) as Record<
+    string,
+    JobResult
+  >;
+  results["automation-admission"] = "skipped";
+  const green: RunScenario = {
+    event: "push",
+    ref: "refs/heads/main",
+    workflowCancelled: false,
+    mode: "full",
+    results,
+  };
+  const runs = (patch: Partial<RunScenario>) =>
+    jobRuns(ci.jobs, "full-green", job.if, { ...green, ...patch });
+
+  expect(runs({})).toBe(true);
+  // The former gate never published from a push because of that skipped ancestor.
+  const former =
+    "${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.plan.outputs.mode == 'full' }}";
+  expect(jobRuns(ci.jobs, "full-green", former, green)).toBe(false);
+  expect(
+    jobRuns(ci.jobs, "full-green", former, {
+      ...green,
+      results: { ...results, "automation-admission": "success" },
+    }),
+  ).toBe(true);
+
+  for (const need of needs)
+    for (const result of ["failure", "cancelled", "skipped"] as const)
+      expect([need, result, runs({ results: { ...results, [need]: result } })]).toEqual([
+        need,
+        result,
+        false,
+      ]);
+  expect(runs({ workflowCancelled: true })).toBe(false);
+  for (const event of ["pull_request", "workflow_dispatch", "schedule", "merge_group"])
+    expect([event, runs({ event })]).toEqual([event, false]);
+  for (const ref of [
+    "refs/heads/production",
+    "refs/heads/changeset-release/main",
+    "refs/heads/queue/x",
+  ])
+    expect([ref, runs({ ref })]).toEqual([ref, false]);
+  for (const mode of ["impact", "docs", ""]) expect([mode, runs({ mode })]).toEqual([mode, false]);
 });
 
 test("queue source retains committed runtime and outstanding release-plan contracts", () => {

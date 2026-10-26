@@ -67,7 +67,7 @@ import {
   MODEL_ATTACHMENT_IMAGE_MAX_DIMENSION_FIELD,
   MODEL_ATTACHMENT_REFS_FIELD,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { modelSourceInputBinding } from "../src/model-request-capture";
 
 function user(text: string): CompactionItem {

@@ -12,11 +12,8 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import { synchronizeCanonicalHumanLoginBindings } from "@opengeni/db/canonical-human-identities";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { registerManagedOnboardingRoutes } from "../src/routes/managed-onboarding";
 import { registerCodexRoutes } from "../src/routes/codex";
@@ -1706,6 +1703,7 @@ describe("organization membership routes", () => {
           organizationId: stored!.accountId,
           status: "active",
           personalWorkspaceId: stored!.personalWorkspaceId,
+          personalWorkspacesEnabled: true,
         },
       ],
     });

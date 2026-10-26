@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, createSession, ensureManagedAccessForUser, type DbClient } from "../src";
 import { NON_RLS_RUNTIME_TABLES } from "../src/runtime-posture";
@@ -51,6 +51,7 @@ describe("non-RLS authority tables (attested posture-review exemption)", () => {
       "auth_verifications",
       "automation_webhook_endpoints",
       "deployment_model_catalog",
+      "event_ingress_routes",
       "integration_oauth_clients",
       "managed_accounts",
       "mcp_oauth_access_tokens",

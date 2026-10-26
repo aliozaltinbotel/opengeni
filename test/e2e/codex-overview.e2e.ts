@@ -22,14 +22,11 @@ import {
 } from "@opengeni/db";
 import { migrate } from "@opengeni/db/migrate";
 import { sql } from "drizzle-orm";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { waitFor } from "@opengeni/testing/process";
 import { createApp } from "../../apps/api/src/app";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
@@ -324,7 +321,15 @@ function accountRow(page: Page, name: string) {
 /** Opens a Codex account's own page from the Models list and returns its body. */
 async function openCodexAccount(page: Page, name: string, activation: "click" | "tap" = "click") {
   const row = accountRow(page, name);
-  await row.waitFor();
+  // A turned-off account folds behind "Show N turned off" once a provider
+  // lists several accounts.
+  const showOff = page.getByRole("button", { name: /^Show \d+ Codex accounts? turned off$/ });
+  await row.or(showOff).first().waitFor();
+  if (!(await row.isVisible())) {
+    if (activation === "tap") await showOff.tap();
+    else await showOff.click();
+    await row.waitFor();
+  }
   if (activation === "tap") await row.tap();
   else await row.click();
   await page

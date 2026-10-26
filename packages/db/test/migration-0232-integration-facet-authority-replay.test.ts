@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, test } from "bun:test";
 import { stableJson } from "@opengeni/contracts";
-import { type SharedTestDatabase } from "@opengeni/testing";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 
 import {
@@ -28,6 +28,10 @@ describe("Integration Facet authority migration replay", () => {
       }
       return;
     }
+    // Today's integration policy reader selects 0974's column; supply only
+    // that column, with its default, on this pre-0482 schema.
+    await shared.admin`ALTER TABLE organization_integration_policies
+      ADD COLUMN IF NOT EXISTS personal_integration_setup text NOT NULL DEFAULT 'members'`;
     let app = createDb(shared.appUrl);
     try {
       const grant = (

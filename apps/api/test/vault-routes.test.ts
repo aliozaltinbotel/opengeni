@@ -14,12 +14,9 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { SessionWorkflowClient } from "@opengeni/core";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 
@@ -211,6 +208,22 @@ describe("vault routes", () => {
     expect(items.status).toBe(200);
     expect(items.json.items.map((item: { name: string }) => item.name)).toEqual(["STRIPE_KEY"]);
     expect(JSON.stringify(items.json)).not.toContain("sk_test_route");
+    for (const flag of ["true", "1", "false"]) {
+      const withArchived = await call(
+        "GET",
+        `${base}/vaults/${team.json.id}/items?includeArchived=${flag}`,
+        asMember,
+      );
+      expect(withArchived.status).toBe(200);
+    }
+    // A bad query names the parameter at fault.
+    const badQuery = await call(
+      "GET",
+      `${base}/vaults/${team.json.id}/items?includeArchived=maybe`,
+      asMember,
+    );
+    expect(badQuery.status).toBe(422);
+    expect(JSON.stringify(badQuery.json)).toContain("includeArchived");
 
     // AX-7: the admin sees neither the Only-me vault nor its item.
     const adminList = await call("GET", `${base}/vaults`, asAdmin);

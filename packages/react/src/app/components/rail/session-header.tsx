@@ -1,10 +1,12 @@
+import { useOptionalAppContext } from "../../app-context";
+import { archiveActionLabel } from "../../lib/archive-session";
 // The session header bar — the slim canvas top strip's contents on a session
 // route. Split out of the session shell as a PURE, presentational component: it takes
 // plain session data + callbacks and renders the two-line identity block
 // (breadcrumb → title) on the left and the action cluster on the right
 // (provider+model·effort·speed, sandbox, pin, connection, status, panel).
 // The live children that need their own hooks — the sandbox switcher and the
-// codex account indicator — arrive as slots so the whole bar can be rendered
+// subscription account control — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in session-shell owns the
 // data wiring and passes the real slots.
 import { t } from "../../lib/console-text";
@@ -27,6 +29,7 @@ import {
   BellOffIcon,
   CalendarClockIcon,
   GaugeIcon,
+  LinkIcon,
   LockIcon,
   MoreHorizontalIcon,
   PanelRightCloseIcon,
@@ -38,8 +41,10 @@ import {
   ShieldCheckIcon,
   ShieldOffIcon,
   SmartphoneIcon,
+  ZapIcon,
+  ZapOffIcon,
 } from "lucide-react";
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
 import { BillingClassMark, type BillingClass } from "../billing-class-mark";
 import { ConnectionPill } from "../common";
@@ -56,13 +61,22 @@ import {
   DropdownMenuItem,
   DropdownMenuMeta,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { useChatOperations } from "../../lib/actions/chat-operations";
+import { RENAME_CURRENT_CHAT_EVENT } from "../../lib/actions/events";
 import { Skeleton } from "../../../ui/skeleton";
 import { requestConversationFind } from "../../lib/conversation-find-event";
 import { currentPhoneAppPlatform, openInAppUrl } from "../../lib/open-in-app";
 import { sessionControlPaused, sessionInputWait } from "../../lib/session-rail";
-import { useSessionStartup } from "../../lib/session-startup";
+import {
+  sessionAutomationWaitLines,
+  sessionAutomationWaitWords,
+} from "../../../components/automations/automation-model";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
+import { useSessionStartup } from "../../../lib/session-startup";
 import { isCodexProductModel } from "../../lib/session-model";
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -71,16 +85,22 @@ import {
   type InlineRename,
 } from "../../lib/session-rename";
 import { pinLiveAnnouncement } from "../../lib/pin-live-announcement";
-import type { SessionRepliesMute } from "../../lib/inbox";
+import { repliesMuteLabel, type SessionRepliesMute } from "../../lib/inbox";
 import { labelEffort, type IntelligenceEffort } from "../../lib/session-tools";
 import type { LatencyMode, Session } from "../../types";
 import { usePage } from "../../lib/navigation";
 import { useUiEventTarget } from "../../lib/ui-events";
 
+const SUBSCRIPTION_RAILS: ReadonlySet<BillingClass> = new Set([
+  "codex_subscription",
+  "claude_subscription",
+  "supergrok_subscription",
+]);
+
 export function SessionHeader({
   session,
   ancestors,
-  onOpenSchedule,
+  onOpenAutomations,
   lineageLoading,
   lineageError,
   connectionState,
@@ -96,7 +116,7 @@ export function SessionHeader({
   adminAccess,
   onOpenUsageLimit,
   sandboxSlot,
-  codexSlot,
+  accountSlot,
   accessSlot,
   leading,
   lastStartedModel,
@@ -111,10 +131,11 @@ export function SessionHeader({
   /** Root-to-direct-parent order. */
   ancestors: SessionSummary[];
   /**
-   * Present only when a scheduled task started this session. Opens that task on
-   * the Schedules page so the reader can see or edit what put this here.
+   * Present only when an automation posts into this session. Opens the
+   * Automations page filtered to this chat, so the reader can see or edit what
+   * puts runs here.
    */
-  onOpenSchedule?: ((() => void) | null) | undefined;
+  onOpenAutomations?: ((() => void) | null) | undefined;
   lineageLoading?: boolean | undefined;
   lineageError?: Error | null | undefined;
   connectionState: SessionEventsConnectionState;
@@ -134,7 +155,7 @@ export function SessionHeader({
    */
   repliesMute?: SessionRepliesMute | null | undefined;
   /**
-   * This session's admin access, when the viewer can see it on or give it.
+   * This session's full access, when the viewer can see it on or give it.
    * Absent hides the shield and the menu action.
    */
   adminAccess?: SessionAdminAccessControl | null | undefined;
@@ -146,10 +167,11 @@ export function SessionHeader({
   /** The "Run on <machine>" control — a live component in production. */
   sandboxSlot?: ReactNode | undefined;
   /**
-   * Replaces the static provider mark when the session is on Codex — same icon,
-   * clickable for account status/switch. Absent for host-credit sessions.
+   * Replaces the static provider mark when the session runs on a subscription
+   * (Codex, Claude, SuperGrok): the same mark, clickable for the account and
+   * its usage. Absent for other payment rails.
    */
-  codexSlot?: ReactNode | undefined;
+  accountSlot?: ReactNode | undefined;
   /** Compact session access state/menu, lazy-mounted by the route shell. */
   accessSlot?: ReactNode | undefined;
   /** Leading control (the mobile hamburger); absent on desktop. */
@@ -162,7 +184,7 @@ export function SessionHeader({
   lastStartedModel?: string | undefined;
   lastStartedReasoningEffort?: IntelligenceEffort | undefined;
   lastStartedLatencyMode?: LatencyMode | undefined;
-  /** Billing rail: Codex account chip, or the mark for makers without a logo. */
+  /** Billing rail: subscription account chip, or the mark for makers without a logo. */
   billingClass?: BillingClass | undefined;
   /** Product model label (e.g. GPT-5.6 Luna). */
   modelLabel?: string | undefined;
@@ -194,9 +216,10 @@ export function SessionHeader({
   const resolvedModel = modelLabel?.trim() || modelDisplayName(modelId);
   const displayEffort: IntelligenceEffort = lastStartedReasoningEffort ?? session.reasoningEffort;
   const displayLatency: LatencyMode = lastStartedLatencyMode ?? session.latencyMode;
-  // Codex → clickable account chip. Other rails → static provider icon only
-  // (never invent a text "Opengeni"/"BYOK" word). Don't key off `codexSlot != null`.
-  const isCodexRail = resolvedBilling === "codex_subscription";
+  // Subscription rails → clickable account chip, the same for every provider.
+  // Other rails → static provider icon only (never invent a text
+  // "Opengeni"/"BYOK" word). Don't key off `accountSlot != null`.
+  const isSubscriptionRail = SUBSCRIPTION_RAILS.has(resolvedBilling);
   const policyBits = [
     resolvedModel,
     labelEffort(displayEffort),
@@ -210,15 +233,29 @@ export function SessionHeader({
   ].filter((bit): bit is string => Boolean(bit));
   const rename = useInlineRename(session, onRename);
   const pin = useSessionPinToggle(session, onPin);
+  const context = useOptionalAppContext();
   const canArchive = Boolean(onArchive) && session.parentSessionId === null;
   const [grantAdminOpen, setGrantAdminOpen] = useState(false);
   // Menu actions that move focus (rename input, find field) run after the menu
   // has closed, so its focus restoration cannot steal focus back to the trigger.
   const afterMenuClose = useRef<(() => void) | null>(null);
-  const providerControl = isCodexRail ? (
-    (codexSlot ?? (
+  const chatOps = useChatOperations();
+  const findKeys = useActionShortcut("chat.find");
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
+  const archiveKeys = useActionShortcut("chat.archive");
+  const panelKeys = useActionShortcut("view.workspacePanel");
+  // "Rename" from the ⌘K menu or the desktop menu bar edits this title.
+  const startRenaming = rename.startEditing;
+  useEffect(() => {
+    const start = () => startRenaming();
+    uiEvents.addEventListener(RENAME_CURRENT_CHAT_EVENT, start);
+    return () => uiEvents.removeEventListener(RENAME_CURRENT_CHAT_EVENT, start);
+  }, [uiEvents, startRenaming]);
+  const providerControl = isSubscriptionRail ? (
+    (accountSlot ?? (
       <BillingClassMark
-        billingClass="codex_subscription"
+        billingClass={resolvedBilling}
         className="size-3.5 shrink-0 text-fg-muted"
         aria-label=""
       />
@@ -242,49 +279,43 @@ export function SessionHeader({
       className="@container/titlebar flex min-h-14 min-w-0 shrink-0 items-center gap-1 border-b border-border bg-canvas/80 pb-1 pl-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-left))] pr-[max(clamp(0.5rem,2.5vw,1.25rem),env(safe-area-inset-right))] pt-[max(0.375rem,env(safe-area-inset-top))] backdrop-blur supports-[backdrop-filter]:bg-canvas/65 flex-wrap"
     >
       {leading}
-      {/* The title takes every pixel the actions leave; it truncates last. */}
-      <div className="flex min-w-20 flex-[1_1_5rem] flex-col justify-center gap-0.5">
-        {/* Child sessions link back to the manager that spawned them, and a
-            session links to its current schedules. */}
-        <div className="flex min-w-0 items-center gap-1.5">
-          <SessionAncestryBreadcrumb
-            workspaceId={session.workspaceId}
-            parentSessionId={session.parentSessionId}
-            ancestors={ancestors}
-            loading={lineageLoading}
-            error={lineageError}
+      {/* One row for every chat, so the header is the same height whether or
+          not a chat has a parent, a Site or automations. The parent link
+          leads into the title; what only some chats have comes last, so the
+          title and access chips never move when a chat gains one. The title
+          takes every pixel the actions leave and truncates first. */}
+      <div className="flex min-w-20 flex-[1_1_5rem] items-center gap-1.5">
+        <SessionAncestryBreadcrumb
+          workspaceId={session.workspaceId}
+          parentSessionId={session.parentSessionId}
+          ancestors={ancestors}
+          loading={lineageLoading}
+          error={lineageError}
+        />
+        <SessionTitleEditor session={session} rename={rename} />
+        {/* Below lg the lifecycle is a dot beside the title; the full badge
+            and connection pill take over from lg. */}
+        <CompactSessionStatus
+          paused={sessionControlPaused(session)}
+          waiting={Boolean(waiting)}
+          status={displayStatus}
+          label={startupLabel}
+        />
+        {accessSlot}
+        {adminAccess ? (
+          <SessionAdminAccessIndicator
+            control={adminAccess}
+            onChangeTimeLimit={() => setGrantAdminOpen(true)}
           />
-          <SiteOriginLink session={session} />
-          {onOpenSchedule ? (
-            <button
-              type="button"
-              onClick={onOpenSchedule}
-              className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1.5 py-0.5 text-2xs text-fg-muted transition-colors hover:border-border-strong hover:text-fg"
-              title="Open schedules for this session"
-            >
-              <CalendarClockIcon aria-hidden className="size-3" />
-              Schedule
-            </button>
-          ) : null}
-        </div>
-        <div className="flex min-w-0 items-center gap-1.5">
-          <SessionTitleEditor session={session} rename={rename} />
-          {/* Below lg the lifecycle is a dot beside the title; the full badge
-              and connection pill take over from lg. */}
-          <CompactSessionStatus
-            paused={sessionControlPaused(session)}
-            waiting={Boolean(waiting)}
-            status={displayStatus}
-            label={startupLabel}
-          />
-          {accessSlot}
-          {adminAccess ? (
-            <SessionAdminAccessIndicator
-              control={adminAccess}
-              onChangeTimeLimit={() => setGrantAdminOpen(true)}
-            />
-          ) : null}
-        </div>
+        ) : null}
+        <SiteOriginLink session={session} />
+        {onOpenAutomations ? (
+          // Only the room the title and access chips leave: its words
+          // truncate before the title does, and at worst it is its icon.
+          <div className="flex min-w-6 flex-[1_1_0%] pointer-coarse:min-w-11">
+            <AutomationWaitChip session={session} onOpen={onOpenAutomations} />
+          </div>
+        ) : null}
       </div>
       <div className="ml-auto flex shrink-0 items-center justify-end gap-0.5 lg:min-w-0 lg:max-w-full lg:shrink lg:flex-wrap lg:gap-2">
         {/* Provider + model · effort · speed stay one cluster on the action side. */}
@@ -384,7 +415,11 @@ export function SessionHeader({
             size="icon-sm"
             onClick={onToggleInspector}
             aria-label={inspectorOpen ? "Hide workspace" : "Open workspace"}
-            title={inspectorOpen ? "Hide workspace" : "Open workspace"}
+            aria-keyshortcuts={panelKeys?.ariaKeys}
+            title={
+              (inspectorOpen ? "Hide workspace" : "Open workspace") +
+              (panelKeys ? ` (${panelKeys.label})` : "")
+            }
             className="pointer-coarse:size-11"
           >
             {inspectorOpen ? (
@@ -420,12 +455,14 @@ export function SessionHeader({
           >
             <DropdownMenuItem
               className="lg:hidden"
+              aria-keyshortcuts={findKeys?.ariaKeys}
               onSelect={() => {
                 afterMenuClose.current = () => requestConversationFind(uiEvents);
               }}
             >
               <SearchIcon />
               Find
+              {findKeys ? <DropdownMenuShortcut>{findKeys.label}</DropdownMenuShortcut> : null}
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => {
@@ -436,12 +473,24 @@ export function SessionHeader({
               Rename
             </DropdownMenuItem>
             <DropdownMenuItem
+              aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+              onSelect={() => void chatOps.copyLink(session)}
+            >
+              <LinkIcon />
+              Copy link
+              {copyLinkKeys ? (
+                <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut>
+              ) : null}
+            </DropdownMenuItem>
+            <DropdownMenuItem
               className="lg:hidden"
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               disabled={pin.busy}
               onSelect={() => pin.toggle()}
             >
               <PinIcon className={session.pinned ? "fill-current" : undefined} />
               {session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
             </DropdownMenuItem>
             {currentPhoneAppPlatform() ? (
               <DropdownMenuItem
@@ -461,7 +510,7 @@ export function SessionHeader({
             {repliesMute ? (
               <DropdownMenuItem disabled={repliesMute.busy} onSelect={() => repliesMute.toggle()}>
                 {repliesMute.muted ? <BellIcon /> : <BellOffIcon />}
-                {repliesMute.muted ? "Unmute replies" : "Mute replies"}
+                {repliesMuteLabel(repliesMute)}
               </DropdownMenuItem>
             ) : null}
             {onOpenUsageLimit ? (
@@ -477,7 +526,7 @@ export function SessionHeader({
             {adminAccess?.state.active && adminAccess.state.canRevoke ? (
               <DropdownMenuItem disabled={adminAccess.busy} onSelect={() => adminAccess.revoke()}>
                 <ShieldOffIcon />
-                Turn off admin access
+                Turn off full access
               </DropdownMenuItem>
             ) : adminAccess && !adminAccess.state.active && adminAccess.state.canGrant ? (
               <DropdownMenuItem
@@ -487,16 +536,27 @@ export function SessionHeader({
                 }}
               >
                 <ShieldCheckIcon />
-                Give admin access…
+                Give full access…
               </DropdownMenuItem>
             ) : null}
             {canArchive ? (
               <>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => void onArchive?.(session, !session.archived)}>
+                <DropdownMenuItem
+                  aria-keyshortcuts={archiveKeys?.ariaKeys}
+                  onSelect={() => void onArchive?.(session, !session.archived)}
+                >
                   {session.archived ? <ArchiveRestoreIcon /> : <ArchiveIcon />}
-                  {session.archived ? "Restore" : "Archive"}
-                  {session.archived ? <DropdownMenuMeta>Archived</DropdownMenuMeta> : null}
+                  {context
+                    ? archiveActionLabel(context, session)
+                    : session.archived
+                      ? "Restore"
+                      : "Archive"}
+                  {session.archived ? (
+                    <DropdownMenuMeta>Archived</DropdownMenuMeta>
+                  ) : archiveKeys ? (
+                    <DropdownMenuShortcut>{archiveKeys.label}</DropdownMenuShortcut>
+                  ) : null}
                 </DropdownMenuItem>
               </>
             ) : null}
@@ -511,6 +571,73 @@ export function SessionHeader({
         ) : null}
       </div>
     </header>
+  );
+}
+
+/**
+ * The automations that post into this chat: what they wait for in a few
+ * words, every wait on hover, and their settings on click. A paused or
+ * finished automation still links to its settings, marked inactive. Narrow
+ * headers keep only the icon; its name always carries the whole wait.
+ */
+function AutomationWaitChip({ session, onOpen }: { session: Session; onOpen: () => void }) {
+  const now = new Date();
+  const wait = sessionAutomationWaitWords(t, session, { now });
+  const lines = sessionAutomationWaitLines(t, session, { now });
+  const kind = wait?.kind ?? "none";
+  return (
+    <HoverCard openDelay={150} closeDelay={80}>
+      <HoverCardTrigger asChild>
+        <button
+          type="button"
+          onClick={onOpen}
+          data-automation-wait={kind}
+          aria-label={t("automations.wait.openPanel", {
+            wait: wait?.label ?? t("automations.wait.none"),
+          })}
+          className="inline-flex min-w-0 max-w-60 items-center gap-1 rounded-full px-1.5 text-2xs text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-ring/55 pointer-coarse:min-h-11"
+        >
+          <AutomationWaitIcon kind={kind} />
+          <span className="hidden min-w-0 truncate sm:block @max-[34rem]/titlebar:hidden!">
+            {wait?.short ?? t("sessionChrome.automation")}
+          </span>
+        </button>
+      </HoverCardTrigger>
+      <HoverCardContent
+        collisionPadding={8}
+        className="w-auto min-w-56 max-w-[min(22rem,calc(100vw-16px))] p-3"
+      >
+        <div data-automation-wait-details="" className="grid min-w-0 gap-2.5">
+          <p className="text-xs font-medium text-fg">{t("automations.wait.details.heading")}</p>
+          <ul className="grid min-w-0 gap-1.5">
+            {lines.map((line) => (
+              <li
+                key={line.text}
+                className="flex min-w-0 items-start gap-2 text-xs leading-4 text-fg-muted"
+              >
+                <span className="flex size-4 shrink-0 items-center justify-center text-fg-subtle">
+                  <AutomationWaitIcon kind={line.kind} />
+                </span>
+                <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{line.text}</span>
+              </li>
+            ))}
+          </ul>
+          <p className="border-t border-border pt-2 text-2xs text-fg-subtle">
+            {t("automations.wait.details.open")}
+          </p>
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+function AutomationWaitIcon({ kind }: { kind: "event" | "schedule" | "none" }) {
+  return kind === "event" ? (
+    <ZapIcon aria-hidden className="size-3 shrink-0" />
+  ) : kind === "schedule" ? (
+    <CalendarClockIcon aria-hidden className="size-3 shrink-0" />
+  ) : (
+    <ZapOffIcon aria-hidden className="size-3 shrink-0" />
   );
 }
 

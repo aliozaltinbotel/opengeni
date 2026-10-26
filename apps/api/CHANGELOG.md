@@ -1,5 +1,776 @@
 # @opengeni/api-router
 
+## 5.3.1
+
+### Minor Changes
+
+- e3782bb: Automation templates and a "This workspace" event source.
+
+  - **Templates.** A template is where a new automation starts: its message, a schedule without a time zone, and event triggers that name a kind of source. Using one opens the ordinary form filled in; nothing is created until the person saves. `@opengeni/react/automations` ships built-in templates (`builtinAutomationTemplates(t)`, including "Meeting notes"), and `AutomationsPanel` takes `templates` (the host's own), `workspaceTemplates` (offer and save the workspace's saved templates, on by default) and `workspaceEvents` (offer this workspace's own events as a source, off by default). The new-automation view offers "Start from scratch", the host's templates and the saved ones; an automation's menu has "Save as template". `useEventSourceStandIns`, `AutomationTemplateList`, `AutomationTemplateTile` and `AutomationTemplateDialog` are exported for hosts that build their own.
+  - **Saved templates.** Workspaces keep the templates their people save: `GET`/`POST /v1/workspaces/:workspaceId/automation-templates` and `PATCH`/`DELETE …/:templateId`, with `listAutomationTemplates`, `createAutomationTemplate`, `updateAutomationTemplate` and `deleteAutomationTemplate` in the SDK. Reading needs `scheduled_tasks:run`, saving needs `scheduled_tasks:manage`; whoever saved a template and workspace admins can rename or delete it (`viewerAccess`). A workspace keeps up to 200; saving more returns 409.
+  - **"This workspace" source.** `createEventSource({ kind: "workspace" })` creates the caller's own source for the workspace's recording events (`recording.started`, `recording.finished`, `recording.transcript.ready` and the rest). It reads under the owner's row security, so a trigger only sees the meetings its owner may open.
+
+- f3d19a2: Bitwarden and Vaultwarden connect directly, like the other password managers. A new package, `@opengeni/vaults-bitwarden`, talks to the server's client API with the account's personal API key and decrypts items itself, so connecting needs only the server address, the API key and the master password, entered once. No bridge program or Bitwarden CLI runs anywhere, and nothing has to be unlocked by hand. Opengeni stores the API key, the server's addresses and the account's user key; the master password is used during setup and never stored. Works with Bitwarden Cloud (US and EU), self-hosted Bitwarden and Vaultwarden.
+
+  The account sees My vault and every organization collection it belongs to, each as its own vault, read-only where the collection is. A hide-passwords collection allows plain fields but refuses passwords, one-time passwords and files. Values are read live on every use and never cached. Writes create logins and notes, patch fields and move items to Bitwarden's trash, and a write that raced another client is a conflict instead of an overwrite.
+
+  Breaking for Bitwarden connections only: the Bitwarden credential is now `{ provider: "bitwarden", serverUrl, clientId, clientSecret, masterPassword }`, Bitwarden is no longer a remote provider on the signed `opengeni.vault.v1` protocol (`VaultProviderWireProvider` is `"external"` only), and a connection saved with the old bridge settings reports that it must be removed and connected again. The bridge package is gone. The shared provider operation helpers Keeper and Proton Pass used now live in `@opengeni/vaults`.
+
+- 21e7ecf: Feedback can now carry where it came from and what the person saw. `createFeedback` accepts an optional `context` (source, how it was opened, app version and build, OS, device model, the screen in view, locale, time zone and up to ten recent errors) and up to three JPEG or PNG `screenshots` of at most 3 MiB each. Screenshots are stored in object storage under create-only, content-addressed keys, so an identical retry stores nothing new, and returned feedback lists each one's index, type, size and SHA-256. The author can read an image with `GET /v1/workspaces/:workspaceId/feedback/:feedbackId/screenshots/:index`. In the phone app, shaking the phone opens Send feedback with a screenshot of the current screen (removable before sending); reports wait on the phone and retry until the server accepts them, and Settings has a Send feedback row and a Shake to send feedback toggle.
+- f9f0607: Event sources that need no setting up are ready to use. An MCP server the person is signed in to that offers events, a Gmail account they connected and "This workspace" are listed by `GET /v1/workspaces/:workspaceId/event-sources/ready` (`client.listReadyEventSources`) with a key such as `mcp-server:<serverId>`, `gmail:<connectionId>` or `workspace`. A trigger's `sourceId` can be that key: saving adds the person's own source behind it, or reuses the one they have. Agents see them under `readyToAdd` in `event_sources_list` and can set up an automation on one without anyone adding a source first. `AutomationsPanel` and the web app's form offer them in the source picker; `useEventSourceStandIns` takes `readySources`, and stand-in ids are now the ready keys.
+- 119f33d: Add independently gated Microsoft Teams agent tools and linked Teams conversations, with durable admission and delivery, private-message authority checks, and workspace setup APIs. Both integrations remain disabled by default.
+
+### Patch Changes
+
+- c8ddf55: A browser or computer action batch that legitimately runs longer than a minute (for example waiting for an upload, filling a field, pressing Enter and then waiting up to 90 seconds for a reply) now completes and returns its normal receipt instead of failing with "The workspace is temporarily unavailable". Each action request gets a deadline derived from its own declared waits: the sum of each action's longest wait, plus the settle after page input, plus a fixed margin. It is never less than the previous one minute and never more than 20 minutes. Every layer that carries the request honours that deadline: the API's controller request on every transport, the Connected Machine runner (whose cap rises from 15 to 20 minutes) and its reply timer, the socket idle timers of the API-to-controller and tool-to-API requests, and the API and browser controller servers, which no longer apply their idle timeout to a running action. A request that still outlives its deadline (or an older runner's 15-minute cap) is not retried and returns `504 action_timeout`, telling the agent that the action may still be running and to check the page or window before doing anything again. `@opengeni/contracts` exports the shared wait and settle bounds and `browserActionDeadlineMs` / `computerActionDeadlineMs`.
+- e7f5d38: A new chat that starts with a file attached now reuses the cached prompt of a chat without one. Before, a turn with a file added an "Attached files" section to the system instructions and the sandbox's mount policy and filesystem layout listed the file, so the whole request missed the provider's prompt cache. The instructions no longer depend on the turn's files; that guidance now ends the turn's attachment notice, after history. Uploads completed without a client sha256 now get one computed from the stored bytes (files up to 20 MiB), so an image uploaded through the plain REST flow reaches the model inline like an SDK upload instead of only as a mounted file.
+- 75dcbac: Batch concurrently pending command-completion lookups for the same runner process using the existing inventory classifier. This reduces database round trips for completion bursts without caching authority, changing collector concurrency, or suppressing retries for exits that race background adoption. Notification receipts and output custody are unchanged.
+- f6f112a: Saving a browser recording now works when the browser runs on a machine with a slow link to storage. Previously a save waited for the whole recording to upload inside one request; anything that took longer than a minute failed, and every retry started the upload from scratch.
+
+  The browser host now uploads the recording in the background. A save waits up to 45 seconds and then answers `202` with `retryAfterMs`. Repeating the save with the same `operationId` joins the upload that is already running. The SDK's `saveBrowserRecording` repeats the request until the save completes, or until its signal aborts.
+
+  Staged recording objects are scheduled for deletion on a durable deadline, so a save that is never repeated leaves nothing behind. Controllers that predate background uploads are still waited on in a single request.
+
+- 2dc5e41: An agent's browser recording is now a recording, so it is stored, owned, shared and deleted like any other. Saving one makes a recording whose purpose is `browser`, with one video track from the browser tab whose chunk is the frame bundle the browser host uploads. The worker encodes the MP4 and its action log in the background instead of the API encoding it inside the save request, then the save copies both into the chat's files and publishes the video as before. While the video is being made, the save answers 202 with `state: "encoding"`, and the SDK keeps repeating it as it does while uploading. The recording follows the chat: a private chat's recording is its owner's and private; a shared chat's belongs to the person the agent acts for. Meeting lists show meetings only, and browser recordings have no transcripts. A recording's tracks now say their `kind` (`audio` or `video`) and, for a video, its size and frame count; a recording says its `purpose` and, if its video failed, an `errorCode`. Migration 0945 adds the columns.
+- 62595d1: `/v1/config/client` now reports `auth.emailVerificationRequired` from the same setting the server enforces (`OPENGENI_MANAGED_AUTH_REQUIRE_EMAIL_VERIFICATION`, defaulting to required outside local). A managed deployment that turns verification off no longer tells new people that a verification link was sent when none is.
+- d6c7c4a: The agent now continues on its own after a person finishes setting up a capability from the agent's connect or add-credentials card, instead of waiting for them to say they are done. After setup is verified, the shared chat cards (and the OAuth return handlers) call the new `POST /v1/workspaces/:workspaceId/sessions/:sessionId/capability-continuations` endpoint (`client.continueAfterCapabilitySetup`). The API records one immediate `capability_setup_completed` internal update per card, and only when the capability is now usable in that chat, nobody has written since the card, and the caller is the person whose request it was. The agent sees one short internal update saying the setup is finished and its tools are available. Failed or cancelled setup sends nothing.
+
+  `SessionConversation` and `OpenGeniChat` now render the shared connect card for the agent's OAuth capability requests with no host code, when the person's grant allows every setup step; otherwise the card says the integration can't be connected from here instead of showing a dead end. The session proxy reports a new `chatConnections` client-config field (`false` when its `createSession` hook owns chat tools), and `timelineProps.renderAuthNeeded` still takes precedence.
+
+- 41bff65: Event source routing keeps no provider identity. The route table has no tenant RLS, so a GitHub route is now keyed by an HMAC of the installation under a secret derived from the deployment's encryption key, and Slack and Gmail sources need no route at all: Slack callbacks already arrive resolved to their workspace and Gmail is read, not delivered. Migration 0941 removes the old plain routes; adding a GitHub source again recomputes its routes. The GitHub binding writers take the route secret as `eventRouteSecret` (`eventRouteSecret(settings)` from `@opengeni/core`). A deployment without `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` can't add a GitHub source.
+- 92d7a2e: Reuse one fresh tenant-scoped public metadata read for the HTTP model catalog, removing redundant transaction setup without caching authorization or provider readiness.
+- 627b2f1: Google Calendar can now be connected from the chat or the Capabilities page, like Gmail: each person connects their own calendar with the deployment's existing Google sign-in app, and the agent can list events in a time range, read one event, check free/busy times, and create, move or delete events. Changes ask first by default, guests are emailed only when asked, and every answer uses the calendar's own time zone. Operators enable it with `OPENGENI_GOOGLE_CALENDAR_ENABLED=true` after enabling the Google Calendar API and adding the `calendar.calendarlist.readonly`, `calendar.events` and `calendar.freebusy` scopes to their Google consent screen.
+- 826b002: Agents can find and read recorded meetings with two new first-party tools. `meetings_search` finds the meetings the person can see by words said or in the title, a named speaker, a start-time range or a product's reference, newest first, with each meeting's speakers and the transcript lines that matched. `meeting_read` reads one meeting's details and its transcript as speaker-named, timestamped lines with names and corrections applied, in parts or for a stretch such as 12:00 to 15:00, and reads the live preview while a meeting is still being recorded. Both are searchable (deferred) tools in the knowledge group and need `sessions:read`. The recordings list in the API and SDK also gains `person`, `startedFrom` and `startedTo` filters.
+- d6c7c4a: New `connections:personal` permission: connect your own accounts and use them in your own chats without administering the workspace. It allows creating, listing and removing only the caller's own (personal) connections, signing in to one's own account through Connect, and turning a reviewed catalog OAuth integration on for personal accounts when it is not on yet (create-only, subject-scoped, no credentials or config, within the organization integration policy). It never covers custom MCP servers, shared or workspace connections, other people's connections, or disabling or reconfiguring integrations. `connections:write` includes it, so existing roles, keys and organization key policies keep their meaning, and workspace Members can now turn such an integration on for their own accounts. Once on, the integration is visible to the workspace's other members as optional; each must connect their own account.
+
+  Organizations can reserve this for admins with the new `personalIntegrationSetup` integration policy setting (`members` by default, `admins`), also in Organization settings → Integrations (migration 0974).
+
+  Embeds: per-user workspaces now get `connections:personal` by default, and the new `identities` option (`"per_user"` or `"shared"`) on the `Opengeni` facade and `createWorkspaceIdResolver` decides it for tenant workspaces: `per_user` adds signed-in tenant users with it, `shared` keeps it off everywhere. `memberPermissions` still overrides both. The shared connect card and the stock conversation's in-chat connect decision use the new `personalIntegrationSetupAccess` helper from `@opengeni/contracts/personal-integration-setup`, offering only a personal connection when that is all the person may do.
+
+- e5446f1: Recordings can tell speakers apart without the transcription model's help: the worker runs its own CPU diarizer (pyannote segmentation and CAM++ voice vectors on ONNX Runtime), chosen with `diarizer: "ours"` per request or in workspace recording settings, and used automatically when the model has no diarization.
+- 83682c3: Meetings can recognize people by voice. It is off by default. When a workspace turns on `settings.recordings.voiceprints`, each diarized speaker's voice vector is kept with the transcript. People who agreed to be remembered get a voiceprint learned from the speakers named as them, and new transcripts suggest them by name with a confidence. The new routes are `PUT` and `DELETE /v1/workspaces/:workspaceId/recording-people/:personId/voice`. A member agrees with `self` consent, and someone from outside the workspace with `attested` consent. Turning the setting off forgets every voice. `PATCH …/speakers` takes `rejectSuggestions` to turn a suggestion down. The SDK adds `rememberRecordingPersonVoice` and `forgetRecordingPersonVoice`, `useRecordingPeople` adds `rememberVoice` and `forgetVoice`, and `useTranscript` adds `rejectSuggestion`.
+- efd5e62: Repeating event triggers keep an automation running after its schedule's last run: a spent one-time date or an ended interval no longer pauses an automation that still listens for events (migration 0951). A blocked run's owner notice now says whether more runs follow from the automation's triggers too, so a finished run-once automation no longer claims it keeps trying. Blocker review facts carry the automation's event policy as `task.events`.
+- 0383280: User messages can now carry the sender's IANA time zone (`timeZone`) on `user.message` events, steer requests, composer submits and the initial message of a new session. The server validates the name, freezes it with the accepted turn, and the agent sees the sender's local time first, for example `[Message sent Sunday 2026-10-25 09:08 Europe/Oslo (08:08 UTC) by Ada]`. Messages without a zone render exactly as before. The zone is not part of a message's idempotency identity, so a retry that names another zone (or none) replays the original message. Published Sites forward their viewer's zone the same way.
+
+  The SDK client fills the zone automatically on a person's device (browser, desktop app, React Native) from `Intl.DateTimeFormat().resolvedOptions().timeZone` when the caller did not pass one. Server-side callers never attach their own zone. Pass `messageTimeZone: false` in the client options to opt out. When an older server rejects the field, the client retries the message once without it.
+
+  Schedules an agent creates or edits without a `timeZone` now use the zone of the message that asked for them instead of UTC (or, in a turn no person's message started, the chat's latest message that had a zone); an edited schedule keeps its current zone, and UTC applies only when there is neither. The create and update receipts report the zone that was used (`facts.scheduleTimeZone`). Requests from people and schedules that name a zone are unchanged.
+
+- 1a7c434: An answer the agent gives before waiting is now shown exactly as written. `wait_for_input` takes a `reply` argument that becomes the agent's message, and agents are told to use it whenever the turn answers someone. Before, Claude Opus 5.5 and Sonnet 5.5 returned an answer written just before the wait as a progress update, so people saw only a one-paragraph summary of it, without its images or tables.
+- 1e30d5c: Reuse the verified workspace account when client config checks subscription-backed voice readiness, avoiding redundant workspace hydration while retaining fresh provider checks.
+- 286058a: New optional `OPENGENI_WEBHOOK_BASE_URL`: the public address other services send webhooks to, when it is not `OPENGENI_PUBLIC_BASE_URL`. Event source webhook URLs, the GitHub App's webhook URL and MCP Events callback URLs use it, so a deployment whose console is reachable only on a private network can publish just the signed webhook paths at another address. Unset, everything uses `OPENGENI_PUBLIC_BASE_URL` as before.
+- 7c02dbd: Windows computer use can type into and click the app it just opened. Before input, the Windows backend brings the target window to the front itself: it dismisses Start or Search if one of them holds the foreground, restores a minimized window, activates it while attached to the foreground thread, and as a last resort clicks the window's own title bar. Only when all of that fails does it refuse, naming the window that kept the front, and none of the action's input is sent. After keyboard input the foreground goes back to the window that had it, as CUA itself does. After a click the clicked window deliberately stays in front, unlike CUA, so a menu or popup the click opened is not closed. Nothing is given back to a dismissed Start or Search, the desktop or the taskbar. A Windows "window was not in front" error from CUA is reported as retryable with nothing sent only when CUA says no input was sent; after a click CUA already sent, it is an unknown outcome to check before acting again.
+
+  The Windows CUA tool catalog is regenerated from the bundled CUA 0.37 driver, so the native `cua_*` tools no longer fail with "CUA tool schema differs from this release". Each generated catalog now records the CUA version it came from, and a test fails unless every catalog names the `@trycua/cua-driver` version browserd pins.
+
+  `computer_open` accepts `includeScreenshot`, like `browser_open`: the result then also carries a still image of the screen with its frame id and pixel size. With several screens it captures the one the computer works in, else the focused one or the one showing the focused window, and it returns no image when the screen changed while it was captured.
+
+  A rejected computer session request body now names the first rejected field, for example `invalid request body: expectedFrameId: pointer action frameId must match expectedFrameId`.
+
+- Updated dependencies [c8ddf55]
+- Updated dependencies [de7e142]
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [1988e97]
+- Updated dependencies [0676499]
+- Updated dependencies [4b3f4b7]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [2ae88c7]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [6e50f56]
+- Updated dependencies [8b08c70]
+- Updated dependencies [7023400]
+- Updated dependencies [cccd692]
+- Updated dependencies [3e52c3c]
+- Updated dependencies [7ccc761]
+- Updated dependencies [f8ed9e5]
+- Updated dependencies [22cfb09]
+- Updated dependencies [a59ecc1]
+- Updated dependencies [226bb1d]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [bbc8f6d]
+- Updated dependencies [392db50]
+- Updated dependencies [f6f3ed1]
+- Updated dependencies [31bca3c]
+- Updated dependencies [41bff65]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [5c4cf54]
+- Updated dependencies [627b2f1]
+- Updated dependencies [0854838]
+- Updated dependencies [2c34440]
+- Updated dependencies [ae5963e]
+- Updated dependencies [c307566]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [e9dae07]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [baf128f]
+- Updated dependencies [4695d41]
+- Updated dependencies [1ac6e9d]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [fa00bb2]
+- Updated dependencies [e0f94c2]
+- Updated dependencies [f9f0607]
+- Updated dependencies [a42a3b5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [986d7e0]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [3c486ea]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [efd5e62]
+- Updated dependencies [67f9ca6]
+- Updated dependencies [2b72f7c]
+- Updated dependencies [48cb71a]
+- Updated dependencies [a5e68e4]
+- Updated dependencies [a6f6c56]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [eafdd84]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [7c9904b]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [19d9791]
+- Updated dependencies [c665cd4]
+- Updated dependencies [0383280]
+- Updated dependencies [1a7c434]
+- Updated dependencies [1e30d5c]
+- Updated dependencies [286058a]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/runtime@5.3.0
+  - @opengeni/observability@5.3.0
+  - @opengeni/db@5.3.0
+  - @opengeni/config@5.3.0
+  - @opengeni/core@5.3.0
+  - @opengeni/network@5.3.0
+  - @opengeni/vaults-bitwarden@5.3.0
+  - @opengeni/vaults@5.3.0
+  - @opengeni/vaults-keeper@5.3.0
+  - @opengeni/vaults-protonpass@5.3.0
+  - @opengeni/vaults-onepassword@5.3.0
+  - @opengeni/capabilities@5.3.0
+  - @opengeni/events@5.3.0
+  - @opengeni/artifact-tool@5.3.0
+  - @opengeni/codemode@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/documents@5.3.0
+  - @opengeni/github@5.3.0
+  - @opengeni/interaction@5.3.0
+  - @opengeni/storage@5.3.0
+  - @opengeni/tool-gateway@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+  - @opengeni/agent-proto@5.3.0
+
+## 5.2.1
+
+### Patch Changes
+
+- ce2b092: Ending a browser or Desktop that is still running on a Connected Machine its task has since moved away from now ends it in one call: the move is recorded, its controller is stopped on the former machine, and the end completes. Previously the first End failed with "belonged to a previous task placement and was retired" and left it lost, and only a second End finished it.
+- Updated dependencies [e1126c2]
+- Updated dependencies [fb72b9d]
+- Updated dependencies [9413acc]
+  - @opengeni/codex@5.2.0
+  - @opengeni/db@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/core@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/runtime@5.2.0
+  - @opengeni/documents@5.2.0
+  - @opengeni/events@5.2.0
+  - @opengeni/artifact-tool@5.2.0
+  - @opengeni/capabilities@5.2.0
+  - @opengeni/codemode@5.2.0
+  - @opengeni/github@5.2.0
+  - @opengeni/interaction@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/storage@5.2.0
+  - @opengeni/tool-gateway@5.2.0
+  - @opengeni/vaults@5.2.0
+  - @opengeni/vaults-keeper@5.2.0
+  - @opengeni/vaults-onepassword@5.2.0
+  - @opengeni/vaults-protonpass@5.2.0
+  - @opengeni/agent-proto@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/xai-subscription@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [4e1a73f]
+- Updated dependencies [442354f]
+  - @opengeni/db@5.1.0
+  - @opengeni/runtime@5.1.0
+  - @opengeni/core@5.1.0
+  - @opengeni/documents@5.1.0
+  - @opengeni/events@5.1.0
+  - @opengeni/codemode@5.1.0
+  - @opengeni/agent-proto@5.1.0
+  - @opengeni/artifact-tool@5.1.0
+  - @opengeni/capabilities@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/github@5.1.0
+  - @opengeni/interaction@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/storage@5.1.0
+  - @opengeni/tool-gateway@5.1.0
+  - @opengeni/vaults@5.1.0
+  - @opengeni/vaults-keeper@5.1.0
+  - @opengeni/vaults-onepassword@5.1.0
+  - @opengeni/vaults-protonpass@5.1.0
+  - @opengeni/xai-subscription@5.1.0
+
+## 5.0.2
+
+### Minor Changes
+
+- 487bd43: External users have an inbox. A product's own users (external actors resolved through its organization key) now receive their sessions' questions, approvals, paused goals and agent notifications in an Opengeni inbox, as members do, and `notify_user` delivers to them instead of reporting `no_human_recipient`. `createSessionProxyHandler` relays the user's own inbox: `GET /v1/inbox` and `PATCH /v1/inbox/items/{id}` limited to the resolved workspace, and `GET`/`PUT /v1/inbox/settings`, so the stock app shows it behind a product's sign-in. `PATCH /v1/inbox/items/{id}` accepts `workspaceId` to act only on an item in that workspace. Phone pushes still need an Opengeni native-app sign-in.
+- 171cdb7: Organization owners and admins can turn Personal workspaces off under Security & data. Off hides them from the workspace switcher and landing, refuses new chats and schedules there, and routes Slack direct messages to a shared workspace; each person's machines, browsers and vaults keep working from shared workspaces, and existing chats stay reachable.
+
+### Patch Changes
+
+- 93bd89d: Chrome profiles on a personal or organization-wide Connected Machine now appear and open in every workspace where that machine can be used, not only the workspace it was enrolled in. Browser and computer sessions record which workspace their profile is stored in, keep using that exact profile, and end when its Chrome restarts. Deleting the workspace a profile is stored in is never blocked by sessions elsewhere that used it. Ending a browser or computer session in a Chrome profile always succeeds: when the profile is disconnected, has restarted, is gone or can no longer be reached from the session's workspace, the end completes in the control plane instead of failing with not found.
+- b872089: Continuing another member's waiting work now also requires that the machine owner can control that chat, the same session authorization every other chat route applies.
+- ca3f931: Workspace control events now reach a reader only for chats that reader can see; a cursor-only frame keeps hidden events from stalling the reader. Session start notices accept machinesEnabled so viewers without machine access never request the machine list.
+- Updated dependencies [93bd89d]
+- Updated dependencies [b331283]
+- Updated dependencies [ca3f931]
+- Updated dependencies [960ae8d]
+- Updated dependencies [487bd43]
+- Updated dependencies [3f6fd05]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [2ffad67]
+- Updated dependencies [6d29c01]
+- Updated dependencies [217ed52]
+  - @opengeni/db@5.0.0
+  - @opengeni/runtime@5.0.0
+  - @opengeni/events@5.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/core@5.0.0
+  - @opengeni/documents@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/artifact-tool@5.0.0
+  - @opengeni/capabilities@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/github@5.0.0
+  - @opengeni/interaction@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/storage@5.0.0
+  - @opengeni/tool-gateway@5.0.0
+  - @opengeni/vaults@5.0.0
+  - @opengeni/vaults-keeper@5.0.0
+  - @opengeni/vaults-onepassword@5.0.0
+  - @opengeni/vaults-protonpass@5.0.0
+  - @opengeni/agent-proto@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- b0d752d: Batch artifact-list source-session authorization reads within existing response windows, while preserving per-source host authorization and a separate post-host visibility check.
+- Updated dependencies [b0d752d]
+- Updated dependencies [85fb89e]
+- Updated dependencies [e4712be]
+- Updated dependencies [238c599]
+  - @opengeni/db@4.8.0
+  - @opengeni/core@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/runtime@4.8.0
+  - @opengeni/documents@4.8.0
+  - @opengeni/events@4.8.0
+  - @opengeni/codemode@4.8.0
+  - @opengeni/artifact-tool@4.8.0
+  - @opengeni/capabilities@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/github@4.8.0
+  - @opengeni/interaction@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/storage@4.8.0
+  - @opengeni/tool-gateway@4.8.0
+  - @opengeni/vaults@4.8.0
+  - @opengeni/vaults-keeper@4.8.0
+  - @opengeni/vaults-onepassword@4.8.0
+  - @opengeni/vaults-protonpass@4.8.0
+  - @opengeni/agent-proto@4.8.0
+  - @opengeni/network@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- Updated dependencies [c6499fc]
+- Updated dependencies [9efd9b3]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [106b430]
+- Updated dependencies [7892bb5]
+- Updated dependencies [8301382]
+- Updated dependencies [61ec823]
+- Updated dependencies [b3fc68b]
+  - @opengeni/runtime@4.7.2
+  - @opengeni/contracts@4.7.2
+  - @opengeni/db@4.7.2
+  - @opengeni/codemode@4.7.2
+  - @opengeni/vaults-onepassword@4.7.2
+  - @opengeni/core@4.7.2
+  - @opengeni/artifact-tool@4.7.2
+  - @opengeni/capabilities@4.7.2
+  - @opengeni/codex@4.7.2
+  - @opengeni/config@4.7.2
+  - @opengeni/documents@4.7.2
+  - @opengeni/events@4.7.2
+  - @opengeni/github@4.7.2
+  - @opengeni/interaction@4.7.2
+  - @opengeni/observability@4.7.2
+  - @opengeni/storage@4.7.2
+  - @opengeni/tool-gateway@4.7.2
+  - @opengeni/vaults@4.7.2
+  - @opengeni/vaults-keeper@4.7.2
+  - @opengeni/vaults-protonpass@4.7.2
+  - @opengeni/agent-proto@4.7.2
+  - @opengeni/network@4.7.2
+  - @opengeni/xai-subscription@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- Updated dependencies [2138bba]
+  - @opengeni/db@4.7.1
+  - @opengeni/core@4.7.1
+  - @opengeni/documents@4.7.1
+  - @opengeni/events@4.7.1
+  - @opengeni/agent-proto@4.7.1
+  - @opengeni/artifact-tool@4.7.1
+  - @opengeni/capabilities@4.7.1
+  - @opengeni/codemode@4.7.1
+  - @opengeni/codex@4.7.1
+  - @opengeni/config@4.7.1
+  - @opengeni/contracts@4.7.1
+  - @opengeni/github@4.7.1
+  - @opengeni/interaction@4.7.1
+  - @opengeni/network@4.7.1
+  - @opengeni/observability@4.7.1
+  - @opengeni/runtime@4.7.1
+  - @opengeni/storage@4.7.1
+  - @opengeni/tool-gateway@4.7.1
+  - @opengeni/vaults@4.7.1
+  - @opengeni/vaults-keeper@4.7.1
+  - @opengeni/vaults-onepassword@4.7.1
+  - @opengeni/vaults-protonpass@4.7.1
+  - @opengeni/xai-subscription@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- Updated dependencies [bf88717]
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [5e3fb3c]
+- Updated dependencies [0e9e59e]
+- Updated dependencies [afb32f5]
+- Updated dependencies [1ea2039]
+- Updated dependencies [7308de5]
+- Updated dependencies [b8452ee]
+  - @opengeni/runtime@4.7.0
+  - @opengeni/db@4.7.0
+  - @opengeni/config@4.7.0
+  - @opengeni/core@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/documents@4.7.0
+  - @opengeni/events@4.7.0
+  - @opengeni/github@4.7.0
+  - @opengeni/storage@4.7.0
+  - @opengeni/artifact-tool@4.7.0
+  - @opengeni/capabilities@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/interaction@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/tool-gateway@4.7.0
+  - @opengeni/vaults@4.7.0
+  - @opengeni/vaults-keeper@4.7.0
+  - @opengeni/vaults-onepassword@4.7.0
+  - @opengeni/vaults-protonpass@4.7.0
+  - @opengeni/agent-proto@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [d0eb91c]
+  - @opengeni/db@4.6.0
+  - @opengeni/codemode@4.6.0
+  - @opengeni/runtime@4.6.0
+  - @opengeni/core@4.6.0
+  - @opengeni/documents@4.6.0
+  - @opengeni/events@4.6.0
+  - @opengeni/agent-proto@4.6.0
+  - @opengeni/artifact-tool@4.6.0
+  - @opengeni/capabilities@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/github@4.6.0
+  - @opengeni/interaction@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/storage@4.6.0
+  - @opengeni/tool-gateway@4.6.0
+  - @opengeni/vaults@4.6.0
+  - @opengeni/vaults-keeper@4.6.0
+  - @opengeni/vaults-onepassword@4.6.0
+  - @opengeni/vaults-protonpass@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- af53167: A browser controller resource that is gone for good, such as an attached Chrome profile that reconnected under a new connection, now reaches the agent as a 409 with the controller's guidance ("open a new browser session") instead of a generic "temporarily unavailable, retry" that never succeeds.
+- 65fc9ab: `sandbox_file_publish` is on the first model request, like the other harness control tools, so a task that hands the person a file no longer spends a tool search to find it. Its description is also shorter (about 20% fewer characters) and names the session's workspace instead of a fixed /workspace path.
+- Updated dependencies [6c7b552]
+- Updated dependencies [cfefee3]
+- Updated dependencies [f838cb7]
+- Updated dependencies [65fc9ab]
+- Updated dependencies [e142b9e]
+- Updated dependencies [1b8ca50]
+- Updated dependencies [acbf24e]
+- Updated dependencies [bce44cc]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+- Updated dependencies [51d84b7]
+  - @opengeni/runtime@4.5.0
+  - @opengeni/codemode@4.5.0
+  - @opengeni/db@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/core@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/interaction@4.5.0
+  - @opengeni/documents@4.5.0
+  - @opengeni/events@4.5.0
+  - @opengeni/github@4.5.0
+  - @opengeni/storage@4.5.0
+  - @opengeni/artifact-tool@4.5.0
+  - @opengeni/capabilities@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/tool-gateway@4.5.0
+  - @opengeni/vaults@4.5.0
+  - @opengeni/vaults-keeper@4.5.0
+  - @opengeni/vaults-onepassword@4.5.0
+  - @opengeni/vaults-protonpass@4.5.0
+  - @opengeni/agent-proto@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
+## 4.4.1
+
+### Minor Changes
+
+- e697879: Make Knowledge search eager for new configured sessions where search is already
+  available, without changing existing sessions' saved tool selections. Reduce
+  search schema overhead and default MCP searches to five results instead of 20.
+  Model callers receive discovery cards with short snippets; use knowledge_get
+  for full text, citation revision IDs and update versions. Codemode retains the
+  complete result shape, HTTP list defaults are unchanged, and previously stored
+  model results are never re-rendered. Existing explicitly eager search tools can
+  incur a one-time schema-prefix cache miss after upgrade.
+- 84b1a18: Every subscription account now has exactly one owner: the organization, one workspace, or one person, and it is used wherever it reaches and nowhere else. The per-workspace split between a workspace's own copy of an account and the organization's copy, the preference that chose between them, and "Set aside" are gone; each account has one on/off switch. A migration keeps everyone's access exactly as it was.
+
+  The organization's account lists now include `reach` (who each account reaches), and the organization's Models page lists every account once, grouped by provider, with its owner and a summary of how many are on and how many need reconnecting. Accounts that are turned off fold away when a provider has several, and the page no longer reads every workspace's accounts or each account's access one by one.
+
+### Patch Changes
+
+- b1539d8: Publishing or uploading a file outside the session's workspace now names the workspace root and says to copy the file in first, instead of only saying the path is outside "the active workspace root".
+- 5c113c6: Managed browsers are now started by the browser controller itself instead of through the separate agent-browser daemon, so the controller is the browser's only DevTools client. This removes launch settings that set managed browsers apart from an ordinary Chrome (hidden scrollbars in headless mode and disabled popup blocking), a second DevTools client attached to every page, one extra process per browser with its launch overhead, and the agent-browser companion from sandbox images and agent installs. It also fixes problems the daemon had been hiding: dedicated web workers on headless pages stayed paused and never ran, a click that opened a JavaScript dialog from an upload control was reported as a completed upload, a network-idle wait could hang on unfinished requests of the page that was replaced, and a full-page overlay was mistaken for a sticky bar when the page showed scrollbars.
+- 7c8a57d: Avoid unused Skill preparation for turns with Skills disabled or no bundled Skills selected, reuse caller-scoped metadata within full-detail session MCP reads, and repair stranded reasoning runs in one pass. Existing tool selection, live authority checks, model inputs and recoverable tool-call pairing remain unchanged.
+- e59b801: The `excel_run` tool description now names the Office.js reads that most often fail with PropertyNotLoaded: each `get…()` call returns a new unloaded object, a sheet's `name` must be loaded too, and range properties are plural.
+- 25d1500: Infrastructure-only session events, such as the idle sandbox reaper terminating a shared box, no longer move a session's `updatedAt`, so stopped sessions keep their real last-activity time in the sidebar and session lists (migration 0904). Sessions and session list entries now carry `hasUpcomingSchedules`, and the sidebar schedule icon only appears for schedules that can still fire. A session whose schedules are all paused or expired keeps a distinct "No upcoming runs" schedule button in its header. Editing only a schedule's timing now refreshes open session lists (migration 0905).
+- 12d13b6: Resolve the current database and workspace model catalog for published Sites, including member model admission and guest credit-model fallback. Models available in the console are no longer rejected solely because the Site used the startup fallback catalog.
+- 60e031c: Voice conversations now pass on what the person said instead of writing their own task for the agent. The voice model is told to relay requests in the person's own words and language, without adding tools, methods or details they didn't say, and to answer directly when the answer is already in the conversation. Each voice request the agent receives now notes that it was relayed and that the person's own words in the transcript take precedence over the relay.
+
+  A voice call that reconnects no longer loses track of things. What was said since the last request carries over to the next request after a reconnect or a same-browser reload. The agent's progress and results for a request made before the reconnect reach the voice model as session context, labelled as work requested earlier in the call, instead of being sent to a conversation item the new connection doesn't have and being dropped. The voice model is also told to pass instructions on to the agent rather than answer them with a promise, and never to state a result, status, name, number or time the agent hasn't reported.
+
+- f7f7987: Show an actionable error when a connector account was removed while a chat was open. Refresh account choices without replacing explicit selections or retrying a failed message with different credentials.
+- Updated dependencies [6930cf0]
+- Updated dependencies [2677b14]
+- Updated dependencies [032d671]
+- Updated dependencies [d705817]
+- Updated dependencies [d948555]
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [7c8a57d]
+- Updated dependencies [9ba6486]
+- Updated dependencies [005c442]
+- Updated dependencies [9c25110]
+- Updated dependencies [926e0b8]
+- Updated dependencies [eec0cab]
+- Updated dependencies [25d1500]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [dbc847f]
+- Updated dependencies [ec6a821]
+- Updated dependencies [a9a54f4]
+- Updated dependencies [f1a619f]
+- Updated dependencies [9979e45]
+- Updated dependencies [d295544]
+- Updated dependencies [81a516c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [81e817c]
+- Updated dependencies [2581842]
+- Updated dependencies [ea21aa0]
+- Updated dependencies [6282659]
+- Updated dependencies [a75f55e]
+- Updated dependencies [f4508d6]
+- Updated dependencies [f0c2065]
+- Updated dependencies [9850b5b]
+- Updated dependencies [84b1a18]
+- Updated dependencies [47dbfdf]
+- Updated dependencies [aa280c9]
+  - @opengeni/core@4.4.0
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/tool-gateway@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/artifact-tool@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/github@4.4.0
+  - @opengeni/interaction@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/vaults-keeper@4.4.0
+  - @opengeni/vaults-onepassword@4.4.0
+  - @opengeni/vaults-protonpass@4.4.0
+  - @opengeni/agent-proto@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
+## 4.3.1
+
+### Minor Changes
+
+- 03947ed: Keep idle session sidebars quiet using authorized commit-level invalidations on
+  the existing workspace live stream. Web and desktop refresh dirty loaded scopes
+  within the existing 15-second cadence and reconcile on reconnect/focus. Private
+  session IDs are filtered with the same RLS and membership fence as list reads.
+
+  Database hosts using a transaction pooler may configure a separate direct/session
+  notification URL. Older servers, external host ACLs, injected database handles
+  without a listener, and finite HTTP/1 streams keep their polling fallback. The new
+  SDK workspace event is transient and does not advance either durable stream cursor.
+
+- 579239a: Sites can be duplicated: `POST /v1/workspaces/:workspaceId/published-artifacts/:artifactId/duplicate` (SDK `duplicateWorkspaceArtifact`) copies a Site's current version (HTML, source and requested tools) into a new Site owned by the caller, with the original's visibility. The copy is titled "… (copy)" unless a title is given; its publication, Site Data and history stay with the original. The copy references the original's immutable stored content instead of copying bytes, and a retry with the same key replays only a copy of the same Site.
+
+### Patch Changes
+
+- 5170489: The `goal_set` tool description now says goals are for long-running objectives that need several turns or continued autonomous work, and that a short or single-step request is answered directly. It used to open with "Create a goal when this session has none", which agents read as an instruction to wrap every request in a goal, adding a goal_set and a goal_complete round trip to one-step tasks.
+- 23fed2a: Chat history no longer depends on the server and `@opengeni/react` being released in a particular order. The events API now says when it applies the conversation filter (`X-OpenGeni-Conversation-Filter: 2`, read as `SessionEventPage.conversationFilter`). When a server does not say so, the React history reads keep tool calls in and drop the ones that are not presented in the browser, so an older server that ignores `presentedToolCalls` no longer makes images, published files or Skill cards vanish from history.
+
+  A long turn's model bookkeeping also stops filling the history window: each model call's `agent.model.request` and `agent.model.usage` rows load with the turn's steps. The server keeps the request rows up to a turn's first model response, which draw its startup phase, and every bookkeeping row of a turn that has no other steps, so what the conversation shows is unchanged. `createEmbeddedSessionClient` now keeps `listEventPage` when the base client has it.
+
+- 559eaa8: Remove unused Drizzle relational-schema registration from `createDb`, avoiding hundreds of query-builder allocations on every transaction. SQL, row-level security, and commit boundaries are unchanged.
+
+  Breaking: the exported `Database` port and its transaction callbacks no longer expose `db.query.<table>`. Use explicit-table queries instead, for example `db.select().from(schema.sessions).where(eq(schema.sessions.id, id))`. Hosts may still inject their own schema-configured Drizzle handles and use relational queries through their original handle; Opengeni's structural port only needs explicit-table builders.
+
+- 1aa8cb3: Connecting a Claude or SuperGrok subscription (and the other subscription pool, site publishing and account routes) now works from the web app of a local `bun run dev` stack, as Codex already did. Every cookie-authenticated state change now uses one browser-origin rule: managed and configured deployments still require the configured public origin with `same-origin` fetch metadata, while local access mode accepts the stack's own loopback web origin instead of failing with 503 (no public base URL) or 403 (web and API on different ports).
+- 1d62cf3: When an agent tries to use someone's personal (Only me) computer that they have not yet allowed in the chat, the chat now shows them the card to allow it right away. The agent is told the card is posted in the chat and gets the chat link, so it tells the person in one sentence (or gives the link when they are reading in Slack or a worker chat) instead of waiting or retrying the same command. Cards for other connections, such as Slack and GitHub together, are not limited; only a repeated computer refusal in the same turn reuses that turn's computer card, even when several are refused at once.
+- 5934780: Remote MCP servers that answer the 2026-07-28 `server/discover` probe but send 2025-era results (no `resultType`) are reconnected over the 2025 handshake instead of losing every tool. This covers agent turns, connector tool permissions, capability probes and OAuth connection checks. A best-effort server's failed `tools/list` warning now names its structural cause (error class, SDK or numeric code, validation violation) without message text.
+- 1e63001: Make the named shared-workspace Member role a full teammate. Members can now take over a session's desktop and terminal, edit a session's files, connect their own accounts and model subscriptions, attach session MCP servers, create Sandbox Environments, see and pick Connected Machines, manage any Site they can see (Site Data, Site SQL, publication, takedown and restore), and author, install and review workspace Skills. Rolling migrations 0865-0867 update the preset, lift older named Member sets written by overlapping binaries, and backfill exact-match memberships in batches; custom and external memberships are unchanged. Settings-class powers (workspace settings, members, API keys, the GitHub App, integration and plugin install, machine enrollment, workspace provider keys, the Slack bot and the default Sandbox Environment) stay Admin-only. Personal-workspace owners also gain `rigs:manage`. A Personal-workspace owner now administers their own Sites (limits, the outside-visitor agent switch and extra Site agent tools). Members can also replace or disconnect workspace-shared integration credentials that someone else connected, and as Site managers they read every record in per-viewer and append-only Site Data collections. Person-less API keys with `rigs:manage` still set the default Sandbox Environment. Installing the workspace Slack bot, through either its install route or the shared Connect flow, now requires `capabilities:manage`; embedding or API keys that hold `connections:write` without `capabilities:manage` can no longer set up the Slack bot.
+
+  Release note: the migrations run before every API instance has the new settings checks, so for the few minutes of a rolling deploy an old instance could let a Member change a workspace provider key, install the Slack bot or set the default Sandbox Environment. This short window is accepted; an admin can revert any such change.
+
+- a00e4bb: Avoid loading full session presentations when API routes need only existence and the canonical event sequence. Preserve RLS and cursor integrity checks while removing unrelated metadata, model, and workflow reads.
+- d8761a7: Use native Ed25519 for NATS authorization JWT signing and reuse the current signing seed's imported key. Preserve JWT bytes, seed validation, permissions, expiry, and key-rotation behavior while avoiding repeated pure-JavaScript key derivation and signing.
+- 7517fbc: Organization owners and admins can now connect OpenAI and Azure OpenAI once for the whole organization in Organization settings → Models, next to the other organization providers. OpenAI stores an encrypted API key; Azure OpenAI stores an encrypted key plus the Azure resource endpoint. Admins add the organization's OpenAI model IDs or Azure deployments as its models, and each is checked with the organization's key (and Azure endpoint) before it is saved. The models (`organization-openai/<model>` and `organization-azure-openai/<deployment>`) inherit into the organization's current and future shared workspaces (Personal workspaces stay local), work for sessions created through the web app and the public API, and are billed to the organization's own provider account with no Opengeni credits. `OrganizationModelProviderKind` and `ModelConnectionAccessKind` gain `openai` and `azure_openai`; organization provider connection requests and responses gain an optional `endpoint` (Azure only). A missing or revoked connection fails closed and never falls back to deployment credentials. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `organization-openai` or `organization-azure-openai` provider ids. Rolling migration `0898_organization_direct_openai_model_providers.sql` widens the provider-kind, lifecycle-fact and analytics allow-lists and adds the nullable endpoint columns.
+
+  An organization ElevenLabs key no longer counts as an OpenRouter access policy when a workspace's model restrictions are read.
+
+- 18030c8: Sites and documents work in Personal workspaces. The owner can now create, open and edit documents, spreadsheets and presentations there; they used to be refused because a Personal workspace has no membership row. Publishing an Only me Site from a Personal workspace (every Site an agent makes there) now shares it with that one-person workspace as it publishes, instead of stopping at a "Share this Site with the workspace first" notice with no way to share. On their published Site the owner is a member again: they can open members-only and invited Sites, and their Site AI chats run as themselves rather than as an outside visitor.
+
+  Workspace Viewers can use a Site's assistant wherever people outside the workspace can (invited or anyone-with-the-link Sites), as an outside visitor would; they used to get "missing permission: sessions:create" while anonymous guests could chat. On members-only Sites the page is now told the assistant is unavailable to them instead of offering it.
+
+- 7774791: Avoid unused legacy Memory reads when preparing first-party agent MCP requests. Tool catalogs, Knowledge scope checks, and live attempt/session authorization remain unchanged.
+- c0b0736: Wait for realtime connection billing settlement before returning the connection response, rather than detaching the first-minute debit and relying on a later heartbeat.
+- d0c8261: Distribute machine state ingestion across API replicas instead of repeating every heartbeat and Hello write in every replica. Renew the exact runner lease and return its accepted metadata in one database statement, preserving independent optional inventory and metrics processing.
+- 86f1f65: Share the four-call Codex overview budget across concurrent organization account prefetches and workspace overview requests in each API instance.
+- 4f0a299: Return a stable diagnostic when personal sign-in mutations fail same-origin browser admission. The web security page detects mismatched API origins before showing sign-in controls and explains how the administrator can correct the deployment.
+- Updated dependencies [75101c9]
+- Updated dependencies [e907c46]
+- Updated dependencies [2d1350b]
+- Updated dependencies [cca885b]
+- Updated dependencies [29a1d94]
+- Updated dependencies [31c6406]
+- Updated dependencies [1b1805f]
+- Updated dependencies [b1a5fad]
+- Updated dependencies [a363a8c]
+- Updated dependencies [49f2177]
+- Updated dependencies [29a1d94]
+- Updated dependencies [3d83bfd]
+- Updated dependencies [3fbbe43]
+- Updated dependencies [d142e5b]
+- Updated dependencies [0e135b2]
+- Updated dependencies [03947ed]
+- Updated dependencies [5e32e0f]
+- Updated dependencies [cd3fdb2]
+- Updated dependencies [74f6ab1]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [659c01a]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [b7ee3dc]
+- Updated dependencies [fda625e]
+- Updated dependencies [f47e3b2]
+- Updated dependencies [b8aaefa]
+- Updated dependencies [c2cbeae]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [ec0855c]
+- Updated dependencies [1ce8ea5]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [dc9a23b]
+- Updated dependencies [a252bf9]
+- Updated dependencies [18030c8]
+- Updated dependencies [23fed2a]
+- Updated dependencies [29a1d94]
+- Updated dependencies [95c5219]
+- Updated dependencies [8c58607]
+- Updated dependencies [eeab39f]
+- Updated dependencies [8f66667]
+- Updated dependencies [ebdd6dc]
+- Updated dependencies [f83cd2a]
+- Updated dependencies [4a2e10f]
+- Updated dependencies [559eaa8]
+- Updated dependencies [00a0865]
+- Updated dependencies [e4915c1]
+- Updated dependencies [1d62cf3]
+- Updated dependencies [5934780]
+- Updated dependencies [6794bf2]
+- Updated dependencies [1e63001]
+- Updated dependencies [9eae8df]
+- Updated dependencies [d3996f9]
+- Updated dependencies [fa5347a]
+- Updated dependencies [d8289f0]
+- Updated dependencies [dc1dd93]
+- Updated dependencies [a00e4bb]
+- Updated dependencies [d8761a7]
+- Updated dependencies [16781e5]
+- Updated dependencies [0432630]
+- Updated dependencies [27a5a89]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [29a1d94]
+- Updated dependencies [9ff7e74]
+- Updated dependencies [18030c8]
+- Updated dependencies [59a90e2]
+- Updated dependencies [9976132]
+- Updated dependencies [b45d380]
+- Updated dependencies [0cc6b93]
+- Updated dependencies [724b529]
+- Updated dependencies [bc64dbb]
+- Updated dependencies [3915617]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [29a1d94]
+- Updated dependencies [726c332]
+- Updated dependencies [b1a2e5b]
+- Updated dependencies [390562e]
+- Updated dependencies [a1265ca]
+- Updated dependencies [7b1da5b]
+- Updated dependencies [734ad21]
+- Updated dependencies [4199cd5]
+- Updated dependencies [017121f]
+- Updated dependencies [7851b64]
+- Updated dependencies [cc0d008]
+- Updated dependencies [d21ada4]
+- Updated dependencies [72e00f6]
+- Updated dependencies [a78e908]
+- Updated dependencies [6e61993]
+- Updated dependencies [1bc6fe5]
+- Updated dependencies [72e032c]
+- Updated dependencies [d0c8261]
+- Updated dependencies [a82b6a4]
+- Updated dependencies [a5d6f8a]
+- Updated dependencies [06b8b74]
+- Updated dependencies [b95784c]
+- Updated dependencies [d6a83bc]
+- Updated dependencies [22e3585]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+- Updated dependencies [db09421]
+- Updated dependencies [e6b2285]
+- Updated dependencies [1b76e0d]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/core@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/agent-proto@4.3.0
+  - @opengeni/vaults-protonpass@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/codemode@4.3.0
+  - @opengeni/github@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/artifact-tool@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/interaction@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/vaults-keeper@4.3.0
+  - @opengeni/vaults-onepassword@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

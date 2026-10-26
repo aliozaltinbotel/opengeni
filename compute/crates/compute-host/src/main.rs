@@ -3,6 +3,7 @@
 mod bench;
 mod fleet_cli;
 mod observing;
+mod readying;
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -25,8 +26,8 @@ use compute_host::protocol::{
     step_name,
 };
 use compute_host::{
-    BusyRule, Chunked, Directory, GuestPort, HostAgent, HostConfig, Keep, NoStore, PagerConfig,
-    PoolConfig, Store, Threads, serve,
+    BusyRule, Chunked, Directory, GuestChecks, GuestPort, HostAgent, HostConfig, Keep, NoStore,
+    PagerConfig, PoolConfig, Store, Threads, serve,
 };
 use tokio::signal::unix::SignalKind;
 
@@ -198,6 +199,15 @@ struct ServeArgs {
     /// Root disk image new sandboxes start from.
     #[arg(long)]
     base_image: PathBuf,
+    /// The guest programs (a bundle's `guest/`) to build the sandbox images
+    /// the control service asks for with; without them the host builds
+    /// none.
+    #[arg(long)]
+    guest: Option<PathBuf>,
+    /// The user name for registries' token services in those builds, with
+    /// the token in `REGISTRY_TOKEN`; without a token, pulls are anonymous.
+    #[arg(long)]
+    registry_user: Option<String>,
     /// Parent cgroup for VMs.
     #[arg(long, default_value = "/sys/fs/cgroup/compute")]
     cgroup: PathBuf,
@@ -292,6 +302,10 @@ struct ServeArgs {
     stream_idle_secs: u64,
     /// Guest vsock port to tell about each restore from a memory image, so
     /// the guest can set its clock, reconnect and learn its sandbox id.
+    /// Every guest must listen on it: the agent also connects to it to
+    /// find guests that stopped while their VMs run on (a power-off, a
+    /// halt, a hung kernel), and ends the VM of one that takes no
+    /// connection for five checks thirty seconds apart, as if it crashed.
     #[arg(long)]
     restore_notice_port: Option<u32>,
     /// Keep warm templates: a guest vsock port that accepts connections
@@ -508,7 +522,7 @@ fn main() -> std::process::ExitCode {
         .build();
     let result = runtime
         .map_err(anyhow::Error::from)
-        .and_then(|runtime| runtime.block_on(agent_main(cli)));
+        .and_then(|runtime| run_to_end(runtime, agent_main(cli)));
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -516,6 +530,18 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// Runs `command` on `runtime` to its end, then stops the runtime
+/// without waiting for work still on its blocking threads, such as a
+/// template's disk copy: the process exits and ends it, as a crash
+/// would, which costs the agent nothing (ADR 10). Waiting would hold the
+/// process up after its lease's renewals have stopped, and the next
+/// agent's start with them. A client command has awaited all it needs.
+fn run_to_end<T>(runtime: tokio::runtime::Runtime, command: impl Future<Output = T>) -> T {
+    let output = runtime.block_on(command);
+    runtime.shutdown_background();
+    output
 }
 
 async fn agent_main(cli: Cli) -> anyhow::Result<()> {
@@ -580,7 +606,22 @@ async fn agent_main(cli: Cli) -> anyhow::Result<()> {
         Command::BuildImage(args) => compute_host::rootfs::build(*args).await,
         Command::Guard(args) => {
             let config = args.config();
-            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config)).await?
+            // Asked to stop, the guard stops at its first step that may
+            // feed the watchdog (see `run_guard`), not where the signal
+            // finds it.
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut terminate = tokio::signal::unix::signal(SignalKind::terminate())?;
+            let mut interrupt = tokio::signal::unix::signal(SignalKind::interrupt())?;
+            let asked = Arc::clone(&stop);
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = terminate.recv() => {}
+                    _ = interrupt.recv() => {}
+                }
+                asked.store(true, std::sync::atomic::Ordering::Relaxed);
+            });
+            tokio::task::spawn_blocking(move || compute_host::fleet::run_guard(&config, &stop))
+                .await?
         }
         Command::Sweep { store, delete } => {
             let chunked = Chunked::from_url(&store)?
@@ -724,10 +765,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
     .with_memory_profile(memory_profile)
     .with_context(|| format!("memory profile {memory_profile}"))?;
     let processor_share = guarantee_vm_processors(share, &mut policy)?;
-    check_huge_pages(memory_profile)?;
-    check_zswap(memory_profile.compress && !args.no_compress)?;
-    raise_open_file_limit();
-    protect_from_oom()?;
+    readying::ready(memory_profile, memory_profile.compress && !args.no_compress)?;
     let about = describe(memory_profile, &args.base_image);
     let budget = policy
         .admission
@@ -742,7 +780,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
             .cpu_budget
             .context("a serving host guarantees processor time")?,
     })?;
-    let prepared = fleet.as_ref().map(FleetConfig::prepare).transpose()?;
+    let prepared = compute_host::fleet::prepare_guarded(fleet.as_ref()).await?;
     // A host in a fleet keeps agent links for the sandboxes that run
     // Opengeni's agent; its tokens come from the control service.
     let agent_link = fleet.as_ref().map(FleetConfig::agent_links).transpose()?;
@@ -755,6 +793,8 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         "the canary runs on a host outside a fleet; a host in a fleet takes its sandboxes from \
          the control service only"
     );
+    let prepare =
+        compute_host::rootfs::PrepareConfig::of(&args.root, args.guest, args.registry_user)?;
     let config = HostConfig {
         root: args.root,
         kernel: args.kernel,
@@ -766,6 +806,7 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         stream_idle: Duration::from_secs(args.stream_idle_secs),
         guest_ports: args.guest_ports,
         restore_notice_port: args.restore_notice_port,
+        guest_checks: GuestChecks::DEFAULT,
         first_uid: args.first_uid,
         host_lock: Some(args.host_lock),
         pool,
@@ -793,8 +834,12 @@ async fn run_serve(args: ServeArgs, socket: PathBuf) -> anyhow::Result<()> {
         observer: observer.clone(),
         summary_every: HostConfig::SUMMARY_EVERY,
         lease: prepared.as_ref().map(|prepared| prepared.gate.clone()),
+        guard_freezes: fleet
+            .as_ref()
+            .map(|fleet| compute_host::fleet::Freezes::beside(&fleet.guard_lock)),
         agent_link,
         processor_share,
+        prepare,
     };
     // Boxed: the agent and everything it was given are large.
     Box::pin(run_with_store(
@@ -875,10 +920,19 @@ async fn run_agent<S: Store>(
 ) -> anyhow::Result<()> {
     let observer = config.observer.clone();
     let links = config.agent_link.clone();
-    let (handle, agent) = HostAgent::start(config, engine, store).await?;
+    // On a host in a fleet the lease is renewed from before this run takes
+    // back what the previous one left until this one exits.
+    let ((handle, agent), mut joined) = if let Some((fleet, prepared)) = fleet {
+        // Boxed: it holds the agent's start, and this future lives long.
+        let (started, joined) =
+            Box::pin(fleet.start(prepared, HostAgent::start(config, engine, store))).await?;
+        (started, Some(joined))
+    } else {
+        (HostAgent::start(config, engine, store).await?, None)
+    };
     // On a host in a fleet only the service creates, adopts and hands off
     // sandboxes; the socket serves the host's own tools the rest.
-    let local = if fleet.is_some() {
+    let local = if joined.is_some() {
         handle.local_to_fleet()
     } else {
         handle.clone()
@@ -886,9 +940,9 @@ async fn run_agent<S: Store>(
     if let Some(canary) = canary {
         tokio::spawn(canary::run(handle.clone(), canary));
     }
-    let joined = async {
-        match fleet {
-            Some((fleet, prepared)) => fleet.run(prepared, handle).await,
+    let in_fleet = async {
+        match &mut joined {
+            Some(joined) => joined.run().await,
             None => std::future::pending().await,
         }
     };
@@ -898,62 +952,35 @@ async fn run_agent<S: Store>(
         result = tokio::signal::ctrl_c() => result.map_err(Into::into),
         _ = terminate.recv() => Ok(()),
         result = agent => result.map_err(Into::into),
-        result = joined => result.context("in the fleet"),
+        result = in_fleet => result.context("in the fleet"),
     };
-    // Stopped by a signal, the agent did not get to it: the agent links'
-    // sessions are on disk before the next agent reads them.
-    if let Some(links) = links {
-        links.shutdown().await;
-    }
-    // What happened last, often why it stopped, still reaches the
-    // collector; a collector that is away does not hold the stop up long.
-    if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
-        .await
-        .is_err()
-    {
-        tracing::warn!("stopping before every event reached the collector");
+    let stopping = async {
+        // Stopped by a signal, the agent did not get to it: the agent
+        // links' sessions are on disk before the next agent reads them.
+        if let Some(links) = links {
+            links.shutdown().await;
+        }
+        // What happened last, often why it stopped, still reaches the
+        // collector; a collector that is away does not hold the stop up
+        // long.
+        if tokio::time::timeout(FLUSH_WITHIN, observer.flush())
+            .await
+            .is_err()
+        {
+            tracing::warn!("stopping before every event reached the collector");
+        }
+    };
+    // The lease is renewed until the process exits, so the next agent
+    // finds as much of its term left as the restart allows.
+    match joined {
+        Some(joined) => joined.stopping(stopping).await,
+        None => stopping.await,
     }
     result
 }
 
 /// How long a stopping agent waits for its last events to be exported.
 const FLUSH_WITHIN: Duration = Duration::from_secs(5);
-
-/// Lets the agent hold as many open files as the system allows it. Every VM
-/// keeps several open here (its process, pager, image files and store
-/// connections), so the usual soft limit of 1024 runs out near a hundred
-/// VMs.
-fn raise_open_file_limit() {
-    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
-    let limit = getrlimit(Resource::Nofile);
-    if limit.current == limit.maximum {
-        return;
-    }
-    let raised = Rlimit {
-        current: limit.maximum,
-        maximum: limit.maximum,
-    };
-    match setrlimit(Resource::Nofile, raised) {
-        Ok(()) => tracing::info!(limit = ?limit.maximum, "open-file limit raised"),
-        Err(error) => {
-            tracing::warn!(%error, current = ?limit.current, "could not raise the open-file limit");
-        }
-    }
-}
-
-/// What the out-of-memory killer adds to the agent's badness, in
-/// thousandths of the memory it weighs: the agent outlasts every VM
-/// process (VMMs and pagers raise theirs to -900) and nearly anything
-/// else on a short host. Not -1000: that makes a process unkillable even
-/// inside its own service unit, so an agent that leaked up to the unit's
-/// `MemoryMax` would hang in reclaim instead of being killed and restarted.
-/// Its helpers inherit it.
-const OOM_SCORE_ADJ: i32 = -999;
-
-fn protect_from_oom() -> anyhow::Result<()> {
-    std::fs::write("/proc/self/oom_score_adj", OOM_SCORE_ADJ.to_string())
-        .context("lowering the agent's oom_score_adj (needs CAP_SYS_RESOURCE)")
-}
 
 /// One number from `/proc/meminfo`, such as `MemTotal:` (in KiB) or
 /// `HugePages_Total:`; 0 when missing.
@@ -1134,49 +1161,38 @@ fn disk_policy(
     Ok(policy)
 }
 
-/// Refuses a huge-page memory profile on a host without a reserved pool of
-/// 2 MiB pages: every VM's memory would fail to allocate.
-fn check_huge_pages(profile: MemoryProfile) -> anyhow::Result<()> {
-    if profile.pages != compute_engine::PageSize::Huge {
-        return Ok(());
-    }
-    let meminfo = std::fs::read_to_string("/proc/meminfo").context("reading /proc/meminfo")?;
-    let field = |name: &str| meminfo_field(&meminfo, name);
-    if field("Hugepagesize:") != 2048 {
-        bail!("the {profile} memory profile needs 2 MiB default huge pages");
-    }
-    let total = field("HugePages_Total:");
-    if total == 0 {
-        bail!(
-            "the {profile} memory profile needs reserved huge pages; set \
-             /proc/sys/vm/nr_hugepages, or choose a profile with --memory-profile"
-        );
-    }
-    tracing::info!(
-        pool_mib = total * 2,
-        free_mib = field("HugePages_Free:") * 2,
-        "huge-page pool"
-    );
-    Ok(())
-}
-
-/// Compressing paused VMs needs zswap: without it the memory pushed out
-/// would go to the swap device, and `memory.zswap.writeback` would mean
-/// nothing.
-fn check_zswap(compress: bool) -> anyhow::Result<()> {
-    if compress
-        && !compute_engine::cgroup::zswap_enabled().context("reading whether zswap is on")?
-    {
-        bail!("compressing paused VMs needs zswap; turn it on or pass --no-compress");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const GIB: u64 = 1 << 30;
+
+    /// Work left on a blocking thread when the command ends does not hold
+    /// the process up: an agent's lease is no longer renewed by then.
+    #[test]
+    fn the_runtime_stops_without_waiting_for_blocking_work() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let began = std::time::Instant::now();
+        let output = run_to_end(runtime, async {
+            let (started, running) = std::sync::mpsc::channel();
+            drop(tokio::task::spawn_blocking(move || {
+                started.send(()).unwrap();
+                std::thread::sleep(Duration::from_secs(5));
+            }));
+            running.recv().unwrap();
+            7
+        });
+        assert_eq!(output, 7);
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "waited {:?} for blocking work",
+            began.elapsed()
+        );
+    }
 
     /// A host keeps a sixteenth of its processors back, at least half of
     /// one, unless told otherwise.

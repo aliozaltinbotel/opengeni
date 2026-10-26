@@ -2,7 +2,7 @@ import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type AccessContext } from "@opengeni/contracts";
 import * as database from "@opengeni/db";
 import { accessGrantAuthorizationFromContext, nativeAccessContinuationForAuthorization, requireAccessGrantAuthorization, requireNativeAccessContinuationAuthority, type NativeAccessContinuation } from "@opengeni/core";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { requireAccessKey } from "../src/http/auth";
 

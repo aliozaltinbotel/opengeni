@@ -10,6 +10,9 @@ import { SiteSessionGroupHeading } from "@opengeni/react/app/components/rail/sit
 import { SiteOriginLink } from "@opengeni/react/app/components/session/site-origin-link";
 import { SiteConversationsPanel } from "@opengeni/react/app/components/artifacts/site-conversations";
 import type { Session } from "@opengeni/react/app/types";
+// The web app backs the shared session UI's links with its router; this
+// fixture renders those components under its own TanStack router the same way.
+import "../src/navigation-host";
 import "../src/styles.css";
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
@@ -43,6 +46,7 @@ function Fixture() {
           expanded={expanded}
           onToggle={() => setExpanded(!expanded)}
           summary={{ kind: "active", count: 1, total: 3, label: "1 working" }}
+          count={3}
         />
         {expanded && <p className="px-9 py-2 text-xs text-fg-muted">Conversations expand here</p>}
         <h2 className="px-2 pb-2 pt-8 text-xs text-fg-muted">Growth project</h2>

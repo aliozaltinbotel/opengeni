@@ -1,6 +1,7 @@
 import { formatMoneyMicros } from "@opengeni/react/app/lib/format";
 import type { BillingSummary } from "@opengeni/react/app/types";
 import { CreditScopeDetails } from "@/components/credits/credit-scope-details";
+import { PromotionReviewNotice } from "@/components/promotion-review-notice";
 
 /** The credit balance, large, with one line on what it means. */
 export function OrganizationCreditBalance({
@@ -10,6 +11,7 @@ export function OrganizationCreditBalance({
   loading,
   hasError,
   showPlanCredit = false,
+  supportEmail,
 }: {
   billing: BillingSummary | null;
   canReadBilling: boolean;
@@ -18,8 +20,25 @@ export function OrganizationCreditBalance({
   hasError: boolean;
   /** Only true after the enabled subscription catalog has been read. */
   showPlanCredit?: boolean;
+  supportEmail?: string | undefined;
 }) {
   const balance = billing?.balance;
+  const holdNotice =
+    balance?.promotionDecision && balance.promotionDecision !== "eligible" ? (
+      <div className="mt-2">
+        <PromotionReviewNotice
+          decision={balance.promotionDecision}
+          accountId={balance.accountId}
+          supportEmail={supportEmail}
+        />
+        {(balance.heldCreditMicros ?? 0) > 0 ? (
+          <p className="mt-2 text-sm text-fg-muted">
+            {formatMoneyMicros(balance.heldCreditMicros!, balance.currency)} of the balance is on
+            hold.
+          </p>
+        ) : null}
+      </div>
+    ) : null;
   const isNegative = balance !== undefined && balance.balanceMicros < 0;
   if (!balance) {
     return (
@@ -50,6 +69,7 @@ export function OrganizationCreditBalance({
           {formatMoneyMicros(balance.balanceMicros, balance.currency)}
         </p>
         <p className="mt-1 text-xs leading-[18px] text-fg-muted">Total balance</p>
+        {holdNotice}
         <div className="mt-4 -mx-2 divide-y divide-border">
           {plan && !scopedPlan ? (
             <div className="flex min-h-16 items-center justify-between gap-4 py-3 pl-2 pr-8">
@@ -74,7 +94,11 @@ export function OrganizationCreditBalance({
               eligibleModelIds={grant.eligibleModelIds}
               coversVoice={grant.coversVoice}
               description={
-                grant.planCredit ? "Used first · Resets monthly · View models" : undefined
+                grant.held
+                  ? "On hold · Not available to spend"
+                  : grant.planCredit
+                    ? "Used first · Resets monthly · View models"
+                    : undefined
               }
             />
           ))}
@@ -86,7 +110,9 @@ export function OrganizationCreditBalance({
               <p className="mt-0.5 text-xs leading-[18px] text-fg-muted">
                 {general < 0
                   ? "Future purchases cover prior usage first."
-                  : "For models and platform usage."}
+                  : general === 0 && balance.promotionalCredits?.length
+                    ? "Other models need general credit."
+                    : "For any model and platform usage."}
               </p>
             </div>
             <span className="shrink-0 text-sm font-medium text-fg tabular-nums">
@@ -109,6 +135,7 @@ export function OrganizationCreditBalance({
           ? "Future credit purchases cover prior usage first. Your card is not charged automatically."
           : "Total balance"}
       </p>
+      {holdNotice}
     </div>
   );
 }

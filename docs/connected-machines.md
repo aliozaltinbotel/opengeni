@@ -6,6 +6,11 @@ an organization, workspace, or organization user and driven by the agent directl
 primary compute target**, not a backend variant layered on top of a managed
 box.
 
+The program that runs on the machine is **Opengeni Runner** (command
+`opengeni-agent`, source in [`../agent`](../agent)). In this document, "native
+agent", "machine agent" and "Connected Machine agent" mean the Runner; "the
+agent" in the context of a session means the AI agent driving it.
+
 Human device-flow approval defaults to user ownership. A user-owned machine follows
 its owner across same-organization workspaces they can currently access; workspace
 ownership limits it to the approving workspace, and organization ownership requires
@@ -69,7 +74,12 @@ the caller's retry budget reads wall time: clock skew, jumps and corrections do
 not poison this transport. The call offset is elapsed caller time since receiving
 the batch, anchored at the receiver's issuance time. This conservatively includes
 return-path latency in the call budget, but not idle prefetch age. Future offsets
-are refused. Receipt expiry is the earlier of the batch deadline and the fixed
+are refused. Because the two hosts' elapsed clocks tick at slightly different
+rates, the caller understates the offset by 1%: a caller clock running a little
+faster than the receiver's would otherwise produce future offsets for older
+tokens. The understatement only makes the receiver charge more elapsed time, so
+deadlines come sooner, never later; the caller stops retrying the delivery by the
+same amount sooner. Receipt expiry is the earlier of the batch deadline and the fixed
 call offset plus lifetime. Streamed exec uses its existing relative timeout from
 that same call offset; delivery or retries cannot reset the deadline.
 The absolute exec deadline remains only for legacy one-shot peers. This does not
@@ -210,6 +220,21 @@ the reconciler cannot read which kind of runner it is, it leaves the command
 for a later pass and records nothing. A Connected Machine never sleeps, so its
 answered queries continue on each pass as before.
 
+A runner lists only operations it knows, so a command whose start never
+reached it (sent while it was offline), or that it no longer holds, would
+never be reported and would stay running forever. So when a Connected Machine
+runner reports its inventory again, the first page of each report makes the
+running commands left to that exact process due again (outcome
+`runner_reported`). The next reconciler pass asks the runner, which is
+talking: an operation it does not know answers lost and the command settles
+lost, never as a success; one it runs continues as before. A compute runner's
+report does not do this, since its running commands are never polled.
+Migration 0984 creates the database function behind this with its runtime
+grant withheld for one release (see
+[expand/contract migrations](migrations-expand-contract.md)), and makes the
+commands already stuck this way due once while it runs. Until a later
+migration grants it, a report skips the re-arm.
+
 A stop can reach an agent before the start it stops, for example when the
 start sat on a link that ended and is delivered again. The agent then refuses
 the start and keeps a tombstone for the operation: a query or attach answers
@@ -346,8 +371,12 @@ Vault secrets reach a machine only per command. When an `exec_command` or
 `/bin/sh -c` on POSIX hosts or `powershell -NoProfile -NonInteractive -Command`
 on Windows (an explicit supported `shell` argument is honoured), splices each
 reference as `OPENGENI_SECRET_n`, and sends the values only in that command's
-`ExecRequest.env`. `{{secretfile:…}}` files are written under the 0700
-`/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
+`ExecRequest.env`. This also applies when the POSIX host's default login shell
+is zsh: a secret-bearing `run_on` exec explicitly selects `/bin/sh`, rather than
+letting the host choose a shell. The tool gateway preserves references and
+escapes until this delivery boundary, including for Codemode calls; it never
+substitutes values into `run_on` command text. `{{secretfile:…}}` files are written
+under the 0700 `/tmp/opengeni-private` root. Attached exec attempts remove their scope on attempt
 end; terminal one-offs clean it on return, while yielded `run_on` commands retain
 it as described below. That best-effort cleanup
 first waits for any write still in flight from an exec that timed out during
@@ -371,8 +400,7 @@ bun run agent:local-runtime
 bun run agent:local-runtime:run
 ```
 
-The command builds browserd, the pinned agent-browser driver, and
-computer-native first, hashes them into one development generation, then embeds
+The command builds browserd and computer-native first, hashes them into one development generation, then embeds
 that exact closure in the Rust agent. On macOS it also enables the same real
 ScreenCaptureKit/CGEvent desktop feature as the release build. This is the supported local path: copying
 an agent binary next to arbitrary helpers can create a protocol-skewed runtime
@@ -419,6 +447,15 @@ origin. Older agent releases that only accept the development origin cannot
 connect the store-installed extension; updating the extension alone cannot fix
 that host-side restriction. Store uploads omit the development-only manifest
 `key` field.
+
+A product built on Opengeni can ship its own branded build of the extension
+(see `apps/browser-extension/README.md`) as its own Chrome Web Store item. The
+agent then also accepts that item's origin: the desktop kit's
+`browserExtensionIds`, or `OPENGENI_AGENT_BROWSER_EXTENSION_IDS` (comma-separated
+IDs) when running `opengeni-agent service install`. On the server,
+`OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`
+make agents, the chat's machine card and `/v1/config/client` name and link that
+extension instead of Opengeni Browser.
 
 Where the browser finds the native host depends on the platform. On macOS and
 Linux the agent writes `ai.opengeni.browser.json` into each Chromium-family
@@ -486,6 +523,20 @@ agent report for the same generation replaces either inference. Native-host
 diagnostics are written to stderr because stdout carries Chrome frames.
 Oversized tab titles are truncated and oversized tab URLs make only that tab
 uncontrollable; neither ends the profile's connection.
+
+Chrome closes a profile together with its last window, which stops the
+extension and ends the profile's connection (`browser_closed_port`) even when
+Chrome itself keeps running, as it does on macOS. The extension therefore never
+closes a profile's only tab without first opening a new tab page in its place
+(a new unfocused window when that tab is in a popup or app window), and when
+Chrome has no window open it creates a requested tab in a new unfocused window.
+A tab close whose connection ends before the extension answers is reported as
+`outcome_unknown` (HTTP 409), because the tab may already be closed; a tab
+Chrome reports as gone is `target_not_found`, and the agent then forgets only
+that tab, not its current browser. A close the browser acknowledged whose
+connection ends before the remaining tabs are listed is also `outcome_unknown`.
+A profile whose last window the person closed stays disconnected until a
+window opens in it again.
 
 An accepted full inventory snapshot observes every connected profile once through
 `attached_browser_inventories.observed_at`. Unchanged profiles need neither a
@@ -690,6 +741,42 @@ owner:
   be active. Removing the person, revoking the machine or revoking the grant
   stops the next attempt.
 
+In a chat on a personal machine, only the owner's own messages start work. A
+message somebody else sends there (through the API, an agent acting for them,
+or an integration) is accepted and kept, but it waits for the owner instead of
+becoming the chat's next turn:
+
+- It is never claimed while the chat stays on that machine, never steers (it
+  cannot interrupt the owner's running turn) and does not count as pending
+  work, so the chat stays idle or keeps running the owner's turn. The send
+  result reports `waitsForMachineOwner: true`, and the operator
+  `session_send_message` tool returns a warning saying so.
+- The owner's next own turn takes the waiting messages in, oldest first, as
+  history ahead of the owner's prompt, each with a short note that it waited
+  for the owner. The agent sees what the other person wrote, and the owner's
+  message says what to do with it. The taken-in rows end as superseded by that
+  turn and never run again.
+- Moving the chat to another machine wakes it, so waiting messages the new
+  machine may run start as their own turns.
+- Steering a waiting message returns `409 WAITING_FOR_MACHINE_OWNER`. An
+  agent's steer into such a chat for anyone but the owner is refused before
+  anything changes (`personal_machine_owner_required`).
+- `get_session_machine_access` lists whose messages wait (`waitingMessages`),
+  and the console explains them in one notice that needs no action.
+
+Whether a message waits is decided live from the chat's current machine
+(`opengeni_private.session_machine_owner_subject_v1`), with the same causal person the attempt
+admission trigger reads. That lookup authorizes nothing; the trigger stays the
+only authority. The console still warns other people before they send. Updates
+from other people's work (agent messages and worker results) keep their own
+waiting-work path, which the owner continues explicitly.
+
+The lookup takes effect one release after it ships: migration 0978 creates it
+without runtime `EXECUTE`, and a later migration grants it once the previous
+release knows it. Until then the lookup reports no personal machine, so nothing
+waits, `waitingMessages` is omitted, and a message from someone other than the
+owner is still refused when it is claimed.
+
 On macOS, the enrollment display offer is independent of Screen Recording
 permission. A detected display keeps the existing screen-control consent option
 available while OS grants are pending. Approval does not grant macOS permissions:
@@ -806,7 +893,8 @@ remains in that group. The browsers it launched run in their own sessions and
 are adopted by the next controller. The agent checks every owned browserd scope through
 its private admin-only idle proof. Open sessions block only when a restart
 would lose something: admitted commands, pending creation or shutdown,
-busy attached browser sessions, browsers without a durable working runtime, and
+busy attached browser sessions, browsers without a durable working runtime,
+sessions with a JavaScript dialog unanswered for less than 30 minutes, and
 isolated virtual desktops. A quiescent managed browser with a durable working
 runtime does not: graceful browserd shutdown detaches from it without closing
 it, so its tabs and unsaved page state stay live and the restarted controller
@@ -1267,6 +1355,23 @@ Reinstalling or restarting the LaunchAgent preserves its existing environment
 (including PATH and locale), rather than replacing it with the invoking shell's
 environment. Fresh installs still inherit the installer's PATH.
 
+When the agent runs from its app bundle (the `install.sh` layout), the
+LaunchAgent also sets `AssociatedBundleIdentifiers` to `ai.opengeni.agent`.
+Without it, macOS cannot tell which app owns the job. The "Background Items
+Added" notification and System Settings → General → Login Items (Login Items &
+Extensions on macOS 15 and later) then fall back to the developer name in the
+signing certificate. With it, they name the app (**Opengeni Agent**) instead.
+Self-update does not rewrite the plist. The next `opengeni-agent start`,
+`opengeni-agent service install` or `install.sh` run adds the key, and the
+resulting reload restarts the agent once.
+Background Task Management keeps the attribution it recorded when it first saw
+the job, so a machine that registered the LaunchAgent before this change keeps
+the developer name. Rewriting, reloading or recreating the plist does not change
+that. To show the app name there, first write the new plist with one of those
+commands, then reset Background Task Management (`sfltool resetbtm`) and
+restart. The reset also clears every other app's login and background item
+approvals.
+
 On Windows, the background agent is a per-user Task Scheduler task named
 **Opengeni Agent**, not a Windows Service. A service runs in session 0, where
 the screen, input and the user's browser are out of reach, and registering one
@@ -1458,24 +1563,60 @@ own computer, the agent posts the **Connected Machine card**: either
 `sandbox_provision` with `kind: "selfhosted"`. Both append the ordinary
 `tool.auth_needed` event with that capability id; the event carries no token.
 
-The card also appears without an agent decision. When `sandbox_swap`,
-`sandbox_attach` or `run_on` is refused with
-`personal_machine_permission_required` (the machine's owner started the turn
-but has not allowed this chat yet), the API posts the same card in the calling
-turn (`apps/api/src/mcp/machine-permission-card.ts`). The refusal the agent
-reads then says the card is posted in this chat in Opengeni, carries the chat
-link (`chatUrl`), and tells the agent to tell the person in one sentence: that
-they can allow it in the chat, or, when they read the chat elsewhere (Slack, a
-worker or a scheduled chat), to open the link. It must not wait or retry:
-choosing the machine sends the message that continues the chat. A repeated
-refusal in the same turn reuses that turn's machine card, since one card lists
-every machine; the lookup and append run atomically under the turn-attempt
-fence (`appendTurnCapabilityCardOnce`), so parallel refusals cannot stack
-copies. Cards for other capabilities, such as Slack and GitHub in the same
-turn, are never limited. `personal_machine_not_permitted` (not
-the owner, or not the owner's turn) and every other failure stay plain
-refusals, and callers without an exact agent attempt get no card. If the card
-cannot be posted, the original refusal is returned unchanged.
+The card also appears without an agent decision. A tool refusal the person can
+fix themselves is listed once in `USER_SETUP_BLOCKERS` (`packages/contracts`),
+which names the refusal code, the capability card that fixes it and an optional
+card `purpose`. Whatever tool hits one, the setup card is posted in the calling
+turn through one shared path: `userSetupCardPayload` (`packages/core`) builds
+the `tool.auth_needed` payload, and `appendTurnCapabilityCardOnce` appends it
+under the turn-attempt fence. API tools use `withUserSetupCard`
+(`apps/api/src/mcp/user-setup-card.ts`); every worker interaction tool
+(`browser_*`, `computer_*`) goes through the same wrapper in
+`packages/runtime/src/interaction-tools.ts`, posting with
+`apps/worker/src/activities/agent-turn/user-setup-card.ts`. Giving another
+refusal a card means adding it to the registry; no tool needs its own handling.
+
+The refusal the agent reads then says the card is posted in this chat in
+Opengeni, carries the chat link when a web base is configured, and tells the
+agent to tell the person in one sentence to use it, or, when they read the chat
+elsewhere (Slack, a worker or a scheduled chat), to open the link. It must not
+describe the card's steps, post another card, wait or retry: finishing the card
+sends the message that continues the chat. If the card can't be posted, an API
+refusal is returned unchanged, and a worker tool's error tells the agent to
+offer the fix itself in the same reply (`capability_authorization_request`, and
+the exact next step). The agent instructions carry the same general rule: when
+something the user can fix blocks a tool, offer the fix in the same reply.
+
+Two refusals are registered today:
+
+- `personal_machine_permission_required`: `sandbox_swap`, `sandbox_attach` or
+  `run_on` was refused because the machine's owner started the turn but has not
+  allowed this chat yet. The plain machine card, naming the requested machine.
+  `personal_machine_not_permitted` (not the owner, or not the owner's turn) and
+  every other failure stay plain refusals, and callers without an exact agent
+  attempt get no card. Only these API tools emit it today; the worker poster
+  passes no requested machine, so an interaction tool that emitted it would get
+  a machine card that names no machine.
+- `attached_browser_unavailable`: `browser_open` with
+  `placement: {kind: "attached_device"}` found no connected Chrome profile. The
+  **Chrome setup card**, the machine card with `purpose: "chrome"`
+  (`session-chrome-card.tsx`), shows one step at a time: **Connect a
+  computer** when no online machine with a display exists, then **Add to
+  Chrome** (the Opengeni Browser extension), then **Continue** once a Chrome
+  profile `browser_open` can drive (connected, with debugger attachment)
+  links up, which sends `Chrome is connected. Continue.` When a computer comes
+  online, the card keeps checking Chrome for up to a minute. It offers Continue
+  only after it saw Chrome missing, so an old or reloaded card sends nothing. The card reflects
+  the viewer's own machines and Chrome; in a shared workspace a teammate may see
+  a different step than the person who started the turn. When Connected
+  Machines are off on the deployment, nothing is posted and the agent is told
+  the person can't fix it here.
+
+A repeated refusal in the same turn reuses that turn's card for the same
+capability, requested machine and purpose; the lookup and append run atomically,
+so parallel refusals cannot stack copies, and a plain machine card does not hide
+the Chrome card. Cards for other capabilities, such as Slack and GitHub in the
+same turn, are never limited.
 
 The card (`packages/react/src/app/components/capabilities/session-machine-card.tsx`):
 
@@ -1497,6 +1638,11 @@ The card (`packages/react/src/app/components/capabilities/session-machine-card.t
   workspace access and confirms locally before connecting. The link carries only
   the origin, workspace/chat destination and subject, never an enrollment token.
   Mobile browsers direct the person to the computer they want to connect;
+- inside the desktop app, the same dialog is **Connect a machine**: for the
+  computer the app runs on it shows the **Computer use** switch (off, turning
+  on, on, waiting on a macOS permission, or a problem with one fix), and never
+  offers a download or **Open app and connect** for it. **Connect another computer or server** holds the
+  command and code flows below;
 - **Connect a server instead** explicitly reveals the advanced terminal flow.
   Only then is a token minted. The person chooses **Who can use it?** (**Only me** by
   default, or **This workspace**) and screen control (off by default); both are
@@ -2012,6 +2158,35 @@ remain enforced. Reuse honors
 explicit placement, identity, revision, network route and linked desktop choices.
 Debugger continuation pages are drained without treating a full page as lost
 history; actual sequence gaps still terminate the connection.
+
+An attached BrowserSession never leaves its empty tabs or Chrome's debugger
+behind. Whatever ends its controller runtime (an explicit end, a controller
+shutdown or restart, or an idle release after the same idle time as a managed
+browser) closes the tabs that session opened that are still blank, and releases
+Chrome's debugger on the tabs it attached, so Chrome stops showing that it is
+being debugged once no agent is using the profile. A tab the session did not
+open, a tab showing a page, and a tab another session on the same controller is
+using are left alone. The session's next request recovers it as it recovers a
+released managed browser, and it continues in the tab it was using; when that
+was an empty tab that has since been closed, it opens a new one, and a request
+naming the closed tab is told which tab is current. Each session records these
+tabs in an owner-only `attached-tabs.json` in its session directory. A
+controller that starts after another crashed finishes any cleanup left undone,
+for the same extension connection generation only: Chrome tab ids are not
+trusted to name the same tabs after the extension reconnects.
+
+A session waiting on a JavaScript dialog is still in use: neither an idle
+release nor an agent restart lets go of its browser until the dialog is
+answered, for attached and managed browsers alike, or until it has been open
+for 30 minutes: a dialog nobody answered by then is taken as forgotten (or its
+close was never reported), and losing it is better than holding the browser
+and the machine's updates indefinitely. Chrome offers a dialog only
+to the debugger that was attached when it opened; a debugger attached later can
+neither see nor answer it, and the page answers nothing until the person does.
+For the same reason, a session that continues in its earlier tab waits at most
+a few seconds for it. A tab blocked by a dialog its page opened while no agent
+held the browser is left as it is for the person, and the session continues in
+a new tab.
 
 An attached tab's debugger disconnect invalidates its cached target, document,
 frame and element authority without restarting Chrome or changing other tabs.

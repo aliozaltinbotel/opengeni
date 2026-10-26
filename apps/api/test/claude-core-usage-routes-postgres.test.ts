@@ -8,11 +8,8 @@
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import type { SubscriptionCoreClaudeCredential } from "../../../packages/db/src/subscription-core-claude-adapter";
 import { encryptEnvironmentValue } from "../../../packages/db/src/environment-crypto";
 import { installNetworkDenialGuard } from "../../../packages/db/test/fixtures/subscription-core-fake-api-key";
@@ -134,7 +131,7 @@ function credential(label: string): string {
   return encryptEnvironmentValue(key, JSON.stringify(value));
 }
 
-/** A shared connection of one pool, assigned to the shared workspace. */
+/** A shared connection: the organization's, or the shared workspace's own. */
 async function sharedConnection(
   org: Org,
   label: string,
@@ -143,20 +140,21 @@ async function sharedConnection(
   const [row] = await shared.admin<{ id: string }[]>`
     insert into subscription_connections (
       account_id, provider, kind, credential_encrypted, ownership, scope_kind,
-      provider_account_id, provider_state, expires_at, label, managed_by_workspace_id
+      provider_account_id, provider_state, expires_at, label, managed_by_workspace_id,
+      allow_personal_workspaces
     ) values (
       ${org.accountId}::uuid, 'claude', 'subscription', ${credential(label)}, 'shared',
-      'organization', ${`claude-${label}-${crypto.randomUUID()}`},
+      ${pool === "workspace" ? "workspaces" : "organization"},
+      ${`claude-${label}-${crypto.randomUUID()}`},
       ${shared.admin.json({ oauthScopes: ["user:inference", "user:profile"] })}::jsonb,
       ${new Date(Date.now() + 86_400_000).toISOString()}::timestamptz, ${label},
-      ${pool === "workspace" ? org.workspaceId : null}::uuid
+      ${pool === "workspace" ? org.workspaceId : null}::uuid, ${pool !== "workspace"}
     ) returning id::text as id`;
-  await shared.admin`
-    insert into subscription_connection_assignment_policies (
-      account_id, connection_id, workspace_id, inference_pool, allowed_model_ids
-    ) values (
-      ${org.accountId}::uuid, ${row!.id}::uuid, ${org.workspaceId}::uuid, ${pool}, null
-    )`;
+  // A workspace's own connection reaches only that workspace.
+  if (pool === "workspace")
+    await shared.admin`
+      insert into subscription_connection_workspaces (account_id, connection_id, workspace_id)
+      values (${org.accountId}::uuid, ${row!.id}::uuid, ${org.workspaceId}::uuid)`;
   return row!.id;
 }
 

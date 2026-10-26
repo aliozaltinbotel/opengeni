@@ -12,6 +12,7 @@ import {
   cadenceOfSchedule,
   createRequestFromDraft,
   deriveScheduleName,
+  draftFromTemplate,
   mergeSchedulePinnedAccounts,
   newScheduleDraft,
   nextRunOf,
@@ -19,9 +20,11 @@ import {
   scheduleErrorText,
   scheduleInheritsChatSettings,
   scheduleConnectionAccountIntent,
+  scheduleTemplates,
   scheduleWords,
   sortSchedulesForList,
   specFromCadence,
+  templateById,
   updateRequestFromDraft,
   type ScheduleDraft,
 } from "./schedule-model";
@@ -132,18 +135,79 @@ describe("schedule names", () => {
   });
 });
 
+describe("schedule templates", () => {
+  test("event templates are offered only where event triggers run", () => {
+    expect(scheduleTemplates(false).some((template) => template.triggers.length > 0)).toBe(false);
+    expect(templateById("pr-review", false)).toBeUndefined();
+    expect(templateById("pr-review", true)?.triggers[0]?.source).toEqual({ kind: "github" });
+    expect(templateById("meeting-notes", true)?.triggers[0]?.source).toEqual({
+      kind: "workspace",
+    });
+  });
+
+  test("the pull request review runs on events only and skips drafts until they are ready", () => {
+    const template = templateById("pr-review")!;
+    const draft = draftFromTemplate(
+      template,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence).toBeNull();
+    expect(draft.prompt).toBe(template.instructions);
+    const sourceId = "00000000-0000-4000-8000-000000000001";
+    const request = createRequestFromDraft(
+      {
+        ...draft,
+        events: {
+          ...draft.events,
+          triggers: draft.events.triggers.map((trigger) => ({ ...trigger, sourceId })),
+        },
+      },
+      { now: NOW, learningScope: "personal" },
+    );
+    expect(request.schedule).toEqual({ type: "manual" });
+    expect("events" in request ? request.events?.triggers : undefined).toEqual([
+      expect.objectContaining({
+        sourceId,
+        eventTypes: ["pull_request.opened", "pull_request.ready_for_review"],
+        conditions: [{ field: "data.pull_request.draft", op: "equals", value: false }],
+      }),
+    ]);
+  });
+
+  test("a scheduled template runs at its time in the viewer's time zone", () => {
+    const draft = draftFromTemplate(
+      templateById("morning-brief")!,
+      { includeOpenGeniTool: false },
+      { timeZone: "Europe/Oslo" },
+    );
+    expect(draft.cadence?.timeZone).toBe("Europe/Oslo");
+    expect(draft.events.triggers).toEqual([]);
+    const request = createRequestFromDraft(draft, { now: NOW, learningScope: "personal" });
+    expect(request.schedule).toEqual(
+      expect.objectContaining({
+        type: "calendar",
+        hour: 8,
+        minute: 0,
+        timeZone: "Europe/Oslo",
+        daysOfWeek: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+      }),
+    );
+  });
+});
+
 describe("schedule requests", () => {
   const base = (): ScheduleDraft => ({
     ...newScheduleDraft({ includeOpenGeniTool: false }, "Europe/Oslo"),
     prompt: "Summarize open incidents.",
   });
 
-  test("a new-chat schedule is created with the default overlap and its attachments", () => {
+  test("a new-chat schedule is created with the default overlap, steer, and its attachments", () => {
     const request = createRequestFromDraft(
       { ...base(), overlapPolicy: "skip", rigId: "rig-1" },
       { now: NOW, learningScope: "workspace" },
     );
-    expect(request.overlapPolicy).toBe("allow_concurrent");
+    expect(request.overlapPolicy).toBe("steer");
     if (!("agentConfig" in request)) throw new Error("Expected a separate agent");
     expect(request.rigId).toBe("rig-1");
     expect(request.name).toBe("Summarize open incidents");
@@ -156,6 +220,36 @@ describe("schedule requests", () => {
       { now: NOW, learningScope: "workspace" },
     );
     expect(request.overlapPolicy).toBe("skip");
+  });
+
+  test("a new automation starts on steer; an edit sends only a changed choice", () => {
+    expect(base().overlapPolicy).toBe("steer");
+    const initial: ScheduleDraft = {
+      ...base(),
+      runMode: "existing_session",
+      targetSessionId: "chat",
+    };
+    const stored = task({
+      runMode: "existing_session",
+      targetSessionId: "chat",
+      overlapPolicy: "steer",
+    });
+    expect(
+      updateRequestFromDraft(stored, initial, { ...initial, overlapPolicy: "skip" }, { now: NOW })
+        .overlapPolicy,
+    ).toBe("skip");
+    expect(
+      updateRequestFromDraft(stored, { ...initial, overlapPolicy: "skip" }, initial, { now: NOW })
+        .overlapPolicy,
+    ).toBe("steer");
+    const moved = updateRequestFromDraft(
+      stored,
+      initial,
+      { ...initial, runMode: "new_session_per_run", targetSessionId: "" },
+      { now: NOW },
+    );
+    expect(moved.runMode).toBe("new_session_per_run");
+    expect(moved.overlapPolicy).toBeUndefined();
   });
 
   test("Secrets narrowing is sent only when vaults are picked, and cleared back to all", () => {
@@ -493,7 +587,7 @@ describe("schedule requests", () => {
     });
   });
 
-  test("editing one account group retains hidden and first-party choices", () => {
+  test("editing one account group retains hidden and active first-party choices", () => {
     const saved = [
       { serverId: "example", connectionId: "old-choice" },
       { serverId: "unavailable", connectionId: "retained-choice" },
@@ -517,7 +611,7 @@ describe("schedule requests", () => {
           },
         ],
       }),
-    ).toEqual([saved[1]!, saved[2]!, saved[3]!, selection]);
+    ).toEqual([saved[1]!, saved[2]!, selection]);
   });
 
   test("a materialized chat keeps only pins its current tools can use; an existing-chat schedule has none", () => {
@@ -618,7 +712,7 @@ describe("schedule requests", () => {
           firstPartyMcpTools: [...destination.chat.firstPartyMcpTools],
         },
       }),
-    ).toEqual(saved);
+    ).toEqual([saved[0]!]);
     expect(
       mergeSchedulePinnedAccounts(saved, [], [], {
         ...destination,
@@ -660,7 +754,7 @@ describe("schedule requests", () => {
           firstPartyMcpPermissions: null,
         },
       }),
-    ).toEqual(saved);
+    ).toEqual([saved[0]!]);
   });
 
   test("removing the last reusable message repository removes its account during a picker edit", () => {
@@ -892,7 +986,7 @@ describe("scheduleAgentOpeningMessage", () => {
       "Europe/Oslo",
     );
     expect(message).toBe(
-      "Help me create a schedule in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
+      "Help me create an automation in this workspace.\n\nEvery weekday morning, summarize new Sentry errors and post them to #eng\n\nMy time zone is Europe/Oslo.",
     );
   });
 });

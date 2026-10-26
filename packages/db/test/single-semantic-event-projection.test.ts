@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import {
   appendSessionEvents,
@@ -22,7 +22,8 @@ let client: ReturnType<typeof createDb>;
 
 beforeAll(async () => {
   const acquired = await acquireSharedTestDatabase("single-semantic-projection", {
-    withheldMigrations: [migration],
+    // 0904 patches this migration's projection by exact text.
+    withheldMigrations: [migration, "0904_infrastructure_events_keep_session_activity.sql"],
   });
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;

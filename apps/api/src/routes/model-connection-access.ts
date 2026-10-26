@@ -6,6 +6,8 @@ import {
   withOrganizationGatewayCatalogProvider,
   withOrganizationOpenRouterCatalogProvider,
   withOrganizationOpperCatalogProvider,
+  withOrganizationDirectCatalogProvider,
+  organizationDirectModelIdPrefix,
 } from "@opengeni/config";
 import { ModelConnectionAccessPolicy, ModelConnectionAccessResponse } from "@opengeni/contracts";
 import {
@@ -29,6 +31,7 @@ import {
   updateSubscriptionCoreProviderModelConnectionAccess,
   getOrganizationAdministrationOverview,
   listOrganizationModelProviderCustomModels,
+  getOrganizationModelProviderConnection,
   getWorkspaceProviderApiKeyConnectionMetadata,
   type ModelConnectionTarget,
 } from "@opengeni/db";
@@ -37,8 +40,10 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requireOrganizationCodexHuman } from "./codex";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
+import { parsePathParam } from "../http/path-identifier";
 import { codexRouteDisposition } from "./codex-core";
 import { requireSubscriptionCoreRoute } from "./subscription-pool-core";
+import { parseRequestBody } from "../http/request-body";
 
 const Kind = z.enum([
   "codex",
@@ -48,8 +53,12 @@ const Kind = z.enum([
   "anthropic",
   "claude_subscription",
   "opper",
+  "openai",
+  "azure_openai",
 ]);
 function modelPrefix(target: ModelConnectionTarget) {
+  if (target.kind === "openai" || target.kind === "azure_openai")
+    return organizationDirectModelIdPrefix(target.kind);
   if (target.kind === "anthropic" || target.kind === "claude_subscription")
     return (
       claudeProviderId(target.kind, target.workspaceId === null ? "organization" : "workspace") +
@@ -88,13 +97,17 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
       c: Context,
       mutate: boolean,
     ): Promise<{ connection: ModelConnectionTarget; core: boolean }> {
-      const kind = Kind.parse(c.req.param("kind"));
+      const kind = parsePathParam(c, "kind", Kind);
       if (kind === "claude_subscription" && !deps.settings.claudeSubscriptionEnabled)
         throw new HTTPException(404, { message: "Claude subscriptions are not enabled" });
-      const scopeId = z.string().uuid().parse(c.req.param("scopeId"));
-      let connectionId = c.req.param("connectionId")!;
-      if (kind === "codex" || kind === "supergrok" || kind === "claude_subscription")
-        connectionId = z.string().uuid().parse(connectionId);
+      const scopeId = parsePathParam(c, "scopeId", z.string().uuid());
+      let connectionId = parsePathParam(
+        c,
+        "connectionId",
+        kind === "codex" || kind === "supergrok" || kind === "claude_subscription"
+          ? z.string().uuid()
+          : z.union([z.literal("current"), z.string().uuid()]),
+      );
       if (scope === "organizations") {
         if (mutate) requireSameOriginBrowserMutation(c, deps);
         const human = await requireOrganizationCodexHuman(c, deps, scopeId);
@@ -109,6 +122,10 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
           core: (await coreAccessDisposition(deps, kind, scopeId)) === "core",
         };
       }
+      // Workspace OpenAI and Azure OpenAI connections are exact direct
+      // connections with no shared access policy; only the organization's has one.
+      if (kind === "openai" || kind === "azure_openai")
+        throw new HTTPException(404, { message: "Connection not found" });
       const grant = await requireAccessGrant(c, deps, scopeId, "workspace:read");
       // On the core a SuperGrok or Claude access policy is a shared connection's, which
       // the core editor authorizes; only the legacy pools have private rows.
@@ -207,6 +224,22 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
                 ? withOrganizationOpperCatalogProvider(settings, models)
                 : withOrganizationOpenRouterCatalogProvider(settings, models);
         }
+        if (connection.kind === "openai" || connection.kind === "azure_openai") {
+          const [models, direct] = await Promise.all([
+            listOrganizationModelProviderCustomModels(deps.db, {
+              ...actor,
+              providerKind: connection.kind,
+            }),
+            getOrganizationModelProviderConnection(deps.db, {
+              ...actor,
+              providerKind: connection.kind,
+            }),
+          ]);
+          settings = withOrganizationDirectCatalogProvider(settings, connection.kind, {
+            endpoint: direct?.endpoint ?? null,
+            models,
+          });
+        }
       }
       // The people an administrator can choose, or null when the account
       // can't be limited to people or the organization has more members than
@@ -260,10 +293,12 @@ export function registerModelConnectionAccessRoutes(app: Hono, deps: ApiRouteDep
     app.put(path, async (c) => {
       // Access of a provider on the shared core lives there; the frozen legacy row is never written.
       const { connection, core } = await target(c, true);
-      const parsed = ModelConnectionAccessPolicy.safeParse(await c.req.json().catch(() => null));
-      if (!parsed.success)
-        throw new HTTPException(422, { message: "Invalid connection access policy" });
-      const policy = parsed.data;
+      const parsed = parseRequestBody(
+        ModelConnectionAccessPolicy,
+        await c.req.json().catch(() => null),
+        { status: 422, message: "Invalid connection access policy" },
+      );
+      const policy = parsed;
       if (policy.sharePersonal && (!core || connection.workspaceId !== null))
         throw new HTTPException(422, {
           message: "Personal sharing requires the organization subscription route",

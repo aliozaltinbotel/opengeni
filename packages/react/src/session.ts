@@ -46,6 +46,7 @@ export type {
   CreatedConversation,
 } from "./hooks/use-new-conversation";
 export type {
+  PendingPrompt,
   SessionConversationController,
   UseSessionConversationOptions,
 } from "./hooks/use-session-conversation";
@@ -83,9 +84,19 @@ export type {
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
+  QueueRecallResult,
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  latestRecallableQueuedTurn,
+  shouldRecallQueuedOnKey,
+  useQueuedPromptRecall,
+} from "./hooks/use-queued-prompt-recall";
+export type {
+  ComposerQueuedRecall,
+  QueuedPromptRecallOutcome,
+} from "./hooks/use-queued-prompt-recall";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
@@ -150,7 +161,32 @@ export type {
   TurnEndItem,
   TurnStepsItem,
   TurnStepsState,
+  TimelineAnnotationSourceDescriptor,
   UserMessageItem,
   WorkerCompletionItem,
   WorkerItem,
 } from "./timeline/types";
+
+// Why a message can't start (an admission block, or a chat on somebody else's
+// personal machine) and the allowed ways forward, for any renderer. Styled web
+// surfaces live in `@opengeni/react/session-ui` (`SessionStartNotice`).
+export { useSessionStart } from "./hooks/use-session-start";
+export type { UseSessionStartOptions, UseSessionStartResult } from "./hooks/use-session-start";
+export {
+  admissionControlNeedsRefresh,
+  admissionRecheckControl,
+  currentSessionMachineAccess,
+  isMachineComputeSelectable,
+  personalMachineCopy,
+  recheckSessionAdmission,
+  savedMessageMachineChoices,
+  sessionAdmissionCopy,
+  sessionAdmissionMachineChangedCopy,
+  sessionAdmissionNeedsDifferentMachine,
+  sessionAdmissionReason,
+} from "./session-admission-model";
+export type {
+  PersonalMachineCopy,
+  SessionAdmissionCopy,
+  SessionAdmissionReason,
+} from "./session-admission-model";

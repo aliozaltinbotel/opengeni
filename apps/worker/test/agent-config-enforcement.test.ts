@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
+import * as fs from "node:fs";
 import { sessionWithEffectiveToolPolicy, resolveSessionAgentConfigForCreate } from "@opengeni/core";
 import { RunContext, type ModelRequest, type Tool } from "@openai/agents";
 import { CODEX_FALLBACK_MODEL_SLUGS, CODEX_MODEL_ID_PREFIX } from "@opengeni/codex/constants";
@@ -45,7 +46,9 @@ import {
   type OpenGeniRuntime,
   type PrepareToolsOptions,
 } from "@opengeni/runtime";
-import { ScriptedModel, startTestMcpServer, testSettings } from "@opengeni/testing";
+import { ScriptedModel } from "@opengeni/testing/scripted-model";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
+import { testSettings } from "@opengeni/testing/settings";
 import { buildTurnAgent, type BuildTurnAgentDeps } from "../src/activities/agent-turn/agent-build";
 import {
   prepareTurnToolPolicy,
@@ -101,6 +104,12 @@ function toolName(tool: Tool | ModelRequest["tools"][number]): string {
 type FixtureOptions = {
   agent?: ResolvedAgentConfig | null;
   hasSkills?: boolean;
+  inlineSkills?: BuildTurnAgentDeps["session"]["skills"];
+  loadSkillDescriptors?: () => Promise<Awaited<ReturnType<typeof db.listSkillDescriptors>>>;
+  loadVideoPolicy?: (
+    phase: "tool-preparation" | "agent-build",
+  ) => Promise<Awaited<ReturnType<typeof db.getWorkspaceVideoGenerationPolicy>>>;
+  videoEnabled?: boolean;
   lazy?: boolean;
   productMcp?: boolean;
   builtins?: boolean;
@@ -114,6 +123,8 @@ type FixtureOptions = {
   machineAttached?: boolean;
   /** The stored bundled selection; `"omit"` leaves it undefined. Default `[]`. */
   bundledSkillIds?: BundledSkillId[] | "omit";
+  /** Rendered workspace governance for this turn. */
+  workspaceGovernance?: string;
 };
 
 // Execute all three production worker phases and the production runtime builder.
@@ -143,7 +154,13 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   ];
   const disabled = options.deploymentDisabled;
   const baseSettings = testSettings({
-    sandboxBackend: "none",
+    sandboxBackend: options.videoEnabled ? "docker" : "none",
+    ...(options.videoEnabled
+      ? {
+          vercelAiGatewayApiKey: "fixture-video-gateway-key",
+          environmentsEncryptionKey: Buffer.alloc(32, 9).toString("base64"),
+        }
+      : {}),
     ...(options.modelId ? { openaiModel: options.modelId } : {}),
     webSearchEnabled: disabled !== "webSearch",
     lazyToolSearchEnabled: options.lazy === true,
@@ -169,21 +186,30 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
   context.attempt.executionGeneration = 1;
   context.eventing.publish = async () => {};
   const skillCatalogWrites: string[] = [];
+  const governanceWrites: Array<string | null> = [];
+  let preparationPhase: "tool-preparation" | "agent-build" = "tool-preparation";
+  const metadataReads = { skillDescriptors: 0, videoPolicy: 0 };
   const persistence = [
     spyOn(db, "requireWorkspace").mockResolvedValue({
       id: SCOPE.workspaceId,
       settings: {},
     } as Awaited<ReturnType<typeof db.requireWorkspace>>),
     spyOn(db, "getSandboxRecoveryDiscontinuity").mockResolvedValue(null),
-    spyOn(db, "getWorkspaceVideoGenerationPolicy").mockResolvedValue({
-      schemaVersion: 1,
-      revision: 0,
-      fundingSource: "workspace_gateway",
-      enabledModelIds: [],
-      defaultModelId: null,
+    spyOn(db, "getWorkspaceVideoGenerationPolicy").mockImplementation(async () => {
+      metadataReads.videoPolicy++;
+      if (options.loadVideoPolicy) return await options.loadVideoPolicy(preparationPhase);
+      return {
+        schemaVersion: 1,
+        revision: 0,
+        fundingSource: options.videoEnabled ? "opengeni_credits" : "workspace_gateway",
+        enabledModelIds: options.videoEnabled ? ["bytedance/seedance-2.5"] : [],
+        defaultModelId: options.videoEnabled ? "bytedance/seedance-2.5" : null,
+      };
     }),
-    spyOn(db, "listSkillDescriptors").mockResolvedValue(
-      options.hasSkills === false
+    spyOn(db, "listSkillDescriptors").mockImplementation(async () => {
+      metadataReads.skillDescriptors++;
+      if (options.loadSkillDescriptors) return await options.loadSkillDescriptors();
+      return options.hasSkills === false
         ? []
         : [
             {
@@ -192,11 +218,15 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
               description: "Installed test Skill",
               activationMode: "workspace_managed",
             } as Awaited<ReturnType<typeof db.listSkillDescriptors>>[number],
-          ],
-    ),
+          ];
+    }),
     spyOn(db, "ensureSessionSkillCatalog").mockImplementation(async (_db, input) => {
       skillCatalogWrites.push(input.catalog);
       return input.catalog;
+    }),
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(async (_db, input) => {
+      governanceWrites.push(input.governance);
+      return input.governance;
     }),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
     ...(typeof db.sessionHasToolRouterHistory === "function"
@@ -262,7 +292,18 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     },
     buildAgent: (runSettings: Settings, resources, agentOptions) => {
       buildOptions = agentOptions;
-      return buildOpenGeniAgent(runSettings, resources, { ...agentOptions, model });
+      // Exercise worker video admission and the real model request without
+      // provisioning physical compute; this fixture never invokes media tools.
+      // Preserve the worker's required cancellation-controller handshake too.
+      if (options.videoEnabled)
+        agentOptions.onToolCancellationFence?.(
+          runtimeExports.createTurnToolCancellationController(),
+        );
+      return buildOpenGeniAgent(
+        options.videoEnabled ? { ...runSettings, sandboxBackend: "none" } : runSettings,
+        resources,
+        { ...agentOptions, model },
+      );
     },
   } satisfies Pick<OpenGeniRuntime, "prepareTools" | "buildAgent">;
   const session = {
@@ -304,7 +345,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
     ...(options.bundledSkillIds === "omit"
       ? {}
       : { bundledSkillIds: options.bundledSkillIds ?? [] }),
-    skills: [],
+    skills: options.inlineSkills ?? [],
     firstPartyMcpTools: [...FIRST_PARTY_MCP_TOOL_NAMES],
     firstPartyMcpPermissions: null,
     model: options.modelId ?? "scripted-model",
@@ -408,9 +449,13 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       throwIfWorkerShuttingDown: () => {},
       throwIfTurnCancelled: () => {},
     } as PrepareTurnToolRuntimeDeps);
+    preparationPhase = "agent-build";
     const built = await buildTurnAgent({
       ...context,
       ...toolRuntime,
+      ...(options.workspaceGovernance !== undefined
+        ? { workspaceGovernance: options.workspaceGovernance }
+        : {}),
       input,
       db: {} as BuildTurnAgentDeps["db"],
       runtime: runtime as OpenGeniRuntime,
@@ -523,6 +568,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       );
     }
     return {
+      metadataReads,
       delegatedPayloads,
       interactionPayloads,
       request,
@@ -538,6 +584,7 @@ async function captureWorkerRequest(options: FixtureOptions = {}) {
       } satisfies AgentMediaAttachment,
       skillCatalog: toolRuntime.skillCatalog,
       skillCatalogWrites,
+      governanceWrites,
       selectedServerIds: policy.turnTools.map((tool) => tool.id).sort(),
       settings,
       session,
@@ -740,6 +787,26 @@ describe("agent configuration reaches the production model request", () => {
       hosted: explicitNull.request.tools.filter((tool) => tool.type === "hosted_tool"),
     }).toMatchSnapshot();
   });
+
+  test.each(["legacy", "all"] as const)(
+    "workspace governance reaches durable history, never the system prompt (%s config)",
+    async (from) => {
+      const agent = from === "all" ? agentConfig("all") : null;
+      const governed = await captureWorkerRequest({
+        agent,
+        workspaceGovernance: "Workspace rule: answer in English.",
+      });
+      const other = await captureWorkerRequest({
+        agent,
+        workspaceGovernance: "Workspace rule: answer in Norwegian.",
+      });
+      // A different initiator or an edited policy must not rewrite the
+      // system prompt that every earlier request of the session sent.
+      expect(governed.request.systemInstructions).toBe(other.request.systemInstructions);
+      expect(governed.request.systemInstructions).not.toContain("Workspace rule");
+      expect(governed.governanceWrites).toEqual(["Workspace rule: answer in English."]);
+    },
+  );
 
   test.each([
     "foreign scope",
@@ -1067,6 +1134,103 @@ describe("effective-tools projection agrees with actual model preparation", () =
 });
 
 describe("Skill attachment is distinct from Skill catalog availability", () => {
+  test.each([false, true])(
+    "disabled Skills skip unused metadata/files with inline selections (unavailable=%s)",
+    async (unavailable) => {
+      const config = agentConfig("all", "skills", unavailable ? "manage" : false);
+      if (unavailable) config.unavailable = ["skills"];
+      const reads = spyOn(fs, "readFileSync");
+      try {
+        const captured = await captureWorkerRequest({
+          agent: config,
+          bundledSkillIds: "omit",
+          inlineSkills: [
+            {
+              name: "inline-disabled-sentinel",
+              description: "Must stay outside the model request",
+              files: [
+                {
+                  path: "SKILL.md",
+                  content:
+                    "---\nname: inline-disabled-sentinel\ndescription: Must stay outside the model request\n---\nNever include this disabled Skill",
+                },
+              ],
+            },
+          ],
+          loadSkillDescriptors: async () => {
+            throw new Error("disabled Skills must not read their descriptors");
+          },
+          videoEnabled: true,
+        });
+        expect(captured.metadataReads).toEqual({ skillDescriptors: 0, videoPolicy: 1 });
+        expect(reads.mock.calls.filter(([path]) => String(path).includes("bundled_"))).toEqual([]);
+        expect(captured.skillCatalog).toEqual([]);
+        expect(captured.names).not.toContain("skill_read");
+        expect(captured.catalog.entries.map((entry) => entry.modelName)).not.toContain(
+          "skill_save",
+        );
+        expect(JSON.stringify(captured.request)).not.toContain("inline-disabled-sentinel");
+        expect(JSON.stringify(captured.request)).not.toContain(SKILL_SENTINEL);
+        expect(captured.mediaAttachment.video).toBe(true);
+        expect(captured.names).toContain("generate_video");
+      } finally {
+        reads.mockRestore();
+      }
+    },
+  );
+
+  test("disabled Skills still fail when agent build's live video-policy read fails", async () => {
+    const phases: string[] = [];
+    const failure = new Error("live video policy unavailable");
+    await expect(
+      captureWorkerRequest({
+        agent: agentConfig("all", "skills", false),
+        loadVideoPolicy: async (phase) => {
+          phases.push(phase);
+          throw failure;
+        },
+      }),
+    ).rejects.toBe(failure);
+    expect(phases).toEqual(["agent-build"]);
+  });
+
+  test.each(["read", "manage"] as const)(
+    "enabled Skills %s retain metadata failures and the later live video-policy read",
+    async (skills) => {
+      const failure = new Error("Skill metadata unavailable");
+      for (const failingRead of ["descriptors", "initial-video", "live-video"] as const) {
+        const phases: string[] = [];
+        await expect(
+          captureWorkerRequest({
+            agent: agentConfig("all", "skills", skills),
+            loadSkillDescriptors: async () => {
+              if (failingRead === "descriptors") throw failure;
+              return [];
+            },
+            loadVideoPolicy: async (phase) => {
+              phases.push(phase);
+              if (
+                failingRead === "initial-video" ||
+                (failingRead === "live-video" && phase === "agent-build")
+              )
+                throw failure;
+              return {
+                schemaVersion: 1,
+                revision: 0,
+                fundingSource: "workspace_gateway",
+                enabledModelIds: [],
+                defaultModelId: null,
+              };
+            },
+          }),
+        ).rejects.toBe(failure);
+        expect(phases).toEqual(
+          failingRead === "live-video" ? ["tool-preparation", "agent-build"] : ["tool-preparation"],
+        );
+      }
+    },
+  );
+
   test.each([false, "read", "manage"] as const)(
     "skills %s exposes only its permitted tool family",
     async (skills) => {

@@ -530,6 +530,52 @@ test("readiness warnings open to a list with one-click fixes", async () => {
   await page.unmount();
 });
 
+test("a login-only deployment's sign-in notice shows on its own, not as something to fix", async () => {
+  const { client } = fakeClient();
+  const notice = {
+    code: "public_sign_in_required" as const,
+    message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+    suggestion:
+      "Anyone with the link can open it after signing in. This is a deployment setting, not a problem with the Site or its link.",
+    fix: null,
+  };
+  const alone = await renderPage({
+    client: client as never,
+    sites: { domain: "sites.example", loginOnly: true },
+    load: { state: "ready", publication: published({ access: "public", warnings: [notice] }) },
+  });
+  expect(alone.host.textContent).toContain(notice.message);
+  expect(alone.host.textContent).toContain(notice.suggestion);
+  expect(alone.host.textContent).toContain(
+    "Anyone who signs in to Opengeni. On this deployment, every Site asks visitors to sign in.",
+  );
+  expect(alone.host.textContent).not.toContain("won't work for public visitors");
+  expect(button(alone.host, "Fix")).toBeUndefined();
+  await alone.unmount();
+
+  const problem = {
+    code: "site_data_guest_read" as const,
+    message: "votes can't be read by anonymous public visitors.",
+    suggestion: "Allow guests to read votes, or publish to invited people only.",
+    fix: null,
+  };
+  const both = await renderPage({
+    client: client as never,
+    sites: { domain: "sites.example", loginOnly: true },
+    load: {
+      state: "ready",
+      publication: published({ access: "public", warnings: [notice, problem] }),
+    },
+  });
+  expect(both.host.textContent).toContain(notice.message);
+  expect(
+    [...both.host.querySelectorAll("button")].some((element) =>
+      element.textContent?.includes("1 thing won't work for public visitors"),
+    ),
+  ).toBe(true);
+  await both.unmount();
+});
+
 test("View as visitor opens the Site as its visitors' role", async () => {
   const { client } = fakeClient();
   const page = await renderPage({
@@ -639,4 +685,55 @@ test("in Settings a first publish offers Publish without Cancel", async () => {
   expect(button(page.host, "Cancel")).toBeUndefined();
   expect(button(page.host, "Discard")).toBeUndefined();
   await page.unmount();
+});
+
+test("as a page of its own, a published Site's form is its Web address, and a submit says it succeeded", async () => {
+  const { client } = fakeClient();
+  let submitted = 0;
+  let back = 0;
+  const page = await renderPage({
+    client: client as never,
+    load: { state: "none" },
+    layout: "page",
+    onSubmitted: () => (submitted += 1),
+    onBack: () => (back += 1),
+  });
+  expect(page.host.textContent).toContain("Publish to web");
+  await waitForCheck();
+  await act(async () => button(page.host, "Publish")!.click());
+  await flush();
+  expect(page.published).toHaveLength(1);
+  expect(submitted).toBe(1);
+  // Cancel goes back without publishing.
+  await act(async () => button(page.host, "Cancel")!.click());
+  expect(back).toBe(1);
+  await page.unmount();
+
+  // A refused publish stays on the form.
+  const taken = fakeClient({
+    updateSitePublication: async () => {
+      throw new OpenGeniApiError(409, JSON.stringify({ error: { code: "site_hostname_taken" } }));
+    },
+  });
+  const refused = await renderPage({
+    client: taken.client as never,
+    load: { state: "none" },
+    layout: "page",
+    onSubmitted: () => (submitted += 1),
+  });
+  await waitForCheck();
+  await act(async () => button(refused.host, "Publish")!.click());
+  await flush();
+  expect(submitted).toBe(1);
+  expect(refused.host.textContent).toContain("Another Site uses this name.");
+  await refused.unmount();
+
+  const settings = await renderPage({
+    client: client as never,
+    load: { state: "ready", publication: published() },
+    layout: "page",
+  });
+  expect(settings.host.textContent).toContain("Web address");
+  expect(settings.host.textContent).not.toContain("Publish to web");
+  await settings.unmount();
 });

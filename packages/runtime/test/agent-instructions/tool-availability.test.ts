@@ -7,7 +7,7 @@ import {
   type Permission,
   type ResolvedAgentConfig,
 } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   DEFAULT_AGENT_IDENTITY,
   composeModularAgentInstructions,
@@ -286,7 +286,7 @@ describe("buildAgent instructions: tool availability", () => {
   test("the option reaches the modular composer and only the operational contract changes", () => {
     const options = {
       agentConfig,
-      agentPromptResources: { ...ALL_RESOURCES, attachments: false },
+      agentPromptResources: ALL_RESOURCES,
       codemodeAvailable: true,
       workspaceGovernance: "GOVERNANCE",
       sessionInstructions: "SESSION",

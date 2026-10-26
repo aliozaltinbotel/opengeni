@@ -3,7 +3,6 @@ import { WORKSPACE_INSTRUCTION_POLICY_CONTENT_MAX_CHARS } from "@opengeni/contra
 import {
   prepareKnowledgeFile,
   updateScheduledTaskForApi,
-  captureScheduledTaskRestoreState,
   syncUpdatedScheduledTask,
   type AccessGrantAuthorization,
   type SessionWorkflowClient,
@@ -12,7 +11,7 @@ import { parseDocumentBytes, type DocumentServices } from "@opengeni/documents";
 import type { ObjectStorage } from "@opengeni/storage";
 import { knowledgeContractPdf } from "./fixtures/knowledge-pdf";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   appendSessionHistoryItems,
@@ -276,7 +275,7 @@ describe("unified Knowledge storage", () => {
       canonicalLocalHumanSession: false,
     };
     const source = { kind: "scheduled_task" as const, id: task.id };
-    const restoreState = await captureScheduledTaskRestoreState(client.db, task);
+    const restoreState = { task };
     await expect(
       updateScheduledTaskForApi(
         client.db,

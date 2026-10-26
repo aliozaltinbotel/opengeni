@@ -1,5 +1,834 @@
 # @opengeni/worker-bundle
 
+## 5.3.1
+
+### Minor Changes
+
+- f3d19a2: Bitwarden and Vaultwarden connect directly, like the other password managers. A new package, `@opengeni/vaults-bitwarden`, talks to the server's client API with the account's personal API key and decrypts items itself, so connecting needs only the server address, the API key and the master password, entered once. No bridge program or Bitwarden CLI runs anywhere, and nothing has to be unlocked by hand. Opengeni stores the API key, the server's addresses and the account's user key; the master password is used during setup and never stored. Works with Bitwarden Cloud (US and EU), self-hosted Bitwarden and Vaultwarden.
+
+  The account sees My vault and every organization collection it belongs to, each as its own vault, read-only where the collection is. A hide-passwords collection allows plain fields but refuses passwords, one-time passwords and files. Values are read live on every use and never cached. Writes create logins and notes, patch fields and move items to Bitwarden's trash, and a write that raced another client is a conflict instead of an overwrite.
+
+  Breaking for Bitwarden connections only: the Bitwarden credential is now `{ provider: "bitwarden", serverUrl, clientId, clientSecret, masterPassword }`, Bitwarden is no longer a remote provider on the signed `opengeni.vault.v1` protocol (`VaultProviderWireProvider` is `"external"` only), and a connection saved with the old bridge settings reports that it must be removed and connected again. The bridge package is gone. The shared provider operation helpers Keeper and Proton Pass used now live in `@opengeni/vaults`.
+
+### Patch Changes
+
+- 4b3f4b7: Closing the last tab of an attached Chrome profile no longer disconnects the profile. Chrome closes a profile with its last window, which stopped the extension and ended the profile's connection while Chrome kept running; the extension now opens a new tab page in that window before closing the profile's only tab. A new tab in a Chrome that is running with no window open (common on macOS) opens in a new unfocused window instead of failing. A tab close whose profile connection ends before the extension answers is reported as `outcome_unknown` (HTTP 409) telling the agent to list the tabs again, instead of an unexpected internal error, and a tab Chrome says is already gone is `target_not_found`. `interaction_discover` now shows the model a compact inventory: each BrowserSession and ComputerSession keeps what is needed to reuse it (id, name, lifecycle, placement, engine or platform, identity, last use, whether it belongs to this chat and the capabilities it lacks), and at most 50 sessions and identities of each kind, this chat's own first and then usable ones by most recent use, with a note naming how many were left out; the whole result stays within a fixed byte budget (768 KiB) and each session keeps only its association with this chat, so it never needs a spill. A large workspace used to produce a result of megabytes that the model could not read. Closing a tab that is already gone no longer makes the agent forget its current browser, and a close whose connection ends before the remaining tabs are listed is `outcome_unknown` too. Code Mode programs still receive every full record.
+
+  A tool result too large for the model (over 1 MiB) is now always readable where the agent runs. Its receipt names the copy's absolute path on the machine it was written to (a Connected Machine's own folder or the sandbox's root), so it opens from any working directory; before the turn's sandbox has started it names the path the copy gets when it starts, instead of none; and a text line after the receipt says to read parts with the shell and, when there is no copy, to fetch the file by its id with `files_get_download_url`.
+
+- e7f5d38: A new chat that starts with a file attached now reuses the cached prompt of a chat without one. Before, a turn with a file added an "Attached files" section to the system instructions and the sandbox's mount policy and filesystem layout listed the file, so the whole request missed the provider's prompt cache. The instructions no longer depend on the turn's files; that guidance now ends the turn's attachment notice, after history. Uploads completed without a client sha256 now get one computed from the stored bytes (files up to 20 MiB), so an image uploaded through the plain REST flow reaches the model inline like an SDK upload instead of only as a mounted file.
+- f6f112a: Saving a browser recording now works when the browser runs on a machine with a slow link to storage. Previously a save waited for the whole recording to upload inside one request; anything that took longer than a minute failed, and every retry started the upload from scratch.
+
+  The browser host now uploads the recording in the background. A save waits up to 45 seconds and then answers `202` with `retryAfterMs`. Repeating the save with the same `operationId` joins the upload that is already running. The SDK's `saveBrowserRecording` repeats the request until the save completes, or until its signal aborts.
+
+  Staged recording objects are scheduled for deletion on a durable deadline, so a save that is never repeated leaves nothing behind. Controllers that predate background uploads are still waited on in a single request.
+
+- 2dc5e41: An agent's browser recording is now a recording, so it is stored, owned, shared and deleted like any other. Saving one makes a recording whose purpose is `browser`, with one video track from the browser tab whose chunk is the frame bundle the browser host uploads. The worker encodes the MP4 and its action log in the background instead of the API encoding it inside the save request, then the save copies both into the chat's files and publishes the video as before. While the video is being made, the save answers 202 with `state: "encoding"`, and the SDK keeps repeating it as it does while uploading. The recording follows the chat: a private chat's recording is its owner's and private; a shared chat's belongs to the person the agent acts for. Meeting lists show meetings only, and browser recordings have no transcripts. A recording's tracks now say their `kind` (`audio` or `video`) and, for a video, its size and frame count; a recording says its `purpose` and, if its video failed, an `errorCode`. Migration 0945 adds the columns.
+- bbc8f6d: Turns funded by Opengeni credits can now generate and edit images. When no turn-native, subscription or workspace Gateway route applies, the agent gets `generate_image` through the deployment's Vercel AI Gateway key and `imageGenerationModel`, priced per image (`OPENGENI_IMAGE_GENERATION_CREDIT_MICROS_PER_IMAGE`, or the built-in price for `openai/gpt-image-2`). It is on by default once the key and a price exist; `OPENGENI_IMAGE_GENERATION_OPENGENI_CREDITS_ENABLED=false` turns it off, and workspaces with Opengeni credits turned off are not offered it.
+
+  Before any provider request, each image must fit the workspace and member allowance and the spendable balance, which includes plan and trial grants covering the turn's chat model, minus images of the workspace still in flight. A refusal is returned to the agent as a plain rejected result instead of failing the turn. The image is debited once, in the same transaction that makes it ready. Migrations 0968 to 0970 (rolling) add the price, credit state and usage model to `image_generation_operations`, plus an index for in-flight images. The workspace Gateway image route now finds the workspace key by provider id.
+
+- 5c4cf54: Gmail search, thread and draft-list results now reach the model as compact mail cards (sender, recipients, date, subject, labels, attachment names and the start of the body, with `contentTruncated` when cut), sized to the current model's tool-output budget, so a 50-message full-content search is about 47 KB of model-visible text instead of a 3.5 MB result that had to spill to a file. `get_message` stays complete but drops the HTML body when a plain-text body exists, and replaces an HTML-only body that does not fit the budget with its readable text. Codemode and the spill file still receive the exact results. Local MCP bridges can supply such a model-only copy through the new optional `projectModelToolResult` hook. Cards keep a Reply-To that names another address than the sender. A spilled tool result that arrives before the turn's lazy sandbox has started now starts it and copies the file, so its receipt gives the shell path instead of `null`; the path is given only once the copy is really there.
+- 1cac78f: Record meetings on phones. `@opengeni/react-native` adds native microphone capture for iOS and Android that keeps recording in the background and writes AAC chunks to the device before they are uploaded, an on-device chunk store, and an Expo config plugin for the microphone permission and background audio. `useRecorder` from `@opengeni/react/recordings` takes a `platform`, so the same hook drives the browser and the phone recorder; the meeting list and transcript view models are shared from `@opengeni/react/recordings`.
+
+  The SDK's `RecordingUploader` no longer leaves a recording that captured no audio stuck uploading: it removes it, on the server and on the device, and reports `discarded`. Stopping a recording while a chunk is still being uploaded can no longer be lost. The worker accepts AAC tracks and remuxes them before transcription.
+
+  Speakers nobody named now read the same on the server and in every client: `defaultRecordingSpeakerName` from `@opengeni/contracts` gives "Speaker 2" for a diarized `speaker_1` and "Microphone" or "Shared audio" for a whole-track label, and the API's speaker `name` uses it. A speaker counts as named only when it has an assignment (`source` is set). Transcript versions report BCP 47 language tags, so ElevenLabs' `eng` is now `en`.
+
+  An upload refused with 401, 408, 425 or 429 is retried with backoff instead of failing, since a sign-in that loads late or is refreshed, a timeout or rate limiting doesn't make the recording bad. `useRecorder` sends its uploads through the latest client it was given, so a recorder created before the app's sign-in token loaded no longer uploads without it, and only the current recording updates what the hook shows.
+
+  `RecordingUploadStatus.created` says when the server has a new recording, so a list can refresh then and show it while it is still being recorded. `languageName` names ISO 639-2 codes such as `eng` on engines that don't canonicalize them, like Hermes.
+
+- e0f94c2: Record credential preparation, client publication and sandbox client readiness in startup timings. Overlap independent lazy post-provision prerequisites while awaiting all started work before failure or cleanup. Batch timing receipts without changing model input or credential authority.
+- 3b1d8c1: A workspace can now say how long it keeps meetings. `settings.recordings.retention` takes `transcriptDays`, after which a meeting is deleted with its audio and transcript, and `audioDays`, after which only its audio is deleted (0 deletes it as soon as the transcript is ready). Both count from when the meeting was recorded and apply to meetings recorded earlier too; audio can't be kept longer than the meeting. The worker applies them every few minutes. A meeting whose audio was deleted says when in `audioDeletedAt`, keeps its transcript and speakers, and can't be played or transcribed again (409 `audio_deleted`). The web settings have Keep meetings and Keep audio, with a confirmation before a change deletes anything sooner. Migration 0946 adds the column and the sweep's inventory, whose runtime EXECUTE grant follows in a later release.
+- e5446f1: Recordings can tell speakers apart without the transcription model's help: the worker runs its own CPU diarizer (pyannote segmentation and CAM++ voice vectors on ONNX Runtime), chosen with `diarizer: "ours"` per request or in workspace recording settings, and used automatically when the model has no diarization.
+- 83682c3: Meetings can recognize people by voice. It is off by default. When a workspace turns on `settings.recordings.voiceprints`, each diarized speaker's voice vector is kept with the transcript. People who agreed to be remembered get a voiceprint learned from the speakers named as them, and new transcripts suggest them by name with a confidence. The new routes are `PUT` and `DELETE /v1/workspaces/:workspaceId/recording-people/:personId/voice`. A member agrees with `self` consent, and someone from outside the workspace with `attested` consent. Turning the setting off forgets every voice. `PATCH …/speakers` takes `rejectSuggestions` to turn a suggestion down. The SDK adds `rememberRecordingPersonVoice` and `forgetRecordingPersonVoice`, `useRecordingPeople` adds `rememberVoice` and `forgetVoice`, and `useTranscript` adds `rejectSuggestion`.
+- 67f9ca6: Keep deltas arriving during a durable append inside their existing batching window. Flush only the requested queue prefix while preserving immediate first text, structural checkpoint durability, serialized writes and final draining.
+
+  Preserve ambiguous single-star reasoning boundaries in both write and read coalescing so batching does not change the rendered heading separators. Unflushed partial deltas can remain in memory until the existing window expires; their crash-time persistence cutoff is not identical to eager draining.
+
+- 32726e9: Speaker diarization holds a fraction of the memory it did on long meetings:
+  each thread embeds one piece of speech at a time, segmentation runs in small
+  batches, and ONNX Runtime no longer keeps a memory plan for every input
+  length. A two-hour meeting on four threads peaks at about 0.9 GB instead of
+  3.6 GB, with identical speakers and turns.
+- 1a7c434: An answer the agent gives before waiting is now shown exactly as written. `wait_for_input` takes a `reply` argument that becomes the agent's message, and agents are told to use it whenever the turn answers someone. Before, Claude Opus 5.5 and Sonnet 5.5 returned an answer written just before the wait as a progress update, so people saw only a one-paragraph summary of it, without its images or tables.
+- Updated dependencies [c8ddf55]
+- Updated dependencies [de7e142]
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [1988e97]
+- Updated dependencies [0676499]
+- Updated dependencies [4b3f4b7]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [c5974ea]
+- Updated dependencies [15b4701]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [eb30cb4]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [2ae88c7]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [6e50f56]
+- Updated dependencies [8b08c70]
+- Updated dependencies [7023400]
+- Updated dependencies [cccd692]
+- Updated dependencies [3e52c3c]
+- Updated dependencies [7ccc761]
+- Updated dependencies [f8ed9e5]
+- Updated dependencies [22cfb09]
+- Updated dependencies [a59ecc1]
+- Updated dependencies [226bb1d]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [bbc8f6d]
+- Updated dependencies [dca33ef]
+- Updated dependencies [392db50]
+- Updated dependencies [f6f3ed1]
+- Updated dependencies [3b9f0e5]
+- Updated dependencies [dcbe25d]
+- Updated dependencies [31bca3c]
+- Updated dependencies [1d5bc4e]
+- Updated dependencies [41bff65]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [fb90446]
+- Updated dependencies [5c4cf54]
+- Updated dependencies [0826dfd]
+- Updated dependencies [627b2f1]
+- Updated dependencies [0854838]
+- Updated dependencies [2c34440]
+- Updated dependencies [bd57ea7]
+- Updated dependencies [ae5963e]
+- Updated dependencies [c307566]
+- Updated dependencies [a97c71b]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [406d1b9]
+- Updated dependencies [e9dae07]
+- Updated dependencies [2c34440]
+- Updated dependencies [c992791]
+- Updated dependencies [87d1b8a]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [baf128f]
+- Updated dependencies [4695d41]
+- Updated dependencies [1ac6e9d]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [fa00bb2]
+- Updated dependencies [68b195d]
+- Updated dependencies [e0f94c2]
+- Updated dependencies [f9f0607]
+- Updated dependencies [a42a3b5]
+- Updated dependencies [75348a5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [986d7e0]
+- Updated dependencies [314522c]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [ee4df07]
+- Updated dependencies [3c486ea]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [efd5e62]
+- Updated dependencies [67f9ca6]
+- Updated dependencies [2b72f7c]
+- Updated dependencies [48cb71a]
+- Updated dependencies [a5e68e4]
+- Updated dependencies [a6f6c56]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [eafdd84]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [b7a14bd]
+- Updated dependencies [7c9904b]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [19d9791]
+- Updated dependencies [c665cd4]
+- Updated dependencies [0383280]
+- Updated dependencies [1a7c434]
+- Updated dependencies [1e30d5c]
+- Updated dependencies [1534f12]
+- Updated dependencies [286058a]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/runtime@5.3.0
+  - @opengeni/observability@5.3.0
+  - @opengeni/db@5.3.0
+  - @opengeni/config@5.3.0
+  - @opengeni/sdk@5.3.0
+  - @opengeni/core@5.3.0
+  - @opengeni/network@5.3.0
+  - @opengeni/vaults-bitwarden@5.3.0
+  - @opengeni/vaults@5.3.0
+  - @opengeni/vaults-keeper@5.3.0
+  - @opengeni/vaults-protonpass@5.3.0
+  - @opengeni/vaults-onepassword@5.3.0
+  - @opengeni/capabilities@5.3.0
+  - @opengeni/events@5.3.0
+  - @opengeni/codemode@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/documents@5.3.0
+  - @opengeni/github@5.3.0
+  - @opengeni/interaction@5.3.0
+  - @opengeni/storage@5.3.0
+  - @opengeni/tool-gateway@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+  - @opengeni/agent-proto@5.3.0
+  - @opengeni/decisions@5.3.0
+  - @opengeni/jev@5.3.0
+  - @opengeni/subscriptions@5.3.0
+
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [e1126c2]
+- Updated dependencies [fb72b9d]
+- Updated dependencies [9413acc]
+- Updated dependencies [2d6484c]
+  - @opengeni/codex@5.2.0
+  - @opengeni/db@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/core@5.2.0
+  - @opengeni/sdk@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/runtime@5.2.0
+  - @opengeni/documents@5.2.0
+  - @opengeni/events@5.2.0
+  - @opengeni/capabilities@5.2.0
+  - @opengeni/codemode@5.2.0
+  - @opengeni/github@5.2.0
+  - @opengeni/interaction@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/storage@5.2.0
+  - @opengeni/tool-gateway@5.2.0
+  - @opengeni/vaults@5.2.0
+  - @opengeni/vaults-keeper@5.2.0
+  - @opengeni/vaults-onepassword@5.2.0
+  - @opengeni/vaults-protonpass@5.2.0
+  - @opengeni/agent-proto@5.2.0
+  - @opengeni/decisions@5.2.0
+  - @opengeni/jev@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/subscriptions@5.2.0
+  - @opengeni/xai-subscription@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- Updated dependencies [4e1a73f]
+- Updated dependencies [442354f]
+- Updated dependencies [5d377a7]
+  - @opengeni/db@5.1.0
+  - @opengeni/runtime@5.1.0
+  - @opengeni/sdk@5.1.0
+  - @opengeni/core@5.1.0
+  - @opengeni/documents@5.1.0
+  - @opengeni/events@5.1.0
+  - @opengeni/codemode@5.1.0
+  - @opengeni/agent-proto@5.1.0
+  - @opengeni/capabilities@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/decisions@5.1.0
+  - @opengeni/github@5.1.0
+  - @opengeni/interaction@5.1.0
+  - @opengeni/jev@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/storage@5.1.0
+  - @opengeni/subscriptions@5.1.0
+  - @opengeni/tool-gateway@5.1.0
+  - @opengeni/vaults@5.1.0
+  - @opengeni/vaults-keeper@5.1.0
+  - @opengeni/vaults-onepassword@5.1.0
+  - @opengeni/vaults-protonpass@5.1.0
+  - @opengeni/xai-subscription@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- Updated dependencies [93bd89d]
+- Updated dependencies [b331283]
+- Updated dependencies [ca3f931]
+- Updated dependencies [960ae8d]
+- Updated dependencies [487bd43]
+- Updated dependencies [3f6fd05]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [2ffad67]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/db@5.0.0
+  - @opengeni/runtime@5.0.0
+  - @opengeni/events@5.0.0
+  - @opengeni/sdk@5.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/core@5.0.0
+  - @opengeni/documents@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/capabilities@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/github@5.0.0
+  - @opengeni/interaction@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/storage@5.0.0
+  - @opengeni/tool-gateway@5.0.0
+  - @opengeni/vaults@5.0.0
+  - @opengeni/vaults-keeper@5.0.0
+  - @opengeni/vaults-onepassword@5.0.0
+  - @opengeni/vaults-protonpass@5.0.0
+  - @opengeni/agent-proto@5.0.0
+  - @opengeni/decisions@5.0.0
+  - @opengeni/jev@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/subscriptions@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- Updated dependencies [b0d752d]
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+- Updated dependencies [85fb89e]
+- Updated dependencies [e4712be]
+- Updated dependencies [238c599]
+  - @opengeni/db@4.8.0
+  - @opengeni/core@4.8.0
+  - @opengeni/sdk@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/runtime@4.8.0
+  - @opengeni/documents@4.8.0
+  - @opengeni/events@4.8.0
+  - @opengeni/codemode@4.8.0
+  - @opengeni/capabilities@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/github@4.8.0
+  - @opengeni/interaction@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/storage@4.8.0
+  - @opengeni/tool-gateway@4.8.0
+  - @opengeni/vaults@4.8.0
+  - @opengeni/vaults-keeper@4.8.0
+  - @opengeni/vaults-onepassword@4.8.0
+  - @opengeni/vaults-protonpass@4.8.0
+  - @opengeni/agent-proto@4.8.0
+  - @opengeni/decisions@4.8.0
+  - @opengeni/jev@4.8.0
+  - @opengeni/network@4.8.0
+  - @opengeni/subscriptions@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- 9efd9b3: On Claude Opus 5.5 and Sonnet 5.5, a progress update is no longer shown or recorded as the agent's message or reply. Claude returns only a summary of it, which could claim things the agent never wrote. It now shows as a thought, and when a person's turn has no real reply before `wait_for_input`, the agent is asked to write one instead of the summary being used.
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- Updated dependencies [c6499fc]
+- Updated dependencies [9efd9b3]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [106b430]
+- Updated dependencies [7892bb5]
+- Updated dependencies [8301382]
+- Updated dependencies [61ec823]
+- Updated dependencies [b3fc68b]
+  - @opengeni/runtime@4.7.2
+  - @opengeni/contracts@4.7.2
+  - @opengeni/db@4.7.2
+  - @opengeni/sdk@4.7.2
+  - @opengeni/codemode@4.7.2
+  - @opengeni/vaults-onepassword@4.7.2
+  - @opengeni/core@4.7.2
+  - @opengeni/capabilities@4.7.2
+  - @opengeni/codex@4.7.2
+  - @opengeni/config@4.7.2
+  - @opengeni/documents@4.7.2
+  - @opengeni/events@4.7.2
+  - @opengeni/github@4.7.2
+  - @opengeni/interaction@4.7.2
+  - @opengeni/observability@4.7.2
+  - @opengeni/storage@4.7.2
+  - @opengeni/tool-gateway@4.7.2
+  - @opengeni/vaults@4.7.2
+  - @opengeni/vaults-keeper@4.7.2
+  - @opengeni/vaults-protonpass@4.7.2
+  - @opengeni/agent-proto@4.7.2
+  - @opengeni/decisions@4.7.2
+  - @opengeni/jev@4.7.2
+  - @opengeni/network@4.7.2
+  - @opengeni/subscriptions@4.7.2
+  - @opengeni/xai-subscription@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- Updated dependencies [2138bba]
+  - @opengeni/db@4.7.1
+  - @opengeni/core@4.7.1
+  - @opengeni/documents@4.7.1
+  - @opengeni/events@4.7.1
+  - @opengeni/agent-proto@4.7.1
+  - @opengeni/capabilities@4.7.1
+  - @opengeni/codemode@4.7.1
+  - @opengeni/codex@4.7.1
+  - @opengeni/config@4.7.1
+  - @opengeni/contracts@4.7.1
+  - @opengeni/decisions@4.7.1
+  - @opengeni/github@4.7.1
+  - @opengeni/interaction@4.7.1
+  - @opengeni/jev@4.7.1
+  - @opengeni/network@4.7.1
+  - @opengeni/observability@4.7.1
+  - @opengeni/runtime@4.7.1
+  - @opengeni/sdk@4.7.1
+  - @opengeni/storage@4.7.1
+  - @opengeni/subscriptions@4.7.1
+  - @opengeni/tool-gateway@4.7.1
+  - @opengeni/vaults@4.7.1
+  - @opengeni/vaults-keeper@4.7.1
+  - @opengeni/vaults-onepassword@4.7.1
+  - @opengeni/vaults-protonpass@4.7.1
+  - @opengeni/xai-subscription@4.7.1
+
+## 4.7.0
+
+### Patch Changes
+
+- 7308de5: Rolling deploys no longer restart running agent turns. A turn worker that is shutting down stops taking new work at once and lets its in-flight turns finish normally for up to 90 seconds (`OPENGENI_TURN_WORKER_SHUTDOWN_GRACE_MS`) before checkpointing any remaining turn for recovery on another worker; the Temporal force stop follows at 105 seconds (`OPENGENI_TURN_WORKER_SHUTDOWN_FORCE_MS`). Control workers keep their 5-second natural window. The worker process now exits as soon as its drain and resource cleanup finish instead of waiting for leftover open handles, so old pods no longer stay `Terminating` until Kubernetes kills them. The Helm chart surges a replacement turn pod before removing an old one and renders both settings from `worker.turns.shutdown`, derived from the turn pod's termination grace (120 seconds by default) when unset.
+- Updated dependencies [bf88717]
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [5e3fb3c]
+- Updated dependencies [0e9e59e]
+- Updated dependencies [afb32f5]
+- Updated dependencies [1ea2039]
+- Updated dependencies [7308de5]
+- Updated dependencies [b8452ee]
+  - @opengeni/runtime@4.7.0
+  - @opengeni/db@4.7.0
+  - @opengeni/config@4.7.0
+  - @opengeni/core@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/documents@4.7.0
+  - @opengeni/events@4.7.0
+  - @opengeni/github@4.7.0
+  - @opengeni/storage@4.7.0
+  - @opengeni/capabilities@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/interaction@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/sdk@4.7.0
+  - @opengeni/tool-gateway@4.7.0
+  - @opengeni/vaults@4.7.0
+  - @opengeni/vaults-keeper@4.7.0
+  - @opengeni/vaults-onepassword@4.7.0
+  - @opengeni/vaults-protonpass@4.7.0
+  - @opengeni/agent-proto@4.7.0
+  - @opengeni/decisions@4.7.0
+  - @opengeni/jev@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/subscriptions@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+- Updated dependencies [d0eb91c]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/db@4.6.0
+  - @opengeni/codemode@4.6.0
+  - @opengeni/runtime@4.6.0
+  - @opengeni/core@4.6.0
+  - @opengeni/documents@4.6.0
+  - @opengeni/events@4.6.0
+  - @opengeni/agent-proto@4.6.0
+  - @opengeni/capabilities@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/decisions@4.6.0
+  - @opengeni/github@4.6.0
+  - @opengeni/interaction@4.6.0
+  - @opengeni/jev@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/storage@4.6.0
+  - @opengeni/subscriptions@4.6.0
+  - @opengeni/tool-gateway@4.6.0
+  - @opengeni/vaults@4.6.0
+  - @opengeni/vaults-keeper@4.6.0
+  - @opengeni/vaults-onepassword@4.6.0
+  - @opengeni/vaults-protonpass@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Patch Changes
+
+- f818ef2: Turns on an owned sandbox start the model sooner. Repository clones, rig setup and credential hooks now run alongside file delivery and model-input preparation instead of after them, and the first model request waits only for whichever finishes last. What the model sees, and its order, is unchanged.
+- Updated dependencies [6c7b552]
+- Updated dependencies [cfefee3]
+- Updated dependencies [f838cb7]
+- Updated dependencies [65fc9ab]
+- Updated dependencies [e142b9e]
+- Updated dependencies [1b8ca50]
+- Updated dependencies [debd64e]
+- Updated dependencies [acbf24e]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [bce44cc]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+- Updated dependencies [51d84b7]
+  - @opengeni/runtime@4.5.0
+  - @opengeni/codemode@4.5.0
+  - @opengeni/db@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/core@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/interaction@4.5.0
+  - @opengeni/subscriptions@4.5.0
+  - @opengeni/documents@4.5.0
+  - @opengeni/events@4.5.0
+  - @opengeni/github@4.5.0
+  - @opengeni/storage@4.5.0
+  - @opengeni/capabilities@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/tool-gateway@4.5.0
+  - @opengeni/vaults@4.5.0
+  - @opengeni/vaults-keeper@4.5.0
+  - @opengeni/vaults-onepassword@4.5.0
+  - @opengeni/vaults-protonpass@4.5.0
+  - @opengeni/agent-proto@4.5.0
+  - @opengeni/decisions@4.5.0
+  - @opengeni/jev@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
+## 4.4.1
+
+### Minor Changes
+
+- e697879: Make Knowledge search eager for new configured sessions where search is already
+  available, without changing existing sessions' saved tool selections. Reduce
+  search schema overhead and default MCP searches to five results instead of 20.
+  Model callers receive discovery cards with short snippets; use knowledge_get
+  for full text, citation revision IDs and update versions. Codemode retains the
+  complete result shape, HTTP list defaults are unchanged, and previously stored
+  model results are never re-rendered. Existing explicitly eager search tools can
+  incur a one-time schema-prefix cache miss after upgrade.
+
+### Patch Changes
+
+- 4a48ec3: A retried context checkpoint request keeps its cause. Each retry, and the failure after the retries run out, now records the checkpoint diagnostics (transport code, status and request), and for a timeout its timeout class, request and whether a response arrived, so the session reports an unresponsive provider instead of a generic outage.
+- a891c5a: A chat no longer fails when the context checkpoint (compaction) request is cut off: a stream that ends without a final event or times out now retries the same turn through the usual bounded provider recovery. These failures stay terminal on ordinary model requests, where a replay could repeat model or tool effects; a checkpoint request only summarizes, so it is safe to send again.
+- 7c8a57d: Avoid unused Skill preparation for turns with Skills disabled or no bundled Skills selected, reuse caller-scoped metadata within full-detail session MCP reads, and repair stranded reasoning runs in one pass. Existing tool selection, live authority checks, model inputs and recoverable tool-call pairing remain unchanged.
+- 9ba6486: When a turn fails because one of Opengeni's own database checks refused it, the failure now records which check refused it: the database function names and line numbers on the call chain, for example `admit_turn_resources:31`. Before, the record kept only the error code. The refusal message and SQL text are still never copied. A one-off permission refusal can now be traced after the fact without server logs.
+- 9979e45: When an optional integration (a connected MCP server) can't connect or list its tools during a turn, tool search and tool list results now name it with a short reason, such as "connected but could not list its tools (HTTP 401); its connection may need to be signed in again". Before, its tools simply vanished: a search found nothing, and the agent told the person it had no access instead of saying the integration was failing.
+- a75f55e: A lost sandbox now recovers by itself on every managed backend, not only Modal. Docker, compute and the other hosted providers restore their latest verified checkpoint automatically, with the same "files may be older" warning Modal already gives. A session continues on an empty workspace only with proof that the lost sandbox is really gone: the compute control plane's own answer, a Docker workspace directory that the same daemon shows deleted, or a provider lifetime that has run out. A single transient or false "not found" (for example during host memory pressure) can therefore at most restore a checkpoint and never empties a workspace by itself. A failed rebuild after a loss keeps that loss on record instead of silently starting the session on an empty workspace, so the person who controls the chat can still choose Retry or an empty workspace without any database repair. `SandboxRecoverySelection.artifactId` is now nullable, because a portable checkpoint has no native artifact.
+- 4ef0433: A turn that a worker restart interrupts while it is running sandbox commands, for example downloading attached files at startup, now resumes on another worker. Before, it failed with the bare message "WORKER_SHUTDOWN", because the cancellation arrived wrapped in the sandbox command's own error and didn't take the shutdown recovery path.
+- Updated dependencies [6930cf0]
+- Updated dependencies [2677b14]
+- Updated dependencies [032d671]
+- Updated dependencies [d705817]
+- Updated dependencies [d948555]
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [7c8a57d]
+- Updated dependencies [9ba6486]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [005c442]
+- Updated dependencies [9c25110]
+- Updated dependencies [926e0b8]
+- Updated dependencies [eec0cab]
+- Updated dependencies [25d1500]
+- Updated dependencies [9a3df31]
+- Updated dependencies [73a4ad9]
+- Updated dependencies [dbc847f]
+- Updated dependencies [ec6a821]
+- Updated dependencies [a9a54f4]
+- Updated dependencies [f1a619f]
+- Updated dependencies [9979e45]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [81e817c]
+- Updated dependencies [2581842]
+- Updated dependencies [ea21aa0]
+- Updated dependencies [6282659]
+- Updated dependencies [a75f55e]
+- Updated dependencies [f4508d6]
+- Updated dependencies [f0c2065]
+- Updated dependencies [84c8b32]
+- Updated dependencies [9850b5b]
+- Updated dependencies [84b1a18]
+- Updated dependencies [47dbfdf]
+- Updated dependencies [aa280c9]
+  - @opengeni/core@4.4.0
+  - @opengeni/db@4.4.0
+  - @opengeni/runtime@4.4.0
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/subscriptions@4.4.0
+  - @opengeni/tool-gateway@4.4.0
+  - @opengeni/documents@4.4.0
+  - @opengeni/events@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/github@4.4.0
+  - @opengeni/interaction@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/storage@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/vaults-keeper@4.4.0
+  - @opengeni/vaults-onepassword@4.4.0
+  - @opengeni/vaults-protonpass@4.4.0
+  - @opengeni/agent-proto@4.4.0
+  - @opengeni/decisions@4.4.0
+  - @opengeni/jev@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
+## 4.3.1
+
+### Minor Changes
+
+- 5e32e0f: Improve deferred tool discovery with field-aware retrieval, best-match-first schema
+  loading and compact alternatives, an optional generic decision model for ambiguous
+  queries, exact-name loading,
+  and a paginated tool-group directory. Freeze disclosures in append-only history and
+  keep the first-request tool block stable. Preserve native Responses search and direct
+  function loading. Add retrieval and live generic discovery evaluations.
+
+  Introduce a shared typed decision-model category for tool discovery and code search,
+  with the existing Jev client and OpenAI/OpenRouter Decisions adapters. Use explicit
+  deployment credentials, preserve legacy code-search configuration, and retain
+  provider usage provenance without customer-credit debits. Code-search stats, usage
+  events and metrics use decision rather than Jev names.
+
+### Patch Changes
+
+- 75101c9: Agents answer requested briefs, letters, plans and reports in chat, and create a document only when the person asks for a document or file (for example a DOCX or PDF), asks to edit an existing document, or the result is too long to read comfortably in chat. Before, "clearly meant to be kept or shared" let an agent turn a request like "write a one-page project brief" into a document: about 80 seconds and several document tool calls instead of a 15-second chat answer, with only a link left in the conversation.
+- 2d1350b: Commit tool receipts with their timeline events and retire completed receipts with stable conversation history, removing duplicate attempt fences without changing model-visible history or parallel-result durability.
+- b1a5fad: Make model-call-fact reconciliation resumable and bounded by input pages instead
+  of a full-history join. Preserve existing facts and billing ledgers, persist
+  progress atomically, and join database work to the maintenance caller's existing
+  deadline and cancellation. Preserve shorter configured statement timeouts.
+  After the initial historical sweep, process commit-coupled arrivals instead of
+  repeatedly rescanning the lookback window. Delayed events reopen unresolved keys.
+
+  Apply rolling migrations 0890–0894 before starting the new worker. Direct callers
+  of `reconcileModelCallFacts` must continue while `truncated` is true: counts are
+  per-page resolved gaps, and a page can have more work with zero gaps. Maintenance
+  cancellation requires the `createDb` postgres.js adapter; unsupported injected
+  drivers fail explicitly rather than leaving detached database work running.
+
+- f1fd83b: Attached files now arrive on sandbox backends that cannot mount object storage, such as the compute backend. Capability descriptors replace `nativeBucketMount: boolean` with `bucketMount: "native" | "in-container" | "none"`; a `"none"` backend always receives files as pre-signed downloads before the first model request, as Connected Machines already did.
+- c2cbeae: An idle sandbox now drains even when an API request (Files, Terminal, Browser and similar) died mid-operation and left its request open. Before, the holder reaper removed the dead request's holder but kept its request, and that request refused every capture of the box: Modal boxes ran until the provider deadline, and Docker boxes stayed draining forever. Docker drains also capture requests left by a crashed turn worker now: the drain removes the exact container before it reads the host workspace, so the capture is a point-in-time image, as Modal snapshots already are.
+- d1de8b4: Honor explicit provider-dispatch catalog preparation even when all MCP servers
+  are already connected. Keep eager schemas available before the first request,
+  and join the same catalog completion fence before tool execution and cleanup.
+  Use the shared transport's dispatch notification after admission and transport
+  setup on both native subscription and generic model routes.
+  Compile a tool's input and output validators together on its first call, before
+  authorization or execution, instead of compiling every unused tool at startup.
+  Malformed schemas now fail that tool's call rather than catalog preparation.
+- 559eaa8: Remove unused Drizzle relational-schema registration from `createDb`, avoiding hundreds of query-builder allocations on every transaction. SQL, row-level security, and commit boundaries are unchanged.
+
+  Breaking: the exported `Database` port and its transaction callbacks no longer expose `db.query.<table>`. Use explicit-table queries instead, for example `db.select().from(schema.sessions).where(eq(schema.sessions.id, id))`. Hosts may still inject their own schema-configured Drizzle handles and use relational queries through their original handle; Opengeni's structural port only needs explicit-table builders.
+
+- d8289f0: Avoid transferring unused frozen session, turn and attempt data for tool receipt and operation checkpoints. Mutation callers can explicitly request the existing narrow event-fence projection; plain callbacks still receive full rows. Lock order, authority decisions, atomic receipt/event persistence and replayed model history are unchanged.
+- 7517fbc: Organization owners and admins can now connect OpenAI and Azure OpenAI once for the whole organization in Organization settings → Models, next to the other organization providers. OpenAI stores an encrypted API key; Azure OpenAI stores an encrypted key plus the Azure resource endpoint. Admins add the organization's OpenAI model IDs or Azure deployments as its models, and each is checked with the organization's key (and Azure endpoint) before it is saved. The models (`organization-openai/<model>` and `organization-azure-openai/<deployment>`) inherit into the organization's current and future shared workspaces (Personal workspaces stay local), work for sessions created through the web app and the public API, and are billed to the organization's own provider account with no Opengeni credits. `OrganizationModelProviderKind` and `ModelConnectionAccessKind` gain `openai` and `azure_openai`; organization provider connection requests and responses gain an optional `endpoint` (Azure only). A missing or revoked connection fails closed and never falls back to deployment credentials. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `organization-openai` or `organization-azure-openai` provider ids. Rolling migration `0898_organization_direct_openai_model_providers.sql` widens the provider-kind, lifecycle-fact and analytics allow-lists and adds the nullable endpoint columns.
+
+  An organization ElevenLabs key no longer counts as an OpenRouter access policy when a workspace's model restrictions are read.
+
+- b1a2e5b: Agents now edit a Word, Excel, PDF or PowerPoint file the user sends to be changed directly in the sandbox with ordinary tools (python-docx, openpyxl, pandoc, LibreOffice), check it and publish it, and make a newly requested file in such a format the same way unless the artifact export tool lists that format. Before, an agent asked for a Word or Excel file built a native artifact and then reported that export was unavailable, and a sent file the document importer could not read was returned unchanged.
+- 4199cd5: A move to another machine that the running turn attempt cannot serve (another workspace root, or a home it cannot reach) now ends the attempt cleanly between tool batches, before the model is asked for its next step. Previously the next batch's first sandbox call failed the attempt, discarding that whole model response, including sibling calls that had already run. A sandbox call in the same batch as the move that is refused before it reaches any machine now returns a result saying it did not start, so every call in the batch has a certain outcome.
+- Updated dependencies [75101c9]
+- Updated dependencies [e907c46]
+- Updated dependencies [2d1350b]
+- Updated dependencies [cca885b]
+- Updated dependencies [29a1d94]
+- Updated dependencies [31c6406]
+- Updated dependencies [1b1805f]
+- Updated dependencies [b1a5fad]
+- Updated dependencies [a363a8c]
+- Updated dependencies [49f2177]
+- Updated dependencies [bb438b0]
+- Updated dependencies [29a1d94]
+- Updated dependencies [3d83bfd]
+- Updated dependencies [3fbbe43]
+- Updated dependencies [d142e5b]
+- Updated dependencies [0e135b2]
+- Updated dependencies [03947ed]
+- Updated dependencies [5e32e0f]
+- Updated dependencies [cd3fdb2]
+- Updated dependencies [74f6ab1]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [ed3a64c]
+- Updated dependencies [659c01a]
+- Updated dependencies [c8c2ca9]
+- Updated dependencies [d776a1f]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [b7ee3dc]
+- Updated dependencies [fda625e]
+- Updated dependencies [f47e3b2]
+- Updated dependencies [b8aaefa]
+- Updated dependencies [c2cbeae]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [ec0855c]
+- Updated dependencies [1ce8ea5]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [dc9a23b]
+- Updated dependencies [c236847]
+- Updated dependencies [a252bf9]
+- Updated dependencies [18030c8]
+- Updated dependencies [23fed2a]
+- Updated dependencies [29a1d94]
+- Updated dependencies [95c5219]
+- Updated dependencies [8c58607]
+- Updated dependencies [eeab39f]
+- Updated dependencies [8f66667]
+- Updated dependencies [ebdd6dc]
+- Updated dependencies [f83cd2a]
+- Updated dependencies [4a2e10f]
+- Updated dependencies [559eaa8]
+- Updated dependencies [00a0865]
+- Updated dependencies [e4915c1]
+- Updated dependencies [1d62cf3]
+- Updated dependencies [5934780]
+- Updated dependencies [6794bf2]
+- Updated dependencies [1e63001]
+- Updated dependencies [9eae8df]
+- Updated dependencies [d3996f9]
+- Updated dependencies [fa5347a]
+- Updated dependencies [d8289f0]
+- Updated dependencies [dc1dd93]
+- Updated dependencies [a00e4bb]
+- Updated dependencies [d8761a7]
+- Updated dependencies [16781e5]
+- Updated dependencies [0432630]
+- Updated dependencies [27a5a89]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [29a1d94]
+- Updated dependencies [9ff7e74]
+- Updated dependencies [18030c8]
+- Updated dependencies [59a90e2]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [b45d380]
+- Updated dependencies [0cc6b93]
+- Updated dependencies [724b529]
+- Updated dependencies [bc64dbb]
+- Updated dependencies [2058cd3]
+- Updated dependencies [3915617]
+- Updated dependencies [908c0d3]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [29a1d94]
+- Updated dependencies [726c332]
+- Updated dependencies [b1a2e5b]
+- Updated dependencies [390562e]
+- Updated dependencies [a1265ca]
+- Updated dependencies [7b1da5b]
+- Updated dependencies [734ad21]
+- Updated dependencies [4199cd5]
+- Updated dependencies [017121f]
+- Updated dependencies [7851b64]
+- Updated dependencies [cc0d008]
+- Updated dependencies [d21ada4]
+- Updated dependencies [72e00f6]
+- Updated dependencies [a78e908]
+- Updated dependencies [6e61993]
+- Updated dependencies [1bc6fe5]
+- Updated dependencies [72e032c]
+- Updated dependencies [d0c8261]
+- Updated dependencies [a82b6a4]
+- Updated dependencies [a5d6f8a]
+- Updated dependencies [06b8b74]
+- Updated dependencies [b95784c]
+- Updated dependencies [d6a83bc]
+- Updated dependencies [83a467d]
+- Updated dependencies [22e3585]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+- Updated dependencies [db09421]
+- Updated dependencies [e6b2285]
+- Updated dependencies [1b76e0d]
+  - @opengeni/runtime@4.3.0
+  - @opengeni/observability@4.3.0
+  - @opengeni/db@4.3.0
+  - @opengeni/events@4.3.0
+  - @opengeni/core@4.3.0
+  - @opengeni/sdk@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/decisions@4.3.0
+  - @opengeni/jev@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/agent-proto@4.3.0
+  - @opengeni/vaults-protonpass@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/subscriptions@4.3.0
+  - @opengeni/documents@4.3.0
+  - @opengeni/codemode@4.3.0
+  - @opengeni/github@4.3.0
+  - @opengeni/storage@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/interaction@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/vaults-keeper@4.3.0
+  - @opengeni/vaults-onepassword@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+
 ## 4.2.0
 
 ### Patch Changes

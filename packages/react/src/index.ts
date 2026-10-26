@@ -14,6 +14,11 @@ export {
   type SessionCapabilityFrameProps,
 } from "./components/session-capability-frame";
 export {
+  SessionIntegrationCapabilityCard,
+  supportsIntegrationCapabilityCard,
+  type SessionIntegrationCapabilityCardProps,
+} from "./components/session-integration-capability-card";
+export {
   attachSessionCapability,
   completeSessionCapabilityOAuth,
   prepareSessionCapabilityAccess,
@@ -130,6 +135,7 @@ export type {
   UseVoiceInputOptions,
   UseVoiceInputResult,
   VoiceInputStatus,
+  VoiceInputRecordingsClient,
 } from "./hooks/use-voice-input";
 export {
   IndexedDbVoiceRecordingStore,
@@ -186,9 +192,19 @@ export type {
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
+  QueueRecallResult,
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export {
+  latestRecallableQueuedTurn,
+  shouldRecallQueuedOnKey,
+  useQueuedPromptRecall,
+} from "./hooks/use-queued-prompt-recall";
+export type {
+  ComposerQueuedRecall,
+  QueuedPromptRecallOutcome,
+} from "./hooks/use-queued-prompt-recall";
 export {
   useLastStartedTurnPolicy,
   isLastStartedTurnPolicyEvent,
@@ -211,6 +227,7 @@ export type {
   SessionChromeProps,
   SessionChromeSignalId,
   SessionChromeSignalTone,
+  SessionChromeWait,
 } from "./components/session-chrome";
 export { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./components/tooltip";
 export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./workstream-control-event";
@@ -288,6 +305,10 @@ export type {
   UpdateVaultItemRequest,
   MoveVaultItemRequest,
   RevealVaultFieldResponse,
+  SecretUseGrantScope,
+  SecretUseGrant,
+  VaultItemApproval,
+  SetVaultItemApprovalRequest,
   ListVaultItemsQuery,
   SessionSecretsVault,
   SessionSecretsView,
@@ -446,6 +467,7 @@ export type {
 } from "./components/human-input-form";
 export { HumanInputSurface } from "./components/human-input-surface";
 export type { HumanInputSurfaceProps } from "./components/human-input-surface";
+export { claimHumanInputDraftOwner, forgetAllHumanInputDrafts } from "./human-input-draft-store";
 
 // Timeline projection
 export {
@@ -618,6 +640,7 @@ export type {
   NewConversationLabels,
 } from "./components/new-conversation";
 export type {
+  PendingPrompt,
   SessionConversationController,
   UseSessionConversationOptions,
 } from "./hooks/use-session-conversation";

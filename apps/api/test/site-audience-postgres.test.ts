@@ -17,12 +17,9 @@ import {
   withSessionRlsActorContext,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp, type AppDependencies } from "../src/app";
 import { resolveSiteSessionOrigin } from "../src/site-session-origin";
 
@@ -471,4 +468,19 @@ test("only a person can make or keep a Site Only me", async () => {
     visibility: "private",
   });
   expect(limit.status).toBe(403);
+});
+
+test("audience projection never bypasses current membership permissions", async () => {
+  const f = await fixture();
+  await f.publish("Private notes", "private");
+  const paths = ["published-artifacts", "artifact-catalog?kind=site", "scheduled-tasks"];
+  await shared.admin`update workspace_memberships
+    set permissions = '["workspace:read"]'::jsonb
+    where workspace_id = ${f.workspace.id} and subject_id = ${f.owner.subjectId}`;
+  for (const path of paths) {
+    const denied = await f.app.request(`/v1/workspaces/${f.workspace.id}/${path}`, {
+      headers: f.owner.headers,
+    });
+    expect(denied.status, await denied.clone().text()).toBe(403);
+  }
 });

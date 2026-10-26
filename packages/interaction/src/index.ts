@@ -1,11 +1,14 @@
 import {
   BrowserActionCommand,
+  BrowserActionNote,
   BrowserActionReceipt,
   INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
   BrowserObservation,
   BrowserTarget,
   ComputerNativeCommand,
   ComputerNativeReceipt,
+  ComputerActionReceipt,
+  INTERACTION_MAX_ACTIONS_PER_BATCH,
   ComputerOperationCommand,
   ComputerOperationReceipt,
   ComputerOperationObservation,
@@ -31,6 +34,7 @@ import {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
   type InteractionOperationJournalRecord,
 } from "./controller-core";
 
@@ -41,6 +45,7 @@ export {
   secretFreeCommandDigest,
   type InteractionControllerErrorCode,
   type InteractionDispatchTrace,
+  type InteractionDriverConnectionState,
 };
 
 export type BrowserInteractionDriver = {
@@ -52,6 +57,9 @@ export type BrowserInteractionDriver = {
     command: BrowserActionCommandValue,
     trace?: InteractionDispatchTrace,
   ): Promise<BrowserObservationValue | null>;
+  /** Bounded probe of the browser connection. Without it, a dispatch error
+   * the driver did not classify counts as a lost controller. */
+  connectionState?(): Promise<InteractionDriverConnectionState>;
 };
 
 export type BrowserInteractionAuthority = {
@@ -72,6 +80,8 @@ export type BrowserInteractionControllerOptions = {
   onJournalRecord?: (record: BrowserOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => BrowserOperationJournalRecord | null;
+  /** Operator logging for a dispatch error the driver did not classify. */
+  onUnexpectedDispatchError?: (error: unknown, command: BrowserActionCommandValue) => void;
 };
 
 /** Placement-resident BrowserSession mutation authority. */
@@ -95,6 +105,9 @@ export class BrowserInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      ...(options.onUnexpectedDispatchError
+        ? { onUnexpectedDispatchError: options.onUnexpectedDispatchError }
+        : {}),
       commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "browser",
@@ -170,9 +183,23 @@ export class BrowserInteractionController {
             error: input.error,
           });
         },
-        maxDispatchTraceItems: INTERACTION_MAX_RESOLVED_ACTION_TARGETS,
+        // Resolved elements and per-action notes share one bounded trace.
+        maxDispatchTraceItems:
+          INTERACTION_MAX_RESOLVED_ACTION_TARGETS + INTERACTION_MAX_ACTIONS_PER_BATCH,
         attachDispatchTrace(receipt, items) {
-          return BrowserActionReceipt.parse({ ...receipt, targets: items });
+          const targets: unknown[] = [];
+          const notes: unknown[] = [];
+          for (const item of items)
+            (BrowserActionNote.safeParse(item).success ? notes : targets).push(item);
+          return BrowserActionReceipt.parse({
+            ...receipt,
+            ...(targets.length > 0
+              ? { targets: targets.slice(0, INTERACTION_MAX_RESOLVED_ACTION_TARGETS) }
+              : {}),
+            ...(notes.length > 0
+              ? { notes: notes.slice(0, INTERACTION_MAX_ACTIONS_PER_BATCH) }
+              : {}),
+          });
         },
         recoverReceipt(receipt, settledAt) {
           if (
@@ -251,7 +278,12 @@ export type ComputerInteractionDriver = {
   target(targetId: string): Promise<ComputerTargetValue | null>;
   observe(targetId: string): Promise<ComputerObservationValue>;
   validate?(command: ComputerActionCommandValue, target: ComputerTargetValue): Promise<void> | void;
-  dispatch(command: ComputerActionCommandValue): Promise<ComputerObservationValue | null>;
+  /** Drivers record on `trace` each action that acted on an element of another
+   * role than its locator named (a ComputerActionRoleStandIn). */
+  dispatch(
+    command: ComputerActionCommandValue,
+    trace?: InteractionDispatchTrace,
+  ): Promise<ComputerObservationValue | null>;
   validateNative?(command: ComputerNativeCommand): Promise<void>;
   dispatchNative?(command: ComputerNativeCommand): Promise<ComputerNativeResult>;
 };
@@ -274,6 +306,8 @@ export type ComputerInteractionControllerOptions = {
   onJournalRecord?: (record: ComputerOperationJournalRecord) => Promise<void> | void;
   /** Reads the same durable authority as onJournalRecord and initialJournal. */
   loadJournalRecord?: (operationId: string) => ComputerOperationJournalRecord | null;
+  /** Operator logging for a dispatch error the driver did not classify. */
+  onUnexpectedDispatchError?: (error: unknown, command: ComputerOperationCommand) => void;
 };
 
 /** Placement-resident ComputerSession mutation authority. Linux AT-SPI/X11,
@@ -310,10 +344,10 @@ export class ComputerInteractionController {
             );
           await options.driver.validateNative(command);
         },
-        dispatch: (command) =>
+        dispatch: (command, trace) =>
           command.targetId === null
             ? options.driver.dispatchNative!(command)
-            : options.driver.dispatch(command),
+            : options.driver.dispatch(command, trace),
       },
       authority: {
         authorizeDispatch: async (command) => {
@@ -358,6 +392,9 @@ export class ComputerInteractionController {
       ...(options.initialJournal ? { initialJournal: options.initialJournal } : {}),
       ...(options.onJournalRecord ? { onJournalRecord: options.onJournalRecord } : {}),
       ...(options.loadJournalRecord ? { loadJournalRecord: options.loadJournalRecord } : {}),
+      ...(options.onUnexpectedDispatchError
+        ? { onUnexpectedDispatchError: options.onUnexpectedDispatchError }
+        : {}),
       commandDigest: (command) => secretFreeCommandDigest(command),
       adapter: {
         resourceLabel: "computer",
@@ -449,6 +486,12 @@ export class ComputerInteractionController {
             observation: input.observation,
             error: input.error,
           });
+        },
+        // The computer driver records an action that acted on an element of
+        // another role than the one named (see ComputerActionRoleStandIn).
+        maxDispatchTraceItems: INTERACTION_MAX_ACTIONS_PER_BATCH,
+        attachDispatchTrace(receipt, items) {
+          return ComputerActionReceipt.parse({ ...receipt, roleStandIns: items });
         },
         recoverReceipt(receipt, settledAt) {
           if (

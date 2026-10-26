@@ -32,9 +32,13 @@ export {
   OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   formatErrorMessage,
+  isMaintenanceError,
   isRetryableStreamError,
+  OPENGENI_MAINTENANCE_ERROR_CODE,
 } from "./errors";
 export type { OpenGeniSecureContextRequiredReason } from "./errors";
+export { isTransientRequestError } from "./read-retry";
+export type { OpenGeniReadRetryOptions } from "./read-retry";
 export { parseDeprecationNotice } from "./deprecation";
 export type { OpenGeniDeprecationHandler, OpenGeniDeprecationNotice } from "./deprecation";
 export { resolveWorkspaceVoiceInputEnabled } from "./transcription";

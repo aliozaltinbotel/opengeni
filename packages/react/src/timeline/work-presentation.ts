@@ -3,7 +3,7 @@
 // renderers decide identically what a turn shows (preparing, working, waiting, worked).
 import { timelineGroupContainsPresentedImage } from "./presented-image";
 import type { TurnSummaryStatus } from "./turn-summary-model";
-import type { ActivityItem, TimelineGroup, ToolCallItem } from "./types";
+import type { ActivityItem, TimelineGroup } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
 export type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
@@ -113,8 +113,9 @@ export function readableWorkHasDetails(
 
 /**
  * Status of a readable turn's work row, minus the host-rendered live preview.
- * Time spent waiting for model capacity is not work: the worked duration and
- * the live working clock exclude it, and the wait itself shows no clock. A
+ * Time spent waiting for model capacity, or between a failed attempt and its
+ * Retry, is not work: the worked duration and the live working clock exclude
+ * it, and a capacity wait itself shows no clock. A
  * wait's `detail` is its one quiet secondary line.
  */
 export function readableWorkStatus(
@@ -199,8 +200,4 @@ export function rollingActivityItem(
       work.findIndex((entry) => entry.id === item.id),
     ),
   };
-}
-
-export function isToolCall(item: ActivityItem): item is ToolCallItem {
-  return item.kind === "tool-call";
 }

@@ -30,6 +30,28 @@ export type WorkspaceArtifactVersion = {
   createdAt: string;
 };
 
+/** Pin or archive a Site row in this person's own sidebar; set at least one. */
+export type UpdateSiteSidebarStateRequest = {
+  pinned?: boolean;
+  /** Hides the row (and the conversations under it) for this person only. */
+  archived?: boolean;
+};
+
+/** This person's sidebar state for one Site row. */
+export type SiteSidebarStateResponse = {
+  siteId: string;
+  pinned: boolean;
+  pinnedAt: string | null;
+  archived: boolean;
+  archivedAt: string | null;
+};
+
+/** This person's latest recorded open of a Site, which orders its sidebar row. */
+export type SiteOpenedResponse = {
+  /** When the open was recorded (ISO 8601). */
+  openedAt: string;
+};
+
 /** Who can see a Site: everyone in the workspace, or only its owner ("Only me"). */
 export type WorkspaceArtifactVisibility = "private" | "workspace";
 
@@ -85,6 +107,13 @@ export type WorkspaceArtifactDetailResponse = {
   events: WorkspaceArtifactEvent[];
   versionsTruncated: boolean;
   eventsTruncated: boolean;
+};
+/**
+ * A Site and its current version without its history or who made it: what an
+ * open Site view checks to see whether a new version is live.
+ */
+export type WorkspaceArtifactCurrentResponse = {
+  artifact: WorkspaceArtifact;
 };
 export type WorkspaceArtifactContentResponse = {
   artifactId: string;

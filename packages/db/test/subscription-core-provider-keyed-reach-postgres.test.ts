@@ -13,7 +13,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { sql } from "drizzle-orm";
 import postgres from "postgres";
 import {
@@ -60,6 +60,8 @@ const MAINTENANCE_MIGRATIONS = [
   "0748_subscription_core_claude_cutover.sql",
   "0749_subscription_shared_personal_choice.sql",
   SUBSCRIPTION_RETIREMENT_MIGRATION,
+  // Rewrites the auto-assignment routine 0713 creates; outside this test.
+  "0907_subscription_connection_one_owner.sql",
 ];
 // A binary that knows 0719, 0720 and the retirement reports only the objects
 // the retirement drops and the missing SuperGrok and Claude receipts until

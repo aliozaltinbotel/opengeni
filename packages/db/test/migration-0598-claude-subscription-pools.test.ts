@@ -11,11 +11,12 @@ import {
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { migrate } from "../src/migrate";
 import { provisionRoles } from "../src/provision-roles";
 import { restorePreRetirementGrants } from "./fixtures/pre-retirement-grants";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
+import { eventTriggerMigrationTail } from "./event-trigger-migration-tail";
 import { encryptEnvironmentValue, decryptEnvironmentValue } from "../src/environment-crypto";
 
 const migration = "0598_claude_subscription_account_pools.sql";
@@ -116,8 +117,19 @@ const subscriptionCoreMigrations = [
   "0882_continuable_core_capacity_waits.sql",
   // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
   "0884_subscription_core_personal_quarantine_expiry.sql",
+  // Rewrites the subscription and vault routines and 0777's policies.
+  "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
+  // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
+  "0907_subscription_connection_one_owner.sql",
+  // Redefines 0759's predicate, which reads the subscription authority column
+  // from withheld 0688; replay after it.
+  "0972_capability_setup_continuations.sql",
   // Rewrites the withheld 0732 probes and claim bodies after their originals exist.
   ...strictOwnerMaintenanceMigrationTail,
+  // Redefines the exhausted-task predicate withheld 0761 creates; replay after it.
+  ...eventTriggerMigrationTail,
 ] as const;
 // The drained Claude cutover moves the very pools this test characterizes, so
 // it stays recorded as applied and never runs here.

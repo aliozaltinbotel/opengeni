@@ -3,6 +3,7 @@ import { parseTotpInput } from "@opengeni/contracts";
 import {
   VaultProviderError,
   type ProviderItemMeta,
+  type ProviderPasskey,
   type ProviderVault,
   type VaultProvider,
   type VaultProviderCapabilities,
@@ -20,8 +21,11 @@ export interface FakeProviderSeedItem {
   externalItemId?: string;
   name: string;
   type?: VaultItemType;
+  category?: string | null;
   websites?: string[];
   fields: FakeProviderSeedField[];
+  /** Passkeys the item holds; reported only when `capabilities.passkeys` is true. */
+  passkeys?: ProviderPasskey[];
 }
 export interface FakeProviderSeedVault {
   externalVaultId?: string;
@@ -33,9 +37,11 @@ export interface FakeProviderSeedVault {
 export interface FakeProviderSeed {
   accountName?: string | null;
   vaults?: FakeProviderSeedVault[];
-  capabilities?: Partial<Omit<VaultProviderCapabilities, "passkeys">>;
+  capabilities?: Partial<VaultProviderCapabilities>;
   /** Every call fails with this code (auth, outage and rate-limit tests). */
   failWith?: VaultProviderErrorCode | null;
+  /** Archived items stay listed, marked with `archivedAt`, as some providers do. */
+  listArchived?: boolean;
 }
 export interface FakeProviderCall {
   op:
@@ -45,7 +51,9 @@ export interface FakeProviderCall {
     | "readFields"
     | "writeItem"
     | "archiveItem"
-    | "createVault";
+    | "createVault"
+    | "readPasskeys"
+    | "updatePasskeySignCount";
   connectionId: string | null;
   externalVaultId?: string;
   externalItemId?: string;
@@ -62,10 +70,13 @@ interface FakeItem {
   externalItemId: string;
   name: string;
   type: VaultItemType;
+  category: string | null;
   websites: string[];
   fields: FakeField[];
+  passkeys: ProviderPasskey[];
   version: number;
   archived: boolean;
+  archivedAt: string | null;
   updatedAt: string;
 }
 interface FakeVault {
@@ -90,15 +101,26 @@ function materialFor(field: FakeField): SecretMaterial {
   return { type: "text", value: field.value };
 }
 
-function itemMeta(item: FakeItem): ProviderItemMeta {
+function itemMeta(item: FakeItem, passkeys: boolean): ProviderItemMeta {
   return {
     externalItemId: item.externalItemId,
     name: item.name,
     type: item.type,
+    ...(item.category ? { category: item.category } : {}),
     websites: [...item.websites],
     fields: item.fields.map(({ externalFieldId, name, kind }) => ({ externalFieldId, name, kind })),
     version: String(item.version),
     updatedAt: item.updatedAt,
+    ...(item.archivedAt ? { archivedAt: item.archivedAt } : {}),
+    ...(passkeys
+      ? {
+          passkeys: item.passkeys.map(({ credentialId, rpId, userName }) => ({
+            credentialId,
+            rpId,
+            userName,
+          })),
+        }
+      : {}),
   };
 }
 
@@ -130,9 +152,12 @@ export function createFakeVaultProvider(
       externalItemId: item.externalItemId ?? fakeId("fi"),
       name: item.name,
       type: item.type ?? "login",
+      category: item.category ?? null,
       websites: item.websites ?? [],
+      passkeys: (item.passkeys ?? []).map((passkey) => ({ ...passkey })),
       version: 1,
       archived: false,
+      archivedAt: null,
       updatedAt: now(),
       fields: item.fields.map((field) => ({
         externalFieldId: field.externalFieldId ?? fakeId("ff"),
@@ -148,8 +173,8 @@ export function createFakeVaultProvider(
     totp: true,
     files: true,
     groupGrants: false,
-    ...seed.capabilities,
     passkeys: false,
+    ...seed.capabilities,
   };
 
   function charge(
@@ -200,8 +225,8 @@ export function createFakeVaultProvider(
     async listItems(ctx, externalVaultId) {
       charge(ctx, { op: "listItems", connectionId: ctx.connectionId, externalVaultId }, "list");
       return vaultById(externalVaultId)
-        .items.filter((item) => !item.archived)
-        .map(itemMeta);
+        .items.filter((item) => seed.listArchived || !item.archived)
+        .map((item) => itemMeta(item, capabilities.passkeys));
     },
     async readFields(ctx, externalVaultId, externalItemId, externalFieldIds) {
       charge(
@@ -249,16 +274,20 @@ export function createFakeVaultProvider(
           externalItemId: fakeId("fi"),
           name: input.name,
           type: input.type,
+          category: null,
           websites: [],
           fields: [],
+          passkeys: [],
           version: 0,
           archived: false,
+          archivedAt: null,
           updatedAt: now(),
         };
         vault.items.push(item);
       }
       item.name = input.name;
       item.type = input.type;
+      item.category = input.category ?? null;
       item.websites = [...input.websites];
       for (const change of input.fields) {
         const existing = item.fields.find(
@@ -271,23 +300,27 @@ export function createFakeVaultProvider(
           if (existing) item.fields.splice(item.fields.indexOf(existing), 1);
           continue;
         }
+        // File content is kept as base64, as seeded file values are.
+        const value = change.file
+          ? btoa(Array.from(change.file.bytes, (byte) => String.fromCharCode(byte)).join(""))
+          : change.value;
         if (existing) {
           existing.name = change.name;
           existing.kind = change.kind;
-          if (change.value !== undefined) existing.value = change.value;
+          if (value !== undefined) existing.value = value;
         } else {
           item.fields.push({
             externalFieldId: fakeId("ff"),
             name: change.name,
             kind: change.kind,
-            value: change.value ?? "",
+            value: value ?? "",
           });
         }
       }
       item.version += 1;
       item.updatedAt = now();
       vault.contentVersion += 1;
-      return itemMeta(item);
+      return itemMeta(item, capabilities.passkeys);
     },
     async archiveItem(ctx, externalVaultId, externalItemId) {
       charge(
@@ -296,7 +329,9 @@ export function createFakeVaultProvider(
         "write",
       );
       const vault = writableVault(externalVaultId);
-      itemById(vault, externalItemId).archived = true;
+      const item = itemById(vault, externalItemId);
+      item.archived = true;
+      item.archivedAt = now();
       vault.contentVersion += 1;
     },
     async createVault(ctx, input) {
@@ -313,6 +348,56 @@ export function createFakeVaultProvider(
       vaults.push(vault);
       return vaultMeta(vault);
     },
+    ...(capabilities.passkeys
+      ? {
+          async readPasskeys(
+            ctx: VaultProviderContext,
+            externalVaultId: string,
+            externalItemId: string,
+          ) {
+            charge(
+              ctx,
+              {
+                op: "readPasskeys",
+                connectionId: ctx.connectionId,
+                externalVaultId,
+                externalItemId,
+              },
+              "read",
+            );
+            const item = itemById(vaultById(externalVaultId), externalItemId);
+            return item.passkeys.map((passkey) => ({ ...passkey }));
+          },
+          async updatePasskeySignCount(
+            ctx: VaultProviderContext,
+            externalVaultId: string,
+            externalItemId: string,
+            update: { credentialId: string; signCount: number },
+          ) {
+            charge(
+              ctx,
+              {
+                op: "updatePasskeySignCount",
+                connectionId: ctx.connectionId,
+                externalVaultId,
+                externalItemId,
+              },
+              "write",
+            );
+            const vault = writableVault(externalVaultId);
+            const item = itemById(vault, externalItemId);
+            const passkey = item.passkeys.find(
+              (candidate) => candidate.credentialId === update.credentialId,
+            );
+            if (!passkey) throw new VaultProviderError("provider_not_found", "passkey not found");
+            if (update.signCount <= passkey.signCount) return;
+            passkey.signCount = update.signCount;
+            item.version += 1;
+            item.updatedAt = now();
+            vault.contentVersion += 1;
+          },
+        }
+      : {}),
   };
   return provider;
 }

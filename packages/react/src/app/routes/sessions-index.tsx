@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
 import { ANALYTICS_COLLECTION_ENABLED_EVENT } from "../lib/analytics-consent";
@@ -105,6 +106,9 @@ import {
   DropdownMenuTrigger,
 } from "../../ui/dropdown-menu";
 import { Notice } from "../../ui/notice";
+import { CreditRefusalNotice } from "../components/credits/credit-refusal-notice";
+import { coveredModelChoice, creditRefusalGap, freeCreditGap } from "../lib/free-credit-gap";
+import { isPaymentRequiredError } from "../lib/model-access";
 import { isTransientServiceFailure, OPENGENI_UPDATING_NOTICE } from "../lib/transient-retry";
 import { useConnectionAccounts } from "../components/capabilities/use-connection-accounts";
 import { StatusDot } from "../../ui/status-dot";
@@ -256,6 +260,10 @@ function SessionsIndexRouteContent({
   const context = useAppContext();
   const api = useAppApi();
   const page = usePage();
+  const starters = useSessionUiFeature("starters");
+  // Without the chat list, the new-chat page shows no other chats either: no
+  // recent chats and no project picker that files the chat among them.
+  const chatList = useSessionUiFeature("chatList");
   const connectionAccounts = useConnectionAccounts(
     context.client,
     {
@@ -613,6 +621,12 @@ function SessionsIndexRouteContent({
   const [usageLimitDraft, setUsageLimitDraft] =
     useState<SessionUsageLimitDraft>(NO_SESSION_USAGE_LIMIT);
   const [usageLimitSendBlocked, setUsageLimitSendBlocked] = useState(false);
+  // The API refused to start this chat because no credit pays for its model.
+  const [createCreditRefusal, setCreateCreditRefusal] = useState<{
+    workspaceId: string;
+    model: string;
+    message: string;
+  } | null>(null);
   const [createdSessionAuthority, setCreatedSessionAuthority] =
     useState<CreatedSessionRouteAuthority | null>(null);
   const composerRegionRef = useRef<HTMLDivElement | null>(null);
@@ -945,6 +959,39 @@ function SessionsIndexRouteContent({
       draft.visibility === "private" &&
       tenancyCapabilities?.canCreatePrivate !== true);
   const selectedPolicyRow = findPickerRow(modelCatalog.rows, context.model);
+  // A refused start names its model until the next start or a dismissal; before
+  // any Send, an uncovered model with free credit left for others does the same.
+  const refusedCreate =
+    createCreditRefusal?.workspaceId === workspaceId ? createCreditRefusal : null;
+  const creditCoverageOptions = {
+    selectedModel: context.model,
+    preferredModel: modelCatalog.defaultSelection?.model,
+  };
+  const creditGap = refusedCreate
+    ? creditRefusalGap(modelCatalog.rows, refusedCreate.model, creditCoverageOptions)
+    : freeCreditGap(modelCatalog.rows, context.model, creditCoverageOptions);
+  const noteCreditRefusal = (error: Error, request: { model?: string | undefined }): boolean => {
+    if (!isPaymentRequiredError(error)) return false;
+    setCreateCreditRefusal({
+      workspaceId,
+      model: request.model ?? context.model,
+      message: error.message,
+    });
+    // Re-read funding so the notice and picker name what the credit covers now.
+    void modelCatalog.refresh();
+    return true;
+  };
+  const chooseCoveredModel = (id: string) => {
+    const row = findPickerRow(modelCatalog.rows, id);
+    const choice = row
+      ? coveredModelChoice(row, context.reasoningEffort, context.latencyMode)
+      : null;
+    if (!choice) return;
+    setModelProvided(true);
+    context.setModel(choice.model);
+    context.setReasoningEffort(choice.effort);
+    if (choice.latencyMode !== null) context.setLatencyMode(choice.latencyMode);
+  };
   const newSessionPolicyValid = Boolean(
     selectedPolicyRow?.selectable &&
     effortOptionsForModel(selectedPolicyRow.catalog).includes(context.reasoningEffort) &&
@@ -1195,8 +1242,13 @@ function SessionsIndexRouteContent({
                       draftConflict = newSessionDraft.captureConflict(error);
                       outcomeUnknown = uncertain;
                       recoverPersonalResourceAttachment(error, request);
+                      connectionAccounts.onSelectionError(error);
                       // A brief outage shows the updating notice, not a toast.
-                      return draftConflict || newSessionDraft.reportUnavailable(error);
+                      return (
+                        draftConflict ||
+                        newSessionDraft.reportUnavailable(error) ||
+                        noteCreditRefusal(error, request)
+                      );
                     },
                   },
                 );
@@ -1206,6 +1258,7 @@ function SessionsIndexRouteContent({
                   return null;
                 }
                 setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+                setCreateCreditRefusal(null);
                 setUsageLimitSendBlocked(false);
                 return {
                   sessionId: created.id,
@@ -1267,10 +1320,15 @@ function SessionsIndexRouteContent({
                     draftConflict = newSessionDraft.captureConflict(error);
                     outcomeUnknown = uncertain;
                     recoverPersonalResourceAttachment(error, request);
+                    connectionAccounts.onSelectionError(error);
                     // A brief outage shows the updating notice, not a toast.
                     // An unconfirmed create keeps its idempotency key, so the
                     // person's next Send cannot start a second session.
-                    return draftConflict || newSessionDraft.reportUnavailable(error);
+                    return (
+                      draftConflict ||
+                      newSessionDraft.reportUnavailable(error) ||
+                      noteCreditRefusal(error, request)
+                    );
                   },
                 },
               );
@@ -1281,6 +1339,7 @@ function SessionsIndexRouteContent({
               }
               // The limit belongs to the chat just created; the next starts with none.
               setUsageLimitDraft(NO_SESSION_USAGE_LIMIT);
+              setCreateCreditRefusal(null);
               setUsageLimitSendBlocked(false);
               return {
                 sessionId: created.id,
@@ -1462,6 +1521,8 @@ function SessionsIndexRouteContent({
     setValue: setMessage,
     hasDraftContent: () => message.length > 0 || attachments.attachments.length > 0,
     sending: busy,
+    // Nothing runs before the session exists: Send just sends.
+    working: false,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()
     // substitutes FILE_ONLY_MESSAGE_TEXT).
@@ -1607,8 +1668,35 @@ function SessionsIndexRouteContent({
           </div>
         ) : null}
 
-        {modelUsesCredits(selectedPolicyRow?.catalog) &&
-        hasAccountPermission(context.accessContext, workspace?.accountId ?? "", "billing:read") ? (
+        {creditGap ? (
+          <div className="mt-6">
+            <CreditRefusalNotice
+              gap={creditGap}
+              message={refusedCreate?.message}
+              workspaceId={workspaceId}
+              canBuyCredits={
+                context.clientConfig.billingMode === "stripe" &&
+                hasAccountPermission(
+                  context.accessContext,
+                  workspace?.accountId ?? "",
+                  "billing:manage",
+                )
+              }
+              canConnectModel={hasWorkspacePermission(
+                context.accessContext,
+                workspaceId,
+                "connections:write",
+              )}
+              onChooseModel={busy ? undefined : chooseCoveredModel}
+              {...(refusedCreate ? { onDismiss: () => setCreateCreditRefusal(null) } : {})}
+            />
+          </div>
+        ) : modelUsesCredits(selectedPolicyRow?.catalog) &&
+          hasAccountPermission(
+            context.accessContext,
+            workspace?.accountId ?? "",
+            "billing:read",
+          ) ? (
           <div className="mt-6">
             <Suspense fallback={null}>
               <EmptyCreditsNotice
@@ -1863,13 +1951,15 @@ function SessionsIndexRouteContent({
               </>
             }
             header={
-              <SessionSetupStrip
-                disabled={busy || newSessionDraft.loading}
-                channels={channelsQuery.channels}
-                selectedChannelId={selectedChannelId}
-                onChannelChange={selectProject}
-                onCreateProject={() => setProjectDialogOpen(true)}
-              />
+              chatList ? (
+                <SessionSetupStrip
+                  disabled={busy || newSessionDraft.loading}
+                  channels={channelsQuery.channels}
+                  selectedChannelId={selectedChannelId}
+                  onChannelChange={selectProject}
+                  onCreateProject={() => setProjectDialogOpen(true)}
+                />
+              ) : undefined
             }
           />
 
@@ -1938,16 +2028,18 @@ function SessionsIndexRouteContent({
           />
         </div>
 
-        <RecentSessions workspaceId={workspaceId} />
-        <NewSessionStarters
-          workspaceId={workspaceId}
-          set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
-          disabled={busy || newSessionDraft.loading}
-          onSelect={(prompt) => {
-            setMessage(prompt);
-            composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
-          }}
-        />
+        {chatList ? <RecentSessions workspaceId={workspaceId} /> : null}
+        {starters ? (
+          <NewSessionStarters
+            workspaceId={workspaceId}
+            set={signupStarterSet(context.authSession?.user.email, workspace?.accountId)}
+            disabled={busy || newSessionDraft.loading}
+            onSelect={(prompt) => {
+              setMessage(prompt);
+              composerRegionRef.current?.querySelector("textarea")?.focus({ preventScroll: true });
+            }}
+          />
+        ) : null}
       </div>
       <ChannelCreateDialog
         open={projectDialogOpen}
@@ -2143,6 +2235,7 @@ function SessionModelControl({
       error={modelCatalog.error ?? policyError}
       menuSide="bottom"
       connectModelsHref={`/workspaces/${encodeURIComponent(workspaceId)}/settings?section=models`}
+      claudeSubscriptionAvailable={context.clientConfig.claudeSubscriptionEnabled === true}
       onModelChange={(model) => {
         onPolicyChosen();
         context.setModel(model);

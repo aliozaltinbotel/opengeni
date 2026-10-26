@@ -33,6 +33,10 @@ const AUTHORITY_FILE: &str = "browser-bridge-authority.json";
 const NATIVE_HOST_NAME: &str = "ai.opengeni.browser";
 const EXTENSION_ID: &str = "imdmcebcclhibdfolbokjbiibpcnpbel";
 const STORE_EXTENSION_ID: &str = "phpmmcbeelfkcinjfbbggegjdcdmnnch";
+/// Comma-separated IDs of a product's own Chrome extensions (its branded build
+/// of the attached-browser extension), set by the desktop app or installer
+/// that registers this agent. Chrome lets them reach the agent too.
+pub const EXTENSION_IDS_ENV: &str = "OPENGENI_AGENT_BROWSER_EXTENSION_IDS";
 // Chrome Native Messaging is intentionally asymmetric: browser -> host may be
 // 64 MiB, while host -> browser is limited to 1 MiB. CDP screenshots travel in
 // browser -> host responses, so flattening both directions to 1 MiB breaks
@@ -44,6 +48,9 @@ const MAX_ATTACHED_PROFILES: usize = 1_000;
 const MAX_TABS_PER_PROFILE: usize = 100_000;
 const MAX_PENDING_COMMANDS: usize = 4_096;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+/// How long past the caller's timeout an unanswered command still counts as
+/// work the extension is doing.
+const LATE_RESULT_GRACE: Duration = Duration::from_secs(10 * 60);
 /// Ended extension connections a bridge remembers and reports.
 const MAX_RECORDED_CONNECTION_ENDS: usize = 32;
 const MAX_CONNECTION_END_DETAIL_BYTES: usize = 512;
@@ -51,6 +58,14 @@ const MAX_CONNECTION_END_DETAIL_BYTES: usize = 512;
 const MAX_TAB_TITLE_BYTES: usize = 8_192;
 const MAX_TAB_URL_BYTES: usize = 65_536;
 const TAB_URL_TOO_LONG: &str = "This tab's address is too long for Opengeni to control";
+
+/// Reading buffered debugger events changes nothing in the browser. Every live
+/// attached connection polls continuously, so treating a poll as accepted work
+/// would keep a self-update waiting for as long as any connection exists, and
+/// refusing one during an idle probe would break every event stream.
+fn is_passive_request(payload: &serde_json::Value) -> bool {
+    payload.get("type").and_then(serde_json::Value::as_str) == Some("debugger.poll")
+}
 
 /// Failures at the trusted local browser-bridge boundary.
 #[derive(Debug, thiserror::Error)]
@@ -81,9 +96,11 @@ pub enum BrowserBridgeError {
     Draining,
 }
 
-/// Chrome passes the allowed extension origin as argv[1]. Native Messaging
-/// manifests cannot append a subcommand, so the agent recognizes that exact
-/// pinned origin before ordinary CLI parsing.
+/// Chrome passes the calling extension's origin as argv[1]. Native Messaging
+/// manifests cannot append a subcommand, so the agent recognizes an extension
+/// origin before ordinary CLI parsing. Which extensions may start the host is
+/// decided by Chrome from the manifest's `allowed_origins`, which the agent
+/// writes, so any well-formed extension origin is a host invocation here.
 #[must_use]
 pub fn is_native_host_invocation() -> bool {
     std::env::args()
@@ -92,14 +109,53 @@ pub fn is_native_host_invocation() -> bool {
 }
 
 fn is_extension_origin(origin: &str) -> bool {
-    extension_origins().iter().any(|allowed| allowed == origin)
+    origin
+        .strip_prefix("chrome-extension://")
+        .and_then(|rest| rest.strip_suffix('/'))
+        .is_some_and(is_extension_id)
 }
 
-fn extension_origins() -> [String; 2] {
-    [
+/// Chrome extension IDs are 32 letters from `a` to `p`.
+fn is_extension_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+/// The extension IDs named in [`EXTENSION_IDS_ENV`]. Malformed entries are
+/// logged and skipped, so a typo cannot widen the manifest to something Chrome
+/// rejects as a whole.
+#[must_use]
+pub fn extension_ids_from_env() -> Vec<String> {
+    std::env::var(EXTENSION_IDS_ENV)
+        .map(|value| parse_extension_ids(&value))
+        .unwrap_or_default()
+}
+
+fn parse_extension_ids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for id in value.split(',').map(str::trim).filter(|id| !id.is_empty()) {
+        if !is_extension_id(id) {
+            warn!(id, "ignoring a malformed Chrome extension ID");
+        } else if !ids.iter().any(|known| known == id) {
+            ids.push(id.to_string());
+        }
+    }
+    ids
+}
+
+/// The origins allowed to start the host: the Opengeni Browser extension's
+/// development and store builds, then `extra_ids` in order.
+fn extension_origins(extra_ids: &[String]) -> Vec<String> {
+    let mut origins = vec![
         extension_origin(),
         format!("chrome-extension://{STORE_EXTENSION_ID}/"),
-    ]
+    ];
+    for id in extra_ids {
+        let origin = format!("chrome-extension://{id}/");
+        if is_extension_id(id) && !origins.contains(&origin) {
+            origins.push(origin);
+        }
+    }
+    origins
 }
 
 fn extension_origin() -> String {
@@ -385,7 +441,8 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 
 /// Install the user-scoped Native Messaging manifest for Google Chrome and for
 /// any already-present compatible Chromium channels. The manifest points at the
-/// exact running agent binary; Chrome supplies the pinned extension origin.
+/// exact running agent binary and allows the Opengeni Browser extension plus
+/// `extra_extension_ids`, a product's own branded extensions.
 ///
 /// On Windows the browsers find the manifest through the per-user registry, so
 /// the one manifest file is written under `%LOCALAPPDATA%` and each browser's
@@ -393,18 +450,23 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
 pub fn install_native_host_manifests(
     binary_path: &Path,
     home: &Path,
+    extra_extension_ids: &[String],
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
     #[cfg(windows)]
     return install_registered_native_host(
         binary_path,
         &browser_data_home(home),
+        extra_extension_ids,
         &CurrentUserRegistry,
     );
     #[cfg(not(windows))]
-    install_native_host_manifests_in(binary_path, &browser_data_home(home))
+    install_native_host_manifests_in(binary_path, &browser_data_home(home), extra_extension_ids)
 }
 
-fn native_host_manifest_body(binary_path: &Path) -> Result<Vec<u8>, BrowserBridgeError> {
+fn native_host_manifest_body(
+    binary_path: &Path,
+    extra_extension_ids: &[String],
+) -> Result<Vec<u8>, BrowserBridgeError> {
     let binary = launchable_program_path(binary_path);
     let binary = binary.to_str().ok_or_else(|| {
         BrowserBridgeError::Protocol("agent binary path is not valid UTF-8".to_string())
@@ -414,7 +476,7 @@ fn native_host_manifest_body(binary_path: &Path) -> Result<Vec<u8>, BrowserBridg
         description: "Opengeni attached-browser bridge",
         path: binary,
         kind: "stdio",
-        allowed_origins: extension_origins(),
+        allowed_origins: extension_origins(extra_extension_ids),
     })?)
 }
 
@@ -464,8 +526,9 @@ fn manifest_points_here(body: &[u8], binary_path: &Path) -> bool {
 fn install_native_host_manifests_in(
     binary_path: &Path,
     data_home: &Path,
+    extra_extension_ids: &[String],
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
-    let body = native_host_manifest_body(binary_path)?;
+    let body = native_host_manifest_body(binary_path, extra_extension_ids)?;
     let mut installed = Vec::new();
     for (browser_root, primary) in native_host_browser_roots(data_home) {
         if !primary && !browser_root.exists() {
@@ -600,9 +663,10 @@ fn windows_manifest_path(manifest_directory: &Path) -> PathBuf {
 fn install_registered_native_host(
     binary_path: &Path,
     manifest_directory: &Path,
+    extra_extension_ids: &[String],
     registry: &dyn NativeHostRegistry,
 ) -> Result<Vec<PathBuf>, BrowserBridgeError> {
-    let body = native_host_manifest_body(binary_path)?;
+    let body = native_host_manifest_body(binary_path, extra_extension_ids)?;
     std::fs::create_dir_all(manifest_directory)?;
     let manifest = windows_manifest_path(manifest_directory);
     write_public_atomic(&manifest, &body)?;
@@ -750,7 +814,7 @@ struct NativeHostManifest<'a> {
     path: &'a str,
     #[serde(rename = "type")]
     kind: &'static str,
-    allowed_origins: [String; 2],
+    allowed_origins: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -992,7 +1056,10 @@ struct PendingCommand {
     device_id: String,
     connection_generation: String,
     settle: Option<oneshot::Sender<Result<ExtensionCommandResult, BrowserBridgeRequestFailure>>>,
-    _reservation: Option<WorkReservation>,
+    /// Physical work the extension may still be doing. Released when the
+    /// result arrives, the port ends, or the extension has had
+    /// `LATE_RESULT_GRACE` past the caller's timeout to answer.
+    reservation: Option<WorkReservation>,
 }
 
 struct ControllerReply {
@@ -1188,7 +1255,7 @@ impl BrowserBridgeInventory {
                     device_id: device_id.to_string(),
                     connection_generation: transport_generation.clone(),
                     settle: Some(settle),
-                    _reservation: opengeni_agent_platform::current_work_reservation(),
+                    reservation: opengeni_agent_platform::current_work_reservation(),
                 },
             );
             (outbound, bytes, receiver, transport_generation)
@@ -1211,9 +1278,33 @@ impl BrowserBridgeInventory {
             Err(_) => {
                 // Timeout ends only the caller's wait. The extension may still
                 // execute; a matching late result is the physical settlement.
+                // A command that never answers (a CDP call that never returns)
+                // must not hold self-updates while its port stays open, so its
+                // work stops counting after a further grace period. A result
+                // that still arrives later is matched and ignored as before.
+                let inventory = self.clone();
+                let request_id = request_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(LATE_RESULT_GRACE).await;
+                    inventory.stop_counting_late_command(&request_id, &transport_generation);
+                });
                 Err(BrowserBridgeError::Timeout)
             }
         }
+    }
+
+    /// Keep an unanswered command matchable for its late result, but stop it
+    /// holding self-updates.
+    fn stop_counting_late_command(&self, request_id: &str, connection_generation: &str) {
+        let released = {
+            let mut state = self.state.write().expect("browser bridge inventory lock");
+            state
+                .pending
+                .get_mut(request_id)
+                .filter(|pending| pending.connection_generation == connection_generation)
+                .and_then(|pending| pending.reservation.take())
+        };
+        drop(released);
     }
 
     fn register(
@@ -1423,22 +1514,27 @@ impl BrowserBridgeInventory {
     }
 }
 
+/// Fail and forget every command sent on a native port that has ended or been
+/// replaced. Its result can only come back on that port, so nothing can settle
+/// it any more; keeping it would hold its work reservation, and with it every
+/// self-update, for as long as the agent runs.
 fn notify_pending_for_profile(
     state: &mut InventoryState,
     device_id: &str,
     connection_generation: Option<&str>,
     reason: BrowserBridgeRequestFailure,
 ) {
-    for command in state.pending.values_mut() {
-        if command.device_id == device_id
+    state.pending.retain(|_, command| {
+        let ended = command.device_id == device_id
             && connection_generation
-                .is_none_or(|generation| command.connection_generation == generation)
-        {
+                .is_none_or(|generation| command.connection_generation == generation);
+        if ended {
             if let Some(settle) = command.settle.take() {
                 let _ = settle.send(Err(reason));
             }
         }
-    }
+        !ended
+    });
 }
 
 /// Long-running loopback server owned by the main agent process.
@@ -1728,11 +1824,18 @@ async fn serve_controller(
         let request_responses = responses.clone();
         // Reserve before spawn/first await. A controller peer's disappearing
         // waiter cannot cancel an accepted extension command or its publisher.
-        let reservation = inventory.update_drain.reserve_work(None);
+        // A passive event poll is neither reserved nor refused: losing one in
+        // a swap only makes the controller resynchronize its event cursor.
+        let passive = is_passive_request(&payload);
+        let reservation = if passive {
+            None
+        } else {
+            inventory.update_drain.reserve_work(None)
+        };
         if let Some(reservation) = &reservation {
             reservation.describe(format!("attached-browser request {request_id}"));
         }
-        let accepted = reservation.is_some();
+        let accepted = passive || reservation.is_some();
         let reply_reservation = reservation.clone();
         let actual = tokio::spawn(opengeni_agent_platform::with_work_reservation(
             reservation,
@@ -2433,18 +2536,79 @@ mod tests {
     }
 
     #[test]
-    fn native_host_accepts_only_exact_development_and_store_origins() {
-        for origin in extension_origins() {
+    fn native_host_accepts_only_well_formed_extension_origins() {
+        for origin in extension_origins(&[]) {
             assert!(is_extension_origin(&origin));
             assert!(!is_extension_origin(origin.trim_end_matches('/')));
             assert!(!is_extension_origin(&format!("{origin}extra")));
         }
-        assert!(!is_extension_origin(
+        // A product's own extension: Chrome only starts the host for origins the
+        // manifest allows, so the agent recognizes any extension origin.
+        assert!(is_extension_origin(
             "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
         ));
+        for malformed in [
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+            "chrome-extension://qaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+            "chrome-extension://Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+            "chrome-extension:///",
+            "--help",
+            "run",
+        ] {
+            assert!(!is_extension_origin(malformed), "{malformed}");
+        }
         assert!(!is_extension_origin(
             "https://phpmmcbeelfkcinjfbbggegjdcdmnnch/"
         ));
+    }
+
+    #[test]
+    fn extra_extension_ids_are_validated_deduplicated_and_kept_in_order() {
+        let ids = parse_extension_ids(&format!(
+            " bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, not-an-id,,{EXTENSION_ID},cccccccccccccccccccccccccccccccc,bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb "
+        ));
+        assert_eq!(
+            ids,
+            vec!["b".repeat(32), EXTENSION_ID.to_string(), "c".repeat(32)]
+        );
+        assert_eq!(
+            extension_origins(&ids),
+            vec![
+                extension_origin(),
+                format!("chrome-extension://{STORE_EXTENSION_ID}/"),
+                format!("chrome-extension://{}/", "b".repeat(32)),
+                format!("chrome-extension://{}/", "c".repeat(32)),
+            ]
+        );
+        assert_eq!(parse_extension_ids(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn installs_a_manifest_that_also_allows_a_products_own_extension() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let binary = directory.path().join("opengeni-agent");
+        std::fs::write(&binary, b"fixture").expect("binary");
+        let own = "d".repeat(32);
+        let manifests =
+            install_native_host_manifests_in(&binary, directory.path(), std::slice::from_ref(&own))
+                .expect("install");
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        assert_ne!(manifests, [] as [std::path::PathBuf; 0]);
+        for path in &manifests {
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).expect("manifest")).expect("json");
+            assert_eq!(manifest["name"], NATIVE_HOST_NAME);
+            assert_eq!(
+                manifest["allowed_origins"],
+                json!([
+                    extension_origin(),
+                    format!("chrome-extension://{STORE_EXTENSION_ID}/"),
+                    format!("chrome-extension://{own}/"),
+                ])
+            );
+        }
+        remove_native_host_manifests_in(directory.path()).expect("remove");
     }
 
     #[test]
@@ -2770,6 +2934,41 @@ mod tests {
         assert_eq!(refused["requestId"], refused_id);
         assert_eq!(refused["error"]["code"], "update_draining");
         assert_eq!(drain.snapshot().unwrap().routed, 1);
+
+        // An event poll behind the same fence is still served and is not
+        // counted as work that holds the update back.
+        let poll_id = "55555555-5555-4555-8555-555555555555";
+        write_native_frame(
+            &mut controller,
+            &serde_json::to_vec(&json!({
+                "type":"request", "protocolVersion":1, "requestId":poll_id, "deviceId":device_id,
+                "expectedConnectionGeneration":generation,
+                "payload":{"type":"debugger.poll", "afterSequence":0, "limit":100}
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let poll_command = read_json(&mut extension).await;
+        assert_eq!(poll_command["requestId"], poll_id);
+        assert_eq!(poll_command["payload"]["type"], "debugger.poll");
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        write_native_frame(
+            &mut extension,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":poll_id, "deviceId":device_id,
+                "connectionGeneration":generation, "ok":true,
+                "payload":{"events":[], "cursor":0, "truncated":false}, "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let polled = read_json(&mut controller).await;
+        assert_eq!(polled["requestId"], poll_id);
+        assert_eq!(polled["ok"], true);
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+
         write_native_frame(
             &mut extension,
             &serde_json::to_vec(&json!({
@@ -2827,7 +3026,7 @@ mod tests {
         let binary = directory.path().join("opengeni-agent");
         std::fs::write(&binary, b"fixture").expect("binary");
         let manifests =
-            install_native_host_manifests_in(&binary, directory.path()).expect("install");
+            install_native_host_manifests_in(&binary, directory.path(), &[]).expect("install");
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         assert_ne!(manifests, Vec::<std::path::PathBuf>::new());
         for path in &manifests {
@@ -2836,7 +3035,7 @@ mod tests {
             assert_eq!(manifest["name"], NATIVE_HOST_NAME);
             assert_eq!(manifest["path"], binary.to_str().expect("path"));
             assert_eq!(manifest["allowed_origins"][0], extension_origin());
-            assert_eq!(manifest["allowed_origins"], json!(extension_origins()));
+            assert_eq!(manifest["allowed_origins"], json!(extension_origins(&[])));
         }
         remove_native_host_manifests_in(directory.path()).expect("remove");
         assert!(manifests.iter().all(|path| !path.exists()));
@@ -2849,13 +3048,13 @@ mod tests {
         let this = directory.path().join("this-agent");
         std::fs::write(&other, b"fixture").expect("other binary");
         let manifests =
-            install_native_host_manifests_in(&other, directory.path()).expect("install");
+            install_native_host_manifests_in(&other, directory.path(), &[]).expect("install");
         assert_eq!(
             remove_native_host_manifests_for_in(&this, directory.path()).expect("keep"),
             Vec::<std::path::PathBuf>::new()
         );
         assert!(manifests.iter().all(|path| path.exists()));
-        install_native_host_manifests_in(&this, directory.path()).expect("overwrite");
+        install_native_host_manifests_in(&this, directory.path(), &[]).expect("overwrite");
         assert_eq!(
             remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
             manifests
@@ -2871,7 +3070,7 @@ mod tests {
         let old_name = install.join("old-agent");
         let this = install.join("This Agent");
         let manifests =
-            install_native_host_manifests_in(&old_name, directory.path()).expect("install");
+            install_native_host_manifests_in(&old_name, directory.path(), &[]).expect("install");
         assert_eq!(
             remove_native_host_manifests_for_in(&this, directory.path()).expect("remove"),
             manifests
@@ -2936,8 +3135,8 @@ mod tests {
         // Edge is installed; Chrome has never run (its key is absent).
         let registry = FakeRegistry::with_keys(&[r"Software\Microsoft\Edge"]);
 
-        let installed =
-            install_registered_native_host(&binary, &manifests_dir, &registry).expect("install");
+        let installed = install_registered_native_host(&binary, &manifests_dir, &[], &registry)
+            .expect("install");
 
         let manifest = manifests_dir.join("ai.opengeni.browser.json");
         assert_eq!(installed, vec![manifest.clone()]);
@@ -2946,7 +3145,7 @@ mod tests {
         assert_eq!(body["name"], NATIVE_HOST_NAME);
         assert_eq!(body["path"], binary.to_str().expect("path"));
         assert_eq!(body["type"], "stdio");
-        assert_eq!(body["allowed_origins"], json!(extension_origins()));
+        assert_eq!(body["allowed_origins"], json!(extension_origins(&[])));
         let named = Some(manifest.to_str().expect("path").to_string());
         assert_eq!(registry.value(CHROME_HOST_KEY), named);
         assert_eq!(registry.value(EDGE_HOST_KEY), named);
@@ -2977,14 +3176,14 @@ mod tests {
             .set_default_value(EDGE_HOST_KEY, r"C:\Elsewhere\host.json")
             .expect("seed");
 
-        install_registered_native_host(&other, &manifests_dir, &registry).expect("install");
+        install_registered_native_host(&other, &manifests_dir, &[], &registry).expect("install");
         assert_eq!(
             remove_registered_native_host_for(&this, &manifests_dir, &registry).expect("keep"),
             Vec::<PathBuf>::new()
         );
         assert!(registry.value(CHROME_HOST_KEY).is_some());
 
-        install_registered_native_host(&this, &manifests_dir, &registry).expect("overwrite");
+        install_registered_native_host(&this, &manifests_dir, &[], &registry).expect("overwrite");
         let manifest = manifests_dir.join("ai.opengeni.browser.json");
         assert_eq!(
             remove_registered_native_host_for(&this, &manifests_dir, &registry).expect("remove"),
@@ -3028,7 +3227,8 @@ mod tests {
         let manifests_dir = directory.path().join("NativeMessagingHosts");
         let registry = FakeRegistry::default();
 
-        install_registered_native_host(&canonical, &manifests_dir, &registry).expect("install");
+        install_registered_native_host(&canonical, &manifests_dir, &[], &registry)
+            .expect("install");
 
         let manifest = manifests_dir.join("ai.opengeni.browser.json");
         let body: serde_json::Value =
@@ -3083,6 +3283,116 @@ mod tests {
             serde_json::from_slice(&hello(device_id, generation, 1)).expect("hello");
         edit(&mut value);
         serde_json::to_vec(&value).expect("hello")
+    }
+
+    async fn wait_until_no_routed_work(drain: &crate::uploads::update_drain::UpdateDrain) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while drain.snapshot().unwrap().routed != 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the ended port's command no longer holds work");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_command_on_an_ended_port_does_not_hold_self_updates() {
+        use super::test_support::connect_extension;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let server = BrowserBridgeServer::start(directory.path())
+            .await
+            .expect("start");
+        let device_id = "11111111-1111-4111-8111-111111111111";
+        let inventory = server.inventory();
+        let drain = inventory.update_drain.clone();
+
+        // A command whose caller stopped waiting (a timeout) is still owned by
+        // the extension while its port lives.
+        let mut first = connect_extension(directory.path(), device_id, "connection-1", None).await;
+        let sent = |request_id: &'static str, generation: &'static str| {
+            let inventory = inventory.clone();
+            let reservation = drain.reserve_work(None).unwrap();
+            tokio::spawn(opengeni_agent_platform::with_work_reservation(
+                Some(reservation),
+                async move {
+                    inventory
+                        .request(request_id, device_id, generation, json!({"type":"ping"}))
+                        .await
+                },
+            ))
+        };
+        let waiter = sent("22222222-2222-4222-8222-222222222222", "connection-1");
+        assert_eq!(read_json(&mut first).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+
+        // The profile reconnects on a new port: the old port's result can
+        // never arrive, so its command must stop holding updates.
+        let mut second = connect_extension(directory.path(), device_id, "connection-2", None).await;
+        wait_until_no_routed_work(&drain).await;
+
+        // The same when the live port closes with a command outstanding.
+        let waiter = sent("33333333-3333-4333-8333-333333333333", "connection-2");
+        assert_eq!(read_json(&mut second).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        drop(second);
+        wait_until_no_routed_work(&drain).await;
+        assert_eq!(
+            drain.reserve_update("update"),
+            crate::uploads::update_drain::UpdateReservation::Started
+        );
+        assert!(drain.seal_update("update"));
+        drain.release_update("update");
+
+        // A command the extension never answers on a live port stops holding
+        // updates after its grace period, and its late result is still taken.
+        let mut third = connect_extension(directory.path(), device_id, "connection-3", None).await;
+        let late_id = "44444444-4444-4444-8444-444444444444";
+        let waiter = sent(late_id, "connection-3");
+        assert_eq!(read_json(&mut third).await["type"], "command");
+        waiter.abort();
+        assert!(waiter.await.unwrap_err().is_cancelled());
+        assert_eq!(drain.snapshot().unwrap().routed, 1);
+        inventory.stop_counting_late_command(late_id, "connection-2");
+        assert_eq!(
+            drain.snapshot().unwrap().routed,
+            1,
+            "only the exact port's command"
+        );
+        inventory.stop_counting_late_command(late_id, "connection-3");
+        assert_eq!(drain.snapshot().unwrap().routed, 0);
+        write_native_frame(
+            &mut third,
+            &serde_json::to_vec(&json!({
+                "type":"command_result", "requestId":late_id, "deviceId":device_id,
+                "connectionGeneration":"connection-3", "ok":true, "payload":{"pong":true},
+                "error":null
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while inventory
+                .state
+                .read()
+                .unwrap()
+                .pending
+                .contains_key(late_id)
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the late result settles the command");
+        assert_eq!(server.inventory().snapshot().devices.len(), 1);
+
+        drop(third);
+        drop(first);
+        server.shutdown().await.expect("shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3493,7 +3803,7 @@ mod tests {
         // These ignored tests run alone; the variable only steers where the
         // manifest installer writes.
         std::env::set_var("XDG_CONFIG_HOME", &xdg);
-        install_native_host_manifests(Path::new(&binary), root.path()).expect("manifest");
+        install_native_host_manifests(Path::new(&binary), root.path(), &[]).expect("manifest");
         let process = tokio::process::Command::new(
             std::env::var("CHROMIUM").unwrap_or_else(|_| "chromium".to_string()),
         )

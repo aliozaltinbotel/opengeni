@@ -4,7 +4,7 @@
    DOM globals are registered exactly once for the bun test process slice that
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, jest, test } from "bun:test";
 import { act as reactAct } from "react";
 import { startTransition, Suspense, useEffect, useState } from "react";
 import { flushSync } from "react-dom";
@@ -41,10 +41,11 @@ import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 import { createEmbeddedSessionClient } from "../src/embedded-session-client";
 import { createOpenGeniText } from "../src/messages/runtime";
+import { SERVICE_UPDATING_CALM_WINDOW_MS } from "../src/lib/transient-retry";
 
 const englishText = createOpenGeniText();
 
-registerDom();
+registerDom({ clock: "virtual" });
 
 function makeEvent(
   sequence: number,
@@ -2798,6 +2799,8 @@ describe("useComposer queue-vs-steer", () => {
       expect(await first.result.current.send("answer after reload")).toBe(true),
     );
     await flush();
+    // Held as an update first; reported once the failure outlasts one.
+    await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
     const failed = first.result.current.optimisticMessages?.[0];
     expect(failed).toMatchObject({ destination: "queue", state: "failed", outcomeUnknown: true });
     const clientEventId = sent.input?.clientEventId;
@@ -2861,6 +2864,8 @@ describe("useComposer queue-vs-steer", () => {
 
     await flushing(async () => expect(await hook.result.current.send("run later")).toBe(true));
     await flush();
+    // Held as an update first; reported once the failure outlasts one.
+    await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
     const failed = hook.result.current.optimisticMessages?.[0];
     expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
     const clientEventId = sent.input?.clientEventId;
@@ -2995,6 +3000,7 @@ describe("useComposer queue-vs-steer", () => {
     expect(hook.result.current.busySend).toBe("steer");
     expect(hook.result.current.singleSend).toBe(false);
     expect(hook.result.current.alternateSend).toBe("queue");
+    expect(hook.result.current.working).toBe(true);
 
     await flushing(async () => expect(await hook.result.current.send("busy")).toBe(true));
     await flushing(async () =>
@@ -3006,11 +3012,14 @@ describe("useComposer queue-vs-steer", () => {
     destination = "chat";
     await hook.rerender(undefined);
     expect(hook.result.current.alternateSend).toBeNull();
+    // Nothing runs or waits: the composer just sends.
+    expect(hook.result.current.working).toBe(false);
     await flushing(async () => expect(await hook.result.current.send("idle")).toBe(true));
     destination = "queue";
     control = { ...control, state: "paused", directState: "paused" };
     await hook.rerender(undefined);
     expect(hook.result.current.alternateSend).toBeNull();
+    expect(hook.result.current.working).toBe(false);
     await flushing(async () => expect(await hook.result.current.send("paused")).toBe(true));
 
     expect(calls).toEqual([
@@ -4530,12 +4539,12 @@ describe("useComposer durable draft and control binding", () => {
       await flush();
       connectionAccounts = [{ ...original[0]!, connectionId: crypto.randomUUID() }];
       if (delivery === "send") {
-        const failed = hook.result.current.optimisticMessages?.find(
-          (message) => message.outcomeUnknown,
-        );
-        expect(failed).toBeDefined();
-        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
-        await flush();
+        // A gateway failure is held as an update and retried by itself.
+        expect(
+          hook.result.current.optimisticMessages?.find((message) => message.outcomeUnknown),
+        ).toMatchObject({ state: "sending" });
+        expect(hook.result.current.reconnecting).toBe(true);
+        await flush(10_000);
       } else {
         await flushing(async () => expect(await hook.result.current.steer()).toBe(true));
       }
@@ -4959,12 +4968,15 @@ describe("useComposer durable draft and control binding", () => {
       );
       await flush();
       if (delivery === "send") {
-        const failed = hook.result.current.optimisticMessages?.find(
+        // A gateway failure is held as an update and retried by itself.
+        const held = hook.result.current.optimisticMessages?.find(
           (message) => message.outcomeUnknown,
         );
-        expect(failed).toMatchObject({ state: "failed", outcomeUnknown: true });
-        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
-        await flush();
+        expect(held).toMatchObject({ state: "sending", outcomeUnknown: true });
+        expect(hook.result.current.reconnecting).toBe(true);
+        expect(hook.result.current.error).toBeNull();
+        await flush(10_000);
+        expect(hook.result.current.reconnecting).toBe(false);
       } else {
         expect(hook.result.current.value).toBe(initial.text);
         expect(hook.result.current.restoredResources).toEqual([resource]);
@@ -5031,8 +5043,9 @@ describe("useComposer durable draft and control binding", () => {
     expect(uncertain).toBeDefined();
     const originalClientEventId = uncertain!.clientEventId;
 
-    await flushing(() => hook.result.current.retryOptimisticMessage?.(originalClientEventId));
-    await flush();
+    // The gateway failure is held and retried by itself; that retry
+    // reconciles first, and its failing read stops it without a resend.
+    await flush(10_000);
     expect({ reconciliationReads, mutationAttempts: attempts.length }).toEqual({
       reconciliationReads: 1,
       mutationAttempts: 1,
@@ -5115,14 +5128,11 @@ describe("useComposer durable draft and control binding", () => {
       await flush();
       const firstId = attempts[0]!.clientEventId;
       if (delivery === "send") {
-        const uncertain = hook.result.current.optimisticMessages?.find(
-          (message) => message.outcomeUnknown,
-        );
-        expect(uncertain).toBeDefined();
-        await flushing(() =>
-          hook.result.current.retryOptimisticMessage?.(uncertain!.clientEventId),
-        );
-        await flush();
+        // The gateway failure is held as an update and retried by itself.
+        expect(
+          hook.result.current.optimisticMessages?.find((message) => message.outcomeUnknown),
+        ).toMatchObject({ state: "sending" });
+        await flush(10_000);
       } else {
         await flushing(async () => expect(await hook.result.current.steer()).toBe(false));
       }
@@ -5211,9 +5221,15 @@ describe("useComposer durable draft and control binding", () => {
         clientEventId: attempts[0]!.clientEventId,
       };
       if (delivery === "send") {
-        const failed = hook.result.current.optimisticMessages?.[0];
-        await flushing(() => hook.result.current.retryOptimisticMessage?.(failed!.clientEventId));
-        await flush();
+        // Held as an update; its automatic retry reconciles first and finds
+        // the message already accepted.
+        expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({ state: "sending" });
+        await flush(10_000);
+        expect(hook.result.current.optimisticMessages?.[0]).toMatchObject({
+          state: "queued",
+          outcomeUnknown: false,
+        });
+        expect(hook.result.current.reconnecting).toBe(false);
       } else {
         await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
       }
@@ -5246,18 +5262,19 @@ describe("useComposer durable draft and control binding", () => {
         updatedAt: new Date().toISOString(),
       };
       const attempts: SendMessageInput[] = [];
+      let outage = true;
       const client = fakeClient({
         getComposerDraft: async () => initial,
         sendMessage: async (_workspaceId, _sessionId, input) => {
           const typed = typeof input === "string" ? { text: input } : input;
           attempts.push(typed);
-          if (attempts.length === 1) throw gatewayError(502);
+          if (outage) throw gatewayError(502);
           return makeEvent(2, "user.message");
         },
         steerMessage: async (_workspaceId, _sessionId, input) => {
           const typed = typeof input === "string" ? { text: input } : input;
           attempts.push(typed);
-          if (attempts.length === 1) throw gatewayError(502);
+          if (outage) throw gatewayError(502);
           return steerResult(makeEvent(2, "user.message"));
         },
       });
@@ -5271,6 +5288,10 @@ describe("useComposer durable draft and control binding", () => {
         expect(await first.result.current[delivery]()).toBe(delivery === "send"),
       );
       await flush();
+      // A Send is held as an update first; this outage outlasts one, so it is
+      // reported for the person to retry.
+      await flush(SERVICE_UPDATING_CALM_WINDOW_MS + 10_000);
+      outage = false;
       await first.unmount();
 
       const second = await renderHook(
@@ -5313,10 +5334,12 @@ describe("useComposer durable draft and control binding", () => {
         await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
       }
 
-      expect(attempts).toHaveLength(2);
-      expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
-      expect(attempts[1]!.text).toBe("original uncertain prompt");
-      expect(attempts[1]!.resources).toEqual([originalResource]);
+      if (delivery === "steer") expect(attempts).toHaveLength(2);
+      else expect(attempts.length).toBeGreaterThan(2);
+      const retried = attempts.at(-1)!;
+      expect(new Set(attempts.map((attempt) => attempt.clientEventId)).size).toBe(1);
+      expect(retried.text).toBe("original uncertain prompt");
+      expect(retried.resources).toEqual([originalResource]);
       expect(second.result.current.value).toBe("edited after timeout");
       expect(second.result.current.restoredResources).toEqual([newerResource]);
       await second.unmount();
@@ -5558,6 +5581,8 @@ describe("useComposer durable draft and control binding", () => {
 
 describe("session hook concurrent target ownership", () => {
   test("a suspended target transition leaves the committed session fully interactive", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const turn = fakeTurn({
@@ -5663,6 +5688,8 @@ describe("session hook concurrent target ownership", () => {
   });
 
   test("a suspended target render cannot retarget a committed draft callback", async () => {
+    // Preserve the native React scheduling window this test observes.
+    jest.useRealTimers();
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
     const draftA: ComposerDraft = {
@@ -6163,7 +6190,7 @@ describe("useAvailableModels", () => {
     expect(hook.result.current.defaultModel).toBeNull();
     await hook.unmount();
     // The shared read is released one task after its last reader leaves.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await flush(0);
     expect(nativeSignal?.aborted).toBe(true);
   });
 });

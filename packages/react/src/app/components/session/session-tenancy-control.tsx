@@ -1,4 +1,5 @@
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
+import { isTransientRequestError } from "@opengeni/sdk";
 import type {
   Session,
   SessionEvent,
@@ -85,12 +86,29 @@ export default function SessionRouteAuxiliary(
         workspaceId: string;
         sessionId: string;
         loadError: unknown;
+        /** Retry the session read now (it also keeps retrying in the background). */
+        onRetry?: (() => void) | undefined;
         session?: never | undefined;
         events?: never | undefined;
       },
 ) {
   return props.session ? (
     <SessionTenancyRouteControl session={props.session} events={props.events} />
+  ) : isTransientRequestError(props.loadError) ? (
+    // The session read has failed transiently for a while (an outage outlasting
+    // a rolling deploy). The read keeps retrying and the page opens the session
+    // on its own when it succeeds.
+    <ProblemPanel
+      title="Temporarily unavailable"
+      description="Retrying automatically."
+      action={
+        props.onRetry ? (
+          <Button type="button" variant="outline" onClick={props.onRetry}>
+            Try again
+          </Button>
+        ) : undefined
+      }
+    />
   ) : !isApiErrorStatus(props.loadError, 404) ? (
     <ProblemPanel
       title="Unable to open session"
@@ -720,7 +738,7 @@ export function SessionTenancyControl({
     // chip with its chevron returns from sm. A narrow title bar (a small app
     // window beside the sidebar) also gets just the icon, so the title keeps
     // its room.
-    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full text-xs font-medium text-fg pointer-coarse:min-h-11 max-sm:min-w-8 max-sm:justify-center max-sm:pointer-coarse:min-w-11 sm:border sm:border-border sm:bg-surface/55 sm:px-2.5 @max-[34rem]/titlebar:min-w-8! @max-[34rem]/titlebar:justify-center @max-[34rem]/titlebar:border-0! @max-[34rem]/titlebar:bg-transparent! @max-[34rem]/titlebar:px-0!">
+    <span className="inline-flex min-h-8 min-w-0 items-center gap-1.5 rounded-full text-xs font-medium text-fg pointer-coarse:min-h-11 max-sm:min-w-8 max-sm:justify-center max-sm:pointer-coarse:min-w-11 sm:border sm:border-border sm:bg-surface/55 sm:px-2.5 @max-[34rem]/titlebar:min-w-8! @max-[34rem]/titlebar:pointer-coarse:min-w-11! @max-[34rem]/titlebar:justify-center @max-[34rem]/titlebar:border-0! @max-[34rem]/titlebar:bg-transparent! @max-[34rem]/titlebar:px-0!">
       {privateSession ? (
         <LockKeyholeIcon className="size-3.5 shrink-0 text-brand" aria-hidden="true" />
       ) : (
@@ -758,7 +776,7 @@ export function SessionTenancyControl({
                 className="rounded-full focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {busy ? (
-                  <span className="inline-flex min-h-8 items-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 text-xs font-medium pointer-coarse:min-h-11">
+                  <span className="inline-flex min-h-8 items-center justify-center gap-1.5 rounded-full border border-border bg-surface/55 px-2.5 text-xs font-medium pointer-coarse:min-h-11 pointer-coarse:min-w-11">
                     <Loader2Icon className="size-3.5 animate-spin motion-reduce:animate-none" />
                     <span className="hidden sm:inline">Updating</span>
                   </span>
@@ -810,7 +828,11 @@ export function SessionTenancyControl({
         ) : (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span tabIndex={0} aria-label={`${stateLabel} session access. ${stateDescription}`}>
+              <span
+                role="img"
+                tabIndex={0}
+                aria-label={`${stateLabel} session access. ${stateDescription}`}
+              >
                 {stateChip}
               </span>
             </TooltipTrigger>
