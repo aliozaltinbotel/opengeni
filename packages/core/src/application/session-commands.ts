@@ -1,3 +1,4 @@
+import { SessionControlRequest } from "@opengeni/contracts";
 import type {
   ComposerDraft,
   DeleteSessionQueueItemRequest,
@@ -9,7 +10,6 @@ import type {
   SessionAuthorizationPort,
   SessionAuthorizationSurface,
   SessionCommandReceipt,
-  SessionControlRequest,
   SessionControlResponse,
   SessionQueueMutationResponse,
   SteerSessionQueueItemRequest,
@@ -914,7 +914,27 @@ export async function steerHumanQueuePrompt(
   return response;
 }
 
+/** Receipt-only safety cancellation uses the same native control/quiescence owner. */
+export async function cancelHumanSessionWorkstreamWithReceipt(
+  deps: Parameters<typeof controlHumanSessionWorkstreamWithOutcome>[0],
+  context: HumanSessionCommandContext,
+  rawInput: unknown,
+): Promise<Pick<SessionControlResponse, "receipt">> {
+  const input = SessionControlRequest.parse(rawInput);
+  if (input.action !== "cancel") throw new Error("Cancellation requires an exact cancel intent");
+  const result = await applyHumanSessionControl(deps, context, input, "session.cancel");
+  return { receipt: result.response.receipt };
+}
+
 export async function controlHumanSessionWorkstreamWithOutcome(
+  deps: Parameters<typeof applyHumanSessionControl>[0],
+  context: HumanSessionCommandContext,
+  input: SessionControlRequest,
+): ReturnType<typeof applyHumanSessionControl> {
+  return await applyHumanSessionControl(deps, context, input, "session.control");
+}
+
+async function applyHumanSessionControl(
   deps: {
     db: Database;
     bus: EventBus;
@@ -926,12 +946,16 @@ export async function controlHumanSessionWorkstreamWithOutcome(
   } & SessionCommandPostCommitDeps,
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
+  operation: "session.control" | "session.cancel",
 ): Promise<{
   response: SessionControlResponse;
   outcome: "changed" | "unchanged" | "replayed";
   replay: boolean;
 }> {
-  const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
+  input = SessionControlRequest.parse(input);
+  if (operation === "session.cancel" && input.action !== "cancel")
+    throw new Error("Cancellation requires an exact cancel intent");
+  const authorization = await authorizeHumanSessionCommand(deps, context, operation);
   const result = await runSessionCommandPersistenceTransaction(
     deps,
     { workspaceId: context.workspaceId },

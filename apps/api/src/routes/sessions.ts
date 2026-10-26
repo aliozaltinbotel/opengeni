@@ -1,3 +1,5 @@
+import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
+import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest } from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import {
@@ -661,11 +663,22 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const operation = sessionAuthorizationOperationForHttp(
+    let operation = sessionAuthorizationOperationForHttp(
       c.req.method,
       new URL(c.req.url).pathname,
       sessionId,
     );
+    const sessionSuffix = new URL(c.req.url).pathname;
+    if (
+      (sessionSuffix.endsWith(`/sessions/${sessionId}/control`) ||
+        sessionSuffix.endsWith(`/sessions/${sessionId}/cancel`)) &&
+      c.req.method === "POST"
+    ) {
+      const input = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
+      if (!input.success || (sessionSuffix.endsWith("/cancel") && input.data.action !== "cancel"))
+        throw new HTTPException(400, { message: "invalid session control request" });
+      operation = sessionSuffix.endsWith("/cancel") ? "session.cancel" : "session.control";
+    }
     if (operation === "session.stream.read") {
       await next();
       return;
@@ -4077,6 +4090,25 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/creation-receipt", async (c) => {
+    const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:create");
+    const expected = SessionCreationReceiptRecoveryRequest.safeParse({
+      idempotencyKey: c.req.query("idempotencyKey"),
+      requestSha256: c.req.query("requestSha256"),
+    });
+    if (!expected.success)
+      throw new HTTPException(400, { message: "invalid session creation receipt request" });
+    try {
+      const creationReceipt = await readSessionCreationReceiptForRequest(
+        deps,
+        grant,
+        c.req.param("sessionId"),
+        expected.data,
+      );
+      return c.json({ creationReceipt });
+    } catch (error) { throw sessionAuthorizationHttpError(error); }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
@@ -4089,6 +4121,26 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     } catch (error) {
       if (error instanceof SessionRetryConflictError)
         return c.json({ code: error.code, message: error.message }, 409);
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/cancel", async (c) => {
+    const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:control");
+    try {
+      return c.json(
+        await cancelHumanSessionWorkstreamWithReceipt(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: c.req.param("workspaceId"),
+            sessionId: c.req.param("sessionId"),
+            subjectId: grant.subjectId,
+          },
+          await c.req.json(),
+        ),
+      );
+    } catch (error) {
       return commandConflictResponse(c, error);
     }
   });
@@ -5807,6 +5859,8 @@ export function sessionAuthorizationOperationForHttp(
   // acceptSessionUserMessageWithOutcome after the body is parsed.
   if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
+  if (suffix === "/cancel" && verb === "POST") return "session.cancel";
+  if (suffix === "/creation-receipt" && verb === "GET") return "session.creation_receipt.read";
   if (suffix === "/retry" && verb === "POST") return "session.control";
   if (suffix === "/sandbox-recovery" && ["GET", "POST"].includes(verb)) return "session.control";
   if (suffix === "/steer" && verb === "POST") return "session.steer";

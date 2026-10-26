@@ -16,6 +16,7 @@ import {
   commitWarmingToWarm,
   createDb,
   createSession,
+  createSessionWithIdempotencyKeyResult,
   createSessionMcpServers,
   createScheduledTask,
   deleteScheduledTask,
@@ -2209,3 +2210,89 @@ test.skipIf(!process.env.OPENGENI_LEGACY_SOURCE_ROOT)("atomic input refuses actu
   expect(await getSessionGoal(client.db, value.grant.workspaceId, value.root.id)).toMatchObject({ status: "paused", version: paused.goal.version });
   expect(await listSessionEvents(client.db, value.grant.workspaceId, value.root.id)).toEqual(before);
 }, 180_000);
+
+test("cancel-only authorization never grants resume, content or unknown control intent", async () => {
+  if (!available || !shared) throw new Error("PostgreSQL required for cancel authorization");
+  const value = await fixture();
+  const operations: string[] = [];
+  let allowed = true;
+  const app = appWith({
+    authorizeSession: async (input) => {
+      operations.push(input.operation);
+      return allowed && input.operation === "session.cancel"
+        ? { allowed: true, relatedSessionAccess: "target" }
+        : { allowed: false, reason: "revoked" };
+    },
+    resolveListScope: async () => ({ kind: "scoped", sessionIds: [], rootSessionIds: [] }),
+  });
+  const url = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}`;
+  const control = async (action: string) =>
+    await app.request(`${url}/control`, {
+      method: "POST",
+      headers: { authorization: value.authorization, "content-type": "application/json" },
+      body: JSON.stringify({ action, clientEventId: crypto.randomUUID() }),
+    });
+  expect((await control("resume")).status).toBe(404);
+  expect((await control("pause")).status).toBe(404);
+  const beforeMalformed = operations.length;
+  expect((await control("cancel_unknown")).status).toBe(400);
+  expect(operations.length).toBe(beforeMalformed);
+  expect((await app.request(url, { headers: { authorization: value.authorization } })).status).toBe(
+    404,
+  );
+  expect((await control("cancel")).status).toBe(404);
+  const receiptOnly = await app.request(`${url}/cancel`, {
+    method: "POST", headers: { authorization: value.authorization, "content-type": "application/json" },
+    body: JSON.stringify({ action: "cancel", clientEventId: crypto.randomUUID() }),
+  });
+  expect(receiptOnly.status).toBe(200);
+  expect(Object.keys(await receiptOnly.json())).toEqual(["receipt"]);
+  expect(operations.filter((operation) => operation === "session.cancel")).toHaveLength(2);
+  const mismatched = await app.request(`${url}/cancel`, {
+    method: "POST", headers: { authorization: value.authorization, "content-type": "application/json" },
+    body: JSON.stringify({ action: "resume", clientEventId: crypto.randomUUID() }),
+  });
+  expect(mismatched.status).toBe(400);
+  allowed = false;
+  expect((await control("cancel")).status).toBe(404);
+});
+
+
+test("creation recovery exposes only an exact original receipt under current authorization", async () => {
+  if (!available || !shared) throw new Error("PostgreSQL required for birth receipt authorization");
+  const value = await fixture();
+  const key = crypto.randomUUID();
+  const requestSha256 = "a".repeat(64);
+  const created = await createSessionWithIdempotencyKeyResult(client.db, {
+    accountId: value.grant.accountId, workspaceId: value.grant.workspaceId,
+    initialMessage: "Synthetic content must not leave the receipt route", resources: [], tools: [], metadata: {},
+    model: "test-model", reasoningEffort: "medium", latencyMode: "standard", sandboxBackend: "none",
+    createdBy: { kind: "subject", subjectId: value.grant.subjectId }, subjectId: value.grant.subjectId,
+    createIdempotencyKey: key,
+    creationReceiptRequest: { requestSha256, creatorSubjectId: value.grant.subjectId, authenticatedSubjectId: value.grant.subjectId, authenticatedPrincipalKind: "human_session" },
+  });
+  if (created.denied) throw new Error("Unexpected fixture denial");
+  const authorization = `Bearer ${await signDelegatedAccessToken(SECRET, {
+    ...value.grant, permissions: ["sessions:read", "sessions:create"], principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 3_600,
+  })}`;
+  let allowed = true;
+  const app = appWith({
+    authorizeSession: async ({ operation }) => allowed && operation === "session.creation_receipt.read"
+      ? { allowed: true } : { allowed: false, reason: "revoked" },
+    resolveListScope: async () => ({ kind: "scoped", rootSessionIds: [], sessionIds: [] }),
+  });
+  const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${created.session.id}`;
+  const read = async (hash: string, idempotencyKey = key) => await app.request(`${base}/creation-receipt?${new URLSearchParams({ idempotencyKey, requestSha256: hash })}`, { headers: { authorization } });
+  const response = await read(requestSha256);
+  expect(response.status).toBe(200);
+  const result = await response.json() as { creationReceipt: Record<string, unknown> };
+  expect(Object.keys(result)).toEqual(["creationReceipt"]);
+  expect(result.creationReceipt).toMatchObject({ requestSha256, idempotencyKey: key, creatorSubjectId: value.grant.subjectId });
+  expect(result.creationReceipt.initialMessage).toBeUndefined();
+  expect((await read("b".repeat(64))).status).toBe(409);
+  expect((await read(requestSha256, crypto.randomUUID())).status).toBe(409);
+  expect((await app.request(base, { headers: { authorization } })).status).toBe(404);
+  allowed = false;
+  expect((await read(requestSha256)).status).toBe(404);
+});

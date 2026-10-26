@@ -5015,6 +5015,9 @@ export const sessions = pgTable(
     skills: jsonb("skills").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    /** Write-once authenticated create proof. Legacy rows remain null. */
+    creationReceipt:
+      jsonb("creation_receipt").$type<import("@opengeni/contracts").SessionCreationReceipt>(),
     // Frozen creator fact. This is used for creation attribution and for the
     // idempotent first-turn repair only; later turns capture their own actor.
     createdByKind: text("created_by_kind").notNull().default("service"),
