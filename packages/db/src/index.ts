@@ -40606,7 +40606,14 @@ async function openSuffixHistorySourcesInTransaction(
     )).limit(1);
     const output = request?.response ? JSON.stringify({ requestId: request.id, ...request.response }) : null;
     const eventOutput = fromPostgresLosslessJson(pending.eventOutput, pending.eventOutputCodecVersion);
-    if (!output || !isDeepStrictEqual(eventOutput, { value: output })) throw new Error("OPEN_SUFFIX_HUMAN_RESPONSE_INEXACT");
+    const expectedResult = {
+      type: "function_call_result", name: "request_human_input", callId: pending.callId,
+      output: { type: "text", text: output },
+    };
+    if (!output || !isDeepStrictEqual(eventOutput, { value: output }) ||
+        !pendingToolCallItemsEqual(fromPostgresLosslessJson(pending.resultItem, pending.resultItemCodecVersion), expectedResult)) {
+      throw new Error("OPEN_SUFFIX_HUMAN_RESPONSE_INEXACT");
+    }
   }
   const sha256 = modelSourceContentDigest(pending.resultItem);
   const rawToolSource = {

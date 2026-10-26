@@ -1,6 +1,6 @@
 import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
 import { settleOpenSuffixResumeIfNeeded } from "../src/activities/open-suffix-resume";
-import { registerPendingSessionToolCall, attachOpenSuffixToPendingToolCalls, acceptSessionHumanInputResponse, getHumanInputResumeForEvent, nextSessionHistoryPosition, modelSourceContentDigest } from "@opengeni/db";
+import { recordPendingSessionToolCallResult, registerPendingSessionToolCall, attachOpenSuffixToPendingToolCalls, acceptSessionHumanInputResponse, getHumanInputResumeForEvent, nextSessionHistoryPosition, modelSourceContentDigest } from "@opengeni/db";
 import { projectGeneratedImageHistoryForModel } from "../src/activities/generated-images";
 import { bindDurableModelHistoryRows } from "../../../packages/runtime/src/model-request-capture";
 import { createTurnHistorySink } from "../src/activities/agent-turn/history-sink";
@@ -1358,7 +1358,7 @@ test("generated image durable projection authenticates exact ancestry and curren
 }, 60_000);
 
 
-test("human-input answer resumes with the exact original model producer across generations", async () => {
+async function humanInputSourceScenario(tamperedResult = false): Promise<void> {
   const f = await fixture();
   const rows = await getActiveSessionHistoryItemsPaged(app.db, f.identity.workspaceId, f.identity.sessionId);
   bindDurableModelHistoryRows(rows);
@@ -1414,6 +1414,18 @@ test("human-input answer resumes with the exact original model producer across g
   expect(resumed.turn.executionGeneration).toBeGreaterThan(f.identity.executionGeneration);
   const resume = await getHumanInputResumeForEvent(app.db, f.identity.workspaceId, f.identity.sessionId, response.event);
   const resumeInput = { ...scope, executionGeneration: resumed.turn.executionGeneration, attemptId, db: app.db, agent, trigger: response.event, humanInputResume: resume, settle: async () => { throw Error("Unexpected additional wait"); } };
+  if (tamperedResult) {
+    if (!resume) throw Error("Missing committed response");
+    await recordPendingSessionToolCallResult(app.db, { ...scope, attemptId, executionGeneration: resumed.turn.executionGeneration,
+      callId: member.callId,
+      resultItem: { type: "function_call_result", name: "request_human_input", callId: member.callId, output: { type: "text", text: "Forged durable answer" } },
+      eventOutput: JSON.stringify({ requestId: resume.requestId, ...resume.response }),
+    });
+    await expect(settleOpenSuffixResumeIfNeeded(resumeInput)).rejects.toThrow("OPEN_SUFFIX_HUMAN_RESPONSE_INEXACT");
+    const refusedHistory = await getActiveSessionHistoryItemsPaged(app.db, scope.workspaceId, scope.sessionId);
+    expect(refusedHistory.filter(row => row.item.type === "function_call" || row.item.type === "function_call_result")).toEqual([]);
+    return;
+  }
   expect(await settleOpenSuffixResumeIfNeeded(resumeInput)).toEqual({ action: "continue" });
   // Exact replay adds no history and no new result.
   expect(await settleOpenSuffixResumeIfNeeded(resumeInput)).toEqual({ action: "continue" });
@@ -1442,4 +1454,7 @@ test("human-input answer resumes with the exact original model producer across g
     expectedExecutionGeneration: resumed.turn.executionGeneration, openSuffixCallId: member.callId,
     items: [{ position: await nextSessionHistoryPosition(app.db, scope.workspaceId, scope.sessionId), item: result.item }],
   })).toBe(false);
-}, 120_000);
+ }
+
+test("human-input answer resumes with the exact original model producer across generations", () => humanInputSourceScenario(), 120_000);
+test("human-input promotion refuses a forged durable result with unchanged committed event output", () => humanInputSourceScenario(true), 120_000);
