@@ -12,6 +12,7 @@ import {
 } from "@opengeni/observability";
 import {
   appendSessionHistoryItems,
+  modelSourceContentDigest,
   sessionTurnFinalReplyFacts,
   sessionTurnHasFinalReplyNudge,
   getSessionEvent,
@@ -37,6 +38,7 @@ import { handOverWaitToSteer } from "./waiting-steer";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
+  omitModelSourceInputBinding,
   AssistantMessagePhaseTracker,
   normalizeModelCallUsage,
   normalizeSdkEvent,
@@ -2354,7 +2356,18 @@ export async function runTurnStreamAttempt(
                   interruptionKind: interruptionKindForCallItem(
                     member.callItem as Record<string, unknown>,
                   ),
-                  reasoningItems: member.reasoningItems as Array<Record<string, unknown>>,
+                  reasoningItems: (member.reasoningItems as Array<Record<string, unknown>>).map(omitModelSourceInputBinding),
+                  ...(interruptionKindForCallItem(member.callItem as Record<string, unknown>) === "human_input"
+                    ? { modelOutputSources: (() => {
+                        const items = [...member.reasoningItems, member.callItem] as Array<Record<string, unknown>>;
+                        const sourceKeys = historySink.modelOutputSourceKeys(items);
+                        return items.map((item, index) => {
+                          const sourceKey = sourceKeys[index];
+                          if (!sourceKey) throw new Error("OPEN_SUFFIX_PRODUCER_UNAVAILABLE");
+                          return { contentSha256: modelSourceContentDigest(omitModelSourceInputBinding(item)), sourceKey };
+                        });
+                      })() }
+                    : {}),
                 };
               }),
             });

@@ -1,5 +1,6 @@
 import { ModelSourceRef, FileResourceRef } from "@opengeni/contracts";
 import {
+  modelSourceContentDigest,
   validatedStoredModelCallSourceReceipt,
   importedHistorySourceBasisTx,
   persistModelCallSourceReceiptWithFence,
@@ -40551,6 +40552,72 @@ export async function ensureSessionReasoningConfiguration(
   );
 }
 
+async function originalPendingToolProducer(
+  tx: Database,
+  pending: typeof schema.sessionPendingToolCalls.$inferSelect,
+  sourceKey: string,
+) {
+  const [stored] = await tx.select().from(schema.modelCallSourceReceipts).where(and(
+    eq(schema.modelCallSourceReceipts.accountId, pending.accountId),
+    eq(schema.modelCallSourceReceipts.workspaceId, pending.workspaceId),
+    eq(schema.modelCallSourceReceipts.sessionId, pending.sessionId),
+    eq(schema.modelCallSourceReceipts.turnId, pending.turnId),
+    eq(schema.modelCallSourceReceipts.attemptId, pending.attemptId),
+    eq(schema.modelCallSourceReceipts.executionGeneration, pending.executionGeneration),
+    eq(schema.modelCallSourceReceipts.sourceKey, sourceKey),
+  )).limit(1);
+  if (!stored) throw new Error("OPEN_SUFFIX_PRODUCER_UNAVAILABLE");
+  const receipt = validatedStoredModelCallSourceReceipt(stored);
+  if (!receipt.complete || receipt.incompleteReasons.length || receipt.purpose !== "AGENT") {
+    throw new Error("OPEN_SUFFIX_PRODUCER_INEXACT");
+  }
+  return { owner: "model_call_source_receipts", id: receipt.id, sha256: receipt.digest };
+}
+
+async function openSuffixHistorySourcesInTransaction(
+  tx: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; turnId: string; openSuffixCallId: string },
+): Promise<Map<string, import("@opengeni/contracts").ModelHistorySourceBasis>> {
+  const [pending] = await tx.select().from(schema.sessionPendingToolCalls).where(and(
+    eq(schema.sessionPendingToolCalls.accountId, input.accountId),
+    eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+    eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+    eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+    eq(schema.sessionPendingToolCalls.callId, input.openSuffixCallId),
+  )).for("update").limit(1);
+  if (pending?.interruptionKind !== "human_input" || pending.callType !== "function_call" ||
+      pending.callItem.name !== "request_human_input" || !pending.resultItem || !pending.modelOutputSources?.length) {
+    throw new Error("OPEN_SUFFIX_SOURCE_UNAVAILABLE");
+  }
+  const sources = new Map<string, import("@opengeni/contracts").ModelHistorySourceBasis>();
+  for (const source of pending.modelOutputSources) {
+    const producer = await originalPendingToolProducer(tx, pending, source.sourceKey);
+    sources.set(source.contentSha256, { kind: "HISTORY_ROW", parents: [producer] });
+  }
+  const callSource = pending.modelOutputSources.find(source => source.contentSha256 === modelSourceContentDigest(pending.callItem));
+  if (!callSource) throw new Error("OPEN_SUFFIX_CALL_SOURCE_UNAVAILABLE");
+  if (pending.interruptionKind === "human_input") {
+    const [request] = await tx.select().from(schema.sessionHumanInputRequests).where(and(
+      eq(schema.sessionHumanInputRequests.accountId, input.accountId),
+      eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+      eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+      eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+      eq(schema.sessionHumanInputRequests.toolCallId, pending.callId),
+    )).limit(1);
+    const output = request?.response ? JSON.stringify({ requestId: request.id, ...request.response }) : null;
+    const eventOutput = fromPostgresLosslessJson(pending.eventOutput, pending.eventOutputCodecVersion);
+    if (!output || !isDeepStrictEqual(eventOutput, { value: output })) throw new Error("OPEN_SUFFIX_HUMAN_RESPONSE_INEXACT");
+  }
+  const sha256 = modelSourceContentDigest(pending.resultItem);
+  const rawToolSource = {
+    sourceCallId: pending.callId, nativeModelSourceKey: callSource.sourceKey,
+    rawSourceRef: { owner: "native.tool.result", id: `open-suffix:${pending.id}:${sha256}`, sha256 },
+    retainedSources: [],
+  };
+  sources.set(sha256, { kind: "TOOL_RESULT", parents: [rawToolSource.rawSourceRef], rawToolSource });
+  return sources;
+}
+
 /**
  * Append conversation items (verbatim SDK AgentInputItems) to the session's
  * history. Idempotent on (workspace, session, position): concurrent or
@@ -40573,6 +40640,8 @@ export async function appendSessionHistoryItems(
       sourceBasis?: import("@opengeni/contracts").ModelHistorySourceBasis;
       nativeProducerSourceKey?: string;
     }>;
+    /** Promote only the exact settled interruption captured by its original attempt. */
+    openSuffixCallId?: string;
     /** Tool outputs already have durable timeline events; retire their receipts with history. */
     completedToolCallIds?: string[];
   },
@@ -40596,11 +40665,19 @@ export async function appendSessionHistoryItems(
         attemptId: input.expectedAttemptId,
       });
       if (!allowed.allowed) return false;
+      const suffix = input.openSuffixCallId
+        ? await openSuffixHistorySourcesInTransaction(tx, { ...input, openSuffixCallId: input.openSuffixCallId })
+        : null;
       // Canonicalize once: insertion and exact readback compare the same values.
       const expected = [];
       for (const entry of input.items) {
         let sourceBasis = entry.sourceBasis;
-        if (sourceBasis?.kind === "HISTORY_ROW")
+        if (suffix) {
+          if (sourceBasis || entry.nativeProducerSourceKey) throw new Error("OPEN_SUFFIX_SOURCE_CONFLICT");
+          sourceBasis = suffix.get(modelSourceContentDigest(entry.item));
+          if (!sourceBasis) throw new Error("OPEN_SUFFIX_HISTORY_INEXACT");
+        }
+        if (!suffix && sourceBasis?.kind === "HISTORY_ROW")
           throw new Error("MODEL_OUTPUT_SOURCE_BASIS_REQUIRES_PRODUCER");
         if (entry.nativeProducerSourceKey !== undefined) {
           if (sourceBasis !== undefined) throw new Error("MODEL_OUTPUT_SOURCE_BASIS_CONFLICT");
@@ -41267,6 +41344,7 @@ export type OpenSuffixPendingToolCall = {
   callItem: Record<string, unknown>;
   interruptionKind: OpenSuffixInterruptionKind;
   tiedReasoningItems: Array<Record<string, unknown>>;
+  modelOutputSources?: Array<{ contentSha256: string; sourceKey: string }> | null;
   resultItem: Record<string, unknown> | null;
   modelToolOutputTruncationTokens: number | null;
 };
@@ -41292,6 +41370,7 @@ export async function attachOpenSuffixToPendingToolCalls(
       callId: string;
       interruptionKind: OpenSuffixInterruptionKind;
       reasoningItems: Array<Record<string, unknown>>;
+      modelOutputSources?: Array<{ contentSha256: string; sourceKey: string }>;
     }>;
   },
 ): Promise<{ accepted: boolean; attached: number }> {
@@ -41346,12 +41425,26 @@ export async function attachOpenSuffixToPendingToolCalls(
               `Open suffix interruption ${member.callId} changed kind from ${existingKind} to ${member.interruptionKind}`,
             );
           }
+          if (member.modelOutputSources) {
+            if (member.interruptionKind !== "human_input" || pending.callType !== "function_call" ||
+                pending.callItem.name !== "request_human_input") throw new Error("OPEN_SUFFIX_SOURCE_KIND_UNSUPPORTED");
+            const outputItems = [...member.reasoningItems, pending.callItem];
+            if (member.modelOutputSources.length !== outputItems.length) throw new Error("OPEN_SUFFIX_SOURCE_INEXACT");
+            for (const [index, source] of member.modelOutputSources.entries()) {
+              if (source.contentSha256 !== modelSourceContentDigest(outputItems[index])) throw new Error("OPEN_SUFFIX_SOURCE_INEXACT");
+              await originalPendingToolProducer(tx, pending, source.sourceKey);
+            }
+            if (pending.modelOutputSources && !isDeepStrictEqual(pending.modelOutputSources, member.modelOutputSources)) {
+              throw new Error("OPEN_SUFFIX_SOURCE_CONFLICT");
+            }
+          }
           const updated = await tx
             .update(schema.sessionPendingToolCalls)
             .set(
               withLosslessContentWriteVersion(
                 {
                   interruptionKind: member.interruptionKind,
+                  ...(member.modelOutputSources ? { modelOutputSources: member.modelOutputSources } : {}),
                   tiedReasoningItems: member.reasoningItems,
                 },
                 "tiedReasoningItems",
@@ -41400,6 +41493,7 @@ export async function listTurnOpenSuffixToolCalls(
         callItem: row.callItem,
         interruptionKind,
         tiedReasoningItems: Array.isArray(row.tiedReasoningItems) ? row.tiedReasoningItems : [],
+        modelOutputSources: row.modelOutputSources,
         resultItem: row.resultItem ?? null,
         modelToolOutputTruncationTokens: row.modelToolOutputTruncationTokens,
       };

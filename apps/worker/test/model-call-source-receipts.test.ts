@@ -1,3 +1,6 @@
+import { OPEN_SUFFIX_RUN_STATE_BLOB } from "@opengeni/contracts";
+import { settleOpenSuffixResumeIfNeeded } from "../src/activities/open-suffix-resume";
+import { registerPendingSessionToolCall, attachOpenSuffixToPendingToolCalls, acceptSessionHumanInputResponse, getHumanInputResumeForEvent, nextSessionHistoryPosition, modelSourceContentDigest } from "@opengeni/db";
 import { projectGeneratedImageHistoryForModel } from "../src/activities/generated-images";
 import { bindDurableModelHistoryRows } from "../../../packages/runtime/src/model-request-capture";
 import { createTurnHistorySink } from "../src/activities/agent-turn/history-sink";
@@ -1353,3 +1356,90 @@ test("generated image durable projection authenticates exact ancestry and curren
   await shared.admin`delete from workspace_memberships where workspace_id=${f.identity.workspaceId} and subject_id=${f.subjectId}`;
   expect((await validateRetainedModelSources(app.db,{identity:{...f.identity,sourceKey:accepted.sourceKey},receipt:accepted})).complete).toBe(false);
 }, 60_000);
+
+
+test("human-input answer resumes with the exact original model producer across generations", async () => {
+  const f = await fixture();
+  const rows = await getActiveSessionHistoryItemsPaged(app.db, f.identity.workspaceId, f.identity.sessionId);
+  bindDurableModelHistoryRows(rows);
+  const questions = [{ id: "choice", kind: "text" as const, prompt: "Which option?", options: [], required: true, allowOther: false }];
+  const call = functionCall("request_human_input", { questions, allowSkip: false }, "human-source-call");
+  const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
+  const sink = createTurnHistorySink({} as Parameters<typeof createTurnHistorySink>[0]);
+  const capture: ModelRequestCapture = () => {};
+  let original: Awaited<ReturnType<typeof persistModelCallSourceReceipt>> | undefined;
+  capture.beforeCall = async sent => {
+    original = await persistModelCallSourceReceipt(app.db, f.identity, {
+      instructions: sent.systemInstructions, tools: sent.tools, input: sent.input,
+      sourceBindings: modelSourceBindings(sent.input), instructionSelections: f.instructionSelections,
+    });
+    expect(original.complete).toBe(true);
+    return original.sourceKey;
+  };
+  capture.callCompleted = (_key, _id, _response, restore) => sink.recordModelSourceRestorer(restore);
+  const model = new ModelRequestCaptureModel(new ScriptedModel([{ output: [call] }]));
+  const { buildOpenGeniAgent, extractOpenSuffixFromRunState } = await import("@opengeni/runtime");
+  const agent = buildOpenGeniAgent(settings, [], { model, humanInputEnabled: true });
+  const paused = await withModelRequestCapture(capture, () => new Runner({ tracingDisabled: true }).run(agent, rows.map(row => row.item) as ModelRequest["input"], { historyOwnership: "external" }));
+  const suffix = extractOpenSuffixFromRunState(paused.state);
+  expect(suffix).toHaveLength(1);
+  const member = suffix[0]!;
+  const scope = { accountId: f.identity.accountId, workspaceId: f.identity.workspaceId, sessionId: f.identity.sessionId, turnId: f.identity.turnId, executionGeneration: f.identity.executionGeneration, attemptId: f.identity.attemptId };
+  await registerPendingSessionToolCall(app.db, { ...scope, callId: member.callId, callType: member.callType, callItem: omitModelSourceInputBinding(member.callItem as Record<string, unknown>) });
+  const outputItems = [...member.reasoningItems, member.callItem] as Record<string, unknown>[];
+  const keys = sink.modelOutputSourceKeys(outputItems);
+  const sourceItems = outputItems.map((item, index) => ({ contentSha256: modelSourceContentDigest(omitModelSourceInputBinding(item)), sourceKey: keys[index]! }));
+  const foreign = await fixture();
+  const foreignRows = await getActiveSessionHistoryItemsPaged(app.db, foreign.identity.workspaceId, foreign.identity.sessionId);
+  bindDurableModelHistoryRows(foreignRows);
+  const foreignReceipt = await persistModelCallSourceReceipt(app.db, foreign.identity, { input: foreignRows.map(row => row.item), sourceBindings: modelSourceBindings(foreignRows.map(row => row.item)), instructionSelections: foreign.instructionSelections });
+  expect(foreignReceipt.complete).toBe(true);
+  await expect(attachOpenSuffixToPendingToolCalls(app.db, { ...scope, members: [{ callId: member.callId, interruptionKind: "human_input", reasoningItems: [], modelOutputSources: sourceItems.map(source => ({ ...source, sourceKey: foreignReceipt.sourceKey })) }] })).rejects.toThrow("OPEN_SUFFIX_PRODUCER_UNAVAILABLE");
+  await expect(attachOpenSuffixToPendingToolCalls(app.db, { ...scope, members: [{ callId: member.callId, interruptionKind: "human_input", reasoningItems: [], modelOutputSources: sourceItems.map(source => ({ ...source, contentSha256: "f".repeat(64) })) }] })).rejects.toThrow("OPEN_SUFFIX_SOURCE_INEXACT");
+  await expect(attachOpenSuffixToPendingToolCalls(app.db, { ...scope, members: [{ callId: member.callId, interruptionKind: "approval", reasoningItems: [], modelOutputSources: sourceItems }] })).rejects.toThrow("OPEN_SUFFIX_SOURCE_KIND_UNSUPPORTED");
+  await attachOpenSuffixToPendingToolCalls(app.db, { ...scope, members: [{ callId: member.callId, interruptionKind: "human_input", reasoningItems: (member.reasoningItems as Record<string, unknown>[]).map(omitModelSourceInputBinding), modelOutputSources: sourceItems }] });
+  const requestId = crypto.randomUUID();
+  await applySessionTurnSettlement(app.db, f.identity.workspaceId, {
+    sessionId: f.identity.sessionId, turnId: f.identity.turnId, triggerEventId: f.triggerEventId,
+    attemptId: f.identity.attemptId, turnStatus: "requires_action", sessionStatus: "requires_action", activeTurnId: f.identity.turnId,
+    runState: { serializedRunState: OPEN_SUFFIX_RUN_STATE_BLOB, pendingApprovals: [], humanInputRequests: [{ id: requestId, toolCallId: member.callId, questions, allowSkip: false }] },
+    events: [{ type: "session.status.changed", payload: { status: "requires_action" } }],
+  });
+  const response = await acceptSessionHumanInputResponse(app.db, { accountId: f.identity.accountId, workspaceId: f.identity.workspaceId, sessionId: f.identity.sessionId, requestId,
+    response: { outcome: "answered", answers: [{ questionId: "choice", values: ["Option A"] }] }, respondedBy: f.subjectId, clientEventId: crypto.randomUUID() });
+  if (response.action !== "accepted") throw Error("Human response not accepted");
+  const attemptId = crypto.randomUUID();
+  const resumed = await claimSessionWorkForAttempt(app.db, f.identity.workspaceId, { sessionId: f.identity.sessionId, workflowId: `session-${f.identity.sessionId}`, workflowRunId: crypto.randomUUID(), dispatchId: crypto.randomUUID(), attemptId, trigger: { kind: "approval", triggerEventId: response.event.id } });
+  if (resumed.action !== "claimed") throw Error("Resume not claimed");
+  expect(resumed.turn.executionGeneration).toBeGreaterThan(f.identity.executionGeneration);
+  const resume = await getHumanInputResumeForEvent(app.db, f.identity.workspaceId, f.identity.sessionId, response.event);
+  const resumeInput = { ...scope, executionGeneration: resumed.turn.executionGeneration, attemptId, db: app.db, agent, trigger: response.event, humanInputResume: resume, settle: async () => { throw Error("Unexpected additional wait"); } };
+  expect(await settleOpenSuffixResumeIfNeeded(resumeInput)).toEqual({ action: "continue" });
+  // Exact replay adds no history and no new result.
+  expect(await settleOpenSuffixResumeIfNeeded(resumeInput)).toEqual({ action: "continue" });
+  const history = await getActiveSessionHistoryItemsPaged(app.db, f.identity.workspaceId, f.identity.sessionId);
+  const pair = history.filter(row => row.item.type === "function_call" || row.item.type === "function_call_result");
+  expect(pair).toHaveLength(2);
+  bindDurableModelHistoryRows(history);
+  const identity = { ...f.identity, attemptId, executionGeneration: resumed.turn.executionGeneration, sourceKey: crypto.randomUUID(), requestIndex: 2 };
+  const receipt = await persistModelCallSourceReceipt(app.db, identity, { input: history.map(row => row.item), sourceBindings: modelSourceBindings(history.map(row => row.item)), instructionSelections: f.instructionSelections });
+  expect(receipt.incompleteReasons).toEqual([]);
+  expect(receipt.complete).toBe(true);
+  expect(receipt.closure.some(node => node.sourceRef.id === original!.id)).toBe(true);
+  expect((await validateRetainedModelSources(app.db, { identity, receipt })).complete).toBe(true);
+  const [saved] = await shared.admin`select model_output_sources from session_pending_tool_calls where workspace_id=${scope.workspaceId} and turn_id=${scope.turnId} and call_id=${member.callId}`;
+  expect(saved!.model_output_sources).toEqual(sourceItems);
+  await expect(Promise.resolve(shared.admin`update session_pending_tool_calls set model_output_sources='[]'::jsonb where workspace_id=${scope.workspaceId} and turn_id=${scope.turnId} and call_id=${member.callId}`)).rejects.toThrow("OPEN_SUFFIX_SOURCE_IMMUTABLE");
+  const result = pair.find(row => row.item.type === "function_call_result")!;
+  await expect(appendSessionHistoryItems(app.db, { ...f.write, expectedAttemptId: attemptId,
+    expectedExecutionGeneration: resumed.turn.executionGeneration, openSuffixCallId: member.callId,
+    items: [{ position: await nextSessionHistoryPosition(app.db, scope.workspaceId, scope.sessionId), item: { ...result.item, output: { type: "text", text: "Forged human answer" } } }],
+  })).rejects.toThrow("OPEN_SUFFIX_HISTORY_INEXACT");
+  await applySessionTurnSettlement(app.db, scope.workspaceId, { sessionId: scope.sessionId, turnId: scope.turnId,
+    triggerEventId: response.event.id, attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [],
+  });
+  expect(await appendSessionHistoryItems(app.db, { ...f.write, expectedAttemptId: attemptId,
+    expectedExecutionGeneration: resumed.turn.executionGeneration, openSuffixCallId: member.callId,
+    items: [{ position: await nextSessionHistoryPosition(app.db, scope.workspaceId, scope.sessionId), item: result.item }],
+  })).toBe(false);
+}, 120_000);

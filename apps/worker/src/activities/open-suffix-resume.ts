@@ -381,6 +381,7 @@ export async function settleOpenSuffixResumeIfNeeded(input: {
         turnId: input.turnId,
         expectedExecutionGeneration: input.executionGeneration,
         expectedAttemptId: input.attemptId,
+        ...(target.modelOutputSources?.length ? { openSuffixCallId: target.callId } : {}),
         ...(truncationTokens !== undefined
           ? { modelToolOutputTruncationTokens: truncationTokens }
           : {}),

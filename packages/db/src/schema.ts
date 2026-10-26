@@ -10047,6 +10047,7 @@ export const sessionPendingToolCalls = pgTable(
     callItem: losslessOrderedJson("call_item_ordered").$type<Record<string, unknown>>().notNull(),
     callItemCodecVersion: losslessCodecVersion("call_item_codec_version"),
     interruptionKind: text("interruption_kind"),
+    modelOutputSources: jsonb("model_output_sources").$type<Array<{ contentSha256: string; sourceKey: string }>>(),
     tiedReasoningItems: losslessOrderedJson("tied_reasoning_items_ordered")
       .$type<Array<Record<string, unknown>>>()
       .notNull()

@@ -1,5 +1,5 @@
 import { appendSessionHistoryItems, upsertSandboxSessionEnvelope } from "@opengeni/db";
-import { toolCallIdFromSdkItem, bindModelSourceInput, modelSourceInputBinding, sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
+import { toolCallIdFromSdkItem, omitModelSourceInputBinding, bindModelSourceInput, modelSourceInputBinding, sandboxStateEntryFromRunState, type OpenGeniRuntime } from "@opengeni/runtime";
 import { sandboxManifestEnvironmentNamePredicate, type Settings } from "@opengeni/config";
 import { TurnAttemptFencedError } from "../turn-attempt-fenced";
 import type { SharedActivityServices } from "../types";
@@ -75,6 +75,34 @@ export class TurnHistorySink {
   // exact outputs observed by this attempt's live native capture registries.
   private readonly modelSourceRestorers = new Set<(items:readonly unknown[])=>void>();
   recordModelSourceRestorer(restore:(items:readonly unknown[])=>void):void {this.modelSourceRestorers.add(restore);}
+  /** Capture only outputs owned by this attempt's completed native responses. */
+  modelOutputSourceKeys(items: readonly Record<string, unknown>[]): string[] {
+    return items.map((item) => {
+      const source = this.restoreModelSourceInput(omitModelSourceInputBinding(item));
+      if (source?.kind !== "HISTORY_ROW" || !source.nativeProducerSourceKey) {
+        throw new Error("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
+      }
+      return source.nativeProducerSourceKey;
+    });
+  }
+
+  private restoreModelSourceInput(item: Record<string, unknown>) {
+    const existing = modelSourceInputBinding(item);
+    if (existing) return existing;
+    let source: ReturnType<typeof modelSourceInputBinding>;
+    for (const restore of this.modelSourceRestorers) {
+      const projected = { ...item };
+      restore([projected]);
+      const candidate = modelSourceInputBinding(projected);
+      if (!candidate) continue;
+      if (source && JSON.stringify(source) !== JSON.stringify(candidate)) {
+        throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
+      }
+      source = candidate;
+    }
+    if (source) bindModelSourceInput(item, source);
+    return source;
+  }
   private readonly toolSourcesByCallId=new Map<string,import("@opengeni/contracts").NativeModelToolSource>();
   recordModelToolSource(source:import("@opengeni/contracts").NativeModelToolSource):void {this.toolSourcesByCallId.set(source.sourceCallId,source);}
   persistedHistoryCount = 0;
@@ -120,17 +148,7 @@ export class TurnHistorySink {
       if (Array.isArray(rawHistory)) {
         const typedHistory = rawHistory as Array<Record<string, unknown>>;
         for (const item of typedHistory.slice(this.persistedHistoryCount)) {
-          if (modelSourceInputBinding(item)) continue;
-          let source: ReturnType<typeof modelSourceInputBinding>;
-          for (const restore of this.modelSourceRestorers) {
-            const projected = {...item};
-            restore([projected]);
-            const candidate = modelSourceInputBinding(projected);
-            if (!candidate) continue;
-            if (source && JSON.stringify(source) !== JSON.stringify(candidate)) throw new Error("MODEL_OUTPUT_SOURCE_AMBIGUOUS");
-            source = candidate;
-          }
-          if (source) bindModelSourceInput(item,source);
+          this.restoreModelSourceInput(item);
         }
         const verifiedKeys = this.prefix.verify(
           typedHistory,
