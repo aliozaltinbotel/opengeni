@@ -33,7 +33,12 @@ ordinary native partial-create retries retain their existing semantics.
 `session.cancel` authorizes only a parsed CANCEL intent through the receipt-only
 `/cancel` route and the same session port; the existing full-state `/control` route
 retains `session.control` for every action. Cancellation receipts establish delivery,
-never verified business success or source provenance.
+never verified business success or source provenance. The receipt-bound
+`GET /cancel/settlement` reads current native interruption, quiescence and background
+command counts through that same `session.cancel` port, without session content,
+Goal, blocker actors or reasons. A matching current cancellation revision with no
+pending writers is `settled`; a superseding revision cannot settle an older receipt.
+Business effect reconciliation remains a separate host responsibility.
 
 ## 1. Startup
 

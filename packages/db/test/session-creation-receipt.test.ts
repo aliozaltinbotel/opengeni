@@ -23,7 +23,11 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-async function fixture(): Promise<SessionCreateInput & { createIdempotencyKey: string }> {
+async function fixture(): Promise<SessionCreateInput & {
+  createIdempotencyKey: string;
+  requestedSessionId: string;
+  creationReceiptRequest: NonNullable<SessionCreateInput["creationReceiptRequest"]>;
+}> {
   const [account] =
     await shared.admin`insert into managed_accounts (name) values ('receipt fixture') returning id`;
   const [workspace] =

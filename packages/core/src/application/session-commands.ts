@@ -1,4 +1,4 @@
-import { SessionControlRequest } from "@opengeni/contracts";
+import { SessionControlRequest, SessionCancelSettlementQuery, SessionCancelSettlement } from "@opengeni/contracts";
 import type {
   ComposerDraft,
   DeleteSessionQueueItemRequest,
@@ -25,6 +25,7 @@ import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
   getComposerDraftInTransaction,
+  getSessionCancelSettlementInTransaction,
   getSession,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -912,6 +913,26 @@ export async function steerHumanQueuePrompt(
     },
   ]);
   return response;
+}
+
+/** Current receipt-bound cancellation settlement; never reads Goal or session content. */
+export async function readHumanSessionCancelSettlement(
+  deps: SessionAuthorizationCommandDeps,
+  context: HumanSessionCommandContext,
+  rawInput: unknown,
+): Promise<SessionCancelSettlement> {
+  const parsed = SessionCancelSettlementQuery.safeParse(rawInput);
+  if (!parsed.success)
+    throw new HTTPException(400, { message: "invalid cancel settlement request" });
+  await authorizeHumanSessionCommand(deps, context, "session.cancel");
+  const result = await withWorkspaceSubjectRls(
+    deps.db,
+    context.workspaceId,
+    context.subjectId,
+    (scoped) => getSessionCancelSettlementInTransaction(scoped, { ...context, ...parsed.data }),
+  );
+  if (!result) throw new HTTPException(404, { message: "cancel receipt not found" });
+  return SessionCancelSettlement.parse(result);
 }
 
 /** Receipt-only safety cancellation uses the same native control/quiescence owner. */
