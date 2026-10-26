@@ -2296,3 +2296,187 @@ test("creation recovery exposes only an exact original receipt under current aut
   allowed = false;
   expect((await read(requestSha256)).status).toBe(404);
 });
+
+test("cancel settlement is content-free and exact to receipt, actor, revision and current authority", async () => {
+  if (!available || !shared) throw new Error("PostgreSQL required for cancel settlement");
+  const value = await fixture();
+  let allowed = true;
+  const app = appWith({
+    authorizeSession: async ({ operation }) =>
+      allowed && operation === "session.cancel"
+        ? { allowed: true, relatedSessionAccess: "target" }
+        : { allowed: false, reason: "revoked" },
+    resolveListScope: async () => ({ kind: "scoped", rootSessionIds: [], sessionIds: [] }),
+  });
+  const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}`;
+  const headers = { authorization: value.authorization, "content-type": "application/json" };
+  const cancel = async () =>
+    await app.request(`${base}/cancel`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ action: "cancel", clientEventId: crypto.randomUUID() }),
+    });
+  const created = await cancel();
+  expect(created.status).toBe(200);
+  const { receipt } = await created.json();
+  const read = async (
+    id = receipt.id,
+    revision = receipt.appliedControlRevision,
+    authorization = value.authorization,
+  ) =>
+    await app.request(
+      `${base}/cancel/settlement?${new URLSearchParams({ receiptId: id, controlRevision: String(revision) })}`,
+      { headers: { authorization } },
+    );
+  const response = await read();
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    receiptId: receipt.id,
+    targetSessionId: value.root.id,
+    controlRevision: receipt.appliedControlRevision,
+    currentControlRevision: receipt.appliedControlRevision,
+    status: "settled",
+    attemptPendingCount: 0,
+    interruptionPendingCount: 0,
+    quiescencePendingCount: 0,
+    backgroundCommandPendingCount: 0,
+  });
+  expect((await read(crypto.randomUUID())).status).toBe(404);
+  expect((await read(receipt.id, receipt.appliedControlRevision + 1)).status).toBe(409);
+  const foreign = await signDelegatedAccessToken(SECRET, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    subjectId: `user:${crypto.randomUUID()}`,
+    permissions: ["sessions:control"],
+    principalKind: "human_session",
+    exp: Math.floor(Date.now() / 1000) + 600,
+  });
+  expect((await read(receipt.id, receipt.appliedControlRevision, `Bearer ${foreign}`)).status).toBe(
+    404,
+  );
+  const pause = await appWith({
+    authorizeSession: async () => ({ allowed: true }),
+    resolveListScope: async () => ({ kind: "all" }),
+  }).request(`${base}/control`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "pause", clientEventId: crypto.randomUUID() }),
+  });
+  expect(pause.status).toBe(200);
+  const pauseReceipt = (await pause.json()).receipt;
+  expect((await read(pauseReceipt.id, pauseReceipt.appliedControlRevision ?? 0)).status).toBe(404);
+  expect((await app.request(base, { headers })).status).toBe(404);
+  const resumed = await appWith({
+    authorizeSession: async () => ({ allowed: true }),
+    resolveListScope: async () => ({ kind: "all" }),
+  }).request(`${base}/control`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "resume", clientEventId: crypto.randomUUID() }),
+  });
+  expect(resumed.status).toBe(409);
+  await cancel();
+  expect((await (await read()).json()).status).toBe("superseded");
+  allowed = false;
+  expect((await read()).status).toBe(404);
+});
+
+test("cancel settlement stays pending through interruption and settles only after genuine attempt quiescence", async () => {
+  if (!available || !shared) throw new Error("PostgreSQL required for cancel settlement");
+  const value = await fixture();
+  const started = await initializeSessionStartAtomically(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.child.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+    goal: null,
+  });
+  if (!started.turn) throw new Error("initial turn required");
+  const attemptId = crypto.randomUUID(),
+    workflowId = `session-${value.child.id}`,
+    workflowRunId = crypto.randomUUID(),
+    dispatchId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.child.id,
+    workflowId,
+    workflowRunId,
+    attemptId,
+    dispatchId,
+    trigger: { kind: "next" },
+  });
+  expect(claimed.action).toBe("claimed");
+  // An unrelated sibling has its own unquiesced writer and pause interruption.
+  // Workspace-wide counts would both leak it and prevent this receipt settling.
+  const siblingStarted = await initializeSessionStartAtomically(client.db, {
+    accountId: value.grant.accountId, workspaceId: value.grant.workspaceId,
+    sessionId: value.hidden.id, reasoningEffortFallback: "low", createdEventPayload: {}, goal: null,
+  });
+  if (!siblingStarted.turn) throw new Error("sibling turn required");
+  const siblingAttempt = crypto.randomUUID();
+  expect((await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+    sessionId: value.hidden.id, workflowId: `session-${value.hidden.id}`, workflowRunId: crypto.randomUUID(),
+    attemptId: siblingAttempt, dispatchId: crypto.randomUUID(), trigger: {kind:"next"},
+  })).action).toBe("claimed");
+  await withWorkspaceSessionActivityRls(client.db, value.grant.workspaceId, scoped => mutateSessionControlInTransaction(scoped, {
+    accountId: value.grant.accountId, workspaceId: value.grant.workspaceId, sessionId: value.hidden.id,
+    actor: {type:"human",subjectId:value.grant.subjectId}, action:"pause", operationKey:crypto.randomUUID(),
+  }));
+  const app = appWith({
+    authorizeSession: async ({ operation }) =>
+      operation === "session.cancel" ? { allowed: true } : { allowed: false, reason: "revoked" },
+    resolveListScope: async () => ({ kind: "scoped", rootSessionIds: [], sessionIds: [] }),
+  });
+  const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}`,
+    headers = { authorization: value.authorization, "content-type": "application/json" };
+  // The descendant's content is hidden by current host authorization. Its writer still counts.
+  expect((await app.request(`/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}`, {headers})).status).toBe(404);
+  const response = await app.request(`${base}/cancel`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "cancel", clientEventId: crypto.randomUUID() }),
+  });
+  expect(response.status).toBe(200);
+  const { receipt } = await response.json();
+  const read = async () =>
+    await (
+      await app.request(
+        `${base}/cancel/settlement?${new URLSearchParams({ receiptId: receipt.id, controlRevision: String(receipt.appliedControlRevision) })}`,
+        { headers },
+      )
+    ).json();
+  expect(await read()).toMatchObject({
+    status: "pending",
+    attemptPendingCount: 1,
+    interruptionPendingCount: 1,
+  });
+  const { settleSessionAttemptInterruptions, markSessionAttemptQuiesced } =
+    await import("@opengeni/db");
+  await settleSessionAttemptInterruptions(
+    client.db,
+    value.grant.workspaceId,
+    value.child.id,
+    attemptId,
+  );
+  expect(await read()).toMatchObject({
+    status: "pending",
+    interruptionPendingCount: 0,
+    quiescencePendingCount: 1,
+  });
+  await markSessionAttemptQuiesced(client.db, {
+    accountId: value.grant.accountId,
+    workspaceId: value.grant.workspaceId,
+    sessionId: value.child.id,
+    attemptId,
+    temporalWorkflowId: workflowId,
+    temporalWorkflowRunId: workflowRunId,
+    temporalActivityId: dispatchId,
+  });
+  expect(await read()).toMatchObject({
+    status: "settled",
+    attemptPendingCount: 0,
+    interruptionPendingCount: 0,
+    quiescencePendingCount: 0,
+    backgroundCommandPendingCount: 0,
+  });
+});

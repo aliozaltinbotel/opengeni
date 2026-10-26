@@ -1,5 +1,6 @@
+import { SessionCancelSettlementQuery } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
-import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest } from "@opengeni/core";
+import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import {
@@ -320,7 +321,6 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   getManagedAuthRequestActorEpoch,
   hasPermission,
-  authorizeKnowledgeQueryOwner,
   requireAccessGrant,
   requireAccessGrantAuthorization,
   requireFreshAccessGrant,
@@ -679,6 +679,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(400, { message: "invalid session control request" });
       operation = sessionSuffix.endsWith("/cancel") ? "session.cancel" : "session.control";
     }
+    if (sessionSuffix.endsWith(`/sessions/${sessionId}/cancel/settlement`) && c.req.method === "GET"
+      && !SessionCancelSettlementQuery.safeParse(c.req.query()).success)
+      throw new HTTPException(400, { message: "invalid cancel settlement request" });
     if (operation === "session.stream.read") {
       await next();
       return;
@@ -4125,6 +4128,27 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   });
 
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/cancel/settlement", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    try {
+      return c.json(
+        await readHumanSessionCancelSettlement(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId: c.req.param("sessionId"),
+            subjectId: grant.subjectId,
+          },
+          c.req.query(),
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/cancel", async (c) => {
     const grant = await requireAccessGrant(c, deps, c.req.param("workspaceId"), "sessions:control");
     try {
@@ -5859,6 +5883,7 @@ export function sessionAuthorizationOperationForHttp(
   // acceptSessionUserMessageWithOutcome after the body is parsed.
   if (suffix === "/composer-draft/submit" && verb === "POST") return "session.append";
   if (suffix === "/control" && verb === "POST") return "session.control";
+  if (suffix === "/cancel/settlement" && verb === "GET") return "session.cancel";
   if (suffix === "/cancel" && verb === "POST") return "session.cancel";
   if (suffix === "/creation-receipt" && verb === "GET") return "session.creation_receipt.read";
   if (suffix === "/retry" && verb === "POST") return "session.control";

@@ -18965,6 +18965,7 @@
         "$.entryId": "string?",
         "$.expectedVersion": "integer!",
         "$.operationId": "string!",
+        "$.reviewMode": "const?=[\"\\\"review_first\\\"\"]",
         "$.scope": "ref(KnowledgeEntryScope)?"
       }
     },
@@ -20380,7 +20381,7 @@
         "$.executionGeneration": "integer!",
         "$.id": "string!",
         "$.incompleteReasons": "array!",
-        "$.incompleteReasons[]": "enum=[\"\\\"CAP_EXCEEDED\\\"\",\"\\\"EMPTY_BASIS\\\"\",\"\\\"UNATTRIBUTED_IMPORT\\\"\",\"\\\"UNAVAILABLE_INPUT\\\"\",\"\\\"UNKNOWN_SOURCE\\\"\",\"\\\"UNRESOLVED_PARENT\\\"\"]",
+        "$.incompleteReasons[]": "enum=[\"\\\"CAP_EXCEEDED\\\"\",\"\\\"EMPTY_BASIS\\\"\",\"\\\"NATIVE_KNOWLEDGE_ORIGIN_MISSING\\\"\",\"\\\"UNATTRIBUTED_IMPORT\\\"\",\"\\\"UNAVAILABLE_INPUT\\\"\",\"\\\"UNKNOWN_SOURCE\\\"\",\"\\\"UNRESOLVED_PARENT\\\"\"]",
         "$.inputs": "array!",
         "$.inputs[]": "ref(ModelSourceInput)",
         "$.purpose": "enum!=[\"\\\"AGENT\\\"\",\"\\\"COMPACTION\\\"\",\"\\\"TITLE\\\"\"]",
@@ -39832,6 +39833,7 @@
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"type\":\"TSTypeReference\",\"typeName\":{\"name\":\"ServiceContext\",\"optional\":false,\"type\":\"Identifier\"}},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "asUser": [
+        "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}},{\"computed\":false,\"key\":{\"name\":\"existingOnly\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSBooleanKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}",
         "{\"kind\":\"method\",\"static\":false,\"optional\":false,\"readonly\":false,\"generics\":null,\"parameters\":[{\"type\":{\"type\":\"TSStringKeyword\"},\"optional\":false,\"rest\":false},{\"type\":{\"members\":[{\"computed\":false,\"key\":{\"name\":\"source\",\"optional\":false,\"type\":\"Identifier\"},\"optional\":true,\"readonly\":false,\"static\":false,\"type\":\"TSPropertySignature\",\"typeAnnotation\":{\"type\":\"TSStringKeyword\"}}],\"type\":\"TSTypeLiteral\"},\"optional\":true,\"rest\":false}],\"result\":{\"type\":\"TSThisType\"}}"
       ],
       "attachBrowserSession": [

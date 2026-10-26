@@ -19611,6 +19611,33 @@ export const SessionControlResponse = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
+/** Current native cancellation settlement only; no content or business outcome is asserted. */
+export const SessionCancelSettlementQuery = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      receiptId: z.string().uuid(),
+      controlRevision: z.coerce.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    })
+    .strict(),
+);
+export type SessionCancelSettlementQuery = z.infer<typeof SessionCancelSettlementQuery>;
+export const SessionCancelSettlement = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      receiptId: z.string().uuid(),
+      targetSessionId: z.string().uuid(),
+      controlRevision: z.number().int().nonnegative(),
+      currentControlRevision: z.number().int().nonnegative(),
+      status: z.enum(["pending", "settled", "superseded"]),
+      attemptPendingCount: z.number().int().nonnegative(),
+      interruptionPendingCount: z.number().int().nonnegative(),
+      quiescencePendingCount: z.number().int().nonnegative(),
+      backgroundCommandPendingCount: z.number().int().nonnegative(),
+    })
+    .strict(),
+);
+export type SessionCancelSettlement = z.infer<typeof SessionCancelSettlement>;
+
 export const SESSION_INSTRUCTIONS_MAX_CHARACTERS = 65_536;
 
 export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(() =>

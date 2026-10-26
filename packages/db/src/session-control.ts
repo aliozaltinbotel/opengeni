@@ -9,6 +9,7 @@ import {
   type WorkspacePauseTimerRequest,
   type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
+  type SessionCancelSettlement,
 } from "@opengeni/contracts";
 import { and, eq, getTableColumns, inArray, sql, type SQL } from "drizzle-orm";
 import { anyOf } from "./sql-arrays";
@@ -1841,6 +1842,95 @@ async function loadSingleTargetControlRow(
     ) commands
   `);
   return rows[0];
+}
+
+/**
+ * Exact human cancellation receipt and current closed settlement, under the same
+ * workspace control fence as canonical control evaluation. No full control state escapes.
+ */
+export async function getSessionCancelSettlementInTransaction(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    receiptId: string;
+    controlRevision: number;
+  },
+): Promise<SessionCancelSettlement | null> {
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "share");
+  const [command] = await db
+    .select({ revision: schema.sessionCommandReceipts.appliedControlRevision })
+    .from(schema.sessionCommandReceipts)
+    .where(
+      and(
+        eq(schema.sessionCommandReceipts.id, input.receiptId),
+        eq(schema.sessionCommandReceipts.accountId, input.accountId),
+        eq(schema.sessionCommandReceipts.workspaceId, input.workspaceId),
+        eq(schema.sessionCommandReceipts.targetSessionId, input.sessionId),
+        eq(schema.sessionCommandReceipts.actorType, "human"),
+        eq(schema.sessionCommandReceipts.actorSubjectId, input.subjectId),
+        eq(schema.sessionCommandReceipts.action, "session.cancel"),
+        sql`${schema.sessionCommandReceipts.targetTurnId} is null`,
+      ),
+    );
+  if (!command) return null;
+  if (command.revision === null || command.revision !== input.controlRevision)
+    throw new SessionControlConflictError("Cancellation receipt revision does not match");
+  const [target] = await db
+    .select({ status: schema.sessions.status, revision: schema.sessions.controlVersion })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.accountId, input.accountId),
+        eq(schema.sessions.workspaceId, input.workspaceId),
+        eq(schema.sessions.id, input.sessionId),
+      ),
+    );
+  if (!target) return null;
+  // Reuse the canonical open-work summaries directly. Full control evaluation
+  // also loads titles, blocker actors and reasons, which this observer never needs.
+  const readPending = async () => ({
+    attempts:
+      (await settlementAttemptCounts(db, input.workspaceId, [input.sessionId])).get(
+        input.sessionId,
+      ) ?? NO_SETTLEMENT_ATTEMPTS,
+    commands:
+      (await stoppingBackgroundCommandCounts(db, input.workspaceId, [input.sessionId])).get(
+        input.sessionId,
+      ) ?? 0,
+  });
+  // Hidden descendants still stop the cancelled workstream. Reuse the existing
+  // workspace-scoped metadata read/restore owner, returning counts only.
+  const pending = (await readOutsideViewerVisibility(db, readPending)) ?? (await readPending());
+  const attempts = pending.attempts;
+  const backgroundCommandPendingCount = pending.commands;
+  const attemptPendingCount = attempts.attemptCount;
+  const interruptionPendingCount = attempts.interruptionPendingCount;
+  const quiescencePendingCount = attempts.quiescencePendingCount;
+  const currentControlRevision = asSafeRevision(target.revision, "session control version")!;
+  const status =
+    currentControlRevision !== input.controlRevision
+      ? "superseded"
+      : target.status === "cancelled" &&
+          attemptPendingCount === 0 &&
+          interruptionPendingCount === 0 &&
+          quiescencePendingCount === 0 &&
+          backgroundCommandPendingCount === 0
+        ? "settled"
+        : "pending";
+  return {
+    receiptId: input.receiptId,
+    targetSessionId: input.sessionId,
+    controlRevision: input.controlRevision,
+    currentControlRevision,
+    status,
+    attemptPendingCount,
+    interruptionPendingCount,
+    quiescencePendingCount,
+    backgroundCommandPendingCount,
+  };
 }
 
 export async function evaluateSessionControls(
