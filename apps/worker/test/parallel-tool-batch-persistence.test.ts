@@ -97,7 +97,7 @@ function harness(
         debug() {},
       },
       attempt: { turnId: crypto.randomUUID(), executionGeneration: 1 },
-      turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "scripted-model" },
+      turn: { id: crypto.randomUUID(), executionGeneration: 1, model: "scripted-model", resources: [] },
       turnExecutionPolicy: { providerId: "openai" },
       trigger: { type: "user.message" },
       eventing: {
@@ -123,6 +123,9 @@ function harness(
       },
       historySink: {
         seedHistory() {},
+        // Upstream's active-history footprint hooks, stubbed as in upstream's own fixtures.
+        seedHistoryFootprint() {},
+        historyFootprintCompactionSignal: () => null,
         reconcileConversationTruth: async () => { order.push("history"); },
       },
       billingState: { isCodexTurn: false },
