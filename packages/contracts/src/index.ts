@@ -9092,6 +9092,41 @@ export const SessionRealtimeMutationResponse = /* @__PURE__ */ defineSchema(() =
 );
 export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
 
+export const SessionCreationReceiptRecoveryRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      idempotencyKey: z.string().min(1),
+      requestSha256: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict(),
+);
+export type SessionCreationReceiptRecoveryRequest = z.infer<
+  typeof SessionCreationReceiptRecoveryRequest
+>;
+
+/** Immutable authenticated birth evidence, separate from live authorization. */
+export const SessionCreationReceiptRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      requestSha256: z.string().regex(/^[a-f0-9]{64}$/),
+      creatorSubjectId: z.string().min(1),
+      authenticatedSubjectId: z.string().min(1),
+      authenticatedPrincipalKind: z.string().min(1),
+    })
+    .strict(),
+);
+export type SessionCreationReceiptRequest = z.infer<typeof SessionCreationReceiptRequest>;
+export const SessionCreationReceipt = /* @__PURE__ */ defineSchema(() =>
+  SessionCreationReceiptRequest.extend({
+    version: z.literal(1),
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+    idempotencyKey: z.string().min(1),
+  }),
+);
+export type SessionCreationReceipt = z.infer<typeof SessionCreationReceipt>;
+
 export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
   z.enum([
     "session.read",
@@ -9102,6 +9137,8 @@ export const SessionAuthorizationOperation = /* @__PURE__ */ defineSchema(() =>
     "session.append",
     "session.steer",
     "session.control",
+    "session.cancel",
+    "session.creation_receipt.read",
     "session.queue.read",
     "session.queue.control",
     "session.composer.read",

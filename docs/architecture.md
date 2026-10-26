@@ -22,6 +22,19 @@ funding. Migration 0845 retains the canonical signup issuer and one-human/one-or
 receipt but issues zero money; monthly Free funding replaces new signup bonuses.
 Legacy positive receipts remain eligible and retain their balances; no backfill.
 
+Keyed authenticated session creation records a write-once `sessions.creation_receipt`
+in the shell insert transaction, before start/dispatch. It binds the complete normalized
+public request digest and original creator to the exact account, workspace, session and
+key. Replays never mint a missing legacy receipt or count as fresh creation. The core
+`readSessionCreationReceiptForRequest` and content-free `/creation-receipt` route use
+current `session.creation_receipt.read` authorization and the original authenticated
+subject/principal binding. Recovery requires the original key and request digest;
+ordinary native partial-create retries retain their existing semantics.
+`session.cancel` authorizes only a parsed CANCEL intent through the receipt-only
+`/cancel` route and the same session port; the existing full-state `/control` route
+retains `session.control` for every action. Cancellation receipts establish delivery,
+never verified business success or source provenance.
+
 ## 1. Startup
 
 The console optionally uses Clerk when `VITE_CLERK_PUBLISHABLE_KEY` is configured.

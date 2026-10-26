@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { CreateSessionRequest, stableJson } from "@opengeni/contracts";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { configuredModels } from "@opengeni/config";
 import type { AccessGrant, LatencyMode } from "@opengeni/contracts";
@@ -12,6 +14,8 @@ import type { ApiRouteDeps } from "../src";
 import {
   acceptSessionUserMessage,
   createSessionForRequest,
+  createSessionForRequestWithOutcome,
+  readSessionCreationReceiptForRequest,
   updateSessionToolPolicy,
 } from "../src/domain/sessions";
 import { sendAgentSessionMessage } from "../src/application/session-commands";
@@ -361,3 +365,101 @@ describe("new session latency defaults", () => {
     expect(await turns(child.id)).toEqual(before);
   }, 30_000);
 });
+
+test("birth receipt survives failed start, repair and lost acknowledgement with live exact recovery authority", async () => {
+  const { deps, grant } = await fixture("standard", false);
+  const request = {
+    requestedSessionId: crypto.randomUUID(),
+    idempotencyKey: crypto.randomUUID(),
+    initialMessage: "Synthetic recovery regression",
+    sandboxBackend: "none",
+  };
+  const expected = {
+    idempotencyKey: request.idempotencyKey,
+    requestSha256: createHash("sha256")
+      .update(stableJson(CreateSessionRequest.parse(request)))
+      .digest("hex"),
+  };
+  const trigger = `fail_birth_${crypto.randomUUID().replaceAll("-", "")}`;
+  await shared.admin.unsafe(
+    `CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.session_id = '${request.requestedSessionId}'::uuid AND NEW.type = 'user.message' THEN RAISE EXCEPTION 'injected birth start failure'; END IF; RETURN NEW; END $$`,
+  );
+  await shared.admin.unsafe(
+    `CREATE TRIGGER ${trigger} BEFORE INSERT ON session_events FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+  );
+  try {
+    await expect(
+      createSessionForRequestWithOutcome(deps, grant, grant.workspaceId, request),
+    ).rejects.toMatchObject({ cause: { message: "injected birth start failure" } });
+  } finally {
+    await shared.admin.unsafe(`DROP TRIGGER ${trigger} ON session_events`);
+    await shared.admin.unsafe(`DROP FUNCTION ${trigger}()`);
+  }
+  const proof = await readSessionCreationReceiptForRequest(
+    deps,
+    grant,
+    request.requestedSessionId,
+    expected,
+  );
+  expect(proof).toMatchObject({
+    ...expected,
+    creatorSubjectId: grant.subjectId,
+    sessionId: request.requestedSessionId,
+  });
+  expect(await turns(request.requestedSessionId)).toHaveLength(0);
+  const repaired = await createSessionForRequestWithOutcome(
+    deps,
+    grant,
+    grant.workspaceId,
+    request,
+  );
+  expect(repaired.outcome).toBe("repaired");
+  // The caller loses the committed repair response and repeats the original request.
+  const lostAcknowledgement = await createSessionForRequestWithOutcome(
+    deps,
+    grant,
+    grant.workspaceId,
+    request,
+  );
+  expect(lostAcknowledgement.outcome).not.toBe("created");
+  expect(
+    await readSessionCreationReceiptForRequest(deps, grant, request.requestedSessionId, expected),
+  ).toEqual(proof);
+  await expect(
+    readSessionCreationReceiptForRequest(deps, grant, request.requestedSessionId, {
+      ...expected,
+      requestSha256: "b".repeat(64),
+    }),
+  ).rejects.toMatchObject({ status: 409 });
+  await expect(
+    readSessionCreationReceiptForRequest(
+      deps,
+      { ...grant, subjectId: "user:foreign" },
+      request.requestedSessionId,
+      expected,
+    ),
+  ).rejects.toMatchObject({ status: 404 });
+  deps.sessionAuthorization = {
+    authorizeSession: async () => ({ allowed: false, reason: "revoked" }),
+    resolveListScope: async () => ({ kind: "scoped", rootSessionIds: [], sessionIds: [] }),
+  };
+  await expect(
+    readSessionCreationReceiptForRequest(deps, grant, request.requestedSessionId, expected),
+  ).rejects.toMatchObject({ reason: "revoked" });
+}, 60_000);
+
+
+test("birth recovery preserves authenticated service identity separately from attributed initiator", async () => {
+  const { deps, grant } = await fixture("standard", false);
+  const authenticatedGrant: AccessGrant = { ...grant, principalKind: "api_key", subjectId: "api_key:synthetic-recovery",
+    serviceInitiator: { kind: "service", subjectId: "synthetic-scheduler" }, serviceInitiatorContext: { job: "synthetic" } };
+  const request = { idempotencyKey: crypto.randomUUID(), requestedSessionId: crypto.randomUUID(),
+    initialMessage: "Synthetic attributed service recovery", sandboxBackend: "none" };
+  const expected = { idempotencyKey: request.idempotencyKey,
+    requestSha256: createHash("sha256").update(stableJson(CreateSessionRequest.parse(request))).digest("hex") };
+  await createSessionForRequest(deps, authenticatedGrant, grant.workspaceId, request);
+  const proof = await readSessionCreationReceiptForRequest(deps, authenticatedGrant, request.requestedSessionId, expected);
+  expect(proof).toMatchObject({ authenticatedSubjectId: authenticatedGrant.subjectId, authenticatedPrincipalKind: "api_key", creatorSubjectId: "synthetic-scheduler" });
+  await expect(readSessionCreationReceiptForRequest(deps, { ...authenticatedGrant, subjectId: "synthetic-scheduler" }, request.requestedSessionId, expected)).rejects.toMatchObject({ status: 404 });
+  await expect(readSessionCreationReceiptForRequest(deps, { ...authenticatedGrant, principalKind: "configured_key" }, request.requestedSessionId, expected)).rejects.toMatchObject({ status: 404 });
+}, 30_000);

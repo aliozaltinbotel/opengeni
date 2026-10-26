@@ -1,3 +1,11 @@
+import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
+import { getSessionCreationReceipt } from "@opengeni/db";
+import type {
+  SessionCreationReceipt,
+  SessionCreationReceiptRecoveryRequest as SessionCreationReceiptRecoveryInput,
+  SessionCreationReceiptRequest,
+} from "@opengeni/contracts";
 import { isDirectModelId, ModelUnavailableError } from "@opengeni/contracts";
 import { requireExplicitPermissionDelegation } from "../access";
 import { acceptSessionFileAttachments, getTemporaryModelImageFile } from "@opengeni/db";
@@ -1078,6 +1086,7 @@ export async function createAndStartSessionWithOutcome(input: {
   // session. Every caller repairs or re-delivers the winner's one atomic start;
   // the durable initializer prevents duplicate events or turns.
   createIdempotencyKey?: string | null;
+  creationReceiptRequest?: SessionCreationReceiptRequest | undefined;
   // Exact explicit installed-Skill selection. The database stores this only as
   // keyed-create identity; runtime behavior comes from the frozen Skill content.
   selectedInstalledSkillIds?: string[];
@@ -1306,6 +1315,7 @@ export async function createAndStartSessionWithOutcome(input: {
           ...(input.memoryScope ? { memoryScope: input.memoryScope } : {}),
           parentSessionId: input.parentSessionId ?? null,
           createIdempotencyKey: input.createIdempotencyKey!,
+          creationReceiptRequest: input.creationReceiptRequest,
           selectedInstalledSkillIds: input.selectedInstalledSkillIds ?? [],
           sandboxGroupId: input.sandboxGroupId ?? null,
           ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
@@ -2628,6 +2638,10 @@ async function createSessionForRequestInFileScope(
 ): Promise<CreateSessionRequestOutcome> {
   const payload = CreateSessionRequest.parse(rawPayload);
 
+  // Hash the complete normalized public request before deployment/default resolution.
+  // This contains no receipt and stores no raw request or credentials.
+  const creationRequestSha256 = createHash("sha256").update(stableJson(payload)).digest("hex");
+
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.
   if (payload.firstPartyMcpTools) {
@@ -2824,6 +2838,15 @@ async function createSessionForRequestInFileScope(
   // defaults erase absent-vs-explicit, and the parent side comes from the
   // durable row rather than anything the caller sent.
   const creationInitiator = creationInitiatorForGrant(grant);
+  const creationReceiptRequest: SessionCreationReceiptRequest | undefined =
+    payload.idempotencyKey && creationInitiator.initiator
+      ? {
+          requestSha256: creationRequestSha256,
+          creatorSubjectId: creationInitiator.initiator.subjectId,
+          authenticatedSubjectId: grant.subjectId,
+          authenticatedPrincipalKind: grant.principalKind ?? "access_grant",
+        }
+      : undefined;
   const scopeUser =
     creationInitiator.initiator?.kind === "subject" ? creationInitiator.initiator.subjectId : null;
   const sessionScope = resolveSessionCreateScope({
@@ -4211,6 +4234,7 @@ async function createSessionForRequestInFileScope(
       ...(claudeProviderAccountAuthoritySnapshot ? { claudeProviderAccountAuthoritySnapshot } : {}),
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
+      creationReceiptRequest,
       selectedInstalledSkillIds,
       initialAgentLearning: payload.agentLearning,
       maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
@@ -4960,6 +4984,37 @@ export async function acceptSessionUserMessage(
   const { accepted, turn, receipt, routing, interruptionCount, replay } =
     await acceptSessionUserMessageWithOutcome(deps, grant, workspaceId, sessionId, input);
   return { accepted, turn, receipt, routing, interruptionCount, replay };
+}
+
+/** Recovery returns only original birth evidence under current authority, never content. */
+export async function readSessionCreationReceiptForRequest(
+  deps: { db: Database; sessionAuthorization?: SessionAuthorizationPort | null },
+  grant: AccessGrant,
+  sessionId: string,
+  expected: SessionCreationReceiptRecoveryInput,
+): Promise<SessionCreationReceipt | null> {
+  const recovery = SessionCreationReceiptRecoveryRequest.parse(expected);
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.creation_receipt.read",
+    surface: "core",
+  });
+  requirePermission(grant, "sessions:create");
+  const receipt = await getSessionCreationReceipt(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId,
+  });
+  if (receipt && (receipt.authenticatedSubjectId !== grant.subjectId ||
+    receipt.authenticatedPrincipalKind !== (grant.principalKind ?? "access_grant")))
+    throw new HTTPException(404, { message: "session not found" });
+  if (
+    receipt &&
+    (receipt.idempotencyKey !== recovery.idempotencyKey ||
+      receipt.requestSha256 !== recovery.requestSha256)
+  )
+    throw new HTTPException(409, { message: "session creation receipt request mismatch" });
+  return receipt;
 }
 
 /**

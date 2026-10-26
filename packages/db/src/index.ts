@@ -1,3 +1,4 @@
+import { SessionCreationReceipt, SessionCreationReceiptRequest } from "@opengeni/contracts";
 import { ModelSourceRef, FileResourceRef } from "@opengeni/contracts";
 import {
   validatedStoredModelCallSourceReceipt,
@@ -29702,6 +29703,7 @@ async function setScheduledTaskAuthorityRlsContext(
 }
 
 export type SessionCreateInput = {
+  creationReceiptRequest?: SessionCreationReceiptRequest | undefined;
   initialMessageModelSourceRefs?: ModelSourceRef[] | undefined;
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
   bundledSkillIds?: BundledSkillId[] | undefined;
@@ -30683,6 +30685,18 @@ async function createSessionInTransaction(
           mode: "explicit",
           inheritedFromSessionId: input.parentSessionId ?? null,
         },
+        ...(input.creationReceiptRequest && createIdempotencyKey && !input.archivedImport
+          ? {
+              creationReceipt: SessionCreationReceipt.parse({
+                ...input.creationReceiptRequest,
+                version: 1,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: id,
+                idempotencyKey: createIdempotencyKey,
+              }),
+            }
+          : {}),
         metadata: sessionMetadata,
         mcpApprovalPolicies: input.mcpApprovalPolicies ?? {},
         ...creatorColumns(frozenCreator),
@@ -31208,6 +31222,27 @@ export async function getSessionEventSequence(
       throw new Error(`Session event cursor invariant failed for session ${sessionId}`);
     }
     return row.lastSequence;
+  });
+}
+
+/** Content-free exact birth evidence; callers must run current session authorization first. */
+export async function getSessionCreationReceipt(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<SessionCreationReceipt | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (tx) => {
+    const [row] = await tx
+      .select({ receipt: schema.sessions.creationReceipt })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    return row?.receipt ? SessionCreationReceipt.parse(row.receipt) : null;
   });
 }
 
