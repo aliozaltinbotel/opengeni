@@ -1528,10 +1528,12 @@ export function createAppComposition(deps: AppDependencies): {
         defaultReasoningEffort: defaultSelection.reasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         defaultSandboxBackend: deps.settings.sandboxBackend,
-        mcpServers: deps.settings.mcpServers.map((server) => ({
-          id: server.id,
-          name: server.name ?? server.id,
-        })),
+        mcpServers: deps.settings.mcpServers
+          .filter((server) => server.visibility !== "internal")
+          .map((server) => ({
+            id: server.id,
+            name: server.name ?? server.id,
+          })),
         firstPartyMcpTools: resolveFirstPartyMcpToolPolicy(deps.settings),
         codeSearch: codeSearchDeploymentPolicy(deps.settings),
         // Archiving needs object storage; without it the worker never archives.

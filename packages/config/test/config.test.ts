@@ -1659,6 +1659,30 @@ describe("sandbox preparation profiles", () => {
     });
   });
 
+  test("registry visibility accepts only user or internal and preserves legacy absence", () => {
+    const servers = [
+      { id: "internal-carrier", url: "https://internal.invalid/mcp", visibility: "internal" },
+      { id: "user-crm", url: "https://crm.invalid/mcp", visibility: "user" },
+      { id: "legacy-mail", url: "https://mail.invalid/mcp" },
+    ];
+    const settings = withEnv({ OPENGENI_MCP_SERVERS: JSON.stringify(servers) }, () =>
+      getSettings(),
+    );
+    expect(settings.mcpServers.find((server) => server.id === "internal-carrier")?.visibility).toBe(
+      "internal",
+    );
+    expect(settings.mcpServers.find((server) => server.id === "user-crm")?.visibility).toBe("user");
+    expect(
+      settings.mcpServers.find((server) => server.id === "legacy-mail")?.visibility,
+    ).toBeUndefined();
+    expect(() =>
+      withEnv(
+        { OPENGENI_MCP_SERVERS: JSON.stringify([{ ...servers[0], visibility: "hidden" }]) },
+        () => getSettings(),
+      ),
+    ).toThrow();
+  });
+
   test("parses MCP server registry JSON", () => {
     const parsed = parseMcpServers(
       '[{"id":"docs","name":"Document Search","url":"http://127.0.0.1:8787/mcp","allowedTools":["search_documents"]}]',

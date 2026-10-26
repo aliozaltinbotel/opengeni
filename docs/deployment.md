@@ -3416,6 +3416,18 @@ Then select it per session with an explicit tool reference such as
 Enterprise token or other provider credential into this server; it is a
 registry-docs endpoint only.
 
+Deployment-owned registry entries may set `"visibility": "internal"`. These
+entries remain registered for explicit tool references but are omitted from
+implicit session defaults and the client connector picker. Omitted visibility
+and `"visibility": "user"` preserve normal connector defaults, including newly
+connected user connectors inherited by workspace-default sessions. Set the same
+metadata on API and worker registry entries.
+
+Visibility is discovery metadata, not authorization. It grants no access,
+changes no execution guard, and does not remove already stored explicit session
+references. Internal entries still require their existing governed authority;
+personal-session refusals must remain final.
+
 ## Connected Machines
 
 A Connected Machine is a user-owned computer (a laptop, workstation, or server,

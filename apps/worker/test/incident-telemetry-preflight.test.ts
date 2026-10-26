@@ -467,3 +467,29 @@ describe("incident telemetry dispatch preflight", () => {
     }
   });
 });
+
+test("internal static MCP defaults stay excluded after responder ID projection without losing explicit references", () => {
+  const input = {
+    settingsMcpServerIds: ["opengeni", "internal-carrier", "mail"],
+    settingsDefaultMcpServerIds: ["mail"],
+    capabilityServerIds: ["new-crm"],
+    apiIntegrationServerIds: [],
+    session: {
+      mcpServers: [],
+      tools: [],
+      toolPolicy: { mode: "workspace_default" as const, inheritedFromSessionId: null },
+    },
+    plannedTools: [],
+  };
+  expect(resolveIncidentTelemetryResponderToolPolicy(input).effectivePolicy.effectiveIds).toEqual([
+    "mail",
+    "new-crm",
+    "opengeni",
+  ]);
+  expect(
+    resolveIncidentTelemetryResponderToolPolicy({
+      ...input,
+      plannedTools: [{ kind: "mcp", id: "internal-carrier", eager: true }],
+    }).effectivePolicy.effectiveIds,
+  ).toEqual(["internal-carrier", "mail", "new-crm", "opengeni"]);
+});

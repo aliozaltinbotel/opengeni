@@ -63,10 +63,17 @@ function sortedIds(ids: Iterable<string>): string[] {
   return [...new Set(ids)].sort();
 }
 
-/** Every configured runtime MCP defaults on; mandatory carrier IDs are separate. */
-export function defaultSessionMcpServerIds(servers: Iterable<{ id: string }>): string[] {
+/** User-visible runtime MCPs default on; internal entries require explicit selection. */
+export function defaultSessionMcpServerIds(
+  servers: Iterable<Pick<Settings["mcpServers"][number], "id" | "visibility">>,
+): string[] {
   const mandatory = new Set<string>(MANDATORY_SESSION_MCP_SERVER_IDS);
-  return sortedIds([...servers].map((server) => server.id).filter((id) => !mandatory.has(id)));
+  return sortedIds(
+    [...servers]
+      .filter((server) => server.visibility !== "internal")
+      .map((server) => server.id)
+      .filter((id) => !mandatory.has(id)),
+  );
 }
 
 function projectIds(ids: readonly string[]): { ids: string[]; truncated: boolean } {
@@ -277,7 +284,7 @@ export async function workspaceSessionToolPolicyServerIds(
   return sortedIds(runtimeSettings.mcpServers.map((server) => server.id));
 }
 
-/** Current omitted-tools defaults: every configured runtime MCP is on. */
+/** Current omitted-tools defaults include user-visible configured runtime MCPs. */
 export async function workspaceSessionToolPolicyDefaultServerIds(
   db: Database,
   workspaceId: string,
@@ -301,7 +308,7 @@ export async function workspaceSessionToolPolicyDefaultServerIds(
  * composer on which connectors a `workspace_default` session executes with.
  */
 export function workspaceSessionToolPolicyDefaultServerIdsFor(
-  runtimeMcpServers: Iterable<{ id: string }>,
+  runtimeMcpServers: Iterable<Pick<Settings["mcpServers"][number], "id" | "visibility">>,
   workspaceSettings: unknown,
 ): string[] {
   const availableDefaults = defaultSessionMcpServerIds(runtimeMcpServers);

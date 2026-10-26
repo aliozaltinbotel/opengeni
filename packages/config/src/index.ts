@@ -2007,6 +2007,12 @@ const SettingsSchema = z.object({
         id: z.string().min(1).regex(registryId),
         name: z.string().min(1).optional(),
         url: z.string().url(),
+        /**
+         * Deployment registry metadata only. Internal entries are omitted from
+         * implicit session defaults and client connector choices; explicit tool
+         * references and all existing authorization checks remain unchanged.
+         */
+        visibility: z.enum(["user", "internal"]).optional(),
         allowedTools: z.array(z.string().min(1)).optional(),
         timeoutMs: z.number().int().positive().optional(),
         /**
