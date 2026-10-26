@@ -175,6 +175,11 @@ durable history owners and copy/import/summary ancestry; raw tool results retain
 source references before projection or spill. A missing owner, unavailable input
 or exceeded cap cannot be recorded as complete. Native completeness describes
 input graph coverage, never a host's Knowledge authorization or business outcome.
+Retained pending Knowledge remains attributable after its exact unedited human
+approval only when the canonical current reader proves the same published/latest
+revision and the adjacent entry version. Its original projection digest must
+still match; historical receipt bytes and proposal status are unchanged. Edits,
+rejection, replacement, archival and revoked source access do not use this bridge.
 An exact session-authorized API/SDK read returns one call's receipt; it does not
 substitute a latest attempt snapshot. Historical facts remain unattributed. Receipt ancestry is memoized only inside
 one fenced persistence transaction: successful walks share a dependency graph,
