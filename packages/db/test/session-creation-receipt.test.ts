@@ -59,6 +59,8 @@ async function fixture(): Promise<SessionCreateInput & {
 
 test("creation receipt commits with a keyed shell before startup and remains exact on replay", async () => {
   const input = await fixture();
+  if (!input.requestedSessionId || !input.creationReceiptRequest)
+    throw new Error("Authenticated birth fixture identity required");
   const first = await createSessionWithIdempotencyKeyResult(client.db, input);
   if (first.denied) throw new Error("Unexpected fixture denial");
   const proof = await getSessionCreationReceipt(client.db, {
