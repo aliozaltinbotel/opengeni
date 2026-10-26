@@ -44,6 +44,10 @@ async function build(input: { override?: readonly SkillCatalogDescriptor[]; froz
       retainedSources=value.retainedSources;
       return input.frozen ?? value.catalog;
     }),
+    // Upstream persists workspace governance beside the catalog (same fence).
+    spyOn(db, "ensureSessionWorkspaceGovernance").mockImplementation(
+      async (_db, value) => value.governance,
+    ),
     spyOn(db, "getExternalLinkTurnAuthorization").mockResolvedValue(null),
   ];
   try {

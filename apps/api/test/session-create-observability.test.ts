@@ -402,6 +402,8 @@ test("committed creation starts usage and policy response reads together", async
       id: "committed",
       policy: "same policy",
       usageLimit: { limitMicros: 123, state: "active" },
+      // Cendra fork (ea564b0a7): the create response states whether it committed a new session.
+      freshCreated: false,
     },
     status: 202,
   });
