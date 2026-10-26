@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { Usage, type ModelRequest } from "@openai/agents";
+import { createTurnHistorySink } from "../src/activities/agent-turn/history-sink";
+import { ModelRequestCaptureModel, withModelRequestCapture, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { Agent, tool } from "@openai/agents";
 import { z } from "zod";
 import {
@@ -315,4 +318,24 @@ describe("open suffix approval results", () => {
     expectPairedResult(await resume("approve"), error.message);
     expect(calls).toEqual([{ title: "Proposed title" }]);
   });
+});
+
+
+test("open suffix retains only exact output producer bindings from the original model response", async () => {
+  const sink = createTurnHistorySink({} as Parameters<typeof createTurnHistorySink>[0]);
+  const call = { type: "function_call" as const, callId: "human-source-call", name: "request_human_input", arguments: "{}" };
+  const capture: ModelRequestCapture = () => {};
+  capture.beforeCall = async () => "original-human-question-source";
+  capture.callCompleted = (_key, _id, _response, restore) => sink.recordModelSourceRestorer(restore);
+  const model = new ModelRequestCaptureModel({
+    async getResponse() { return { usage: new Usage(), output: [call] }; },
+    async *getStreamedResponse() { throw new Error("Unexpected stream"); },
+  });
+  const request: ModelRequest = { input: [], tools: [], modelSettings: {}, outputType: "text", tracing: false };
+  await withModelRequestCapture(capture, () => model.getResponse(request));
+  // Simulate the SDK's JSON projection, which drops the private source binding.
+  const projected = JSON.parse(JSON.stringify(call));
+  expect(sink.modelOutputSourceKeys([projected])).toEqual(["original-human-question-source"]);
+  expect(() => sink.modelOutputSourceKeys([{ ...projected, arguments: '{"forged":true}' }])).toThrow("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
+  expect(() => sink.modelOutputSourceKeys([{ ...projected, callId: "different-call" }])).toThrow("MODEL_OUTPUT_PRODUCER_UNAVAILABLE");
 });

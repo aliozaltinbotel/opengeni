@@ -67,6 +67,13 @@ continues from history when the interruption group is empty.
 It does not rediscover the response through a best-effort event or tool
 call lookup during execution, and it does not require `RunState.fromString`.
 
+New structured-input suffixes also retain the original model response's exact
+producer bindings on their pending-tool receipt. Promotion into history checks
+that original producer and the committed answer under the current attempt fence;
+a newer execution generation does not become the question's producer. Historical
+suffixes without those bindings remain unattributed. Neither the latest model
+request nor an ordinary tool approval supplies replacement provenance.
+
 Settlement is first-writer-wins under a database lock and compare-and-set:
 
 - a human answer and the expiry timer cannot both win;
