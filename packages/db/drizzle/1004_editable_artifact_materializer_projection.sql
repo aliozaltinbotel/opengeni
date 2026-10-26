@@ -54,7 +54,7 @@ BEGIN
     OR (length(source) - length(replace(source, old_blob_read, '')))
       / length(old_blob_read) <> 1
   THEN
-    RAISE EXCEPTION '0896 materializer projection preimage changed'
+    RAISE EXCEPTION '1004 materializer projection preimage changed'
       USING ERRCODE = '55000';
   END IF;
 
@@ -76,7 +76,7 @@ BEGIN
       WHERE namespace.nspname = data_schema AND relation.relname = table_name
         AND policy.polname = 'editable_artifact_materializer_owner'
     ) THEN
-      RAISE EXCEPTION '0896 materializer source policy preimage changed'
+      RAISE EXCEPTION '1004 materializer source policy preimage changed'
         USING ERRCODE = '55000';
     END IF;
     EXECUTE pg_catalog.format(
@@ -91,7 +91,7 @@ BEGIN
     'config', p.proconfig, 'acl', p.proacl
   ) INTO after_facts FROM pg_catalog.pg_proc p WHERE p.oid = target;
   IF after_facts IS DISTINCT FROM before_facts THEN
-    RAISE EXCEPTION '0896 materializer projection security metadata changed'
+    RAISE EXCEPTION '1004 materializer projection security metadata changed'
       USING ERRCODE = '55000';
   END IF;
 END;

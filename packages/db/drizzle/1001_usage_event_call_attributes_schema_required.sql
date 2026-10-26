@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- Keep 0668 immutable; a missing schema member must refuse rather than yield
+-- Keep 1000 immutable; a missing schema member must refuse rather than yield
 -- SQL NULL, which a CHECK accepts. Existing malformed rows fail validation.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';

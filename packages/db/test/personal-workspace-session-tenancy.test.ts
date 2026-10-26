@@ -62,7 +62,10 @@ type ManagedHuman = {
 };
 
 beforeAll(async () => {
-  shared = await acquireRestrictedRuntimeTestDatabase("personal-workspace-session-tenancy", "public");
+  shared = await acquireRestrictedRuntimeTestDatabase(
+    "personal-workspace-session-tenancy",
+    "public",
+  );
   if (!shared) {
     if (requireRealDatabase) {
       throw new Error(
@@ -133,34 +136,73 @@ async function provisionPrivateChildOwner(kind: "managed" | "external"): Promise
     source: "private-child-restricted-fixture",
     externalId: crypto.randomUUID(),
   });
-  return { ...managed, subjectId: external.subjectId, personalWorkspaceId: external.personalWorkspaceId,
-    organizationMembershipId: external.organizationMembershipId };
+  return {
+    ...managed,
+    subjectId: external.subjectId,
+    personalWorkspaceId: external.personalWorkspaceId,
+    organizationMembershipId: external.organizationMembershipId,
+  };
 }
 
 async function claimedPrivateParent(human: ManagedHuman) {
   if (!client) throw new Error("test database unavailable");
   const parent = await createSessionWithIdempotencyKey(client.db, {
-    accountId: human.accountId, workspaceId: human.personalWorkspaceId, visibility: "user_private",
-    initialMessage: "private parent authority fixture", resources: [], metadata: {},
-    createdBy: { kind: "subject", subjectId: human.subjectId }, subjectId: human.subjectId,
-    model: "test-model", reasoningEffort: "medium", latencyMode: "standard", sandboxBackend: "none",
+    accountId: human.accountId,
+    workspaceId: human.personalWorkspaceId,
+    visibility: "user_private",
+    initialMessage: "private parent authority fixture",
+    resources: [],
+    metadata: {},
+    createdBy: { kind: "subject", subjectId: human.subjectId },
+    subjectId: human.subjectId,
+    model: "test-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
     createIdempotencyKey: crypto.randomUUID(),
   });
-  await withWorkspaceSubjectSessionActivityRls(client.db, human.personalWorkspaceId, human.subjectId,
-    db => db.transaction(tx => submitHumanPromptInTransaction(tx as unknown as typeof db, {
-      accountId: human.accountId, workspaceId: human.personalWorkspaceId, sessionId: parent.session.id,
-      subjectId: human.subjectId, actor: { type: "human", subjectId: human.subjectId },
-      operationKey: crypto.randomUUID(), delivery: "send", text: "spawn one private child", resources: [],
-      model: "test-model", reasoningEffort: "medium", reasoningEffortFallback: "medium", source: "user",
-    })));
+  await withWorkspaceSubjectSessionActivityRls(
+    client.db,
+    human.personalWorkspaceId,
+    human.subjectId,
+    (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as typeof db, {
+          accountId: human.accountId,
+          workspaceId: human.personalWorkspaceId,
+          sessionId: parent.session.id,
+          subjectId: human.subjectId,
+          actor: { type: "human", subjectId: human.subjectId },
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "spawn one private child",
+          resources: [],
+          model: "test-model",
+          reasoningEffort: "medium",
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      ),
+  );
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
-    sessionId: parent.session.id, workflowId: `session-${parent.session.id}`, workflowRunId: crypto.randomUUID(),
-    attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" },
+    sessionId: parent.session.id,
+    workflowId: `session-${parent.session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: crypto.randomUUID(),
+    trigger: { kind: "next" },
   });
   if (claim.action !== "claimed") throw new Error("private parent turn was not claimed");
-  return { parent, actor: { sessionId: parent.session.id, turnId: claim.turn.id, attemptId,
-    executionGeneration: claim.turn.executionGeneration } };
+  return {
+    parent,
+    actor: {
+      sessionId: parent.session.id,
+      turnId: claim.turn.id,
+      attemptId,
+      executionGeneration: claim.turn.executionGeneration,
+    },
+  };
 }
 
 /**
@@ -660,94 +702,93 @@ describe("session tenancy SQL seams inside a managed human's own personal worksp
   }, 180_000);
 
   for (const ownerKind of ["managed", "external"] as const) {
-  test(`an exact private parent attempt creates a same-owner private child (${ownerKind})`, async () => {
-    if (!shared || !client) return;
-    const human = await provisionPrivateChildOwner(ownerKind);
-    const parent = await createSessionWithIdempotencyKey(client.db, {
-      accountId: human.accountId,
-      workspaceId: human.personalWorkspaceId,
-      visibility: "user_private",
-      initialMessage: "private parent",
-      resources: [],
-      metadata: {},
-      createdBy: { kind: "subject", subjectId: human.subjectId },
-      subjectId: human.subjectId,
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      createIdempotencyKey: `private-parent-${crypto.randomUUID()}`,
-    });
-    const submitted = await withWorkspaceSubjectSessionActivityRls(
-      client.db,
-      human.personalWorkspaceId,
-      human.subjectId,
-      (db) =>
-        db.transaction((tx) =>
-          submitHumanPromptInTransaction(tx as unknown as typeof db, {
-            accountId: human.accountId,
-            workspaceId: human.personalWorkspaceId,
-            sessionId: parent.session.id,
-            subjectId: human.subjectId,
-            actor: { type: "human", subjectId: human.subjectId },
-            operationKey: crypto.randomUUID(),
-            delivery: "send",
-            text: "spawn privately",
-            resources: [],
-            model: "test-model",
-            reasoningEffort: "medium",
-            reasoningEffortFallback: "medium",
-            source: "user",
-          }),
-        ),
-    );
-    const attemptId = crypto.randomUUID();
-    const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
-      sessionId: parent.session.id,
-      workflowId: `session-${parent.session.id}`,
-      workflowRunId: crypto.randomUUID(),
-      attemptId,
-      dispatchId: crypto.randomUUID(),
-      trigger: { kind: "next" },
-    });
-    if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId) {
-      throw new Error("private parent attempt was not claimed");
-    }
-    const child = await createSession(client.db, {
-      accountId: human.accountId,
-      workspaceId: human.personalWorkspaceId,
-      visibility: "user_private",
-      initialMessage: "private child",
-      resources: [],
-      metadata: {},
-      model: "test-model",
-      reasoningEffort: "medium",
-      latencyMode: "standard",
-      sandboxBackend: "none",
-      parentSessionId: parent.session.id,
-      sandboxGroupId: parent.session.sandboxGroupId,
-      createdByActor: {
-        type: "agent_attempt",
+    test(`an exact private parent attempt creates a same-owner private child (${ownerKind})`, async () => {
+      if (!shared || !client) return;
+      const human = await provisionPrivateChildOwner(ownerKind);
+      const parent = await createSessionWithIdempotencyKey(client.db, {
+        accountId: human.accountId,
+        workspaceId: human.personalWorkspaceId,
+        visibility: "user_private",
+        initialMessage: "private parent",
+        resources: [],
+        metadata: {},
+        createdBy: { kind: "subject", subjectId: human.subjectId },
+        subjectId: human.subjectId,
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        createIdempotencyKey: `private-parent-${crypto.randomUUID()}`,
+      });
+      const submitted = await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        human.personalWorkspaceId,
+        human.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as unknown as typeof db, {
+              accountId: human.accountId,
+              workspaceId: human.personalWorkspaceId,
+              sessionId: parent.session.id,
+              subjectId: human.subjectId,
+              actor: { type: "human", subjectId: human.subjectId },
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "spawn privately",
+              resources: [],
+              model: "test-model",
+              reasoningEffort: "medium",
+              reasoningEffortFallback: "medium",
+              source: "user",
+            }),
+          ),
+      );
+      const attemptId = crypto.randomUUID();
+      const claim = await claimSessionWorkForAttempt(client.db, human.personalWorkspaceId, {
         sessionId: parent.session.id,
-        turnId: claim.turn.id,
+        workflowId: `session-${parent.session.id}`,
+        workflowRunId: crypto.randomUUID(),
         attemptId,
-        executionGeneration: claim.turn.executionGeneration,
-      },
-    });
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      });
+      if (claim.action !== "claimed" || claim.turn.id !== submitted.turnId) {
+        throw new Error("private parent attempt was not claimed");
+      }
+      const child = await createSession(client.db, {
+        accountId: human.accountId,
+        workspaceId: human.personalWorkspaceId,
+        visibility: "user_private",
+        initialMessage: "private child",
+        resources: [],
+        metadata: {},
+        model: "test-model",
+        reasoningEffort: "medium",
+        latencyMode: "standard",
+        sandboxBackend: "none",
+        parentSessionId: parent.session.id,
+        sandboxGroupId: parent.session.sandboxGroupId,
+        createdByActor: {
+          type: "agent_attempt",
+          sessionId: parent.session.id,
+          turnId: claim.turn.id,
+          attemptId,
+          executionGeneration: claim.turn.executionGeneration,
+        },
+      });
 
-    expect(
-      await getSessionForSubject(client.db, human.personalWorkspaceId, child.id, human.subjectId),
-    ).toMatchObject({
-      parentSessionId: parent.session.id,
-      sandboxGroupId: parent.session.sandboxGroupId,
-      tenancy: {
-        visibility: "private",
-        ownedByCurrentUser: true,
-        authorityEpoch: 1,
-      },
-    });
-  }, 180_000);
-
+      expect(
+        await getSessionForSubject(client.db, human.personalWorkspaceId, child.id, human.subjectId),
+      ).toMatchObject({
+        parentSessionId: parent.session.id,
+        sandboxGroupId: parent.session.sandboxGroupId,
+        tenancy: {
+          visibility: "private",
+          ownedByCurrentUser: true,
+          authorityEpoch: 1,
+        },
+      });
+    }, 180_000);
   }
 
   test("the database rejects a workspace-visible child under a private parent", async () => {
@@ -2155,17 +2196,32 @@ test("private child restricted owner posture, exact metadata and migration repla
     select rolname as name, rolsuper as superuser, rolbypassrls as bypass from pg_roles
     where rolname in (${shared.ownerRole}, 'opengeni_app') order by rolname`;
   expect(roles).toHaveLength(2);
-  for (const role of roles) expect({ superuser: role.superuser, bypass: role.bypass }).toEqual({ superuser: false, bypass: false });
-  const facts = await shared.admin<Array<{ owner: string; definer: boolean; acl: unknown; config: string[]; forced: boolean }>>`
+  for (const role of roles)
+    expect({ superuser: role.superuser, bypass: role.bypass }).toEqual({
+      superuser: false,
+      bypass: false,
+    });
+  const facts = await shared.admin<
+    Array<{ owner: string; definer: boolean; acl: unknown; config: string[]; forced: boolean }>
+  >`
     select pg_get_userbyid(p.proowner) as owner, p.prosecdef as definer, p.proacl::text as acl,
       p.proconfig as config, c.relforcerowsecurity as forced
     from pg_proc p cross join pg_class c
     where p.oid='open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer)'::regprocedure
       and c.oid='organization_memberships'::regclass`;
-  expect(facts[0]?.owner).toBe(shared.ownerRole);expect(facts[0]?.definer).toBe(true);expect(facts[0]?.forced).toBe(true);
-  const source = await readFile(new URL("../drizzle/0895_private_child_membership_authority.sql", import.meta.url), "utf8");
-  await shared.admin.begin(async transaction => { await transaction.unsafe(source); });
-  const after = await shared.admin<Array<{ owner: string; definer: boolean; acl: unknown; config: string[]; forced: boolean }>>`
+  expect(facts[0]?.owner).toBe(shared.ownerRole);
+  expect(facts[0]?.definer).toBe(true);
+  expect(facts[0]?.forced).toBe(true);
+  const source = await readFile(
+    new URL("../drizzle/1003_private_child_membership_authority.sql", import.meta.url),
+    "utf8",
+  );
+  await shared.admin.begin(async (transaction) => {
+    await transaction.unsafe(source);
+  });
+  const after = await shared.admin<
+    Array<{ owner: string; definer: boolean; acl: unknown; config: string[]; forced: boolean }>
+  >`
     select pg_get_userbyid(p.proowner) as owner, p.prosecdef as definer, p.proacl::text as acl,
       p.proconfig as config, c.relforcerowsecurity as forced
     from pg_proc p cross join pg_class c
@@ -2177,8 +2233,14 @@ test("private child restricted owner posture, exact metadata and migration repla
     "GRANT EXECUTE ON FUNCTION open_private_child_session_create_capability(uuid,uuid,uuid,uuid,uuid,uuid,integer) TO PUBLIC",
   ]) {
     let rejected: unknown;
-    try { await shared.admin.begin(async transaction => { await transaction.unsafe(unsafeMetadata); await transaction.unsafe(source); }); }
-    catch (error) { rejected = error; }
+    try {
+      await shared.admin.begin(async (transaction) => {
+        await transaction.unsafe(unsafeMetadata);
+        await transaction.unsafe(source);
+      });
+    } catch (error) {
+      rejected = error;
+    }
     expect(nestedPostgresSqlState(rejected)).toBe("55000");
   }
 });
@@ -2189,37 +2251,78 @@ for (const condition of ["active", "foreign", "interrupted", "revoked"] as const
     const human = await provisionPrivateChildOwner("external");
     const { parent, actor } = await claimedPrivateParent(human);
     if (condition === "interrupted") {
-      await withWorkspaceSubjectSessionActivityRls(client.db, human.personalWorkspaceId, human.subjectId,
-        db => mutateSessionControlInTransaction(db, { accountId: human.accountId, workspaceId: human.personalWorkspaceId,
-          sessionId: parent.session.id, actor: { type: "human", subjectId: human.subjectId }, operationKey: crypto.randomUUID(), action: "pause" }));
+      await withWorkspaceSubjectSessionActivityRls(
+        client.db,
+        human.personalWorkspaceId,
+        human.subjectId,
+        (db) =>
+          mutateSessionControlInTransaction(db, {
+            accountId: human.accountId,
+            workspaceId: human.personalWorkspaceId,
+            sessionId: parent.session.id,
+            actor: { type: "human", subjectId: human.subjectId },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+          }),
+      );
     }
     if (condition === "revoked") {
-      const service = await createOrganizationApiKey(client.db, { accountId: human.accountId, name: "Synthetic membership lifecycle",
-        prefix: "test", keyHash: "7".repeat(64), permissions: ["account:admin"] });
+      const service = await createOrganizationApiKey(client.db, {
+        accountId: human.accountId,
+        name: "Synthetic membership lifecycle",
+        prefix: "test",
+        keyHash: "7".repeat(64),
+        permissions: ["account:admin"],
+      });
       const operationId = crypto.randomUUID();
-      await updateOrganizationMember(client.db, { organizationId: human.accountId, actorSubjectId: `api_key:${service.id}`,
-        operationId, membershipId: human.organizationMembershipId,
-        transition: { kind: "offboard", expectedAuthorizationRevision: 1, operationId, reason: "Synthetic revocation fence" } });
+      await updateOrganizationMember(client.db, {
+        organizationId: human.accountId,
+        actorSubjectId: `api_key:${service.id}`,
+        operationId,
+        membershipId: human.organizationMembershipId,
+        transition: {
+          kind: "offboard",
+          expectedAuthorizationRevision: 1,
+          operationId,
+          reason: "Synthetic revocation fence",
+        },
+      });
     }
     const foreign = condition === "foreign" ? await provisionPrivateChildOwner("managed") : null;
     let failure: unknown;
     let allowed = false;
     try {
-      await withRlsContext(client.db, { accountId: foreign?.accountId ?? human.accountId,
-        workspaceId: foreign?.personalWorkspaceId ?? human.personalWorkspaceId }, async tx => {
-          await tx.execute(sql`select set_config('opengeni.organization_tenancy_lifecycle', 'synthetic_previous_marker', true)`);
+      await withRlsContext(
+        client.db,
+        {
+          accountId: foreign?.accountId ?? human.accountId,
+          workspaceId: foreign?.personalWorkspaceId ?? human.personalWorkspaceId,
+        },
+        async (tx) => {
+          await tx.execute(
+            sql`select set_config('opengeni.organization_tenancy_lifecycle', 'synthetic_previous_marker', true)`,
+          );
           const capability = await openPrivateChildSessionCreateCapability(tx, {
-            accountId: human.accountId, workspaceId: human.personalWorkspaceId, sessionId: crypto.randomUUID(),
-            parentSessionId: parent.session.id, actorTurnId: actor.turnId, actorAttemptId: actor.attemptId,
+            accountId: human.accountId,
+            workspaceId: human.personalWorkspaceId,
+            sessionId: crypto.randomUUID(),
+            parentSessionId: parent.session.id,
+            actorTurnId: actor.turnId,
+            actorAttemptId: actor.attemptId,
             actorExecutionGeneration: actor.executionGeneration,
           });
-          const [marker] = await rawRows<{ value: string }>(tx,
-            sql`select current_setting('opengeni.organization_tenancy_lifecycle',true) as value`);
+          const [marker] = await rawRows<{ value: string }>(
+            tx,
+            sql`select current_setting('opengeni.organization_tenancy_lifecycle',true) as value`,
+          );
           expect(marker?.value).toBe("synthetic_previous_marker");
           await closePrivateSessionCreateCapability(tx, capability.capabilityId);
           allowed = true;
-        });
-    } catch (error) { failure = error; }
+        },
+      );
+    } catch (error) {
+      failure = error;
+    }
     if (condition === "active") expect(failure).toBeUndefined();
     else expect(nestedPostgresSqlState(failure)).toBe("42501");
     expect(allowed).toBe(condition === "active");

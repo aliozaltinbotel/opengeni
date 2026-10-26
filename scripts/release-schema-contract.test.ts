@@ -41,13 +41,15 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.some(
-        (migration) => migration.path === "0896_editable_artifact_materializer_projection.sql",
+        (migration) => migration.path === "1004_editable_artifact_materializer_projection.sql",
       ),
     ).toBe(true);
-    expect(contract.migrations.find((migration) =>
-      migration.path === "0896_editable_artifact_materializer_projection.sql",
-    )).toMatchObject({
-      path: "0896_editable_artifact_materializer_projection.sql",
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "1004_editable_artifact_materializer_projection.sql",
+      ),
+    ).toMatchObject({
+      path: "1004_editable_artifact_materializer_projection.sql",
       deploymentMode: "rolling",
     });
     expect(contract.latestMigration).toBe(contract.migrations.at(-1)?.path);
@@ -2447,8 +2449,8 @@ describe("release schema contract", () => {
       "0897_workspace_owner_administers_subscriptions.sql",
       "0896_shared_child_turn_context_authority.sql",
       "0895_organization_voice_defaults.sql",
-      "0896_editable_artifact_materializer_projection.sql",
-      "0895_private_child_membership_authority.sql",
+      "1004_editable_artifact_materializer_projection.sql",
+      "1003_private_child_membership_authority.sql",
       "0894_model_fact_reconciliation_arrivals.sql",
       "0893_model_fact_ledger_source.sql",
       "0892_model_fact_event_pages.sql",
@@ -2880,7 +2882,7 @@ describe("release schema contract", () => {
       "0546_organization_integration_primitives.sql",
       "0547_idle_command_containment.sql",
       "0549_claude_subscription_usage.sql",
-      "0665_external_workspace_member_empty_permission_updates.sql",
+      "0997_external_workspace_member_empty_permission_updates.sql",
       "0548_lost_sandbox_group_continuity.sql",
       "0550_organization_oauth_pending_states.sql",
       "0552_usage_allowances.sql",
@@ -2985,11 +2987,11 @@ describe("release schema contract", () => {
       "0662_session_first_party_default_intent.sql",
       "0663_inbox_paused_goal_setting.sql",
       "0664_inbox_rich_notifications.sql",
-      "0666_model_call_source_receipts.sql",
-      "0667_recurring_temporary_image_cleanup_fairness.sql",
-      "0668_usage_event_call_attributes.sql",
-      "0669_usage_event_call_attributes_schema_required.sql",
-      "0670_knowledge_index_receipt_owner.sql",
+      "0998_model_call_source_receipts.sql",
+      "0999_recurring_temporary_image_cleanup_fairness.sql",
+      "1000_usage_event_call_attributes.sql",
+      "1001_usage_event_call_attributes_schema_required.sql",
+      "1002_knowledge_index_receipt_owner.sql",
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
       "0672_sandbox_checkpoint_staleness.sql",
@@ -3038,8 +3040,10 @@ describe("release schema contract", () => {
       "0870_invitation_binding_seat_scope.sql",
       "0871_explicit_workspace_recovery.sql",
       "0872_file_app_shot.sql",
-      "0955_human_knowledge_review_first_proposals.sql",
-      "0958_session_creation_receipt.sql",
+      "1006_human_knowledge_review_first_proposals.sql",
+      "1008_session_creation_receipt.sql",
+      "1005_existing_only_external_identity.sql",
+      "1007_pending_tool_model_output_sources.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -4201,13 +4205,15 @@ describe("release schema contract", () => {
     });
     // Keep the published-history exceptions above, while deriving all new
     // forward migrations from the actual release rather than a maintained list.
-    const forwardMigrationPaths = [...new Set([
-      ...companyBrainMigrationPaths,
-      ...appendedMigrationPaths,
-      ...unfilteredSourceContract.migrations
-        .filter((migration) => migration.path.slice(0, 4) > "0326")
-        .map((migration) => migration.path),
-    ])];
+    const forwardMigrationPaths = [
+      ...new Set([
+        ...companyBrainMigrationPaths,
+        ...appendedMigrationPaths,
+        ...unfilteredSourceContract.migrations
+          .filter((migration) => migration.path.slice(0, 4) > "0326")
+          .map((migration) => migration.path),
+      ]),
+    ];
     const sourceContract =
       forwardMigrationPaths.length > 0
         ? await contractWithoutMigrations(forwardMigrationPaths)

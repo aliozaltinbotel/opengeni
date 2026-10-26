@@ -16,9 +16,9 @@ function usageEnqueueBlock(sql: string): string {
   return sql.slice(start, end + "  $create$, target_schema);".length);
 }
 
-describe("migration 0668 usage event call attributes", () => {
+describe("migration 1000 usage event call attributes", () => {
   test("adds a bounded, immutable, nullable column without rewriting historical usage", async () => {
-    const sql = await readFile(join(drizzle, "0668_usage_event_call_attributes.sql"), "utf8");
+    const sql = await readFile(join(drizzle, "1000_usage_event_call_attributes.sql"), "utf8");
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(sql).toContain("ADD COLUMN IF NOT EXISTS attributes jsonb");
     expect(sql).toContain("usage_events_attributes_shape_check");
@@ -34,7 +34,7 @@ describe("migration 0668 usage event call attributes", () => {
       await readFile(join(drizzle, "0533_turn_surface_analytics.sql"), "utf8"),
     );
     const after = usageEnqueueBlock(
-      await readFile(join(drizzle, "0668_usage_event_call_attributes.sql"), "utf8"),
+      await readFile(join(drizzle, "1000_usage_event_call_attributes.sql"), "utf8"),
     );
     const anchor = "        'billingProviderEventId', NEW.billing_provider_event_id\n      );";
     const replacement =

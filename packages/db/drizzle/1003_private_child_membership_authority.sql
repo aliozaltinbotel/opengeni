@@ -65,7 +65,7 @@ BEGIN
   IF before_facts->>'definer' IS DISTINCT FROM 'true'
     OR (before_facts->>'owner')::oid IS DISTINCT FROM
       (SELECT relowner FROM pg_catalog.pg_class WHERE oid='organization_memberships'::regclass) THEN
-    RAISE EXCEPTION '0895 private child authority owner changed' USING ERRCODE='55000';
+    RAISE EXCEPTION '1003 private child authority owner changed' USING ERRCODE='55000';
   END IF;
   IF (SELECT p.proconfig FROM pg_catalog.pg_proc p WHERE p.oid=target)
       IS DISTINCT FROM ARRAY[pg_catalog.format('search_path=pg_catalog, %I, pg_temp',pg_catalog.current_schema())]
@@ -74,13 +74,13 @@ BEGIN
         pg_catalog.aclexplode(coalesce(p.proacl,pg_catalog.acldefault('f',p.proowner))) grant_row
       WHERE p.oid=target AND grant_row.grantee=0 AND grant_row.privilege_type='EXECUTE'
     ) THEN
-    RAISE EXCEPTION '0895 private child authority metadata changed' USING ERRCODE='55000';
+    RAISE EXCEPTION '1003 private child authority metadata changed' USING ERRCODE='55000';
   END IF;
   IF md5(source)='ab9a765665fbeb27e0b0895a0577f404' THEN RETURN; END IF;
   IF md5(source) IS DISTINCT FROM '9835218483e121ce78bb177e35517b29'
     OR array_length(string_to_array(source,membership_anchor),1)<>2
     OR array_length(string_to_array(source,personal_anchor),1)<>2 THEN
-    RAISE EXCEPTION '0895 private child authority pre-image changed' USING ERRCODE='55000';
+    RAISE EXCEPTION '1003 private child authority pre-image changed' USING ERRCODE='55000';
   END IF;
   EXECUTE replace(replace(definition,membership_anchor,membership_replacement),personal_anchor,
     '  IF owner_membership.personal_workspace_id IS DISTINCT FROM p_workspace_id THEN');
@@ -88,7 +88,7 @@ BEGIN
     INTO after_facts FROM pg_catalog.pg_proc p WHERE p.oid=target;
   IF after_facts IS DISTINCT FROM before_facts
     OR (SELECT md5(p.prosrc) FROM pg_catalog.pg_proc p WHERE p.oid=target) IS DISTINCT FROM 'ab9a765665fbeb27e0b0895a0577f404' THEN
-    RAISE EXCEPTION '0895 private child authority post-image changed' USING ERRCODE='55000';
+    RAISE EXCEPTION '1003 private child authority post-image changed' USING ERRCODE='55000';
   END IF;
 END
 $private_child_owner$;
