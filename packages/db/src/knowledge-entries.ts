@@ -493,21 +493,37 @@ export async function knowledgeSelectionSourceIsCurrent(
   } catch {
     return false;
   }
-  const rows = await read(db, context, {
+  let rows = await read(db, context, {
     operation: "get",
     entryId: ref.id,
     view: version[2] === "pending" ? "needs_review" : "published",
     limit: 1,
   });
+  let approvedPendingRevision = false;
+  if (!rows[0] && version[2] === "pending") {
+    // Re-enter the canonical reader: publication never substitutes for current
+    // actor, scope, source visibility or transitive-evidence authorization.
+    rows = await read(db, context, { operation: "get", entryId: ref.id, view: "published", limit: 1 });
+    approvedPendingRevision = true;
+  }
   if (!rows[0]) return false;
   const selected = version[3] === "summary" ? decodeProjection(rows[0], false) : decodeProjection(rows[0], true);
-  let revision = selected.revision;
+  if (approvedPendingRevision && (
+    selected.archived || selected.version !== version[1] + 1 || selected.revision.id !== version[0]
+    || selected.publishedRevisionId !== version[0] || selected.latestRevisionId !== version[0]
+    || selected.revision.outcome !== "published" || selected.revision.reviewBatchId === null
+  )) return false;
+  // knowledge_entry_apply retains a revision while advancing N -> N+1 to
+  // published only for an unedited approval of the exact pending decision.
+  // Reconstruct that original projection solely for its retained digest; never
+  // rewrite history or report the historical proposal as already published.
+  let revision = approvedPendingRevision ? { ...selected.revision, outcome: "pending" as const } : selected.revision;
   if (version[3] === "range") {
     const [, , , , start, end, total] = version;
     if (!("entry" in revision) || revision.entry.content.length !== total) return false;
     revision = { ...revision, entry: { ...revision.entry, content: revision.entry.content.slice(start, end) } };
   }
-  const descriptor = [revision.id, selected.version, revision.outcome,
+  const descriptor = [revision.id, approvedPendingRevision ? version[1] : selected.version, revision.outcome,
     ...(version[3] === "range" ? ["range", version[4], version[5], version[6]] : [version[3]])];
   return !selected.archived && ref.version === JSON.stringify(descriptor)
     && ref.sha256 === createHash("sha256").update(JSON.stringify(revision)).digest("hex");

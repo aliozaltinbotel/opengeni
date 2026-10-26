@@ -639,12 +639,43 @@ test.each(["automatic", "review_first", "off"] as const)("native learning %s gov
   const exact = await retainedReceipt(second, [ref]);
   expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(true);
   if (mode === "review_first") {
-    await reviewKnowledgeEntry(app.db, {...f.identity, actor: {kind: "human", principalKind: "human_session", subjectId: f.suffix,
-      writeScopes: ["workspace"], settingsScopes: ["workspace"], review: true}}, {operationId: crypto.randomUUID(), entryId: record.id,
-      revisionId: record.revision.id, expectedVersion: record.version, decision: "reject"});
+    const reviewer = {...f.identity, actor: {kind: "human" as const, principalKind: "human_session" as const, subjectId: f.suffix,
+      writeScopes: ["workspace" as const], settingsScopes: ["workspace" as const], review: true}};
+    const summary = (await listKnowledgeEntries(app.db, secondContext, {view: "needs_review"})).entries.find(entry => entry.id === record.id)!;
+    const summaryRef = {...ref, version: JSON.stringify([summary.revision.id, summary.version, "pending", "summary"]),
+      sha256: createHash("sha256").update(JSON.stringify(summary.revision)).digest("hex")};
+    const rangedRevision = {...record.revision, entry: {...record.revision.entry, content: record.revision.entry.content.slice(3, 11)}};
+    const rangeRef = {...ref, version: JSON.stringify([record.revision.id, record.version, "pending", "range", 3, 11, record.revision.entry.content.length]),
+      sha256: createHash("sha256").update(JSON.stringify(rangedRevision)).digest("hex")};
+    const originalProjections = [exact, await retainedReceipt(second, [summaryRef]), await retainedReceipt(second, [rangeRef])];
+    for (const projection of originalProjections) expect((await validateRetainedModelSources(app.db, projection)).complete).toBe(true);
+    const approved = await reviewKnowledgeEntry(app.db, reviewer, {operationId: crypto.randomUUID(), entryId: record.id,
+      revisionId: record.revision.id, expectedVersion: record.version, decision: "approve"});
+    expect(approved.revisionId).toBe(record.revision.id);
+    expect(approved.version).toBe(record.version + 1);
+    for (const projection of originalProjections) expect((await validateRetainedModelSources(app.db, projection)).complete).toBe(true);
+    for (const forged of [{...ref, sha256: "0".repeat(64)}, {...ref, version: JSON.stringify([record.revision.id, record.version + 1, "pending", "full"])}]) {
+      expect((await validateRetainedModelSources(app.db, await retainedReceipt(second, [forged]))).complete).toBe(false);
+    }
+    const published = (await getKnowledgeEntry(app.db, secondContext, saved.entryId))!;
+    expect(published.revision.outcome).toBe("published");
+    const publishedRef = {...ref, version: JSON.stringify([published.revision.id, published.version, "published", "full"]),
+      sha256: createHash("sha256").update(JSON.stringify(published.revision)).digest("hex")};
+    expect((await validateRetainedModelSources(app.db, await retainedReceipt(second, [publishedRef]))).complete).toBe(true);
+    // A later edit cannot reuse this bounded approval transition.
+    const correction = await saveKnowledgeEntry(app.db, context, {...command, operationId: crypto.randomUUID(),
+      expectedVersion: published.version, entry: {...command.entry, content: "Changed synthetic handoff observation."}});
     expect((await validateRetainedModelSources(app.db, exact)).complete).toBe(false);
+    const pending = (await getKnowledgeEntry(app.db, secondContext, saved.entryId, {view: "needs_review"}))!;
+    const pendingRef = {...ref, version: JSON.stringify([pending.revision.id, pending.version, "pending", "full"]),
+      sha256: createHash("sha256").update(JSON.stringify(pending.revision)).digest("hex")};
+    const rejected = await retainedReceipt(second, [pendingRef]);
+    expect((await validateRetainedModelSources(app.db, rejected)).complete).toBe(true);
+    await reviewKnowledgeEntry(app.db, reviewer, {operationId: crypto.randomUUID(), entryId: record.id,
+      revisionId: correction.revisionId, expectedVersion: correction.version, decision: "reject"});
+    expect((await validateRetainedModelSources(app.db, rejected)).complete).toBe(false);
   }
-});
+}, 60_000);
 
 
 test("native selected artifact catalog retains complete origins and freezes omitted selections", async () => {

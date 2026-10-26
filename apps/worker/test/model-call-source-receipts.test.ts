@@ -20,18 +20,19 @@ import { createHash } from "node:crypto";
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Agent, tool, Runner, Usage, type ModelRequest, type Model, type StreamEvent, type MCPServer } from "@openai/agents";
 import { acquireSharedTestDatabase, ScriptedModel, functionCall, testSettings, type SharedTestDatabase } from "@opengeni/testing";
-import { appendSessionEventsForTurnAttempt, listSessionEvents, ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
+import { saveAgentLearningSettings, appendSessionEventsForTurnAttempt, listSessionEvents, ensureSessionSkillCatalog, validateRetainedModelSources, submitHumanPromptInTransaction, withWorkspaceSubjectSessionActivityRls, applySessionTurnSettlement, ensureManagedAccessForUser, forkSessionContent, appendSessionHistoryItems, applyContextCompaction, bootstrapWorkspace, claimSessionWorkForAttempt, createDb, createSession, getActiveSessionHistoryItemsPaged, initializeSessionStartAtomically, getOrCreateCompanyProfileSnapshot, getOrCreateWorkspaceInstructionPolicySnapshot, getOrCreatePreferenceRegistrySnapshot, withSessionRlsActorContext, persistModelCallSourceReceipt, readModelCallSourceReceipt, recordModelCallFact, type ModelCallSourceIdentity } from "@opengeni/db";
 import { ModelRequestCaptureModel, withModelRequestCapture, bindModelSourceInput, modelSourceInputBinding, omitModelSourceInputBinding, modelSourceBindings, nativeModelSourceKeyForToolCall, type ModelRequestCapture } from "../../../packages/runtime/src/model-request-capture";
 import { toPostgresLosslessJson } from "../../../packages/db/src/lossless-json";
 let shared:SharedTestDatabase;
 let app:ReturnType<typeof createDb>;
 beforeAll(async()=>{const external=process.env.OPENGENI_MODEL_SOURCE_TEST_APP_URL;if(external){const adminUrl=process.env.OPENGENI_MODEL_SOURCE_TEST_ADMIN_URL;if(!adminUrl)throw Error("External source receipt fixture requires its exact admin URL");const admin=postgres(adminUrl,{max:1});shared={appUrl:external,adminUrl,admin,release:async()=>{await admin.end();}};app=createDb(external,{max:4});return;}const acquired=await acquireSharedTestDatabase("model-call-source-receipts");if(!acquired)throw Error("PostgreSQL required");shared=acquired;app=createDb(shared.appUrl,{max:4});},180_000);
 afterAll(async()=>{await app?.close();await shared?.release();},60_000);
-async function fixture(options:{initialMessage?:string;metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean}={}){
+async function fixture(options:{initialMessage?:string;metadata?:Record<string,unknown>;initialModelContext?:string;initialMessageModelSourceRefs?:import("@opengeni/contracts").ModelSourceRef[];managed?:boolean;learningMode?:"review_first"}={}){
  const suffix=crypto.randomUUID();
  const userId=`native-source-${suffix}`;const subjectId=options.managed?`user:${userId}`:suffix;
  const access=options.managed?await ensureManagedAccessForUser(app.db,{userId,email:`${userId}@example.test`,name:"Synthetic owner"}):await bootstrapWorkspace(app.db,{accountExternalSource:"source-receipt",accountExternalId:suffix,accountName:"Test",workspaceExternalSource:"source-receipt",workspaceExternalId:suffix,workspaceName:"Test",subjectId:suffix});
  const {accountId,workspaceId}=access.workspaceGrants[0]!;if(!workspaceId)throw Error("workspace");
+ if(options.learningMode)await saveAgentLearningSettings(app.db,{accountId,workspaceId,actor:{kind:"human",subjectId,principalKind:"human_session",writeScopes:["workspace"],settingsScopes:["workspace"],review:true}},{operationId:crypto.randomUUID(),scope:"workspace",expectedVersion:0,settings:{knowledge:options.learningMode,skills:"automatic",instructions:"review_first"}});
  const session=await createSession(app.db,{accountId,workspaceId,initialMessage:options.initialMessage??"Synthetic request",...(options.initialMessageModelSourceRefs?{initialMessageModelSourceRefs:options.initialMessageModelSourceRefs}:{}),createdBy:{kind:"subject",subjectId},resources:[],metadata:options.metadata??{},...(options.initialModelContext?{initialModelContext:options.initialModelContext}:{}),model:"scripted",reasoningEffort:"low",latencyMode:"standard",sandboxBackend:"none"});
  await initializeSessionStartAtomically(app.db,{accountId,workspaceId,sessionId:session.id,reasoningEffortFallback:"low",createdEventPayload:{}});
  const attemptId=crypto.randomUUID();const claim=await claimSessionWorkForAttempt(app.db,workspaceId,{sessionId:session.id,workflowId:`session-${session.id}`,workflowRunId:crypto.randomUUID(),dispatchId:suffix,attemptId,trigger:{kind:"next"}});
@@ -1189,7 +1190,7 @@ test("actual native Knowledge GET envelopes retain exact range provenance and li
 
 test("Knowledge GET provenance survives the real sink and fresh-turn hydration; legacy native reads refuse", async () => {
   const { turnInput } = await import("../src/activities/run-input");
-  const { getSessionEvent, persistAttemptToolCatalog, saveKnowledgeEntry } = await import("@opengeni/db");
+  const { getSessionEvent, persistAttemptToolCatalog, saveKnowledgeEntry, reviewKnowledgeEntry } = await import("@opengeni/db");
   const { buildOpenGeniAgent, prepareAgentTools, prepareRunInput } = await import("@opengeni/runtime");
   const { callModelInputFilterForSettings } = await import("../../../packages/runtime/src/model-input");
   const { OpenGeniResponsesModel } = await import("../../../packages/runtime/src/model-provider-routing");
@@ -1197,11 +1198,13 @@ test("Knowledge GET provenance survives the real sink and fresh-turn hydration; 
   const { McpServer } = await import("@modelcontextprotocol/sdk/server/mcp.js");
   const { WebStandardStreamableHTTPServerTransport } = await import("@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js");
   const { default: OpenAI } = await import("openai");
-  for (const variant of ["current", "legacy", "not-found", "error", "third-party"] as const) {
-    const f = await fixture();
+  for (const variant of ["current", "review-first", "legacy", "not-found", "error", "third-party"] as const) {
+    const f = await fixture(variant === "review-first" ? {learningMode: "review_first"} : {});
     let identity = f.identity;
     const human = { ...identity, actor: { kind: "human" as const, subjectId: f.subjectId, principalKind: "human_session" as const, writeScopes: ["workspace" as const], settingsScopes: ["workspace" as const], review: true } };
-    const saved = await saveKnowledgeEntry(app.db, human, { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace", entry: { kind: "note", title: "Synthetic retained page", content: "Synthetic authorized content 🟦" } });
+    const writer = variant === "review-first" ? {...identity, actor: {kind: "agent" as const, ...identity}} : human;
+    const saved = await saveKnowledgeEntry(app.db, writer, { operationId: crypto.randomUUID(), expectedVersion: 0, scope: "workspace", entry: { kind: "note", title: "Synthetic retained page", content: "Synthetic authorized content 🟦" } });
+    expect(saved.outcome).toBe(variant === "review-first" ? "pending" : "published");
     const serverId = variant === "third-party" ? "cendra-pms" : "opengeni";
     const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
     const http = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
@@ -1221,7 +1224,7 @@ test("Knowledge GET provenance survives the real sink and fresh-turn hydration; 
       let requests = 0;
       const client = new OpenAI({ apiKey: "synthetic-key", maxRetries: 0, fetch: async () => {
         requests++;
-        const output = requests < 3 ? [{ type: "function_call", id: `fc_${requests}`, call_id: `call_${requests}`, name: requests === 1 ? "tool_search" : "tool_invoke", status: "completed", arguments: JSON.stringify(requests === 1 ? { query: "", names: [entry.modelName] } : { name: entry.modelName, arguments: variant === "error" ? {} : { entryId: variant === "not-found" ? crypto.randomUUID() : saved.entryId, offset: 3, maxChars: 8 } }) }]
+        const output = requests < 3 ? [{ type: "function_call", id: `fc_${requests}`, call_id: `call_${requests}`, name: requests === 1 ? "tool_search" : "tool_invoke", status: "completed", arguments: JSON.stringify(requests === 1 ? { query: "", names: [entry.modelName] } : { name: entry.modelName, arguments: variant === "error" ? {} : { entryId: variant === "not-found" ? crypto.randomUUID() : saved.entryId, offset: 3, maxChars: 8, ...(variant === "review-first" ? {view: "needs_review"} : {}) } }) }]
           : [{ type: "message", id: `msg_${requests}`, role: "assistant", status: "completed", content: [{ type: "output_text", text: "Synthetic grounded response", annotations: [], logprobs: [] }] }];
         return new Response(JSON.stringify({ id: `response_${requests}`, status: "completed", output, usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } }), { headers: { "content-type": "application/json" } });
       } });
@@ -1257,8 +1260,14 @@ test("Knowledge GET provenance survives the real sink and fresh-turn hydration; 
       const [storedRead] = await shared.admin`select source_basis from session_history_items where id=${read!.id}`;
       const basis = storedRead!.source_basis as import("@opengeni/contracts").ModelHistorySourceBasis;
       expect(basis.rawToolSource?.nativeModelSourceKey).toBeDefined();
-      expect(basis.retainedSources?.filter(ref => ref.owner === "native.knowledge.selection.v2")).toHaveLength(variant === "current" ? 1 : 0);
+      expect(basis.retainedSources?.filter(ref => ref.owner === "native.knowledge.selection.v2")).toHaveLength(variant === "current" || variant === "review-first" ? 1 : 0);
       expect((await applySessionTurnSettlement(app.db, identity.workspaceId, { sessionId: identity.sessionId, turnId: identity.turnId, triggerEventId: f.triggerEventId, attemptId: identity.attemptId, turnStatus: "completed", sessionStatus: "idle", activeTurnId: null, events: [{ type: "turn.completed", payload: {} }] })).action).toBe("settled");
+      if (variant === "review-first") {
+        const approved = await reviewKnowledgeEntry(app.db, human, {operationId: crypto.randomUUID(), entryId: saved.entryId,
+          revisionId: saved.revisionId, expectedVersion: saved.version, decision: "approve"});
+        expect(approved.revisionId).toBe(saved.revisionId);
+        expect(approved.outcome).toBe("published");
+      }
       await withWorkspaceSubjectSessionActivityRls(app.db, identity.workspaceId, f.subjectId, db => submitHumanPromptInTransaction(db, { accountId: identity.accountId, workspaceId: identity.workspaceId, sessionId: identity.sessionId, subjectId: f.subjectId, actor: { type: "human", subjectId: f.subjectId }, operationKey: crypto.randomUUID(), delivery: "send", text: "Synthetic follow-up", modelContext: null, resources: [], reasoningEffort: "low", reasoningEffortFallback: "low", source: "user" }));
       const attemptId = crypto.randomUUID();
       const claimed = await claimSessionWorkForAttempt(app.db, identity.workspaceId, { sessionId: identity.sessionId, workflowId: `session-${identity.sessionId}`, workflowRunId: crypto.randomUUID(), attemptId, dispatchId: crypto.randomUUID(), trigger: { kind: "next" } });
@@ -1271,8 +1280,10 @@ test("Knowledge GET provenance survives the real sink and fresh-turn hydration; 
       if (variant === "legacy") expect(replay.incompleteReasons).toContain("NATIVE_KNOWLEDGE_ORIGIN_MISSING");
       else {
         expect((await validateRetainedModelSources(app.db, { identity, receipt: replay })).complete).toBe(true);
-        if (variant === "current") {
+        if (variant === "current" || variant === "review-first") {
           expect(replay.closure.flatMap(node => node.retainedSources).some(ref => ref.owner === "native.knowledge.selection.v2" && JSON.parse(ref.version!)[3] === "range")).toBe(true);
+          if (variant === "review-first") expect(replay.closure.flatMap(node => node.retainedSources)
+            .some(ref => ref.owner === "native.knowledge.selection.v2" && JSON.parse(ref.version!)[2] === "pending")).toBe(true);
           const [membership] = await shared.admin`select permissions from workspace_memberships where account_id=${identity.accountId} and workspace_id=${identity.workspaceId} and subject_id=${f.subjectId}`;
           try {
             await shared.admin`update workspace_memberships set permissions='["goals:manage"]'::jsonb where account_id=${identity.accountId} and workspace_id=${identity.workspaceId} and subject_id=${f.subjectId}`;
