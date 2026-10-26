@@ -95,6 +95,26 @@ export const CENDRA_HOST_ROUTE_EXEMPTIONS: ReadonlyArray<{
     path: "/v1/workspaces/:workspaceId/external-members/:subjectId",
     reason: "Cendra host: legacy external-member permission update owned by host reconcile",
   },
+  {
+    method: "POST",
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/cancel",
+    reason: "Cendra host: receipt-only cancellation through the host session port",
+  },
+  {
+    method: "GET",
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/cancel/settlement",
+    reason: "Cendra host: content-free settlement read of a host cancellation receipt",
+  },
+  {
+    method: "GET",
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/creation-receipt",
+    reason: "Cendra host: keyed recovery read of the session birth receipt",
+  },
+  {
+    method: "POST",
+    path: "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input",
+    reason: "Cendra host: canonical Goal continuation input through dedicated admission",
+  },
 ];
 
 export function isActionCatalogExempt(path: string, method?: string): boolean {
