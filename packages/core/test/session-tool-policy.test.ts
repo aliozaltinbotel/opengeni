@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   defaultSessionMcpServerIds,
+  workspaceSessionToolPolicyDefaultServerIdsFor,
   resolveSessionToolPolicy,
   resolveTurnToolPolicy,
   scheduledTurnFirstPartyMcpTools,
@@ -298,4 +299,66 @@ describe("session tool policy resolution", () => {
     expect(JSON.stringify(result.effectivePolicy)).not.toContain("Authorization");
     expect(JSON.stringify(result.effectivePolicy)).not.toContain("secret");
   });
+});
+
+test("internal MCP registry entries are never implicit defaults while future user connectors inherit", () => {
+  const servers = [
+    { id: "opengeni" },
+    { id: "internal-carrier", visibility: "internal" as const },
+    { id: "existing-mail" },
+    { id: "new-crm", visibility: "user" as const },
+  ];
+  expect(defaultSessionMcpServerIds(servers)).toEqual(["existing-mail", "new-crm"]);
+  expect(workspaceSessionToolPolicyDefaultServerIdsFor(servers, null)).toEqual([
+    "existing-mail",
+    "new-crm",
+  ]);
+  expect(
+    workspaceSessionToolPolicyDefaultServerIdsFor(servers, {
+      sessionToolDefaults: { mcpServerIds: ["existing-mail"], inheritConnectedMcpServers: true },
+    }),
+  ).toEqual(["existing-mail", "new-crm"]);
+  const result = resolveSessionToolPolicy({
+    toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+    sessionTools: [],
+    availableMcpServerIds: servers.map((server) => server.id),
+    defaultMcpServerIds: defaultSessionMcpServerIds(servers),
+  });
+  expect(result.effectivePolicy.effectiveIds).toEqual(["existing-mail", "new-crm", "opengeni"]);
+});
+
+test("internal MCP visibility is metadata and preserves explicit governed references", () => {
+  const servers = [{ id: "opengeni" }, { id: "internal-carrier", visibility: "internal" as const }];
+  const selected = mcp("internal-carrier", false, true);
+  const result = resolveSessionToolPolicy({
+    toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    sessionTools: [selected],
+    availableMcpServerIds: servers.map((server) => server.id),
+    defaultMcpServerIds: defaultSessionMcpServerIds(servers),
+  });
+  expect(result.toolRefs).toEqual([selected, mcp("opengeni")]);
+  expect(result.effectivePolicy.droppedIds).toEqual([]);
+});
+
+test("internal MCP visibility preserves retained selections and normal workspace-default exclusion recovery", () => {
+  const servers = [{ id: "opengeni" }, { id: "internal-carrier", visibility: "internal" as const }];
+  const input = {
+    sessionTools: [mcp("internal-carrier", true)],
+    availableMcpServerIds: servers.map((server) => server.id),
+    defaultMcpServerIds: defaultSessionMcpServerIds(servers),
+  };
+  const retained = resolveSessionToolPolicy({
+    ...input,
+    toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+  });
+  expect(retained.effectivePolicy.effectiveIds).toEqual(["internal-carrier", "opengeni"]);
+  const recovered = resolveSessionToolPolicy({
+    ...input,
+    toolPolicy: {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+      excludedMcpServerIds: ["internal-carrier"],
+    },
+  });
+  expect(recovered.effectivePolicy.effectiveIds).toEqual(["opengeni"]);
 });

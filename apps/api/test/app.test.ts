@@ -1956,6 +1956,34 @@ describe("GET /v1/config/client", () => {
     return ClientConfig.parse(await response.json());
   }
 
+  test("internal MCP registry entries are absent from user-selectable client configuration", async () => {
+    const config = await fetchClientConfig(
+      testSettings({
+        mcpServers: [
+          {
+            id: "internal-carrier",
+            name: "Internal",
+            url: "https://internal.invalid/mcp",
+            cacheToolsList: false,
+            visibility: "internal",
+          },
+          { id: "user-mail", name: "Mail", url: "https://mail.invalid/mcp", cacheToolsList: false },
+          {
+            id: "user-crm",
+            name: "CRM",
+            url: "https://crm.invalid/mcp",
+            cacheToolsList: false,
+            visibility: "user",
+          },
+        ],
+      }),
+    );
+    expect(config.mcpServers).toEqual([
+      { id: "user-mail", name: "Mail" },
+      { id: "user-crm", name: "CRM" },
+    ]);
+  });
+
   test("compresses JSON responses without changing their decoded contract", async () => {
     const response = await appFor(testSettings()).request("/v1/config/client", {
       headers: { "accept-encoding": "gzip" },

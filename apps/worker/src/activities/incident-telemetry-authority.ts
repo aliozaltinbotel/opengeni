@@ -130,6 +130,7 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
       : (input.plannedTools ?? withFirstPartyTools(input.settings, input.task.agentConfig.tools));
   const resolvedToolPolicy = resolveIncidentTelemetryResponderToolPolicy({
     settingsMcpServerIds: input.settings.mcpServers.map((server) => server.id),
+    settingsDefaultMcpServerIds: defaultSessionMcpServerIds(input.settings.mcpServers),
     capabilityServerIds,
     apiIntegrationServerIds,
     ...(input.executionPolicy
@@ -231,6 +232,8 @@ export async function resolveIncidentTelemetryResponderMetadata(input: {
 /** Resolve the responder's current ID-only MCP policy without materializing runtime secrets. */
 export function resolveIncidentTelemetryResponderToolPolicy(input: {
   settingsMcpServerIds: readonly string[];
+  /** Implicit defaults resolved before static registry visibility metadata is projected to IDs. */
+  settingsDefaultMcpServerIds?: readonly string[];
   capabilityServerIds: readonly string[];
   apiIntegrationServerIds: readonly string[];
   acceptedSessionMcpServerIds?: readonly string[];
@@ -241,14 +244,19 @@ export function resolveIncidentTelemetryResponderToolPolicy(input: {
   } | null;
   plannedTools: Session["tools"];
 }) {
-  const workspaceDefaultMcpServerIds = new Set(input.settingsMcpServerIds);
+  const workspaceDefaultMcpServerIds = new Set(
+    input.settingsDefaultMcpServerIds ?? input.settingsMcpServerIds,
+  );
   for (const id of input.capabilityServerIds) workspaceDefaultMcpServerIds.add(id);
   for (const id of input.apiIntegrationServerIds) workspaceDefaultMcpServerIds.add(id);
   for (const id of input.acceptedSessionMcpServerIds ?? []) {
     workspaceDefaultMcpServerIds.add(id);
   }
 
-  const availableMcpServerIds = new Set(workspaceDefaultMcpServerIds);
+  const availableMcpServerIds = new Set([
+    ...input.settingsMcpServerIds,
+    ...workspaceDefaultMcpServerIds,
+  ]);
   for (const server of input.session?.mcpServers ?? []) {
     availableMcpServerIds.add(server.id);
   }
