@@ -8,6 +8,7 @@ import {
   OrganizationMember,
   OrganizationMembershipRole,
   PutOrganizationWorkspaceMemberRequest,
+  WorkspaceMemberRole,
   RevokeOrganizationInvitationRequest,
   RevokeOrganizationWorkspaceMemberRequest,
 } from "./organization-membership-lifecycle";
@@ -116,6 +117,24 @@ export const HOST_INVITATION_REVISION_CONFLICT = "HOST_INVITATION_REVISION_CONFL
  * settled; a revoke at its current revision still records it as `revoked`.
  */
 export const HOST_INVITATION_NOT_PENDING = "HOST_INVITATION_NOT_PENDING";
+/**
+ * The host owner ensure is not available on this deployment yet (503,
+ * retryable): its database routine ships ungranted and a later release grants
+ * it. Nothing was written.
+ */
+export const HOST_ORGANIZATION_OWNER_UNAVAILABLE = "HOST_ORGANIZATION_OWNER_UNAVAILABLE";
+/**
+ * The host owner ensure refused (409) because the token's subject already has
+ * a membership in the organization that is not an active owner. The ensure
+ * never promotes or reactivates a membership; nothing was changed.
+ */
+export const HOST_ORGANIZATION_OWNER_CONFLICT = "HOST_ORGANIZATION_OWNER_CONFLICT";
+/**
+ * The attribution name a host owner ensure is recorded under. It is not a
+ * `GovernedMutation`: no native route can do it, so there is nothing for
+ * `decide` to refuse.
+ */
+export const HOST_ORGANIZATION_OWNER_ENSURE = "host_owner.ensure";
 
 const encoder = new TextEncoder();
 function boundedOpaqueText(maxBytes: number) {
@@ -223,6 +242,32 @@ export type HostRevokeOrganizationWorkspaceMemberRequest = z.infer<
 >;
 
 /**
+ * Host owner ensure (`POST /v1/host/organizations/:id/host-owner/ensure`):
+ * makes the service token's own subject the active owner of the token's own
+ * organization, for an organization bootstrapped before `bootstrapWorkspace`
+ * wrote that owner. The command names no subject: the token's is the only one.
+ */
+export const HostEnsureOrganizationOwnerRequest = /* @__PURE__ */ defineSchema(() =>
+  hostCommand(z.object({ operationId: primitives.uuid }).strict()),
+);
+export type HostEnsureOrganizationOwnerRequest = z.infer<typeof HostEnsureOrganizationOwnerRequest>;
+
+/**
+ * The host's owner membership. `created` is true only for the call that wrote
+ * it; every later ensure, a replayed operation id included, answers false.
+ */
+export const HostOrganizationOwner = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      membershipId: primitives.uuid,
+      subjectId: z.string().min(1).max(1024),
+      created: z.boolean(),
+    })
+    .strict(),
+);
+export type HostOrganizationOwner = z.infer<typeof HostOrganizationOwner>;
+
+/**
  * Host identity lookup (`POST /v1/host/organizations/:id/identities/lookup`):
  * `identityId` is a native identity id, the `sub` of a host session token.
  * A read, so it takes no `actingExternalUser` and writes no attribution.
@@ -242,6 +287,15 @@ export type HostLookupOrganizationIdentityRequest = z.infer<
  * - `memberships`: the identity's memberships in this organization, oldest
  *   first (a list: an identity can have more than one account). Every status
  *   answers 200; a host MUST refuse to link a membership that is not `active`.
+ *   - `authorizationRevision`: the value a member command's
+ *     `expectedAuthorizationRevision` (change-role, suspend, reactivate,
+ *     offboard) must equal.
+ *   - `sharedWorkspaceAccess`: the membership's grants in the organization's
+ *     shared workspaces (never its Personal workspace), ordered by workspace
+ *     name. `updatedAt` is what a workspace-access command's
+ *     `expectedUpdatedAt` must equal, compared to the microsecond: send it
+ *     back exactly as received. `role` is `custom` when `permissions` is not
+ *     a preset role's set. Empty for a suspended or offboarded membership.
  * - `verifiedEmail`: the email of this organization's member account that the
  *   active login binding signs in to or, without an active binding, of the
  *   oldest active membership's account; null when that email is unverified or
@@ -271,6 +325,18 @@ export const HostOrganizationIdentity = /* @__PURE__ */ defineSchema(() =>
               id: primitives.uuid,
               status: OrganizationMember.shape.status,
               role: OrganizationMembershipRole,
+              authorizationRevision: primitives.positiveInteger,
+              sharedWorkspaceAccess: z.array(
+                z
+                  .object({
+                    workspaceId: primitives.uuid,
+                    membershipId: primitives.uuid,
+                    role: WorkspaceMemberRole,
+                    permissions: z.array(z.string().min(1).max(128)),
+                    updatedAt: primitives.string.datetime({ offset: true }),
+                  })
+                  .strict(),
+              ),
             })
             .strict(),
         )

@@ -50,8 +50,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
- * the running commands a returning runner did not answer for (0984) and the
- * host's lookup of a native identity in its organization (1016). Each is
+ * the running commands a returning runner did not answer for (0984), the
+ * host's lookup of a native identity in its organization (1016) and the
+ * host's ensure of its own owner membership in its organization (1017). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -66,6 +67,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "lookup_organization_host_identity(uuid, text, uuid)",
+  "ensure_organization_host_owner(uuid, text, uuid)",
 ] as const;
 
 /**
@@ -80,19 +82,24 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * 0984 withholds the connected-command re-arm the same way; until it is
  * granted, a runner's inventory report skips it. 1016 withholds the host
  * identity lookup; until it is granted, the lookup resolves the identity
- * through the organization's member list.
+ * through the organization's member list. 1017 withholds the host owner
+ * ensure; until it is granted, bootstrapWorkspace writes no owner membership
+ * and the host's ensure command answers HOST_ORGANIZATION_OWNER_UNAVAILABLE.
  *
  * runtime-posture-compatibility-postgres fails once the pinned previous
  * release knows a routine listed here: grant it then in a rolling migration
  * (for 1016: GRANT EXECUTE ON FUNCTION
  * opengeni_private.lookup_organization_host_identity(uuid, text, uuid) to
  * every application role, as 0947 does), drop it from this list, and remove
- * its "not yet" path (lookupThroughMemberList for 1016).
+ * its "not yet" path (lookupThroughMemberList for 1016; for 1017, GRANT
+ * EXECUTE ON FUNCTION opengeni_private.ensure_organization_host_owner(uuid,
+ * text, uuid) the same way and drop HOST_ORGANIZATION_OWNER_UNAVAILABLE's path).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "lookup_organization_host_identity(uuid, text, uuid)",
+  "ensure_organization_host_owner(uuid, text, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -127,6 +134,16 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_membership_invitations",
     "auth_identities",
     "auth_users",
+    "workspace_memberships",
+    "workspaces",
+  ],
+  "ensure_organization_host_owner(uuid, text, uuid)": [
+    "managed_accounts",
+    "organization_host_command_attributions",
+    "organization_memberships",
+    "workspace_memberships",
+    "workspaces",
+    "workspace_inference_controls",
   ],
 };
 

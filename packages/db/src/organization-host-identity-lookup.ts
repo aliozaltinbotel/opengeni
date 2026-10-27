@@ -1,4 +1,8 @@
-import { OrganizationInvitation, OrganizationMember } from "@opengeni/contracts";
+import {
+  OrganizationAdministrationOverview,
+  OrganizationInvitation,
+  OrganizationMember,
+} from "@opengeni/contracts";
 import { CanonicalHumanIdentityProjection } from "@opengeni/contracts/canonical-human-identities";
 import {
   HostOrganizationIdentity,
@@ -105,11 +109,7 @@ async function lookupThroughMemberList(
     identityStatus: activeIdentity.status,
     verifiedEmail,
     activeLoginBinding: binding ? { id: binding.id, revision: binding.revision } : null,
-    memberships: matched.map(({ member }) => ({
-      id: member.id,
-      status: member.status,
-      role: member.role,
-    })),
+    memberships: await membershipsWithAccess(db, input, matched),
     // The member list cannot see 1016's accepted_at, so acceptedAt is the
     // invitation's updatedAt. They are equal for every accepted invitation:
     // 0263's accept branch is the only writer of status 'accepted' and sets
@@ -124,6 +124,46 @@ async function lookupThroughMemberList(
           : [],
     ),
   });
+}
+
+type HostMembership = HostOrganizationIdentityType["memberships"][number];
+
+/**
+ * Each matched membership with the fences its commands compare: the
+ * authorization revision, and the shared-workspace grants as the
+ * administration overview gives them (workspaces by name, Personal workspaces
+ * excluded, updatedAt in the database's own text). Bounded like the overview:
+ * 500 shared workspaces, 1000 grants each (54000 beyond).
+ */
+async function membershipsWithAccess(
+  db: Database,
+  input: LookupInput,
+  matched: readonly MatchedMember[],
+): Promise<HostMembership[]> {
+  const [row] = await rawRows<{ result: unknown }>(
+    db,
+    sql`select get_organization_administration_overview(
+      ${input.organizationId}::uuid, ${input.actorSubjectId}
+    ) as result`,
+  );
+  const { workspaces } = OrganizationAdministrationOverview.parse(row?.result);
+  return matched.map(({ member }) => ({
+    id: member.id,
+    status: member.status,
+    role: member.role,
+    authorizationRevision: member.authorizationRevision,
+    sharedWorkspaceAccess: workspaces.flatMap((workspace) =>
+      workspace.members
+        .filter((access) => access.organizationMembershipId === member.id)
+        .map((access) => ({
+          workspaceId: workspace.id,
+          membershipId: access.membershipId,
+          role: access.role,
+          permissions: access.permissions,
+          updatedAt: access.updatedAt,
+        })),
+    ),
+  }));
 }
 
 /**

@@ -264,7 +264,11 @@ personal-machine owner lookup withheld; its callers check
 permission error would abort. 0984 created the connected-command re-arm
 withheld the same way, with the same caller check. 1016 created the host
 identity lookup withheld; until it is granted, the route answers through the
-organization's member list.
+organization's member list. 1017 replaced that lookup's body (it stays
+withheld) and created the host owner ensure withheld; until it is granted,
+`bootstrapWorkspace` writes no owner and the host's ensure command answers
+`HOST_ORGANIZATION_OWNER_UNAVAILABLE`. Nothing granted today can write an
+owner membership for a host subject, so that write has no fallback.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

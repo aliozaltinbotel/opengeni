@@ -55,11 +55,24 @@ const hostPort: OrganizationGovernancePort = {
 type App = ReturnType<typeof createApp>;
 type Person = { cookie: string; email: string; userId: string; subjectId: string };
 type HostOrganization = { organizationId: string; businessWorkspaceId: string };
+type SharedWorkspaceAccess = {
+  workspaceId: string;
+  membershipId: string;
+  role: string;
+  permissions: string[];
+  updatedAt: string;
+};
 type LookupBody = {
   identityStatus: string;
   verifiedEmail: string | null;
   activeLoginBinding: { id: string; revision: number } | null;
-  memberships: { id: string; status: string; role: string }[];
+  memberships: {
+    id: string;
+    status: string;
+    role: string;
+    authorizationRevision: number;
+    sharedWorkspaceAccess: SharedWorkspaceAccess[];
+  }[];
   acceptedInvitations: { id: string; acceptedMembershipId: string; acceptedAt: string }[];
 };
 
@@ -226,6 +239,30 @@ async function membershipOf(organizationId: string, subjectId: string) {
   return { id: row!.id, authorizationRevision: Number(row!.authorization_revision) };
 }
 
+/**
+ * The member's shared-workspace grants as the database holds them, with
+ * updatedAt in the exact text the database gives it: the PUT fence compares
+ * it to the microsecond.
+ */
+async function sharedAccessOf(
+  organizationId: string,
+  subjectId: string,
+): Promise<SharedWorkspaceAccess[]> {
+  const rows = await shared.admin<SharedWorkspaceAccess[]>`
+    select access.workspace_id as "workspaceId", access.id as "membershipId",
+      opengeni_private.workspace_member_role(access.role, access.permissions) as role,
+      access.permissions, to_jsonb(access.updated_at) #>> '{}' as "updatedAt"
+    from workspace_memberships access
+    join workspaces workspace on workspace.id = access.workspace_id
+    where access.account_id = ${organizationId} and access.subject_id = ${subjectId}
+      and not exists (
+        select 1 from organization_memberships personal_owner
+        where personal_owner.account_id = ${organizationId}
+          and personal_owner.personal_workspace_id = workspace.id)
+    order by lower(workspace.name), workspace.id`;
+  return rows.map((row) => ({ ...row }));
+}
+
 async function membershipIdOf(organizationId: string, subjectId: string): Promise<string> {
   return (await membershipOf(organizationId, subjectId)).id;
 }
@@ -347,13 +384,27 @@ for (const path of ["member list (1016 not granted)", "lookup by identity (1016 
         from organization_membership_invitations where id = ${firstInvitationId}`;
       // 1016's trigger records the acceptance time from the accepting write.
       expect(invitation!.accepted_at).toEqual(invitation!.updated_at);
-      const membershipId = await membershipIdOf(first.organizationId, member.subjectId);
+      const membership = await membershipOf(first.organizationId, member.subjectId);
+      const membershipId = membership.id;
       expect(invitation!.accepted_membership_id).toBe(membershipId);
+      const sharedWorkspaceAccess = await sharedAccessOf(first.organizationId, member.subjectId);
+      // The invitation's initial workspace, granted with the member role.
+      expect(sharedWorkspaceAccess.map(({ workspaceId, role }) => ({ workspaceId, role }))).toEqual(
+        [{ workspaceId: first.businessWorkspaceId, role: "member" }],
+      );
       expect(body).toEqual({
         identityStatus: "active",
         verifiedEmail: member.email,
         activeLoginBinding: { id: binding!.id, revision: binding!.revision },
-        memberships: [{ id: membershipId, status: "active", role: "member" }],
+        memberships: [
+          {
+            id: membershipId,
+            status: "active",
+            role: "member",
+            authorizationRevision: membership.authorizationRevision,
+            sharedWorkspaceAccess,
+          },
+        ],
         acceptedInvitations: [
           {
             id: firstInvitationId,
@@ -399,16 +450,119 @@ for (const path of ["member list (1016 not granted)", "lookup by identity (1016 
         });
         expect(response.status).toBe(200);
         const body = (await response.json()) as LookupBody;
+        const membership = await membershipOf(first.organizationId, person.subjectId);
+        // Suspension and offboarding remove every shared-workspace grant.
         expect(body.memberships).toEqual([
           {
-            id: await membershipIdOf(first.organizationId, person.subjectId),
+            id: membership.id,
             status,
             role: "member",
+            authorizationRevision: membership.authorizationRevision,
+            sharedWorkspaceAccess: [],
           },
         ]);
         expect(body.acceptedInvitations.map((accepted) => accepted.id)).toEqual([invitationId]);
       }
     }, 180_000);
+
+    test("authorizationRevision is exactly change-role's fence", async () => {
+      const email = `${crypto.randomUUID()}@example.test`;
+      await hostInvite(first, email);
+      const person = await acceptAll(email);
+      const identityId = (await identityOf(person)).id;
+      const read = async () => {
+        const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
+          identityId,
+        });
+        expect(response.status).toBe(200);
+        return ((await response.json()) as LookupBody).memberships[0]!;
+      };
+      const before = await read();
+      const changeRole = async (role: string, expectedAuthorizationRevision: number) =>
+        await governedApp.request(
+          `/v1/host/organizations/${first.organizationId}/members/${before.id}/change-role`,
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${await hostToken(first)}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              actingExternalUser,
+              command: { role, expectedAuthorizationRevision, operationId: crypto.randomUUID() },
+            }),
+          },
+        );
+      const changed = await changeRole("admin", before.authorizationRevision);
+      expect(changed.status).toBe(200);
+      const after = await read();
+      expect(after.role).toBe("admin");
+      expect(after.authorizationRevision).toBe(
+        (await membershipOf(first.organizationId, person.subjectId)).authorizationRevision,
+      );
+      expect(after.authorizationRevision).toBeGreaterThan(before.authorizationRevision);
+      // The value read before the change is stale now.
+      expect((await changeRole("member", before.authorizationRevision)).status).toBe(409);
+      expect((await changeRole("member", after.authorizationRevision)).status).toBe(200);
+    }, 120_000);
+
+    test("sharedWorkspaceAccess updatedAt is exactly the custom-permission PUT's fence", async () => {
+      const email = `${crypto.randomUUID()}@example.test`;
+      await hostInvite(first, email);
+      const person = await acceptAll(email);
+      const identityId = (await identityOf(person)).id;
+      const read = async () => {
+        const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
+          identityId,
+        });
+        expect(response.status).toBe(200);
+        return ((await response.json()) as LookupBody).memberships[0]!;
+      };
+      const before = await read();
+      const [grant] = before.sharedWorkspaceAccess;
+      expect(grant?.workspaceId).toBe(first.businessWorkspaceId);
+      const put = async (permissions: string[], expectedUpdatedAt: string) =>
+        await governedApp.request(
+          `/v1/host/organizations/${first.organizationId}/workspaces/${first.businessWorkspaceId}/members/${before.id}`,
+          {
+            method: "PUT",
+            headers: {
+              authorization: `Bearer ${await hostToken(first)}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              actingExternalUser,
+              command: {
+                role: "custom",
+                permissions,
+                expectedUpdatedAt,
+                operationId: crypto.randomUUID(),
+              },
+            }),
+          },
+        );
+      const custom = ["workspace:read", "sessions:read"];
+      expect((await put(custom, grant!.updatedAt)).status).toBe(200);
+      const after = await read();
+      expect(after.sharedWorkspaceAccess).toEqual(
+        await sharedAccessOf(first.organizationId, person.subjectId),
+      );
+      expect(after.sharedWorkspaceAccess).toEqual([
+        {
+          workspaceId: first.businessWorkspaceId,
+          membershipId: grant!.membershipId,
+          role: "custom",
+          permissions: custom,
+          updatedAt: expect.any(String),
+        },
+      ]);
+      expect(after.sharedWorkspaceAccess[0]!.updatedAt).not.toBe(grant!.updatedAt);
+      // The value read before the PUT is stale now.
+      expect((await put(["workspace:read"], grant!.updatedAt)).status).toBe(409);
+      expect(
+        (await put(["workspace:read"], after.sharedWorkspaceAccess[0]!.updatedAt)).status,
+      ).toBe(200);
+    }, 120_000);
 
     test("an unverified email answers verifiedEmail null", async () => {
       const email = `${crypto.randomUUID()}@example.test`;

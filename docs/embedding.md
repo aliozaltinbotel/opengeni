@@ -938,12 +938,61 @@ workspaces, holding `members:manage`; anything else is `401
 HOST_COMMAND_SERVICE_TOKEN_REQUIRED`. The command must be allowed by
 `decide` with `via: "host"`, and an ungoverned organization answers `403
 ORGANIZATION_NOT_HOST_GOVERNED`. The token's `subjectId` is the database
-actor, checked like any administrator (for example the owner subject the host
-passed to `bootstrapWorkspace`); the native receipt and lifecycle event are
+actor, checked like any administrator: an active `owner` or `admin`
+membership of the organization, otherwise `403
+HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. That is normally the subject the host
+passed to `bootstrapWorkspace`, which owns the organizations it creates (see
+the host owner below). The native receipt and lifecycle event are
 written as for the native route, and `organization_host_command_attributions`
 names the acting external user and service initiator under the same operation
 id. Reusing an operation id for another command or acting user is `409
 HOST_COMMAND_OPERATION_CONFLICT`.
+
+**The host owner.** When `bootstrapWorkspace` creates an organization, it also
+makes the subject it is given the organization's active `owner` (an
+`organization_memberships` row, with the hidden Personal workspace every
+active membership has and no access to it). It does so only for a new
+organization, and never for the `opengeni:local`, `opengeni:configured` and
+`better-auth:user` accounts, which have their own memberships. An
+organization bootstrapped before this has no such owner, so every host
+command and read for it is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. The host
+fixes that once with `POST /v1/host/organizations/:id/host-owner/ensure`
+(`HostEnsureOrganizationOwnerRequest`):
+`{ actingExternalUser, command: { operationId } }`.
+
+- It authenticates with the same service token, but the token's subject need
+  not be an administrator yet. The organization must be governed (otherwise
+  `403 ORGANIZATION_NOT_HOST_GOVERNED`). There is no `decide`: no native route
+  can do this.
+- It only ever makes the token's own `subjectId` the owner of the token's own
+  organization. The command names no subject, and another field is `422`.
+- The subject must own one of the organization's workspaces, which is what
+  `bootstrapWorkspace` left for it. Any other subject, and identity-backed
+  subjects (`user:`, `external_user:`), are `403
+  HOST_COMMAND_ACTOR_NOT_AUTHORIZED`.
+- It is idempotent. The answer (`HostOrganizationOwner`) is
+  `{ membershipId, subjectId, created }`, where `created` is true only for the
+  call that wrote the row. A membership of the subject that is already an
+  active owner is a no-op. Any other membership of the subject (an admin, a
+  member, suspended or revoked) is `409 HOST_ORGANIZATION_OWNER_CONFLICT`: the
+  ensure never promotes or reactivates anyone. It changes no other membership.
+- It is audited like a host command: `organization_host_command_attributions`
+  records it under `mutation = "host_owner.ensure"` with the acting external
+  user, service subject and initiator, and the same operation-id rules apply.
+  The database enforces this: it adds an owner to an existing organization only
+  for an operation id recorded that way by the same subject, and
+  `bootstrapWorkspace`'s own call (with no operation id) only to an
+  organization that has no membership yet.
+  Like the other host commands, it then turns Personal workspaces off.
+- Answers carry `cache-control: no-store`.
+
+The owner write is a new runtime definer
+(`opengeni_private.ensure_organization_host_owner`, migration 1017), so its
+runtime `EXECUTE` is granted one release later. Until then
+`bootstrapWorkspace` writes no owner, and the ensure command answers `503`
+with `error.details.code = "HOST_ORGANIZATION_OWNER_UNAVAILABLE"`
+(`retryable: true`) and writes nothing. After the grant, call the ensure once
+for each organization bootstrapped before it.
 
 A governed organization's people have no Personal workspace to see or start
 work in. The fork turns the organization's Personal workspaces setting off
@@ -991,7 +1040,19 @@ is:
   identityStatus: "active" | "recovery_required" | "disputed" | "disabled";
   verifiedEmail: string | null; // null while the account's email is unverified
   activeLoginBinding: { id: string; revision: number } | null;
-  memberships: { id: string; status: "provisioning" | "active" | "suspended" | "revoked"; role: "owner" | "admin" | "member" }[];
+  memberships: {
+    id: string;
+    status: "provisioning" | "active" | "suspended" | "revoked";
+    role: "owner" | "admin" | "member";
+    authorizationRevision: number; // members/:id/* expectedAuthorizationRevision
+    sharedWorkspaceAccess: {
+      workspaceId: string;
+      membershipId: string; // the workspace grant's id
+      role: "viewer" | "member" | "admin" | "custom";
+      permissions: string[];
+      updatedAt: string; // workspaces/:ws/members/:id expectedUpdatedAt, exact
+    }[];
+  }[];
   acceptedInvitations: { id: string; acceptedMembershipId: string; acceptedAt: string }[];
 }
 ```
@@ -1000,6 +1061,22 @@ is:
 first; it is a list because one identity can sign in through more than one
 account. A suspended or offboarded (`revoked`) member still answers `200`:
 **the host must refuse to link any membership that is not `active`.**
+
+Each membership carries the values the host's member commands fence on, so
+the host does not need a second read before changing someone:
+
+- `authorizationRevision` is what `members/:id/change-role`, `suspend`,
+  `reactivate` and `offboard` take as `expectedAuthorizationRevision`. A stale
+  value is `409`.
+- `sharedWorkspaceAccess` lists the membership's grants in the organization's
+  shared workspaces (never its Personal workspace), ordered by workspace name,
+  as the organization administration overview shows them. `updatedAt` is what
+  `PUT` and `DELETE workspaces/:ws/members/:id` take as `expectedUpdatedAt`.
+  The database compares it to the microsecond, so it keeps full precision
+  (for example `2026-10-27T10:15:30.123456+00:00`): send it back exactly as
+  received. A stale value is `409`. `role` is `custom` when `permissions` is
+  not one of the preset roles. A suspended or offboarded membership has no
+  grants.
 
 `verifiedEmail` is the email of this organization's member account that the
 active login binding signs in to; without an active binding, the oldest
@@ -1019,11 +1096,13 @@ or admin of the organization is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`, the
 code every host command now gives when the database refuses its actor.
 
 The read is one query by identity
-(`opengeni_private.lookup_organization_host_identity`, migration 1016). Like
-every new runtime definer, its runtime `EXECUTE` is granted one release
-later; until then the route answers the same through the organization's
-member list, at one identity projection per member and one invitation page
-per 100 invitations.
+(`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
+adds the fences). Like every new runtime definer, its runtime `EXECUTE` is
+granted one release later. Until then the route gives the same answer through
+the organization's member list, at one identity projection per member, one
+invitation page per 100 invitations and one administration overview read.
+That fallback inherits the overview's bounds: more than 500 shared workspaces,
+or more than 1000 grants in one workspace, is refused.
 
 A host that retries an invitation revoke until it settles needs to know why a
 revoke was refused. The host's `invitations/:id/revoke` command answers `409`
@@ -1079,7 +1158,7 @@ membership functions are not routed through it.
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.
 
-`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and membership rows, then returns an `AccessContext`.
+`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and membership rows, then returns an `AccessContext`. When it creates the account, it also makes the subject the organization's owner (see "The host owner" under Organization Governance), except for the local, configured and managed-human accounts.
 
 The workspace remains the operational boundary. Route and core code must use the workspace id from the grant/path, not a resource id, as the access boundary.
 

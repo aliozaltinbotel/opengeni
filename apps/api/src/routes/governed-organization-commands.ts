@@ -16,12 +16,17 @@ import {
   HOST_INVITATION_NOT_IN_ORGANIZATION,
   HOST_INVITATION_NOT_PENDING,
   HOST_INVITATION_REVISION_CONFLICT,
+  HOST_ORGANIZATION_OWNER_CONFLICT,
+  HOST_ORGANIZATION_OWNER_ENSURE,
+  HOST_ORGANIZATION_OWNER_UNAVAILABLE,
   HostChangeOrganizationMemberRoleRequest,
+  HostEnsureOrganizationOwnerRequest,
   HostInviteOrganizationMemberRequest,
   HostLookupOrganizationIdentityRequest,
   HostOrganizationIdentity,
   HostOrganizationInvitation,
   HostOrganizationMemberLifecycleRequest,
+  HostOrganizationOwner,
   HostReactivateOrganizationMemberRequest,
   HostRevokeOrganizationInvitationRequest,
   HostRevokeOrganizationWorkspaceMemberRequest,
@@ -38,8 +43,10 @@ import {
 } from "@opengeni/core";
 import {
   createOrganizationInvitation,
+  ensureOrganizationHostOwner,
   getOrganizationInvitationForAdministration,
   getWorkspace,
+  hostOrganizationOwnerGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
   putOrganizationWorkspaceMember,
@@ -79,8 +86,9 @@ type HostCommandAuthority = {
 };
 
 /**
- * Host commands for organizations an embedding host governs, and the host's
- * identity lookup and invitation read. Each command runs the
+ * Host commands for organizations an embedding host governs, the host's
+ * identity lookup and invitation read, and the ensure of the host's own owner
+ * membership. Each membership command runs the
  * same membership, invitation or workspace-access operation as the native
  * route, so its receipt and lifecycle event are the native ones; the acting
  * external user is recorded next to them under the same operation id.
@@ -327,6 +335,57 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
     }
   });
 
+  // The token's own subject becomes the owner of the token's own organization,
+  // for an organization bootstrapped before bootstrapWorkspace wrote that
+  // owner. Not a governed mutation: no native route does it, and the host is
+  // the caller. Recorded like a host command, under its own attribution name.
+  // Before the owner exists the subject is no administrator, so this runs on
+  // requireHostService and applies the governed policy only afterwards.
+  app.post(`${base}/host-owner/ensure`, async (context) => {
+    context.header("cache-control", "no-store");
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
+    const { actingExternalUser, command } = await parseCommand(
+      context,
+      HostEnsureOrganizationOwnerRequest,
+    );
+    if (!(await hostOrganizationOwnerGranted(deps.db))) throw hostOrganizationOwnerUnavailable();
+    await recordAttribution(deps, authority, {
+      mutation: HOST_ORGANIZATION_OWNER_ENSURE,
+      operationId: command.operationId,
+      actingExternalUser,
+    });
+    let owner: HostOrganizationOwner | null;
+    try {
+      owner = await ensureOrganizationHostOwner(deps.db, {
+        organizationId: authority.organizationId,
+        subjectId: authority.actorSubjectId,
+        operationId: command.operationId,
+      });
+    } catch (error) {
+      if (nestedPostgresSqlState(error) === "55000")
+        throw new ApiHttpError(409, {
+          code: "conflict",
+          message: "This subject's membership here is not an active owner; it is never promoted.",
+          retryable: false,
+          outcomeUnknown: false,
+          details: { code: HOST_ORGANIZATION_OWNER_CONFLICT },
+        });
+      rethrowHostMembershipError(error);
+    }
+    if (!owner) throw hostOrganizationOwnerUnavailable();
+    try {
+      await applyGovernedOrganizationPolicy(deps, {
+        organizationId: authority.organizationId,
+        actorSubjectId: authority.actorSubjectId,
+      });
+    } catch (error) {
+      rethrowHostMembershipError(error);
+    }
+    return context.json(HostOrganizationOwner.parse(owner));
+  });
+
   // A read: no governed mutation to decide and no attribution to record.
   app.post(`${base}/identities/lookup`, async (context) => {
     // Every answer, refusals included, is about one person: never cached.
@@ -547,7 +606,7 @@ async function recordAttribution(
   deps: ApiRouteDeps,
   authority: HostCommandAuthority,
   input: {
-    mutation: GovernedMutation;
+    mutation: GovernedMutation | typeof HOST_ORGANIZATION_OWNER_ENSURE;
     operationId: string;
     actingExternalUser: ActingExternalUser;
   },
@@ -611,6 +670,16 @@ function organizationNotHostGoverned(): ApiHttpError {
     retryable: false,
     outcomeUnknown: false,
     details: { code: ORGANIZATION_NOT_HOST_GOVERNED },
+  });
+}
+
+function hostOrganizationOwnerUnavailable(): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "Ensuring a host owner is not available on this deployment yet.",
+    retryable: true,
+    outcomeUnknown: false,
+    details: { code: HOST_ORGANIZATION_OWNER_UNAVAILABLE },
   });
 }
 

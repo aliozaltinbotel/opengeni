@@ -10,9 +10,11 @@ import {
   createDb,
   createManagedOrganization,
   createOrganizationInvitation,
+  createOrganizationWorkspace,
   hostIdentityLookupGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
+  putOrganizationWorkspaceMember,
   type DbClient,
 } from "../src";
 import { synchronizeCanonicalHumanLoginBindings } from "../src/canonical-human-identities";
@@ -193,8 +195,8 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
     const throughMembers = await lookup(world.identityId);
     await setLookupGrant(true);
     const byIdentity = await lookup(world.identityId);
-    const [membership] = await fixture.admin<{ id: string }[]>`
-      select id from organization_memberships
+    const [membership] = await fixture.admin<{ id: string; authorization_revision: string }[]>`
+      select id, authorization_revision from organization_memberships
       where account_id = ${world.organizationId} and subject_id = ${world.memberSubjectId}`;
     const [invitation] = await fixture.admin<{ accepted_at: Date }[]>`
       select accepted_at from organization_membership_invitations where id = ${world.invitationId}`;
@@ -202,7 +204,15 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
       identityStatus: "active",
       verifiedEmail: world.memberEmail,
       activeLoginBinding: { id: expect.any(String), revision: 1 },
-      memberships: [{ id: membership!.id, status: "active", role: "member" }],
+      memberships: [
+        {
+          id: membership!.id,
+          status: "active",
+          role: "member",
+          authorizationRevision: Number(membership!.authorization_revision),
+          sharedWorkspaceAccess: [],
+        },
+      ],
       acceptedInvitations: [
         {
           id: world.invitationId,
@@ -289,6 +299,85 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
     expect(byIdentity?.verifiedEmail).toBeNull();
     expect(byIdentity?.activeLoginBinding).toEqual({ id: binding!.id, revision: 1 });
     expect(byIdentity?.memberships).toHaveLength(1);
+    expect(throughMembers).toEqual(byIdentity);
+  });
+
+  test("both paths answer the revision and shared-workspace grants the fences compare", async () => {
+    if (!fixture) return;
+    const db = client!.db;
+    const member = await memberAccount();
+    const { identityId } = await synchronizeCanonicalHumanLoginBindings(db, member.userId);
+    const [membership] = await fixture.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${world.organizationId} and subject_id = ${member.subjectId}`;
+    const workspaces = [];
+    for (const name of ["Zeta workspace", "alpha workspace"])
+      workspaces.push(
+        await createOrganizationWorkspace(db, {
+          organizationId: world.organizationId,
+          actorSubjectId: world.ownerSubjectId,
+          name,
+          operationId: crypto.randomUUID(),
+        }),
+      );
+    const grants = [
+      { role: "viewer" as const, expectedUpdatedAt: null, operationId: crypto.randomUUID() },
+      {
+        role: "custom" as const,
+        permissions: ["workspace:read" as const, "sessions:read" as const],
+        expectedUpdatedAt: null,
+        operationId: crypto.randomUUID(),
+      },
+    ];
+    for (const [index, access] of grants.entries())
+      await putOrganizationWorkspaceMember(db, {
+        organizationId: world.organizationId,
+        actorSubjectId: world.ownerSubjectId,
+        workspaceId: workspaces[index]!.id,
+        targetOrganizationMembershipId: membership!.id,
+        access,
+      });
+    const [revision] = await fixture.admin<{ authorization_revision: string }[]>`
+      select authorization_revision from organization_memberships where id = ${membership!.id}`;
+    // What the fences read, in the database's own text for the instant.
+    const sharedWorkspaceAccess = await fixture.admin<
+      {
+        workspaceId: string;
+        membershipId: string;
+        permissions: string[];
+        updatedAt: string;
+        name: string;
+      }[]
+    >`
+      select access.workspace_id as "workspaceId", access.id as "membershipId",
+        access.permissions, to_jsonb(access.updated_at) #>> '{}' as "updatedAt",
+        workspace.name
+      from workspace_memberships access
+      join workspaces workspace on workspace.id = access.workspace_id
+      where access.subject_id = ${member.subjectId}
+        and access.account_id = ${world.organizationId}
+        and access.workspace_id in (${workspaces[0]!.id}, ${workspaces[1]!.id})
+      order by lower(workspace.name), workspace.id`;
+    const { throughMembers, byIdentity } = await bothPaths(identityId);
+    expect(byIdentity?.memberships).toEqual([
+      {
+        id: membership!.id,
+        status: "active",
+        role: "member",
+        authorizationRevision: Number(revision!.authorization_revision),
+        sharedWorkspaceAccess: sharedWorkspaceAccess.map((row) => ({
+          workspaceId: row.workspaceId,
+          membershipId: row.membershipId,
+          role: row.name === "alpha workspace" ? "custom" : "viewer",
+          permissions: row.permissions,
+          updatedAt: row.updatedAt,
+        })),
+      },
+    ]);
+    expect(byIdentity?.memberships[0]!.sharedWorkspaceAccess.map((grant) => grant.role)).toEqual([
+      "custom",
+      "viewer",
+    ]);
     expect(throughMembers).toEqual(byIdentity);
   });
 

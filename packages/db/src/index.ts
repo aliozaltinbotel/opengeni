@@ -1182,6 +1182,7 @@ import {
   type WorkspaceControlRow,
 } from "./session-control";
 import { ensureManagedHumanPersonalWorkspace } from "./managed-human-provisioning";
+import { ensureBootstrappedOrganizationOwner } from "./organization-host-owner";
 import {
   sessionRealtimeIsActiveInTransaction,
   settleExpiredSessionRealtimeInTransaction,
@@ -1375,6 +1376,12 @@ export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
 export * from "./organization-host-command-attributions";
 export * from "./organization-host-identity-lookup";
+export {
+  HOST_ORGANIZATION_OWNER_ROUTINE,
+  ensureOrganizationHostOwner,
+  hostOrganizationOwnerGranted,
+  type HostOrganizationOwnerResult,
+} from "./organization-host-owner";
 import {
   assertActiveManagedHumanOrganizationMembership,
   getOrganizationAdministrationOverview,
@@ -2360,6 +2367,9 @@ export async function bootstrapWorkspace(
         ),
       )
       .limit(1);
+    // A new organization's host owner is written below, once the subject's
+    // workspace grant exists.
+    const organizationCreated = !account;
     if (!account) {
       [account] = await tx
         .insert(schema.managedAccounts)
@@ -2491,6 +2501,19 @@ export async function bootstrapWorkspace(
           updatedAt: new Date(),
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
+    }
+    if (organizationCreated) {
+      // Host commands and reads run as this subject, checked like any
+      // organization administrator: it owns the organization it provisioned.
+      await setRlsContext(tx as unknown as Database, {
+        accountId: account.id,
+        workspaceId: null,
+      });
+      await ensureBootstrappedOrganizationOwner(tx as unknown as Database, {
+        organizationId: account.id,
+        subjectId: input.subjectId,
+        accountExternalSource: input.accountExternalSource,
+      });
     }
     if (
       input.accountExternalSource === "opengeni:local" &&
