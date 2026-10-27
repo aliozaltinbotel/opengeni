@@ -10,6 +10,7 @@ afterAll(() => GlobalRegistrator.unregister());
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { CatalogItemPage } = await import("./catalog-item-page");
+const { configurePageAppHost } = await import("@opengeni/react/app/lib/app-host");
 type CapabilityCatalogItem = import("@opengeni/react/app/types").CapabilityCatalogItem;
 
 async function render(node: import("react").ReactNode) {
@@ -103,6 +104,34 @@ describe("connector page account management", () => {
       } finally {
         await view.unmount();
       }
+    }
+  });
+  test("with Secrets hidden by the host extension, 1Password's page has no Secrets link", async () => {
+    configurePageAppHost({ hiddenNativeDestinations: ["secrets"] });
+    const view = await render(
+      <CatalogItemPage
+        {...common}
+        item={item({
+          id: "api:1password",
+          kind: "api",
+          source: "built_in",
+          name: "1Password",
+          providerDomain: "1password.com",
+          surfaceType: "first_party_onepassword",
+          enabled: true,
+          authKind: "api_key",
+          mcpUrl: null,
+          endpointUrl: null,
+        })}
+        onAction={() => {}}
+      />,
+    );
+    try {
+      expect(view.container.querySelector('a[href*="/secrets"]')).toBeNull();
+      expect(view.container.textContent).not.toContain("Manage 1Password");
+    } finally {
+      await view.unmount();
+      configurePageAppHost({ hiddenNativeDestinations: undefined });
     }
   });
   test("the header action that only disables the connector says so, and accounts are managed per row", async () => {

@@ -4,11 +4,11 @@ import {
   type ModelPolicyPickerGroupPresentation,
 } from "../../components/model-policy-picker";
 import type { ComponentPropsWithoutRef } from "react";
-import { BrandMark } from "./brand-mark";
+import { OpengeniMark } from "./brand-mark";
 
 /** First-party branding is explicit; embedded package defaults stay neutral. */
 export const openGeniGroupPresentation: ModelPolicyPickerGroupPresentation = {
-  opengeni_credits: { label: "Opengeni", icon: <BrandMark /> },
+  opengeni_credits: { label: "Opengeni", icon: <OpengeniMark /> },
 };
 
 export function BillingClassMark(props: ComponentPropsWithoutRef<typeof SharedBillingClassMark>) {

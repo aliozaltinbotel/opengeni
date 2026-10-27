@@ -15,6 +15,8 @@ import {
 } from "react";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
+import type { ToolRegistryEntry } from "../../timeline";
+import type { HostExtension, NativeDestination } from "../host-extension";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import type { MessageContextPill, MessageContextStore } from "./message-context";
@@ -52,6 +54,18 @@ export type AppHost = Readonly<{
    * page's own event stream (no second connection).
    */
   onSessionState?: ((state: SessionViewState) => void) | undefined;
+  /** The host extension's tool cards, ahead of the built-in renderers. */
+  toolRegistryEntries?: readonly ToolRegistryEntry[] | undefined;
+  /** Native destinations the host extension hides from every link source. */
+  hiddenNativeDestinations?: readonly NativeDestination[] | undefined;
+  /** The host extension's mark and wordmark, in place of the stock brand. */
+  brand?: HostExtension["brand"] | undefined;
+  /** The product name the console shows in place of the stock one. */
+  productName?: string | undefined;
+  /** Narrows the workspaces the console's pickers and landing offer (see `hostFilteredWorkspaces`). */
+  workspaceFilter?: HostExtension["workspaceFilter"] | undefined;
+  /** The host extension's hooks, awaited (bounded) before sign-out and workspace switches. */
+  lifecycle?: HostExtension["lifecycle"] | undefined;
 }>;
 
 const AppHostContext = createContext<AppHost | null>(null);
@@ -77,6 +91,18 @@ export function AppHostProvider(props: { host: AppHost; children?: ReactNode }) 
 /** This app's host: the embed's own, or the page's. */
 export function useAppHost(): Partial<AppHost> {
   return useContext(AppHostContext) ?? pageHost;
+}
+
+const NOTHING_HIDDEN: readonly NativeDestination[] = [];
+
+/** The native destinations the host extension hides; none in the stock console. */
+export function useHiddenNativeDestinations(): readonly NativeDestination[] {
+  return useAppHost().hiddenNativeDestinations ?? NOTHING_HIDDEN;
+}
+
+/** Whether a link to this native destination may be offered. */
+export function useNativeDestinationVisible(destination: NativeDestination): boolean {
+  return !useHiddenNativeDestinations().includes(destination);
 }
 
 /** Whether this app is embedded in a page it does not own. */

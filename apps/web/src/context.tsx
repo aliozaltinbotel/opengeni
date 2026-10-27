@@ -55,6 +55,7 @@ import {
 import { CreditRequiredGate } from "@opengeni/react/app/components/credit-required-gate";
 import type { PendingSlackLink } from "@opengeni/react/app/app-context";
 import type { ClientConfig, SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
+import { afterHostSignOut } from "@/host-extension/lifecycle";
 import {
   clearPendingDeveloperSetup,
   pendingDeveloperSetupFor,
@@ -148,12 +149,15 @@ const webAppStateHost: AppStateHost = {
   fetchAuthSession,
   signInEmail,
   signUpEmail,
-  signOutManaged,
+  // Every native sign-out first waits for the host extension's onSignOut hook
+  // (bounded), after the console has unmounted its authenticated readers and
+  // while the session is still valid.
+  signOutManaged: () => afterHostSignOut(signOutManaged),
   startManagedSocialSignIn,
   configureManagedActorEpoch,
   getStoredAccessKey,
   hasExternalAccessTokenSource,
-  signOutExternalAccess,
+  signOutExternalAccess: () => afterHostSignOut(signOutExternalAccess),
   setStoredAccessKey,
   clearStoredAccessKey,
   slackLink: createSlackLinkPrepareController<SlackUserLinkAccessRequest>(

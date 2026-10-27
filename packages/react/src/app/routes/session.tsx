@@ -22,6 +22,7 @@ import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
 import { useMessageSenderRenderer } from "../components/session/message-senders";
+import { useHostToolRegistry } from "../lib/host-tool-registry";
 import {
   createFailedSessionRetry,
   type FailedSessionRetryInput,
@@ -158,7 +159,11 @@ import {
   SessionMachineAccessNotice,
 } from "../components/session/session-machine-access-notice";
 import { LoadingPanel, ProblemPanel } from "../components/common";
-import { useHostMessageContext, useReportSessionState } from "../lib/app-host";
+import {
+  useHostMessageContext,
+  useNativeDestinationVisible,
+  useReportSessionState,
+} from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { useSessionOpening } from "../lib/session-opening";
 import { creationHandoffReconciled } from "../lib/session-creation-handoff";
@@ -387,6 +392,8 @@ export function SessionRoute({
   const context = useAppContext();
   const rail = useRail();
   const navigate = useNavigate();
+  const pluginsVisible = useNativeDestinationVisible("plugins");
+  const knowledgeVisible = useNativeDestinationVisible("state");
   const page = usePage();
   const consumeRealtimeAutostart = useCallback(() => {
     void navigate({
@@ -1340,13 +1347,28 @@ export function SessionRoute({
           params: { workspaceId, sessionId: nextSessionId },
         })
       }
-      onMemoryClick={(memoryId) =>
-        void navigate({
-          to: "/workspaces/$workspaceId/memory",
-          params: { workspaceId },
-          search: { memory: memoryId },
-        })
+      onMemoryClick={
+        knowledgeVisible
+          ? (memoryId) =>
+              void navigate({
+                to: "/workspaces/$workspaceId/memory",
+                params: { workspaceId },
+                search: { memory: memoryId },
+              })
+          : undefined
       }
+      canOpenLearningRefusal={(place) => {
+        switch (place.kind) {
+          case "skill":
+          case "skills":
+            return pluginsVisible;
+          case "instructions":
+          case "knowledge":
+            return knowledgeVisible;
+          case "learning-settings":
+            return true;
+        }
+      }}
       onLearningRefusalOpen={(place) => {
         switch (place.kind) {
           case "skill":
@@ -1963,8 +1985,10 @@ function SessionChatPane(props: {
   onOpenSession: (sessionId: string) => void;
   /** Current titles for the agents this session spawns, messages, and hears from. */
   resolveSessionTitle: (sessionId: string) => string | null;
-  /** Deep-link a timeline memory step to its first-class workspace Memory record. */
-  onMemoryClick: (memoryId: string) => void;
+  /** Deep-link a timeline memory step to its Knowledge record; absent when Knowledge is hidden. */
+  onMemoryClick: ((memoryId: string) => void) | undefined;
+  /** Whether the app offers the place a refused learning change links to. */
+  canOpenLearningRefusal: (place: LearningRefusalPlace) => boolean;
   /** Opens where a person can make a refused Skill, instruction, or Knowledge change. */
   onLearningRefusalOpen: (place: LearningRefusalPlace) => void;
   onNewSession: () => void;
@@ -2468,6 +2492,7 @@ function SessionChatPane(props: {
     ],
   );
   const navigate = useNavigate();
+  const secretsVisible = useNativeDestinationVisible("secrets");
   const launch = props.launch ?? EMPTY_COMPOSER_LAUNCH;
   const launchModel = launch.model;
   const launchEffort = launch.effort;
@@ -3186,6 +3211,7 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     context.accessContext.subjectId,
   );
+  const toolRegistry = useHostToolRegistry();
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -3550,7 +3576,10 @@ function SessionChatPane(props: {
           {
             <>
               <div data-testid="session-timeline" className="min-h-0 min-w-0 flex-1">
-                <LearningRefusalActionsProvider onOpen={props.onLearningRefusalOpen}>
+                <LearningRefusalActionsProvider
+                  onOpen={props.onLearningRefusalOpen}
+                  canOpen={props.canOpenLearningRefusal}
+                >
                   <KnowledgeActivityProvider
                     onInspect={props.onMemoryClick}
                     onRetryFile={(fileId) =>
@@ -3571,6 +3600,7 @@ function SessionChatPane(props: {
                       onViewDetails={viewToolReviewDetails}
                     >
                       <MessageTimeline
+                        toolRegistry={toolRegistry}
                         resolveLink={resolveLink}
                         renderMessageSender={renderMessageSender}
                         allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}
@@ -3999,11 +4029,14 @@ function SessionChatPane(props: {
                                     });
                                     toast.success(`Saved ${item.name} to ${target.name}`);
                                   }}
-                                  onManage={() =>
-                                    void navigate({
-                                      to: "/workspaces/$workspaceId/secrets",
-                                      params: { workspaceId: props.session.workspaceId },
-                                    })
+                                  onManage={
+                                    secretsVisible
+                                      ? () =>
+                                          void navigate({
+                                            to: "/workspaces/$workspaceId/secrets",
+                                            params: { workspaceId: props.session.workspaceId },
+                                          })
+                                      : undefined
                                   }
                                 />
                               ),

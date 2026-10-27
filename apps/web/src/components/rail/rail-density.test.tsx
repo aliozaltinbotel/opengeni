@@ -14,6 +14,8 @@ let pathname = "/workspaces/workspace-1/sessions/session-1";
 mock.module("@tanstack/react-router", () => ({
   useRouterState: ({ select }: { select: (state: unknown) => unknown }) =>
     select({ location: { pathname } }),
+  // Host extension nav links; the stock stub renders none.
+  Link: ({ children }: { children?: ReactNode }) => <a href="#extension">{children}</a>,
 }));
 
 mock.module("@opengeni/react/app/components/rail/rail-context", () => ({

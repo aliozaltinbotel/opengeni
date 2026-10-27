@@ -21,8 +21,14 @@ import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
 import { requestCommandMenu } from "../../lib/actions/events";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
 import { OPEN_SESSION_SEARCH_EVENT } from "../../lib/session-search-route";
-import { workspaceManagementLocation } from "../../lib/workspace-management-location";
+import {
+  workspaceManagementLocation,
+  workspaceSwitchTarget,
+} from "../../lib/workspace-management-location";
 import { useUiEventTarget } from "../../lib/ui-events";
+import { useAppHost } from "../../lib/app-host";
+import { switchWorkspaceAfterHostHook } from "../../lib/host-lifecycle";
+import { hostFilteredWorkspaces } from "../../host-extension";
 
 const SessionSearchDialog = lazy(() => import("../session/session-search-dialog"));
 
@@ -123,17 +129,24 @@ function readStoredWidth(): number {
   }
 }
 
+/** A stable empty default, so `openWorkspace` keeps its identity across renders. */
+const NO_EXTENSION_SETTINGS_PATHS: readonly string[] = [];
+
 export function RailProvider({
   workspaceId,
+  extensionSettingsPaths = NO_EXTENSION_SETTINGS_PATHS,
   children,
 }: {
   workspaceId: string;
+  /** The host extension's settings-mode route paths (see `workspaceManagementLocation`). */
+  extensionSettingsPaths?: readonly string[];
   children: ReactNode;
 }) {
   const windowEvents = useUiEventTarget("window");
   const navigate = useNavigate();
   const router = useRouter();
   const appContext = useAppContext();
+  const { lifecycle, workspaceFilter } = useAppHost();
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchMounted, setSearchMounted] = useState(false);
   // What to search for when the dialog opens from the ⌘K menu ("Search messages for …").
@@ -240,9 +253,10 @@ export function RailProvider({
     }
   }, []);
 
+  // Every switch out of this workspace waits for the host extension's
+  // onWorkspaceSwitch hook (bounded) before it leaves; see host-lifecycle.ts.
   const openWorkspace = useCallback(
     (nextWorkspaceId: string) => {
-      appContext.resetSessionView();
       setDrawerOpen(false);
       // In settings, switching workspace keeps the same settings page.
       const current = router.state.location;
@@ -250,63 +264,50 @@ export function RailProvider({
         current.pathname,
         workspaceId,
         (current.search as { section?: unknown }).section,
+        extensionSettingsPaths,
       );
-      if (settings?.kind === "settings") {
-        void navigate({
-          to: "/workspaces/$workspaceId/settings",
-          params: { workspaceId: nextWorkspaceId },
-          search: settings.section ? { section: settings.section } : {},
-        });
-        return;
-      }
-      if (settings?.kind === "page") {
-        void navigate({ to: settings.target, params: { workspaceId: nextWorkspaceId } });
-        return;
-      }
-      if (settings?.kind === "organization") {
-        void navigate({
-          to: "/workspaces/$workspaceId/organization",
-          params: { workspaceId: nextWorkspaceId },
-          search: settings.section ? { section: settings.section } : {},
-        });
-        return;
-      }
-      void navigate({
-        to: "/workspaces/$workspaceId/sessions",
-        params: { workspaceId: nextWorkspaceId },
+      switchWorkspaceAfterHostHook(lifecycle, workspaceId, nextWorkspaceId, () => {
+        appContext.resetSessionView();
+        void navigate(workspaceSwitchTarget(settings, nextWorkspaceId));
       });
     },
-    [appContext, navigate, router, workspaceId, setDrawerOpen],
+    [appContext, navigate, router, workspaceId, extensionSettingsPaths, setDrawerOpen, lifecycle],
   );
 
   const openOrg = useCallback(
     (accountId: string) => {
-      const target = appContext.workspaces.find((workspace) => workspace.accountId === accountId);
+      const target = hostFilteredWorkspaces(appContext.workspaces, workspaceFilter).find(
+        (workspace) => workspace.accountId === accountId,
+      );
       if (!target) {
         return;
       }
-      appContext.resetSessionView();
       setDrawerOpen(false);
-      void navigate({
-        to: "/workspaces/$workspaceId/sessions",
-        params: { workspaceId: target.id },
+      switchWorkspaceAfterHostHook(lifecycle, workspaceId, target.id, () => {
+        appContext.resetSessionView();
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId: target.id },
+        });
       });
     },
-    [appContext, navigate, setDrawerOpen],
+    [appContext, navigate, setDrawerOpen, workspaceId, workspaceFilter, lifecycle],
   );
 
   const openSession = useCallback(
     (sessionId: string, inWorkspaceId?: string) => {
       const target = inWorkspaceId ?? workspaceId;
-      // Another workspace's chat leaves this workspace, as switching does.
-      if (target !== workspaceId) appContext.resetSessionView();
       setDrawerOpen(false);
-      void navigate({
-        to: "/workspaces/$workspaceId/sessions/$sessionId",
-        params: { workspaceId: target, sessionId },
+      switchWorkspaceAfterHostHook(lifecycle, workspaceId, target, () => {
+        // Another workspace's chat leaves this workspace, as switching does.
+        if (target !== workspaceId) appContext.resetSessionView();
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions/$sessionId",
+          params: { workspaceId: target, sessionId },
+        });
       });
     },
-    [appContext, navigate, workspaceId, setDrawerOpen],
+    [appContext, navigate, workspaceId, setDrawerOpen, lifecycle],
   );
 
   const startNewSession = useCallback(() => {

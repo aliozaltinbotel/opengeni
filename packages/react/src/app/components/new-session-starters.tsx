@@ -1,4 +1,5 @@
 import { Link } from "../lib/navigation";
+import { useNativeDestinationVisible } from "../lib/app-host";
 import { Blocks, Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
 import { linearLogo, slackLogo } from "./new-session-starter-logos";
 import { Button } from "../../ui/button";
@@ -92,6 +93,7 @@ export function NewSessionStarters({
   /** Where the playground demo opens (product set). */
   workspaceId?: string | undefined;
 }) {
+  const playgroundVisible = useNativeDestinationVisible("playground");
   const general =
     set === "product"
       ? PRODUCT_GENERAL_IDS.map((id) => NEW_SESSION_STARTERS.find((starter) => starter.id === id)!)
@@ -118,7 +120,7 @@ export function NewSessionStarters({
                 description={ADD_AGENT_STARTER.description}
               />
             </Button>
-            {workspaceId ? (
+            {workspaceId && playgroundVisible ? (
               <Button asChild variant="outline" className={STARTER_CLASS}>
                 <Link
                   to="/workspaces/$workspaceId/playground"

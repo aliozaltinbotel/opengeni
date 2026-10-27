@@ -6,7 +6,7 @@
 // personal settings all draw this same rail, so a page never moves to another
 // rail and the scope of every page is visible.
 import { t } from "@opengeni/react/app/lib/console-text";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   BarChart3Icon,
   CodeIcon,
@@ -31,6 +31,8 @@ import {
 } from "./organization-settings-pages";
 import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
+import { hostExtensionNavTarget } from "@/components/rail/host-extension-nav-link";
+import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
 import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
@@ -46,9 +48,12 @@ import {
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
-import type {
-  WorkspaceManagementLocation,
-  WorkspaceSettingsSection,
+import { currentHostExtension, hiddenNativeDestinations } from "@/host-extension/registry";
+import { afterHostWorkspaceSwitch } from "@/host-extension/lifecycle";
+import {
+  workspaceSwitchTarget,
+  type WorkspaceManagementLocation,
+  type WorkspaceSettingsSection,
 } from "@opengeni/react/app/lib/workspace-management-location";
 
 /** Where in settings the person is: a workspace page, an organization page, or their account. */
@@ -152,13 +157,63 @@ export const RUNTIME_PAGES = [
   },
 ] as const;
 
-/** The runtime pages the rail lists: Computer use only inside a desktop app that has it. */
+/**
+ * The runtime pages the rail lists: Computer use only inside a desktop app that
+ * has it, and none the host extension hides.
+ */
 export function runtimePages(insideDesktopApp: boolean) {
-  return RUNTIME_PAGES.filter((page) => !("desktopOnly" in page) || insideDesktopApp);
+  return visibleNativeItems(RUNTIME_PAGES, hiddenNativeDestinations()).filter(
+    (page) => !("desktopOnly" in page) || insideDesktopApp,
+  );
+}
+
+/**
+ * One section per settings group of the host extension, after the workspace's
+ * own: the group's nav items that show in this workspace. A group without one
+ * is left out.
+ */
+function extensionSettingsSections(workspaceId: string, pathname: string): SettingsRailSection[] {
+  const { nav = [], settingsGroups = [] } = currentHostExtension();
+  return settingsGroups.flatMap((group) => {
+    const items = nav.filter(
+      (item) =>
+        item.placement !== "primary" &&
+        item.placement.settingsGroup === group.id &&
+        (item.visible?.({ workspaceId, pathname }) ?? true),
+    );
+    if (items.length === 0) return [];
+    return [
+      {
+        id: `extension-group:${group.id}`,
+        label: group.label,
+        groups: [
+          {
+            items: items.map((item) => ({
+              id: `extension:${item.id}`,
+              label: item.label,
+              icon: item.icon,
+              link: (
+                <Link
+                  to={hostExtensionNavTarget(item) as never}
+                  params={{ workspaceId } as never}
+                />
+              ),
+            })),
+          },
+        ],
+      },
+    ];
+  });
+}
+
+/** The extension's nav item for a settings-mode extension route, if it lists one. */
+function extensionNavItem(path: string) {
+  return currentHostExtension().nav?.find((item) => item.path === path);
 }
 
 /** The name of a workspace settings page or dashboard. */
 export function workspacePageLabel(location: WorkspaceManagementLocation): string {
+  if (location.kind === "extension") return extensionNavItem(location.path)?.label ?? "Settings";
   if (location.kind === "settings")
     return WORKSPACE_SETTINGS_COPY[location.section ?? "general"].title;
   if (location.kind === "page") {
@@ -187,6 +242,11 @@ export function settingsRailItemId(location: SettingsLocation): string | null {
       return `workspace:${location.target}`;
     case "organization":
       return location.section ? `organization:${location.section}` : null;
+    case "extension": {
+      // The same id as the extension's settings rail item.
+      const item = extensionNavItem(location.path);
+      return item ? `extension:${item.id}` : null;
+    }
     case "account":
       return "account:security";
   }
@@ -230,6 +290,7 @@ export function useSettingsRail(input: {
 }): SettingsRail {
   const context = useAppContext();
   const navigate = useNavigate();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
   const { location, managedWorkspace } = input;
   const workspace = input.workspaceId
     ? (context.workspaces.find((candidate) => candidate.id === input.workspaceId) ?? null)
@@ -262,42 +323,41 @@ export function useSettingsRail(input: {
         : resolveOrganizationSettingsSection(location.section, access.visibleSections)
       : null;
 
+  /** This page as the next workspace can show it. */
+  function switchLocation(
+    current: WorkspaceManagementLocation,
+    nextWorkspaceId: string,
+  ): WorkspaceManagementLocation {
+    if (current.kind === "settings") {
+      // A Personal workspace has no API keys or Developer page; land on General.
+      const nextPersonal = isPersonalWorkspace(
+        context.workspaces.find((candidate) => candidate.id === nextWorkspaceId) ?? null,
+        context.managedSelfContext,
+      );
+      return nextPersonal && (current.section === "api-keys" || current.section === "developer")
+        ? { kind: "settings", section: "general" }
+        : current;
+    }
+    if (current.kind === "organization")
+      return { kind: "organization", section: organizationSection };
+    return current;
+  }
+
+  /** Waits for the host extension's onWorkspaceSwitch hook (bounded), as the main rail does. */
   function openWorkspace(nextWorkspaceId: string) {
-    context.resetSessionView();
-    switch (location.kind) {
-      case "settings": {
-        // A Personal workspace has no API keys or Developer page; land on General.
-        const nextPersonal = isPersonalWorkspace(
-          context.workspaces.find((candidate) => candidate.id === nextWorkspaceId) ?? null,
-          context.managedSelfContext,
-        );
-        const section =
-          nextPersonal && (location.section === "api-keys" || location.section === "developer")
-            ? "general"
-            : location.section;
+    afterHostWorkspaceSwitch(input.workspaceId ?? nextWorkspaceId, nextWorkspaceId, () => {
+      context.resetSessionView();
+      if (location.kind === "account") {
         void navigate({
           to: "/workspaces/$workspaceId/settings",
           params: { workspaceId: nextWorkspaceId },
-          search: section ? { section } : {},
         });
         return;
       }
-      case "page":
-        void navigate({ to: location.target, params: { workspaceId: nextWorkspaceId } });
-        return;
-      case "organization":
-        void navigate({
-          to: "/workspaces/$workspaceId/organization",
-          params: { workspaceId: nextWorkspaceId },
-          search: organizationSection ? { section: organizationSection } : {},
-        });
-        return;
-      case "account":
-        void navigate({
-          to: "/workspaces/$workspaceId/settings",
-          params: { workspaceId: nextWorkspaceId },
-        });
-    }
+      void navigate(
+        workspaceSwitchTarget(switchLocation(location, nextWorkspaceId), nextWorkspaceId),
+      );
+    });
   }
 
   const workspaceName = managedWorkspace?.name ?? workspace?.name ?? null;
@@ -356,7 +416,9 @@ export function useSettingsRail(input: {
       workspaceId,
       "workspace:admin",
     );
-    const activityPages = ACTIVITY_PAGES.filter((page) => !page.requiresAdmin || canReadInsights);
+    const activityPages = visibleNativeItems(ACTIVITY_PAGES, hiddenNativeDestinations()).filter(
+      (page) => !page.requiresAdmin || canReadInsights,
+    );
     sections.push({
       id: "workspace",
       // The picker names the workspace; the header only names the scope.
@@ -404,6 +466,7 @@ export function useSettingsRail(input: {
         },
       ],
     });
+    sections.push(...extensionSettingsSections(workspaceId, pathname));
   }
 
   if (accountId && organizationName && access) {

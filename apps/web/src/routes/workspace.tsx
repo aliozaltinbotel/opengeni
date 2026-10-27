@@ -26,9 +26,14 @@ import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-s
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
+import { currentHostExtension, extensionSettingsPaths } from "@/host-extension/registry";
+import { HostExtensionProviders } from "@/host-extension/providers";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
-import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
+import {
+  HostWorkspaceSwitchBoundary,
+  useHostWorkspaceEntered,
+} from "@/host-extension/workspace-switch-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { useWorkspaceIntegrations } from "@opengeni/react/app/lib/use-workspace-integrations";
@@ -341,6 +346,8 @@ export function WorkspaceShellRouteContent({
   }
 
   useWorkspaceIntegrations(context, workspaceId, activeWorkspaceId !== null && workspaceStateReady);
+  // The workspace a host extension's onWorkspaceSwitch fallback switches from.
+  useHostWorkspaceEntered(workspaceId, activeWorkspaceId !== null && workspaceStateReady);
 
   if (!activeWorkspace && !hasNarrowSlackFlow && managementLocation?.kind === "settings") {
     const unavailable = (
@@ -393,13 +400,11 @@ export function WorkspaceShellRouteContent({
 
   if (!workspaceStateReady) {
     return (
-      <WorkspaceTenantBoundary
+      <HostWorkspaceSwitchBoundary
         workspaceId={workspaceId}
         stateOwnerWorkspaceId={context.workspaceStateOwnerId}
         prepareTransition={context.prepareWorkspaceTransition}
-      >
-        {null}
-      </WorkspaceTenantBoundary>
+      />
     );
   }
 
@@ -497,6 +502,7 @@ function AuthorizedWorkspaceShell({
     location.pathname,
     workspaceId,
     location.search.section,
+    extensionSettingsPaths(),
   );
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -510,6 +516,7 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
+      productName={currentHostExtension().productName}
       // The console's API adapter owns update notices and guarded page reloads.
       onWorkspaceControlEvent={(event) => {
         if (workspaceControlEventInvalidatesWorkspace(event)) {
@@ -531,26 +538,60 @@ function AuthorizedWorkspaceShell({
           {/* A meeting being recorded keeps going while the person moves
           between pages, so the recorder lives above both shells. */}
           <ConsoleMeetingRecorderProvider workspaceId={workspaceId}>
-            <RailProvider workspaceId={workspaceId}>
+            <RailProvider
+              workspaceId={workspaceId}
+              extensionSettingsPaths={extensionSettingsPaths()}
+            >
               <ActionsProvider>
-                {managementLocation ? (
-                  <WorkspaceManagementShell
-                    workspaceId={workspaceId}
-                    workspaceName={activeWorkspace?.name}
-                    organizationName={organizationName}
-                    location={managementLocation}
-                  >
-                    {children}
-                  </WorkspaceManagementShell>
-                ) : (
-                  <RailShell>{children}</RailShell>
-                )}
+                <WorkspaceShells
+                  workspaceId={workspaceId}
+                  workspaceName={activeWorkspace?.name}
+                  organizationName={organizationName}
+                  managementLocation={managementLocation}
+                >
+                  {children}
+                </WorkspaceShells>
               </ActionsProvider>
             </RailProvider>
           </ConsoleMeetingRecorderProvider>
         </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>
+  );
+}
+
+/**
+ * The settings shell on a settings page, else the rail shell, inside the host
+ * extension's providers so its pages and nav can read them in either mode.
+ */
+export function WorkspaceShells({
+  workspaceId,
+  workspaceName,
+  organizationName,
+  managementLocation,
+  children,
+}: {
+  workspaceId: string;
+  workspaceName: string | undefined;
+  organizationName: string;
+  managementLocation: ReturnType<typeof workspaceManagementLocation>;
+  children: ReactNode;
+}) {
+  return (
+    <HostExtensionProviders workspaceId={workspaceId}>
+      {managementLocation ? (
+        <WorkspaceManagementShell
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          organizationName={organizationName}
+          location={managementLocation}
+        >
+          {children}
+        </WorkspaceManagementShell>
+      ) : (
+        <RailShell>{children}</RailShell>
+      )}
+    </HostExtensionProviders>
   );
 }
 
@@ -574,6 +615,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
         location.pathname,
         workspaceId,
         location.search.section,
+        extensionSettingsPaths(),
       )}
     />
   );

@@ -104,7 +104,11 @@ async function source(path: string): Promise<string> {
 describe("workspace route scroll ownership", () => {
   test("classifies every route mounted inside the fixed app canvas", async () => {
     const app = await source("App.tsx");
-    const workspaceChildren = app.match(/workspaceRoute\.addChildren\(\[([\s\S]*?)\n  \]\),/);
+    // The children sit in `visibleNativeRoutes([...])`, which drops the
+    // destinations a host extension hides.
+    const workspaceChildren = app.match(
+      /workspaceRoute\.addChildren\(\s*visibleNativeRoutes\(\s*\[([\s\S]*?)\n {6}\],/,
+    );
     const workspaceChildrenSource = workspaceChildren?.[1];
     expect(workspaceChildrenSource).toBeDefined();
     if (!workspaceChildrenSource) throw new Error("Workspace route children were not found");
@@ -117,6 +121,19 @@ describe("workspace route scroll ownership", () => {
     ).sort();
 
     expect(registeredRoutes).toEqual(Object.keys(workspaceRouteContracts).sort());
+
+    // Host extension pages come last, after every classified native route.
+    const lines = workspaceChildrenSource.split("\n").filter((line) => line.trim() !== "");
+    expect(lines.at(-1)?.trim()).toBe(
+      "...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),",
+    );
+  });
+
+  test("host extension rail pages use the default ContentPage scroll contract", async () => {
+    // Rail pages are framed in ContentPage when they load. Settings pages render
+    // bare, inside the settings shell's own ContentPage scroller.
+    expect(await source("host-extension/routes.tsx")).toContain('import("./route-frame")');
+    expect(await source("host-extension/route-frame.tsx")).toContain("<ContentPage");
   });
 
   test("ordinary pages use ContentPage and workbenches declare self-managed overflow", async () => {

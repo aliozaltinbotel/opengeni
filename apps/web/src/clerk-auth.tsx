@@ -7,6 +7,7 @@ import { Select } from "@opengeni/react/ui/select";
 import { t } from "@opengeni/react/app/lib/console-text";
 import { useNavigate } from "@tanstack/react-router";
 import { ExternalAuthRecoveryProvider } from "./lib/external-auth-recovery";
+import { afterHostSignOut } from "@/host-extension/lifecycle";
 
 /** Only existing Clerk memberships are offered; this never creates access. */
 function ClerkAccountRecovery({ retry }: { retry: () => void }) {
@@ -51,7 +52,7 @@ function ClerkAccountRecovery({ retry }: { retry: () => void }) {
     setActionError(false);
     try {
       await navigate({ to: "/", search: {}, hash: "", replace: true });
-      await signOut();
+      await afterHostSignOut(() => signOut());
     } catch {
       setActionError(true);
     } finally {
@@ -118,7 +119,9 @@ function ClerkAccountRecovery({ retry }: { retry: () => void }) {
               ) : null}
               <Button
                 type="button"
-                disabled={busy || !memberships.some(({ organization }) => organization.id === selected)}
+                disabled={
+                  busy || !memberships.some(({ organization }) => organization.id === selected)
+                }
                 onClick={() => {
                   void chooseOrganization();
                 }}

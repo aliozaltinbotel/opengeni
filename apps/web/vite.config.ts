@@ -9,6 +9,11 @@ import { defineConfig } from "vite";
 import { compactProtectedIndexHtml } from "./vite-index-html";
 import { chunkEvaluationOrderPlugin } from "./vite-chunk-evaluation-order";
 import { eagerGraphPlugin } from "./vite-eager-graph";
+import {
+  hostExtensionAliases,
+  hostExtensionDefine,
+  resolveHostExtensionFiles,
+} from "./vite-host-extension";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,10 +22,17 @@ const browserExtensionArchive = path.resolve(
   dirname,
   "../browser-extension/dist/opengeni-browser-extension.tar",
 );
+// Fails the build for a configured extension directory that is incomplete.
+const hostExtensionFiles = resolveHostExtensionFiles(
+  process.env.OPENGENI_WEB_HOST_EXTENSION,
+  path.resolve(dirname, "src/host-extension/none"),
+);
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
   .filter(Boolean);
 export default defineConfig({
+  // A stock build drops extension-only checks from the startup bundle.
+  define: hostExtensionDefine(process.env.OPENGENI_WEB_HOST_EXTENSION),
   build: {
     // The canonical post-build budget below computes gzip sizes for the exact
     // initial/session graphs and every chunk. Avoid Vite recomputing compressed
@@ -676,9 +688,10 @@ export default defineConfig({
     ...(allowedHosts?.length ? { allowedHosts } : {}),
   },
   resolve: {
-    alias: {
-      "@": path.resolve(dirname, "src"),
-    },
+    alias: [
+      { find: "@", replacement: path.resolve(dirname, "src") },
+      ...hostExtensionAliases(hostExtensionFiles),
+    ],
     dedupe: ["react", "react-dom", "radix-ui"],
   },
   plugins: [

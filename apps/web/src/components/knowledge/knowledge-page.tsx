@@ -24,6 +24,7 @@ import { PageHeader } from "@opengeni/react/ui/page-header";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import { hasAccountPermission, hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
+import { hiddenNativeDestinations } from "@/host-extension/registry";
 
 import { errorText, useArchiveKnowledge } from "./knowledge-data";
 import { AddKnowledgePage, EntryEditPage, EntryPage, NewCollectionDialog } from "./knowledge-entry";
@@ -239,7 +240,8 @@ export function KnowledgePage({
       fn(...args);
     };
 
-  if (search.view === "skills") {
+  // Old Skills links open Plugins, unless the host extension hides it.
+  if (search.view === "skills" && !hiddenNativeDestinations().includes("plugins")) {
     return (
       <Navigate
         to="/workspaces/$workspaceId/plugins"

@@ -5,7 +5,7 @@ import { OpperMark } from "../../../components/opper-mark";
 import { GrokMark } from "../../../components/grok-mark";
 import type { SVGProps } from "react";
 
-import { BrandMark } from "../brand-mark";
+import { OpengeniMark } from "../brand-mark";
 import { ChatGptMark } from "../chatgpt-mark";
 import { LogoTile, type LogoTileSize } from "../../../ui/logo-tile";
 
@@ -67,5 +67,5 @@ export function ProviderTile({
 
 /** The Opengeni credits logo tile, shared by every credits row. */
 export function OpenGeniCreditsTile({ size }: { size?: LogoTileSize | undefined }) {
-  return <LogoTile size={size} icon={<BrandMark className="text-fg" />} name="Opengeni" />;
+  return <LogoTile size={size} icon={<OpengeniMark className="text-fg" />} name="Opengeni" />;
 }
