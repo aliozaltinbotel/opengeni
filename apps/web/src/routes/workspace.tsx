@@ -26,7 +26,7 @@ import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-s
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
-import { hostExtension } from "@/host-extension/registry";
+import { EXTENSION_SETTINGS_PATHS } from "@/host-extension/registry";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
 import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
@@ -47,11 +47,6 @@ import {
   type WorkspaceOperationIdentity,
 } from "@opengeni/react/app/lib/workspace-transition";
 import type { SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
-
-/** Host extension pages that open in the settings-mode shell, by route path. */
-const EXTENSION_SETTINGS_PATHS: readonly string[] = (hostExtension.routes ?? [])
-  .filter((route) => route.mode === "settings")
-  .map((route) => route.path);
 
 const LazyWorkspaceManagementShell = lazy(() =>
   import("@/components/settings/workspace-settings-shell").then((module) => ({
@@ -538,7 +533,10 @@ function AuthorizedWorkspaceShell({
           {/* A meeting being recorded keeps going while the person moves
           between pages, so the recorder lives above both shells. */}
           <ConsoleMeetingRecorderProvider workspaceId={workspaceId}>
-            <RailProvider workspaceId={workspaceId}>
+            <RailProvider
+              workspaceId={workspaceId}
+              extensionSettingsPaths={EXTENSION_SETTINGS_PATHS}
+            >
               <ActionsProvider>
                 {managementLocation ? (
                   <WorkspaceManagementShell

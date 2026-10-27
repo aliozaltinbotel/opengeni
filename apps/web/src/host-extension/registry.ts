@@ -214,3 +214,8 @@ export function validateHostExtension(value: unknown): HostExtension {
 
 /** This build's host extension: the configured bundle, or the stock stub. */
 export const hostExtension: HostExtension = validateHostExtension(extension);
+
+/** Paths of this build's extension routes that open in the settings-mode shell. */
+export const EXTENSION_SETTINGS_PATHS: readonly string[] = (hostExtension.routes ?? [])
+  .filter((route) => route.mode === "settings")
+  .map((route) => route.path);

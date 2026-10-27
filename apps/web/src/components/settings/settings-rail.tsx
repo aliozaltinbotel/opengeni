@@ -47,9 +47,10 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
 import { hostExtension } from "@/host-extension/registry";
-import type {
-  WorkspaceManagementLocation,
-  WorkspaceSettingsSection,
+import {
+  workspaceSwitchTarget,
+  type WorkspaceManagementLocation,
+  type WorkspaceSettingsSection,
 } from "@opengeni/react/app/lib/workspace-management-location";
 
 /** Where in settings the person is: a workspace page, an organization page, or their account. */
@@ -274,55 +275,38 @@ export function useSettingsRail(input: {
         : resolveOrganizationSettingsSection(location.section, access.visibleSections)
       : null;
 
+  /** This page as the next workspace can show it. */
+  function switchLocation(
+    current: WorkspaceManagementLocation,
+    nextWorkspaceId: string,
+  ): WorkspaceManagementLocation {
+    if (current.kind === "settings") {
+      // A Personal workspace has no API keys or Developer page; land on General.
+      const nextPersonal = isPersonalWorkspace(
+        context.workspaces.find((candidate) => candidate.id === nextWorkspaceId) ?? null,
+        context.managedSelfContext,
+      );
+      return nextPersonal && (current.section === "api-keys" || current.section === "developer")
+        ? { kind: "settings", section: "general" }
+        : current;
+    }
+    if (current.kind === "organization")
+      return { kind: "organization", section: organizationSection };
+    return current;
+  }
+
   function openWorkspace(nextWorkspaceId: string) {
     context.resetSessionView();
-    switch (location.kind) {
-      case "settings": {
-        // A Personal workspace has no API keys or Developer page; land on General.
-        const nextPersonal = isPersonalWorkspace(
-          context.workspaces.find((candidate) => candidate.id === nextWorkspaceId) ?? null,
-          context.managedSelfContext,
-        );
-        const section =
-          nextPersonal && (location.section === "api-keys" || location.section === "developer")
-            ? "general"
-            : location.section;
-        void navigate({
-          to: "/workspaces/$workspaceId/settings",
-          params: { workspaceId: nextWorkspaceId },
-          search: section ? { section } : {},
-        });
-        return;
-      }
-      case "page":
-        void navigate({ to: location.target, params: { workspaceId: nextWorkspaceId } });
-        return;
-      case "extension":
-        // A page addressed by its own ids ($params) belongs to this workspace;
-        // the next one opens on its settings instead.
-        void navigate(
-          location.path.includes("$")
-            ? { to: "/workspaces/$workspaceId/settings", params: { workspaceId: nextWorkspaceId } }
-            : {
-                // Extension paths are registered at build time, outside the typed route tree.
-                to: `/workspaces/$workspaceId/${location.path}` as "/workspaces/$workspaceId",
-                params: { workspaceId: nextWorkspaceId },
-              },
-        );
-        return;
-      case "organization":
-        void navigate({
-          to: "/workspaces/$workspaceId/organization",
-          params: { workspaceId: nextWorkspaceId },
-          search: organizationSection ? { section: organizationSection } : {},
-        });
-        return;
-      case "account":
-        void navigate({
-          to: "/workspaces/$workspaceId/settings",
-          params: { workspaceId: nextWorkspaceId },
-        });
+    if (location.kind === "account") {
+      void navigate({
+        to: "/workspaces/$workspaceId/settings",
+        params: { workspaceId: nextWorkspaceId },
+      });
+      return;
     }
+    void navigate(
+      workspaceSwitchTarget(switchLocation(location, nextWorkspaceId), nextWorkspaceId),
+    );
   }
 
   const workspaceName = managedWorkspace?.name ?? workspace?.name ?? null;

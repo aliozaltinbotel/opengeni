@@ -113,3 +113,57 @@ export function workspaceManagementLocation(
   );
   return extensionPath === undefined ? null : { kind: "extension", path: extensionPath };
 }
+
+type WorkspaceParams = { workspaceId: string };
+
+/** Where switching to another workspace lands, as navigation options. */
+export type WorkspaceSwitchTarget =
+  | {
+      to: "/workspaces/$workspaceId/settings";
+      params: WorkspaceParams;
+      search: { section?: WorkspaceSettingsSection };
+    }
+  | { to: WorkspacePageTarget; params: WorkspaceParams }
+  | {
+      to: "/workspaces/$workspaceId/organization";
+      params: WorkspaceParams;
+      search: { section?: OrganizationAdminSection };
+    }
+  | { to: "/workspaces/$workspaceId/sessions"; params: WorkspaceParams };
+
+/**
+ * Where switching to `nextWorkspaceId` lands from `location`: the same settings
+ * page, dashboard, organization page or host extension settings page there, or
+ * that workspace's sessions outside settings mode. An extension page addressed
+ * by its own ids (`$params`) names a record of this workspace, so the next
+ * workspace opens on its settings instead.
+ */
+export function workspaceSwitchTarget(
+  location: WorkspaceManagementLocation | null,
+  nextWorkspaceId: string,
+): WorkspaceSwitchTarget {
+  const params = { workspaceId: nextWorkspaceId };
+  switch (location?.kind) {
+    case "settings":
+      return {
+        to: "/workspaces/$workspaceId/settings",
+        params,
+        search: location.section ? { section: location.section } : {},
+      };
+    case "page":
+      return { to: location.target, params };
+    case "organization":
+      return {
+        to: "/workspaces/$workspaceId/organization",
+        params,
+        search: location.section ? { section: location.section } : {},
+      };
+    case "extension":
+      return location.path.includes("$")
+        ? { to: "/workspaces/$workspaceId/settings", params, search: {} }
+        : // Extension paths are registered at build time, outside the typed route tree.
+          { to: `/workspaces/$workspaceId/${location.path}` as never, params };
+    case undefined:
+      return { to: "/workspaces/$workspaceId/sessions", params };
+  }
+}

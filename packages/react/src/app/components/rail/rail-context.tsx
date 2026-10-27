@@ -21,7 +21,10 @@ import { requestCreateComposerFocus } from "../../lib/create-composer-focus";
 import { requestCommandMenu } from "../../lib/actions/events";
 import { desktopBridge, desktopCapability } from "../../lib/desktop";
 import { OPEN_SESSION_SEARCH_EVENT } from "../../lib/session-search-route";
-import { workspaceManagementLocation } from "../../lib/workspace-management-location";
+import {
+  workspaceManagementLocation,
+  workspaceSwitchTarget,
+} from "../../lib/workspace-management-location";
 import { useUiEventTarget } from "../../lib/ui-events";
 
 const SessionSearchDialog = lazy(() => import("../session/session-search-dialog"));
@@ -123,11 +126,17 @@ function readStoredWidth(): number {
   }
 }
 
+/** A stable empty default, so `openWorkspace` keeps its identity across renders. */
+const NO_EXTENSION_SETTINGS_PATHS: readonly string[] = [];
+
 export function RailProvider({
   workspaceId,
+  extensionSettingsPaths = NO_EXTENSION_SETTINGS_PATHS,
   children,
 }: {
   workspaceId: string;
+  /** The host extension's settings-mode route paths (see `workspaceManagementLocation`). */
+  extensionSettingsPaths?: readonly string[];
   children: ReactNode;
 }) {
   const windowEvents = useUiEventTarget("window");
@@ -250,33 +259,11 @@ export function RailProvider({
         current.pathname,
         workspaceId,
         (current.search as { section?: unknown }).section,
+        extensionSettingsPaths,
       );
-      if (settings?.kind === "settings") {
-        void navigate({
-          to: "/workspaces/$workspaceId/settings",
-          params: { workspaceId: nextWorkspaceId },
-          search: settings.section ? { section: settings.section } : {},
-        });
-        return;
-      }
-      if (settings?.kind === "page") {
-        void navigate({ to: settings.target, params: { workspaceId: nextWorkspaceId } });
-        return;
-      }
-      if (settings?.kind === "organization") {
-        void navigate({
-          to: "/workspaces/$workspaceId/organization",
-          params: { workspaceId: nextWorkspaceId },
-          search: settings.section ? { section: settings.section } : {},
-        });
-        return;
-      }
-      void navigate({
-        to: "/workspaces/$workspaceId/sessions",
-        params: { workspaceId: nextWorkspaceId },
-      });
+      void navigate(workspaceSwitchTarget(settings, nextWorkspaceId));
     },
-    [appContext, navigate, router, workspaceId, setDrawerOpen],
+    [appContext, navigate, router, workspaceId, extensionSettingsPaths, setDrawerOpen],
   );
 
   const openOrg = useCallback(
