@@ -373,7 +373,10 @@ describe("bootstrapWorkspace's owner write", () => {
   test("identity-backed subjects are skipped, as the routine refuses them", async () => {
     if (!fixture) return;
     await setGrant(true);
-    for (const subjectId of [`user:${crypto.randomUUID()}`, `external_user:${crypto.randomUUID()}`]) {
+    for (const subjectId of [
+      `user:${crypto.randomUUID()}`,
+      `external_user:${crypto.randomUUID()}`,
+    ]) {
       const organization = await bootstrap(subjectId);
       expect(await memberships(organization.organizationId)).toEqual([]);
     }

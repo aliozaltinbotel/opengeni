@@ -460,8 +460,7 @@ function withStagedFixture<T>(use: (staged: string) => T, target = stagedFixture
     return use(target);
   } finally {
     rmSync(target, { recursive: true, force: true });
-    if (!parentExisted && existsSync(parent) && readdirSync(parent).length === 0)
-      rmdirSync(parent);
+    if (!parentExisted && existsSync(parent) && readdirSync(parent).length === 0) rmdirSync(parent);
   }
 }
 
@@ -568,9 +567,12 @@ describe("staging the host extension fixture", () => {
       expect(existsSync(existingParent)).toBe(true);
       const createdParent = path.join(root, "created");
       expect(() =>
-        withStagedFixture(() => {
-          throw new Error("build failed");
-        }, path.join(createdParent, "host-extension-fixture")),
+        withStagedFixture(
+          () => {
+            throw new Error("build failed");
+          },
+          path.join(createdParent, "host-extension-fixture"),
+        ),
       ).toThrow("build failed");
       expect(existsSync(createdParent)).toBe(false);
     } finally {

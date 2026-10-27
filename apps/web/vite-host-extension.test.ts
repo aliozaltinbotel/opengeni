@@ -188,13 +188,12 @@ describe("web host extension resolution", () => {
     test("compares the stylesheet and the module id as normalized paths", () => {
       // Vite hands transforms normalized ids; the configured stylesheet path
       // may not be (a "./" or doubled separator, or Windows separators).
-      const plugin = hostExtensionTailwindSource(
-        "/opt/extension",
-        "/console/./src//styles.css",
-      );
+      const plugin = hostExtensionTailwindSource("/opt/extension", "/console/./src//styles.css");
       if (!plugin) throw new Error("expected a plugin for a configured extension");
       const transform = transformOf(plugin);
-      expect(transform("a {}", "/console/src/styles.css")).toBe('a {}\n@source "/opt/extension";\n');
+      expect(transform("a {}", "/console/src/styles.css")).toBe(
+        'a {}\n@source "/opt/extension";\n',
+      );
       expect(transform("a {}", "/console/src/styles.css?inline")).toBe(
         'a {}\n@source "/opt/extension";\n',
       );
