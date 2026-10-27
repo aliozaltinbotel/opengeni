@@ -31,6 +31,7 @@ const { RailHeader } = await import("@opengeni/react/app/components/rail/rail-se
 const { TooltipProvider } = await import("@opengeni/react/ui/tooltip");
 const { WorkspaceShells } = await import("@/routes/workspace");
 const { afterHostSignOut } = await import("./lifecycle");
+const { HostWorkspaceSwitchBoundary } = await import("./workspace-switch-boundary");
 const { hostExtension } = await import("./registry");
 
 afterAll(() => {
@@ -113,6 +114,24 @@ describe("stock shell (no host extension)", () => {
     } finally {
       await view.done();
     }
+  });
+
+  test("the tenant boundary hands over at once, as before", async () => {
+    const prepared: string[] = [];
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <HostWorkspaceSwitchBoundary
+          workspaceId="w2"
+          stateOwnerWorkspaceId="w1"
+          prepareTransition={(workspaceId) => prepared.push(workspaceId)}
+        />,
+      );
+    });
+    expect(prepared).toEqual(["w2"]);
+    expect(container.textContent).toContain("Switching workspace");
+    await act(async () => root.unmount());
   });
 
   test("sign-out goes straight to the native request", async () => {

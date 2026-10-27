@@ -18,14 +18,23 @@ export function useProductName(): string {
 }
 
 /**
+ * The console's brand mark: the host extension's mark when it has one, else
+ * the Opengeni iconmark. Surfaces that name Opengeni itself (the credits
+ * provider) use `OpengeniMark`, which a host brand never replaces.
+ */
+export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
+  const HostMark = useAppHost().brand?.mark;
+  if (HostMark) return <HostMark className={cn("h-auto shrink-0", className)} />;
+  return <OpengeniMark className={className} {...props} />;
+}
+
+/**
  * The Opengeni iconmark: two stacked filled chevrons, wider than tall
  * (176:138.73). Filled with currentColor, so it takes the surrounding text
  * color (`fg`, never a brand tint). Size it by width (`w-5`); the height
  * follows the aspect ratio.
  */
-export function BrandMark({ className, ...props }: SVGProps<SVGSVGElement>) {
-  const HostMark = useAppHost().brand?.mark;
-  if (HostMark) return <HostMark className={cn("h-auto shrink-0", className)} />;
+export function OpengeniMark({ className, ...props }: SVGProps<SVGSVGElement>) {
   return (
     <svg
       viewBox="0 0 176 138.73"

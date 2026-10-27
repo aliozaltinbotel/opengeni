@@ -30,7 +30,10 @@ import { EXTENSION_SETTINGS_PATHS, hostExtension } from "@/host-extension/regist
 import { HostExtensionProviders } from "@/host-extension/providers";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
-import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
+import {
+  HostWorkspaceSwitchBoundary,
+  useHostWorkspaceEntered,
+} from "@/host-extension/workspace-switch-boundary";
 import { WorkspaceUnavailableRoute } from "@/routes/workspace-unavailable";
 import { useAppContext, type AppContextValue } from "@opengeni/react/app/app-context";
 import { useWorkspaceIntegrations } from "@opengeni/react/app/lib/use-workspace-integrations";
@@ -343,6 +346,8 @@ export function WorkspaceShellRouteContent({
   }
 
   useWorkspaceIntegrations(context, workspaceId, activeWorkspaceId !== null && workspaceStateReady);
+  // The workspace a host extension's onWorkspaceSwitch fallback switches from.
+  useHostWorkspaceEntered(workspaceId, activeWorkspaceId !== null && workspaceStateReady);
 
   if (!activeWorkspace && !hasNarrowSlackFlow && managementLocation?.kind === "settings") {
     const unavailable = (
@@ -395,13 +400,11 @@ export function WorkspaceShellRouteContent({
 
   if (!workspaceStateReady) {
     return (
-      <WorkspaceTenantBoundary
+      <HostWorkspaceSwitchBoundary
         workspaceId={workspaceId}
         stateOwnerWorkspaceId={context.workspaceStateOwnerId}
         prepareTransition={context.prepareWorkspaceTransition}
-      >
-        {null}
-      </WorkspaceTenantBoundary>
+      />
     );
   }
 

@@ -6,6 +6,7 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
+  Link,
   Outlet,
   RouterProvider,
   createMemoryHistory,
@@ -15,7 +16,7 @@ import {
   type AnyRoute,
   type RouteComponent,
 } from "@tanstack/react-router";
-import { act, isValidElement, type ReactElement, type ReactNode } from "react";
+import { act, isValidElement, useState, type ReactElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { HostExtension } from "@opengeni/react/app/host-extension";
 import type { AppContextValue } from "@opengeni/react/app/app-context";
@@ -84,6 +85,12 @@ const { TooltipProvider } = await import("@opengeni/react/ui/tooltip");
 const { WorkspaceShells } = await import("@/routes/workspace");
 const { useSettingsRail } = await import("@/components/settings/settings-rail");
 const { afterHostSignOut } = await import("./lifecycle");
+const { HostWorkspaceSwitchBoundary, useHostWorkspaceEntered } =
+  await import("./workspace-switch-boundary");
+const { BrandMark } = await import("@opengeni/react/app/components/brand-mark");
+const { openGeniGroupPresentation } =
+  await import("@opengeni/react/app/components/billing-class-mark");
+const { OpenGeniCreditsTile } = await import("@opengeni/react/app/components/models/provider-mark");
 const { signOutManaged } = await import("@/api");
 const app = await import("../App");
 
@@ -161,6 +168,7 @@ async function settle(): Promise<void> {
 type Mounted = {
   container: HTMLElement;
   pathname: () => string;
+  history: { back: () => void; forward: () => void };
   done: () => Promise<void>;
 };
 
@@ -220,6 +228,7 @@ async function mount(input: {
   return {
     container,
     pathname: () => router.state.location.pathname,
+    history: { back: () => router.history.back(), forward: () => router.history.forward() },
     done: async () => {
       await act(async () => root.unmount());
       container.remove();
@@ -288,6 +297,36 @@ describe("host extension shell", () => {
         "Fixture PMS",
       );
       expect(home?.textContent).not.toContain("Opengeni");
+    } finally {
+      await view.done();
+    }
+  });
+
+  test("Opengeni credit marks keep the Opengeni mark under a host brand", async () => {
+    const view = await mount({
+      url: "/workspaces/w1/sessions",
+      context: appContextFor([W1]),
+      workspace: () => (
+        <>
+          <span data-testid="console-brand">
+            <BrandMark />
+          </span>
+          <span data-testid="credits-tile">
+            <OpenGeniCreditsTile />
+          </span>
+          <span data-testid="credits-class">
+            {openGeniGroupPresentation.opengeni_credits?.icon}
+          </span>
+        </>
+      ),
+    });
+    try {
+      const within = (id: string) => view.container.querySelector(`[data-testid="${id}"]`);
+      expect(within("console-brand")?.querySelector('[data-testid="fixture-mark"]')).not.toBeNull();
+      for (const id of ["credits-tile", "credits-class"]) {
+        expect(within(id)?.querySelector('[data-testid="fixture-mark"]')).toBeNull();
+        expect(within(id)?.querySelector('svg[viewBox="0 0 176 138.73"]')).not.toBeNull();
+      }
     } finally {
       await view.done();
     }
@@ -439,6 +478,145 @@ describe("host extension lifecycle", () => {
       hook.resolve();
       await settle();
       expect(view.pathname()).toBe("/workspaces/w2/settings");
+    } finally {
+      await view.done();
+    }
+  });
+});
+
+describe("host extension workspace-switch fallback", () => {
+  /** The console's workspace state owner, kept across the workspace route's renders. */
+  const owner: { current: string | null } = { current: null };
+  beforeEach(async () => {
+    owner.current = null;
+    // Signing out forgets the workspace last entered, so each test starts fresh.
+    await afterHostSignOut(async () => undefined);
+  });
+
+  /** The workspace route as the console builds it: the tenant boundary, then the shell. */
+  function FallbackShell({ workspaceId }: { workspaceId: string }) {
+    const [stateOwner, setStateOwner] = useState(owner.current);
+    const ready = stateOwner === workspaceId;
+    useHostWorkspaceEntered(workspaceId, ready);
+    if (!ready) {
+      return (
+        <HostWorkspaceSwitchBoundary
+          workspaceId={workspaceId}
+          stateOwnerWorkspaceId={stateOwner}
+          prepareTransition={(next) => {
+            owner.current = next;
+            setStateOwner(next);
+          }}
+        />
+      );
+    }
+    return (
+      <RailProvider workspaceId={workspaceId}>
+        <CaptureRail />
+        <Link to="/workspaces/$workspaceId/sessions" params={{ workspaceId: "w2" }}>
+          Open w2
+        </Link>
+      </RailProvider>
+    );
+  }
+  const rail: { openWorkspace: ((workspaceId: string) => void) | null } = { openWorkspace: null };
+  function CaptureRail() {
+    rail.openWorkspace = useRail().openWorkspace;
+    return null;
+  }
+
+  async function shellAt(url: string) {
+    const view = await mount({
+      url,
+      context: appContextFor([W1, W2]),
+      workspace: (workspaceId) => <FallbackShell workspaceId={workspaceId} />,
+    });
+    await settle();
+    return view;
+  }
+
+  function recordSwitches(): { seen: string[]; release: () => void } {
+    const seen: string[] = [];
+    let pending = deferred();
+    hooks.workspaceSwitch = (from, to) => {
+      seen.push(`${from}->${to}`);
+      return pending.promise;
+    };
+    return {
+      seen,
+      release: () => {
+        pending.resolve();
+        pending = deferred();
+      },
+    };
+  }
+
+  test("a raw link into another workspace waits for onWorkspaceSwitch once", async () => {
+    const switches = recordSwitches();
+    const view = await shellAt("/workspaces/w1/sessions");
+    try {
+      expect(switches.seen).toEqual([]);
+      const link = Array.from(view.container.querySelectorAll("a")).find(
+        (anchor) => anchor.textContent === "Open w2",
+      );
+      await act(async () => link?.click());
+      await settle();
+      expect(view.pathname()).toBe("/workspaces/w2/sessions");
+      expect(view.container.textContent).toContain("Switching workspace");
+      expect(switches.seen).toEqual(["w1->w2"]);
+      switches.release();
+      await settle();
+      expect(owner.current).toBe("w2");
+      expect(view.container.textContent).not.toContain("Switching workspace");
+      expect(switches.seen).toEqual(["w1->w2"]);
+    } finally {
+      await view.done();
+    }
+  });
+
+  test("back and forward each wait for onWorkspaceSwitch once", async () => {
+    const switches = recordSwitches();
+    const view = await shellAt("/workspaces/w1/sessions");
+    try {
+      const link = Array.from(view.container.querySelectorAll("a")).find(
+        (anchor) => anchor.textContent === "Open w2",
+      );
+      await act(async () => link?.click());
+      await settle();
+      switches.release();
+      await settle();
+      await act(async () => view.history.back());
+      await settle();
+      expect(view.pathname()).toBe("/workspaces/w1/sessions");
+      expect(switches.seen).toEqual(["w1->w2", "w2->w1"]);
+      expect(owner.current).toBe("w2");
+      switches.release();
+      await settle();
+      expect(owner.current).toBe("w1");
+      await act(async () => view.history.forward());
+      await settle();
+      switches.release();
+      await settle();
+      expect(view.pathname()).toBe("/workspaces/w2/sessions");
+      expect(owner.current).toBe("w2");
+      expect(switches.seen).toEqual(["w1->w2", "w2->w1", "w1->w2"]);
+    } finally {
+      await view.done();
+    }
+  });
+
+  test("a switch the rail already waited on is not hooked again at the boundary", async () => {
+    const switches = recordSwitches();
+    const view = await shellAt("/workspaces/w1/sessions");
+    try {
+      await act(async () => rail.openWorkspace?.("w2"));
+      await settle();
+      expect(view.pathname()).toBe("/workspaces/w1/sessions");
+      switches.release();
+      await settle();
+      expect(view.pathname()).toBe("/workspaces/w2/sessions");
+      expect(owner.current).toBe("w2");
+      expect(switches.seen).toEqual(["w1->w2"]);
     } finally {
       await view.done();
     }

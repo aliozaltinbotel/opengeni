@@ -54,7 +54,25 @@ export type HostExtension = Readonly<{
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
   toolRegistryEntries?: readonly ToolRegistryEntry[];
   workspaceFilter?: (workspace: Readonly<{ id: string; accountId: string }>) => boolean;
-  /** Design §12.2 I15: awaited by the console before sign-out and before switching workspace. */
+  /**
+   * Design §12.2 I15: awaited by the console before sign-out and before
+   * switching workspace, each bounded (5 s); a rejection or timeout is logged
+   * as HOST_LIFECYCLE_HOOK_FAILED and the action goes on.
+   *
+   * - `onSignOut` runs before every native sign-out request, after the console
+   *   has unmounted its authenticated surfaces (the session is still valid).
+   * - `onWorkspaceSwitch(from, to)` runs before the console's own switches
+   *   navigate (switchers, ⌘K, organization switch, another workspace's chat)
+   *   while the shell is still mounted. Any other in-tab change (a raw link,
+   *   back and forward, a deep link, an account switch) is caught at the
+   *   workspace route's tenant boundary, after the previous shell (and so this
+   *   extension's shell providers) has unmounted. Each switch calls it once.
+   * - A typed URL or a full reload starts a new page and cannot be hooked.
+   *
+   * Hooks must not depend on the extension's providers being mounted: hold any
+   * session handle they need (for example an embedded provider session) at
+   * module level.
+   */
   lifecycle?: Readonly<{
     onSignOut?: () => Promise<void>;
     onWorkspaceSwitch?: (from: string, to: string) => Promise<void>;
