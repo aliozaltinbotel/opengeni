@@ -120,6 +120,30 @@ export async function ensureGovernedOrganizationSessionPolicy(
 }
 
 /**
+ * Stores the governed default unless a policy is stored, in one statement:
+ * true when this call stored it, false when a policy was already there.
+ */
+export async function storeGovernedOrganizationSessionPolicyIfMissing(
+  db: Database,
+  organizationId: string,
+): Promise<boolean> {
+  return await withAccountRls(db, organizationId, async (scopedDb) => {
+    const inserted = await rawRows<{ account_id: string }>(
+      scopedDb,
+      sql`insert into organization_session_policies (
+          account_id, attachments, tool_family_mode, tool_families, source
+        ) values (
+          ${organizationId}::uuid, 'disabled', 'deny',
+          ARRAY['shell', 'codemode', 'browser', 'computerUse']::text[], 'governed_default'
+        )
+        on conflict (account_id) do nothing
+        returning account_id`,
+    );
+    return inserted.length > 0;
+  });
+}
+
+/**
  * One page of organizations that carry an external identity source, in id
  * order (managed_accounts is a deployment-wide runtime table). For a pass
  * that asks a host port which of them it governs.

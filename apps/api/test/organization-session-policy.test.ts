@@ -29,6 +29,7 @@ import {
 } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, createAppComposition } from "../src/app";
+import { startGovernedSessionPolicyBackfill } from "../src/governed-session-policy-backfill";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 /*
@@ -665,6 +666,98 @@ describe("automations, MCP and the startup pass", () => {
     expect(await storeGovernedOrganizationSessionPolicyDefaults({ db: client.db })).toEqual({
       governed: 0,
       stored: 0,
+      failed: 0,
+    });
+  });
+
+  test("the startup pass isolates each organization: one that fails does not stop the others", async () => {
+    const [first, broken, last] = [
+      await organization(HOST_SOURCE),
+      await organization(HOST_SOURCE),
+      await organization(HOST_SOURCE),
+    ];
+    const port: OrganizationGovernancePort = {
+      ...hostPort,
+      governs: (input) => {
+        if (input.organizationId === broken!.organizationId) throw new Error("port failure");
+        return hostPort.governs(input);
+      },
+    };
+    const outcomes = new Map<string, string>();
+    const result = await storeGovernedOrganizationSessionPolicyDefaults(
+      { db: client.db, organizationGovernance: port },
+      {
+        pageSize: 1,
+        onOrganization: ({ organizationId, outcome }) => outcomes.set(organizationId, outcome),
+      },
+    );
+    expect(result.failed).toBe(1);
+    expect(outcomes.get(broken!.organizationId)).toBe("failed");
+    for (const org of [first!, last!]) {
+      expect(outcomes.get(org.organizationId)).toBe("stored");
+      expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
+        source: "governed_default",
+      });
+    }
+    expect(await getOrganizationSessionPolicy(client.db, broken!.organizationId)).toBeNull();
+    // Run again: what is stored is reported present, and the failure again.
+    outcomes.clear();
+    await storeGovernedOrganizationSessionPolicyDefaults(
+      { db: client.db, organizationGovernance: port },
+      { onOrganization: ({ organizationId, outcome }) => outcomes.set(organizationId, outcome) },
+    );
+    expect(outcomes.get(first!.organizationId)).toBe("present");
+    expect(outcomes.get(broken!.organizationId)).toBe("failed");
+  });
+
+  test("the API runs the pass in the background and reports every outcome", async () => {
+    const broken = await organization(HOST_SOURCE);
+    const fresh = await organization(HOST_SOURCE);
+    const port: OrganizationGovernancePort = {
+      ...hostPort,
+      governs: (input) => {
+        if (input.organizationId === broken.organizationId) throw new TypeError("port failure");
+        return hostPort.governs(input);
+      },
+    };
+    const counters: { outcome: string; amount: number }[] = [];
+    const logs: { level: string; message: string; attributes: Record<string, unknown> }[] = [];
+    const observability = {
+      incrementCounter: (input: { labels?: Record<string, string>; amount?: number }) =>
+        counters.push({ outcome: input.labels?.outcome ?? "", amount: input.amount ?? 1 }),
+      info: (message: string, attributes: Record<string, unknown> = {}) =>
+        logs.push({ level: "info", message, attributes }),
+      warn: (message: string, attributes: Record<string, unknown> = {}) =>
+        logs.push({ level: "warn", message, attributes }),
+      error: (message: string, attributes: Record<string, unknown> = {}) =>
+        logs.push({ level: "error", message, attributes }),
+    };
+    const pass = startGovernedSessionPolicyBackfill(
+      { db: client.db, organizationGovernance: port },
+      observability,
+    );
+    // Returned at once, before any organization is visited.
+    expect(counters).toEqual([]);
+    const result = await pass;
+    expect(result?.failed).toBe(1);
+    expect(await getOrganizationSessionPolicy(client.db, fresh.organizationId)).toMatchObject({
+      source: "governed_default",
+    });
+    const failure = logs.find(
+      (log) => log.level === "warn" && log.attributes.organizationId === broken.organizationId,
+    );
+    expect(failure?.attributes).toMatchObject({
+      errorClass: "TypeError",
+      errorCode: "governed_session_policy_default_failed",
+    });
+    const total = (outcome: string) =>
+      counters.filter((counter) => counter.outcome === outcome).reduce((n, c) => n + c.amount, 0);
+    expect(total("failed")).toBe(1);
+    expect(total("stored")).toBeGreaterThanOrEqual(1);
+    expect(logs.at(-1)).toMatchObject({
+      level: "info",
+      message: "governed session policy defaults stored",
+      attributes: { failed: 1 },
     });
   });
 });

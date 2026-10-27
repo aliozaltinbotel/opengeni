@@ -12,6 +12,7 @@ import {
   ensureGovernedOrganizationSessionPolicy,
   getOrganizationSessionPolicy,
   listManagedAccountExternalSources,
+  storeGovernedOrganizationSessionPolicyIfMissing,
   type Database,
   type StoredOrganizationSessionPolicy,
 } from "@opengeni/db";
@@ -83,26 +84,58 @@ export async function ensureOrganizationSessionPolicyAtEntry(
   await resolveOrganizationSessionPolicy(deps, organizationId);
 }
 
+/** What the startup pass did for one organization the port was asked about. */
+export type GovernedSessionPolicyDefaultOutcome = {
+  organizationId: string;
+  /** stored: the default was written now; present: a policy was already stored. */
+  outcome: "stored" | "present" | "failed";
+  error?: unknown;
+};
+
+export type GovernedSessionPolicyDefaultsResult = {
+  governed: number;
+  stored: number;
+  failed: number;
+};
+
+/** Governed organizations of one page handled at a time. */
+const DEFAULTS_CONCURRENCY = 4;
+
 /**
  * Stores the governed default for every organization the bound port governs
  * that has no policy yet: organizations governed before migration 1018, whose
  * stored schedules and triggers the worker (which has no port) would
  * otherwise run as stock. Run when the API starts. Idempotent; pages through
- * the organizations that carry an external source. Without a port, nothing.
+ * the organizations that carry an external source (one read per page) and
+ * stores each governed one's default with one statement. Each organization
+ * is isolated: a port answer or database write that fails for one is
+ * reported (`onOrganization`, outcome `failed`) and counted, and the pass
+ * continues. Ungoverned organizations are not reported. Without a port,
+ * nothing.
  */
 export async function storeGovernedOrganizationSessionPolicyDefaults(
   deps: OrganizationGovernanceDeps,
-  options: { pageSize?: number } = {},
-): Promise<{ governed: number; stored: number }> {
+  options: {
+    pageSize?: number;
+    onOrganization?: (outcome: GovernedSessionPolicyDefaultOutcome) => void;
+  } = {},
+): Promise<GovernedSessionPolicyDefaultsResult> {
+  const result: GovernedSessionPolicyDefaultsResult = { governed: 0, stored: 0, failed: 0 };
   const port = deps.organizationGovernance;
-  if (!port) return { governed: 0, stored: 0 };
+  if (!port) return result;
   const pageSize = options.pageSize ?? 500;
-  let after: string | null = null;
-  let governed = 0;
-  let stored = 0;
-  for (;;) {
-    const page = await listManagedAccountExternalSources(deps.db, { after, limit: pageSize });
-    for (const account of page) {
+  const report = (outcome: GovernedSessionPolicyDefaultOutcome): void => {
+    if (outcome.outcome === "failed") result.failed += 1;
+    else result.governed += 1;
+    if (outcome.outcome === "stored") result.stored += 1;
+    try {
+      options.onOrganization?.(outcome);
+    } catch {
+      // A reporting failure never stops the pass.
+    }
+  };
+  const storeOne = async (account: { id: string; externalSource: string }): Promise<void> => {
+    try {
       const answer: unknown = port.governs({
         organizationId: account.id,
         externalSource: account.externalSource,
@@ -111,13 +144,19 @@ export async function storeGovernedOrganizationSessionPolicyDefaults(
         throw new OrganizationGovernancePortContractError(
           "OrganizationGovernancePort.governs must return a boolean",
         );
-      if (!answer) continue;
-      governed += 1;
-      if (await getOrganizationSessionPolicy(deps.db, account.id)) continue;
-      await ensureGovernedOrganizationSessionPolicy(deps.db, account.id);
-      stored += 1;
+      if (!answer) return;
+      const stored = await storeGovernedOrganizationSessionPolicyIfMissing(deps.db, account.id);
+      report({ organizationId: account.id, outcome: stored ? "stored" : "present" });
+    } catch (error) {
+      report({ organizationId: account.id, outcome: "failed", error });
     }
-    if (page.length < pageSize) return { governed, stored };
+  };
+  let after: string | null = null;
+  for (;;) {
+    const page = await listManagedAccountExternalSources(deps.db, { after, limit: pageSize });
+    for (let index = 0; index < page.length; index += DEFAULTS_CONCURRENCY)
+      await Promise.all(page.slice(index, index + DEFAULTS_CONCURRENCY).map(storeOne));
+    if (page.length < pageSize) return result;
     after = page.at(-1)!.id;
   }
 }

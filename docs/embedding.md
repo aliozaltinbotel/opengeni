@@ -1208,13 +1208,22 @@ type OrganizationSessionPolicy = {
   database shows governed (those that already ran a host command). When the API
   starts with its port bound it stores the default for every other
   organization the port governs that has none
-  (`storeGovernedOrganizationSessionPolicyDefaults`; idempotent, paged). **So
-  schedules and triggers a governed organization saved before 1018 start
-  running under the governed default after the migration and that startup
-  pass**: no attachments (a saved file reference makes the run
+  (`storeGovernedOrganizationSessionPolicyDefaults`; idempotent, paged, one
+  statement per governed organization). The pass runs in the background, so
+  the API serves without waiting for it. Each organization is isolated: one
+  whose port answer or write fails is logged with its id and skipped, and the
+  pass goes on. Every governed organization counts once in
+  `opengeni_governed_session_policy_defaults_total{outcome="stored"|"present"|"failed"}`,
+  and a summary line (`governed session policy defaults stored`, with
+  `governed`, `stored`, `failed`, `durationMs`) closes the pass; a failed
+  organization gets the default at its next governed entry point or the next
+  start. **So schedules and triggers a governed organization saved before 1018
+  start running under the governed default after the migration and that
+  startup pass**: no attachments (a saved file reference makes the run
   `attachments_disabled`) and no generic tool families. A worker that fires one
-  in the seconds between the migration and the API's startup pass still runs
-  it as stock; a drained cutover has no such window. Nothing is stored
+  between the migration and the moment the pass reaches its organization still
+  runs it as stock; a drained cutover that waits for the summary line before
+  undraining has no such window. Nothing is stored
   for an ungoverned organization, and without a bound port the API reads
   nothing, so stock deployments are unchanged.
 - **Who may write the row.** The runtime may read it and insert only the
