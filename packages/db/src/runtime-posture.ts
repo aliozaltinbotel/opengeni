@@ -1710,6 +1710,8 @@ export const FORCE_RLS_TABLES = [
   "audit_events",
   "auth_jwks",
   "auth_runs",
+  "auth_session_authentications",
+  "auth_two_factors",
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
@@ -2252,6 +2254,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "auth_identities",
   "auth_rate_limits",
   "auth_sessions",
+  "auth_two_factors",
   "auth_users",
   "auth_verifications",
   "automation_run_event_links",
@@ -2578,6 +2581,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
   "auth_jwks",
+  "auth_session_authentications",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",

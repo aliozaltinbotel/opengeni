@@ -10,12 +10,17 @@ import {
   CanonicalHumanIdentityNotFoundError,
   getCanonicalHumanIdentityProjection,
 } from "@opengeni/db/canonical-human-identities";
-import { sql } from "drizzle-orm";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
 import { hostSessionTokenJwks, signHostSessionToken } from "../auth/managed-auth";
+import {
+  readSessionAuthentication,
+  signInAuthenticationMethod,
+  type AuthenticationMethod,
+  type SessionAuthenticationRecord,
+} from "../auth/session-authentication";
 
 /**
  * Audience-bound host session token. A host that embeds Opengeni verifies the
@@ -53,6 +58,11 @@ export const HOST_TOKEN_REFUSALS = {
     code: "HOST_TOKEN_IDENTITY_NOT_ACTIVE",
     message: "Your account identity is not active",
   },
+  amrUnknown: {
+    status: 403,
+    code: "HOST_TOKEN_AMR_UNKNOWN",
+    message: "How this session signed in is unknown. Sign in again.",
+  },
 } as const satisfies Record<
   string,
   { status: ContentfulStatusCode; code: `HOST_TOKEN_${string}`; message: string }
@@ -68,13 +78,6 @@ class HostTokenRefusalError extends Error {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
-
-/** Login-binding provider to RFC 8176 authentication method reference. */
-const AMR_BY_PROVIDER: Readonly<Record<string, string>> = {
-  credential: "pwd",
-  google: "oauth",
-  github: "oauth",
-};
 
 type HostTokenConfiguration = {
   auth: ManagedAuth;
@@ -161,8 +164,8 @@ async function mintHostSessionToken(
   if (identity.status !== "active") {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.identityNotActive);
   }
-  const loginRecord = await readSessionLoginRecord(deps, human);
-  if (!loginRecord || loginRecord.identityId !== identity.id) {
+  const authentication = await readSessionAuthentication(deps.db, human);
+  if (!authentication || authentication.identityId !== identity.id) {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.sessionRequired);
   }
   // The canonical access resolver re-derives live membership: a suspended or
@@ -177,9 +180,9 @@ async function mintHostSessionToken(
   );
   const organizationId = activeOrganizationOf(authorization, human.authUserId, workspaceId);
   const binding = projection.loginBindings.find(
-    (candidate) => candidate.id === loginRecord.loginBindingId,
+    (candidate) => candidate.id === authentication.loginBindingId,
   );
-  const amr = binding && AMR_BY_PROVIDER[binding.providerId];
+  const latest = latestAuthentication(authentication, binding?.providerId);
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + configuration.ttlSeconds;
   const token = await signHostSessionToken(configuration.auth, {
@@ -189,8 +192,8 @@ async function mintHostSessionToken(
     sid: human.authSessionId,
     org: organizationId,
     ws: workspaceId,
-    auth_time: Math.floor(loginRecord.createdAt.getTime() / 1000),
-    amr: amr ? [amr] : [],
+    auth_time: Math.floor(latest.authenticatedAt.getTime() / 1000),
+    amr: latest.amr,
     identity_status: "active",
     iat: issuedAt,
     exp: expiresAt,
@@ -219,31 +222,19 @@ function activeOrganizationOf(
 }
 
 /**
- * `auth_time` is the session's own sign-in: Better Auth's sliding renewal moves
- * `updated_at`/`expires_at`, never `created_at`.
+ * The session's latest authentication: its latest re-authentication, else its
+ * own sign-in. Better Auth's sliding renewal moves `updated_at`/`expires_at`,
+ * never `created_at`, so refreshing a session never advances `auth_time`. A
+ * sign-in whose method is unknown refuses minting: `amr` is never empty.
  */
-async function readSessionLoginRecord(
-  deps: ApiRouteDeps,
-  human: { authUserId: string; authSessionId: string },
-): Promise<{ createdAt: Date; identityId: string | null; loginBindingId: string | null } | null> {
-  const result = await deps.db.execute(sql`
-    select created_at as "createdAt", identity_id as "identityId",
-      login_binding_id as "loginBindingId"
-    from auth_sessions
-    where id = ${human.authSessionId} and user_id = ${human.authUserId}
-  `);
-  const rows = (Array.isArray(result) ? result : (result as { rows: unknown[] }).rows) as Array<{
-    createdAt: Date | string;
-    identityId: string | null;
-    loginBindingId: string | null;
-  }>;
-  const row = rows[0];
-  if (!row) return null;
-  return {
-    createdAt: row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt),
-    identityId: row.identityId,
-    loginBindingId: row.loginBindingId,
-  };
+function latestAuthentication(
+  authentication: SessionAuthenticationRecord,
+  signInProviderId: string | undefined,
+): { authenticatedAt: Date; amr: AuthenticationMethod[] } {
+  if (authentication.latestReauthentication) return authentication.latestReauthentication;
+  const method = signInAuthenticationMethod(signInProviderId);
+  if (!method) throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.amrUnknown);
+  return { authenticatedAt: authentication.signedInAt, amr: [method] };
 }
 
 async function refuseOnHttpStatus<T>(

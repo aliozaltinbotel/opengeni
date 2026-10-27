@@ -62,6 +62,31 @@ export const MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES = {
   "/reset-password/*": { window: 60, max: 20 },
 } as const satisfies Record<string, ManagedAuthClientRateLimitRule>;
 
+/**
+ * Product-owned routes that verify a password or a TOTP code outside Better
+ * Auth's router (`/v1/auth/reauthenticate` and `/v1/auth/totp/*`), which Better
+ * Auth's limiter never sees. Each route keeps its own per-client-address
+ * window with the email sign-in limit, and every attempt also spends the
+ * person's email sign-in throttle (`MANAGED_AUTH_EMAIL_THROTTLES`), so guessing
+ * through these routes shares the sign-in budget.
+ */
+export const MANAGED_AUTH_PRODUCT_CREDENTIAL_RATE_LIMIT =
+  MANAGED_AUTH_CLIENT_RATE_LIMIT_RULES["/sign-in/email"];
+
+export type ManagedAuthProductCredentialRoute = "reauthenticate" | "totp";
+
+/** Content-free per-client-address counter key for a product credential route. */
+export function managedAuthProductCredentialThrottleKey(
+  secret: string,
+  route: ManagedAuthProductCredentialRoute,
+  source: string,
+): string {
+  const digest = createHmac("sha256", secret)
+    .update(`opengeni:managed-auth:product-credential-throttle:v1\n${route}\n${source}`)
+    .digest("hex");
+  return `${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}product:${route}:${digest}`;
+}
+
 /** The rules handed to Better Auth: the limits above, plus `false` for each
  * path in {@link MANAGED_AUTH_UNLIMITED_PATHS}, which skips its limiter. */
 export const MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES: Record<

@@ -3049,6 +3049,7 @@ describe("release schema contract", () => {
       "1011_existing_external_identity_membership_key_share.sql",
       "1012_usage_event_call_attributes_schema_required_validate.sql",
       "1013_better_auth_jwks.sql",
+      "1014_managed_auth_reauthentication_totp.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

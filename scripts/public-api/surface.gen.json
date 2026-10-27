@@ -13475,6 +13475,8 @@
         "$.legal.privacyPolicyUrl": "string?",
         "$.legal.termsOfServiceUrl": "string?",
         "$.managedAuthSessionSetMode": "enum!=[\"\\\"broker\\\"\",\"\\\"dual\\\"\",\"\\\"legacy\\\"\"]",
+        "$.managedAuthTotp": "object?",
+        "$.managedAuthTotp.enabled": "const!=[\"true\"]",
         "$.mcpServers": "array!",
         "$.mcpServers[]": "object",
         "$.mcpServers[].id": "string!",

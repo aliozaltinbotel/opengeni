@@ -38,3 +38,13 @@ test("an audience requires managed product access", () => {
     getSettings({ OPENGENI_HOST_TOKEN_AUDIENCE: "https://host.example.test/api" }),
   ).toThrow("OPENGENI_HOST_TOKEN_AUDIENCE requires OPENGENI_PRODUCT_ACCESS_MODE=managed");
 });
+
+test("TOTP re-authentication is off unless enabled, and needs managed product access", () => {
+  expect(getSettings({}).managedAuthTotpEnabled).toBe(false);
+  expect(getSettings({ ...managed, OPENGENI_MANAGED_AUTH_TOTP_ENABLED: "true" })).toMatchObject({
+    managedAuthTotpEnabled: true,
+  });
+  expect(() => getSettings({ OPENGENI_MANAGED_AUTH_TOTP_ENABLED: "true" })).toThrow(
+    "OPENGENI_MANAGED_AUTH_TOTP_ENABLED requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
+  );
+});

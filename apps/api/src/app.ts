@@ -398,6 +398,8 @@ import {
 } from "./routes/managed-sign-in-methods";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
 import { registerHostTokenRoutes } from "./routes/host-token";
+import { registerManagedAuthTotpRoutes } from "./routes/managed-auth-totp";
+import { registerReauthenticationRoutes } from "./routes/reauthenticate";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   registerManagedAuthSessionSetRoutes,
@@ -1192,6 +1194,8 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedSignInMethodRoutes(app, routeDeps);
   registerNativeAppAuthRoutes(app, routeDeps);
   registerHostTokenRoutes(app, routeDeps);
+  registerReauthenticationRoutes(app, routeDeps);
+  registerManagedAuthTotpRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
@@ -1680,6 +1684,9 @@ export function createAppComposition(deps: AppDependencies): {
         productAccessMode: deps.settings.productAccessMode,
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
+        ...(managedAuth && deps.settings.managedAuthTotpEnabled
+          ? { managedAuthTotp: { enabled: true as const } }
+          : {}),
         auth: clientAuthConfig(
           deps.settings,
           deps.settings.productAccessMode === "managed"

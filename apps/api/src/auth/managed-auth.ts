@@ -21,6 +21,7 @@ import { betterAuth } from "better-auth";
 import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
 import { jwt } from "better-auth/plugins/jwt";
+import { twoFactor } from "better-auth/plugins/two-factor";
 import { sql } from "drizzle-orm";
 import { Pool, type PoolConfig } from "pg";
 
@@ -266,7 +267,7 @@ export function createManagedAuth(
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
     logger: { log: logBetterAuthMessage },
-    ...(settings.hostTokenAudience ? { plugins: [hostSessionTokenPlugin(settings)] } : {}),
+    ...managedAuthPluginOptions(settings),
     hooks: {
       before: createManagedAuthEmailThrottleHook(
         db,
@@ -642,6 +643,85 @@ export function createManagedAuth(
   }) as ManagedAuth;
   configureManagedUserAdmission(auth, settings.allowedUserEmails);
   return auth;
+}
+
+export const MANAGED_AUTH_PRODUCT_NAME = "Opengeni";
+
+/**
+ * The opt-in Better Auth plugins. With neither the host session token nor TOTP
+ * configured no `plugins` key is set, so the configuration is the stock one.
+ */
+function managedAuthPluginOptions(settings: Settings) {
+  const plugins = [
+    ...(settings.hostTokenAudience ? [hostSessionTokenPlugin(settings)] : []),
+    ...(settings.managedAuthTotpEnabled ? [reauthenticationTotpPlugin()] : []),
+  ];
+  return plugins.length > 0 ? { plugins } : {};
+}
+
+/**
+ * Better Auth's twoFactor plugin, used for TOTP as a re-authentication second
+ * factor only. Its sign-in interception (an `after` hook that replaces the
+ * session of an enrolled person's email sign-in with a two-factor challenge)
+ * is removed: sign-in, including the session-set sign-in, is unchanged, and
+ * `POST /v1/auth/reauthenticate` asks for the code. The plugin's own
+ * `/two-factor/*` routes are refused (they rotate the session, which would
+ * reset its sign-in time); the product TOTP routes use its enable endpoint and
+ * its storage. Factors live in `auth_two_factors`.
+ */
+function reauthenticationTotpPlugin() {
+  const plugin = twoFactor({
+    issuer: MANAGED_AUTH_PRODUCT_NAME,
+    // A person without a password (Google or GitHub only) can enroll too; the
+    // plugin still requires the password whenever one exists, and the product
+    // route requires a fresh sign-in from everyone else.
+    allowPasswordless: true,
+    schema: {
+      user: { fields: { twoFactorEnabled: "two_factor_enabled" } },
+      twoFactor: {
+        modelName: "auth_two_factors",
+        fields: {
+          secret: "secret",
+          backupCodes: "backup_codes",
+          userId: "user_id",
+          verified: "verified",
+          failedVerificationCount: "failed_verification_count",
+          lockedUntil: "locked_until",
+        },
+      },
+    },
+  });
+  return { ...plugin, hooks: undefined };
+}
+
+type ManagedAuthTotpApi = {
+  enableTwoFactor(input: {
+    body: { password?: string };
+    headers: Headers;
+  }): Promise<{ totpURI: string; backupCodes: string[] }>;
+};
+
+/**
+ * Start a TOTP enrollment through the plugin's enable endpoint, as the session
+ * the proof headers carry. It stores a fresh encrypted secret as an
+ * unverified factor and returns its `otpauth://` URI; it never rotates the
+ * session. The plugin also stores backup codes, which this product never
+ * offers or accepts.
+ */
+export async function beginManagedAuthTotpEnrollment(
+  auth: ManagedAuth,
+  input: { headers: Headers; password?: string },
+): Promise<string> {
+  const plugins: ReadonlyArray<{ id?: unknown }> = auth.options.plugins ?? [];
+  if (!plugins.some((plugin) => plugin.id === "two-factor")) {
+    throw new Error("Managed auth was created without the TOTP plugin");
+  }
+  const api = auth.api as unknown as ManagedAuthTotpApi;
+  const result = await api.enableTwoFactor({
+    body: input.password === undefined ? {} : { password: input.password },
+    headers: input.headers,
+  });
+  return result.totpURI;
 }
 
 /**
