@@ -3047,6 +3047,7 @@ describe("release schema contract", () => {
       "1009_model_call_fact_source_receipt_deferrable_fk.sql",
       "1010_model_call_fact_source_receipt_fk_validate.sql",
       "1011_existing_external_identity_membership_key_share.sql",
+      "1012_usage_event_call_attributes_schema_required_validate.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
