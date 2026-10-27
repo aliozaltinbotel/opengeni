@@ -1383,6 +1383,7 @@ export {
   type HostOrganizationOwnerResult,
 } from "./organization-host-owner";
 export * from "./organization-session-policies";
+import { ensureGovernedOrganizationSessionPolicyInScope } from "./organization-session-policies";
 import {
   assertActiveManagedHumanOrganizationMembership,
   getOrganizationAdministrationOverview,
@@ -2342,6 +2343,13 @@ export type BootstrapWorkspaceInput = {
   subjectLabel?: string;
   accountPermissions?: Permission[];
   workspacePermissions?: Permission[];
+  /**
+   * The organization is governed by the embedding host calling this: store its
+   * governed session policy (no attachments, no shell, Codemode, browser or
+   * computer-use tools; migration 1018) in the same transaction, unless a
+   * policy is already stored, so its first session can never run without it.
+   */
+  governedSessionPolicy?: boolean;
 };
 
 function samePermissionSet(left: unknown, right: readonly Permission[]): boolean {
@@ -2443,6 +2451,8 @@ export async function bootstrapWorkspace(
       accountId: workspace.accountId,
       workspaceId: workspace.id,
     });
+    if (input.governedSessionPolicy)
+      await ensureGovernedOrganizationSessionPolicyInScope(tx as unknown as Database, account.id);
     const [workspaceControl] = await tx
       .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
       .from(schema.workspaceInferenceControls)

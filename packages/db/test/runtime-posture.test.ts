@@ -1908,13 +1908,17 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
-          // 1017 organization session policies: one organization-scoped,
-          // read, insert and update FORCE-RLS table.
+          // 1018 organization session policies: one organization-scoped
+          // FORCE-RLS table the runtime reads and inserts the governed default
+          // into (its INSERT policy admits nothing else).
           (tables === FORCE_RLS_TABLES ||
-          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1018 session policy receipts: FORCE RLS, written only by the host
+          // routine; no runtime privileges.
+          (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES ? 1 : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1980,7 +1984,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1014 re-authentication events: deployment-wide, read and insert, FORCE-RLS.
         1 + // 1014 TOTP factors: deployment-wide, full-DML, FORCE-RLS.
         1 + // 1015 host command attributions: organization-scoped, read and insert, FORCE-RLS.
-        1; // 1017 organization session policies: organization-scoped, read/insert/update, FORCE-RLS.
+        1 + // 1018 organization session policies: organization-scoped, read and insert, FORCE-RLS.
+        1; // 1018 session policy receipts: organization-scoped, no runtime privileges, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("auth_jwks");
       expect(RUNTIME_READ_INSERT_TABLES).toContain("auth_jwks");
       expect(FORCE_RLS_TABLES).toContain("auth_session_authentications");
@@ -1990,7 +1995,8 @@ describe("runtime database posture evaluator", () => {
       expect(FORCE_RLS_TABLES).toContain("organization_host_command_attributions");
       expect(RUNTIME_READ_INSERT_TABLES).toContain("organization_host_command_attributions");
       expect(FORCE_RLS_TABLES).toContain("organization_session_policies");
-      expect(RUNTIME_READ_INSERT_UPDATE_TABLES).toContain("organization_session_policies");
+      expect(RUNTIME_READ_INSERT_TABLES).toContain("organization_session_policies");
+      expect(PROTECTED_NO_DIRECT_DML_TABLES).toContain("organization_session_policy_receipts");
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");
@@ -3916,7 +3922,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 1016's and 1017's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's, 1016's, 1017's and 1018's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3961,6 +3967,9 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "auth_users",
     // 1017's host owner ensure also reads the host command attributions (1015).
     "organization_host_command_attributions",
+    // 1018's host session policy write.
+    "organization_session_policies",
+    "organization_session_policy_receipts",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -4008,12 +4017,14 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "lookup_organization_host_identity(uuid, text, uuid)",
       "ensure_organization_host_owner(uuid, text, uuid)",
+      "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "lookup_organization_host_identity(uuid, text, uuid)",
       "ensure_organization_host_owner(uuid, text, uuid)",
+      "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4066,6 +4077,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
       "lookup_organization_host_identity(uuid, text, uuid)",
       "ensure_organization_host_owner(uuid, text, uuid)",
+      "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

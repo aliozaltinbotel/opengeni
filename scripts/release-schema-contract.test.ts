@@ -3053,7 +3053,7 @@ describe("release schema contract", () => {
       "1015_organization_host_command_attributions.sql",
       "1016_organization_host_identity_lookup.sql",
       "1017_organization_host_owner.sql",
-      "1017_organization_session_policies.sql",
+      "1018_organization_session_policies.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

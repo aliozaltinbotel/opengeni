@@ -84,13 +84,29 @@ export const OrganizationSessionPolicyView = /* @__PURE__ */ defineSchema(() =>
 );
 export type OrganizationSessionPolicyView = z.infer<typeof OrganizationSessionPolicyView>;
 
+/** The host command's answer: the stored policy, and whether this was a replay of its operation. */
+export const HostPutOrganizationSessionPolicyResponse = /* @__PURE__ */ defineSchema(() =>
+  OrganizationSessionPolicyView.extend({ replay: primitives.boolean }).strict(),
+);
+export type HostPutOrganizationSessionPolicyResponse = z.infer<
+  typeof HostPutOrganizationSessionPolicyResponse
+>;
+
 /** `PUT /v1/host/organizations/:organizationId/session-policy`. */
 export const HostPutOrganizationSessionPolicyRequest = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       actingExternalUser: ActingExternalUser,
       command: z
-        .object({ policy: OrganizationSessionPolicy, operationId: primitives.uuid })
+        .object({
+          policy: OrganizationSessionPolicy,
+          operationId: primitives.uuid,
+          /**
+           * The stored revision this command replaces (`revision` of a GET). 0
+           * means no host policy yet: nothing stored, or only the governed default.
+           */
+          expectedRevision: primitives.nonnegativeInteger,
+        })
         .strict(),
     })
     .strict(),
@@ -102,6 +118,23 @@ export type HostPutOrganizationSessionPolicyRequest = z.infer<
 /** Refusal detail codes (`error.details.code`). */
 export const ATTACHMENTS_DISABLED = "ATTACHMENTS_DISABLED";
 export const SESSION_TOOL_FAMILY_DENIED = "SESSION_TOOL_FAMILY_DENIED";
+/** 409: this operation id already wrote a different policy. */
+export const SESSION_POLICY_OPERATION_CONFLICT = "SESSION_POLICY_OPERATION_CONFLICT";
+/** 409: `expectedRevision` is not the stored revision. */
+export const SESSION_POLICY_REVISION_CONFLICT = "SESSION_POLICY_REVISION_CONFLICT";
+/** 503: this deployment cannot write a host's session policy yet (1018's routine is not granted). */
+export const HOST_SESSION_POLICY_UNAVAILABLE = "HOST_SESSION_POLICY_UNAVAILABLE";
+
+/** The digest a host command's policy is idempotent on: canonical JSON, families sorted. */
+export function organizationSessionPolicyDigestInput(policy: OrganizationSessionPolicy): string {
+  return JSON.stringify({
+    attachments: policy.attachments,
+    toolFamilies: {
+      mode: policy.toolFamilies.mode,
+      families: [...policy.toolFamilies.families].sort(),
+    },
+  });
+}
 
 /** The families a policy removes, in `SESSION_TOOL_FAMILIES` order. */
 export function deniedSessionToolFamilies(policy: OrganizationSessionPolicy): SessionToolFamily[] {

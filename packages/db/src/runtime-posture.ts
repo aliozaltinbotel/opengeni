@@ -51,8 +51,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * due inventory (0935), the recording retention sweep's due inventory (0946),
  * the lookup of whose personal machine a chat runs on (0978), the re-arm of
  * the running commands a returning runner did not answer for (0984), the
- * host's lookup of a native identity in its organization (1016) and the
- * host's ensure of its own owner membership in its organization (1017). Each is
+ * host's lookup of a native identity in its organization (1016), the
+ * host's ensure of its own owner membership in its organization (1017) and the
+ * host's write of its organization's session policy (1018). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -68,6 +69,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "lookup_organization_host_identity(uuid, text, uuid)",
   "ensure_organization_host_owner(uuid, text, uuid)",
+  "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
 ] as const;
 
 /**
@@ -85,6 +87,9 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * through the organization's member list. 1017 withholds the host owner
  * ensure; until it is granted, bootstrapWorkspace writes no owner membership
  * and the host's ensure command answers HOST_ORGANIZATION_OWNER_UNAVAILABLE.
+ * 1018 withholds the host session policy write; until it is granted, the
+ * host's session-policy command answers HOST_SESSION_POLICY_UNAVAILABLE and a
+ * governed organization keeps the governed default.
  *
  * runtime-posture-compatibility-postgres fails once the pinned previous
  * release knows a routine listed here: grant it then in a rolling migration
@@ -93,13 +98,16 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * every application role, as 0947 does), drop it from this list, and remove
  * its "not yet" path (lookupThroughMemberList for 1016; for 1017, GRANT
  * EXECUTE ON FUNCTION opengeni_private.ensure_organization_host_owner(uuid,
- * text, uuid) the same way and drop HOST_ORGANIZATION_OWNER_UNAVAILABLE's path).
+ * text, uuid) the same way and drop HOST_ORGANIZATION_OWNER_UNAVAILABLE's path;
+ * for 1018, grant put_host_organization_session_policy(uuid, text, uuid, text,
+ * text, text[], text, bigint) and drop HOST_SESSION_POLICY_UNAVAILABLE's path).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
   "lookup_organization_host_identity(uuid, text, uuid)",
   "ensure_organization_host_owner(uuid, text, uuid)",
+  "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -144,6 +152,11 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "workspace_memberships",
     "workspaces",
     "workspace_inference_controls",
+  ],
+  "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)": [
+    "organization_host_command_attributions",
+    "organization_session_policies",
+    "organization_session_policy_receipts",
   ],
 };
 
@@ -1982,6 +1995,7 @@ export const FORCE_RLS_TABLES = [
   "organization_recovery_policy_heads",
   "organization_service_accounts",
   "organization_session_policies",
+  "organization_session_policy_receipts",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",
@@ -2662,6 +2676,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_sync_runs",
   "model_call_source_receipts",
   "organization_host_command_attributions",
+  "organization_session_policies",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",
@@ -2714,7 +2729,6 @@ export const RUNTIME_READ_INSERT_UPDATE_TABLES = [
   "interaction_operations",
   "interaction_resource_operations",
   "network_routes",
-  "organization_session_policies",
   "scheduled_task_runs",
   "scheduled_tasks",
   "session_attempt_codemode_calls",
@@ -2799,6 +2813,7 @@ export const PROTECTED_NO_DIRECT_DML_TABLES = [
   "organization_recovery_operations",
   "organization_recovery_policies",
   "organization_recovery_policy_heads",
+  "organization_session_policy_receipts",
   "organization_shared_workspace_administration_capabilities",
   "organization_user_resource_authorities",
   "organization_user_resource_grants",

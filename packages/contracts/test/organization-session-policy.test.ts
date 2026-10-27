@@ -63,9 +63,20 @@ describe("organization session policy", () => {
     expect(
       HostPutOrganizationSessionPolicyRequest.safeParse({
         actingExternalUser: { source: "test-host:user", externalId: "staff-1" },
-        command: { policy: STOCK_ORGANIZATION_SESSION_POLICY, operationId: crypto.randomUUID() },
+        command: {
+          policy: STOCK_ORGANIZATION_SESSION_POLICY,
+          operationId: crypto.randomUUID(),
+          expectedRevision: 1,
+        },
       }).success,
     ).toBe(true);
+    // A command must name the revision it replaces.
+    expect(
+      HostPutOrganizationSessionPolicyRequest.safeParse({
+        actingExternalUser: { source: "test-host:user", externalId: "staff-1" },
+        command: { policy: STOCK_ORGANIZATION_SESSION_POLICY, operationId: crypto.randomUUID() },
+      }).success,
+    ).toBe(false);
   });
 
   test("every first-party browser tool is the browser or computer-use family", () => {
