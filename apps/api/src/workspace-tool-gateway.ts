@@ -1783,17 +1783,23 @@ export class HostMcpMethodConflictError extends Error {
 
 /**
  * A fork-owned copy of an MCP error the host raised, recognised structurally as
- * the SDK's own protocol layer does: the host may use another copy of the SDK,
- * so `instanceof McpError` would miss it. Null for any other value.
+ * the SDK's own protocol layer does: the host may use another copy or major
+ * version of the SDK, so `instanceof McpError` would miss it. SDK v1 raises
+ * `McpError`; SDK v2 raises `ProtocolError` (and subclasses, which keep that
+ * name). Null for any other value.
  */
 function hostMcpError(error: unknown): McpError | null {
-  if (!(error instanceof Error) || error.name !== "McpError") return null;
+  if (!(error instanceof Error) || !HOST_MCP_ERROR_NAMES.has(error.name)) return null;
   const { code, data } = error as { code?: unknown; data?: unknown };
   if (typeof code !== "number" || !Number.isSafeInteger(code)) return null;
-  // McpError prefixes its message; drop that so the copy does not repeat it.
-  const message = error.message.replace(/^MCP error -?\d+: /u, "");
+  // v1 McpError prefixes its message; drop that so the copy does not repeat
+  // it. A v2 ProtocolError message has no prefix and is kept as raised.
+  const message =
+    error.name === "McpError" ? error.message.replace(/^MCP error -?\d+: /u, "") : error.message;
   return new McpError(code, message, data);
 }
+
+const HOST_MCP_ERROR_NAMES: ReadonlySet<string> = new Set(["McpError", "ProtocolError"]);
 
 const HOST_MCP_METHOD_NAME = /^[a-z]+\/[a-z_]+$/u;
 

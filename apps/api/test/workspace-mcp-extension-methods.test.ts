@@ -462,6 +462,16 @@ describe("host MCP extension methods on the workspace MCP", () => {
             data: { field: "cursor" },
           });
         },
+        // An SDK v2 ProtocolError: its own class, that name, no message prefix.
+        "events/acknowledge": async () => {
+          throw new ForeignProtocolError(ErrorCode.InvalidParams, "Subscription not found: sub-9", {
+            subscriptionId: "sub-9",
+          });
+        },
+        // That name without an integer code is not an MCP error.
+        "events/replay": async () => {
+          throw new ForeignProtocolError("broken" as unknown as number, "replay store at 10.0.0.7");
+        },
       }),
     ]);
     try {
@@ -483,6 +493,15 @@ describe("host MCP extension methods on the workspace MCP", () => {
         message: "MCP error -32602: unknown cursor",
         data: { field: "cursor" },
       });
+      const protocol = await w.post({ method: "events/acknowledge", params: {} });
+      expect(protocol.body.error).toEqual({
+        code: ErrorCode.InvalidParams,
+        message: "MCP error -32602: Subscription not found: sub-9",
+        data: { subscriptionId: "sub-9" },
+      });
+      const unnumbered = await w.post({ method: "events/replay", params: {} });
+      expect(unnumbered.body.error?.code).toBe(ErrorCode.InternalError);
+      expect(JSON.stringify(unnumbered.body)).not.toContain("10.0.0.7");
     } finally {
       await w.cleanup();
     }
@@ -599,6 +618,19 @@ describe("host MCP extension methods on the workspace MCP", () => {
     }
   });
 });
+
+/** Shaped like SDK v2's ProtocolError, on a prototype unrelated to this SDK copy. */
+class ForeignProtocolError extends Error {
+  static readonly mcpBrand = "mcp.ProtocolError";
+  constructor(
+    readonly code: number,
+    message: string,
+    readonly data?: unknown,
+  ) {
+    super(message);
+    this.name = "ProtocolError";
+  }
+}
 
 function grantStub(): AccessGrant {
   return {
