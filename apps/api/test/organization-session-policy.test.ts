@@ -5,10 +5,15 @@ import {
   GOVERNED_ORGANIZATION_SESSION_POLICY,
   STOCK_ORGANIZATION_SESSION_POLICY,
 } from "@opengeni/contracts/organization-session-policy";
-import type { AppDependencies } from "@opengeni/core";
+import {
+  storeGovernedOrganizationSessionPolicyDefaults,
+  type AppDependencies,
+} from "@opengeni/core";
 import {
   completeFileUpload,
   createAdditionalManagedOrganization,
+  createAutomationSource,
+  createAutomationTrigger,
   createManagedOrganization,
   createDb,
   createFileUpload,
@@ -23,7 +28,8 @@ import {
   type SharedTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
-import { createApp } from "../src/app";
+import { createApp, createAppComposition } from "../src/app";
+import { buildOpenGeniMcpServer } from "../src/mcp/server";
 
 /*
  * A host-governed organization's sessions get no file attachments and no
@@ -51,7 +57,13 @@ beforeAll(async () => {
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });
+  // Tests run as a deployment that has granted 1018's host routine; the one
+  // that needs it withheld revokes it and restores the grant.
+  await grantDeferredRuntimeAccess(shared.admin);
 }, 180_000);
+
+const HOST_ROUTINE =
+  "opengeni_private.put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)";
 
 async function signUpOwner(app: App): Promise<string> {
   const email = `session-policy-${crypto.randomUUID()}@example.test`;
@@ -117,7 +129,11 @@ function storageStub(): ObjectStorage {
 type App = ReturnType<typeof createApp>;
 
 function appFor(organizationGovernance?: OrganizationGovernancePort): App {
-  return createApp({
+  return createApp(depsFor(organizationGovernance));
+}
+
+function depsFor(organizationGovernance?: OrganizationGovernancePort): AppDependencies {
+  return {
     settings: testSettings({
       databaseUrl: shared.adminUrl,
       productAccessMode: "managed",
@@ -128,15 +144,29 @@ function appFor(organizationGovernance?: OrganizationGovernancePort): App {
     }),
     db: client.db,
     bus: new MemoryEventBus(),
-    workflowClient: {} as never,
+    workflowClient: {
+      syncScheduledTask: async () => undefined,
+      deleteScheduledTask: async () => undefined,
+      triggerAutomationRun: async () => undefined,
+    } as never,
     objectStorage: storageStub(),
     ...(organizationGovernance ? { organizationGovernance } : {}),
-  } as AppDependencies);
+  } as AppDependencies;
 }
 
 /** An organization the host provisions out of band, like a tenant, with its own owner. */
+// Each owner creates a bounded number of organizations, and sign-ins are rate
+// limited, so a few organizations share one owner.
+let currentOwner: { subjectId: string; organizations: number } | null = null;
+async function nextOwner(): Promise<string> {
+  if (!currentOwner || currentOwner.organizations >= 3)
+    currentOwner = { subjectId: await signUpOwner(appFor()), organizations: 0 };
+  currentOwner.organizations += 1;
+  return currentOwner.subjectId;
+}
+
 async function organization(source: string) {
-  const ownerSubjectId = await signUpOwner(appFor());
+  const ownerSubjectId = await nextOwner();
   const created = await createAdditionalManagedOrganization(client.db, {
     subjectId: ownerSubjectId,
     subjectLabel: "Organization owner",
@@ -340,18 +370,21 @@ describe("attachment kill switch", () => {
 
 describe("host session policy command", () => {
   test("until 1018's routine is granted, the command is unavailable and the default holds", async () => {
-    const app = appFor(hostPort);
-    const org = await organization(HOST_SOURCE);
-    const response = await putHostPolicy(app, org, OPEN_ALL);
-    expect(response.status).toBe(503);
-    expect(detailCode(await response.json())).toBe("HOST_SESSION_POLICY_UNAVAILABLE");
-    expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
-      policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
-      source: "governed_default",
-    });
-    expect((await requestUpload(app, org)).status).toBe(403);
-    // Every later test runs as a deployment that has granted it.
-    await grantDeferredRuntimeAccess(shared.admin);
+    await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${HOST_ROUTINE} FROM opengeni_app`);
+    try {
+      const app = appFor(hostPort);
+      const org = await organization(HOST_SOURCE);
+      const response = await putHostPolicy(app, org, OPEN_ALL);
+      expect(response.status).toBe(503);
+      expect(detailCode(await response.json())).toBe("HOST_SESSION_POLICY_UNAVAILABLE");
+      expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
+        policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
+        source: "governed_default",
+      });
+      expect((await requestUpload(app, org)).status).toBe(403);
+    } finally {
+      await shared.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${HOST_ROUTINE} TO opengeni_app`);
+    }
   });
 
   test("the host turns attachments on; uploads then succeed and the client config follows", async () => {
@@ -491,6 +524,161 @@ describe("attachments on every person-facing entry", () => {
     });
     expect(schedule.status).toBe(403);
     expect(detailCode(await schedule.json())).toBe("ATTACHMENTS_DISABLED");
+  });
+});
+
+describe("automations, MCP and the startup pass", () => {
+  test("automation triggers and manual events that attach files are refused", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const fileId = await readyFile(org);
+    const source = await createAutomationSource(client.db, {
+      accountId: org.organizationId,
+      workspaceId: org.workspaceId,
+      createdBySubjectId: org.ownerSubjectId,
+      webhookSecretEncrypted: "test-ciphertext",
+      request: {
+        name: "Events",
+        adapterId: "signed-json.v1",
+        webhookSecret: "never-stored",
+        configuration: {},
+      },
+    });
+    const template = {
+      prompt: "Read the notes",
+      instructions: null,
+      resources: [{ kind: "file", fileId }],
+      skills: [],
+      tools: [],
+      firstPartyMcpTools: [],
+      firstPartyMcpPermissions: [],
+      model: null,
+      reasoningEffort: null,
+      sandboxBackend: null,
+      policyRole: null,
+      metadata: {},
+    };
+    const created = await post(app, org, "/automations/triggers", {
+      sourceId: source.id,
+      name: "Notes",
+      eventTypes: ["notes.arrived"],
+      configuration: {},
+      parameters: {},
+      sessionTemplate: template,
+      status: "active",
+    });
+    expect(created.status).toBe(403);
+    expect(detailCode(await created.json())).toBe("ATTACHMENTS_DISABLED");
+    // A trigger saved while the organization was stock.
+    await createAutomationTrigger(client.db, {
+      accountId: org.organizationId,
+      workspaceId: org.workspaceId,
+      createdBySubjectId: org.ownerSubjectId,
+      adapterId: source.adapterId,
+      request: {
+        sourceId: source.id,
+        name: "Notes",
+        eventTypes: ["notes.arrived"],
+        configuration: {},
+        parameters: {},
+        sessionTemplate: template as never,
+        status: "active",
+      },
+    });
+    const event = await post(app, org, `/automations/sources/${source.id}/events`, {
+      eventType: "notes.arrived",
+      occurrenceKey: crypto.randomUUID(),
+      payload: {},
+    });
+    expect(event.status).toBe(403);
+    expect(detailCode(await event.json())).toBe("ATTACHMENTS_DISABLED");
+  });
+
+  test("MCP scheduled_tasks_trigger refuses a schedule that attaches files", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const policyRevision = async () =>
+      (await getOrganizationSessionPolicy(client.db, org.organizationId))?.revision ?? 0;
+    // Saved while the host allowed attachments, then turned off.
+    expect((await putHostPolicy(app, org, OPEN_ALL)).status).toBe(200);
+    const created = await post(app, org, "/scheduled-tasks", {
+      name: "Read notes",
+      schedule: { type: "manual" },
+      agentConfig: {
+        prompt: "Read the notes.",
+        resources: [{ kind: "file", fileId: await readyFile(org) }],
+        tools: [],
+      },
+    });
+    const task = (await created.json()) as { id: string };
+    expect(created.status).toBe(201);
+    expect(
+      (
+        await putHostPolicy(app, org, GOVERNED_ORGANIZATION_SESSION_POLICY, {
+          expectedRevision: await policyRevision(),
+        })
+      ).status,
+    ).toBe(200);
+    const { routeDeps } = createAppComposition(depsFor(hostPort));
+    const server = buildOpenGeniMcpServer(routeDeps, {
+      accountId: org.organizationId,
+      workspaceId: org.workspaceId,
+      subjectId: org.ownerSubjectId,
+      permissions: ["scheduled_tasks:run", "scheduled_tasks:manage"],
+      principalKind: "human_session",
+    });
+    const tool = (
+      server as unknown as {
+        _registeredTools: Record<
+          string,
+          { handler: (args: unknown, extra: unknown) => Promise<unknown> }
+        >;
+      }
+    )._registeredTools.scheduled_tasks_trigger;
+    if (!tool) throw new Error("scheduled_tasks_trigger is not registered");
+    const refused = await tool.handler({ id: task.id }, {}).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    const outcome = JSON.stringify(refused);
+    expect(outcome).toContain("ATTACHMENTS_DISABLED");
+  });
+
+  test("the startup pass stores the default for governed organizations without one", async () => {
+    const governed = await organization(HOST_SOURCE);
+    const ungoverned = await organization("someone-else");
+    expect(await getOrganizationSessionPolicy(client.db, governed.organizationId)).toBeNull();
+    const deps = { db: client.db, organizationGovernance: hostPort };
+    const first = await storeGovernedOrganizationSessionPolicyDefaults(deps, { pageSize: 2 });
+    expect(first.stored).toBeGreaterThanOrEqual(1);
+    expect(await getOrganizationSessionPolicy(client.db, governed.organizationId)).toMatchObject({
+      source: "governed_default",
+    });
+    expect(await getOrganizationSessionPolicy(client.db, ungoverned.organizationId)).toBeNull();
+    expect((await storeGovernedOrganizationSessionPolicyDefaults(deps)).stored).toBe(0);
+    expect(await storeGovernedOrganizationSessionPolicyDefaults({ db: client.db })).toEqual({
+      governed: 0,
+      stored: 0,
+    });
+  });
+});
+
+describe("guard order", () => {
+  test("an unauthenticated request to a guarded route writes nothing", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    for (const path of [
+      `/v1/workspaces/${org.workspaceId}/browser-sessions`,
+      `/v1/workspaces/${org.workspaceId}/sessions/${crypto.randomUUID()}/fs/write`,
+    ]) {
+      const response = await app.request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      expect(response.status).toBe(401);
+    }
+    expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toBeNull();
   });
 });
 

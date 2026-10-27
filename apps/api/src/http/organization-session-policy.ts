@@ -1,6 +1,7 @@
 import {
   ATTACHMENTS_DISABLED,
   SESSION_TOOL_FAMILY_DENIED,
+  sessionToolFamilyGate,
   type SessionToolFamily,
 } from "@opengeni/contracts/organization-session-policy";
 import {
@@ -8,8 +9,8 @@ import {
   SessionToolFamilyDeniedError,
   ensureOrganizationSessionPolicyAtEntry,
   organizationSessionToolFamilyGate,
+  readOrganizationSessionPolicy,
   requireAccessGrant,
-  resolveOrganizationSessionPolicy,
   requireOrganizationAttachmentsAllowed,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -153,7 +154,11 @@ export function registerSessionToolFamilyRouteGuards(app: Hono, deps: ApiRouteDe
       const workspaceId = context.req.param("workspaceId") ?? "";
       const organizationId = await workspaceOrganization(deps, workspaceId);
       if (!organizationId) return await next();
-      const gate = await organizationSessionToolFamilyGate(deps, organizationId);
+      // A read with no side effect: these guards store nothing, so a request
+      // that is refused (or unauthenticated) writes nothing.
+      const gate = sessionToolFamilyGate(
+        (await readOrganizationSessionPolicy(deps, organizationId)).policy,
+      );
       const denied = route.families.find((family) => gate.denies(family));
       if (!denied) return await next();
       await requireAccessGrant(context, deps, workspaceId);
@@ -165,7 +170,7 @@ export function registerSessionToolFamilyRouteGuards(app: Hono, deps: ApiRouteDe
       const workspaceId = context.req.param("workspaceId") ?? "";
       const organizationId = await workspaceOrganization(deps, workspaceId);
       if (!organizationId) return await next();
-      const { policy } = await resolveOrganizationSessionPolicy(deps, organizationId);
+      const { policy } = await readOrganizationSessionPolicy(deps, organizationId);
       if (policy.attachments === "enabled") return await next();
       const grant = await requireAccessGrant(context, deps, workspaceId);
       // An agent's own writes are its work, not a person's attachment.

@@ -551,6 +551,14 @@ export async function acceptAutomationEvent(
       message: `automation event matches more than ${AUTOMATION_MAX_MATCHED_TRIGGERS} triggers`,
     });
   }
+  // A manual event or a webhook starts the matching triggers' work: their
+  // organization's policy row exists first, and a template that attaches files
+  // is refused where attachments are off (the worker refuses it again).
+  await requireScheduledWorkAdmissible(
+    deps,
+    source.accountId,
+    matchingByEvent.flatMap((trigger) => trigger.sessionTemplate.resources),
+  );
   const stored =
     matchingByEvent.length === 0
       ? await recordAutomationEvent(deps.db, {

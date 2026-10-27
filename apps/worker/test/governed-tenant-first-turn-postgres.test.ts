@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   CreateScheduledTaskRequest,
   signDelegatedAccessToken,
@@ -25,6 +25,7 @@ import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/te
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../../api/src/app";
 import { createActivityTestHarness } from "../src/activities";
+import { createAutomationActivities } from "../src/activities/automations";
 import { createScheduledTaskActivities } from "../src/activities/scheduled-tasks";
 import type { ActivityServices } from "../src/activities/types";
 
@@ -44,6 +45,9 @@ const hostPort: OrganizationGovernancePort = {
   governs: ({ externalSource }) => externalSource === HOST_SOURCE,
   decide: ({ via }) => (via === "host" ? "allow" : "refuse"),
 };
+
+// Each case runs a real worker turn.
+setDefaultTimeout(60_000);
 
 let shared: SharedTestDatabase;
 let client: DbClient;
@@ -194,6 +198,10 @@ async function firstTurn(
   return request.tools.map((tool) => (tool as { name?: string }).name ?? "");
 }
 
+/** The browser tools a host would ask for, so the stock control can show them. */
+const BROWSER_TOOLS = ["browser_open", "browser_observe", "browser_act"] as const;
+const REQUESTED_TOOLS = [...BROWSER_TOOLS, "computer_open", "computer_act", "knowledge_search"];
+
 async function createServiceSession(
   api: ReturnType<typeof createApp>,
   grant: Awaited<ReturnType<typeof provision>>,
@@ -201,7 +209,10 @@ async function createServiceSession(
   const response = await api.request(`/v1/workspaces/${grant.workspaceId}/sessions`, {
     method: "POST",
     headers: { authorization: await serviceBearer(grant), "content-type": "application/json" },
-    body: JSON.stringify({ initialMessage: "What is on today?" }),
+    body: JSON.stringify({
+      initialMessage: "What is on today?",
+      firstPartyMcpTools: REQUESTED_TOOLS,
+    }),
   });
   const body = (await response.json()) as { id?: string; session?: { id: string } };
   if (response.status >= 300)
@@ -222,8 +233,11 @@ describe("a governed tenant's first turn", () => {
     expect(await getOrganizationSessionPolicy(client.db, grant.accountId)).toBeNull();
     const model = new ScriptedModel([{ output: [assistantMessage("Nothing today.")] }]);
     const tools = await firstTurn(grant, sessionId, model);
-    // Without a sandbox, the desktop (computer-use) tools are what the stock
-    // catalog offers of the generic families.
+    // Positive controls: the browser tools the session asked for, and the
+    // desktop (computer-use) tools, reach a stock first turn.
+    expect(generic(tools)).toEqual(
+      expect.arrayContaining(BROWSER_TOOLS.map((tool) => `interaction__${tool}`)),
+    );
     expect(generic(tools)).toContain("interaction__cua_click");
   });
 
@@ -238,9 +252,7 @@ describe("a governed tenant's first turn", () => {
     });
     // The model forges a call to a tool its catalog never had.
     const model = new ScriptedModel([
-      { output: [functionCall("browser_open", { url: "https://example.test" })] },
-      { output: [assistantMessage("Done.")] },
-      { output: [assistantMessage("Done.")] },
+      { output: [functionCall("interaction__browser_open", { url: "https://example.test" })] },
     ]);
     const tools = await firstTurn(grant, sessionId, model);
     expect(tools.length).toBeGreaterThan(0);
@@ -253,15 +265,12 @@ describe("a governed tenant's first turn", () => {
       after: 0,
       limit: 200,
     });
-    const succeeded = events.filter(
-      (event) =>
-        event.type === "agent.toolCall.output" &&
-        JSON.stringify(event.payload).includes("browser_open") &&
-        !JSON.stringify(event.payload).toLowerCase().includes("not found"),
-    );
-    expect(succeeded.filter((event) => JSON.stringify(event.payload).includes("tabId"))).toEqual(
-      [],
-    );
+    // The runtime refuses the call itself: the tool is not in the agent, so
+    // the turn ends with the SDK's refusal and nothing ran.
+    expect(
+      events.filter((event) => event.type === "turn.failed").map((event) => event.payload),
+    ).toEqual([{ error: "Tool interaction__browser_open not found in agent Opengeni Agent." }]);
+    expect(events.filter((event) => event.type.startsWith("agent.toolCall"))).toEqual([]);
   });
 
   test("a schedule created before any session fires a first turn with no generic tools", async () => {
@@ -367,5 +376,104 @@ describe("a governed tenant's first turn", () => {
       producerKey: `governed-files-${crypto.randomUUID()}`,
     });
     expect(run).toEqual({ action: "blocked", reason: "attachments_disabled" });
+  });
+});
+
+describe("a governed tenant's automation trigger", () => {
+  test("a trigger whose template attaches a file is refused when it fires", async () => {
+    const grant = await provision(HOST_SOURCE);
+    await shared.admin`insert into organization_session_policies
+        (account_id, attachments, tool_family_mode, tool_families, source)
+      values (${grant.accountId}, 'disabled', 'deny',
+        ARRAY['shell','codemode','browser','computerUse']::text[], 'governed_default')`;
+    const triggerId = crypto.randomUUID();
+    const eventId = crypto.randomUUID();
+    const runId = crypto.randomUUID();
+    const run = {
+      id: runId,
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sourceId: crypto.randomUUID(),
+      triggerId,
+      triggerRevision: 1,
+      eventId,
+      occurrenceKey: "manual:1",
+      status: "dispatching",
+      sessionId: null,
+      errorCode: null,
+      createdAt: new Date(0).toISOString(),
+      updatedAt: new Date(0).toISOString(),
+      acceptedExecution: {
+        version: 1,
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sourceId: "",
+        sourceVersion: 1,
+        triggerId,
+        triggerRevision: 1,
+        eventId,
+        adapterId: "signed-json.v1",
+        occurrenceKey: "manual:1",
+        initialMessage: "Read the attached notes.",
+        sessionTemplate: {
+          prompt: "Read",
+          instructions: null,
+          // Saved while the organization was stock.
+          resources: [{ kind: "file", fileId: crypto.randomUUID() }],
+          skills: [],
+          tools: [],
+          firstPartyMcpTools: [],
+          firstPartyMcpPermissions: [],
+          model: null,
+          reasoningEffort: null,
+          sandboxBackend: "none",
+          policyRole: "automation",
+          metadata: {},
+        },
+        serviceSubjectId: `automation:${triggerId}`,
+        serviceLabel: "Test automation",
+        provenance: { eventId },
+      },
+    };
+    run.acceptedExecution.sourceId = run.sourceId;
+    const settled: unknown[] = [];
+    let created = false;
+    const activity = createAutomationActivities(
+      async () =>
+        ({
+          settings: settings(),
+          db: client.db,
+          bus: new MemoryEventBus(),
+          wakeSessionWorkflow: null,
+          entitlements: null,
+          observability: { info: () => undefined, warn: () => undefined },
+        }) as unknown as ActivityServices,
+      {
+        claim: async () => run as never,
+        settle: async (_db, input) => {
+          settled.push(input);
+        },
+        admit: async () => null,
+        assertModelPolicy: async () => undefined,
+        assertAuthority: async () => undefined,
+        recordUsage: async () => undefined,
+        readWorkspace: async () => ({ settings: {} }) as never,
+        createSession: (async () => {
+          created = true;
+          throw new Error("a session must not be created");
+        }) as never,
+      },
+    );
+    expect(
+      await activity.dispatchAutomationRun({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        runId,
+      }),
+    ).toEqual({ action: "failed", reason: "attachments_disabled" });
+    expect(created).toBe(false);
+    expect(settled).toEqual([
+      expect.objectContaining({ runId, status: "failed", errorCode: "attachments_disabled" }),
+    ]);
   });
 });

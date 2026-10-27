@@ -11,10 +11,12 @@ import {
 import {
   ensureGovernedOrganizationSessionPolicy,
   getOrganizationSessionPolicy,
+  listManagedAccountExternalSources,
   type Database,
   type StoredOrganizationSessionPolicy,
 } from "@opengeni/db";
 import {
+  OrganizationGovernancePortContractError,
   organizationGovernedByHost,
   type OrganizationGovernanceDeps,
 } from "./organization-governance";
@@ -79,6 +81,45 @@ export async function ensureOrganizationSessionPolicyAtEntry(
 ): Promise<void> {
   if (!deps.organizationGovernance) return;
   await resolveOrganizationSessionPolicy(deps, organizationId);
+}
+
+/**
+ * Stores the governed default for every organization the bound port governs
+ * that has no policy yet: organizations governed before migration 1018, whose
+ * stored schedules and triggers the worker (which has no port) would
+ * otherwise run as stock. Run when the API starts. Idempotent; pages through
+ * the organizations that carry an external source. Without a port, nothing.
+ */
+export async function storeGovernedOrganizationSessionPolicyDefaults(
+  deps: OrganizationGovernanceDeps,
+  options: { pageSize?: number } = {},
+): Promise<{ governed: number; stored: number }> {
+  const port = deps.organizationGovernance;
+  if (!port) return { governed: 0, stored: 0 };
+  const pageSize = options.pageSize ?? 500;
+  let after: string | null = null;
+  let governed = 0;
+  let stored = 0;
+  for (;;) {
+    const page = await listManagedAccountExternalSources(deps.db, { after, limit: pageSize });
+    for (const account of page) {
+      const answer: unknown = port.governs({
+        organizationId: account.id,
+        externalSource: account.externalSource,
+      });
+      if (typeof answer !== "boolean")
+        throw new OrganizationGovernancePortContractError(
+          "OrganizationGovernancePort.governs must return a boolean",
+        );
+      if (!answer) continue;
+      governed += 1;
+      if (await getOrganizationSessionPolicy(deps.db, account.id)) continue;
+      await ensureGovernedOrganizationSessionPolicy(deps.db, account.id);
+      stored += 1;
+    }
+    if (page.length < pageSize) return { governed, stored };
+    after = page.at(-1)!.id;
+  }
 }
 
 /**

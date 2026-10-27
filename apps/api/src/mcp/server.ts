@@ -2312,6 +2312,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, triggerId }) => {
         const task = await requireVisibleTask(id);
+        await requireScheduledWorkAdmissible(deps, grant.accountId, task.agentConfig.resources);
         if (task.action.kind === "agent_turn") {
           const targetSession = await validateScheduledTaskTarget({
             db: deps.db,

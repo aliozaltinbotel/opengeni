@@ -51,6 +51,7 @@ import {
   SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
+  storeGovernedOrganizationSessionPolicyDefaults,
 } from "@opengeni/core";
 import {
   Connection,
@@ -714,6 +715,20 @@ export async function startApi(options: StartApiOptions = {}) {
       db: runtimeDatabaseReadyCheck(dbClient.db, databasePosture),
     },
   });
+  if (routeDeps.organizationGovernance) {
+    // Organizations a host governed before migration 1018 get the governed
+    // session policy now, before their stored schedules and triggers fire.
+    try {
+      const stored = await storeGovernedOrganizationSessionPolicyDefaults(routeDeps);
+      observability.info("governed session policy defaults stored", stored);
+    } catch (error) {
+      observability.error("governed session policy defaults could not be stored", {
+        errorClass: error instanceof Error ? error.name : "unknown",
+        errorCode: "governed_session_policy_backfill_failed",
+        origin: "api",
+      });
+    }
+  }
   if (!routeDeps.editableArtifacts) {
     observability.warn("editable artifact engine is not composed", {
       subsystem: "editable_artifacts",
