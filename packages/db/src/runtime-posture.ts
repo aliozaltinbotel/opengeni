@@ -81,6 +81,13 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * granted, a runner's inventory report skips it. 1016 withholds the host
  * identity lookup; until it is granted, the lookup resolves the identity
  * through the organization's member list.
+ *
+ * runtime-posture-compatibility-postgres fails once the pinned previous
+ * release knows a routine listed here: grant it then in a rolling migration
+ * (for 1016: GRANT EXECUTE ON FUNCTION
+ * opengeni_private.lookup_organization_host_identity(uuid, text, uuid) to
+ * every application role, as 0947 does), drop it from this list, and remove
+ * its "not yet" path (lookupThroughMemberList for 1016).
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",

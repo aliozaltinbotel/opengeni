@@ -94,7 +94,10 @@ export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT"
 export const GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE =
   "GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE";
 export const HOST_IDENTITY_NOT_IN_ORGANIZATION = "HOST_IDENTITY_NOT_IN_ORGANIZATION";
-/** The service token's subject may not do this here: not an active owner or admin, or a role rule. */
+/**
+ * Any database authorization refusal for the acting subject (the service
+ * token's subject): for example not an active owner or admin, or a role rule.
+ */
 export const HOST_COMMAND_ACTOR_NOT_AUTHORIZED = "HOST_COMMAND_ACTOR_NOT_AUTHORIZED";
 
 const encoder = new TextEncoder();
@@ -222,9 +225,11 @@ export type HostLookupOrganizationIdentityRequest = z.infer<
  * - `memberships`: the identity's memberships in this organization, oldest
  *   first (a list: an identity can have more than one account). Every status
  *   answers 200; a host MUST refuse to link a membership that is not `active`.
- * - `verifiedEmail`: the email of the account the active login binding signs
- *   in to or, without an active binding, of the oldest active membership's
- *   account; null when that email is unverified or there is no such account.
+ * - `verifiedEmail`: the email of this organization's member account that the
+ *   active login binding signs in to or, without an active binding, of the
+ *   oldest active membership's account; null when that email is unverified or
+ *   there is no such account (the binding signs in to an account that is not a
+ *   member here).
  * - `activeLoginBinding`: the identity's active login binding, or null when it
  *   has none in the `active` state (see `identityStatus`). `id` changes when
  *   another sign-in method becomes the active binding; `revision` increases

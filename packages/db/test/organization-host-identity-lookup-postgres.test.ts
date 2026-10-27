@@ -113,6 +113,50 @@ afterAll(async () => {
   await fixture?.release();
 }, 180_000);
 
+/** A new account that accepts an invitation into the world's organization. */
+async function memberAccount(): Promise<{ userId: string; subjectId: string; email: string }> {
+  const db = client!.db;
+  const email = `${crypto.randomUUID()}@example.test`;
+  const userId = await authUser(email, true);
+  const subjectId = `user:${userId}`;
+  const invitation = await createOrganizationInvitation(db, {
+    organizationId: world.organizationId,
+    actorSubjectId: world.ownerSubjectId,
+    operationId: crypto.randomUUID(),
+    targetSubjectId: null,
+    targetEmail: email,
+    role: "member",
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  await bindPendingOrganizationInvitationsForVerifiedEmail(db, { subjectId, email });
+  const [bound] = await fixture!.admin<{ revision: string }[]>`
+    select revision from organization_membership_invitations where id = ${invitation.id}`;
+  await acceptOrganizationInvitation(db, {
+    organizationId: world.organizationId,
+    actorSubjectId: subjectId,
+    operationId: crypto.randomUUID(),
+    invitationId: invitation.id,
+    expectedRevision: Number(bound!.revision),
+  });
+  return { userId, subjectId, email };
+}
+
+/** A second account of an existing identity, as account linking would leave it. */
+async function attachAccount(identityId: string, authUserId: string): Promise<void> {
+  await fixture!.admin`
+    insert into canonical_human_identity_subjects (auth_user_id, identity_id)
+    values (${authUserId}, ${identityId})`;
+}
+
+/** Both paths' answers for one identity. */
+async function bothPaths(identityId: string) {
+  await setLookupGrant(false);
+  const throughMembers = await lookup(identityId);
+  await setLookupGrant(true);
+  const byIdentity = await lookup(identityId);
+  return { throughMembers, byIdentity };
+}
+
 async function setLookupGrant(granted: boolean): Promise<void> {
   await fixture!.admin.unsafe(
     `${granted ? "GRANT" : "REVOKE"} EXECUTE ON FUNCTION ${LOOKUP} ${granted ? "TO" : "FROM"} opengeni_app`,
@@ -225,5 +269,47 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
     });
     expect(updated.row.accepted_at).toEqual(updated.row.updated_at);
     expect(updated.forced).toBe(true);
+  });
+
+  test("an active binding on an account that is not a member here answers no email", async () => {
+    if (!fixture) return;
+    const member = await memberAccount();
+    const { identityId } = await synchronizeCanonicalHumanLoginBindings(client!.db, member.userId);
+    // The identity's other account never joined the organization, and the
+    // identity's active login binding signs in to that account.
+    const outsiderId = await authUser(`${crypto.randomUUID()}@example.test`, true);
+    await attachAccount(identityId, outsiderId);
+    const [binding] = await fixture.admin<{ id: string }[]>`
+      insert into canonical_human_login_bindings (identity_id, provider_id, provider_account_id)
+      values (${identityId}, 'credential', ${outsiderId}) returning id`;
+    await fixture.admin`
+      update canonical_human_identities set active_login_binding_id = ${binding!.id}
+      where id = ${identityId}`;
+    const { throughMembers, byIdentity } = await bothPaths(identityId);
+    expect(byIdentity?.verifiedEmail).toBeNull();
+    expect(byIdentity?.activeLoginBinding).toEqual({ id: binding!.id, revision: 1 });
+    expect(byIdentity?.memberships).toHaveLength(1);
+    expect(throughMembers).toEqual(byIdentity);
+  });
+
+  test("an identity with two member accounts answers both, the same on both paths", async () => {
+    if (!fixture) return;
+    const first = await memberAccount();
+    const { identityId } = await synchronizeCanonicalHumanLoginBindings(client!.db, first.userId);
+    const second = await memberAccount();
+    await attachAccount(identityId, second.userId);
+    const memberships = await fixture.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${world.organizationId}
+        and subject_id in (${first.subjectId}, ${second.subjectId})
+      order by created_at, id`;
+    const { throughMembers, byIdentity } = await bothPaths(identityId);
+    expect(byIdentity?.memberships.map((membership) => membership.id)).toEqual(
+      memberships.map((membership) => membership.id),
+    );
+    expect(byIdentity?.acceptedInvitations).toHaveLength(2);
+    // The active binding signs in to the first account, a member here.
+    expect(byIdentity?.verifiedEmail).toBe(first.email);
+    expect(throughMembers).toEqual(byIdentity);
   });
 });

@@ -1001,9 +1001,11 @@ first; it is a list because one identity can sign in through more than one
 account. A suspended or offboarded (`revoked`) member still answers `200`:
 **the host must refuse to link any membership that is not `active`.**
 
-`verifiedEmail` is the email of the account the active login binding signs
-in to; without an active binding, the oldest active membership's account. It
-is `null` while that email is unverified, or when there is no such account.
+`verifiedEmail` is the email of this organization's member account that the
+active login binding signs in to; without an active binding, the oldest
+active membership's account. It is `null` while that email is unverified, or
+when there is no such account (for example when the binding signs in to an
+account of the identity that is not a member here).
 `activeLoginBinding` is the identity's active canonical login binding, or
 `null` when it has none in the `active` state. Its `id` changes when another
 sign-in method becomes the active binding, and its `revision` increases

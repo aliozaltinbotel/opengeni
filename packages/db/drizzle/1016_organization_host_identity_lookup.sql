@@ -102,17 +102,16 @@ BEGIN
     'identityStatus', identity_row.status,
     'verifiedEmail', CASE
       WHEN identity_row.binding_id IS NOT NULL THEN (
-        -- The account the active login binding signs in to.
+        -- This organization's member account the active login binding signs
+        -- in to: never an account of the identity the organization never had.
         SELECT account_user.email
-        FROM canonical_human_identity_subjects subject_row
+        FROM member
         JOIN auth_identities account
-          ON account.user_id = subject_row.auth_user_id
+          ON account.user_id = member.auth_user_id
           AND pg_catalog.lower(account.provider_id) = identity_row.provider_id
           AND account.account_id = identity_row.provider_account_id
         JOIN auth_users account_user ON account_user.id = account.user_id
-        WHERE subject_row.identity_id = p_identity_id
-          AND subject_row.status = 'active'
-          AND account_user.email_verified
+        WHERE account_user.email_verified
         LIMIT 1
       )
       ELSE (

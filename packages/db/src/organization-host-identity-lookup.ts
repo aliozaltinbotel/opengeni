@@ -110,6 +110,11 @@ async function lookupThroughMemberList(
       status: member.status,
       role: member.role,
     })),
+    // The member list cannot see 1016's accepted_at, so acceptedAt is the
+    // invitation's updatedAt. They are equal for every accepted invitation:
+    // 0263's accept branch is the only writer of status 'accepted' and sets
+    // updated_at in that same statement (1016's trigger copies it), and every
+    // later invitation write (revoke, email binding) filters on pending.
     acceptedInvitations: (await listAllInvitations(db, input)).flatMap(
       ({ id, status, acceptedMembershipId, updatedAt }) =>
         status === "accepted" &&
@@ -121,7 +126,11 @@ async function lookupThroughMemberList(
   });
 }
 
-/** This organization's managed-human members whose account belongs to the identity, oldest first. */
+/**
+ * This organization's managed-human members whose account belongs to the
+ * identity, oldest first: list_organization_members orders by created_at, id,
+ * and the array order is kept.
+ */
 async function membersOfIdentity(db: Database, input: LookupInput): Promise<MatchedMember[]> {
   const rows = await rawRows<{ member: unknown; projection: unknown }>(
     db,
@@ -129,25 +138,21 @@ async function membersOfIdentity(db: Database, input: LookupInput): Promise<Matc
       select candidate.member, candidate.projection
       from (
         select
+          member.position,
           member.value as member,
           get_canonical_human_identity_projection(
             substr(member.value ->> 'subjectId', ${MANAGED_HUMAN_SUBJECT_PREFIX.length + 1})
           ) as projection
         from jsonb_array_elements(
           list_organization_members(${input.organizationId}::uuid, ${input.actorSubjectId})
-        ) member
+        ) with ordinality as member(value, position)
         where starts_with(member.value ->> 'subjectId', ${MANAGED_HUMAN_SUBJECT_PREFIX})
       ) candidate
       where candidate.projection -> 'activeIdentity' ->> 'id' = ${input.identityId}
+      order by candidate.position
     `,
   );
-  return rows
-    .map((row) => MatchedMember.parse({ member: row.member, projection: row.projection }))
-    .sort(
-      (left, right) =>
-        Date.parse(left.member.createdAt) - Date.parse(right.member.createdAt) ||
-        left.member.id.localeCompare(right.member.id),
-    );
+  return rows.map((row) => MatchedMember.parse({ member: row.member, projection: row.projection }));
 }
 
 function authUserIdOf(subjectId: string): string {

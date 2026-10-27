@@ -8,10 +8,12 @@ import {
 import { createDb, type DbClient } from "../src/database";
 import {
   assertRuntimeDatabasePosture,
+  DEFERRED_RUNTIME_PRIVATE_ROUTINES,
   evaluateRuntimeDatabasePosture,
   inspectRuntimeDatabasePosture,
 } from "../src/runtime-posture";
 import {
+  deferredRuntimeRoutinesDueForGrant,
   loadRuntimePostureBaseline,
   PRE_COMPATIBILITY_PRODUCTION_SOURCE,
   readRuntimePostureBaseline,
@@ -50,6 +52,15 @@ afterAll(async () => {
 }, 180_000);
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
+
+// A withheld definer (0978, 0984, 1016's host identity lookup) waits only for a
+// previous release that knows it. Once the pin advances past it, this fails
+// until a rolling migration grants it and it leaves the deferred list.
+realTest("no withheld runtime definer is already known to the pinned release", () => {
+  expect(
+    deferredRuntimeRoutinesDueForGrant(baseline!.module, DEFERRED_RUNTIME_PRIVATE_ROUTINES),
+  ).toEqual([]);
+});
 
 realTest("readiness inspects both namespaces once without caching posture", async () => {
   const driver = (client!.db as unknown as { $client: postgres.Sql }).$client;
