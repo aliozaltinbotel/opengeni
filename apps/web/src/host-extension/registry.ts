@@ -180,7 +180,13 @@ function checkToolRegistryEntries(value: unknown): void {
     if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
     const name = text(entry.name, `${field}.name`);
     if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
-    if (isBuiltInToolCardName(name)) fail(`${field}.name`, `"${name}" has a built-in card`);
+    // A stock build has no entries to check; the flag lets it drop the name list.
+    if (
+      import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" &&
+      isBuiltInToolCardName(name)
+    ) {
+      fail(`${field}.name`, `"${name}" has a built-in card`);
+    }
     names.add(name);
     component(entry.render, `${field}.render`);
     // An omitted flag means prefixed leaf matching in the timeline registry, so
@@ -230,7 +236,11 @@ export type HostExtensionSlot = Readonly<{
   install: (value: unknown) => HostExtension;
   /** The installed extension; the stock one until something is installed. */
   current: () => HostExtension;
+  /** The installed extension's settings-mode route paths: one array per installation. */
+  settingsPaths: () => readonly string[];
 }>;
+
+const NONE: readonly never[] = Object.freeze([]);
 
 /**
  * A slot that holds one host extension. Reading it before installation gives
@@ -240,6 +250,7 @@ export type HostExtensionSlot = Readonly<{
  */
 export function createHostExtensionSlot(): HostExtensionSlot {
   let installed: HostExtension | undefined;
+  let settingsPaths: readonly string[] = NONE;
   let readBeforeInstall = false;
   return {
     install(value) {
@@ -251,13 +262,21 @@ export function createHostExtensionSlot(): HostExtensionSlot {
           "HOST_EXTENSION_READ_BEFORE_INSTALL: read the host extension at call time, after startup",
         );
       }
-      installed = validateHostExtension(value);
-      return installed;
+      const extension = validateHostExtension(value);
+      installed = extension;
+      settingsPaths = (extension.routes ?? [])
+        .filter((route) => route.mode === "settings")
+        .map((route) => route.path);
+      return extension;
     },
     current() {
       if (installed) return installed;
       readBeforeInstall = true;
       return EMPTY_HOST_EXTENSION;
+    },
+    settingsPaths() {
+      if (!installed) readBeforeInstall = true;
+      return settingsPaths;
     },
   };
 }
@@ -270,24 +289,11 @@ export const installHostExtension: HostExtensionSlot["install"] = slot.install;
 /** This build's host extension (the configured bundle, or the stock stub). Read it at call time. */
 export const currentHostExtension: HostExtensionSlot["current"] = slot.current;
 
-const NONE: readonly never[] = Object.freeze([]);
-let settingsPathsOf: HostExtension | undefined;
-let settingsPaths: readonly string[] = NONE;
-
 /**
  * Paths of this build's extension routes that open in the settings-mode shell.
- * The same array on every call for one extension, so it can be a memo input.
+ * The same array on every call, so it can be a memo input.
  */
-export function extensionSettingsPaths(): readonly string[] {
-  const extension = currentHostExtension();
-  if (extension !== settingsPathsOf) {
-    settingsPathsOf = extension;
-    settingsPaths = (extension.routes ?? [])
-      .filter((route) => route.mode === "settings")
-      .map((route) => route.path);
-  }
-  return settingsPaths;
-}
+export const extensionSettingsPaths: HostExtensionSlot["settingsPaths"] = slot.settingsPaths;
 
 /** Native destinations this build's extension hides from every link source; none for the stub. */
 export function hiddenNativeDestinations(): readonly NativeDestination[] {

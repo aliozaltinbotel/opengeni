@@ -40,3 +40,9 @@ export function isBuiltInToolCardName(name: string): boolean {
   const boundary = name.indexOf("__");
   return boundary >= 0 && BUILT_IN_LEAF_TOOL_NAMES.has(name.slice(boundary + 2));
 }
+
+/** Every name listed here, exact-only and leaf-matching, for the drift test. */
+export function* builtInToolCardNames(): Generator<string> {
+  yield* BUILT_IN_EXACT_TOOL_NAMES;
+  yield* BUILT_IN_LEAF_TOOL_NAMES;
+}

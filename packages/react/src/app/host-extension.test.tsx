@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 
 import type { ToolCallItem } from "../timeline";
 import { builtInToolRegistryEntries, defaultToolRegistry } from "../timeline/tool-renderers";
+import { builtInToolCardNames } from "./built-in-tool-names";
 import {
   isBuiltInToolCardName,
   isWorkspaceSegmentHidden,
@@ -105,6 +106,13 @@ describe("built-in tool card names", () => {
         builtIn: rendersBuiltIn(name),
       });
     }
+  });
+
+  test("lists no name the default tool registry has no built-in card for", () => {
+    const listed = [...builtInToolCardNames()];
+    expect(listed.length).toBeGreaterThan(0);
+    for (const name of listed)
+      expect({ name, builtIn: rendersBuiltIn(name) }).toEqual({ name, builtIn: true });
   });
 
   test("an exact-only built-in name is not claimed behind another prefix", () => {

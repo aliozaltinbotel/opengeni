@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -398,7 +398,8 @@ describe("web bundle budget policy", () => {
 });
 
 const repoRoot = path.resolve(import.meta.dir, "..");
-const webDist = path.join(repoRoot, "apps/web/dist");
+const webRoot = path.join(repoRoot, "apps/web");
+const webDist = path.join(webRoot, "dist");
 const extensionFixture = path.join(repoRoot, "apps/web/test/fixtures/host-extension-dist");
 // Two full production web builds (stub, then fixture): they run only when
 // asked for. The fixture's shape is checked on every run.
@@ -485,12 +486,17 @@ describe("web bundle budget with a host extension", () => {
       // its pages and cards must add nothing else to the initial load.
       expect(fixture.report.initial.files).toBeLessThanOrEqual(stub.report.initial.files + 1);
       expect(fixture.report.initial.gzip - stub.report.initial.gzip).toBeLessThanOrEqual(2 * KIB);
-      const lazyKeys = Object.keys(fixture.manifest).filter((key) =>
-        key.includes("host-extension-dist/chunks/"),
-      );
-      expect(lazyKeys.length).toBeGreaterThanOrEqual(1);
+      // Every page and card body the fixture ships is its own lazy entry,
+      // outside the static initial graph. Manifest keys are relative to apps/web.
+      const lazyKeys = readdirSync(path.join(extensionFixture, "chunks"))
+        .filter((file) => file.endsWith(".js"))
+        .map((file) => path.relative(webRoot, path.join(extensionFixture, "chunks", file)));
+      expect(lazyKeys.length).toBeGreaterThan(0);
       const initialGraph = staticImportGraph(fixture.manifest);
-      for (const key of lazyKeys) expect(initialGraph.has(key)).toBe(false);
+      for (const key of lazyKeys) {
+        expect({ key, inManifest: key in fixture.manifest }).toEqual({ key, inManifest: true });
+        expect({ key, initial: initialGraph.has(key) }).toEqual({ key, initial: false });
+      }
     },
     15 * 60 * 1000,
   );

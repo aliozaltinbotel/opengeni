@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { parseSync } from "oxc-parser";
 import {
   EMPTY_HOST_EXTENSION,
   type HostExtension,
@@ -61,6 +63,8 @@ describe("host extension registry", () => {
       });
       expect(slot.install(extension)).toBe(extension);
       expect(slot.current()).toBe(extension);
+      expect(slot.settingsPaths()).toEqual(["prefs"]);
+      expect(slot.settingsPaths()).toBe(slot.settingsPaths());
       expect(() => slot.install(extension)).toThrow(/^HOST_EXTENSION_INSTALLED: /);
     });
 
@@ -68,6 +72,14 @@ describe("host extension registry", () => {
       const slot = createHostExtensionSlot();
       expect(() => slot.install({ id: "" })).toThrow(/^HOST_EXTENSION_INVALID: id /);
       expect(() => slot.install(EMPTY_HOST_EXTENSION)).not.toThrow();
+    });
+
+    test("refuses to install after a reader already saw the stock settings paths", () => {
+      const slot = createHostExtensionSlot();
+      expect(slot.settingsPaths()).toEqual([]);
+      expect(() => slot.install(EMPTY_HOST_EXTENSION)).toThrow(
+        /^HOST_EXTENSION_READ_BEFORE_INSTALL: /,
+      );
     });
 
     test("refuses to install after a reader already saw the stock extension", () => {
@@ -81,26 +93,119 @@ describe("host extension registry", () => {
     });
   });
 
-  test("only the startup module imports the build's extension", async () => {
+  describe("startup wiring", () => {
     // A lazy route that statically reaches a module with import() reshuffles
     // the startup chunks, so the descriptor (whose pages load through
-    // import()) is imported from the main entry's startup module alone.
-    const sources = new Bun.Glob("**/*.{ts,tsx}").scan({
-      cwd: new URL("..", import.meta.url).pathname,
+    // import()) is reached from the main entry's startup module alone, and
+    // only main-entry modules import that startup module.
+    const sourceRoot = new URL("..", import.meta.url).pathname;
+
+    async function consoleSources(): Promise<{ file: string; source: string }[]> {
+      const sources: { file: string; source: string }[] = [];
+      for await (const file of new Bun.Glob("**/*.{ts,tsx}").scan({ cwd: sourceRoot })) {
+        if (/\.test\.tsx?$/.test(file)) continue;
+        sources.push({ file, source: await readFile(join(sourceRoot, file), "utf8") });
+      }
+      return sources.sort((left, right) => (left.file < right.file ? -1 : 1));
+    }
+
+    /** Each module specifier a source imports (static, side-effect, re-export or import()), resolved under src. */
+    function importedModules(file: string, source: string): string[] {
+      const specifiers = source.matchAll(
+        /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["']([^"']+)["']/gm,
+      );
+      return Array.from(specifiers, ([, specifier = ""]) => {
+        if (specifier.startsWith("@/")) return specifier.slice(2);
+        if (specifier.startsWith(".")) return join(dirname(file), specifier);
+        return specifier;
+      });
+    }
+
+    test("only the startup module imports the build's extension", async () => {
+      const importers = (await consoleSources())
+        .filter(({ file, source }) =>
+          importedModules(file, source).includes("@opengeni/web-host-extension"),
+        )
+        .map(({ file }) => file);
+      expect(importers).toEqual(["host-extension/startup.ts"]);
+      const main = await readFile(join(sourceRoot, "main.tsx"), "utf8");
+      expect(main).toMatch(/^import "\.\/app-host";$/m);
     });
-    const importers: string[] = [];
-    for await (const file of sources) {
-      if (/\.test\.tsx?$/.test(file)) continue;
-      const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
-      if (/["']@opengeni\/web-host-extension["']/.test(source)) importers.push(file);
+
+    test("only main-entry modules import the startup module", async () => {
+      const importers = (await consoleSources())
+        .filter(({ file, source }) =>
+          importedModules(file, source).includes("host-extension/startup"),
+        )
+        .map(({ file }) => file);
+      expect(importers).toEqual(["App.tsx", "app-host.ts"]);
+    });
+
+    const EXTENSION_READERS: ReadonlySet<string> = new Set([
+      "currentHostExtension",
+      "hiddenNativeDestinations",
+      "extensionSettingsPaths",
+    ]);
+
+    type AstNode = Readonly<{ type: string; start: number; callee?: AstNode; name?: string }>;
+    const FUNCTION_NODES: ReadonlySet<string> = new Set([
+      "FunctionDeclaration",
+      "FunctionExpression",
+      "ArrowFunctionExpression",
+    ]);
+
+    function isAstNode(value: unknown): value is AstNode {
+      return (
+        typeof value === "object" &&
+        value !== null &&
+        typeof Reflect.get(value, "type") === "string"
+      );
     }
-    expect(importers.sort()).toEqual(["host-extension/startup.ts"]);
-    const main = await readFile(new URL("../main.tsx", import.meta.url), "utf8");
-    expect(main).toMatch(/^import "\.\/app-host";$/m);
-    for (const file of ["../app-host.ts", "../App.tsx"]) {
-      const source = await readFile(new URL(file, import.meta.url), "utf8");
-      expect(source).toContain('from "@/host-extension/startup"');
+
+    /** `file:line` of each call to an extension reader outside every function body. */
+    function moduleScopeReads(file: string, source: string): string[] {
+      const { program, errors } = parseSync(file, source);
+      expect(errors).toEqual([]);
+      const reads: string[] = [];
+      const visit = (node: AstNode, inFunction: boolean): void => {
+        const callee = node.type === "CallExpression" ? node.callee : undefined;
+        if (
+          !inFunction &&
+          callee?.type === "Identifier" &&
+          EXTENSION_READERS.has(callee.name ?? "")
+        ) {
+          reads.push(`${file}:${source.slice(0, node.start).split("\n").length}`);
+        }
+        const nested = inFunction || FUNCTION_NODES.has(node.type);
+        for (const value of Object.values(node)) {
+          for (const child of Array.isArray(value) ? value : [value]) {
+            if (isAstNode(child)) visit(child, nested);
+          }
+        }
+      };
+      visit(program as unknown as AstNode, false);
+      return reads;
     }
+
+    test("no module reads the extension while it loads, except main-entry App.tsx", async () => {
+      // Shared chunks evaluate before the main entry's own modules, so a
+      // module-scope read would see the stock extension (and make startup's
+      // install throw). Reads inside functions run at call time.
+      const reads = (await consoleSources())
+        .filter(({ file }) => file !== "App.tsx")
+        .flatMap(({ file, source }) => moduleScopeReads(file, source));
+      expect(reads).toEqual([]);
+    });
+
+    test("the module-scope scan finds a load-time read and skips call-time ones", () => {
+      const source = [
+        "const hidden = hiddenNativeDestinations();",
+        "export function Page() { return currentHostExtension().productName; }",
+        "export const paths = () => extensionSettingsPaths();",
+        "export function Shell({ lifecycle = currentHostExtension().lifecycle }) { return lifecycle; }",
+      ].join("\n");
+      expect(moduleScopeReads("probe.ts", source)).toEqual(["probe.ts:1"]);
+    });
   });
 
   test("accepts a complete extension", () => {

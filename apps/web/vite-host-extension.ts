@@ -62,3 +62,18 @@ export function hostExtensionAliases(files: HostExtensionFiles): Alias[] {
     { find: /^@opengeni\/web-host-extension$/, replacement: files.entry },
   ];
 }
+
+/**
+ * The build-time flag the console reads as
+ * `import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK`: the string "true" when no
+ * extension is configured (env values are strings). Code that only checks an extension (for example its tool-card
+ * names against the built-in cards) is then dead in a stock build and is
+ * dropped from the startup bundle. Outside a Vite build the property is
+ * undefined, so those checks run.
+ */
+export const HOST_EXTENSION_STOCK_DEFINE = "import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK";
+
+/** Vite `define` entries for this build's host extension setting. */
+export function hostExtensionDefine(configured: string | undefined): Record<string, string> {
+  return { [HOST_EXTENSION_STOCK_DEFINE]: JSON.stringify(String(!configured?.trim())) };
+}
