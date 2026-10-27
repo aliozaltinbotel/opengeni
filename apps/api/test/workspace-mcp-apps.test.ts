@@ -21,6 +21,10 @@ import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+import {
+  buildWorkspaceToolGatewayMcpServer,
+  type PreparedWorkspaceToolGateway,
+} from "../src/workspace-tool-gateway";
 
 setDefaultTimeout(60_000);
 
@@ -357,3 +361,71 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
     }
   });
 });
+
+describe("MCP Apps resources after the caller's authority is revoked", () => {
+  /** A prepared gateway whose one host tool has a view, served on an in-process client. */
+  async function revocableGateway(reads: string[]) {
+    let revoked = false;
+    const prepared = {
+      toolGateway: {},
+      toolGatewayCatalog: {
+        digest: "test-digest",
+        entries: [
+          {
+            identity: { serverId: "acme", toolName: "get_status" },
+            modelName: "acme__get_status",
+            codemodePath: "acme.get_status",
+            source: "mcp",
+            approval: "none",
+            inputSchema: { type: "object" },
+            meta: { ui: { resourceUri: STATUS_VIEW } },
+          },
+        ],
+      },
+      close: async () => undefined,
+      reauthorize: async () => {
+        if (revoked) throw new Error("caller authority changed");
+      },
+      hostViewServers: [{ serverId: "acme", ...acmeResources(reads) }],
+    } as unknown as PreparedWorkspaceToolGateway;
+    const server = buildWorkspaceToolGatewayMcpServer(prepared, {} as never);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const mcpClient = new Client({ name: "revoked-reader", version: "1.0.0" });
+    await server.connect(serverTransport);
+    await mcpClient.connect(clientTransport);
+    const read = async (uri: string) =>
+      await mcpClient.readResource({ uri }).then(
+        (result) => ({ result, error: undefined }),
+        (error: { code?: number; message?: string }) => ({
+          result: undefined,
+          error: { code: error.code, message: error.message },
+        }),
+      );
+    return {
+      read,
+      revoke: () => void (revoked = true),
+      close: async () => await Promise.allSettled([mcpClient.close(), server.close()]),
+    };
+  }
+
+  test("a revoked caller gets the same refusal for a known and an unknown URI", async () => {
+    const reads: string[] = [];
+    const gateway = await revocableGateway(reads);
+    try {
+      expect((await gateway.read(STATUS_VIEW)).result?.contents[0]?.text).toBe(STATUS_HTML);
+      expect((await gateway.read("ui://acme/views/missing.html")).error?.code).toBe(-32002);
+      reads.length = 0;
+      gateway.revoke();
+      const known = await gateway.read(STATUS_VIEW);
+      const unknown = await gateway.read("ui://acme/views/missing.html");
+      expect(known.result).toBeUndefined();
+      expect(known.error).toBeDefined();
+      expect(known.error?.code).not.toBe(-32002);
+      expect(unknown).toEqual(known);
+      expect(reads).toEqual([]);
+    } finally {
+      await gateway.close();
+    }
+  });
+});
+

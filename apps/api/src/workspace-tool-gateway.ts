@@ -1432,11 +1432,13 @@ function registerHostViewResources(
     return { resources };
   });
   server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    // Authority first, so a revoked caller gets one answer for every URI and
+    // learns nothing about which views exist.
+    await prepared.reauthorize?.();
     const { uri } = request.params;
     const notFound = () => new McpError(MCP_RESOURCE_NOT_FOUND, "Resource not found", { uri });
     const host = viewServers.get(uri);
     if (!host?.readResource) throw notFound();
-    await prepared.reauthorize?.();
     const view = await host.readResource(uri);
     if (view?.mimeType !== MCP_APP_RESOURCE_MIME_TYPE || typeof view.text !== "string")
       throw notFound();
