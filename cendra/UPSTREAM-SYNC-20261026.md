@@ -141,20 +141,21 @@ First pass (`ba4430956`): the merged migrator on a fork25-migrated database stop
 | --- | --- |
 | 1000, 1005, 1007, 1008 (DDL) | Columns `ADD COLUMN IF NOT EXISTS` with a type assertion; checks and triggers created when absent, else compared with the exact post-image (constraint definition and validation; trigger function, type, enabled state and column list); guard and reader functions created or replaced only when absent or byte-identical (md5 of `prosrc`). 1000 also accepts 1001's successor check. |
 | 1002, 1004, 1006 (function patches) | Early return on the exact post-image (md5 / sha-256 of the body; 1004 also its two owner-only SELECT policies), before the existing pre-image pins. No upstream migration in 0895-0996 touches `knowledge_index_work`, `validate_editable_artifact_projection` or `knowledge_entry_apply`; the post-image digests were read from a fork25-migrated database and equal the merged fresh install's. |
-| 0997, 0998, 0999, 1001, 1003 | Already re-runnable (2026-10-08 bodies; 1001 rewrites its own check; 1003 accepts its post-image). |
+| 0997, 0998, 0999, 1003 | Already do nothing when their post-image is present (2026-10-08 guarded bodies; 1003's post-image check). |
+| 1001 (fix round 2) | Its fix-round-1 body only reached the same end state: it dropped, re-added and validated the call check in one transaction on every fork25 database, holding ACCESS EXCLUSIVE on `usage_events` for the scan. Now the exact COALESCE post-image is a no-op (validated, or awaiting 1012), 1000's definition is rewritten `NOT VALID`, anything else refuses; the new 1012 validates under SHARE UPDATE EXCLUSIVE. |
 
 Three forward fork migrations follow (fix round 1): 1009 and 1010 make the model-call-fact receipt key a deferrable
 NO ACTION check (re-added `NOT VALID`, then validated, as 0927/0928; 0998 now creates it deferrable on a fresh
 install), and 1011 moves the existing-only identity resolver's membership fence to `FOR NO KEY UPDATE`.
 
-Proof at `9a82a150e` (final migration bytes):
+Proof at the fix-round-2 head (final migration bytes; round 1 had the same results at `9a82a150e` with 988/1000 rows):
 
 | Path | Result |
 | --- | --- |
-| (a) empty PG17 -> merged migrator | rc 0; 988 ledger rows, head `1011_existing_external_identity_membership_key_share.sql`; both spool overloads of `fork_session_content` carry the fork's `source_basis` copy and upstream's `FOR NO KEY UPDATE` fence |
+| (a) empty PG17 -> merged migrator | rc 0; 989 ledger rows, head `1012_usage_event_call_attributes_schema_required_validate.sql`; both spool overloads of `fork_session_content` carry the fork's `source_basis` copy and upstream's `FOR NO KEY UPDATE` fence |
 | (a) merged migrator again | rc 0, applied 0 |
 | (b) empty PG17 -> fork25 migrator (`a9f495d8f`'s `packages/` and exactly its 894 migration files) | rc 0; 894 rows, head `0958_session_creation_receipt.sql` |
-| (b) then the merged migrator | rc 0; applied 106 (upstream's 91, the 12 renamed fork files, 1009-1011); 1000 rows |
+| (b) then the merged migrator | rc 0; applied 107 (upstream's 91, the 12 renamed fork files, 1009-1012); 1001 rows |
 | (b) merged migrator again | rc 0, applied 0 |
 | (a) vs (b) normalized schema dumps (`pg_dump --schema-only`, owner name and column order normalized) | equal except the install timestamp upstream's 0515 bakes into a function |
 | Both end states | receipt key deferrable, not deferred, validated; `read_existing_external_identity` md5 `fa17db36...` (`FOR NO KEY UPDATE`) |
@@ -164,7 +165,7 @@ The staging ledger itself was not read (the read-only tunnel was down); path (b)
 migrator and migration set.
 
 Drain set for the repin: of upstream's 91 new migrations, one is `-- deployment-mode: maintenance`
-(`0907_subscription_connection_one_owner.sql`); the other 90 and all fifteen fork files (0997-1011) are rolling.
+(`0907_subscription_connection_one_owner.sql`); the other 90 and all sixteen fork files (0997-1012) are rolling.
 
 ## Regenerated files
 
@@ -248,12 +249,36 @@ At `f54969111`, own PG17 and Temporal as above:
 | `bun run typecheck` | PASS, all projects clean |
 | `bun scripts/check-migration-schema-contract.ts --base 01f15f453` | PASS (988 migrations, 686 forward additions; 1009-1011 registered) |
 | `bun scripts/check-migration-ordinals.ts --base 01f15f453` | no fork collision (only upstream's own 0730/0871/0872 groups, as before) |
-| `check-migration-deployment-mode`, `-lock-order`, `-online-safety`, `-rls-backfills` | PASS (online-safety: constraint-validation exceptions declared for 0998, 1000, 1001 and 1007, whose adds only run on a fresh install) |
+| `check-migration-deployment-mode`, `-lock-order`, `-online-safety`, `-rls-backfills` | PASS. Online-safety: constraint-validation exceptions for 0998, 1000 and 1007, whose constraint adds are skipped when the post-image is present, so they do work only on a fresh install. Fix round 1 also gave 1001 an exception on a false premise (it runs again on fork25 databases); fix round 2 removed it, and the guard reports 0 findings without it. |
 | `release-schema-contract`, `embedding-migration-order`, `migration-ordinals`, `check-migration-deployment-mode`, `check-migration-online-safety` tests | PASS 111/111 |
 | PostgreSQL proof (a)/(b), reruns, dump comparison | PASS (Migrations) |
 | `workspace-deletion-cascade-postgres -t "workspace deletion schema"` | PASS 2/2 |
 | `existing-external-identity-key-checks` (new) | PASS 2/2; with 1011 removed: 0/2 (`40P01 deadlock detected`, fence still `FOR UPDATE`) |
 | 32 test files that touch the changed migrations, functions or usage paths (incl. `usage-event-call-attributes`, `migration-1000-...`, `model-call-source-receipts`, `session-creation-receipt`, `editable-artifact-materialization-postgres`, `external-identity-request-lock-order-postgres`, `membership-fence-foreign-key-checks`, `runtime-posture`, `unified-knowledge-postgres`, `skills-postgres`, `codex-core-usage-attribution`) | 29 green (`usage-event-call-attributes` after `f54969111` reads 1000's check from its new branch); 3 red with exactly the cases they had before (`runtime-posture-compatibility-postgres`, `session-authorization-routes`, `personal-workspace-session-tenancy`, all inherited from fork25) |
+
+### Fix round 2 re-runs
+
+`1001` was rewritten to the post-image rule with its validation moved to the new `1012` (commit "fix(db): make 1001
+accept its post-image and validate in 1012"). Own PG17 again:
+
+| Check | Result |
+| --- | --- |
+| (b) fork25 database (894 rows) -> merged migrator | rc 0, applied 107, 1001 rows; second run applies 0 |
+| (a) fresh -> merged migrator | rc 0, applied 989; second run applies 0 |
+| (a) vs (b) normalized schema dumps | equal except 0515's install timestamp; call check validated with the COALESCE definition on both |
+| 1001 on a database holding its post-image (rolled back) | no `AccessExclusiveLock` on `usage_events` taken |
+| 1001 on 1000's definition, then 1012 (rolled back) | rewritten `NOT VALID` with the COALESCE definition, validated by 1012 |
+| 1001 on any other definition | `USAGE_EVENT_CALL_ATTRIBUTES_PREIMAGE_DRIFT` |
+| `check-migration-online-safety` (no exception header on 1001) | 0 findings |
+| `check-migration-schema-contract --base 01f15f453` | ok (989 migrations, 687 forward additions; 1012 registered) |
+| deployment-mode, lock-order, rls-backfills, ordinals | PASS / no fork collision |
+| Migration script tests | 111/111 |
+| `usage-event-call-attributes`, `migration-1000-...`, `runtime-posture` | 140/140 |
+
+Not done (optional): an md5 drift check before 1000's trailing `CREATE OR REPLACE` of
+`opengeni_private.enqueue_host_usage_event_export()`. Its body is produced by `format()` with the installed schema
+name, so a fixed digest would differ between the public-schema and dedicated-schema deployments. It is still a
+complete replacement, so a re-run converges to the same definition.
 
 ## New upstream defaults touching auth, tenancy or MCP
 
@@ -277,7 +302,7 @@ Settings are named by their environment variable; "default" is the merged `packa
 
 ## Open risks and decisions for Native
 
-1. **Renamed migrations (resolved in fix round 1):** all fifteen fork migrations follow the post-image rule; a
+1. **Renamed migrations (resolved in fix rounds 1 and 2):** all sixteen fork migrations do nothing when their post-image is present; a
    fork25-migrated database upgrades with rc 0 and converges to the fresh schema. The staging ledger was not read.
 2. **Compaction exact-request reuse is effectively off for Cendra.** Upstream's withheld-wire-history compaction
    input is used only when every item is bound to a durable history row; otherwise the fork re-projects durable items
