@@ -80,6 +80,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     agentAutoUpdate: false,
     productAccessMode: "local",
     managedAuthSessionSetMode: "legacy",
+    hostTokenTtlSeconds: 300,
     nativeAppSchemes: ["opengeni"],
     nativeAppIds: ["ai.opengeni.app"],
     managedAuthNewSignupsEnabled: true,

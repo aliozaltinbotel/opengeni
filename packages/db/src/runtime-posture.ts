@@ -1708,6 +1708,7 @@ export const FORCE_RLS_TABLES = [
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
+  "auth_jwks",
   "auth_runs",
   "automation_run_event_links",
   "automation_runs",
@@ -2576,6 +2577,7 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "auth_jwks",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",

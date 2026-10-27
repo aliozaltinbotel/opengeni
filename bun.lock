@@ -121,6 +121,7 @@
         "@types/json-bigint": "^1.0.4",
         "@types/pg": "^8.20.0",
         "@types/ws": "^8.18.1",
+        "jose": "^6.1.3",
         "postgres": "^3.4.7",
         "tsup": "^8.5.0",
         "typescript": "7.0.2",

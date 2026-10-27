@@ -20,6 +20,7 @@ import type { Observability } from "@opengeni/observability";
 import { betterAuth } from "better-auth";
 import { APIError, createEmailVerificationToken } from "better-auth/api";
 import { hashPassword, verifyPassword } from "better-auth/crypto";
+import { jwt } from "better-auth/plugins/jwt";
 import { sql } from "drizzle-orm";
 import { Pool, type PoolConfig } from "pg";
 
@@ -265,6 +266,7 @@ export function createManagedAuth(
     database: pool,
     trustedOrigins: betterAuthTrustedOrigins(settings),
     logger: { log: logBetterAuthMessage },
+    ...(settings.hostTokenAudience ? { plugins: [hostSessionTokenPlugin(settings)] } : {}),
     hooks: {
       before: createManagedAuthEmailThrottleHook(
         db,
@@ -640,6 +642,79 @@ export function createManagedAuth(
   }) as ManagedAuth;
   configureManagedUserAdmission(auth, settings.allowedUserEmails);
   return auth;
+}
+
+/**
+ * Better Auth's jwt plugin, configured only for the host session token. Keys
+ * are ES256 and stored in `auth_jwks`. The plugin's ambient JWT surfaces stay
+ * off: no `set-auth-jwt` header on `/get-session`, and `/v1/auth/token` is
+ * refused by the host token routes. The plugin's default audience stays its
+ * base URL, so only the host token route ever signs for the host audience.
+ */
+function hostSessionTokenPlugin(settings: Settings) {
+  return jwt({
+    jwks: { keyPairConfig: { alg: "ES256" } },
+    jwt: {
+      issuer: canonicalPublicOrigin(settings.publicBaseUrl) ?? undefined,
+      expirationTime: `${settings.hostTokenTtlSeconds}s`,
+    },
+    disableSettingJwtHeader: true,
+    schema: {
+      jwks: {
+        modelName: "auth_jwks",
+        fields: {
+          publicKey: "public_key",
+          privateKey: "private_key",
+          createdAt: "created_at",
+          expiresAt: "expires_at",
+        },
+      },
+    },
+  });
+}
+
+/** The exact claim set of a host session token. */
+export type HostSessionTokenClaims = {
+  iss: string;
+  aud: string;
+  sub: string;
+  sid: string;
+  org: string;
+  ws: string;
+  auth_time: number;
+  amr: string[];
+  identity_status: "active";
+  iat: number;
+  exp: number;
+  jti: string;
+};
+
+export type HostSessionTokenJwks = { keys: Array<Record<string, unknown>> };
+
+type HostSessionTokenApi = {
+  signJWT(input: { body: { payload: HostSessionTokenClaims } }): Promise<{ token: string }>;
+  getJwks(): Promise<HostSessionTokenJwks>;
+};
+
+function hostSessionTokenApi(auth: ManagedAuth): HostSessionTokenApi {
+  const plugins: ReadonlyArray<{ id?: unknown }> = auth.options.plugins ?? [];
+  if (!plugins.some((plugin) => plugin.id === "jwt")) {
+    throw new Error("Managed auth was created without the host session token plugin");
+  }
+  return auth.api as unknown as HostSessionTokenApi;
+}
+
+/** Sign with the jwt plugin's own key store (it creates the first key on demand). */
+export async function signHostSessionToken(
+  auth: ManagedAuth,
+  claims: HostSessionTokenClaims,
+): Promise<string> {
+  return (await hostSessionTokenApi(auth).signJWT({ body: { payload: claims } })).token;
+}
+
+/** The jwt plugin's public JWKS: ES256 public keys only. */
+export async function hostSessionTokenJwks(auth: ManagedAuth): Promise<HostSessionTokenJwks> {
+  return await hostSessionTokenApi(auth).getJwks();
 }
 
 export type ManagedAuthOAuthAttempt = {

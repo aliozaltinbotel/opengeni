@@ -1880,6 +1880,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1013 host session token signing keys: one deployment-wide,
+          // append-only FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1940,7 +1947,10 @@ describe("runtime database posture evaluator", () => {
         1 + // 0954 recording notes: full-DML, FORCE-RLS.
         1 + // 0959 automation templates: full-DML, FORCE-RLS.
         1 + // 0971 per-message app-action grants: full-DML, FORCE-RLS.
-        1; // 0666 fork exact-call source receipts: append-only runtime evidence, FORCE-RLS.
+        1 + // 0666 fork exact-call source receipts: append-only runtime evidence, FORCE-RLS.
+        1; // 1013 host session token signing keys: deployment-wide, read and insert, FORCE-RLS.
+      expect(FORCE_RLS_TABLES).toContain("auth_jwks");
+      expect(RUNTIME_READ_INSERT_TABLES).toContain("auth_jwks");
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

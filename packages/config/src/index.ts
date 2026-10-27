@@ -2150,6 +2150,11 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Audience of the short-lived host session token (`GET /v1/auth/host-token`).
+  // Unset disables the token and its JWKS entirely. A host that embeds Opengeni
+  // verifies the ES256 token locally against `GET /v1/auth/jwks`.
+  hostTokenAudience: z.string().trim().min(1).max(512).optional(),
+  hostTokenTtlSeconds: z.coerce.number().int().min(60).max(900).default(300),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -5952,6 +5957,8 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    hostTokenAudience: optional("OPENGENI_HOST_TOKEN_AUDIENCE"),
+    hostTokenTtlSeconds: optional("OPENGENI_HOST_TOKEN_TTL_SECONDS"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
@@ -11308,6 +11315,16 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
     throw new Error(
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID and OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET must be configured together",
     );
+  }
+  if (settings.hostTokenAudience !== undefined) {
+    if (settings.productAccessMode !== "managed") {
+      throw new Error("OPENGENI_HOST_TOKEN_AUDIENCE requires OPENGENI_PRODUCT_ACCESS_MODE=managed");
+    }
+    if (!canonicalPublicOrigin(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when OPENGENI_HOST_TOKEN_AUDIENCE is configured",
+      );
+    }
   }
   const managedSocialAuthConfigured = Boolean(
     settings.managedAuthGoogleClientId || settings.managedAuthGithubClientId,

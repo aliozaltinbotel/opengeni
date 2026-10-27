@@ -397,6 +397,7 @@ import {
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import { registerHostTokenRoutes } from "./routes/host-token";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   registerManagedAuthSessionSetRoutes,
@@ -1190,6 +1191,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedAuthSessionSetRoutes(app, routeDeps);
   registerManagedSignInMethodRoutes(app, routeDeps);
   registerNativeAppAuthRoutes(app, routeDeps);
+  registerHostTokenRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
