@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { readFileSync, rmSync } from "node:fs";
+import path from "node:path";
 
 import {
   ACTIVE_WORK_ACTION_ICON_RAW_BUDGET,
@@ -393,4 +395,93 @@ describe("web bundle budget policy", () => {
     const source = readFileSync(new URL("./check-web-bundle-budget.ts", import.meta.url), "utf8");
     expect(source).toContain("wholeKibEnvelope(2_536_098, 1.5 * kib)");
   });
+});
+
+const repoRoot = path.resolve(import.meta.dir, "..");
+const webDist = path.join(repoRoot, "apps/web/dist");
+const extensionFixture = path.join(repoRoot, "apps/web/test/fixtures/host-extension-dist");
+// Two full production web builds (stub, then fixture): they run only when
+// asked for. The fixture's shape is checked on every run.
+const fixtureBuildRequested = process.env.OPENGENI_WEB_BUNDLE_FIXTURE_BUILD === "1";
+
+type BudgetReport = Readonly<{ initial: Readonly<{ gzip: number; files: number }> }>;
+type ManifestChunk = Readonly<{ imports?: string[]; isEntry?: boolean }>;
+type BuildMeasure = Readonly<{ report: BudgetReport; manifest: Record<string, ManifestChunk> }>;
+
+function bun(args: string[], env: Record<string, string> = {}) {
+  return spawnSync(process.execPath, args, {
+    cwd: repoRoot,
+    // Nested `bun run` calls in the build script use this same Bun.
+    env: {
+      ...process.env,
+      PATH: `${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH ?? ""}`,
+      ...env,
+    },
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+}
+
+/** Builds apps/web, then reads the budget report (printed even when a budget fails). */
+function buildAndMeasure(hostExtension: string): BuildMeasure {
+  try {
+    // `bun test` sets NODE_ENV=test, which Vite would keep for the build.
+    const build = bun(["run", "--cwd", "apps/web", "build"], {
+      NODE_ENV: "production",
+      OPENGENI_WEB_HOST_EXTENSION: hostExtension,
+    });
+    if (build.status !== 0) {
+      throw new Error(`apps/web build failed:\n${build.stdout}\n${build.stderr}`);
+    }
+    const check = bun(["run", "check:web-bundle-budget"]);
+    return {
+      report: JSON.parse(check.stdout) as BudgetReport,
+      manifest: JSON.parse(
+        readFileSync(path.join(webDist, ".vite/manifest.json"), "utf8"),
+      ) as Record<string, ManifestChunk>,
+    };
+  } finally {
+    rmSync(webDist, { recursive: true, force: true });
+  }
+}
+
+function staticImportGraph(manifest: Record<string, ManifestChunk>): Set<string> {
+  const graph = new Set<string>();
+  const pending = Object.keys(manifest).filter((key) => manifest[key]?.isEntry);
+  while (pending.length > 0) {
+    const key = pending.pop()!;
+    if (graph.has(key)) continue;
+    graph.add(key);
+    pending.push(...(manifest[key]?.imports ?? []));
+  }
+  return graph;
+}
+
+describe("web bundle budget with a host extension", () => {
+  test("the prebuilt extension fixture keeps its page and card body behind import()", () => {
+    const descriptor = readFileSync(path.join(extensionFixture, "index.js"));
+    const source = descriptor.toString("utf8");
+    expect(source).toContain('import("./chunks/today-page.js")');
+    expect(source).toContain('import("./chunks/status-card.js")');
+    expect(source).not.toMatch(/^import .*["']\.\/chunks\//m);
+    // The eager descriptor stays tiny: well under the 2 KiB fixture allowance.
+    expect(Bun.gzipSync(descriptor).byteLength).toBeLessThan(KIB);
+  });
+
+  test.skipIf(!fixtureBuildRequested)(
+    "OPENGENI_WEB_BUNDLE_FIXTURE_BUILD=1: the fixture extension build stays within 2 KiB of the stub's initial load",
+    () => {
+      const stub = buildAndMeasure("");
+      const fixture = buildAndMeasure(extensionFixture);
+      expect(fixture.report.initial.files).toBe(stub.report.initial.files);
+      expect(fixture.report.initial.gzip - stub.report.initial.gzip).toBeLessThanOrEqual(2 * KIB);
+      const lazyKeys = Object.keys(fixture.manifest).filter((key) =>
+        key.includes("host-extension-dist/chunks/"),
+      );
+      expect(lazyKeys).toHaveLength(2);
+      const initialGraph = staticImportGraph(fixture.manifest);
+      for (const key of lazyKeys) expect(initialGraph.has(key)).toBe(false);
+    },
+    15 * 60 * 1000,
+  );
 });

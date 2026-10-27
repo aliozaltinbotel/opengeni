@@ -22,6 +22,7 @@ import { isEditableArtifactKind } from "../lib/artifact-catalog";
 import type { NativeConnectRequest } from "../components/capabilities/native-connect-setup";
 import { FailureRecoveryBoundary } from "../components/session/failure-recovery-boundary";
 import { useMessageSenderRenderer } from "../components/session/message-senders";
+import { useHostToolRegistry } from "../lib/host-tool-registry";
 import {
   createFailedSessionRetry,
   type FailedSessionRetryInput,
@@ -3210,6 +3211,7 @@ function SessionChatPane(props: {
     props.session.workspaceId,
     context.accessContext.subjectId,
   );
+  const toolRegistry = useHostToolRegistry();
   const commandContext = useMemo(
     () => ({
       client: context.client,
@@ -3598,6 +3600,7 @@ function SessionChatPane(props: {
                       onViewDetails={viewToolReviewDetails}
                     >
                       <MessageTimeline
+                        toolRegistry={toolRegistry}
                         resolveLink={resolveLink}
                         renderMessageSender={renderMessageSender}
                         allowanceExhaustedLabels={CONSOLE_TIMELINE_ALLOWANCE_LABELS}

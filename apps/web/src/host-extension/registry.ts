@@ -167,12 +167,20 @@ function checkBrand(value: unknown): void {
   component(brand.wordmark, "brand.wordmark");
 }
 
-function checkToolRegistryEntry(value: unknown, field: string): void {
-  const entry = record(value, field);
-  if (entry.match === "name") text(entry.name, `${field}.name`);
-  else if (entry.match === "rawType") text(entry.type, `${field}.type`);
-  else fail(`${field}.match`, 'must be "rawType" or "name"');
-  component(entry.render, `${field}.render`);
+function checkToolRegistryEntries(value: unknown): void {
+  const names = new Set<string>();
+  list(value, "toolRegistryEntries").forEach((item, index) => {
+    const field = `toolRegistryEntries[${index}]`;
+    const entry = record(item, field);
+    if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
+    const name = text(entry.name, `${field}.name`);
+    if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
+    names.add(name);
+    component(entry.render, `${field}.render`);
+    // An omitted flag means prefixed leaf matching in the timeline registry, so
+    // only an explicit false keeps another server's same-named tool off this card.
+    if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
+  });
 }
 
 function checkLifecycle(value: unknown): void {
@@ -205,9 +213,7 @@ export function validateHostExtension(value: unknown): HostExtension {
   list(fields.shellProviders, "shellProviders").forEach((provider, index) =>
     component(provider, `shellProviders[${index}]`),
   );
-  list(fields.toolRegistryEntries, "toolRegistryEntries").forEach((entry, index) =>
-    checkToolRegistryEntry(entry, `toolRegistryEntries[${index}]`),
-  );
+  checkToolRegistryEntries(fields.toolRegistryEntries);
   optionalFunction(fields.workspaceFilter, "workspaceFilter");
   checkLifecycle(fields.lifecycle);
   return value as HostExtension;

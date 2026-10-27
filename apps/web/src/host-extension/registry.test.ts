@@ -154,4 +154,65 @@ describe("host extension registry", () => {
       "nav[0].placement.settingsGroup",
     );
   });
+
+  describe("tool registry entries", () => {
+    const Card = () => null;
+    const entry = {
+      match: "name",
+      name: "host-app__get_onboarding_status",
+      render: Card,
+      matchPrefixedLeaf: false,
+    } as const;
+
+    test("accepts an exact-name entry that disables prefixed leaf matching", () => {
+      const extension = extensionWith({ toolRegistryEntries: [entry] });
+      expect(validateHostExtension(extension)).toBe(extension);
+    });
+
+    test("refuses an entry that allows prefixed leaf matching", () => {
+      expectInvalid(
+        { id: "fixture", toolRegistryEntries: [{ ...entry, matchPrefixedLeaf: true }] },
+        "toolRegistryEntries[0].matchPrefixedLeaf",
+      );
+    });
+
+    test("refuses an entry that leaves prefixed leaf matching at its default", () => {
+      const { matchPrefixedLeaf: _omitted, ...withoutFlag } = entry;
+      expectInvalid(
+        { id: "fixture", toolRegistryEntries: [withoutFlag] },
+        "toolRegistryEntries[0].matchPrefixedLeaf",
+      );
+    });
+
+    test("refuses a raw-type entry", () => {
+      expectInvalid(
+        {
+          id: "fixture",
+          toolRegistryEntries: [{ match: "rawType", type: "computer_call", render: Card }],
+        },
+        "toolRegistryEntries[0].match",
+      );
+    });
+
+    test("refuses two entries for one tool name", () => {
+      expectInvalid(
+        extensionWith({ toolRegistryEntries: [entry, { ...entry, render: Page }] }),
+        "toolRegistryEntries[1].name",
+      );
+    });
+  });
+
+  test("the prebuilt extension dist fixture is a valid extension with lazy pages", async () => {
+    const fixture = new URL("../../test/fixtures/host-extension-dist/", import.meta.url);
+    const loaded: { default: unknown } = await import(new URL("index.js", fixture).href);
+    const extension = validateHostExtension(loaded.default);
+    expect(extension.toolRegistryEntries).toHaveLength(1);
+    const [fixtureRoute] = extension.routes ?? [];
+    expect(fixtureRoute).toBeDefined();
+    const page = await fixtureRoute!.load();
+    expect(typeof page.default).toBe("function");
+    const style = await readFile(new URL("style.css", fixture), "utf8");
+    expect(style.match(/--og-color-[a-z-]+:/g)).toHaveLength(2);
+    expect(style).not.toMatch(/#[0-9a-f]{3,8}\b/i);
+  });
 });

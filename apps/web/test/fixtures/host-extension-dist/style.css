@@ -1,0 +1,5 @@
+/* The fixture's theme: two console tokens, defined for both appearances. */
+:root {
+  --og-color-primary: light-dark(oklch(0.42 0.09 255), oklch(0.82 0.08 255));
+  --og-color-primary-fg: light-dark(oklch(0.98 0 0), oklch(0.2 0.02 255));
+}

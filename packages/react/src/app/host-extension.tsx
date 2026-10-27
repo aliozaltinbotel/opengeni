@@ -4,7 +4,7 @@
 // time through the `@opengeni/web-host-extension` specifier; without one it
 // uses EMPTY_HOST_EXTENSION and behaves as stock.
 import type { ComponentType, ReactNode } from "react";
-import type { ToolRegistryEntry } from "../timeline";
+import type { ToolRenderer } from "../timeline";
 
 export type NativeDestination =
   | "plugins"
@@ -40,6 +40,17 @@ export type HostExtensionNavItem = Readonly<{
   placement: "primary" | Readonly<{ settingsGroup: string }>;
   visible?: (context: HostExtensionContext) => boolean;
 }>;
+/**
+ * A host tool card: the renderer for one exact tool name, ahead of the built-in
+ * renderers. Prefixed leaf matching stays off, so a call from another MCP
+ * server whose tool name merely ends the same way never renders this card.
+ */
+export type HostToolRegistryEntry = Readonly<{
+  match: "name";
+  name: string;
+  render: ToolRenderer;
+  matchPrefixedLeaf: false;
+}>;
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
@@ -52,7 +63,7 @@ export type HostExtension = Readonly<{
   settingsGroups?: readonly Readonly<{ id: string; label: string }>[];
   hiddenNativeDestinations?: readonly NativeDestination[];
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
-  toolRegistryEntries?: readonly ToolRegistryEntry[];
+  toolRegistryEntries?: readonly HostToolRegistryEntry[];
   workspaceFilter?: (workspace: Readonly<{ id: string; accountId: string }>) => boolean;
   /**
    * Design §12.2 I15: awaited by the console before sign-out and before
