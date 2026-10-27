@@ -1,6 +1,16 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import {
+  MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER,
+  MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
+  type ManagedAuthSessionSetProjection,
+} from "@opengeni/contracts/managed-auth-session-sets";
+import {
+  MANAGED_AUTH_ACTOR_EPOCH_HEADER,
+  MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE,
+  MANAGED_AUTH_SESSION_SET_COOKIE,
+} from "@opengeni/core/managed-auth-session-sets";
+import {
   acceptOrganizationInvitation,
   applyCanonicalHumanIdentityOperation,
   createDb,
@@ -147,6 +157,124 @@ async function sessionRow(cookie: string) {
   return row;
 }
 
+/** Verify a minted token against the published JWKS and return its claims. */
+async function verifiedClaims(app: ManagedApp, response: Response) {
+  expect(response.status).toBe(200);
+  const body = (await response.json()) as { token: string; expiresAt: string };
+  const jwks = (await (await app.request("/v1/auth/jwks")).json()) as JSONWebKeySet;
+  const { payload, protectedHeader } = await jwtVerify(body.token, createLocalJWKSet(jwks), {
+    issuer: origin,
+    audience,
+    algorithms: ["ES256"],
+  });
+  expect(protectedHeader.alg).toBe("ES256");
+  expect(Object.keys(payload).sort()).toEqual(exactClaims);
+  expect(payload.exp! - payload.iat!).toBe(300);
+  expect(body.expiresAt).toBe(new Date(payload.exp! * 1000).toISOString());
+  return payload;
+}
+
+/** A refusal carries its code and never a token. */
+async function expectRefusal(response: Response, status: number, code: string) {
+  expect(response.status).toBe(status);
+  const body = (await response.json()) as Record<string, unknown>;
+  expect(body.code).toBe(code);
+  expect(body).not.toHaveProperty("token");
+}
+
+function oneCookie(response: Response, name: string): string {
+  const value = response.headers.getSetCookie().find((cookie) => cookie.startsWith(`${name}=`));
+  if (!value) throw new Error(`response omitted ${name}`);
+  return value.split(";", 1)[0]!;
+}
+
+function sessionSetMutationHeaders(
+  projection: ManagedAuthSessionSetProjection,
+  cookies: string,
+): Record<string, string> {
+  return {
+    origin,
+    "sec-fetch-site": "same-origin",
+    "content-type": "application/json",
+    [MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER]: MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
+    "x-opengeni-session-csrf": projection.csrfToken,
+    [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projection.actorEpoch,
+    cookie: cookies,
+  };
+}
+
+/** Sign up and select one account through the browser session-set flow. */
+async function sessionSetSignIn(app: ManagedApp, name: string) {
+  const initialResponse = await app.request("/v1/auth/session-set");
+  expect(initialResponse.status).toBe(200);
+  const initial = (await initialResponse.json()) as ManagedAuthSessionSetProjection;
+  const authority = oneCookie(initialResponse, MANAGED_AUTH_SESSION_SET_COOKIE);
+  const email = `host-token-set-${crypto.randomUUID()}@example.test`;
+  const password = "password1234";
+  const registered = await app.request("/v1/auth/sign-up/email", {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: authority },
+    body: JSON.stringify({ name, email, password }),
+  });
+  expect(registered.status).toBeLessThan(300);
+  await shared.admin`update auth_users set email_verified = true where email = ${email}`;
+  const begin = await app.request("/v1/auth/session-set/transactions", {
+    method: "POST",
+    headers: sessionSetMutationHeaders(initial, authority),
+    body: JSON.stringify({
+      operationId: crypto.randomUUID(),
+      expectedGeneration: initial.generation,
+      kind: "add",
+    }),
+  });
+  expect(begin.status).toBe(200);
+  const transaction = (await begin.json()) as { id: string };
+  const transactionCookie = oneCookie(begin, MANAGED_AUTH_LOGIN_TRANSACTION_COOKIE);
+  const completion = await app.request("/v1/auth/session-set/transactions/email-password", {
+    method: "POST",
+    headers: sessionSetMutationHeaders(initial, `${authority}; ${transactionCookie}`),
+    body: JSON.stringify({
+      operationId: crypto.randomUUID(),
+      expectedGeneration: initial.generation,
+      transactionId: transaction.id,
+      email,
+      password,
+    }),
+  });
+  expect(completion.status).toBe(200);
+  const completed = (await completion.json()) as { projection: ManagedAuthSessionSetProjection };
+  const select = await app.request("/v1/auth/session-set/select", {
+    method: "POST",
+    headers: sessionSetMutationHeaders(completed.projection, authority),
+    body: JSON.stringify({
+      operationId: crypto.randomUUID(),
+      expectedGeneration: completed.projection.generation,
+      slotId: completed.projection.slots[0]!.id,
+    }),
+  });
+  expect(select.status).toBe(200);
+  const projection = (await select.json()) as ManagedAuthSessionSetProjection;
+  expect(projection.selectedSlotId).not.toBeNull();
+  // Dual mode also sets the selected session cookie; broker mode keeps only
+  // the session-set authority.
+  const selectedSession = select.headers
+    .getSetCookie()
+    .map((cookie) => cookie.split(";", 1)[0]!)
+    .filter((cookie) => /^better-auth\.session_token=.+/u.test(cookie));
+  const [user] = await shared.admin<
+    { id: string }[]
+  >`select id from auth_users where email = ${email}`;
+  return {
+    headers: {
+      cookie: [authority, ...selectedSession].join("; "),
+      [MANAGED_AUTH_ACTOR_EPOCH_HEADER]: projection.actorEpoch,
+    },
+    email,
+    userId: user!.id,
+    subjectId: `user:${user!.id}`,
+  };
+}
+
 describe("host session token, stock deployment", () => {
   test("is disabled and publishes no JWKS without a configured audience", async () => {
     const app = managedApp();
@@ -280,11 +408,14 @@ describe("host session token with an audience", () => {
       invitationId: invitation.id,
       expectedRevision: invitation.revision,
     });
-    const memberWorkspaceId = (await accessOf(instance, member.cookie)).workspaceGrants.find(
-      (grant) => grant.accountId === owner.organizationId,
-    )!.workspaceId;
+    // The member's own Personal workspace in that organization.
+    const memberWorkspaceId = membership.personalWorkspaceId!;
+    expect(memberWorkspaceId).toBeString();
+    expect(
+      (await accessOf(instance, member.cookie)).workspaceGrants.map((grant) => grant.workspaceId),
+    ).toContain(memberWorkspaceId);
     const allowed = await mint(instance, { cookie: member.cookie }, memberWorkspaceId);
-    expect(allowed.status).toBe(200);
+    expect((await verifiedClaims(instance, allowed)).ws).toBe(memberWorkspaceId);
 
     await updateOrganizationMember(client.db, {
       organizationId: owner.organizationId,
@@ -298,8 +429,7 @@ describe("host session token with an audience", () => {
       },
     });
     const refused = await mint(instance, { cookie: member.cookie }, memberWorkspaceId);
-    expect(refused.status).toBe(403);
-    expect(await refusalCode(refused)).toBe("HOST_TOKEN_NOT_MEMBER");
+    await expectRefusal(refused, 403, "HOST_TOKEN_NOT_MEMBER");
   }, 60_000);
 
   test("refuses a canonical identity that is not active", async () => {
@@ -317,7 +447,130 @@ describe("host session token with an audience", () => {
     expect(lostFactor.identity.activeIdentity.status).toBe("recovery_required");
     const recoveryCookie = await signIn(instance, owner.email, owner.password);
     const refused = await mint(instance, { cookie: recoveryCookie }, owner.workspaceId);
-    expect(refused.status).toBe(403);
-    expect(await refusalCode(refused)).toBe("HOST_TOKEN_IDENTITY_NOT_ACTIVE");
+    await expectRefusal(refused, 403, "HOST_TOKEN_IDENTITY_NOT_ACTIVE");
   }, 60_000);
+
+  // A disputed or disabled identity fails closed one step earlier: the
+  // canonical session check deletes its sessions, so it reads as signed out.
+  test("refuses an identity that a login-binding dispute contained", async () => {
+    const instance = app();
+    const owner = await ownerWithOrganization(instance, "Disputed Owner");
+    const claimant = await signUp(instance, "Conflicting Claimant");
+    // A generic provider: managed Google/GitHub collisions are refused before
+    // they can reach the dispute path.
+    const providerId = "test-oidc";
+    const providerAccountId = `host-token-dispute-${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into auth_identities (id, user_id, provider_id, account_id, created_at, updated_at)
+      values (${crypto.randomUUID()}, ${owner.userId}, ${providerId}, ${providerAccountId}, now(), now())
+    `;
+    const ownerIdentity = await getCanonicalHumanIdentityProjection(client.db, owner.userId);
+    await applyCanonicalHumanIdentityOperation(client.db, {
+      operationId: crypto.randomUUID(),
+      authUserId: owner.userId,
+      expectedIdentityRevision: ownerIdentity.activeIdentity.identityRevision,
+      operationType: "link",
+      providerId,
+      providerAccountId,
+      reason: "Attach the first verified claimant",
+    });
+    const cookie = await signIn(instance, owner.email, owner.password);
+    await verifiedClaims(instance, await mint(instance, { cookie }, owner.workspaceId));
+
+    await shared.admin`
+      update auth_identities set user_id = ${claimant.userId}, updated_at = now()
+      where provider_id = ${providerId} and account_id = ${providerAccountId}
+    `;
+    const claimantIdentity = await getCanonicalHumanIdentityProjection(client.db, claimant.userId);
+    const disputed = await applyCanonicalHumanIdentityOperation(client.db, {
+      operationId: crypto.randomUUID(),
+      authUserId: claimant.userId,
+      expectedIdentityRevision: claimantIdentity.activeIdentity.identityRevision,
+      operationType: "link",
+      providerId,
+      providerAccountId,
+      reason: "Contain the conflicting verified claimant",
+    });
+    expect(disputed.outcome).toBe("disputed");
+    expect(
+      (await getCanonicalHumanIdentityProjection(client.db, owner.userId)).activeIdentity.status,
+    ).toBe("disputed");
+    await expectRefusal(
+      await mint(instance, { cookie }, owner.workspaceId),
+      401,
+      "HOST_TOKEN_SESSION_REQUIRED",
+    );
+  }, 60_000);
+
+  test("refuses a disabled identity", async () => {
+    const instance = app();
+    const owner = await ownerWithOrganization(instance, "Disabled Owner");
+    await verifiedClaims(
+      instance,
+      await mint(instance, { cookie: owner.cookie }, owner.workspaceId),
+    );
+    const { id: sessionId } = await sessionRow(owner.cookie);
+    const identity = await getCanonicalHumanIdentityProjection(client.db, owner.userId);
+    // No product operation disables an identity yet; set the state directly.
+    await shared.admin`
+      update canonical_human_identities
+      set status = 'disabled', recovery_state = 'disabled', updated_at = now()
+      where id = ${identity.activeIdentity.id}
+    `;
+    await expectRefusal(
+      await mint(instance, { cookie: owner.cookie }, owner.workspaceId),
+      401,
+      "HOST_TOKEN_SESSION_REQUIRED",
+    );
+    const [remaining] = await shared.admin<{ count: number }[]>`
+      select count(*)::integer as count from auth_sessions where id = ${sessionId}
+    `;
+    expect(remaining).toEqual({ count: 0 });
+  }, 60_000);
+});
+
+describe("host session token with browser session sets", () => {
+  for (const mode of ["dual", "broker"] as const) {
+    test(`mints for an active member and refuses a non-member in ${mode} mode`, async () => {
+      const instance = managedApp({ hostTokenAudience: audience, managedAuthSessionSetMode: mode });
+      const human = await sessionSetSignIn(instance, `Session Set ${mode} Owner`);
+      const created = await createManagedOrganization(client.db, {
+        subjectId: human.subjectId,
+        subjectLabel: human.email,
+        name: `Session Set ${mode} Org`,
+        operationId: crypto.randomUUID(),
+      });
+      const [session] = await shared.admin<{ id: string; created_at: Date }[]>`
+        select id, created_at from auth_sessions where user_id = ${human.userId}
+      `;
+      const identity = await getCanonicalHumanIdentityProjection(client.db, human.userId);
+
+      const payload = await verifiedClaims(
+        instance,
+        await mint(instance, human.headers, created.workspaceId),
+      );
+      expect(payload).toMatchObject({
+        iss: origin,
+        aud: audience,
+        sub: identity.activeIdentity.id,
+        sid: session!.id,
+        org: created.organization.id,
+        ws: created.workspaceId,
+        auth_time: Math.floor(session!.created_at.getTime() / 1000),
+        amr: ["pwd"],
+        identity_status: "active",
+      });
+
+      const stranger = await ownerWithOrganization(managedApp(), `Session Set ${mode} Stranger`);
+      for (const workspaceId of [stranger.workspaceId, crypto.randomUUID()]) {
+        await expectRefusal(
+          await mint(instance, human.headers, workspaceId),
+          403,
+          "HOST_TOKEN_NOT_MEMBER",
+        );
+      }
+      const jwks = await instance.request("/v1/auth/jwks");
+      expect(jwks.status).toBe(200);
+    }, 60_000);
+  }
 });
