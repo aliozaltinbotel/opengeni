@@ -2,6 +2,7 @@ import type { ManagedEmailTransport } from "@opengeni/core";
 import type { Database } from "@opengeni/db";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { escapeHtml } from "./email-html";
 
 const Claim = z.object({
   operationId: z.string().uuid(),
@@ -12,9 +13,14 @@ const Claim = z.object({
 });
 const started = new WeakSet<object>();
 
+/**
+ * Claims, sends and settles one sign-in-method-changed notice. `productName`
+ * is the product the notice names (`settings.productName`).
+ */
 export async function deliverManagedSignInNotification(
   db: Database,
   transport: ManagedEmailTransport,
+  productName: string,
   operationId: string | null = null,
 ): Promise<"sent" | "failed" | "outcome_unknown"> {
   try {
@@ -33,9 +39,9 @@ export async function deliverManagedSignInNotification(
           from: claim.sender,
           to: claim.email,
           idempotencyKey: `sign-in-method:${claim.operationId}`,
-          subject: "Your Opengeni sign-in methods changed",
-          text: `Your Opengeni ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.`,
-          html: `<p>Your Opengeni ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.</p>`,
+          subject: `Your ${productName} sign-in methods changed`,
+          text: `Your ${productName} ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.`,
+          html: `<p>Your ${escapeHtml(productName)} ${claim.provider} sign-in method changed. If this was not you, reset your password and contact your administrator.</p>`,
         }),
         new Promise<{ status: "outcome_unknown" }>((resolve) => {
           timer = setTimeout(() => resolve({ status: "outcome_unknown" }), 5_000);
@@ -61,6 +67,7 @@ export async function deliverManagedSignInNotification(
 export function startManagedSignInNotificationDelivery(
   db: Database,
   transport: ManagedEmailTransport,
+  productName: string,
 ): void {
   if (started.has(db as object)) return;
   started.add(db as object);
@@ -70,7 +77,10 @@ export function startManagedSignInNotificationDelivery(
     active = true;
     try {
       for (let count = 0; count < 10; count++)
-        if ((await deliverManagedSignInNotification(db, transport)) === "outcome_unknown") break;
+        if (
+          (await deliverManagedSignInNotification(db, transport, productName)) === "outcome_unknown"
+        )
+          break;
     } finally {
       active = false;
     }

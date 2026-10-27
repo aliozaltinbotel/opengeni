@@ -349,6 +349,7 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
           notification: await deliverManagedSignInNotification(
             deps.db,
             deps.managedEmailTransport,
+            deps.settings.productName,
             body.operationId,
           ),
         });
@@ -435,7 +436,12 @@ export async function handleManagedSignInConnectCallback(
     sql`select u.email from auth_identities a join auth_users u on u.id=a.user_id where a.managed_link_intent_id=${proof.intentId}`,
   );
   if (linked)
-    await deliverManagedSignInNotification(deps.db, deps.managedEmailTransport, proof.intentId);
+    await deliverManagedSignInNotification(
+      deps.db,
+      deps.managedEmailTransport,
+      deps.settings.productName,
+      proof.intentId,
+    );
   if (response.status >= 400 || !linked) {
     return context.redirect(
       new URL(

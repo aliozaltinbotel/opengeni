@@ -224,6 +224,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     managedEmailDelivery: "resend",
     resendApiKey: undefined,
     emailFrom: "Opengeni <auth@mail.opengeni.ai>",
+    productName: "Opengeni",
     stripeSecretKey: undefined,
     stripePublishableKey: undefined,
     stripeWebhookSecret: undefined,

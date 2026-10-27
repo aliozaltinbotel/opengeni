@@ -506,9 +506,9 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       sent.push(message);
       return { status: "sent", providerMessageId: "simulated-provider-deduplicated" };
     };
-    expect(await deliverManagedSignInNotification(client.db, rt.transport, operationId)).toBe(
-      "sent",
-    );
+    expect(
+      await deliverManagedSignInNotification(client.db, rt.transport, "Opengeni", operationId),
+    ).toBe("sent");
     expect(sent.length).toBe(2);
     expect(sent[1]).toEqual(sent[0]);
     expect(
@@ -516,7 +516,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
         await admin`select notification_status from managed_sign_in_method_operations where operation_id=${operationId}`
       )[0]!.notification_status,
     ).toBe("sent");
-    await deliverManagedSignInNotification(client.db, rt.transport, operationId);
+    await deliverManagedSignInNotification(client.db, rt.transport, "Opengeni", operationId);
     expect(sent.length).toBe(2);
   });
   test("crash-recovery notification claims reject provider changes and expired idempotency windows", async () => {

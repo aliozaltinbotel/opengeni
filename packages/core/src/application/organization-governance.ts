@@ -4,7 +4,13 @@ import {
   type GovernedMutationChannel,
   type OrganizationGovernancePort,
 } from "@opengeni/contracts/organization-governance";
-import { getManagedAccount, withAccountRls, type Database } from "@opengeni/db";
+import {
+  getManagedAccount,
+  getOrganizationPrivacyPreferences,
+  updateOrganizationPrivacyPreferences,
+  withAccountRls,
+  type Database,
+} from "@opengeni/db";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
@@ -25,11 +31,66 @@ export async function organizationGovernanceDecision(
   input: { organizationId: string; mutation: GovernedMutation; via: GovernedMutationChannel },
 ): Promise<OrganizationGovernanceDecision> {
   const port = deps.organizationGovernance;
-  if (!port) return "ungoverned";
-  const externalSource = await organizationExternalSource(deps.db, input.organizationId);
-  if (port.governs({ organizationId: input.organizationId, externalSource }) !== true)
-    return "ungoverned";
+  if (!port || !(await organizationGovernedByHost(deps, input.organizationId))) return "ungoverned";
   return port.decide(input) === "allow" ? "allow" : "refuse";
+}
+
+/**
+ * Whether a bound port governs this organization. Without a port nothing is
+ * read; a port that throws, and a failed lookup, fail the caller (closed).
+ */
+export async function organizationGovernedByHost(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<boolean> {
+  const port = deps.organizationGovernance;
+  if (!port) return false;
+  const externalSource = await organizationExternalSource(deps.db, organizationId);
+  return port.governs({ organizationId, externalSource }) === true;
+}
+
+/**
+ * A governed organization's people have no Personal workspace to see or start
+ * work in: the host decides where they work. This turns the organization's
+ * Personal workspaces setting (0918) off the first time the fork sees the
+ * organization governed: at native creation and before each host command,
+ * because a host usually provisions its organizations out of band. Idempotent;
+ * an ungoverned organization, or no bound port, is never touched.
+ *
+ * `actorSubjectId` must be an active owner or admin (the database refuses
+ * anyone else): the creator, or the host command's service-token subject.
+ */
+export async function applyGovernedOrganizationPolicy(
+  deps: OrganizationGovernanceDeps,
+  input: { organizationId: string; actorSubjectId: string },
+): Promise<void> {
+  if (!(await organizationGovernedByHost(deps, input.organizationId))) return;
+  const preferences = await getOrganizationPrivacyPreferences(deps.db, input.organizationId);
+  if (!preferences.personalWorkspacesEnabled) return;
+  await updateOrganizationPrivacyPreferences(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+    personalWorkspacesEnabled: false,
+  });
+}
+
+/** Raised when a governed organization's owner tries to turn Personal workspaces back on. */
+export class PersonalWorkspacesGovernedByHostError extends Error {
+  readonly name = "PersonalWorkspacesGovernedByHostError";
+  readonly code = ORGANIZATION_GOVERNED_BY_HOST;
+  constructor() {
+    super("Personal workspaces stay off in an organization its host application manages.");
+  }
+}
+
+/** Refuses turning Personal workspaces on in a governed organization. Off is always accepted. */
+export async function requirePersonalWorkspacesSettingAllowed(
+  deps: OrganizationGovernanceDeps,
+  input: { organizationId: string; personalWorkspaces: boolean | undefined },
+): Promise<void> {
+  if (input.personalWorkspaces !== true) return;
+  if (await organizationGovernedByHost(deps, input.organizationId))
+    throw new PersonalWorkspacesGovernedByHostError();
 }
 
 /** Raised where a governed organization's host refuses a mutation. */

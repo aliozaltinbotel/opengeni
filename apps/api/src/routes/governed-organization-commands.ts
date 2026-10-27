@@ -19,7 +19,7 @@ import {
   type ActingExternalUser,
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
-import { hasPermission, type ApiRouteDeps } from "@opengeni/core";
+import { applyGovernedOrganizationPolicy, hasPermission, type ApiRouteDeps } from "@opengeni/core";
 import {
   createOrganizationInvitation,
   getOrganizationInvitationForAdministration,
@@ -300,6 +300,16 @@ async function requireHostCommand(
       details: { code: ORGANIZATION_NOT_HOST_GOVERNED },
     });
   if (decision === "refuse") throw organizationGovernedByHostError(mutation);
+  // A host provisions its organizations out of band, so its first command is
+  // where the fork learns this one is governed: no Personal workspaces there.
+  try {
+    await applyGovernedOrganizationPolicy(deps, {
+      organizationId,
+      actorSubjectId: payload.subjectId,
+    });
+  } catch (error) {
+    rethrowMembershipError(error);
+  }
   return {
     organizationId,
     actorSubjectId: payload.subjectId,

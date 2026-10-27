@@ -4,8 +4,10 @@ import {
 } from "@opengeni/contracts/organization-governance";
 import {
   OrganizationGovernedByHostError,
+  PersonalWorkspacesGovernedByHostError,
   requireAccessContext,
   requireNativeOrganizationMutationAllowed,
+  requirePersonalWorkspacesSettingAllowed,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
@@ -74,6 +76,29 @@ export async function requireNativeWorkspaceMutationForRequest(
   if (!deps.organizationGovernance) return;
   await requireAccessContext(context, deps);
   await requireNativeWorkspaceMutation(deps, workspaceId, mutation);
+}
+
+/**
+ * A governed organization keeps Personal workspaces off: turning them on
+ * answers 403 ORGANIZATION_GOVERNED_BY_HOST with `setting: "personalWorkspaces"`.
+ */
+export async function requirePersonalWorkspacesSetting(
+  deps: GovernanceDeps,
+  organizationId: string,
+  personalWorkspaces: boolean | undefined,
+): Promise<void> {
+  try {
+    await requirePersonalWorkspacesSettingAllowed(deps, { organizationId, personalWorkspaces });
+  } catch (error) {
+    if (!(error instanceof PersonalWorkspacesGovernedByHostError)) throw error;
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: ORGANIZATION_GOVERNED_BY_HOST, setting: "personalWorkspaces" },
+    });
+  }
 }
 
 export function organizationGovernedByHostError(mutation: GovernedMutation): ApiHttpError {

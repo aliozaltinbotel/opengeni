@@ -939,6 +939,17 @@ names the acting external user and service initiator under the same operation
 id. Reusing an operation id for another command or acting user is `409
 HOST_COMMAND_OPERATION_CONFLICT`.
 
+A governed organization's people have no Personal workspace to see or start
+work in. The fork turns the organization's Personal workspaces setting off
+(`personal_workspaces_enabled`, migration 0918) the first time it sees the
+organization governed: when it is created through `POST /v1/organizations`
+or `/v1/organizations/additional`, and before each host command, because a
+host usually provisions its organizations out of band. Members then land in a
+shared workspace, as for any organization with the setting off. Turning the
+setting back on through `PATCH /v1/organizations/:id/privacy-settings` is
+`403 ORGANIZATION_GOVERNED_BY_HOST` with `details.setting =
+"personalWorkspaces"`; turning it off is always accepted.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 

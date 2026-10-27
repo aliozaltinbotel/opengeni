@@ -261,7 +261,7 @@ export function createManagedAuth(
     options.newSignupsGate ??
     createManagedAuthNewSignupsGate({ db, settings, observability: options.observability });
   const auth = betterAuth({
-    appName: "Opengeni",
+    appName: settings.productName,
     baseURL: betterAuthBaseUrl(settings),
     basePath: "/v1/auth",
     secret: settings.betterAuthSecret,
@@ -443,18 +443,15 @@ export function createManagedAuth(
           const url = await verificationUrl(settings, user.email);
           await sendManagedAuthEmail(
             managedEmailTransport,
-            emailVerificationMessage(user.email, url),
+            emailVerificationMessage(settings.productName, user.email, url),
           );
         }
       },
       sendResetPassword: async ({ user, url }) => {
-        await sendManagedAuthEmail(managedEmailTransport, {
-          kind: "password_reset",
-          to: user.email,
-          subject: "Reset your Opengeni password",
-          text: `Reset your Opengeni password: ${url}`,
-          html: `<p>Reset your Opengeni password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
-        });
+        await sendManagedAuthEmail(
+          managedEmailTransport,
+          passwordResetMessage(settings.productName, user.email, url),
+        );
       },
     },
     emailVerification: {
@@ -467,7 +464,7 @@ export function createManagedAuth(
       sendVerificationEmail: async ({ user, url }) => {
         await sendManagedAuthEmail(
           managedEmailTransport,
-          emailVerificationMessage(user.email, url),
+          emailVerificationMessage(settings.productName, user.email, url),
         );
       },
       afterEmailVerification: async (user) => {
@@ -498,7 +495,12 @@ export function createManagedAuth(
               currentManagedSignInConnectIntent()
             )
               return;
-            await deliverManagedSignInNotification(db, managedEmailTransport, account.id);
+            await deliverManagedSignInNotification(
+              db,
+              managedEmailTransport,
+              settings.productName,
+              account.id,
+            );
           },
         },
       },
@@ -672,8 +674,6 @@ async function recordSignInAuthentication(
   });
 }
 
-export const MANAGED_AUTH_PRODUCT_NAME = "Opengeni";
-
 /**
  * The opt-in Better Auth plugins. With neither the host session token nor TOTP
  * configured no `plugins` key is set, so the configuration is the stock one.
@@ -681,7 +681,7 @@ export const MANAGED_AUTH_PRODUCT_NAME = "Opengeni";
 function managedAuthPluginOptions(settings: Settings) {
   const plugins = [
     ...(settings.hostTokenAudience ? [hostSessionTokenPlugin(settings)] : []),
-    ...(settings.managedAuthTotpEnabled ? [reauthenticationTotpPlugin()] : []),
+    ...(settings.managedAuthTotpEnabled ? [reauthenticationTotpPlugin(settings.productName)] : []),
   ];
   return plugins.length > 0 ? { plugins } : {};
 }
@@ -696,9 +696,9 @@ function managedAuthPluginOptions(settings: Settings) {
  * reset its sign-in time); the product TOTP routes use its enable endpoint and
  * its storage. Factors live in `auth_two_factors`.
  */
-function reauthenticationTotpPlugin() {
+function reauthenticationTotpPlugin(productName: string) {
   const plugin = twoFactor({
-    issuer: MANAGED_AUTH_PRODUCT_NAME,
+    issuer: productName,
     // A person without a password (Google or GitHub only) can enroll too; the
     // plugin still requires the password whenever one exists, and the product
     // route requires a fresh sign-in from everyone else.
@@ -976,14 +976,36 @@ export async function sendManagedAuthEmail(
 
 // Verification can sign the clicker in (autoSignInAfterVerification), so an
 // unsolicited verification email must say plainly that it can be ignored.
-function emailVerificationMessage(to: string, url: string): Omit<ManagedEmailMessage, "from"> {
-  const ignore = "If you did not create an Opengeni account, ignore this email.";
+function emailVerificationMessage(
+  productName: string,
+  to: string,
+  url: string,
+): Omit<ManagedEmailMessage, "from"> {
+  const product = escapeHtml(productName);
+  // "an Opengeni account", "a Hostbrand account": the article follows the name's first letter.
+  const article = /^[aeiou]/iu.test(productName) ? "an" : "a";
+  const ignore = (name: string) =>
+    `If you did not create ${article} ${name} account, ignore this email.`;
   return {
     kind: "email_verification",
     to,
-    subject: "Verify your Opengeni email",
-    text: `Verify your Opengeni email: ${url}\n\n${ignore}`,
-    html: `<p>Verify your Opengeni email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore}</p>`,
+    subject: `Verify your ${productName} email`,
+    text: `Verify your ${productName} email: ${url}\n\n${ignore(productName)}`,
+    html: `<p>Verify your ${product} email:</p><p><a href="${escapeHtml(url)}">Verify email</a></p><p>${ignore(product)}</p>`,
+  };
+}
+
+function passwordResetMessage(
+  productName: string,
+  to: string,
+  url: string,
+): Omit<ManagedEmailMessage, "from"> {
+  return {
+    kind: "password_reset",
+    to,
+    subject: `Reset your ${productName} password`,
+    text: `Reset your ${productName} password: ${url}`,
+    html: `<p>Reset your ${escapeHtml(productName)} password:</p><p><a href="${escapeHtml(url)}">Reset password</a></p>`,
   };
 }
 

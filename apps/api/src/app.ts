@@ -539,7 +539,12 @@ export function createAppComposition(deps: AppDependencies): {
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
-  if (managedAuth) startManagedSignInNotificationDelivery(deps.db, managedEmailTransport);
+  if (managedAuth)
+    startManagedSignInNotificationDelivery(
+      deps.db,
+      managedEmailTransport,
+      deps.settings.productName,
+    );
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;

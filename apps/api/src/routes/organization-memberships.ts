@@ -1,6 +1,7 @@
 import { signupCreditModelIds } from "@opengeni/config";
 import { ApiHttpError } from "../http/api-error";
 import {
+  applyGovernedOrganizationPolicy,
   lookupExternalIdentityForRequest,
   cancelExternalWorkspaceMemberGrantForRequest,
   updateExternalWorkspaceMemberForRequest,
@@ -103,6 +104,7 @@ import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/re
 import {
   requireNativeOrganizationMutation,
   requireNativeOrganizationMutationForRequest,
+  requirePersonalWorkspacesSetting,
 } from "../http/organization-governance";
 import type { GovernedMutation } from "@opengeni/contracts/organization-governance";
 
@@ -339,20 +341,22 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     const { session, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateOrganizationRequest);
     try {
-      return context.json(
-        CreateOrganizationResponse.parse(
-          await createManagedOrganization(deps.db, {
-            subjectId,
-            subjectLabel: session.user.email || session.user.name,
-            ...payload,
-            trialCreditModelIds: signupCreditModelIds(deps.settings),
-            trialCreditsEnabled:
-              deps.settings.productAccessMode === "managed" &&
-              deps.settings.verifiedSignupTrialCreditsEnabled,
-          }),
-        ),
-        201,
+      const created = CreateOrganizationResponse.parse(
+        await createManagedOrganization(deps.db, {
+          subjectId,
+          subjectLabel: session.user.email || session.user.name,
+          ...payload,
+          trialCreditModelIds: signupCreditModelIds(deps.settings),
+          trialCreditsEnabled:
+            deps.settings.productAccessMode === "managed" &&
+            deps.settings.verifiedSignupTrialCreditsEnabled,
+        }),
       );
+      await applyGovernedOrganizationPolicy(deps, {
+        organizationId: created.organization.id,
+        actorSubjectId: subjectId,
+      });
+      return context.json(created, 201);
     } catch (error) {
       rethrowMembershipError(error);
     }
@@ -362,16 +366,18 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     const { session, subjectId } = await requireManagedHuman(context, deps);
     const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
     try {
-      return context.json(
-        CreateAdditionalOrganizationResponse.parse(
-          await createAdditionalManagedOrganization(deps.db, {
-            subjectId,
-            subjectLabel: session.user.email || session.user.name,
-            ...payload,
-          }),
-        ),
-        201,
+      const created = CreateAdditionalOrganizationResponse.parse(
+        await createAdditionalManagedOrganization(deps.db, {
+          subjectId,
+          subjectLabel: session.user.email || session.user.name,
+          ...payload,
+        }),
       );
+      await applyGovernedOrganizationPolicy(deps, {
+        organizationId: created.organization.id,
+        actorSubjectId: subjectId,
+      });
+      return context.json(created, 201);
     } catch (error) {
       rethrowMembershipError(error, "additional organization limit reached");
     }
@@ -816,6 +822,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const { subjectId } = await requirePrivateSessionAdministrator(context, deps, organizationId);
     const request = await parseBody(context, UpdateOrganizationPrivacySettingsRequest);
+    await requirePersonalWorkspacesSetting(deps, organizationId, request.personalWorkspaces);
     try {
       return context.json(
         OrganizationPrivacySettings.parse(
