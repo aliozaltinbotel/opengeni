@@ -5567,6 +5567,11 @@ export type ClientConfig = {
   /** Client-safe hint for whether the console should offer Stripe checkout. */
   billingMode?: BillingMode | undefined;
   managedAuthSessionSetMode: "legacy" | "dual" | "broker";
+  /**
+   * Present only when managed auth offers an authenticator app (TOTP) as a
+   * re-authentication second factor. Omitted by stock and older servers.
+   */
+  managedAuthTotp?: { enabled: true } | undefined;
   auth: ClientAuthConfig;
   /**
    * Product documentation for a console Help link. `null` means the deployment

@@ -130,6 +130,27 @@ export function mcpAccountRouteReviewLabel(label: McpAccountRouteLabel): string 
   return label.account ? `${label.connector} · ${label.account}` : label.connector;
 }
 
+/** MIME type of an MCP Apps view resource (SEP-1865). */
+export const MCP_APP_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app" as const;
+
+/** An MCP Apps view: a `ui://` HTML resource that the tool's own server serves. */
+export const McpAppResourceUri = /* @__PURE__ */ defineSchema(() =>
+  z
+    .string()
+    .max(2_048)
+    .regex(/^ui:\/\/[a-z0-9.-]+\/[A-Za-z0-9._/-]+\.html$/u),
+);
+
+/** The tool-definition metadata a catalog keeps: only an MCP Apps view. */
+export const AttemptToolCatalogMeta = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      ui: z.object({ resourceUri: McpAppResourceUri }).strict().optional(),
+    })
+    .strict(),
+);
+export type AttemptToolCatalogMeta = z.infer<typeof AttemptToolCatalogMeta>;
+
 export const AttemptToolCatalogEntry = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
@@ -144,6 +165,8 @@ export const AttemptToolCatalogEntry = /* @__PURE__ */ defineSchema(() =>
       outputSchema: AttemptToolJsonSchema.optional(),
       annotations: AttemptToolAnnotations.optional(),
       icons: z.array(AttemptToolCatalogIcon).max(16).optional(),
+      /** Set only for an in-process host tool server's tool that publishes an MCP Apps view. */
+      meta: AttemptToolCatalogMeta.optional(),
       source: z.enum(["opengeni", "files", "docs", "mcp", "codex_apps", "interaction"]),
       approval: z.enum(["none", "human", "policy"]),
     })

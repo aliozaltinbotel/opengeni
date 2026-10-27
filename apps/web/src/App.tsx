@@ -38,6 +38,7 @@
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
+//   /reauthenticate?return=<path>            → confirm it's you, then return (same-origin paths only)
 //   /desktop-return?url=…                    → hands a finished browser sign-in back to the desktop app
 //   /dev/composer-chrome                     → DEV-only SessionChrome harness (mocked)
 //   /dev/composer-stack                      → DEV-only session column preview (mocked)
@@ -193,6 +194,10 @@ const LazyAccountAuthRoute = lazyRouteComponent(
 const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
+);
+const LazyReauthenticateRoute = lazyRouteComponent(
+  () => import("@/routes/reauthenticate"),
+  "ReauthenticateRoute",
 );
 const LazyNativeSignInRoute = lazyRouteComponent(
   () => import("@/routes/native-sign-in"),
@@ -427,6 +432,16 @@ const personalSecurityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "settings/security",
   component: LazyPersonalSecurityRoute,
+});
+// Confirm it's you before a sensitive change (a host's step-up), then return to
+// `?return=`. Behind the managed sign-in gate like Personal security; the page
+// itself keeps only same-origin return paths.
+const reauthenticateRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "reauthenticate",
+  validateSearch: (search: Record<string, unknown>): { return?: string } =>
+    typeof search.return === "string" && search.return ? { return: search.return } : {},
+  component: Reauthenticate,
 });
 // Where the Opengeni phone app's sign-in opens in the system auth browser:
 // sign in with any web method, then allow the device (code + PKCE).
@@ -1027,6 +1042,7 @@ const routeTree = rootRoute.addChildren([
   setupAccountRoute,
   accountAuthRoute,
   personalSecurityRoute,
+  reauthenticateRoute,
   nativeSignInRoute,
   siteAuthorizeRoute,
   ...(import.meta.env.DEV
@@ -1645,6 +1661,11 @@ function ResetPassword() {
 
 function SetupAccount() {
   return <LazySetupAccountRoute />;
+}
+
+function Reauthenticate() {
+  const search = reauthenticateRoute.useSearch();
+  return <LazyReauthenticateRoute returnTo={search.return} />;
 }
 
 function AccountAuth() {

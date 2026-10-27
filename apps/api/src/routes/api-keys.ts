@@ -43,6 +43,7 @@ import {
   type AccessGrantAuthorization,
 } from "@opengeni/core";
 import { requireLimit } from "@opengeni/core";
+import { requireNativeOrganizationMutation } from "../http/organization-governance";
 
 export { organizationApiKeyAccess } from "@opengeni/core";
 
@@ -122,6 +123,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
       const permissions: Permission[] =
         body.permissions.length > 0 ? (body.permissions as Permission[]) : ["workspace:read"];
       ensureDelegablePermissions(authorization, permissions);
+      await requireNativeOrganizationMutation(deps, grant.accountId, "api_key.create");
       await requireLimit(deps, {
         accountId: grant.accountId,
         workspaceId,
@@ -146,7 +148,8 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.delete("/v1/workspaces/:workspaceId/api-keys/:apiKeyId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireWorkspaceApiKeyControl(c, deps, workspaceId);
+    const authorization = await requireWorkspaceApiKeyControl(c, deps, workspaceId);
+    await requireNativeOrganizationMutation(deps, authorization.grant.accountId, "api_key.revoke");
     return c.json(await revokeApiKey(deps.db, workspaceId, c.req.param("apiKeyId")));
   });
 
@@ -189,6 +192,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
         },
         !body.policy,
       );
+      await requireNativeOrganizationMutation(deps, organizationId, "api_key.create");
       try {
         const apiKey = await createOrganizationApiKeyRecord(deps.db, {
           accountId: organizationId,
@@ -237,6 +241,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
       requireOrganizationApiKeyControlPermission(context, organizationId);
       const body = c.req.valid("json");
       if (body.policy) ensureOrganizationPolicyDelegable(context, body.policy);
+      await requireNativeOrganizationMutation(deps, organizationId, "api_key.update");
       try {
         const apiKey = await updateOrganizationApiKey(
           deps.db,
@@ -259,6 +264,7 @@ export function registerApiKeyRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizationId = c.req.param("organizationId");
     const context = await requireAccessContext(c, deps);
     requireOrganizationApiKeyControlPermission(context, organizationId);
+    await requireNativeOrganizationMutation(deps, organizationId, "api_key.revoke");
     const apiKey = await revokeOrganizationApiKey(deps.db, organizationId, c.req.param("apiKeyId"));
     if (!apiKey) {
       throw new HTTPException(404, { message: "API key not found" });

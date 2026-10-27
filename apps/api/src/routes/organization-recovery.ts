@@ -12,6 +12,7 @@ import {
   getManagedAuthRequestActorLeaseStamp,
   requireCanonicalHumanRequestIdentity,
 } from "@opengeni/core/canonical-human-identities";
+import type { GovernedMutation } from "@opengeni/contracts/organization-governance";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   acceptOrganizationRecoveryCustody,
@@ -31,6 +32,7 @@ import type { Context, Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
+import { requireNativeOrganizationMutation } from "../http/organization-governance";
 import { parseRequestBody } from "../http/request-body";
 
 const OrganizationId = z.string().uuid();
@@ -180,8 +182,13 @@ async function mutationContext(
   context: Context,
   deps: ApiRouteDeps,
   services: OrganizationRecoveryRouteServices,
+  governedMutation?: GovernedMutation,
 ) {
   const identity = await requireRecoveryIdentity(context, deps, services);
+  // A recovery operation hands ownership to a member: a governing host decides
+  // it once the caller is known. Without a bound port nothing runs.
+  if (governedMutation)
+    await requireNativeOrganizationMutation(deps, organizationId(context), governedMutation);
   return {
     organizationId: organizationId(context),
     actorSubjectId: identity.actorSubjectId,
@@ -274,7 +281,7 @@ export function registerOrganizationRecoveryRoutes(
   });
 
   app.post(`${base}/operations`, async (context) => {
-    const authority = await mutationContext(context, deps, services);
+    const authority = await mutationContext(context, deps, services, "organization_recovery.start");
     const payload = await parseBody(context, StartOrganizationRecoveryOperationRequest);
     try {
       return mutationResponse(
@@ -294,8 +301,9 @@ export function registerOrganizationRecoveryRoutes(
   async function mutateOperation(
     context: Context,
     command: typeof approveOrganizationRecoveryOperation,
+    governedMutation: GovernedMutation,
   ): Promise<Response> {
-    const authority = await mutationContext(context, deps, services);
+    const authority = await mutationContext(context, deps, services, governedMutation);
     const payload = await parseBody(context, OrganizationRecoveryOperationCommandRequest);
     try {
       return mutationResponse(
@@ -313,12 +321,24 @@ export function registerOrganizationRecoveryRoutes(
   }
 
   app.post(`${base}/operations/:recoveryOperationId/approve`, async (context) =>
-    mutateOperation(context, services.approveOrganizationRecoveryOperation),
+    mutateOperation(
+      context,
+      services.approveOrganizationRecoveryOperation,
+      "organization_recovery.approve",
+    ),
   );
   app.post(`${base}/operations/:recoveryOperationId/cancel`, async (context) =>
-    mutateOperation(context, services.cancelOrganizationRecoveryOperation),
+    mutateOperation(
+      context,
+      services.cancelOrganizationRecoveryOperation,
+      "organization_recovery.cancel",
+    ),
   );
   app.post(`${base}/operations/:recoveryOperationId/execute`, async (context) =>
-    mutateOperation(context, services.executeOrganizationRecoveryOperation),
+    mutateOperation(
+      context,
+      services.executeOrganizationRecoveryOperation,
+      "organization_recovery.execute",
+    ),
   );
 }

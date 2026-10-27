@@ -54,6 +54,7 @@ import {
   requireWorkspaceToolGatewayAuthorization,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
+import { requireNativeOrganizationMutation } from "./http/organization-governance";
 
 const CLIENT_PREFIX = "ogmcp_client_";
 const REQUEST_PREFIX = "ogmcp_req_";
@@ -334,6 +335,8 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "OAuth consent authority changed",
       });
     }
+    // Refused before the request is rebound or a code is issued.
+    await requireNativeOrganizationMutation(deps, grant.accountId, "mcp_connection.create");
     if (grant.workspaceId !== request.workspaceId || grant.accountId !== request.accountId) {
       const prepared = await prepareWorkspaceToolGateway(deps, authorization);
       try {
@@ -423,6 +426,8 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
     const organizations = await consentOrganizations(deps, person.context);
     const organization = organizations.find((each) => each.id === decision.organizationId);
     if (!organization) throw new HTTPException(403, { message: "organization is not available" });
+    // Refused before the request is bound or a code is issued.
+    await requireNativeOrganizationMutation(deps, organization.id, "mcp_connection.create");
     const access = decision.access;
     if (access.workspaceScope.kind === "selected") {
       const reachable = new Set(organization.workspaces.map((workspace) => workspace.id));

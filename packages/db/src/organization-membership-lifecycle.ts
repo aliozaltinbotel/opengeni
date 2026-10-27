@@ -39,6 +39,7 @@ import {
   type RevokeOrganizationWorkspaceMemberResponse as RevokeOrganizationWorkspaceMemberResponseType,
   type UpdateOrganizationMemberRequest,
 } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import type { Database } from "./database";
 import { revokePersonalApiKeysForOwner } from "./personal-api-keys";
@@ -374,6 +375,8 @@ export async function removeWorkspaceMember(
     actorSubjectId: string;
     targetSubjectId: string;
     requireOrganizationSharedWorkspaceAdministration?: boolean;
+    /** Refuse removing a managed human's last shared workspace (a governed organization). */
+    requireRemainingSharedWorkspace?: boolean;
     operationId?: string;
   },
 ): Promise<boolean> {
@@ -440,6 +443,9 @@ export async function removeWorkspaceMember(
         return parseOrganizationMembershipProtocolSettlements(row?.result ?? []);
       },
     );
+    // Checked after the command authorized the actor and under the
+    // organization-membership lock, so concurrent removals see each other.
+    if (input.requireRemainingSharedWorkspace) await assertMemberKeepsSharedWorkspace(txDb, input);
     await settleOrganizationMembershipProtocols(txDb, settlements);
     const removed = await withRlsContext(
       txDb,
@@ -465,6 +471,57 @@ export async function removeWorkspaceMember(
     }
     return removed;
   });
+}
+
+/**
+ * Raised when a removal would leave a managed human organization member with
+ * no shared workspace: their default would fall back to their Personal one.
+ */
+export class LastSharedWorkspaceRemovalError extends Error {
+  readonly name = "LastSharedWorkspaceRemovalError";
+  constructor() {
+    super("This is the member's last shared workspace.");
+  }
+}
+
+/**
+ * Only a managed human member (one with a Personal workspace in this
+ * organization) is checked, and only for a grant they hold: service
+ * principals, external identities and missing grants keep the command's own
+ * answer. Any other grant than the Personal workspace counts, as for the
+ * access projection's default.
+ */
+async function assertMemberKeepsSharedWorkspace(
+  db: Database,
+  input: { accountId: string; workspaceId: string; targetSubjectId: string },
+): Promise<void> {
+  const accountId = input.accountId.toLowerCase();
+  const workspaceId = input.workspaceId.toLowerCase();
+  const [row] = await withRlsContext(db, { accountId, workspaceId: null }, async (scopedDb) =>
+    rawRows<{ human: boolean; holds: boolean; keeps: boolean }>(
+      scopedDb,
+      sql`
+        with personal as (
+          select id from workspaces
+          where account_id = ${accountId}::uuid
+            and external_source = 'opengeni:organization-membership'
+            and external_id = ${`${accountId}:${input.targetSubjectId}`}
+        ), grants as (
+          select workspace_id from workspace_memberships
+          where account_id = ${accountId}::uuid and subject_id = ${input.targetSubjectId}
+        )
+        select
+          exists (select 1 from personal) as human,
+          exists (select 1 from grants where workspace_id = ${workspaceId}::uuid) as holds,
+          exists (
+            select 1 from grants
+            where workspace_id <> ${workspaceId}::uuid
+              and workspace_id not in (select id from personal)
+          ) as keeps
+      `,
+    ),
+  );
+  if (row?.human && row.holds && !row.keeps) throw new LastSharedWorkspaceRemovalError();
 }
 
 type OrganizationWorkspaceCommandResult = {
@@ -578,6 +635,8 @@ export async function revokeOrganizationWorkspaceMember(
     targetOrganizationMembershipId: string;
     expectedUpdatedAt: string;
     operationId: string;
+    /** See `removeWorkspaceMember`. */
+    requireRemainingSharedWorkspace?: boolean;
   },
 ): Promise<RevokeOrganizationWorkspaceMemberResponseType> {
   return await db.transaction(async (tx) => {
@@ -614,7 +673,8 @@ export async function revokeOrganizationWorkspaceMember(
         ${`session-personal-state:${input.workspaceId}:${targetSubjectId}`}, 0
       ))`,
     );
-    const command = { action: "revoke", ...input, targetSubjectId };
+    const { requireRemainingSharedWorkspace, ...commandInput } = input;
+    const command = { action: "revoke", ...commandInput, targetSubjectId };
     const prepared = await withRlsContext(
       txDb,
       { accountId: input.organizationId, workspaceId: null },
@@ -644,6 +704,7 @@ export async function revokeOrganizationWorkspaceMember(
       actorSubjectId: input.actorSubjectId,
       targetSubjectId,
       requireOrganizationSharedWorkspaceAdministration: true,
+      ...(requireRemainingSharedWorkspace ? { requireRemainingSharedWorkspace } : {}),
       operationId: input.operationId,
     });
     if (!removed) throw new Error("Organization workspace removal lost its locked membership");
@@ -1071,9 +1132,18 @@ export async function updateOrganizationMember(
   input: CommandBase & {
     membershipId: string;
     transition: UpdateOrganizationMemberRequest;
+    /**
+     * Reactivation only: shared workspaces granted (role member) in the same
+     * transaction, because suspension removed every grant. Each grant is the
+     * ordinary organization workspace grant, keyed by an operation id derived
+     * from the reactivation's, so a replay converges.
+     */
+    reactivationWorkspaceIds?: readonly string[];
   },
 ): Promise<OrganizationMemberType> {
-  const { transition, ...base } = input;
+  const { transition, reactivationWorkspaceIds, ...base } = input;
+  if (reactivationWorkspaceIds !== undefined && transition.kind !== "reactivate")
+    throw new Error("Workspace grants accompany only a reactivation");
   const command = {
     action: transition.kind,
     ...base,
@@ -1091,6 +1161,17 @@ export async function updateOrganizationMember(
         await settleOrganizationMembershipProtocols(tx as unknown as Database, settlements);
       }
       const member = OrganizationMember.parse(await runCommand(tx as unknown as Database, command));
+      for (const workspaceId of reactivationWorkspaceIds ?? [])
+        await runOrganizationWorkspaceCommand(tx as unknown as Database, {
+          action: "grant",
+          organizationId: base.organizationId,
+          actorSubjectId: base.actorSubjectId,
+          workspaceId,
+          targetOrganizationMembershipId: base.membershipId,
+          role: "member",
+          expectedUpdatedAt: null,
+          operationId: derivedOperationId(base.operationId, `reactivation-grant:${workspaceId}`),
+        });
       // A person who leaves loses every key that acts as them here, so
       // rejoining later never revives one. Suspension keeps keys: they stop
       // working while suspended because each request rechecks membership.
@@ -1102,6 +1183,12 @@ export async function updateOrganizationMember(
       return member;
     }),
   );
+}
+
+/** A stable operation id for one step of a composite command. */
+function derivedOperationId(operationId: string, step: string): string {
+  const hex = createHash("sha256").update(`${operationId.toLowerCase()}:${step}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-8${hex.slice(13, 16)}-${((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 export async function getOrganizationRetentionPolicy(

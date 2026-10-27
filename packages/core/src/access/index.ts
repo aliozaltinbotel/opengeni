@@ -55,6 +55,12 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import type { ManagedAuth } from "../managed-auth-type";
+import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
+import {
+  OrganizationGovernedByHostError,
+  organizationGovernanceDecision,
+  requireNativeOrganizationMutationAllowed,
+} from "../application/organization-governance";
 import {
   getManagedSession,
   getNativeAppManagedSession,
@@ -799,6 +805,8 @@ export type AccessDeps = {
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;
   /** Analytics only: notes canonical managed-cookie activity, never authority. */
   userPresence?: UserPresenceRecorder | null;
+  /** Host membership governance: refuses first-use external provisioning when the host does. */
+  organizationGovernance?: OrganizationGovernancePort | null;
 };
 
 /** null means this is not an authenticated external lane; [] means that lane
@@ -1219,6 +1227,12 @@ async function provisionExternalMemberOnFirstUse(
     workspace.externalSource?.startsWith(USER_ISOLATION_WORKSPACE_SOURCE_PREFIX)
   )
     return false;
+  // The governing host decides at the moment the membership would be created.
+  await requireNativeOrganizationMutationAllowed(
+    deps,
+    external.identity.accountId,
+    "external_member.add",
+  );
   try {
     await ensureExternalWorkspaceMemberOnFirstUse(
       deps.db,
@@ -1979,6 +1993,15 @@ async function apiKeyAccessContext(
       throw new HTTPException(400, { message: "invalid external actor selection" });
     }
     const existingOnly = selection.mode === "external" && selection.existingOnly === true;
+    // A governing host that refuses external_member.add leaves only identities
+    // that already exist: first use neither provisions nor heals one.
+    const provisioningRefused =
+      !existingOnly &&
+      (await organizationGovernanceDecision(deps, {
+        organizationId: apiKey.accountId,
+        mutation: "external_member.add",
+        via: "native",
+      })) === "refuse";
     let identity: ExternalIdentity;
     try {
       identity = await withAccountRls(deps.db, apiKey.accountId, async (tx) => {
@@ -1986,7 +2009,10 @@ async function apiKeyAccessContext(
         // Claim the lifecycle prefix first so a membership-fenced session
         // writer can recheck that identity without a lock inversion.
         await lockExternalWorkspaceMembershipLifecycle(tx, apiKey.accountId);
-        const resolveIdentity = existingOnly ? readExistingExternalIdentity : ensureExternalIdentity;
+        const resolveIdentity =
+          existingOnly || provisioningRefused
+            ? readExistingExternalIdentity
+            : ensureExternalIdentity;
         return await resolveIdentity(tx, {
           accountId: apiKey.accountId,
           ...selection.identity,
@@ -1994,6 +2020,7 @@ async function apiKeyAccessContext(
       });
     } catch (error) {
       if (nestedPostgresSqlState(error) === "42501") {
+        if (provisioningRefused) throw new OrganizationGovernedByHostError("external_member.add");
         throw new HTTPException(403, { message: "external identity is unavailable" });
       }
       throw new HTTPException(503, { message: "external identity authority is unavailable" });
