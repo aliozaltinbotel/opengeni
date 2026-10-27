@@ -991,7 +991,8 @@ fixes that once with `POST /v1/host/organizations/:id/host-owner/ensure`
   for an operation id recorded that way by the same subject, and
   `bootstrapWorkspace`'s own call (with no operation id) only to an
   organization that has no membership yet.
-  Like the other host commands, it then turns Personal workspaces off.
+  Like the other host commands, it then stores the governed session policy
+  default (unless a policy is stored) and turns Personal workspaces off.
 - Answers carry `cache-control: no-store`.
 
 The owner write is a new runtime definer
@@ -1195,9 +1196,12 @@ type OrganizationSessionPolicy = {
   `{ attachments: "disabled", toolFamilies: { mode: "deny", families:
   ["shell", "codemode", "browser", "computerUse"] } }`. With the port bound,
   the API stores it unless a policy is stored at every governed entry point
-  that can start work: native organization creation, every host command,
-  session creation, message admission, and the create, update, resume and run
-  of a schedule or an automation trigger (REST and first-party MCP alike).
+  that can start work: native organization creation, every host command and
+  the host owner ensure, session creation, message admission, the create,
+  update, resume and run of a schedule or an automation trigger (REST and
+  first-party MCP alike), and the workspace-scoped
+  `GET /v1/config/client?workspaceId=` (which reports `fileUploads.enabled`
+  from it).
   `bootstrapWorkspace({ ..., governedSessionPolicy: true })` stores it in the
   bootstrap transaction. The worker, which has no port, treats a missing row as
   stock; because every governed entry stores the row first, a governed
