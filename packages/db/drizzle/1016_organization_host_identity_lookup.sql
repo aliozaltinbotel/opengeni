@@ -55,6 +55,8 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS 
 DECLARE
   previous_identity_marker text :=
     pg_catalog.current_setting('opengeni.canonical_human_identity_lifecycle', true);
+  previous_tenancy_marker text :=
+    pg_catalog.current_setting('opengeni.organization_tenancy_lifecycle', true);
   result jsonb;
 BEGIN
   IF p_account_id IS NULL
@@ -162,6 +164,9 @@ BEGIN
 
   PERFORM pg_catalog.set_config(
     'opengeni.canonical_human_identity_lifecycle', coalesce(previous_identity_marker, ''), true
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', coalesce(previous_tenancy_marker, ''), true
   );
   RETURN result;
 END

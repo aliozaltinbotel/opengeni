@@ -268,7 +268,12 @@ organization's member list. 1017 replaced that lookup's body (it stays
 withheld) and created the host owner ensure withheld; until it is granted,
 `bootstrapWorkspace` writes no owner and the host's ensure command answers
 `HOST_ORGANIZATION_OWNER_UNAVAILABLE`. Nothing granted today can write an
-owner membership for a host subject, so that write has no fallback.
+owner membership for a host subject, so that write has no fallback. 1018
+created the host session policy write
+(`opengeni_private.put_host_organization_session_policy`) withheld; until it
+is granted, the host's session-policy command answers
+`HOST_SESSION_POLICY_UNAVAILABLE` before it records anything, and every
+governed organization keeps the governed default the runtime may insert.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

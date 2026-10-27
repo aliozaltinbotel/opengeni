@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
+import { sql } from "drizzle-orm";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
@@ -18,6 +19,7 @@ import {
   type DbClient,
 } from "../src";
 import { synchronizeCanonicalHumanLoginBindings } from "../src/canonical-human-identities";
+import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 
 /*
  * Migration 1016 under the deployed posture: a NOSUPERUSER, NOBYPASSRLS
@@ -222,6 +224,33 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
       ],
     });
     expect(throughMembers).toEqual(byIdentity);
+  });
+
+  test("the lookup by identity leaves the caller's lifecycle markers as it found them", async () => {
+    if (!fixture) return;
+    await setLookupGrant(true);
+    const markers = await withRlsContext(
+      client!.db,
+      { accountId: world.organizationId, workspaceId: null },
+      async (scopedDb) => {
+        await setSubjectRlsContext(scopedDb, world.ownerSubjectId);
+        const [row] = await rawRows<{ found: boolean; tenancy: string; identity: string }>(
+          scopedDb,
+          sql`with called as materialized (
+              select opengeni_private.lookup_organization_host_identity(
+                ${world.organizationId}::uuid, ${world.ownerSubjectId}, ${world.identityId}::uuid
+              ) is not null as found
+            )
+            select called.found,
+              coalesce(current_setting('opengeni.organization_tenancy_lifecycle', true), '') as tenancy,
+              coalesce(current_setting('opengeni.canonical_human_identity_lifecycle', true), '')
+                as identity
+            from called`,
+        );
+        return row;
+      },
+    );
+    expect(markers).toEqual({ found: true, tenancy: "", identity: "" });
   });
 
   test("both paths answer nothing for an unknown identity or a non-member one", async () => {

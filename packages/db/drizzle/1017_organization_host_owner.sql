@@ -56,8 +56,8 @@ BEGIN
     OR p_account_id IS DISTINCT FROM opengeni_private.current_account_id()
     OR p_subject_id <> pg_catalog.btrim(p_subject_id)
     OR pg_catalog.length(p_subject_id) NOT BETWEEN 1 AND 1024
-    OR p_subject_id LIKE 'user:%'
-    OR p_subject_id LIKE 'external_user:%'
+    OR pg_catalog.starts_with(p_subject_id, 'user:')
+    OR pg_catalog.starts_with(p_subject_id, 'external_user:')
   THEN
     RAISE EXCEPTION 'organization host owner authority is invalid' USING ERRCODE = '42501';
   END IF;
@@ -173,6 +173,8 @@ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS 
 DECLARE
   previous_identity_marker text :=
     pg_catalog.current_setting('opengeni.canonical_human_identity_lifecycle', true);
+  previous_tenancy_marker text :=
+    pg_catalog.current_setting('opengeni.organization_tenancy_lifecycle', true);
   result jsonb;
 BEGIN
   IF p_account_id IS NULL
@@ -308,6 +310,9 @@ BEGIN
 
   PERFORM pg_catalog.set_config(
     'opengeni.canonical_human_identity_lifecycle', coalesce(previous_identity_marker, ''), true
+  );
+  PERFORM pg_catalog.set_config(
+    'opengeni.organization_tenancy_lifecycle', coalesce(previous_tenancy_marker, ''), true
   );
   RETURN result;
 END
