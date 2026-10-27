@@ -2,6 +2,7 @@ type AtlassianRequestAuthority = {
   connectionUseContext?: Omit<AcceptedConnectionUseContext, "physicalRequestId" | "usePhase">;
 };
 
+import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
 import type { AcceptedConnectionUseContext } from "@opengeni/db";
 import {
   withOrganizationIntegrationAcquisition,
@@ -1023,6 +1024,7 @@ async function materializeSchedules(
         task,
       });
     } else {
+      await requireScheduledWorkAdmissible(deps, input.grant.accountId, []);
       task = await createValidatedScheduledTask({
         settings: deps.settings,
         db: deps.db,

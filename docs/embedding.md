@@ -938,12 +938,61 @@ workspaces, holding `members:manage`; anything else is `401
 HOST_COMMAND_SERVICE_TOKEN_REQUIRED`. The command must be allowed by
 `decide` with `via: "host"`, and an ungoverned organization answers `403
 ORGANIZATION_NOT_HOST_GOVERNED`. The token's `subjectId` is the database
-actor, checked like any administrator (for example the owner subject the host
-passed to `bootstrapWorkspace`); the native receipt and lifecycle event are
+actor, checked like any administrator: an active `owner` or `admin`
+membership of the organization, otherwise `403
+HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. That is normally the subject the host
+passed to `bootstrapWorkspace`, which owns the organizations it creates (see
+the host owner below). The native receipt and lifecycle event are
 written as for the native route, and `organization_host_command_attributions`
 names the acting external user and service initiator under the same operation
 id. Reusing an operation id for another command or acting user is `409
 HOST_COMMAND_OPERATION_CONFLICT`.
+
+**The host owner.** When `bootstrapWorkspace` creates an organization, it also
+makes the subject it is given the organization's active `owner` (an
+`organization_memberships` row, with the hidden Personal workspace every
+active membership has and no access to it). It does so only for a new
+organization, and never for the `opengeni:local`, `opengeni:configured` and
+`better-auth:user` accounts, which have their own memberships. An
+organization bootstrapped before this has no such owner, so every host
+command and read for it is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. The host
+fixes that once with `POST /v1/host/organizations/:id/host-owner/ensure`
+(`HostEnsureOrganizationOwnerRequest`):
+`{ actingExternalUser, command: { operationId } }`.
+
+- It authenticates with the same service token, but the token's subject need
+  not be an administrator yet. The organization must be governed (otherwise
+  `403 ORGANIZATION_NOT_HOST_GOVERNED`). There is no `decide`: no native route
+  can do this.
+- It only ever makes the token's own `subjectId` the owner of the token's own
+  organization. The command names no subject, and another field is `422`.
+- The subject must own one of the organization's workspaces, which is what
+  `bootstrapWorkspace` left for it. Any other subject, and identity-backed
+  subjects (`user:`, `external_user:`), are `403
+  HOST_COMMAND_ACTOR_NOT_AUTHORIZED`.
+- It is idempotent. The answer (`HostOrganizationOwner`) is
+  `{ membershipId, subjectId, created }`, where `created` is true only for the
+  call that wrote the row. A membership of the subject that is already an
+  active owner is a no-op. Any other membership of the subject (an admin, a
+  member, suspended or revoked) is `409 HOST_ORGANIZATION_OWNER_CONFLICT`: the
+  ensure never promotes or reactivates anyone. It changes no other membership.
+- It is audited like a host command: `organization_host_command_attributions`
+  records it under `mutation = "host_owner.ensure"` with the acting external
+  user, service subject and initiator, and the same operation-id rules apply.
+  The database enforces this: it adds an owner to an existing organization only
+  for an operation id recorded that way by the same subject, and
+  `bootstrapWorkspace`'s own call (with no operation id) only to an
+  organization that has no membership yet.
+  Like the other host commands, it then turns Personal workspaces off.
+- Answers carry `cache-control: no-store`.
+
+The owner write is a new runtime definer
+(`opengeni_private.ensure_organization_host_owner`, migration 1017), so its
+runtime `EXECUTE` is granted one release later. Until then
+`bootstrapWorkspace` writes no owner, and the ensure command answers `503`
+with `error.details.code = "HOST_ORGANIZATION_OWNER_UNAVAILABLE"`
+(`retryable: true`) and writes nothing. After the grant, call the ensure once
+for each organization bootstrapped before it.
 
 A governed organization's people have no Personal workspace to see or start
 work in. The fork turns the organization's Personal workspaces setting off
@@ -976,14 +1025,259 @@ of that is `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`:
 The host's `PUT workspaces/:ws/members/:id` command only grants or changes
 access; `DELETE workspaces/:ws/members/:id` removes it.
 
+To link one of its people to the native identity that accepted its
+invitation, the host reads `POST /v1/host/organizations/:id/identities/lookup`
+with `{ identityId }`, the `sub` of a host session token
+(`HostLookupOrganizationIdentityRequest`). It authenticates like the host
+commands (the same service token, `members:manage`, an administrator subject
+and `403 ORGANIZATION_NOT_HOST_GOVERNED`), but it is a read: no `decide`, no
+`actingExternalUser` and no attribution row. Every answer, refusals included,
+is sent with `cache-control: no-store`. The answer (`HostOrganizationIdentity`)
+is:
+
+```ts
+{
+  identityStatus: "active" | "recovery_required" | "disputed" | "disabled";
+  verifiedEmail: string | null; // null while the account's email is unverified
+  activeLoginBinding: { id: string; revision: number } | null;
+  memberships: {
+    id: string;
+    status: "provisioning" | "active" | "suspended" | "revoked";
+    role: "owner" | "admin" | "member";
+    authorizationRevision: number; // members/:id/* expectedAuthorizationRevision
+    sharedWorkspaceAccess: {
+      workspaceId: string;
+      membershipId: string; // the workspace grant's id
+      role: "viewer" | "member" | "admin" | "custom";
+      permissions: string[];
+      updatedAt: string; // workspaces/:ws/members/:id expectedUpdatedAt, exact
+    }[];
+  }[];
+  acceptedInvitations: { id: string; acceptedMembershipId: string; acceptedAt: string }[];
+}
+```
+
+`memberships` lists the identity's memberships in this organization, oldest
+first; it is a list because one identity can sign in through more than one
+account. A suspended or offboarded (`revoked`) member still answers `200`:
+**the host must refuse to link any membership that is not `active`.**
+
+Each membership carries the values the host's member commands fence on, so
+the host does not need a second read before changing someone:
+
+- `authorizationRevision` is what `members/:id/change-role`, `suspend`,
+  `reactivate` and `offboard` take as `expectedAuthorizationRevision`. A stale
+  value is `409`.
+- `sharedWorkspaceAccess` lists the membership's grants in the organization's
+  shared workspaces (never its Personal workspace), ordered by workspace name,
+  as the organization administration overview shows them. `updatedAt` is what
+  `PUT` and `DELETE workspaces/:ws/members/:id` take as `expectedUpdatedAt`.
+  The database compares it to the microsecond, so it keeps full precision
+  (for example `2026-10-27T10:15:30.123456+00:00`): send it back exactly as
+  received. A stale value is `409`. `role` is `custom` when `permissions` is
+  not one of the preset roles. A suspended or offboarded membership has no
+  grants.
+
+`verifiedEmail` is the email of this organization's member account that the
+active login binding signs in to; without an active binding, the oldest
+active membership's account. It is `null` while that email is unverified, or
+when there is no such account (for example when the binding signs in to an
+account of the identity that is not a member here).
+`activeLoginBinding` is the identity's active canonical login binding, or
+`null` when it has none in the `active` state. Its `id` changes when another
+sign-in method becomes the active binding, and its `revision` increases
+whenever that binding's state changes. `acceptedInvitations` lists only this
+organization's invitations, newest first; `acceptedAt` is the invitation's
+`accepted_at` (migration 1016), set when it is accepted. An identity with no
+membership in the organization answers `404` with
+`error.details.code = "HOST_IDENTITY_NOT_IN_ORGANIZATION"`, the same answer as
+an identity that does not exist. A token whose subject is not an active owner
+or admin of the organization is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`, the
+code every host command now gives when the database refuses its actor.
+
+The read is one query by identity
+(`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
+adds the fences). Like every new runtime definer, its runtime `EXECUTE` is
+granted one release later. Until then the route gives the same answer through
+the organization's member list, at one identity projection per member, one
+invitation page per 100 invitations and one administration overview read.
+That fallback inherits the overview's bounds: more than 500 shared workspaces,
+or more than 1000 grants in one workspace, is refused.
+
+A host that retries an invitation revoke until it settles needs to know why a
+revoke was refused. The host's `invitations/:id/revoke` command answers `409`
+with `error.code = "conflict"` and one of two refusal codes:
+
+- `error.details.code = "HOST_INVITATION_REVISION_CONFLICT"` with
+  `details.status = "pending"`: the invitation is still pending, but at a
+  revision other than `expectedRevision`. Read it back and retry at its current
+  revision.
+- `error.details.code = "HOST_INVITATION_NOT_PENDING"` with `details.status`
+  `"accepted"`, `"revoked"` or `"expired"`. For `accepted` and `revoked` no
+  revoke can succeed, at any revision; an `accepted` invitation made a
+  membership, so offboard that member if the person must go. An `expired`
+  invitation can no longer be accepted and the host may treat it as settled; a
+  revoke at its current revision still records it as `revoked`.
+
+Every other answer is the native one. An unknown invitation is `404`. An
+expired invitation revoked at its current revision is revoked (`200`), because
+its stored row is still pending. The revoke is idempotent on its
+`operationId`: replaying the same command after success returns the original
+receipt and changes nothing. The same `operationId` with another input is
+`409`.
+
+To read an invitation back, the host calls
+`GET /v1/host/organizations/:id/invitations/:invitationId`. It authenticates
+like the identity lookup (the same service token, `members:manage`, an
+administrator subject, `403 ORGANIZATION_NOT_HOST_GOVERNED`) and is a read, with
+no `decide` and no attribution row. Every answer, refusals included, is sent
+with `cache-control: no-store`. The answer (`HostOrganizationInvitation`) is:
+
+```ts
+{
+  id: string;
+  organizationId: string;
+  status: "pending" | "accepted" | "revoked" | "expired"; // expired: pending past expiresAt
+  revision: number; // a revoke's expectedRevision while pending
+  acceptedMembershipId: string | null; // set when accepted
+  acceptedAt: string | null; // set when accepted
+  expiresAt: string;
+}
+```
+
+Instants are ISO-8601 UTC with millisecond precision. The invitee's email,
+name and workspaces are left out. An invitation that does not exist and one
+that belongs to another organization both answer `404` with
+`error.details.code = "HOST_INVITATION_NOT_IN_ORGANIZATION"`. Without the
+governance port, the route does not exist.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
+
+#### Session policy: attachments and generic tool families
+
+Each governed organization has one session policy
+(`@opengeni/contracts/organization-session-policy`, table
+`organization_session_policies`, migration 1018) for every session in its
+workspaces, whatever started it (chat, API, schedules, automations):
+
+```ts
+type OrganizationSessionPolicy = {
+  attachments: "enabled" | "disabled";
+  toolFamilies: {
+    mode: "deny" | "allow";
+    families: ("shell" | "codemode" | "browser" | "computerUse")[];
+  };
+};
+```
+
+- **Families.** `shell` is the sandbox shell and file-editing tools
+  (`exec_command`, `write_stdin`, `apply_patch`, `view_image`, `code_search`,
+  `command_read`/`command_wait`) and the compute-routing tools
+  (`sandboxes_list`, `sandbox_attach`, `sandbox_swap`, `sandbox_provision`,
+  `run_on`, `connected_machine_enroll_token`, `connected_machine_remove`).
+  `codemode` is the in-sandbox Codemode bearer and the `/codemode/*` routes.
+  `browser` is the browser and interaction tools. `computerUse` is the
+  `computer_*` tools, the desktop tools, `excel_run` and
+  `connected_machine_enable_screen_control`. `deny` removes the named families;
+  `allow` keeps only the named ones. The policy only narrows: a kept family
+  still follows the session's own capabilities.
+- **Default, from the first piece of work.** The governed default is
+  `{ attachments: "disabled", toolFamilies: { mode: "deny", families:
+  ["shell", "codemode", "browser", "computerUse"] } }`. With the port bound,
+  the API stores it unless a policy is stored at every governed entry point
+  that can start work: native organization creation, every host command,
+  session creation, message admission, and the create, update, resume and run
+  of a schedule or an automation trigger (REST and first-party MCP alike).
+  `bootstrapWorkspace({ ..., governedSessionPolicy: true })` stores it in the
+  bootstrap transaction. The worker, which has no port, treats a missing row as
+  stock; because every governed entry stores the row first, a governed
+  organization's work never reaches the worker without one.
+- **Organizations governed before 1018.** Whether a host governs an
+  organization is the port's answer at run time, not a fact in the database,
+  so migration 1018 backfills the governed default only for organizations the
+  database shows governed (those that already ran a host command). When the API
+  starts with its port bound it stores the default for every other
+  organization the port governs that has none
+  (`storeGovernedOrganizationSessionPolicyDefaults`; idempotent, paged). **So
+  schedules and triggers a governed organization saved before 1018 start
+  running under the governed default after the migration and that startup
+  pass**: no attachments (a saved file reference makes the run
+  `attachments_disabled`) and no generic tool families. A worker that fires one
+  in the seconds between the migration and the API's startup pass still runs
+  it as stock; a drained cutover has no such window. Nothing is stored
+  for an ungoverned organization, and without a bound port the API reads
+  nothing, so stock deployments are unchanged.
+- **Who may write the row.** The runtime may read it and insert only the
+  governed default (the table's INSERT policy admits nothing else); it has no
+  UPDATE or DELETE. A host's policy is written only by
+  `opengeni_private.put_host_organization_session_policy`, a SECURITY DEFINER
+  routine that requires the host command's `session_policy.update`
+  attribution for the same service subject and operation id, keeps a receipt
+  per operation id with the body's digest, and checks the expected revision.
+  The routine's runtime EXECUTE is withheld for one release (expand-contract);
+  until it is granted the host command answers `503
+  HOST_SESSION_POLICY_UNAVAILABLE` and every governed organization keeps the
+  governed default.
+- **Host command.** `PUT /v1/host/organizations/:org/session-policy` with
+  `{ actingExternalUser, command: { policy, operationId, expectedRevision } }`
+  replaces the policy (mutation `session_policy.update`, decided with
+  `via: "host"`; the same service-token rules as the other host commands).
+  `expectedRevision` is the `revision` the host last read; `0` means no host
+  policy yet (nothing stored, or only the governed default). The same
+  operation id with the same body replays (`replay: true`); with another body
+  it is `409 SESSION_POLICY_OPERATION_CONFLICT`; a stale revision is `409
+  SESSION_POLICY_REVISION_CONFLICT`, so a delayed old command never overwrites
+  a newer revision. `GET` on the same path is a read with no side effect: it
+  stores nothing, decides nothing and records nothing, and answers the
+  governed default with revision `0` while nothing is stored. Answers are
+  `{ organizationId, policy, source: "stock" | "governed_default" | "host",
+  revision, updatedAt }` (and `replay` on PUT). No native route writes the
+  policy, and native workspace settings or session capabilities cannot widen
+  it.
+- **Attachments off.** These answer `403` with `details.code
+  ATTACHMENTS_DISABLED`:
+  - a person's `POST /v1/workspaces/:ws/files/uploads` and its `/complete`;
+  - a session create or message that attaches a file (`resources[].kind ===
+    "file"`);
+  - `POST /v1/workspaces/:ws/knowledge/drops` (text or file);
+  - a person's `sessions/:id/fs/write`, `fs/move` and `fs/mkdir`;
+  - a schedule or automation trigger whose template attaches a file, at create,
+    update, resume and run (REST `trigger`, first-party MCP
+    `scheduled_tasks_trigger`), and a manual automation event or webhook that
+    would start such a trigger. When the worker fires one saved before
+    attachments were turned off, it refuses it (`attachments_disabled`).
+
+  The workspace-scoped `GET /v1/config/client?workspaceId=` reports
+  `fileUploads.enabled: false`, and the console hides its attach controls for
+  that workspace. **Accepted exemptions:** an agent principal's own uploads
+  and file writes are its outputs, not attachments, and pass; a session fork
+  or history import reuses files that were already admitted, and is not
+  re-checked.
+- **Families off.** The worker removes the denied families from every turn's
+  tool catalog (first-party tools, function tools, the sandbox shell and
+  filesystem capabilities) and mints no Codemode bearer when `codemode` or
+  `shell` is denied. The API refuses them again at call admission: the
+  first-party MCP server never registers a denied tool whatever the token's
+  signed selection names, and these routes answer `403` with `details.code
+  SESSION_TOOL_FAMILY_DENIED` and `details.family`, after authenticating the
+  caller (these guards only read the policy, so an unauthenticated or refused
+  request writes nothing): `/codemode/*`; `browser-sessions` and `computer-sessions`
+  (mutations); `machines/:id/screen-control`; `enrollments/token` and
+  `enrollments/device/approve` (a Connected Machine is both `shell` and
+  `computerUse`); `sessions/:id/terminal/*`, `sessions/:id/fs/*` and
+  `sessions/:id/git/*`.
+- **A stored row outlives governance.** Nothing deletes a policy row. If a
+  host stops governing an organization, its stored policy still applies, at
+  the API and in the worker. If the port is unbound, the worker keeps
+  honouring the row while the API, which reads nothing without a port, stops
+  refusing at its own entry points. An operator deletes the row to lift it.
 
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.
 
-`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and membership rows, then returns an `AccessContext`.
+`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and membership rows, then returns an `AccessContext`. When it creates the account, it also makes the subject the organization's owner (see "The host owner" under Organization Governance), except for the local, configured and managed-human accounts.
 
 The workspace remains the operational boundary. Route and core code must use the workspace id from the grant/path, not a resource id, as the access boundary.
 

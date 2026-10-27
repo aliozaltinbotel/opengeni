@@ -981,6 +981,8 @@ export const organizationMembershipInvitations = pgTable(
     revision: bigint("revision", { mode: "number" }).notNull().default(1),
     createdByMembershipId: uuid("created_by_membership_id").notNull(),
     acceptedMembershipId: uuid("accepted_membership_id"),
+    /** When the invitation was accepted (1016): set by trigger at acceptance. */
+    acceptedAt: timestamp("accepted_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

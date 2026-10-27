@@ -82,6 +82,20 @@ if (import.meta.main) {
 }
 
 /**
+ * Runtime definers this release still withholds (DEFERRED_RUNTIME_PRIVATE_ROUTINES)
+ * that the pinned previous release already knows. Each must now be granted in a
+ * rolling migration and dropped from the deferred list, as 0947 and 0950 did:
+ * the withholding exists only until the previous release knows the routine.
+ */
+export function deferredRuntimeRoutinesDueForGrant(
+  previous: { readonly RUNTIME_DEFINER_ROUTINES?: readonly string[] },
+  deferred: readonly string[],
+): string[] {
+  const known = new Set(previous.RUNTIME_DEFINER_ROUTINES ?? []);
+  return deferred.filter((routine) => known.has(routine));
+}
+
+/**
  * Run BOTH the inspector and evaluator from the pinned source, not today's
  * evaluator with yesterday's table list. The only executable external import
  * is drizzle-orm (the query adapter); binary-owned relative dependencies are

@@ -1,3 +1,8 @@
+import {
+  sessionToolFamilyGate,
+  type SessionToolFamilyGate,
+} from "@opengeni/contracts/organization-session-policy";
+import { withoutDeniedFamilyTools } from "./session-tool-families";
 import { createKnowledgeSourceAttemptTools } from "./knowledge-source-tools";
 import { userSetupCardPoster } from "./user-setup-card";
 import { withAppActionConfirmation } from "./app-action-confirmation";
@@ -160,6 +165,8 @@ export type PrepareTurnToolPolicyDeps = {
 };
 
 export type PrepareTurnToolRuntimeDeps = {
+  /** The organization's session policy; absent means nothing is denied. */
+  sessionToolFamilies?: SessionToolFamilyGate;
   independentSessionTitles?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
   vaultAccess: AttemptVaultAccess;
@@ -472,17 +479,24 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
   const toolFamilies = resolveAgentToolFamilies(session.agent, {
     sandboxAttached: (activeSandboxBackend ?? groupBoxBackend) !== "none",
   });
-  const selectedFirstPartyMcpTools = toolFamilies.firstPartyTools(
-    scheduledTurnMcpServerIds(turn) !== null
-      ? allowedFirstPartyMcpToolsForSession(
-          runSettings,
-          scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
-        )
-      : resolveSessionFirstPartyMcpTools(
-          runSettings,
-          session,
-          (await requireWorkspace(db, input.workspaceId)).settings,
-        ),
+  // The organization's session policy narrows every selection, whichever
+  // entry point created the session; it never widens one.
+  const sessionToolFamilies = deps.sessionToolFamilies ?? sessionToolFamilyGate(null);
+  const selectedFirstPartyMcpTools = withoutDeniedFamilyTools(
+    toolFamilies.firstPartyTools(
+      scheduledTurnMcpServerIds(turn) !== null
+        ? allowedFirstPartyMcpToolsForSession(
+            runSettings,
+            scheduledTurnFirstPartyMcpTools(turn) ?? session.firstPartyMcpTools,
+          )
+        : resolveSessionFirstPartyMcpTools(
+            runSettings,
+            session,
+            (await requireWorkspace(db, input.workspaceId)).settings,
+          ),
+    ),
+    (name) => name,
+    sessionToolFamilies,
   );
   // Frozen with the selection and ceiling above; instructions only.
   const promptToolAvailability = promptToolAvailabilityForTurn({
@@ -908,7 +922,11 @@ export async function prepareTurnToolRuntime(deps: PrepareTurnToolRuntimeDeps) {
     }),
     ...codeSearchTools,
     ...webSearchTools,
-  ].filter((tool) => attemptToolFamilies.allowsFunctionTool(tool.modelName));
+  ].filter(
+    (tool) =>
+      attemptToolFamilies.allowsFunctionTool(tool.modelName) &&
+      sessionToolFamilies.allowsTool(tool.modelName),
+  );
   recordTurnStartupPhase(observability, {
     phase: "tool_context_preparation",
     provider: turnExecutionPolicy.providerId,

@@ -302,6 +302,10 @@ import {
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import {
+  ensureOrganizationSessionPolicyAtEntry,
+  requireOrganizationAttachmentsAllowed,
+} from "../application/organization-session-policy";
+import {
   requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
 } from "../application/session-tenancy";
@@ -3488,6 +3492,15 @@ async function createSessionForRequestInFileScope(
           message: "object storage is not configured",
         });
       }
+      // A governed organization's policy row exists before its first session.
+      await ensureOrganizationSessionPolicyAtEntry(unresolvedDeps, grant.accountId);
+      // A person's attached file is refused where the organization turns
+      // attachments off; an agent passes on files it produced.
+      if (
+        resources.some((resource) => resource.kind === "file") &&
+        grant.principalKind !== "agent_attempt"
+      )
+        await requireOrganizationAttachmentsAllowed(unresolvedDeps, grant.accountId);
       // The outer creation scope already established the caller's file actor.
       // Only attached files need a second live ownership read at validation.
       const ownerContext = !resources.some((resource) => resource.kind === "file")
@@ -4867,6 +4880,13 @@ async function acceptSessionUserMessageInFileScope(
         message: "object storage is not configured",
       });
     }
+    // A governed organization's policy row exists before work is admitted.
+    await ensureOrganizationSessionPolicyAtEntry(deps, grant.accountId);
+    if (
+      requestedResources.some((resource) => resource.kind === "file") &&
+      grant.principalKind !== "agent_attempt"
+    )
+      await requireOrganizationAttachmentsAllowed(deps, grant.accountId);
     const attachmentOwnerContext = input.authorization
       ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
       : grant.principalKind === "agent_attempt"

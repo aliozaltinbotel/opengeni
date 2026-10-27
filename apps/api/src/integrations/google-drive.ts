@@ -2,6 +2,7 @@ import {
   GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
   GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
 } from "@opengeni/contracts/google-drive-native-retirement";
+import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
 import {
   withOrganizationIntegrationAcquisition,
   withOrganizationIntegrationPolicyFence,
@@ -1757,6 +1758,7 @@ async function materializeGoogleDriveKnowledgeSchedules(
         task,
       });
     } else {
+      await requireScheduledWorkAdmissible(deps, input.grant.accountId, []);
       task = await createValidatedScheduledTask({
         settings: deps.settings,
         db: deps.db,

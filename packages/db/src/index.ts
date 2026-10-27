@@ -1182,6 +1182,7 @@ import {
   type WorkspaceControlRow,
 } from "./session-control";
 import { ensureManagedHumanPersonalWorkspace } from "./managed-human-provisioning";
+import { ensureBootstrappedOrganizationOwner } from "./organization-host-owner";
 import {
   sessionRealtimeIsActiveInTransaction,
   settleExpiredSessionRealtimeInTransaction,
@@ -1374,6 +1375,15 @@ export * from "./insights-usage-bundle";
 export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
 export * from "./organization-host-command-attributions";
+export * from "./organization-host-identity-lookup";
+export {
+  HOST_ORGANIZATION_OWNER_ROUTINE,
+  ensureOrganizationHostOwner,
+  hostOrganizationOwnerGranted,
+  type HostOrganizationOwnerResult,
+} from "./organization-host-owner";
+export * from "./organization-session-policies";
+import { ensureGovernedOrganizationSessionPolicyInScope } from "./organization-session-policies";
 import {
   assertActiveManagedHumanOrganizationMembership,
   getOrganizationAdministrationOverview,
@@ -2333,6 +2343,13 @@ export type BootstrapWorkspaceInput = {
   subjectLabel?: string;
   accountPermissions?: Permission[];
   workspacePermissions?: Permission[];
+  /**
+   * The organization is governed by the embedding host calling this: store its
+   * governed session policy (no attachments, no shell, Codemode, browser or
+   * computer-use tools; migration 1018) in the same transaction, unless a
+   * policy is already stored, so its first session can never run without it.
+   */
+  governedSessionPolicy?: boolean;
 };
 
 function samePermissionSet(left: unknown, right: readonly Permission[]): boolean {
@@ -2359,6 +2376,9 @@ export async function bootstrapWorkspace(
         ),
       )
       .limit(1);
+    // A new organization's host owner is written below, once the subject's
+    // workspace grant exists.
+    const organizationCreated = !account;
     if (!account) {
       [account] = await tx
         .insert(schema.managedAccounts)
@@ -2431,6 +2451,8 @@ export async function bootstrapWorkspace(
       accountId: workspace.accountId,
       workspaceId: workspace.id,
     });
+    if (input.governedSessionPolicy)
+      await ensureGovernedOrganizationSessionPolicyInScope(tx as unknown as Database, account.id);
     const [workspaceControl] = await tx
       .select({ workspaceId: schema.workspaceInferenceControls.workspaceId })
       .from(schema.workspaceInferenceControls)
@@ -2490,6 +2512,19 @@ export async function bootstrapWorkspace(
           updatedAt: new Date(),
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
+    }
+    if (organizationCreated) {
+      // Host commands and reads run as this subject, checked like any
+      // organization administrator: it owns the organization it provisioned.
+      await setRlsContext(tx as unknown as Database, {
+        accountId: account.id,
+        workspaceId: null,
+      });
+      await ensureBootstrappedOrganizationOwner(tx as unknown as Database, {
+        organizationId: account.id,
+        subjectId: input.subjectId,
+        accountExternalSource: input.accountExternalSource,
+      });
     }
     if (
       input.accountExternalSource === "opengeni:local" &&

@@ -178,6 +178,7 @@ import {
   eventTriggersEnabled,
   OrganizationGovernedByHostError,
   PersonalWorkspacesOffError,
+  resolveOrganizationSessionPolicy,
   sessionUsageLimitsProducerEnabled,
 } from "@opengeni/core";
 import {
@@ -391,6 +392,11 @@ import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
 import { registerGovernedOrganizationCommandRoutes } from "./routes/governed-organization-commands";
+import {
+  deniedSessionToolFamiliesForOrganization,
+  organizationSessionPolicyHttpError,
+  registerSessionToolFamilyRouteGuards,
+} from "./http/organization-session-policy";
 import { organizationGovernedByHostError } from "./http/organization-governance";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
@@ -1490,6 +1496,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
   registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
+  // Before every route a generic tool family's refusal guards.
+  registerSessionToolFamilyRouteGuards(app, routeDeps);
+
   app.get("/v1/config/client", async (c) => {
     c.header("cache-control", "no-store");
     const resolvedCatalog = await resolveCatalogSettings(deps.db, deps.settings);
@@ -1508,6 +1517,8 @@ export function createAppComposition(deps: AppDependencies): {
     let modelSelectionForbidden = false;
     let voiceInputAvailable = false;
     let voiceInputProviders: string[] = [];
+    // The workspace's organization may turn attachments off for its sessions.
+    let workspaceAttachmentsAllowed = true;
     const requestedWorkspaceId = c.req.query("workspaceId");
     if (
       requestedWorkspaceId !== undefined &&
@@ -1561,6 +1572,10 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
+          if (routeDeps.organizationGovernance && workspace)
+            workspaceAttachmentsAllowed =
+              (await resolveOrganizationSessionPolicy(routeDeps, workspace.accountId)).policy
+                .attachments === "enabled";
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
             workspace?.settings.voiceInput,
           ).data;
@@ -1661,7 +1676,7 @@ export function createAppComposition(deps: AppDependencies): {
         },
         eventTriggers: { enabled: eventTriggersEnabled(deps.settings) },
         fileUploads: {
-          enabled: objectStorage !== null,
+          enabled: objectStorage !== null && workspaceAttachmentsAllowed,
           maxSizeBytes: objectStorage?.maxSinglePutSizeBytes ?? 5_000_000_000,
         },
         voiceInput: {
@@ -2006,9 +2021,8 @@ export function createAppComposition(deps: AppDependencies): {
           typeof boundSessionId === "string"
             ? { accountId: grant.accountId, workspaceId, sessionId: boundSessionId }
             : null;
-        const [, [mcpDeps, startedByPerson, fullAccess]] = await alongsideAuthorization(
-          authorizeBoundSession(),
-          () =>
+        const [, [mcpDeps, startedByPerson, fullAccess, deniedToolFamilies]] =
+          await alongsideAuthorization(authorizeBoundSession(), () =>
             Promise.all([
               resolveWorkspaceMcpRouteDeps(routeDeps, grant),
               // Fixed for the session's life: a person started it themselves.
@@ -2019,11 +2033,14 @@ export function createAppComposition(deps: AppDependencies): {
                     (authority) => authority !== null,
                   )
                 : false,
+              // The organization's session policy: refused families are never registered.
+              deniedSessionToolFamiliesForOrganization(routeDeps, grant.accountId),
             ]),
-        );
+          );
         reads.handOffToToolDispatch();
         const mcp = buildOpenGeniMcpServer(mcpDeps, grant, {
           requestOrigin: new URL(c.req.url).origin,
+          deniedToolFamilies,
           appActions: sessionScope
             ? {
                 access: {
@@ -2501,7 +2518,8 @@ export function createAppComposition(deps: AppDependencies): {
                 outcomeUnknown: false,
                 details: { code: rawError.code },
               })
-            : (sessionUsageLimitHttpError(rawError) ??
+            : (organizationSessionPolicyHttpError(rawError) ??
+              sessionUsageLimitHttpError(rawError) ??
               allowanceExhaustedHttpError(rawError) ??
               subscriptionSettingsLockedHttpError(rawError) ??
               workspaceControlBusyHttpError(rawError) ??

@@ -429,6 +429,12 @@ import {
   type OtherWorkspaceSessionTool,
 } from "./session-other-workspace";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
+import {
+  sessionToolFamilyGate,
+  type SessionToolFamily,
+  type SessionToolFamilyGate,
+} from "@opengeni/contracts/organization-session-policy";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -451,6 +457,12 @@ export type McpServerOptions = {
     | { access: SessionAdminAccessDispatch; startedByPerson: boolean; fullAccess: boolean }
     | null
     | undefined;
+  /**
+   * Generic tool families the organization's session policy removes. Their
+   * tools are never registered, whatever the grant's signed selection names,
+   * so a call to one is refused like any unknown tool.
+   */
+  deniedToolFamilies?: readonly SessionToolFamily[] | undefined;
 };
 
 const ORCHESTRATION_FAILURE_CODE_MAX_LENGTH = 128;
@@ -903,6 +915,7 @@ class PolicyMcpServer extends McpServer {
     private readonly sessionId: string | null,
     private readonly selectedTools: ReadonlySet<FirstPartyMcpToolName> | null,
     private readonly appActions: { startedByPerson: boolean; fullAccess: boolean } | null = null,
+    private readonly familyGate: SessionToolFamilyGate = sessionToolFamilyGate(null),
   ) {
     super({ name: "opengeni", version: "1.0.0" });
   }
@@ -920,7 +933,11 @@ class PolicyMcpServer extends McpServer {
         true) &&
       (policy.anyOf?.some((permission) => hasPermission(this.grant.permissions, permission)) ??
         true);
-    return authorized && (this.selectedTools === null || this.selectedTools.has(toolName));
+    return (
+      authorized &&
+      this.familyGate.allowsTool(toolName) &&
+      (this.selectedTools === null || this.selectedTools.has(toolName))
+    );
   }
 
   override registerTool<
@@ -940,7 +957,7 @@ class PolicyMcpServer extends McpServer {
   ): RegisteredTool {
     const catalogued = FIRST_PARTY_MCP_TOOL_NAME_SET.has(name);
     let admitted = false;
-    if (catalogued) {
+    if (catalogued && this.familyGate.allowsTool(name)) {
       const toolName = name as FirstPartyMcpToolName;
       const policy: FirstPartyToolAuthorization = FIRST_PARTY_TOOL_AUTHORIZATION[toolName];
       if (policy.personSessionRequired) {
@@ -1154,6 +1171,14 @@ export function buildOpenGeniMcpServer(
       startedByPerson: appActions.startedByPerson,
       fullAccess: appActions.fullAccess,
     },
+    sessionToolFamilyGate(
+      options.deniedToolFamilies?.length
+        ? {
+            attachments: "enabled",
+            toolFamilies: { mode: "deny", families: [...options.deniedToolFamilies] },
+          }
+        : null,
+    ),
   );
   // One authority for everything this session does as a person: the app
   // action tools, and the session tools' chats in other workspaces, which
@@ -2067,6 +2092,7 @@ export function buildOpenGeniMcpServer(
           action: "schedule:create",
           quantity: 1,
         });
+        await requireScheduledWorkAdmissible(deps, grant.accountId, payload.agentConfig.resources);
         const task = await createValidatedScheduledTask({
           settings: deps.settings,
           db: deps.db,
@@ -2171,6 +2197,11 @@ export function buildOpenGeniMcpServer(
             }),
           );
         }
+        await requireScheduledWorkAdmissible(
+          deps,
+          grant.accountId,
+          update.agentConfig?.resources ?? existing.agentConfig.resources,
+        );
         const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -2253,6 +2284,11 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
         });
+        await requireScheduledWorkAdmissible(
+          deps,
+          grant.accountId,
+          update.agentConfig?.resources ?? existing.agentConfig.resources,
+        );
         const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -2276,6 +2312,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ id, triggerId }) => {
         const task = await requireVisibleTask(id);
+        await requireScheduledWorkAdmissible(deps, grant.accountId, task.agentConfig.resources);
         if (task.action.kind === "agent_turn") {
           const targetSession = await validateScheduledTaskTarget({
             db: deps.db,

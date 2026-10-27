@@ -6,6 +6,7 @@ import {
   type OrganizationGovernancePort,
 } from "@opengeni/contracts/organization-governance";
 import {
+  ensureGovernedOrganizationSessionPolicy,
   getManagedAccount,
   getOrganizationPrivacyPreferences,
   updateOrganizationPrivacyPreferences,
@@ -73,10 +74,12 @@ function describeValue(value: unknown): string {
 /**
  * A governed organization's people have no Personal workspace to see or start
  * work in: the host decides where they work. This turns the organization's
- * Personal workspaces setting (0918) off the first time the fork sees the
- * organization governed: at native creation and before each host command,
- * because a host usually provisions its organizations out of band. Idempotent;
- * an ungoverned organization, or no bound port, is never touched.
+ * Personal workspaces setting (0918) off, and stores the governed session
+ * policy (no attachments, no generic tool families) unless one is stored, the
+ * first time the fork sees the organization governed: at native creation and
+ * before each host command, because a host usually provisions its
+ * organizations out of band. Idempotent; an ungoverned organization, or no
+ * bound port, is never touched.
  *
  * `actorSubjectId` must be an active owner or admin (the database refuses
  * anyone else): the creator, or the host command's service-token subject.
@@ -86,6 +89,9 @@ export async function applyGovernedOrganizationPolicy(
   input: { organizationId: string; actorSubjectId: string },
 ): Promise<void> {
   if (!(await organizationGovernedByHost(deps, input.organizationId))) return;
+  // Its sessions get no attachments and no generic tool families until the
+  // host sets a policy; stored, so the worker reads the same answer.
+  await ensureGovernedOrganizationSessionPolicy(deps.db, input.organizationId);
   const preferences = await getOrganizationPrivacyPreferences(deps.db, input.organizationId);
   if (!preferences.personalWorkspacesEnabled) return;
   await updateOrganizationPrivacyPreferences(deps.db, {

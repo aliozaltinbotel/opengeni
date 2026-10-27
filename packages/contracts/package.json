@@ -98,6 +98,10 @@
       "types": "./src/organization-governance.ts",
       "default": "./src/organization-governance.ts"
     },
+    "./organization-session-policy": {
+      "types": "./src/organization-session-policy.ts",
+      "default": "./src/organization-session-policy.ts"
+    },
     "./organization-access": {
       "types": "./src/organization-access.ts",
       "default": "./src/organization-access.ts"

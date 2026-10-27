@@ -77,6 +77,7 @@ import {
   prepareMcpOAuthWorkspaceToolGateway,
 } from "../workspace-tool-gateway";
 import { parseRequestJson, parseRequestQuery } from "../http/request-body";
+import { requireWorkspaceAttachmentsAllowed } from "../http/organization-session-policy";
 
 export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { db, objectStorage } = deps;
@@ -182,6 +183,10 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
+    // A person's upload is an attachment for the workspace's sessions; an
+    // agent's is its own output. The organization may turn attachments off.
+    if (!fileRequestAuthority.get(c.req.raw)?.agent)
+      await requireWorkspaceAttachmentsAllowed(deps, grant.accountId);
     const payload = await parseRequestJson(c, CreateFileUploadRequest);
     // An app-shot describes a screenshot; on anything else it would be text
     // the model reads about a file that shows something different.
@@ -317,6 +322,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "object storage is not configured",
       });
     }
+    // An upload started before attachments were turned off does not finish.
+    if (!fileRequestAuthority.get(c.req.raw)?.agent)
+      await requireWorkspaceAttachmentsAllowed(deps, grant.accountId);
     const upload = await getFileUpload(db, workspaceId, c.req.param("uploadId"));
     if (!upload) {
       throw new HTTPException(404, { message: "file upload not found" });

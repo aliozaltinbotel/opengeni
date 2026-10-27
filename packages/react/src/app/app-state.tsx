@@ -12,7 +12,10 @@ import {
   type PendingSlackLink,
   type SessionCreationHandoff,
 } from "./app-context";
-import { startWorkspaceVoiceCapabilityRefresh } from "./lib/workspace-voice-capability";
+import {
+  startWorkspaceVoiceCapabilityRefresh,
+  workspaceScopedClientConfig,
+} from "./lib/workspace-voice-capability";
 import { markIntegrationConnectRedirect } from "./lib/integration-connect-redirect";
 import { userErrorText } from "../ui/api-error";
 import {
@@ -333,6 +336,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
   const [clientConfig, setClientConfig] = useState<ClientConfig | null>(null);
   const [workspaceVoiceInput, setWorkspaceVoiceInput] =
     useState<ClientConfig["voiceInput"]>(undefined);
+  const [workspaceFileUploads, setWorkspaceFileUploads] = useState<ClientConfig["fileUploads"]>();
   const [configError, setConfigError] = useState<BootstrapErrorPresentation | null>(null);
   const [configRequestVersion, setConfigRequestVersion] = useState(0);
   const [authSession, setAuthSession] = useState<AuthSession | null | undefined>(undefined);
@@ -596,6 +600,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       setPersonalGitHubBusy(false);
       resetWorkspaceIntegrations();
       setWorkspaceVoiceInput(undefined);
+      setWorkspaceFileUploads(undefined);
       setWorkspaceStateOwnerId(workspaceId);
     },
     [resetSessionView, resetWorkspaceIntegrations, sessionChannelProjectionAuthority],
@@ -630,6 +635,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       read: (signal) => fetchClientConfig(signal, workspaceId),
       ownsWorkspace: () => ownsWorkspaceInvocation(workspaceId, accepted),
       apply: (voiceInput) => setWorkspaceVoiceInput(voiceInput),
+      applyFileUploads: (fileUploads) => setWorkspaceFileUploads(fileUploads),
       subscribeFocus: (refresh) => {
         window.addEventListener("focus", refresh);
         return () => window.removeEventListener("focus", refresh);
@@ -2484,14 +2490,10 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     return clientConfig && accessContext
       ? ({
           client,
-          clientConfig: {
-            ...clientConfig,
-            voiceInput:
-              workspaceVoiceInput ??
-              (clientConfig.voiceInput
-                ? { ...clientConfig.voiceInput, available: false, providers: [] }
-                : undefined),
-          },
+          clientConfig: workspaceScopedClientConfig(clientConfig, {
+            voiceInput: workspaceVoiceInput,
+            fileUploads: workspaceFileUploads,
+          }),
           authSession: authSession ?? null,
           accessContext,
           workspaces,
@@ -2602,6 +2604,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
     client,
     clientConfig,
     workspaceVoiceInput,
+    workspaceFileUploads,
     connectionState,
     contextAddManualRepository,
     contextCreateWorkspace,

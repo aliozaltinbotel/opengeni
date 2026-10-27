@@ -421,6 +421,7 @@ export type AcceptSessionUserMessageDependencies = Pick<
   | "sessionAuthorization"
   | "schedulePromptPostCommit"
   | "observability"
+  | "organizationGovernance"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

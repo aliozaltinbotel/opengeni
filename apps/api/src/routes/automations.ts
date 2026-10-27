@@ -1,4 +1,5 @@
 import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
 import { modelUnavailableHttpException } from "@opengeni/core";
 import {
   AUTOMATION_WEBHOOK_MAX_BYTES,
@@ -195,6 +196,7 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAutomationWriter(c, deps, workspaceId);
     const request = await parseRequestJson(c, CreateAutomationTriggerRequest);
+    await requireScheduledWorkAdmissible(deps, grant.accountId, request.sessionTemplate.resources);
     const credentialRestriction = await automationCredentialRestrictionForGrant(deps.db, grant);
     requireAutomationCredentialRestrictionPermissions(
       credentialRestriction,
@@ -266,6 +268,11 @@ export function registerAutomationRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "automation trigger not found",
       });
     assertGenericTriggerMutable(existing);
+    await requireScheduledWorkAdmissible(
+      deps,
+      grant.accountId,
+      (request.sessionTemplate ?? existing.sessionTemplate).resources,
+    );
     const credentialRestriction =
       existing.sessionTemplate.credentialRestriction ??
       (await automationCredentialRestrictionForGrant(deps.db, grant));
@@ -544,6 +551,14 @@ export async function acceptAutomationEvent(
       message: `automation event matches more than ${AUTOMATION_MAX_MATCHED_TRIGGERS} triggers`,
     });
   }
+  // A manual event or a webhook starts the matching triggers' work: their
+  // organization's policy row exists first, and a template that attaches files
+  // is refused where attachments are off (the worker refuses it again).
+  await requireScheduledWorkAdmissible(
+    deps,
+    source.accountId,
+    matchingByEvent.flatMap((trigger) => trigger.sessionTemplate.resources),
+  );
   const stored =
     matchingByEvent.length === 0
       ? await recordAutomationEvent(deps.db, {
