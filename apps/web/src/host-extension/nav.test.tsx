@@ -28,7 +28,7 @@ import {
   renderInRouter,
   setViewportHeight,
   settingsRailSections,
-} from "./nav-harness";
+} from "../../test/fixtures/host-extension-nav-harness";
 
 const extension: HostExtension = {
   ...hostExtensionFixture,

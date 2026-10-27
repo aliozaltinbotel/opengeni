@@ -13,7 +13,7 @@ import {
   renderInRouter,
   setViewportHeight,
   settingsRailSections,
-} from "./nav-harness";
+} from "../../test/fixtures/host-extension-nav-harness";
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
