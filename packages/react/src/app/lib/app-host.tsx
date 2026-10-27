@@ -89,6 +89,18 @@ export function useAppHost(): Partial<AppHost> {
   return useContext(AppHostContext) ?? pageHost;
 }
 
+const NOTHING_HIDDEN: readonly NativeDestination[] = [];
+
+/** The native destinations the host extension hides; none in the stock console. */
+export function useHiddenNativeDestinations(): readonly NativeDestination[] {
+  return useAppHost().hiddenNativeDestinations ?? NOTHING_HIDDEN;
+}
+
+/** Whether a link to this native destination may be offered. */
+export function useNativeDestinationVisible(destination: NativeDestination): boolean {
+  return !useHiddenNativeDestinations().includes(destination);
+}
+
 /** Whether this app is embedded in a page it does not own. */
 export function useEmbedded(): boolean {
   return useContext(AppHostContext) !== null;

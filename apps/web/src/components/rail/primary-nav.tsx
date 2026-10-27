@@ -8,11 +8,41 @@ import { useMeetingRecorderState } from "@opengeni/react/meetings";
 import { InboxLink } from "@/components/rail/inbox-link";
 import { useRail } from "@opengeni/react/app/components/rail/rail-context";
 import { WorkspaceConfigLink } from "@/components/rail/workspace-config-link";
-import { isConfigItemActive, PRIMARY_WORKSPACE_ITEMS } from "@/components/rail/workspace-nav-data";
+import {
+  HostExtensionNavLink,
+  isHostExtensionNavItemActive,
+} from "@/components/rail/host-extension-nav-link";
+import {
+  isConfigItemActive,
+  PRIMARY_WORKSPACE_ITEMS,
+  visibleNativeItems,
+  type WorkspaceConfigItem,
+  type WorkspaceConfigTarget,
+} from "@/components/rail/workspace-nav-data";
+import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
+
+/** The native shortcuts the host extension does not hide. */
+const PRIMARY_ITEMS = visibleNativeItems(PRIMARY_WORKSPACE_ITEMS, HIDDEN_NATIVE_DESTINATIONS);
+
+/** A native shortcut, or undefined when the host extension hides it. */
+function primaryItem(to: WorkspaceConfigTarget): WorkspaceConfigItem | undefined {
+  return PRIMARY_ITEMS.find((item) => item.to === to);
+}
+
+const KNOWLEDGE_ITEM = primaryItem("/workspaces/$workspaceId/state");
+const AUTOMATIONS_ITEM = primaryItem("/workspaces/$workspaceId/automations");
+const MEETINGS_ITEM = primaryItem("/workspaces/$workspaceId/meetings");
+
+/** The extension's primary-nav items that show here, after the native shortcuts. */
+function extensionPrimaryItems(workspaceId: string, pathname: string) {
+  return (hostExtension.nav ?? []).filter(
+    (item) => item.placement === "primary" && (item.visible?.({ workspaceId, pathname }) ?? true),
+  );
+}
 
 function initialWorkspaceShortcutsExpanded(): boolean {
   if (typeof window === "undefined") return true;
@@ -44,10 +74,11 @@ export function WorkspaceShortcutLinks({
   const recorderState = useMeetingRecorderState();
   const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const extensionItems = extensionPrimaryItems(rail.workspaceId, pathname);
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      {PRIMARY_WORKSPACE_ITEMS.map((item) => (
+      {PRIMARY_ITEMS.map((item) => (
         <WorkspaceConfigLink
           key={item.to}
           item={item}
@@ -60,6 +91,17 @@ export function WorkspaceShortcutLinks({
           variant="rail"
           collapsed={rail.collapsed}
           active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+          onNavigate={() => rail.setDrawerOpen(false)}
+        />
+      ))}
+      {extensionItems.map((item) => (
+        <HostExtensionNavLink
+          key={item.id}
+          item={item}
+          workspaceId={rail.workspaceId}
+          variant="rail"
+          collapsed={rail.collapsed}
+          active={isHostExtensionNavItemActive(pathname, rail.workspaceId, item)}
           onNavigate={() => rail.setDrawerOpen(false)}
         />
       ))}
@@ -78,10 +120,11 @@ export function PrimaryNavExtras() {
   const recorderState = useMeetingRecorderState();
   const recordingMeeting = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const activeWorkspaceItem = PRIMARY_WORKSPACE_ITEMS.find((item) =>
-    isConfigItemActive(pathname, rail.workspaceId, item.to),
-  );
-  const activeWorkspaceSection = activeWorkspaceItem?.label;
+  const extensionItems = extensionPrimaryItems(rail.workspaceId, pathname);
+  const activeWorkspaceSection =
+    PRIMARY_ITEMS.find((item) => isConfigItemActive(pathname, rail.workspaceId, item.to))?.label ??
+    extensionItems.find((item) => isHostExtensionNavItemActive(pathname, rail.workspaceId, item))
+      ?.label;
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );
@@ -138,13 +181,9 @@ export function PrimaryNavExtras() {
             </>
           ) : (
             <>
-              {pendingKnowledge ? (
+              {pendingKnowledge && KNOWLEDGE_ITEM ? (
                 <WorkspaceConfigLink
-                  item={
-                    PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/state",
-                    )!
-                  }
+                  item={KNOWLEDGE_ITEM}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   needsReview
@@ -156,13 +195,9 @@ export function PrimaryNavExtras() {
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
               ) : null}
-              {schedulesNeedAttention ? (
+              {schedulesNeedAttention && AUTOMATIONS_ITEM ? (
                 <WorkspaceConfigLink
-                  item={
-                    PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/automations",
-                    )!
-                  }
+                  item={AUTOMATIONS_ITEM}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   needsAttention
@@ -174,13 +209,9 @@ export function PrimaryNavExtras() {
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
               ) : null}
-              {recordingMeeting ? (
+              {recordingMeeting && MEETINGS_ITEM ? (
                 <WorkspaceConfigLink
-                  item={
-                    PRIMARY_WORKSPACE_ITEMS.find(
-                      (item) => item.to === "/workspaces/$workspaceId/meetings",
-                    )!
-                  }
+                  item={MEETINGS_ITEM}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   recording

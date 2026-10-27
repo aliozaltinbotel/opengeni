@@ -1,5 +1,9 @@
 // Workspace destination catalog (routes, labels, icon keys). Rendering lives in
 // `workspace-config-link.tsx`.
+import {
+  isWorkspaceSegmentHidden,
+  type NativeDestination,
+} from "@opengeni/react/app/host-extension";
 
 export type WorkspaceConfigTarget =
   | "/workspaces/$workspaceId/insights"
@@ -131,6 +135,23 @@ export const WORKSPACE_CONFIG_GROUPS: WorkspaceConfigGroup[] = [
 export const WORKSPACE_BROWSE_ITEMS: WorkspaceConfigItem[] = WORKSPACE_CONFIG_GROUPS.flatMap(
   (group) => group.items,
 ).filter((item) => item.to !== "/workspaces/$workspaceId/settings");
+
+const WORKSPACE_TARGET_PREFIX = "/workspaces/$workspaceId/";
+
+/**
+ * The items whose destination the host extension does not hide, in order. An
+ * item is hidden by the segment after `$workspaceId/` in its `to`.
+ */
+export function visibleNativeItems<T extends { to: string }>(
+  items: readonly T[],
+  hidden: readonly NativeDestination[],
+): T[] {
+  return items.filter((item) => {
+    if (!item.to.startsWith(WORKSPACE_TARGET_PREFIX)) return true;
+    const segment = item.to.slice(WORKSPACE_TARGET_PREFIX.length).split("/")[0] ?? "";
+    return !isWorkspaceSegmentHidden(segment, hidden);
+  });
+}
 
 export function filterWorkspaceConfigGroups(
   groups: WorkspaceConfigGroup[],

@@ -22,6 +22,7 @@ import {
   type RefObject,
 } from "react";
 import { toast } from "../../lib/toast";
+import { useNativeDestinationVisible } from "../../lib/app-host";
 
 import { findPickerRow } from "../../../model-policy";
 import { withLineageAutomationFacts } from "../../../session-list-model";
@@ -531,6 +532,7 @@ function SessionRouteHeader({
   const policyReady = !lastStarted.loading;
   const displayModelId = policyReady ? lastStartedModel || session.model : session.model;
   const navigate = useNavigate();
+  const automationsVisible = useNativeDestinationVisible("automations");
   const catalog = useWorkspaceModelCatalog(session.workspaceId);
   const selectedRow = findPickerRow(catalog.rows, displayModelId);
   const policyLoading = lastStarted.loading || catalog.loading;
@@ -582,7 +584,7 @@ function SessionRouteHeader({
       session={session}
       ancestors={ancestors}
       onOpenAutomations={
-        session.hasSchedules
+        session.hasSchedules && automationsVisible
           ? () =>
               void navigate({
                 to: "/workspaces/$workspaceId/automations",

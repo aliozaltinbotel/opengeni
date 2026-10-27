@@ -5,6 +5,7 @@ import {
   WORKSPACE_CONFIG_GROUPS,
   isConfigItemActive,
   isWorkspaceConfigPath,
+  visibleNativeItems,
 } from "./workspace-nav-data";
 
 const workspaceNavSource = await Bun.file(`${import.meta.dir}/workspace-nav.tsx`).text();
@@ -62,5 +63,37 @@ describe("workspace rail destinations", () => {
     expect(shell.slice(management, shell.indexOf("</WorkspaceManagementShell>"))).not.toContain(
       "<RailShell>",
     );
+  });
+});
+
+describe("visible native destinations", () => {
+  test("nothing hidden keeps every item, in order", () => {
+    expect(visibleNativeItems(PRIMARY_WORKSPACE_ITEMS, [])).toEqual(PRIMARY_WORKSPACE_ITEMS);
+  });
+
+  test("drops an item whose segment after $workspaceId/ is hidden", () => {
+    expect(
+      visibleNativeItems(PRIMARY_WORKSPACE_ITEMS, ["automations", "secrets"]).map(
+        (item) => item.to,
+      ),
+    ).toEqual([
+      "/workspaces/$workspaceId/plugins",
+      "/workspaces/$workspaceId/state",
+      "/workspaces/$workspaceId/meetings",
+      "/workspaces/$workspaceId/artifacts",
+    ]);
+  });
+
+  test("matches the whole first segment only", () => {
+    const items = [
+      { to: "/workspaces/$workspaceId/secrets" },
+      { to: "/workspaces/$workspaceId/secrets/$vaultId" },
+      { to: "/workspaces/$workspaceId/secrets-archive" },
+      { to: "/workspaces/$workspaceId/settings" },
+    ];
+    expect(visibleNativeItems(items, ["secrets"]).map((item) => item.to)).toEqual([
+      "/workspaces/$workspaceId/secrets-archive",
+      "/workspaces/$workspaceId/settings",
+    ]);
   });
 });

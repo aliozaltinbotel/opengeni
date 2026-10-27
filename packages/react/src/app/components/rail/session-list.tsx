@@ -11,6 +11,7 @@ import {
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
 import { useSiteOpenedListener } from "../../lib/site-opened";
+import { useNativeDestinationVisible } from "../../lib/app-host";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -391,6 +392,8 @@ export function SessionList() {
   const sessionClient = context.client;
   const setContextSession = context.setSession;
   const navigate = useNavigate();
+  const readOnlyChatsVisible = useNativeDestinationVisible("read-only-chats");
+  const artifactsVisible = useNativeDestinationVisible("artifacts");
   const activeSessionId = useRouterState({
     select: (state): string | null => railRouteSelection(state.location).sessionId,
   });
@@ -3865,7 +3868,7 @@ export function SessionList() {
                     updateBrowsePreferences({ showEmptyGroups: show })
                   }
                 />
-                {context.clientConfig.sessionArchive ? (
+                {context.clientConfig.sessionArchive && readOnlyChatsVisible ? (
                   <>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
@@ -3990,15 +3993,21 @@ export function SessionList() {
                 ) : null}
                 {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
                   <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                    Some older Sites aren&apos;t shown. Find them in{" "}
-                    <Link
-                      to="/workspaces/$workspaceId/artifacts"
-                      params={{ workspaceId: rail.workspaceId }}
-                      className="underline underline-offset-2 hover:text-fg"
-                    >
-                      Artifacts
-                    </Link>
-                    .
+                    Some older Sites aren&apos;t shown.
+                    {artifactsVisible ? (
+                      <>
+                        {" "}
+                        Find them in{" "}
+                        <Link
+                          to="/workspaces/$workspaceId/artifacts"
+                          params={{ workspaceId: rail.workspaceId }}
+                          className="underline underline-offset-2 hover:text-fg"
+                        >
+                          Artifacts
+                        </Link>
+                        .
+                      </>
+                    ) : null}
                   </p>
                 ) : null}
                 {browseStatus === "archived" ? null : channelMode ? (

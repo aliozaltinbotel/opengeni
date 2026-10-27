@@ -104,7 +104,11 @@ async function source(path: string): Promise<string> {
 describe("workspace route scroll ownership", () => {
   test("classifies every route mounted inside the fixed app canvas", async () => {
     const app = await source("App.tsx");
-    const workspaceChildren = app.match(/workspaceRoute\.addChildren\(\[([\s\S]*?)\n  \]\),/);
+    // The children sit in `visibleNativeRoutes([...])`, which drops the
+    // destinations a host extension hides.
+    const workspaceChildren = app.match(
+      /workspaceRoute\.addChildren\(\s*visibleNativeRoutes\(\s*\[([\s\S]*?)\n {6}\],/,
+    );
     const workspaceChildrenSource = workspaceChildren?.[1];
     expect(workspaceChildrenSource).toBeDefined();
     if (!workspaceChildrenSource) throw new Error("Workspace route children were not found");

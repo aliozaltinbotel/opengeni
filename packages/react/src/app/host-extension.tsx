@@ -89,3 +89,34 @@ export const NATIVE_DESTINATIONS = Object.keys(
 export function isNativeDestination(value: unknown): value is NativeDestination {
   return typeof value === "string" && Object.hasOwn(NATIVE_DESTINATION_SET, value);
 }
+
+/**
+ * Legacy workspace segments that only redirect into a native destination, and
+ * companion segments that also open one. Hiding the destination hides them
+ * too, so no old link leads into a not-found by way of a redirect.
+ */
+const SEGMENT_REDIRECTS: Readonly<Record<string, readonly NativeDestination[]>> = {
+  capabilities: ["plugins"],
+  schedules: ["automations"],
+  documents: ["state"],
+  memory: ["state"],
+  "variable-sets": ["variable-sets", "secrets"],
+  environments: ["environments", "secrets"],
+};
+
+/** The native destinations a first segment under workspaces/$workspaceId/ opens. */
+export function nativeDestinationsOfSegment(segment: string): readonly NativeDestination[] {
+  if (Object.hasOwn(SEGMENT_REDIRECTS, segment)) return SEGMENT_REDIRECTS[segment] ?? [];
+  return isNativeDestination(segment) ? [segment] : [];
+}
+
+/** Whether a first workspace segment opens a destination the host extension hides. */
+export function isWorkspaceSegmentHidden(
+  segment: string,
+  hidden: readonly NativeDestination[],
+): boolean {
+  return (
+    hidden.length > 0 &&
+    nativeDestinationsOfSegment(segment).some((destination) => hidden.includes(destination))
+  );
+}

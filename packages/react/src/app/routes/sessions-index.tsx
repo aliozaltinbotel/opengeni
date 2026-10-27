@@ -1,4 +1,5 @@
 import { useAppApi } from "../lib/app-api";
+import { useNativeDestinationVisible } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -302,6 +303,7 @@ function SessionsIndexRouteContent({
     [firstPartyMcpToolPolicy],
   );
   const navigate = useNavigate();
+  const secretsVisible = useNativeDestinationVisible("secrets");
   const modelCatalog = useWorkspaceModelCatalog(workspaceId);
   const channelsQuery = useChannels({ pollIntervalMs: 60_000 });
   const launchChannelId = launch.channelId === "default" ? null : launch.channelId;
@@ -1871,11 +1873,14 @@ function SessionsIndexRouteContent({
                                     : { ...rest, vaultPolicy: policy };
                                 })
                               }
-                              onManage={() =>
-                                void navigate({
-                                  to: "/workspaces/$workspaceId/secrets",
-                                  params: { workspaceId },
-                                })
+                              onManage={
+                                secretsVisible
+                                  ? () =>
+                                      void navigate({
+                                        to: "/workspaces/$workspaceId/secrets",
+                                        params: { workspaceId },
+                                      })
+                                  : undefined
                               }
                             />
                           ),
@@ -2561,6 +2566,7 @@ function ComputeTargetControl(props: {
 }) {
   const { draft, onChange } = props;
   const { fleet, machines } = props;
+  const machinesVisible = useNativeDestinationVisible("machines");
   const selfhostedPrimary = props.defaultSandboxBackend === "selfhosted";
   // Managed-primary deployments keep Connected Machine opt-in and hide the
   // chooser when the fleet is empty. Selfhosted-primary deployments always show
@@ -2623,14 +2629,16 @@ function ComputeTargetControl(props: {
             disabled={props.disabled}
             onRetryMachines={() => void fleet.refresh()}
             connectAction={
-              <Button asChild variant="outline" size="sm">
-                <Link
-                  to="/workspaces/$workspaceId/machines"
-                  params={{ workspaceId: props.workspaceId }}
-                >
-                  Connect a machine
-                </Link>
-              </Button>
+              machinesVisible ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link
+                    to="/workspaces/$workspaceId/machines"
+                    params={{ workspaceId: props.workspaceId }}
+                  >
+                    Connect a machine
+                  </Link>
+                </Button>
+              ) : undefined
             }
           />
         </div>

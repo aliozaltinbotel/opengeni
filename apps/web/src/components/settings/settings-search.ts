@@ -3,9 +3,7 @@
 // "invoices"). The index is built from the rail itself, so search never offers
 // a page the person can't use: a setting is listed only when its page is.
 import { cloneElement, isValidElement, type ReactElement } from "react";
-import type { LucideIcon } from "lucide-react";
-
-import type { SettingsRailSection } from "./settings-sidebar";
+import type { SettingsRailIcon, SettingsRailSection } from "./settings-sidebar";
 
 export interface SettingsSearchEntry {
   id: string;
@@ -13,7 +11,7 @@ export interface SettingsSearchEntry {
   label: string;
   /** Where it lives: "Workspace · General", or "Organization" for a page. */
   location: string;
-  icon: LucideIcon;
+  icon: SettingsRailIcon;
   /** The router link, without children. */
   link: ReactElement;
   keywords: readonly string[];

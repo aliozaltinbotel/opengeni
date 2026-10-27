@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { createElement } from "react";
 import {
   BotIcon,
+  BuildingIcon,
   KeyRoundIcon,
+  LockKeyholeIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   SparklesIcon,
@@ -131,5 +133,77 @@ describe("settings search", () => {
     expect(labels("sécurité")).toEqual([]);
     expect(labels("Sécurity")).toContain("Security");
     expect(labels("   ")).toEqual([]);
+  });
+});
+
+describe("settings search over a host extension's rail", () => {
+  const extensionSections: SettingsRailSection[] = [
+    {
+      id: "workspace",
+      label: "Workspace",
+      groups: [
+        {
+          items: [
+            {
+              id: "workspace:general",
+              label: "General",
+              icon: SlidersHorizontalIcon,
+              link: link({ section: "general" }),
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: "extension-group:property",
+      label: "Property",
+      groups: [
+        {
+          items: [
+            {
+              id: "extension:property-preferences",
+              label: "Property preferences",
+              icon: BuildingIcon,
+              link: link({}),
+            },
+          ],
+        },
+      ],
+    },
+  ];
+  const extensionEntries = settingsSearchEntries(extensionSections);
+
+  test("indexes an extension settings page under its group, in rail order", () => {
+    expect(extensionEntries.map((entry) => entry.id).at(-1)).toBe("extension:property-preferences");
+    expect(
+      searchSettings(extensionEntries, "property").map((entry) => [entry.id, entry.location]),
+    ).toEqual([["extension:property-preferences", "Property"]]);
+  });
+
+  test("a native page the rail leaves out, such as a hidden Secrets, is never offered", () => {
+    expect(extensionEntries.some((entry) => entry.id.includes("secrets"))).toBe(false);
+    for (const query of ["secrets", "vault", "passwords", "totp"]) {
+      expect(searchSettings(extensionEntries, query)).toEqual([]);
+    }
+    // The same words find Secrets when the rail lists it.
+    const withSecrets = settingsSearchEntries([
+      {
+        id: "workspace",
+        label: "Workspace",
+        groups: [
+          {
+            items: [
+              {
+                id: "workspace:/workspaces/$workspaceId/secrets",
+                label: "Secrets",
+                icon: LockKeyholeIcon,
+                link: link({}),
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+    expect(searchSettings(withSecrets, "vault").map((entry) => entry.label)).toEqual(["Secrets"]);
   });
 });

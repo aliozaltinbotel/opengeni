@@ -116,10 +116,13 @@ describe("host extension workspace routes", () => {
   test("with the stub, the workspace route has exactly the stock children", async () => {
     const app = await import("../App");
     const source = await Bun.file(`${import.meta.dir}/../App.tsx`).text();
-    const block = source.match(/workspaceRoute\.addChildren\(\[([\s\S]*?)\n  \]\),/)?.[1] ?? "";
-    // The direct native children sit at four spaces; nested children deeper.
+    const block =
+      source.match(
+        /workspaceRoute\.addChildren\(\s*visibleNativeRoutes\(\s*\[([\s\S]*?)\n {6}\],/,
+      )?.[1] ?? "";
+    // The direct native children sit at eight spaces; nested children deeper.
     const nativeCount = Array.from(
-      block.matchAll(/^ {4}(workspace[A-Z]\w+Route)(?:,|\.addChildren\(\[)$/gm),
+      block.matchAll(/^ {8}(workspace[A-Z]\w+Route)(?:,|\.addChildren\(\[)$/gm),
     ).length;
     expect(nativeCount).toBeGreaterThan(40);
     expect(app.hostExtensionWorkspaceRoutes).toEqual([]);

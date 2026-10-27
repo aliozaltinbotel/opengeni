@@ -1,0 +1,172 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`stock primary nav and settings rail the expanded primary nav is the stock one 1`] = `"<a aria-label="Inbox" href="/workspaces/w1/inbox" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50 data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span aria-hidden="true" class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-inbox size-4 shrink-0" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg><span class="min-w-0 truncate">Inbox</span></a><div class="grid gap-0.5"><div class="grid gap-0.5"><a title="Plugins, Skills, and integrations" href="/workspaces/w1/plugins" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-plug size-4 shrink-0" aria-hidden="true"><path d="M12 22v-5"></path><path d="M15 8V2"></path><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"></path><path d="M9 8V2"></path></svg><span class="min-w-0 truncate">Capabilities</span></a><a title="Knowledge, instructions, and agent learning" href="/workspaces/w1/state" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-brain-circuit size-4 shrink-0" aria-hidden="true"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"></path><path d="M9 13a4.5 4.5 0 0 0 3-4"></path><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"></path><path d="M3.477 10.896a4 4 0 0 1 .585-.396"></path><path d="M6 18a4 4 0 0 1-1.967-.516"></path><path d="M12 13h4"></path><path d="M12 18h6a2 2 0 0 1 2 2v1"></path><path d="M12 8h8"></path><path d="M16 8V5a2 2 0 0 1 2-2"></path><circle cx="16" cy="13" r=".5"></circle><circle cx="18" cy="3" r=".5"></circle><circle cx="20" cy="21" r=".5"></circle><circle cx="20" cy="8" r=".5"></circle></svg><span class="min-w-0 truncate">Knowledge</span></a><a title="Run agents on a schedule or when something happens" href="/workspaces/w1/automations" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-zap size-4 shrink-0" aria-hidden="true"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"></path></svg><span class="min-w-0 truncate">Automations</span></a><a title="Record meetings and read who said what" href="/workspaces/w1/meetings" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-audio-lines size-4 shrink-0" aria-hidden="true"><path d="M2 10v3"></path><path d="M6 6v11"></path><path d="M10 3v18"></path><path d="M14 8v7"></path><path d="M18 5v13"></path><path d="M22 10v3"></path></svg><span class="min-w-0 truncate">Meetings</span></a><a title="Sites, images, documents, and files built with Opengeni" href="/workspaces/w1/artifacts" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-panels-top-left size-4 shrink-0" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M3 9h18"></path><path d="M9 21V9"></path></svg><span class="min-w-0 truncate">Artifacts</span></a></div></div>"`;
+
+exports[`stock primary nav and settings rail the collapsed rail's shortcuts are the stock ones 1`] = `"<div class="grid gap-0.5"><a aria-label="Capabilities" title="Capabilities — Plugins, Skills, and integrations" href="/workspaces/w1/plugins" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection w-8 justify-center pointer-coarse:w-10"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-plug size-4 shrink-0" aria-hidden="true"><path d="M12 22v-5"></path><path d="M15 8V2"></path><path d="M17 8a1 1 0 0 1 1 1v4a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V9a1 1 0 0 1 1-1z"></path><path d="M9 8V2"></path></svg></a><a aria-label="Knowledge" title="Knowledge — Knowledge, instructions, and agent learning" href="/workspaces/w1/state" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection w-8 justify-center pointer-coarse:w-10"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-brain-circuit size-4 shrink-0" aria-hidden="true"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"></path><path d="M9 13a4.5 4.5 0 0 0 3-4"></path><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"></path><path d="M3.477 10.896a4 4 0 0 1 .585-.396"></path><path d="M6 18a4 4 0 0 1-1.967-.516"></path><path d="M12 13h4"></path><path d="M12 18h6a2 2 0 0 1 2 2v1"></path><path d="M12 8h8"></path><path d="M16 8V5a2 2 0 0 1 2-2"></path><circle cx="16" cy="13" r=".5"></circle><circle cx="18" cy="3" r=".5"></circle><circle cx="20" cy="21" r=".5"></circle><circle cx="20" cy="8" r=".5"></circle></svg></a><a aria-label="Automations" title="Automations — Run agents on a schedule or when something happens" href="/workspaces/w1/automations" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection w-8 justify-center pointer-coarse:w-10"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-zap size-4 shrink-0" aria-hidden="true"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"></path></svg></a><a aria-label="Meetings" title="Meetings — Record meetings and read who said what" href="/workspaces/w1/meetings" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection w-8 justify-center pointer-coarse:w-10"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-audio-lines size-4 shrink-0" aria-hidden="true"><path d="M2 10v3"></path><path d="M6 6v11"></path><path d="M10 3v18"></path><path d="M14 8v7"></path><path d="M18 5v13"></path><path d="M22 10v3"></path></svg></a><a aria-label="Artifacts" title="Artifacts — Sites, images, documents, and files built with Opengeni" href="/workspaces/w1/artifacts" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection w-8 justify-center pointer-coarse:w-10"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-panels-top-left size-4 shrink-0" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M3 9h18"></path><path d="M9 21V9"></path></svg></a></div>"`;
+
+exports[`stock primary nav and settings rail a short window's folded shortcuts, with knowledge and automations waiting, are the stock ones 1`] = `"<a aria-label="Inbox" href="/workspaces/w1/inbox" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg focus-visible:ring-2 focus-visible:ring-ring/50 data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span aria-hidden="true" class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-inbox size-4 shrink-0" aria-hidden="true"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline><path d="M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path></svg><span class="min-w-0 truncate">Inbox</span></a><div class="grid gap-0.5"><a aria-label="Knowledge, needs review" title="Knowledge needs review" href="/workspaces/w1/state?review=true" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-brain-circuit size-4 shrink-0" aria-hidden="true"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"></path><path d="M9 13a4.5 4.5 0 0 0 3-4"></path><path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"></path><path d="M3.477 10.896a4 4 0 0 1 .585-.396"></path><path d="M6 18a4 4 0 0 1-1.967-.516"></path><path d="M12 13h4"></path><path d="M12 18h6a2 2 0 0 1 2 2v1"></path><path d="M12 8h8"></path><path d="M16 8V5a2 2 0 0 1 2-2"></path><circle cx="16" cy="13" r=".5"></circle><circle cx="18" cy="3" r=".5"></circle><circle cx="20" cy="21" r=".5"></circle><circle cx="20" cy="8" r=".5"></circle></svg><span class="min-w-0 truncate">Knowledge</span><span aria-hidden="true" class="shrink-0 rounded-full bg-status-waiting ml-auto size-2"></span></a><a aria-label="Automations, needs attention" title="An automation needs your attention" href="/workspaces/w1/automations" class="group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label transition-colors pointer-coarse:h-10 hover:bg-hover hover:text-fg data-[active=true]:bg-selection data-[active=true]:text-fg data-[active=true]:hover:bg-selection gap-2.5 px-2.5"><span class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"></span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-zap size-4 shrink-0" aria-hidden="true"><path d="M15.914 4a1.5 1.5 0 00-2.474-1.561l-9 9A1.5 1.5 0 005.5 14h4.002a.5.5 0 01.471.666L8.086 20a1.5 1.5 0 002.475 1.56l9-9A1.5 1.5 0 0018.5 10h-3.997a.5.5 0 01-.472-.667z"></path></svg><span class="min-w-0 truncate">Automations</span><span aria-hidden="true" class="shrink-0 rounded-full bg-status-waiting ml-auto size-2"></span></a><button data-slot="button" data-variant="ghost" data-size="sm" class="inline-flex shrink-0 cursor-pointer items-center text-sm whitespace-nowrap transition-all outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-2 focus-visible:ring-offset-bg disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*='size-'])]:size-4 hover:bg-hover hover:text-fg h-8 rounded-md has-[>svg]:px-2.5 group relative w-full justify-start gap-2.5 px-2.5 font-normal text-fg-label pointer-coarse:h-10" type="button" aria-expanded="false"><span aria-hidden="true" class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand transition-opacity opacity-0"></span><span class="min-w-0 flex-1 truncate text-left">More</span><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-chevron-down size-3.5 shrink-0" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg></button></div>"`;
+
+exports[`stock primary nav and settings rail the settings rail and its search are the stock ones 1`] = `
+[
+  {
+    "groups": [
+      [
+        {
+          "id": "workspace:general",
+          "label": "General",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": {
+            "section": "general",
+          },
+          "to": "/workspaces/$workspaceId/settings",
+        },
+        {
+          "id": "workspace:access",
+          "label": "Access",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": {
+            "section": "access",
+          },
+          "to": "/workspaces/$workspaceId/settings",
+        },
+        {
+          "id": "workspace:learning",
+          "label": "Agent learning",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": {
+            "section": "learning",
+          },
+          "to": "/workspaces/$workspaceId/settings",
+        },
+        {
+          "id": "workspace:usage",
+          "label": "Usage",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": {
+            "section": "usage",
+          },
+          "to": "/workspaces/$workspaceId/settings",
+        },
+        {
+          "id": "workspace:api-keys",
+          "label": "API keys",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": {
+            "section": "api-keys",
+          },
+          "to": "/workspaces/$workspaceId/settings",
+        },
+        {
+          "id": "workspace:developer",
+          "label": "Developer",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": {
+            "section": "developer",
+          },
+          "to": "/workspaces/$workspaceId/settings",
+        },
+        {
+          "id": "workspace:/workspaces/$workspaceId/insights",
+          "label": "Insights",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": null,
+          "to": "/workspaces/$workspaceId/insights",
+        },
+      ],
+      [
+        {
+          "id": "workspace:/workspaces/$workspaceId/secrets",
+          "label": "Secrets",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": null,
+          "to": "/workspaces/$workspaceId/secrets",
+        },
+        {
+          "id": "workspace:/workspaces/$workspaceId/rigs",
+          "label": "Sandbox environments",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": null,
+          "to": "/workspaces/$workspaceId/rigs",
+        },
+        {
+          "id": "workspace:/workspaces/$workspaceId/machines",
+          "label": "Machines",
+          "params": {
+            "workspaceId": "w1",
+          },
+          "search": null,
+          "to": "/workspaces/$workspaceId/machines",
+        },
+      ],
+    ],
+    "id": "workspace",
+    "label": "Workspace",
+    "meta": null,
+  },
+  {
+    "groups": [
+      [
+        {
+          "id": "account:security",
+          "label": "Security",
+          "params": null,
+          "search": {},
+          "to": "/settings/security",
+        },
+      ],
+    ],
+    "id": "account",
+    "label": "Your account",
+    "meta": null,
+  },
+]
+`;
+
+exports[`stock primary nav and settings rail the settings rail and its search are the stock ones 2`] = `
+[
+  "workspace:general",
+  "workspace:general#Agent defaults",
+  "workspace:general#Agent activity",
+  "workspace:general#Default machine",
+  "workspace:general#Sandbox environment",
+  "workspace:general#Sandbox image",
+  "workspace:general#Voice input",
+  "workspace:general#Video generation",
+  "workspace:general#Use connected apps automatically",
+  "workspace:general#Delete workspace",
+  "workspace:access",
+  "workspace:access#Add people",
+  "workspace:learning",
+  "workspace:usage",
+  "workspace:api-keys",
+  "workspace:api-keys#Create API key",
+  "workspace:developer",
+  "workspace:developer#Add webhook",
+  "workspace:developer#Credential provider",
+  "workspace:/workspaces/$workspaceId/insights",
+  "workspace:/workspaces/$workspaceId/secrets",
+  "workspace:/workspaces/$workspaceId/rigs",
+  "workspace:/workspaces/$workspaceId/machines",
+  "account:security",
+  "account:security#Password",
+  "account:security#Analytics preferences",
+]
+`;

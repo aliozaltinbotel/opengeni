@@ -132,7 +132,9 @@ import {
 import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
-import { hostExtension } from "@/host-extension/registry";
+import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
+import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
+import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
 import { buildHostExtensionWorkspaceRoutes } from "@/host-extension/routes";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
@@ -1048,60 +1050,67 @@ export const routeTree = rootRoute.addChildren([
     : []),
   ...(import.meta.env.DEV && composerStackPreviewRoute ? [composerStackPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
-  workspaceRoute.addChildren([
-    workspaceIndexRoute,
-    workspaceAgentRoute,
-    workspaceRetiredPriorityRoute,
-    workspaceRetiredAgentsRoute,
-    workspaceSessionsRoute,
-    workspaceSessionRoute,
-    workspaceSecretsRoute.addChildren([
-      workspaceSecretsIndexRoute,
-      workspaceSecretsVaultRoute,
-      workspaceSecretsItemRoute,
-    ]),
-    workspaceVariableSetsRoute,
-    workspaceVariableSetDetailRoute,
-    workspaceEnvironmentsRoute,
-    workspaceRigsRoute,
-    workspaceRigDetailRoute,
-    workspaceReadOnlyChatsRoute,
-    workspaceInboxRoute,
-    workspaceMachinesRoute,
-    workspaceComputerUseRoute,
-    workspaceInsightsRoute,
-    workspaceCapabilitiesRoute,
-    workspaceLegacyCapabilitiesRoute,
-    workspaceAutomationsRoute,
-    workspaceAutomationNewRoute,
-    workspaceAutomationDetailRoute,
-    workspaceAutomationEditRoute,
-    workspaceEventSourcesRoute,
-    workspaceEventSourceNewRoute,
-    workspaceEventSourceDetailRoute,
-    workspaceAutomationTemplatesRoute,
-    workspaceLegacySchedulesRoute,
-    workspaceLegacyScheduleNewRoute,
-    workspaceLegacyScheduleDetailRoute,
-    workspaceLegacyScheduleEditRoute,
-    workspaceMeetingsRoute,
-    workspaceMeetingDetailRoute,
-    workspacePlaygroundRoute,
-    workspaceDocumentsRoute,
-    workspaceMemoryRoute,
-    workspaceStateRoute,
-    workspaceArtifactsRoute,
-    workspaceRetainedArtifactRoute,
-    workspaceArtifactDetailRoute,
-    workspaceSiteViewRoute,
-    workspaceEditableArtifactRoute,
-    workspaceSettingsRoute,
-    workspaceOrganizationRoute,
-    workspaceAccountRoute,
-    // Typed `never` so the dynamic paths stay out of the typed route tree: an
-    // `AnyRoute` child would make every `/workspaces/$workspaceId/…` link valid.
-    ...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),
-  ]),
+  // A destination the host extension hides has no route: its URL renders the
+  // root not-found page, like any unknown URL.
+  workspaceRoute.addChildren(
+    visibleNativeRoutes(
+      [
+        workspaceIndexRoute,
+        workspaceAgentRoute,
+        workspaceRetiredPriorityRoute,
+        workspaceRetiredAgentsRoute,
+        workspaceSessionsRoute,
+        workspaceSessionRoute,
+        workspaceSecretsRoute.addChildren([
+          workspaceSecretsIndexRoute,
+          workspaceSecretsVaultRoute,
+          workspaceSecretsItemRoute,
+        ]),
+        workspaceVariableSetsRoute,
+        workspaceVariableSetDetailRoute,
+        workspaceEnvironmentsRoute,
+        workspaceRigsRoute,
+        workspaceRigDetailRoute,
+        workspaceReadOnlyChatsRoute,
+        workspaceInboxRoute,
+        workspaceMachinesRoute,
+        workspaceComputerUseRoute,
+        workspaceInsightsRoute,
+        workspaceCapabilitiesRoute,
+        workspaceLegacyCapabilitiesRoute,
+        workspaceAutomationsRoute,
+        workspaceAutomationNewRoute,
+        workspaceAutomationDetailRoute,
+        workspaceAutomationEditRoute,
+        workspaceEventSourcesRoute,
+        workspaceEventSourceNewRoute,
+        workspaceEventSourceDetailRoute,
+        workspaceAutomationTemplatesRoute,
+        workspaceLegacySchedulesRoute,
+        workspaceLegacyScheduleNewRoute,
+        workspaceLegacyScheduleDetailRoute,
+        workspaceLegacyScheduleEditRoute,
+        workspaceMeetingsRoute,
+        workspaceMeetingDetailRoute,
+        workspacePlaygroundRoute,
+        workspaceDocumentsRoute,
+        workspaceMemoryRoute,
+        workspaceStateRoute,
+        workspaceArtifactsRoute,
+        workspaceRetainedArtifactRoute,
+        workspaceArtifactDetailRoute,
+        workspaceSiteViewRoute,
+        workspaceEditableArtifactRoute,
+        workspaceSettingsRoute,
+        workspaceOrganizationRoute,
+        workspaceAccountRoute,
+        // Typed `never` so the dynamic paths stay out of the typed route tree: an
+        // `AnyRoute` child would make every `/workspaces/$workspaceId/…` link valid.
+        ...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),
+      ],
+      HIDDEN_NATIVE_DESTINATIONS,
+    ),
+  ),
 ]);
 // Every match needs its own Suspense boundary. Without a default pending
 // component, a cold lazy workspace page suspends through WorkspaceShell and is
@@ -1116,14 +1125,20 @@ const router = createRouter({
   ...routerErrorOptions(() => appRoutePattern()),
 });
 installDesktopShell((path) => router.history.push(path));
-warmDesktopPages([
-  LazySessionRoute,
-  LazySessionsIndexRoute,
-  LazyInboxRoute,
-  LazyCapabilitiesRoute,
-  LazyAutomationsRoute,
-  LazyArtifactsRoute,
-]);
+// Each page with its destination, so a page the host extension hides is never warmed.
+warmDesktopPages(
+  visibleNativeItems(
+    [
+      { to: "/workspaces/$workspaceId/sessions/$sessionId", page: LazySessionRoute },
+      { to: "/workspaces/$workspaceId/sessions", page: LazySessionsIndexRoute },
+      { to: "/workspaces/$workspaceId/inbox", page: LazyInboxRoute },
+      { to: "/workspaces/$workspaceId/plugins", page: LazyCapabilitiesRoute },
+      { to: "/workspaces/$workspaceId/automations", page: LazyAutomationsRoute },
+      { to: "/workspaces/$workspaceId/artifacts", page: LazyArtifactsRoute },
+    ],
+    HIDDEN_NATIVE_DESTINATIONS,
+  ).map((entry) => entry.page),
+);
 
 /** The matched route pattern (for example `/workspaces/$workspaceId/sessions`), never the URL. */
 export function appRoutePattern(): string {

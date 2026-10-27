@@ -2,13 +2,16 @@ import { useNavigate } from "@tanstack/react-router";
 import { GitPullRequestIcon } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
+import { HIDDEN_NATIVE_DESTINATIONS } from "@/host-extension/registry";
 
 /**
  * Pull-request review is an automation: a GitHub pull-request trigger plus
- * review instructions. This points Plugins at that template.
+ * review instructions. This points Plugins at that template, unless the host
+ * extension hides Automations.
  */
 export function PrReviewAutomationCard(props: { workspaceId: string }) {
   const navigate = useNavigate();
+  if (HIDDEN_NATIVE_DESTINATIONS.includes("automations")) return null;
   return (
     <section className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-4">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border text-fg-muted">

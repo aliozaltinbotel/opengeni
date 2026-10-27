@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowLeftIcon, MenuIcon, type LucideIcon } from "lucide-react";
+import { ArrowLeftIcon, MenuIcon } from "lucide-react";
 import {
   useEffect,
   useId,
@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentType,
   type KeyboardEvent,
   type ReactElement,
   type ReactNode,
@@ -56,10 +57,13 @@ export const SETTINGS_SHELL_CLASS =
 
 const NARROW_QUERY = desktopBridge ? "(max-width: 639px)" : "(max-width: 1023px)";
 
+/** A rail item's icon: a lucide icon, or a host extension's own. */
+export type SettingsRailIcon = ComponentType<{ className?: string }>;
+
 export interface SettingsRailItem {
   id: string;
   label: string;
-  icon: LucideIcon;
+  icon: SettingsRailIcon;
   /** The router link for this destination, without children (`<Link to=... />`). */
   link: ReactElement;
   /** A purple dot for "needs you". */

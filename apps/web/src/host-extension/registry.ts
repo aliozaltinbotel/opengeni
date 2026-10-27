@@ -8,6 +8,7 @@ import {
   isNativeDestination,
   NATIVE_DESTINATIONS,
   type HostExtension,
+  type NativeDestination,
 } from "@opengeni/react/app/host-extension";
 
 /** Lowercase segments with optional `$param` segments, relative to the workspace. */
@@ -219,3 +220,7 @@ export const hostExtension: HostExtension = validateHostExtension(extension);
 export const EXTENSION_SETTINGS_PATHS: readonly string[] = (hostExtension.routes ?? [])
   .filter((route) => route.mode === "settings")
   .map((route) => route.path);
+
+/** Native destinations this build's extension hides from every link source; none for the stub. */
+export const HIDDEN_NATIVE_DESTINATIONS: readonly NativeDestination[] =
+  hostExtension.hiddenNativeDestinations ?? [];
