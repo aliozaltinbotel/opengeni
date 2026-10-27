@@ -1812,6 +1812,10 @@ tool-card bodies with `lazy(() => import(…))` behind the card's own
 `Suspense`. Pages and cards then download only when someone opens them, and the
 descriptor adds about one small module to the console's startup load.
 
+The console's Tailwind build also scans that directory, so a utility class
+that only the extension's built JS uses is still generated, even when the
+directory is listed in the host's `.gitignore`.
+
 The console imports the descriptor from one startup module that only its main
 entry reaches (`apps/web/src/host-extension/startup.ts`). Every other console
 module reads the installed extension at call time. Do not import the

@@ -12,6 +12,7 @@ import { eagerGraphPlugin } from "./vite-eager-graph";
 import {
   hostExtensionAliases,
   hostExtensionDefine,
+  hostExtensionTailwindSource,
   resolveHostExtensionFiles,
 } from "./vite-host-extension";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
@@ -697,6 +698,12 @@ export default defineConfig({
   plugins: [
     tanstackRouter({ target: "react", enableRouteGeneration: false }),
     viteReact(),
+    // Tailwind also scans a configured extension's built JS, so the utilities
+    // only its pages use are generated. A stock build adds no plugin.
+    hostExtensionTailwindSource(
+      process.env.OPENGENI_WEB_HOST_EXTENSION,
+      path.resolve(dirname, "src/styles.css"),
+    ),
     tailwindcss(),
     safeReactHmrPlugin(),
     chunkEvaluationOrderPlugin(),
