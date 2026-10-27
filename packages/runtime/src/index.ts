@@ -5269,10 +5269,12 @@ export type LocalMcpServerRegistration = {
    * MCP protocol-extension request handlers keyed by method name, for example
    * `events/list`. Only the workspace MCP serves these, and only for an
    * embedding host's registration; model execution ignores them. A name must
-   * match `^[a-z]+/[a-z_]+$` and must not be a core MCP method, a notification
-   * or a method another registration declares. A handler must resolve to a JSON
-   * object. An `McpError` it throws reaches the client as raised; any other
-   * error is answered with a generic internal error.
+   * match `^[a-z]+/[a-z_]+$` and must not be a core MCP method, a name in a
+   * core method's namespace (`tools/`, `resources/`, `notifications/`, …) or a
+   * method another registration declares. A handler must resolve to a JSON
+   * object. An `McpError` it throws (from any copy of the SDK) reaches the
+   * client with its code and message; any other error is answered with a
+   * generic internal error.
    */
   extensionMethods?: Readonly<Record<string, McpExtensionMethodHandler>>;
 };

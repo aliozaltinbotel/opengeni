@@ -10,10 +10,15 @@ import type { AccessGrant } from "@opengeni/contracts";
 import type { AppDependencies } from "@opengeni/core";
 import {
   bootstrapWorkspace,
+  consumeMcpOAuthAuthorizationRequest,
   createDb,
+  createMcpOAuthAuthorizationRequest,
   createOrganizationApiKey,
   deleteWorkspace,
+  exchangeMcpOAuthAuthorizationCode,
+  registerMcpOAuthClient,
   revokeOrganizationApiKey,
+  rotateMcpOAuthRefreshToken,
   type DbClient,
 } from "@opengeni/db";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime/workspace-tool-gateway";
@@ -26,6 +31,7 @@ import {
   buildWorkspaceToolGatewayMcpServer,
   HOST_MCP_METHOD_CONFLICT,
   prepareWorkspaceToolGatewayForGrant,
+  type HostMcpMethodConflictReason,
   type PreparedWorkspaceToolGateway,
 } from "../src/workspace-tool-gateway";
 
@@ -117,12 +123,22 @@ function eventMethods(calls: HandlerCall[]): ExtensionMethods {
   };
 }
 
+type ToolIdentity = { serverId: string; toolName: string };
+/** A workspace-bound MCP OAuth connection: its access token and a real revocation. */
+type OAuthConnection = { bearer: string; revokeByRefreshReuse: () => Promise<void> };
 type World = {
   owner: AccessGrant;
-  post: (body: unknown) => Promise<{ status: number; body: JsonRpcBody }>;
+  post: (body: unknown, bearer?: string) => Promise<{ status: number; body: JsonRpcBody }>;
   revokeKey: () => Promise<void>;
+  connectOAuth: (toolIdentities: ToolIdentity[]) => Promise<OAuthConnection>;
   cleanup: () => Promise<void>;
 };
+
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+const randomToken = () => crypto.randomUUID().replaceAll("-", "").repeat(2);
+const inMinutes = (minutes: number) => new Date(Date.now() + minutes * 60_000);
+const OAUTH_REDIRECT = "http://127.0.0.1:4567/callback";
+const OAUTH_CHALLENGE = "c".repeat(43);
 
 async function world(
   mcpServers: Settings["mcpServers"],
@@ -147,8 +163,9 @@ async function world(
     keyHash: createHash("sha256").update(bearer).digest("hex"),
     permissions: ["workspace:read"],
   });
+  const settings = settingsFor(mcpServers);
   const app = createApp({
-    settings: settingsFor(mcpServers),
+    settings,
     db: client!.db,
     bus: {} as never,
     workflowClient: {} as never,
@@ -156,11 +173,11 @@ async function world(
     ...(workspaceToolServers ? { workspaceToolServers } : {}),
   });
   let id = 0;
-  const post = async (body: unknown) => {
+  const post = async (body: unknown, as = bearer) => {
     const response = await app.request(`http://localhost/v1/workspaces/${owner.workspaceId}/mcp`, {
       method: "POST",
       headers: {
-        authorization: `Bearer ${bearer}`,
+        authorization: `Bearer ${as}`,
         "content-type": "application/json",
         accept: "application/json, text/event-stream",
       },
@@ -174,6 +191,8 @@ async function world(
     post,
     revokeKey: async () =>
       void (await revokeOrganizationApiKey(client!.db, owner.accountId, key.id)),
+    connectOAuth: async (toolIdentities) =>
+      await connectOAuth(owner, new URL(settings.publicBaseUrl!).origin, toolIdentities),
     cleanup: async () => void (await deleteWorkspace(client!.db, owner.workspaceId)),
   };
 }
@@ -182,8 +201,86 @@ const settingsFor = (mcpServers: Settings["mcpServers"]) =>
   testSettings({
     productAccessMode: "configured",
     environmentsEncryptionKey: Buffer.alloc(32, 46).toString("base64"),
+    mcpOauthEnabled: true,
     mcpServers,
   });
+
+/**
+ * Connects an MCP OAuth client to the owner's workspace MCP through the real
+ * authorization-request, code and token rows, consenting to `toolIdentities`.
+ */
+async function connectOAuth(
+  owner: AccessGrant,
+  issuer: string,
+  toolIdentities: ToolIdentity[],
+): Promise<OAuthConnection> {
+  const db = client!.db;
+  const clientId = `extension-methods-${crypto.randomUUID()}`;
+  const resource = `${issuer}/v1/workspaces/${owner.workspaceId}/mcp`;
+  await registerMcpOAuthClient(db, {
+    clientId,
+    redirectUris: [OAUTH_REDIRECT],
+    clientName: "Extension methods test",
+    grantTypes: ["authorization_code", "refresh_token"],
+    responseTypes: ["code"],
+    registrationScopeHash: sha256(clientId),
+  });
+  const requestHash = sha256(randomToken());
+  await createMcpOAuthAuthorizationRequest(db, {
+    requestHash,
+    clientId,
+    accountId: owner.accountId,
+    workspaceId: owner.workspaceId,
+    subjectId: owner.subjectId,
+    resource,
+    redirectUri: OAUTH_REDIRECT,
+    codeChallenge: OAUTH_CHALLENGE,
+    state: null,
+    permissions: ["workspace:read"],
+    toolIdentities,
+    organizationAccess: null,
+    expiresAt: inMinutes(10),
+  });
+  const codeHash = sha256(randomToken());
+  await consumeMcpOAuthAuthorizationRequest(db, {
+    requestHash,
+    subjectId: owner.subjectId,
+    codeHash,
+    codeExpiresAt: inMinutes(10),
+  });
+  const bearer = `ogmcp_at_${randomToken()}`;
+  const refreshToken = `ogmcp_rt_${randomToken()}`;
+  const exchanged = await exchangeMcpOAuthAuthorizationCode(db, {
+    codeHash,
+    clientId,
+    redirectUri: OAUTH_REDIRECT,
+    resource,
+    codeChallenge: OAUTH_CHALLENGE,
+    accessTokenHash: sha256(bearer),
+    refreshTokenHash: sha256(refreshToken),
+    accessExpiresAt: inMinutes(60),
+    refreshExpiresAt: inMinutes(600),
+  });
+  if (!exchanged) throw new Error("MCP OAuth code exchange failed");
+  const rotate = async () =>
+    await rotateMcpOAuthRefreshToken(db, {
+      refreshTokenHash: sha256(refreshToken),
+      clientId,
+      resource,
+      accessTokenHash: sha256(randomToken()),
+      nextRefreshTokenHash: sha256(randomToken()),
+      accessExpiresAt: inMinutes(60),
+      refreshExpiresAt: inMinutes(600),
+    });
+  return {
+    bearer,
+    // Reusing a rotated refresh token revokes its whole family, access tokens included.
+    revokeByRefreshReuse: async () => {
+      if (!(await rotate())) throw new Error("MCP OAuth refresh rotation failed");
+      if (await rotate()) throw new Error("MCP OAuth refresh reuse was not refused");
+    },
+  };
+}
 
 const initialize = {
   method: "initialize",
@@ -276,7 +373,7 @@ describe("host MCP extension methods on the workspace MCP", () => {
     }
   });
 
-  test("a declared core, notification, malformed or duplicate method is refused with HOST_MCP_METHOD_CONFLICT", async () => {
+  test("a declared core, core-namespace, malformed or duplicate method is refused with HOST_MCP_METHOD_CONFLICT", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client!.db, {
       accountExternalSource: "workspace-mcp-extension-methods",
@@ -290,31 +387,41 @@ describe("host MCP extension methods on the workspace MCP", () => {
     const grant = access.workspaceGrants[0]! as AccessGrant;
     const settings = settingsFor([remoteServer, acmeEntry, { ...acmeEntry, id: "beta" }]);
     const handler = async () => ({});
-    const cases: Array<{ name: string; registrations: Array<[string, ExtensionMethods]> }> = [
-      { name: "tools/list", registrations: [["acme", { "tools/list": handler }]] },
-      { name: "resources/read", registrations: [["acme", { "resources/read": handler }]] },
-      { name: "ping", registrations: [["acme", { ping: handler }]] },
-      {
-        name: "notifications/initialized",
-        registrations: [["acme", { "notifications/initialized": handler }]],
-      },
-      {
-        name: "notifications/events",
-        registrations: [["acme", { "notifications/events": handler }]],
-      },
-      { name: "Events/List", registrations: [["acme", { "Events/List": handler }]] },
-      { name: "events/list/all", registrations: [["acme", { "events/list/all": handler }]] },
-      { name: "events", registrations: [["acme", { events: handler }]] },
+    const single = (
+      method: string,
+      reason: HostMcpMethodConflictReason,
+    ): { name: string; reason: HostMcpMethodConflictReason; registrations: Registrations } => ({
+      name: method,
+      reason,
+      registrations: [["acme", { [method]: handler }]],
+    });
+    type Registrations = Array<[string, ExtensionMethods]>;
+    const cases = [
+      single("tools/list", "core_method"),
+      single("resources/read", "core_method"),
+      single("ping", "invalid_name"),
+      single("notifications/initialized", "core_method"),
+      // Every namespace of a core method is reserved whole, notifications included.
+      single("notifications/events", "core_namespace"),
+      single("tools/search", "core_namespace"),
+      single("resources/watch", "core_namespace"),
+      single("prompts/render", "core_namespace"),
+      single("tasks/retry", "core_namespace"),
+      single("sampling/stop", "core_namespace"),
+      single("Events/List", "invalid_name"),
+      single("events/list/all", "invalid_name"),
+      single("events", "invalid_name"),
       {
         name: "duplicate events/list",
+        reason: "duplicate" as const,
         registrations: [
           ["acme", { "events/list": handler }],
           ["beta", { "events/list": handler }],
-        ],
+        ] as Registrations,
       },
     ];
     try {
-      for (const { name, registrations } of cases) {
+      for (const { name, reason, registrations } of cases) {
         const closed: string[] = [];
         const deps = {
           db: client!.db,
@@ -325,7 +432,10 @@ describe("host MCP extension methods on the workspace MCP", () => {
             ),
         } as unknown as Parameters<typeof prepareWorkspaceToolGatewayForGrant>[0];
         const refused = prepareWorkspaceToolGatewayForGrant(deps, grant);
-        await expect(refused, name).rejects.toMatchObject({ code: HOST_MCP_METHOD_CONFLICT });
+        await expect(refused, name).rejects.toMatchObject({
+          code: HOST_MCP_METHOD_CONFLICT,
+          reason,
+        });
         // Every registration is closed on refusal.
         expect(closed.sort(), name).toEqual(registrations.map(([id]) => id).sort());
       }
@@ -344,6 +454,14 @@ describe("host MCP extension methods on the workspace MCP", () => {
           throw new McpError(ErrorCode.InvalidParams, "unknown event name");
         },
         "events/unsubscribe": async () => "not an object",
+        // An MCP error from another copy of the SDK: same name and code, another prototype.
+        "events/describe": async () => {
+          throw Object.assign(new Error("MCP error -32602: unknown cursor"), {
+            name: "McpError",
+            code: ErrorCode.InvalidParams,
+            data: { field: "cursor" },
+          });
+        },
       }),
     ]);
     try {
@@ -359,12 +477,18 @@ describe("host MCP extension methods on the workspace MCP", () => {
       const malformed = await w.post({ method: "events/unsubscribe", params: {} });
       expect(malformed.body.error?.code).toBe(ErrorCode.InternalError);
       expect(JSON.stringify(malformed.body)).not.toContain("not an object");
+      const foreign = await w.post({ method: "events/describe", params: {} });
+      expect(foreign.body.error).toEqual({
+        code: ErrorCode.InvalidParams,
+        message: "MCP error -32602: unknown cursor",
+        data: { field: "cursor" },
+      });
     } finally {
       await w.cleanup();
     }
   });
 
-  test("a revoked MCP connection's request is refused before the handler runs", async () => {
+  test("a revoked organization API key's request is refused before the handler runs", async () => {
     const calls: HandlerCall[] = [];
     const w = await world([remoteServer, acmeEntry], async () => [
       await hostRegistration("acme", eventMethods(calls)),
@@ -377,6 +501,52 @@ describe("host MCP extension methods on the workspace MCP", () => {
       expect(refused.status).toBe(401);
       expect(refused.body.result).toBeUndefined();
       expect(calls).toHaveLength(1);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("a revoked MCP OAuth connection's request is refused before the handler runs", async () => {
+    const calls: HandlerCall[] = [];
+    const w = await world([remoteServer, acmeEntry], async () => [
+      await hostRegistration("acme", eventMethods(calls)),
+    ]);
+    try {
+      const connection = await w.connectOAuth([{ serverId: "acme", toolName: "get_status" }]);
+      const listed = await w.post(listEvents, connection.bearer);
+      expect(listed.status).toBe(200);
+      expect(listed.body.result).toEqual({
+        events: [{ name: "reservation.created", workspace: w.owner.workspaceId }],
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.grant.principalKind).toBe("human_session");
+      expect(calls[0]!.grant.subjectId).toBe(w.owner.subjectId);
+
+      await connection.revokeByRefreshReuse();
+      const refused = await w.post(listEvents, connection.bearer);
+      expect(refused.status).toBe(401);
+      expect(refused.body.result).toBeUndefined();
+      expect(calls).toHaveLength(1);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("MCP OAuth consent scopes extension methods per host server", async () => {
+    const calls: HandlerCall[] = [];
+    const w = await world([remoteServer, acmeEntry], async () => [
+      await hostRegistration("acme", eventMethods(calls)),
+    ]);
+    try {
+      // Consent to another server's tool only: the host server is not in this connection.
+      const elsewhere = await w.connectOAuth([
+        { serverId: "remote", toolName: "search_documents" },
+      ]);
+      const init = await w.post(initialize, elsewhere.bearer);
+      expect(init.status).toBe(200);
+      expect(init.body.result?.capabilities?.experimental).toBeUndefined();
+      expect((await w.post(listEvents, elsewhere.bearer)).body.error?.code).toBe(-32601);
+      expect(calls).toHaveLength(0);
     } finally {
       await w.cleanup();
     }

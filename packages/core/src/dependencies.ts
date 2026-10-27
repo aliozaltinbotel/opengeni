@@ -317,9 +317,11 @@ export type AppDependencies = {
    * A used registration's `extensionMethods` are served on the workspace MCP
    * server only and advertised under `capabilities.experimental[<id>]`. Each
    * call runs the same reauthorize step as `tools/list`, then the handler with
-   * the request's grant. A malformed name, a core MCP method or notification,
-   * or a method two registrations declare is refused with
-   * `HOST_MCP_METHOD_CONFLICT`.
+   * the request's grant. A malformed name, a core MCP method, a name in a core
+   * method's namespace, or a method two registrations declare is refused with
+   * `HOST_MCP_METHOD_CONFLICT`. MCP OAuth consent scopes extension methods per
+   * host server, not per method: a connection consented to any of a host
+   * server's tools can call all of that server's extension methods.
    */
   workspaceToolServers?: (input: {
     grant: AccessGrant;

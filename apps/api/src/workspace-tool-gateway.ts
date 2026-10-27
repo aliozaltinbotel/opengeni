@@ -1372,8 +1372,9 @@ function hostExtensionCapabilities(
  * Serves one host extension method. Every call first runs the same live
  * reauthorize step `tools/list` does, so revoked authority is refused before
  * the host handler runs. The handler gets the request's grant and abort
- * signal. An `McpError` it raises reaches the client as raised; any other
- * failure, or a result that is not a JSON object, is a generic internal error.
+ * signal. An MCP error it raises (from any copy of the SDK) reaches the client
+ * with its code, message and data; any other failure, or a result that is not
+ * a JSON object, is a generic internal error.
  */
 function registerHostExtensionMethod(
   server: Server,
@@ -1388,8 +1389,7 @@ function registerHostExtensionMethod(
     try {
       result = await handler(params, { grant, signal: extra.signal });
     } catch (error) {
-      if (error instanceof McpError) throw error;
-      throw new McpError(ErrorCode.InternalError, "Extension method failed");
+      throw hostMcpError(error) ?? new McpError(ErrorCode.InternalError, "Extension method failed");
     }
     if (typeof result !== "object" || result === null || Array.isArray(result))
       throw new McpError(ErrorCode.InternalError, "Extension method failed");
@@ -1762,7 +1762,11 @@ export const HOST_TOOL_SERVER_ID_CONFLICT = "HOST_TOOL_SERVER_ID_CONFLICT";
 export const HOST_MCP_METHOD_CONFLICT = "HOST_MCP_METHOD_CONFLICT";
 
 /** Why a host extension method was refused. */
-export type HostMcpMethodConflictReason = "invalid_name" | "core_method" | "duplicate";
+export type HostMcpMethodConflictReason =
+  | "invalid_name"
+  | "core_method"
+  | "core_namespace"
+  | "duplicate";
 
 /** A host extension method that is malformed or would shadow another handler. */
 export class HostMcpMethodConflictError extends Error {
@@ -1775,6 +1779,20 @@ export class HostMcpMethodConflictError extends Error {
     super(`host MCP extension method ${method} from ${serverId} is refused: ${reason}`);
     this.name = "HostMcpMethodConflictError";
   }
+}
+
+/**
+ * A fork-owned copy of an MCP error the host raised, recognised structurally as
+ * the SDK's own protocol layer does: the host may use another copy of the SDK,
+ * so `instanceof McpError` would miss it. Null for any other value.
+ */
+function hostMcpError(error: unknown): McpError | null {
+  if (!(error instanceof Error) || error.name !== "McpError") return null;
+  const { code, data } = error as { code?: unknown; data?: unknown };
+  if (typeof code !== "number" || !Number.isSafeInteger(code)) return null;
+  // McpError prefixes its message; drop that so the copy does not repeat it.
+  const message = error.message.replace(/^MCP error -?\d+: /u, "");
+  return new McpError(code, message, data);
 }
 
 const HOST_MCP_METHOD_NAME = /^[a-z]+\/[a-z_]+$/u;
@@ -1794,9 +1812,18 @@ const CORE_MCP_METHODS: ReadonlySet<string> = new Set(
 );
 
 /**
+ * Every namespace of a core method (`tools`, `resources`, `notifications`, …),
+ * reserved whole so a later SDK method there can never collide with a host's.
+ */
+const CORE_MCP_NAMESPACES: ReadonlySet<string> = new Set(
+  [...CORE_MCP_METHODS].map((method) => method.split("/")[0]!),
+);
+
+/**
  * The first refused extension method across all registrations: a name outside
- * `^[a-z]+/[a-z_]+$`, a core MCP method or any `notifications/` name (never a
- * request), or a method two registrations declare.
+ * `^[a-z]+/[a-z_]+$`, a core MCP method, any name in a core method's namespace
+ * (including `notifications/`, never a request), or a method two registrations
+ * declare.
  */
 function hostExtensionMethodConflict(
   registrations: readonly LocalMcpServerRegistration[],
@@ -1806,8 +1833,10 @@ function hostExtensionMethodConflict(
     for (const method of Object.keys(extensionMethods ?? {})) {
       if (!HOST_MCP_METHOD_NAME.test(method))
         return new HostMcpMethodConflictError(id, method, "invalid_name");
-      if (CORE_MCP_METHODS.has(method) || method.startsWith("notifications/"))
+      if (CORE_MCP_METHODS.has(method))
         return new HostMcpMethodConflictError(id, method, "core_method");
+      if (CORE_MCP_NAMESPACES.has(method.split("/")[0]!))
+        return new HostMcpMethodConflictError(id, method, "core_namespace");
       if (declared.has(method)) return new HostMcpMethodConflictError(id, method, "duplicate");
       declared.add(method);
     }
