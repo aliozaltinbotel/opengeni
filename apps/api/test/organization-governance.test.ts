@@ -770,6 +770,22 @@ describe("organization governance port", () => {
     expect(withoutPermission.status).toBe(403);
     expect(refusalCode(await json(withoutPermission))).toBe("HOST_COMMAND_PERMISSION_REQUIRED");
 
+    // The token's subject is the database actor and is checked like any
+    // administrator: a subject that is not an owner or admin changes nothing.
+    const outsiderEmail = `outsider-${id()}@example.test`;
+    const outsider = await governedApp.request(path, {
+      method: "POST",
+      headers: bearer(await serviceToken({ subjectId: `user:${id()}` })),
+      body: JSON.stringify({ actingExternalUser, command: inviteBody(outsiderEmail) }),
+    });
+    expect(outsider.status).toBe(403);
+    const [{ count: outsiderInvitations } = { count: -1 }] = await shared.admin<
+      { count: number }[]
+    >`
+      select count(*)::int as count from organization_membership_invitations
+      where account_id = ${world.governedOrganizationId} and target_email = ${outsiderEmail}`;
+    expect(outsiderInvitations).toBe(0);
+
     const refusingHost = appFor({ governs: () => true, decide: () => "refuse" });
     const refused = await refusingHost.request(path, {
       method: "POST",
