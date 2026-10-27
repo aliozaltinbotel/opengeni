@@ -176,6 +176,7 @@ import {
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   eventTriggersEnabled,
+  OrganizationGovernedByHostError,
   PersonalWorkspacesOffError,
   sessionUsageLimitsProducerEnabled,
 } from "@opengeni/core";
@@ -389,6 +390,8 @@ import { registerSessionArtifactAssociationRoutes } from "./routes/session-artif
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerGovernedOrganizationCommandRoutes } from "./routes/governed-organization-commands";
+import { organizationGovernedByHostError } from "./http/organization-governance";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -397,6 +400,9 @@ import {
   handleManagedSignInConnectCallback,
 } from "./routes/managed-sign-in-methods";
 import { registerNativeAppAuthRoutes } from "./routes/native-app-auth";
+import { registerHostTokenRoutes } from "./routes/host-token";
+import { registerManagedAuthTotpRoutes } from "./routes/managed-auth-totp";
+import { registerReauthenticationRoutes } from "./routes/reauthenticate";
 import { registerOfficeWorkbookRoutes } from "./routes/office-workbooks";
 import {
   registerManagedAuthSessionSetRoutes,
@@ -533,7 +539,12 @@ export function createAppComposition(deps: AppDependencies): {
   const managedAuthSessionAdapter =
     deps.managedAuthSessionAdapter ??
     (managedAuth ? createBetterAuthSessionAdapter(managedAuth, deps.db) : null);
-  if (managedAuth) startManagedSignInNotificationDelivery(deps.db, managedEmailTransport);
+  if (managedAuth)
+    startManagedSignInNotificationDelivery(
+      deps.db,
+      managedEmailTransport,
+      deps.settings.productName,
+    );
   const objectStorage =
     deps.objectStorage === undefined ? createObjectStorage(deps.settings) : deps.objectStorage;
   let documentServices: DocumentServices | null = deps.documentServices ?? null;
@@ -1190,6 +1201,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerManagedAuthSessionSetRoutes(app, routeDeps);
   registerManagedSignInMethodRoutes(app, routeDeps);
   registerNativeAppAuthRoutes(app, routeDeps);
+  registerHostTokenRoutes(app, routeDeps);
+  registerReauthenticationRoutes(app, routeDeps);
+  registerManagedAuthTotpRoutes(app, routeDeps);
   if (managedAuth) {
     app.on(["GET", "POST"], "/v1/auth/*", async (c) => {
       const pathname = new URL(c.req.url).pathname;
@@ -1678,6 +1692,9 @@ export function createAppComposition(deps: AppDependencies): {
         productAccessMode: deps.settings.productAccessMode,
         billingMode: deps.settings.billingMode,
         managedAuthSessionSetMode: deps.settings.managedAuthSessionSetMode,
+        ...(managedAuth && deps.settings.managedAuthTotpEnabled
+          ? { managedAuthTotp: { enabled: true as const } }
+          : {}),
         auth: clientAuthConfig(
           deps.settings,
           deps.settings.productAccessMode === "managed"
@@ -2434,6 +2451,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerGovernedOrganizationCommandRoutes(app, routeDeps);
   registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);
@@ -2473,41 +2491,43 @@ export function createAppComposition(deps: AppDependencies): {
     const error =
       rawError instanceof OrganizationIntegrationDeniedError
         ? new HTTPException(403, { message: rawError.message })
-        : rawError instanceof PersonalWorkspacesOffError
-          ? new ApiHttpError(403, {
-              code: "forbidden",
-              message: rawError.message,
-              retryable: false,
-              outcomeUnknown: false,
-              details: { code: rawError.code },
-            })
-          : (sessionUsageLimitHttpError(rawError) ??
-            allowanceExhaustedHttpError(rawError) ??
-            subscriptionSettingsLockedHttpError(rawError) ??
-            workspaceControlBusyHttpError(rawError) ??
-            scheduledTaskTargetAccessHttpError(rawError) ??
-            agentConfigHttpError(rawError) ??
-            modelUnavailableHttpError(rawError) ??
-            connectionAccountSelectionHttpError(rawError) ??
-            (rawError instanceof UnsupportedLatencyModeError
-              ? new ApiHttpError(422, {
-                  code: "validation_failed",
-                  message: rawError.message,
-                  retryable: false,
-                  outcomeUnknown: false,
-                  details: {
-                    code: rawError.code,
-                    modelId: rawError.modelId,
-                    latencyMode: rawError.latencyMode,
-                    allowedLatencyModes: [...rawError.allowedLatencyModes],
-                  },
-                })
-              : null) ??
-            requestBodyValidationHttpError(rawError) ??
-            invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
-            databaseUnavailableHttpError(rawError, c.req.method) ??
-            databaseContentionHttpError(rawError, c.req.method) ??
-            rawError);
+        : rawError instanceof OrganizationGovernedByHostError
+          ? organizationGovernedByHostError(rawError.mutation)
+          : rawError instanceof PersonalWorkspacesOffError
+            ? new ApiHttpError(403, {
+                code: "forbidden",
+                message: rawError.message,
+                retryable: false,
+                outcomeUnknown: false,
+                details: { code: rawError.code },
+              })
+            : (sessionUsageLimitHttpError(rawError) ??
+              allowanceExhaustedHttpError(rawError) ??
+              subscriptionSettingsLockedHttpError(rawError) ??
+              workspaceControlBusyHttpError(rawError) ??
+              scheduledTaskTargetAccessHttpError(rawError) ??
+              agentConfigHttpError(rawError) ??
+              modelUnavailableHttpError(rawError) ??
+              connectionAccountSelectionHttpError(rawError) ??
+              (rawError instanceof UnsupportedLatencyModeError
+                ? new ApiHttpError(422, {
+                    code: "validation_failed",
+                    message: rawError.message,
+                    retryable: false,
+                    outcomeUnknown: false,
+                    details: {
+                      code: rawError.code,
+                      modelId: rawError.modelId,
+                      latencyMode: rawError.latencyMode,
+                      allowedLatencyModes: [...rawError.allowedLatencyModes],
+                    },
+                  })
+                : null) ??
+              requestBodyValidationHttpError(rawError) ??
+              invalidPathIdentifierHttpError(rawError, new URL(c.req.url).pathname) ??
+              databaseUnavailableHttpError(rawError, c.req.method) ??
+              databaseContentionHttpError(rawError, c.req.method) ??
+              rawError);
     const compactionLock = codexCompactionV2ProviderLockedError(error);
     const apiError = error instanceof ApiHttpError ? error : null;
     const status = compactionLock ? 422 : httpStatusForError(error);

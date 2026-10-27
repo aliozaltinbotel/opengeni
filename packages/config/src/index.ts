@@ -2150,6 +2150,15 @@ const SettingsSchema = z.object({
     .min(1)
     .optional(),
   managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+  // Audience of the short-lived host session token (`GET /v1/auth/host-token`).
+  // Unset disables the token and its JWKS entirely. A host that embeds Opengeni
+  // verifies the ES256 token locally against `GET /v1/auth/jwks`.
+  hostTokenAudience: z.string().trim().min(1).max(512).optional(),
+  hostTokenTtlSeconds: z.coerce.number().int().min(60).max(900).default(300),
+  // TOTP as a re-authentication second factor (Better Auth's twoFactor plugin).
+  // Off by default; when on, people can enroll an authenticator app and
+  // `POST /v1/auth/reauthenticate` requires its code from enrolled people.
+  managedAuthTotpEnabled: EnvBoolean.default(false),
   // URL schemes the native app may receive its sign-in code on
   // (`<scheme>://auth/callback`). A host shipping its own build of the app
   // adds its scheme here.
@@ -2200,6 +2209,18 @@ const SettingsSchema = z.object({
   managedEmailDelivery: z.enum(["resend", "disabled"]).default("resend"),
   resendApiKey: z.string().optional(),
   emailFrom: z.string().default("Opengeni <auth@mail.opengeni.ai>"),
+  // The product the auth emails (verification, password reset, invitation,
+  // sign-in-method changed) and the authenticator-app issuer name. A host that
+  // embeds Opengeni sets its own name; it is a mail header, so no line breaks.
+  productName: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value), {
+      message: "must not contain control characters",
+    })
+    .default("Opengeni"),
   stripeSecretKey: z.string().optional(),
   stripePublishableKey: z.string().optional(),
   stripeWebhookSecret: z.string().optional(),
@@ -5952,6 +5973,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
         ? undefined
         : source.OPENGENI_ALLOWED_USER_EMAILS.split(",").map((email) => email.trim()),
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
+    hostTokenAudience: optional("OPENGENI_HOST_TOKEN_AUDIENCE"),
+    hostTokenTtlSeconds: optional("OPENGENI_HOST_TOKEN_TTL_SECONDS"),
+    managedAuthTotpEnabled: optional("OPENGENI_MANAGED_AUTH_TOTP_ENABLED"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
         ? undefined
@@ -5981,6 +6005,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedEmailDelivery: optional("OPENGENI_MANAGED_EMAIL_DELIVERY"),
     resendApiKey: optional("OPENGENI_RESEND_API_KEY"),
     emailFrom: optional("OPENGENI_EMAIL_FROM"),
+    productName: optional("OPENGENI_PRODUCT_NAME"),
     stripeSecretKey: optional("OPENGENI_STRIPE_SECRET_KEY"),
     stripePublishableKey: optional("OPENGENI_STRIPE_PUBLISHABLE_KEY"),
     stripeWebhookSecret: optional("OPENGENI_STRIPE_WEBHOOK_SECRET"),
@@ -11307,6 +11332,21 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
   ) {
     throw new Error(
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID and OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (settings.hostTokenAudience !== undefined) {
+    if (settings.productAccessMode !== "managed") {
+      throw new Error("OPENGENI_HOST_TOKEN_AUDIENCE requires OPENGENI_PRODUCT_ACCESS_MODE=managed");
+    }
+    if (!canonicalPublicOrigin(settings.publicBaseUrl)) {
+      throw new Error(
+        "OPENGENI_PUBLIC_BASE_URL must be a credential-free HTTP(S) origin when OPENGENI_HOST_TOKEN_AUDIENCE is configured",
+      );
+    }
+  }
+  if (settings.managedAuthTotpEnabled && settings.productAccessMode !== "managed") {
+    throw new Error(
+      "OPENGENI_MANAGED_AUTH_TOTP_ENABLED requires OPENGENI_PRODUCT_ACCESS_MODE=managed",
     );
   }
   const managedSocialAuthConfigured = Boolean(

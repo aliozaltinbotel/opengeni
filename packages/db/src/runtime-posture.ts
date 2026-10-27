@@ -1708,7 +1708,10 @@ export const FORCE_RLS_TABLES = [
   "attached_browser_devices",
   "attached_browser_inventories",
   "audit_events",
+  "auth_jwks",
   "auth_runs",
+  "auth_session_authentications",
+  "auth_two_factors",
   "automation_run_event_links",
   "automation_runs",
   "automation_sources",
@@ -1912,6 +1915,7 @@ export const FORCE_RLS_TABLES = [
   "organization_company_profile_agent_policies",
   "organization_company_profile_agent_policy_events",
   "organization_credential_providers",
+  "organization_host_command_attributions",
   "organization_integration_policies",
   "organization_integration_policy_operations",
   "organization_invitation_binding_events",
@@ -2251,6 +2255,7 @@ export const RUNTIME_FULL_DML_TABLES = [
   "auth_identities",
   "auth_rate_limits",
   "auth_sessions",
+  "auth_two_factors",
   "auth_users",
   "auth_verifications",
   "automation_run_event_links",
@@ -2576,6 +2581,8 @@ export const RUNTIME_READ_UPDATE_TABLES = ["workspace_session_activity_revisions
 
 /** Append-only evidence/revision tables are insertable and queryable, never mutable. */
 export const RUNTIME_READ_INSERT_TABLES = [
+  "auth_jwks",
+  "auth_session_authentications",
   "browser_revision_components",
   "browser_revisions",
   "company_profile_revisions",
@@ -2615,6 +2622,7 @@ export const RUNTIME_READ_INSERT_TABLES = [
   "knowledge_sources",
   "knowledge_sync_runs",
   "model_call_source_receipts",
+  "organization_host_command_attributions",
   "pr_review_managed_github_authority_nonces",
   "preference_registry_preferences",
   "preference_registry_revisions",

@@ -27,6 +27,7 @@ import { z } from "zod";
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "../http/acting-person";
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
+import { requireNativeOrganizationMutation } from "../http/organization-governance";
 
 /* ----------------------------------------------------------------------------
    Personal API keys: keys that act as the person who created them. A script
@@ -69,6 +70,7 @@ export function registerPersonalApiKeyRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (expiresAt && expiresAt.getTime() <= Date.now()) {
       throw new HTTPException(400, { message: "Choose an expiry date in the future." });
     }
+    await requireNativeOrganizationMutation(deps, organizationId, "personal_api_key.create");
     const token = generatePersonalApiKeyToken();
     try {
       const apiKey = await createPersonalApiKey(deps.db, {
@@ -104,6 +106,7 @@ export function registerPersonalApiKeyRoutes(app: Hono, deps: ApiRouteDeps): voi
     if (!existing || (existing.ownerSubjectId !== context.subjectId && !admin)) {
       throw new HTTPException(404, { message: "API key not found" });
     }
+    await requireNativeOrganizationMutation(deps, organizationId, "personal_api_key.revoke");
     await revokePersonalApiKey(deps.db, { accountId: organizationId, apiKeyId });
     return c.body(null, 204);
   });

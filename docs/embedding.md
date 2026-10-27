@@ -881,6 +881,104 @@ have that user connect it from a canonical signed-in Opengeni session, which
 freezes an ordinary personal-connection delegation onto the causal turn. See
 `docs/organization-tenancy.md` for the authority model.
 
+### Organization Governance
+
+Canonical sources: `OrganizationGovernancePort` and `GOVERNED_MUTATIONS` in
+`packages/contracts/src/organization-governance.ts`, the route gate in
+`apps/api/src/http/organization-governance.ts` and the host commands in
+`apps/api/src/routes/governed-organization-commands.ts`.
+
+A host that owns business authorization can govern the organizations it
+provisions by binding `AppDependencies.organizationGovernance` (or the
+`startApi` option of the same name):
+
+```ts
+type OrganizationGovernancePort = {
+  governs(input: { organizationId: string; externalSource: string | null }): boolean;
+  decide(input: {
+    organizationId: string;
+    mutation: GovernedMutation;
+    via: "native" | "host";
+  }): "allow" | "refuse";
+};
+```
+
+`governs` receives the organization's `managed_accounts.external_source`
+and must answer synchronously with a boolean; any other answer (a Promise
+included) fails the request closed (`OrganizationGovernancePortContractError`).
+For a governed organization, every native route that invites, revokes or
+re-sends an invitation, changes a role, suspends, reactivates or offboards a
+member, adds, changes or removes workspace or external members, creates,
+changes or revokes API keys, personal API keys or service accounts,
+connects, changes or disconnects an MCP agent (the OAuth consent is refused
+before a code is issued), starts, approves, cancels or executes an
+organization recovery operation (`organization_recovery.*`), or deletes a
+workspace (`workspace.delete`, both `DELETE /v1/organizations/:id/workspaces/:ws`
+and `DELETE /v1/workspaces/:ws`) asks `decide` with `via: "native"` after
+authenticating the caller. First-use external provisioning through an
+organization key (`x-opengeni-external-actor`) asks for `external_member.add`:
+when refused, only identities and memberships that already exist resolve. A
+refusal is `403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`,
+for owners too. Unbound, nothing changes and the host routes below are not
+registered.
+
+`decide` MUST answer `"refuse"` for any mutation it does not recognize:
+`GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
+stay closed until the host chooses to allow it.
+
+The host performs these mutations through `/v1/host/organizations/:id/...`
+(`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,
+`members/:id/{suspend,reactivate,offboard}` (reactivate also takes
+`workspaceIds`, below), `PUT workspaces/:ws/members/:id` and
+`DELETE workspaces/:ws/members/:id`). Each takes
+`{ actingExternalUser: { source, externalId }, command }`, where `command` is
+the native request body. Authentication is a service delegated token
+(`ogd2_`, `principalKind: "service"`) for that organization and one of its
+workspaces, holding `members:manage`; anything else is `401
+HOST_COMMAND_SERVICE_TOKEN_REQUIRED`. The command must be allowed by
+`decide` with `via: "host"`, and an ungoverned organization answers `403
+ORGANIZATION_NOT_HOST_GOVERNED`. The token's `subjectId` is the database
+actor, checked like any administrator (for example the owner subject the host
+passed to `bootstrapWorkspace`); the native receipt and lifecycle event are
+written as for the native route, and `organization_host_command_attributions`
+names the acting external user and service initiator under the same operation
+id. Reusing an operation id for another command or acting user is `409
+HOST_COMMAND_OPERATION_CONFLICT`.
+
+A governed organization's people have no Personal workspace to see or start
+work in. The fork turns the organization's Personal workspaces setting off
+(`personal_workspaces_enabled`, migration 0918) the first time it sees the
+organization governed: when it is created through `POST /v1/organizations`
+or `/v1/organizations/additional`, and before each host command, because a
+host usually provisions its organizations out of band. Members then land in a
+shared workspace, as for any organization with the setting off. Turning the
+setting back on through `PATCH /v1/organizations/:id/privacy-settings` is
+`403 ORGANIZATION_GOVERNED_BY_HOST` with `details.setting =
+"personalWorkspaces"`; turning it off is always accepted.
+
+Because a governed member has no Personal workspace to fall back to, the host
+must keep every human member in at least one shared workspace, and each break
+of that is `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`:
+
+- A host or native invitation with an empty `initialWorkspaceIds` is `422`.
+- Removing a managed human member's last shared workspace, through the host's
+  `DELETE workspaces/:ws/members/:id` command (whose `command` is the native
+  revoke body, `{ expectedUpdatedAt, operationId }`) or a native removal route
+  the host allows, is `409`. The removal command checks it under
+  its organization lock; service principals and external identities are not
+  checked. To take someone out, offboard them.
+- Suspension removes every workspace grant, so reactivation must re-grant:
+  the host's `members/:id/reactivate` command takes `workspaceIds` (required,
+  shared workspaces of the organization) and grants each with the workspace
+  role `member` in the same transaction as the reactivation; without them it
+  is `422`. A native reactivation cannot carry grants and is `422` too.
+
+The host's `PUT workspaces/:ws/members/:id` command only grants or changes
+access; `DELETE workspaces/:ws/members/:id` removes it.
+
+The gate is on HTTP routes. In-process callers of the `@opengeni/db`
+membership functions are not routed through it.
+
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.

@@ -337,12 +337,13 @@ export function RootRouteComponent() {
         <Outlet />
       </NativeSignInProvider>
     )
-  ) : /^\/settings\/security\/?$/.test(pathname) &&
+  ) : /^\/(?:settings\/security|reauthenticate)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&
     clientConfig ? (
-    // Personal security requires the selected managed human, never a workspace
-    // grant. Keep this after authentication but before access/onboarding gates.
+    // Personal security and confirming it's you require the selected managed
+    // human, never a workspace grant. Keep this after authentication but before
+    // access/onboarding gates.
     // The outer BrowserAccountsRuntime still owns broker actor transitions.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />

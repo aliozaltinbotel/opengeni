@@ -33,6 +33,8 @@ export type SignInMethodsViewProps = {
   errorAction?: ReactNode;
   /** One quiet action beside the "Sign-in methods" heading, for example Refresh. */
   sectionAction?: ReactNode;
+  /** Further security sections under sign-in methods, for example the authenticator app. */
+  additionalSections?: ReactNode;
   onReauthenticate: () => void;
   onConnect: (provider: ManagedSocialProvider) => void;
   onDisconnect: (provider: ManagedSocialProvider) => Promise<boolean>;
@@ -358,6 +360,9 @@ export function SignInMethodsView(props: SignInMethodsViewProps) {
           separate connections managed in workspace Capabilities. Connecting or disconnecting a
           sign-in method does not grant or remove those integrations.
         </p>
+        {props.additionalSections ? (
+          <SectionStack className="mt-8">{props.additionalSections}</SectionStack>
+        ) : null}
       </SecurityPageBody>
       <ConfirmDialog
         open={disconnect !== null}

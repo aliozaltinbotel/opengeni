@@ -94,6 +94,10 @@
       "types": "./src/external-identities.ts",
       "default": "./src/external-identities.ts"
     },
+    "./organization-governance": {
+      "types": "./src/organization-governance.ts",
+      "default": "./src/organization-governance.ts"
+    },
     "./organization-access": {
       "types": "./src/organization-access.ts",
       "default": "./src/organization-access.ts"

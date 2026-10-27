@@ -23257,6 +23257,12 @@ export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
     // Safe rollout discriminator: the browser only mounts the optional
     // @opengeni/sdk/accounts controller when this is dual or broker.
     managedAuthSessionSetMode: z.enum(["legacy", "dual", "broker"]).default("legacy"),
+    // Present only when managed auth offers TOTP (an authenticator app) as a
+    // re-authentication second factor. Omitted by stock and older servers.
+    managedAuthTotp: z
+      .object({ enabled: z.literal(true) })
+      .strict()
+      .optional(),
     auth: ClientAuthConfig.default({ mode: "none" }),
     // Product documentation the console links from its Help menu. The API
     // always sends it: DEFAULT_OPENGENI_DOCUMENTATION_URL unless operators

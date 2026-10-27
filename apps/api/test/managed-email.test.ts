@@ -79,6 +79,7 @@ describe("managed email transport", () => {
 
   test("renders an escaped, frozen safe snapshot with a stable payload digest", async () => {
     const rendered = renderOrganizationUserSetupEmail({
+      productName: "Opengeni",
       senderEmail: "Opengeni <invites@example.test>",
       recipientEmail: "invited@example.test",
       recipientName: "Ada <Admin>",

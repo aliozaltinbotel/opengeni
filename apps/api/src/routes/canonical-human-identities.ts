@@ -128,6 +128,7 @@ async function mutate(
       await deliverManagedSignInNotification(
         deps.db,
         deps.managedEmailTransport,
+        deps.settings.productName,
         input.operationId,
       );
     return context.json(response);

@@ -15,6 +15,7 @@ import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
+import { requireNativeOrganizationMutation } from "../http/organization-governance";
 
 /* ----------------------------------------------------------------------------
    Connected agents: outside MCP clients people signed in to the organization
@@ -64,6 +65,7 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         }
       }
     }
+    await requireNativeOrganizationMutation(deps, organizationId, "mcp_connection.update");
     await updateOrganizationMcpConnectionAccess(deps.db, {
       accountId: organizationId,
       connectionId: connection.id,
@@ -89,6 +91,7 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         message: "Only the person who connected this agent, or an admin, can disconnect it.",
       });
     }
+    await requireNativeOrganizationMutation(deps, organizationId, "mcp_connection.revoke");
     await revokeOrganizationMcpConnection(deps.db, {
       accountId: organizationId,
       connectionId: connection.id,

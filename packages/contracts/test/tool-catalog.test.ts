@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { AttemptToolCatalog, AttemptToolResult, type AttemptToolCatalogEntry } from "../src";
+import {
+  AttemptToolCatalog,
+  AttemptToolResult,
+  McpAppResourceUri,
+  ToolGatewayCatalogEntry,
+  type AttemptToolCatalogEntry,
+} from "../src";
 
 const ids = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -106,5 +112,31 @@ describe("AttemptToolResult", () => {
       "resource",
     ]);
     expect(parsed.structuredContent).toEqual({ ok: true });
+  });
+});
+
+describe("tool catalog MCP Apps view", () => {
+  test("an entry may name its MCP Apps view by a ui:// HTML resource URI", () => {
+    const meta = { ui: { resourceUri: "ui://acme/views/status.html" } };
+    expect(AttemptToolCatalog.parse(catalog([entry({ meta })])).entries[0]?.meta).toEqual(meta);
+    expect(ToolGatewayCatalogEntry.parse(entry()).meta).toBeUndefined();
+  });
+
+  test.each([
+    "https://acme.example/views/status.html",
+    "ui://acme/views/status.js",
+    "ui://Acme/views/status.html",
+    "ui://acme/status.html?x=1",
+    "ui://acme",
+  ])("rejects the view URI %s", (resourceUri) => {
+    expect(
+      ToolGatewayCatalogEntry.safeParse(entry({ meta: { ui: { resourceUri } } })).success,
+    ).toBe(false);
+    expect(McpAppResourceUri.safeParse(resourceUri).success).toBe(false);
+  });
+
+  test("rejects other tool metadata", () => {
+    const parsed = ToolGatewayCatalogEntry.safeParse({ ...entry(), meta: { other: true } });
+    expect(parsed.success).toBe(false);
   });
 });
