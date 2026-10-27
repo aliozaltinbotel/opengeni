@@ -17,6 +17,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import { base32 } from "@better-auth/utils/base32";
 import { createOTP } from "@better-auth/utils/otp";
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
+import { sql } from "drizzle-orm";
 
 import { createApp } from "../src/app";
 import { MANAGED_AUTH_PRODUCT_CREDENTIAL_RATE_LIMIT } from "../src/auth/managed-auth-rate-limits";
@@ -342,6 +343,22 @@ describe("host token auth_time and amr", () => {
     expect((await sessionRow(person.cookie)).created_at.getTime()).toBe(
       person.signedInAt.getTime(),
     );
+  }, 60_000);
+
+  test("ending a re-authenticated session as the runtime role removes its events", async () => {
+    const app = stepUpApp();
+    const person = await member(app, "Sign Out Person");
+    expect((await post(person, "/v1/auth/reauthenticate", { password })).status).toBe(200);
+    // Sign-out and revocation delete the session as the runtime role, which
+    // has no DELETE on the event table: the cascade must still apply.
+    const [role] = await client.db.execute<{ role: string }>(sql`select current_user as role`);
+    expect(role!.role).not.toBe("postgres");
+    await client.db.execute(sql`delete from auth_sessions where id = ${person.sessionId}`);
+    const [events] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from auth_session_authentications
+      where auth_session_id = ${person.sessionId}
+    `;
+    expect(events!.count).toBe(0);
   }, 60_000);
 
   test("a wrong password is REAUTH_FAILED and leaves auth_time unchanged", async () => {
