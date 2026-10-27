@@ -181,9 +181,13 @@ function createHostTokenJwksCache(auth: ManagedAuth): HostTokenJwksCache {
   return {
     async read() {
       if (cached && Date.now() < cached.expiresAtMs) return cached.jwks;
-      pending ??= load().finally(() => {
-        pending = null;
-      });
+      if (!pending) {
+        const inFlight: Promise<HostSessionTokenJwks> = load().finally(() => {
+          // An invalidation may have started a newer load meanwhile; keep it.
+          if (pending === inFlight) pending = null;
+        });
+        pending = inFlight;
+      }
       return await pending;
     },
     noteSigningKey(kid) {

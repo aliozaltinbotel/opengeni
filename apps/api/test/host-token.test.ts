@@ -633,6 +633,38 @@ describe("host session token JWKS cache and mint limit", () => {
     }
   });
 
+  test("concurrent reads of an empty cache share one key-store read", async () => {
+    let reads = 0;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const managedAuth = {
+      options: { plugins: [{ id: "jwt" }] },
+      api: {
+        getJwks: async () => {
+          reads += 1;
+          await gate;
+          return { keys: [{ kid: "key-1", kty: "EC" }] };
+        },
+      },
+    };
+    const routes = new Hono();
+    registerHostTokenRoutes(routes, {
+      settings: { hostTokenAudience: audience, hostTokenTtlSeconds: 300, publicBaseUrl: origin },
+      managedAuth,
+    } as unknown as ApiRouteDeps);
+    const responses = Promise.all([
+      routes.request("/v1/auth/jwks"),
+      routes.request("/v1/auth/jwks"),
+    ]);
+    // Both requests reach the cache while the first read is still pending.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    release();
+    expect((await responses).map((response) => response.status)).toEqual([200, 200]);
+    expect(reads).toBe(1);
+  });
+
   test("a signing key the cached JWKS lacks refreshes it", async () => {
     const instance = managedApp({ hostTokenAudience: audience });
     const owner = await ownerWithOrganization(instance, "Rotated Key Owner");
