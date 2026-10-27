@@ -123,6 +123,71 @@ describe("attached browser extension protocol", () => {
     ).toThrow("unknown fields");
   });
 
+  test("parses a command fenced to one debugger attachment", () => {
+    const envelope = (attachment: unknown) => ({
+      type: "command",
+      protocolVersion: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      deviceId: "22222222-2222-4222-8222-222222222222",
+      connectionGeneration: "generation-1",
+      payload: {
+        type: "debugger.command",
+        tabId: "7",
+        attachment,
+        method: "DOM.enable",
+        params: {},
+      },
+    });
+    expect(parseExtensionCommand(envelope(3)).payload).toEqual({
+      type: "debugger.command",
+      tabId: "7",
+      attachment: 3,
+      method: "DOM.enable",
+      params: {},
+    });
+    for (const invalid of [0, -1, 1.5, "3"])
+      expect(() => parseExtensionCommand(envelope(invalid))).toThrow();
+  });
+
+  test("parses a bounded download lookup", () => {
+    const envelope = (payload: Record<string, unknown>) => ({
+      type: "command",
+      protocolVersion: 1,
+      requestId: "11111111-1111-4111-8111-111111111111",
+      deviceId: "22222222-2222-4222-8222-222222222222",
+      connectionGeneration: "generation-1",
+      payload,
+    });
+    expect(
+      parseExtensionCommand(
+        envelope({
+          type: "downloads.find",
+          url: "https://example.test/report",
+          startedAfter: "2026-10-22T13:00:00.000Z",
+        }),
+      ).payload,
+    ).toEqual({
+      type: "downloads.find",
+      url: "https://example.test/report",
+      startedAfter: "2026-10-22T13:00:00.000Z",
+    });
+    expect(() =>
+      parseExtensionCommand(
+        envelope({ type: "downloads.find", url: "https://example.test/", startedAfter: "soon" }),
+      ),
+    ).toThrow();
+    expect(() =>
+      parseExtensionCommand(
+        envelope({
+          type: "downloads.find",
+          url: "https://example.test/",
+          startedAfter: "2026-10-22T13:00:00.000Z",
+          query: "all",
+        }),
+      ),
+    ).toThrow("unknown fields");
+  });
+
   test("accepts readiness only for one exact profile fence", () => {
     expect(
       parseExtensionReady({

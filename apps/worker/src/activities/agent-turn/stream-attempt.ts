@@ -35,6 +35,7 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { handOverWaitToSteer } from "./waiting-steer";
+import { withAppActionApprovalTitle } from "./app-action-confirmation";
 import { startSteerWatch, type SteerWatch } from "./steer-watch";
 import { recordProviderRecoveryOutcome } from "./provider-recovery-metrics";
 import {
@@ -53,8 +54,7 @@ import {
   type AnthropicRequestSizeError,
   ANTHROPIC_REQUEST_MAX_BYTES,
   compactionProviderRejection,
-  withRunCredentialsSession,
-  runOwnedSandboxSetup,
+  modelResponseHasProgressUpdate,
   modelResponseHasVisibleText,
   ModelStepHandover,
   isPreemptedModelResponse,
@@ -103,7 +103,6 @@ import {
   recordModelStepPhase,
   recordTurnStartupPhase,
   recordTurnWorkerPreparationTotal,
-  recordSandboxSharedPreparation,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
 } from "../../observability-metrics";
@@ -128,6 +127,7 @@ import { ownedTurnSandboxForAgent } from "./turn-sandbox-access";
 import { createTurnCredentialLeases } from "./credential-leases";
 import { createTurnMediaArtifacts } from "./media-artifacts";
 import { createTurnHistorySink } from "./history-sink";
+import { requestImageCompactionThreshold } from "./compaction-prep";
 import {
   interruptionCallIdsFromPause,
   settleOpenSuffixResumeIfNeeded,
@@ -202,15 +202,16 @@ import {
 } from "./quiescence";
 import {
   inputWaitReply,
+  inputWaitReplyMessage,
   inputWaitReplyRefusal,
   latestDurableTurnMessageText,
 } from "./input-wait-reply";
 import { waitForTurnOperation } from "./sandbox-provision";
-import { createSharedRigSetupCoordinator } from "./sandbox-shared-preparation";
+import { createEagerOwnedSandboxSetup, type EagerOwnedSandboxSetup } from "./owned-sandbox-setup";
 import { finalReplyNudge, needsFinalReply } from "./final-reply";
 
 import type { CompactionSummarizer } from "../context-compaction";
-import type { TurnExecutionPolicyV1 } from "@opengeni/contracts";
+import type { PromptCacheRequestFingerprint, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { createTurnRouteWatch, terminalResponseTokens } from "./turn-budget";
 import type { BoundRunCredentialResolver } from "../run-credentials";
 import type { ModelHistoryAttachmentProjector } from "../run-input";
@@ -304,6 +305,8 @@ export type TurnStreamAttemptDeps = {
     Pick<import("@opengeni/runtime").BeforeModelCallSourceReceipt, "beforeProviderDispatch">;
   workerPreparationStartedAt: number;
   fileDownloadsMaterializedForRun: boolean;
+  /** Eager owned-box platform setup, possibly already started by the worker. */
+  eagerOwnedSandboxSetup?: EagerOwnedSandboxSetup;
   unavailableSandboxFilesNote: string | undefined;
   runCredentialsNote: string | undefined;
   mcpAvailabilityNote: string | undefined;
@@ -312,7 +315,7 @@ export type TurnStreamAttemptDeps = {
   activeSandboxBackend: Settings["sandboxBackend"] | undefined;
   groupBoxBackend: Settings["sandboxBackend"];
   turnExecutionPolicy: TurnExecutionPolicyV1;
-  turn: Pick<SessionTurn, "initiator" | "initiatorContext"> & {
+  turn: Pick<SessionTurn, "initiator" | "initiatorContext" | "resources"> & {
     initiatingHumanSubjectId: string | null;
     id: string;
     executionGeneration: number;
@@ -359,6 +362,58 @@ export async function attachPendingUpdatesBeforePreparingModelInput(input: {
   return true;
 }
 
+/** History loads faster than this in nearly every turn; only slower loads get a visible phase. */
+export const HISTORY_STARTUP_PHASE_VISIBLE_AFTER_MS = 1_000;
+
+type HistoryStartupPhaseEvent = {
+  type: "turn.startup.phase.started" | "turn.startup.phase.completed" | "turn.startup.phase.failed";
+  payload: { phase: "history"; durationMs?: number };
+};
+
+/**
+ * Loads the conversation history for the first model request and, when that
+ * takes longer than `visibleAfterMs` (for example slow screenshot reads),
+ * shows it as the `history` startup phase. A fast load publishes nothing, so
+ * the common path adds no event and no timeline row.
+ */
+export async function prepareHistoryWithStartupPhase(input: {
+  publish: (events: HistoryStartupPhaseEvent[]) => Promise<unknown>;
+  prepare: () => Promise<void>;
+  visibleAfterMs?: number;
+}): Promise<void> {
+  const startedAt = performance.now();
+  const reveal: { published: Promise<unknown> | null } = { published: null };
+  const timer = setTimeout(() => {
+    reveal.published = input.publish([
+      { type: "turn.startup.phase.started", payload: { phase: "history" } },
+    ]);
+    // Awaited below; this only keeps an early rejection from being unhandled.
+    reveal.published.catch(() => undefined);
+  }, input.visibleAfterMs ?? HISTORY_STARTUP_PHASE_VISIBLE_AFTER_MS);
+  let outcome: "completed" | "failed" = "completed";
+  try {
+    await input.prepare();
+  } catch (error) {
+    outcome = "failed";
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    if (reveal.published) {
+      await reveal.published;
+      await input.publish([
+        {
+          type:
+            outcome === "completed" ? "turn.startup.phase.completed" : "turn.startup.phase.failed",
+          payload: {
+            phase: "history",
+            durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          },
+        },
+      ]);
+    }
+  }
+}
+
 export async function runTurnStreamAttempt(
   deps: TurnStreamAttemptDeps,
 ): Promise<RunAgentTurnResult> {
@@ -391,11 +446,9 @@ export async function runTurnStreamAttempt(
     claimedResult,
     flushRuntimeBatcher,
     finalizeTurnOpStreamOps,
-    runWorkspaceMutationForSandbox,
     throwIfWorkerShuttingDown,
     throwIfTurnCancelled,
     setLastInputTokensFenced,
-    attachGitCredentialRenewal,
     attachCodemodeTokenRenewal,
     attachRunCredentialRenewal,
     withProviderRequestContext,
@@ -436,11 +489,9 @@ export async function runTurnStreamAttempt(
     modelHistoryProjector,
     compactionModeOptions,
     initialRunCredentialMaterial,
-    initialGitCredentials,
     sandboxEnvironment,
     sandboxCodemodeToken,
     sandboxCodemodeTokenExpiresAt,
-    fileResourceDownloads,
     runCredentialResolver,
     videoGenerationAcceptancesByCallId,
   } = deps;
@@ -577,6 +628,7 @@ export async function runTurnStreamAttempt(
         ...(runCredentialsNote ? { runCredentialsNote } : {}),
         ...(mcpAvailabilityNote ? { mcpAvailabilityNote } : {}),
         ...(knowledgeSourcePreparationNote ? { knowledgeSourcePreparationNote } : {}),
+        mountedFileResources: turn.resources.filter((resource) => resource.kind === "file"),
         providerApi,
         ...(settings.subscriptionCrossProviderFailoverEnabled &&
         compactionModeOptions.codexCompactionMode === "portable" &&
@@ -598,6 +650,14 @@ export async function runTurnStreamAttempt(
       });
       runInput = prepared.input;
       historySink.providerArtifactCandidates = prepared.providerArtifactCandidates;
+      historySink.seedHistoryFootprint(prepared.historyFootprint, prepared.historyRecovery);
+      if (prepared.historyRecovery) {
+        observability.warn("active history exceeds the materialization guard; compacting", {
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          ...prepared.historyRecovery,
+        });
+      }
       // Slice index = the length of the model-facing (active) history this turn
       // is seeded from; new items beyond it (the trigger message + this turn's
       // generated items) are the ones to persist. After a compaction this is the
@@ -730,6 +790,9 @@ export async function runTurnStreamAttempt(
   let latestAssistantMessageText: string | null = null;
   // Waits refused because they would leave a person's message unanswered.
   let inputWaitReplyRefusals = 0;
+  // The accepted wait's verbatim reply was handled once (published, or found
+  // to repeat the latest message), across every stream of this activity.
+  let waitReplyPublished = false;
   let workerPreparationTotalRecorded = false;
   let toolsExecuted = false;
   let finalReplyNudged = false;
@@ -794,6 +857,10 @@ export async function runTurnStreamAttempt(
       steerHandover = true;
       throw new ModelStepHandover("steer");
     }
+    // The watch noticed a Steer that no longer waits (withdrawn, or the
+    // automation run that steered was paused) before this boundary. Listen
+    // again, or every later request would be cut short at once.
+    if (checkSteer && steerWatch?.signal().aborted) steerWatch.rearm();
   };
   const runStreamAttempt = async (options: {
     requireTerminalModelResponse: boolean;
@@ -861,6 +928,10 @@ export async function runTurnStreamAttempt(
     const streamTiming = new StreamTimingMetrics(observability, {
       provider: streamProvider,
     });
+    // Wire fingerprint of the latest main request. The next model entry waits
+    // for the previous response's settlement, so the response being settled
+    // always belongs to the latest dispatched request (as for streamTiming).
+    let latestPromptCacheRequest: Promise<PromptCacheRequestFingerprint | null> | null = null;
     let fallbackProviderRequestStartedAt: number | null = null;
     let fallbackProviderRequestLifecycleStartedAt: number | null = null;
     const recordFallbackProviderDispatchAtWire = async (): Promise<void> => {
@@ -972,6 +1043,7 @@ export async function runTurnStreamAttempt(
         countsTowardTokenCap: billingState.countsTowardTokenCap,
         servingCredentialId: providerTurn.effectiveCodexCredentialId,
         priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+        subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
         emittedSourceKeys: emittedModelUsageSourceKeys,
         renewLease: () => leases.renewServing("model_usage"),
         leaseLost: leases.servingLost,
@@ -979,100 +1051,26 @@ export async function runTurnStreamAttempt(
         setLastInputTokens: setLastInputTokensFenced,
         contextContributions: eventing.companyBrainContextContributions,
         responseTiming: () => streamTiming.completeResponse(),
+        promptCacheRequest: () => {
+          const request = latestPromptCacheRequest;
+          latestPromptCacheRequest = null;
+          return request;
+        },
       });
 
+    const eagerOwnedSandboxSetup =
+      deps.eagerOwnedSandboxSetup ?? createEagerOwnedSandboxSetup(deps);
     const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
-      const eagerResolvedSandbox = sandboxState.resolvedSandbox;
       // Eager owned sessions must settle the exact platform-setup provider
       // promise before the long model stream starts; otherwise one admission
       // would remain in flight for the entire turn and suppress every
       // heartbeat capture. Lazy setup already runs under the same wrapper in
-      // its first-operation provisioner above.
-      if (eagerResolvedSandbox && !sandboxState.lazyOwnedSandbox && ownedEstablished) {
-        const ownedSandboxSetupStartedAt = performance.now();
-        let ownedSandboxSetupOutcome: "completed" | "failed" = "completed";
-        try {
-          const eagerSetupSession = sandboxState.setupBoxSession ?? ownedEstablished.session;
-          // `deferredSetup: true` below tells the runtime that the worker owns
-          // platform setup, so the runtime intentionally skips its credential
-          // session callback. Materialize host-managed run credentials here
-          // before any setup command (including provider login hooks), then
-          // decorate setup commands so they source the active generation.
-          await attachRunCredentialRenewal(
-            eagerSetupSession as RunCredentialCommandSession,
-            initialRunCredentialMaterial,
-            eagerResolvedSandbox,
-          );
-          const eagerCredentialSetupSession = initialRunCredentialMaterial
-            ? withRunCredentialsSession(eagerSetupSession as object, input.sessionId)
-            : eagerSetupSession;
-          await runWorkspaceMutationForSandbox(
-            eagerResolvedSandbox,
-            "eagerOwnedSandboxSetup",
-            async () =>
-              await runOwnedSandboxSetup(
-                agent,
-                ownedEstablished.session as never,
-                eagerCredentialSetupSession as never,
-                {
-                  settings: runSettings,
-                  environment: sandboxEnvironment,
-                  preparedInput: runInput!,
-                  ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
-                  onRuntimeEvent: async (event) => {
-                    await leases.renewServing("runtime_event");
-                    if (leases.servingLost()) {
-                      throw new Error("Provider credential lease expired during sandbox setup");
-                    }
-                    await eventing.publish!([{ type: event.type, payload: event.payload }], true);
-                  },
-                  ...(eventing.toolCancellationFenceRef.current
-                    ? {
-                        commandRunner:
-                          eventing.toolCancellationFenceRef.current.runSandboxCommand.bind(
-                            eventing.toolCancellationFenceRef.current,
-                          ),
-                      }
-                    : {}),
-                  ...(sandboxState.sandboxGroupId && sandboxState.sandboxHolderId
-                    ? {
-                        coordinateSharedRigSetup: createSharedRigSetupCoordinator({
-                          db,
-                          accountId: input.accountId,
-                          workspaceId: input.workspaceId,
-                          sandboxGroupId: sandboxState.sandboxGroupId,
-                          attemptId: input.attemptId,
-                          holderId: sandboxState.sandboxHolderId,
-                          sandbox: eagerResolvedSandbox,
-                          ...(runtimeCancellationSignal
-                            ? { signal: runtimeCancellationSignal }
-                            : {}),
-                          observe: (measurement) =>
-                            recordSandboxSharedPreparation(observability, measurement),
-                        }),
-                      }
-                    : {}),
-                },
-              ),
-          );
-          await attachGitCredentialRenewal(
-            eagerSetupSession as GitCredentialTokenWriterSession,
-            initialGitCredentials,
-          );
-        } catch (error) {
-          ownedSandboxSetupOutcome = "failed";
-          throw error;
-        } finally {
-          recordTurnStartupPhase(observability, {
-            phase: "owned_sandbox_setup",
-            provider: turnExecutionPolicy.providerId,
-            backend: activeSandboxBackend ?? groupBoxBackend,
-            outcome: ownedSandboxSetupOutcome,
-            durationSeconds: (performance.now() - ownedSandboxSetupStartedAt) / 1_000,
-            count: fileResourceDownloads.length,
-          });
-        }
-      }
+      // its first-operation provisioner above. The first stream may join a
+      // setup the worker started alongside file delivery and input preparation.
+      await eagerOwnedSandboxSetup.beforeModelStream({
+        preparedInput: runInput!,
+        fileDownloadsMaterialized: fileDownloadsMaterializedForRun,
+      });
       // Conservative request boundary: once control enters runStream, the
       // provider may have accepted work even if no response/event follows.
       // Escaped MCP setup timeouts are automatically recoverable only
@@ -1249,6 +1247,13 @@ export async function runTurnStreamAttempt(
             modelResponseContextSignal(modelResponseState, responseCountBeforeStream),
           contextCompactionRequested: () =>
             isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
+          contextHistoryFootprint: {
+            storedFootprint: historySink.historyFootprintCompactionSignal,
+            imageThreshold: requestImageCompactionThreshold(
+              resolvedModel?.provider,
+              eventing.modelRunSettings,
+            ),
+          },
           onModelPreparationPhase: (measurement) => {
             recordTurnStartupPhase(observability, {
               phase: `model_prepare_${measurement.phase}`,
@@ -1273,6 +1278,10 @@ export async function runTurnStreamAttempt(
               { provider: streamProvider, dispatchId },
               clock,
             );
+          },
+          onPromptCacheFingerprint: (fingerprint) => {
+            if (isAuxiliaryProviderDispatch()) return;
+            latestPromptCacheRequest = fingerprint;
           },
           ...(eventing.toolCancellationFenceRef.current
             ? {
@@ -1304,10 +1313,15 @@ export async function runTurnStreamAttempt(
     try {
       eventing.stream = await withProviderRequestContext(runStreamOnce);
       const stream = eventing.stream;
-      eventing.inputWaitReplyGuard = async () => {
+      eventing.inputWaitReplyGuard = async (request) => {
         const refusal = await inputWaitReplyRefusal({
           turn,
           refusalsSoFar: inputWaitReplyRefusals,
+          reply: request.reply,
+          hasProgressUpdate: () =>
+            modelResponseHasProgressUpdate(
+              (stream.state as { _lastTurnResponse?: unknown })._lastTurnResponse,
+            ),
           hasVisibleReply: async () =>
             Boolean(latestAssistantMessageText?.trim()) ||
             modelResponseHasVisibleText(
@@ -1871,6 +1885,25 @@ export async function runTurnStreamAttempt(
               : undefined;
           if (event.type === "agent.toolCall.output") {
             const batcher = eventing.batcher;
+            // An accepted wait's verbatim reply is made durable before the
+            // tool result that follows its acceptance, after the response's
+            // own text, so an approval pause or a retried activity cannot lose
+            // it. Settlement and later activities then find it as the turn's
+            // latest message and do not publish it again.
+            const acceptedReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+            if (acceptedReply !== null && !waitReplyPublished) {
+              waitReplyPublished = true;
+              const message = inputWaitReplyMessage({
+                waitAccepted: true,
+                waitReply: acceptedReply,
+                latestAssistantMessageText,
+                attemptId: input.attemptId,
+              });
+              if (message) {
+                await batcher.push({ type: "agent.message.completed", payload: message });
+                latestAssistantMessageText = message.text;
+              }
+            }
             const emitted = emittedAt(next.value);
             if (emitted) {
               const id = (event.payload as { id?: unknown }).id;
@@ -2391,9 +2424,12 @@ export async function runTurnStreamAttempt(
                     payload: {
                       approvals: approvals.map((approval) =>
                         withPublicApprovalFields(
-                          withMcpToolDisplayMetadata(
-                            eventing.preparedTools?.mcpServers ?? [],
-                            approval,
+                          withAppActionApprovalTitle(
+                            withMcpToolDisplayMetadata(
+                              eventing.preparedTools?.mcpServers ?? [],
+                              approval,
+                            ),
+                            { workspaceId: input.workspaceId, sessionId: input.sessionId },
                           ),
                         ),
                       ),
@@ -2555,9 +2591,18 @@ export async function runTurnStreamAttempt(
     // copy is published only when this stream did not complete that text.
     const finalOutputAlreadyCompleted = latestStreamedAssistantText === finalOutput;
     // A wait ends the turn with empty output; a human's message still gets
-    // its answer recorded for unread attention and Slack.
+    // its answer recorded for unread attention and Slack. A wait's own
+    // `reply` argument is that answer verbatim, shown as the agent's message.
+    const waitReply = eventing.preparedTools?.inputWaitYield?.reply ?? null;
+    const waitReplyMessage = inputWaitReplyMessage({
+      waitAccepted: inputWaitYielded,
+      waitReply,
+      latestAssistantMessageText,
+      attemptId: input.attemptId,
+    });
     const reply = await inputWaitReply({
       inputWaitYielded,
+      waitReply,
       turn,
       latestAssistantMessageText,
       readLatestDurableTurnMessage: async () =>
@@ -2586,6 +2631,9 @@ export async function runTurnStreamAttempt(
           ...(inputWaitYielded || finalOutputAlreadyCompleted
             ? []
             : [{ type: "agent.message.completed" as const, payload: { text: finalOutput } }]),
+          ...(waitReplyMessage
+            ? [{ type: "agent.message.completed" as const, payload: waitReplyMessage }]
+            : []),
           {
             type: "turn.completed",
             payload: {
@@ -2683,7 +2731,11 @@ export async function runTurnStreamAttempt(
       shouldAttach:
         trigger.type === "user.approvalDecision" || trigger.type === "user.humanInputResponse",
       attachPendingUpdates: attachPendingUpdatesAfterOpenSuffix,
-      prepareModelInput: prepareRunAttemptInput,
+      prepareModelInput: () =>
+        prepareHistoryWithStartupPhase({
+          publish: eventing.publish!,
+          prepare: prepareRunAttemptInput,
+        }),
     }))
   ) {
     return claimedResult({ status: "cancelled" });
@@ -2726,6 +2778,7 @@ export async function runTurnStreamAttempt(
           countsTowardTokenCap: billingState.countsTowardTokenCap,
           servingCredentialId: providerTurn.effectiveCodexCredentialId,
           priorSessionCredentialId: providerTurn.priorSessionCodexCredentialId,
+          subscriptionConnectionId: subscriptionCoreTurnOf(providerTurn)?.connectionId ?? null,
           emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => leases.renewServing("model_usage"),
           leaseLost: leases.servingLost,
@@ -2884,6 +2937,13 @@ export async function runTurnStreamAttempt(
           ...safeErrorDiagnostic(attemptError),
           signalTokens: compactionNeeded?.signalTokens,
           thresholdTokens: compactionNeeded?.thresholdTokens,
+          ...(compactionNeeded?.historyFootprint
+            ? {
+                historyFootprintDimension: compactionNeeded.historyFootprint.dimension,
+                historyFootprintActual: compactionNeeded.historyFootprint.actual,
+                historyFootprintThreshold: compactionNeeded.historyFootprint.threshold,
+              }
+            : {}),
           ...(requestSizeError ? { ...requestSizeError.requestSize } : {}),
         });
         // When compaction is needed before the turn's first model request,

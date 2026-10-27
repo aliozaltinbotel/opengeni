@@ -1,6 +1,6 @@
 import { buildOpenGeniAgent, modelToolResultFits } from "@opengeni/runtime";
 import { SKILL_USE_META_KEY, skillUseFromToolOutput } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { Capability, Manifest, type SandboxSessionLike } from "@openai/agents/sandbox";
 import { describe, expect, test } from "bun:test";
 import {
@@ -195,7 +195,7 @@ describe("skill_read gateway definition", () => {
               const rendered = JSON.parse(text.text).files[0].content as string;
               expect(rendered).toBe(markdown);
               const start = rendered.indexOf("## Make new Sites readable by default");
-              const build = rendered.indexOf("## Use normal Bun + React");
+              const build = rendered.indexOf("## Edit an existing Site");
               expect(start).toBeGreaterThan(-1);
               expect(start).toBeLessThan(build);
               const guidance = rendered.slice(start, build).replace(/\s+/gu, " ");
@@ -305,10 +305,14 @@ describe("skill_read gateway definition", () => {
     for (const paths of [[], ["SKILL.md"]]) {
       await expect(read({ listFiles: true, paths })).rejects.toThrow();
     }
-    for (const listFiles of ["true", 1, null]) {
+    // The gateway repairs only the exact literals "true"/"false" at a boolean
+    // location; every other non-boolean flag is refused before loading.
+    for (const listFiles of ["yes", "True", 1, null]) {
       await expect(read({ listFiles })).rejects.toThrow();
     }
     expect(loads).toBe(0);
+    await expect(read({ listFiles: "true" })).resolves.toBeDefined();
+    expect(loads).toBe(1);
   });
 
   test("inventory permits 1024 files and rejects overflow, unsafe and duplicate paths", async () => {

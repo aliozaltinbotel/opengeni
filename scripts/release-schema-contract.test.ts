@@ -41,13 +41,15 @@ describe("release schema contract", () => {
     const contract = await buildCompleteSchemaContract();
     expect(
       contract.migrations.some(
-        (migration) => migration.path === "0896_editable_artifact_materializer_projection.sql",
+        (migration) => migration.path === "1004_editable_artifact_materializer_projection.sql",
       ),
     ).toBe(true);
-    expect(contract.migrations.find((migration) =>
-      migration.path === "0896_editable_artifact_materializer_projection.sql",
-    )).toMatchObject({
-      path: "0896_editable_artifact_materializer_projection.sql",
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "1004_editable_artifact_materializer_projection.sql",
+      ),
+    ).toMatchObject({
+      path: "1004_editable_artifact_materializer_projection.sql",
       deploymentMode: "rolling",
     });
     expect(contract.latestMigration).toBe(contract.migrations.at(-1)?.path);
@@ -2356,8 +2358,99 @@ describe("release schema contract", () => {
       expect(taskTreeNotes).toMatchObject({ deploymentMode: "rolling" });
     }
     const appendedMigrationPaths = [
-      "0896_editable_artifact_materializer_projection.sql",
-      "0895_private_child_membership_authority.sql",
+      "0996_personal_machine_reconnect_elsewhere.sql",
+      "0995_membership_same_role_keeps_authority.sql",
+      "0991_artifact_catalog_session_tree.sql",
+      "0987_event_source_custom_webhooks.sql",
+      "0986_provider_vault_passkeys.sql",
+      "0984_connected_commands_rearm_on_runner_report.sql",
+      "0982_promotion_abuse_detection.sql",
+      "0981_promotion_funding_decisions.sql",
+      "0980_workspace_governance_context_forks.sql",
+      "0979_model_call_facts_prompt_cache_diagnostics.sql",
+      "0978_messages_wait_for_machine_owner.sql",
+      "0977_recording_credit_cost.sql",
+      "0976_recording_allowance_usage.sql",
+      "0975_feedback_context_screenshots.sql",
+      "0974_personal_integration_setup_policy.sql",
+      "0973_capability_setup_continuations_validate.sql",
+      "0972_capability_setup_continuations.sql",
+      "0971_chat_actions_allowed.sql",
+      "0970_image_generation_credit_hold_index.sql",
+      "0969_image_generation_credit_funding_validate.sql",
+      "0968_image_generation_credit_funding.sql",
+      "0967_vault_item_types_validate.sql",
+      "0966_provider_vault_archived_items.sql",
+      "0965_organization_azure_openai_entra_auth.sql",
+      "0964_session_event_tool_call_fallback_pages.sql",
+      "0963_session_event_tool_call_pages.sql",
+      "0962_dictation_recordings.sql",
+      "0961_secret_use_approval_host_cards.sql",
+      "0960_event_status_reason_codes.sql",
+      "0959_automation_templates.sql",
+      "0958_workspace_event_source.sql",
+      "0956_vault_username_hints.sql",
+      "0955_recording_notes_event_types_validate.sql",
+      "0954_recording_notes.sql",
+      "0953_secret_use_approval_session_visibility.sql",
+      "0952_secret_use_approvals.sql",
+      "0951_repeating_event_triggers_outlive_schedule.sql",
+      "0950_recording_retention_runtime_grant.sql",
+      "0949_site_sidebar_states.sql",
+      "0948_personal_machine_attempt_carry.sql",
+      "0947_definer_runtime_grants.sql",
+      "0946_recording_retention.sql",
+      "0945_browser_recordings.sql",
+      "0943_session_event_tool_name_pages.sql",
+      "0944_session_event_tool_name_fallback_pages.sql",
+      "0942_recording_live_transcript.sql",
+      "0941_event_ingress_routes_without_identities.sql",
+      "0940_recording_voiceprints.sql",
+      "0939_recordings_maintenance_owner_policies.sql",
+      "0938_event_source_awaiting_secret.sql",
+      "0937_definer_runtime_grants_deferred.sql",
+      "0936_knowledge_visibility_statement_reuse.sql",
+      "0935_event_source_feeds.sql",
+      "0934_teams_conversations.sql",
+      "0932_mcp_event_subscriptions.sql",
+      "0931_recordings_webhook_event_types_validate.sql",
+      "0930_recordings.sql",
+      "0929_event_triggers.sql",
+      "0928_workspace_deletion_foreign_keys_validate.sql",
+      "0927_workspace_deletion_deferrable_foreign_keys.sql",
+      "0926_workspace_deletion_scoped_knowledge_cascade.sql",
+      "0925_membership_fences_allow_key_checks.sql",
+      "0923_external_user_inbox.sql",
+      "0922_attached_device_computer_session_indexes.sql",
+      "0921_attached_device_session_indexes.sql",
+      "0920_attached_browser_cross_workspace_validate.sql",
+      "0919_attached_browser_cross_workspace.sql",
+      "0918_organization_personal_workspaces_setting.sql",
+      "0917_continue_waiting_work.sql",
+      "0916_scoped_turn_history_pages.sql",
+      "0915_inbox_mute_scheduled_runs.sql",
+      "0914_knowledge_group_summary_projection.sql",
+      "0912_session_message_search_backfill_cleanup.sql",
+      "0913_session_events_tool_call_identity.sql",
+      "0911_session_message_search_trigram_index.sql",
+      "0910_session_message_search_backfill.sql",
+      "0909_session_message_search_index.sql",
+      "0908_site_opens.sql",
+      "0907_subscription_connection_one_owner.sql",
+      "0906_scheduled_shared_slack_authority.sql",
+      "0905_schedule_timing_session_list_hints.sql",
+      "0904_infrastructure_events_keep_session_activity.sql",
+      "0903_organization_default_voice_model.sql",
+      "0902_batched_knowledge_visibility.sql",
+      "0901_session_personal_state_probes.sql",
+      "0900_workspace_admin_predicate_privileges.sql",
+      "0899_ordered_turn_history_pages.sql",
+      "0898_organization_direct_openai_model_providers.sql",
+      "0897_workspace_owner_administers_subscriptions.sql",
+      "0896_shared_child_turn_context_authority.sql",
+      "0895_organization_voice_defaults.sql",
+      "1004_editable_artifact_materializer_projection.sql",
+      "1003_private_child_membership_authority.sql",
       "0894_model_fact_reconciliation_arrivals.sql",
       "0893_model_fact_ledger_source.sql",
       "0892_model_fact_event_pages.sql",
@@ -2789,7 +2882,7 @@ describe("release schema contract", () => {
       "0546_organization_integration_primitives.sql",
       "0547_idle_command_containment.sql",
       "0549_claude_subscription_usage.sql",
-      "0665_external_workspace_member_empty_permission_updates.sql",
+      "0997_external_workspace_member_empty_permission_updates.sql",
       "0548_lost_sandbox_group_continuity.sql",
       "0550_organization_oauth_pending_states.sql",
       "0552_usage_allowances.sql",
@@ -2894,11 +2987,11 @@ describe("release schema contract", () => {
       "0662_session_first_party_default_intent.sql",
       "0663_inbox_paused_goal_setting.sql",
       "0664_inbox_rich_notifications.sql",
-      "0666_model_call_source_receipts.sql",
-      "0667_recurring_temporary_image_cleanup_fairness.sql",
-      "0668_usage_event_call_attributes.sql",
-      "0669_usage_event_call_attributes_schema_required.sql",
-      "0670_knowledge_index_receipt_owner.sql",
+      "0998_model_call_source_receipts.sql",
+      "0999_recurring_temporary_image_cleanup_fairness.sql",
+      "1000_usage_event_call_attributes.sql",
+      "1001_usage_event_call_attributes_schema_required.sql",
+      "1002_knowledge_index_receipt_owner.sql",
       "0665_inbox_replies.sql",
       "0666_inbox_reply_current_turn.sql",
       "0672_sandbox_checkpoint_staleness.sql",
@@ -2947,8 +3040,14 @@ describe("release schema contract", () => {
       "0870_invitation_binding_seat_scope.sql",
       "0871_explicit_workspace_recovery.sql",
       "0872_file_app_shot.sql",
-      "0955_human_knowledge_review_first_proposals.sql",
-      "0958_session_creation_receipt.sql",
+      "1006_human_knowledge_review_first_proposals.sql",
+      "1008_session_creation_receipt.sql",
+      "1005_existing_only_external_identity.sql",
+      "1007_pending_tool_model_output_sources.sql",
+      "1009_model_call_fact_source_receipt_deferrable_fk.sql",
+      "1010_model_call_fact_source_receipt_fk_validate.sql",
+      "1011_existing_external_identity_membership_key_share.sql",
+      "1012_usage_event_call_attributes_schema_required_validate.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
@@ -4110,13 +4209,15 @@ describe("release schema contract", () => {
     });
     // Keep the published-history exceptions above, while deriving all new
     // forward migrations from the actual release rather than a maintained list.
-    const forwardMigrationPaths = [...new Set([
-      ...companyBrainMigrationPaths,
-      ...appendedMigrationPaths,
-      ...unfilteredSourceContract.migrations
-        .filter((migration) => migration.path.slice(0, 4) > "0326")
-        .map((migration) => migration.path),
-    ])];
+    const forwardMigrationPaths = [
+      ...new Set([
+        ...companyBrainMigrationPaths,
+        ...appendedMigrationPaths,
+        ...unfilteredSourceContract.migrations
+          .filter((migration) => migration.path.slice(0, 4) > "0326")
+          .map((migration) => migration.path),
+      ]),
+    ];
     const sourceContract =
       forwardMigrationPaths.length > 0
         ? await contractWithoutMigrations(forwardMigrationPaths)

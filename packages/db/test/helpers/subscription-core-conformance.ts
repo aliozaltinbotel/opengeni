@@ -24,7 +24,7 @@
  * test replaces module bindings (`mock.module`) for the whole process.
  */
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import type { Sql } from "postgres";
 import type { Settings } from "@opengeni/config";
 import {
@@ -1078,6 +1078,12 @@ export function describeSubscriptionCoreConformance<Credential>(
    * answers with a refresh is retried once on the same connection, with the
    * same replies scripted for the renewed credential unless the refusal is
    * one the refresh cures (`survivesRefresh: false`).
+   *
+   * Only the transport call is classified: a failure of the settlement or of
+   * its assertions is the suite's own and surfaces as itself. An unclassified
+   * transport failure is an unknown outcome only when the script lost the
+   * connection; any other one (a refused or reset socket, a body that is not
+   * the upstream's) is a harness fault and fails the call with its cause.
    */
   async function callUpstream(
     turn: Turn,
@@ -1118,45 +1124,80 @@ export function describeSubscriptionCoreConformance<Credential>(
         attemptId: turn.attemptId,
         executionGeneration: turn.executionGeneration,
       };
+      let failure: { error: unknown } | null = null;
       try {
         await subject.upstream.complete(credential, model.upstreamModelId);
+      } catch (error) {
+        failure = { error };
+      }
+      if (failure === null) {
         await requests.settleSubscriptionCoreRequest(db(), turn.identity, lease, {
           ...request,
           outcome: "response_received",
         });
         expect(await requestOutcome(operationId)).toBe("response_received");
         return null;
-      } catch (error) {
-        const outcome = subject.upstream.classify(error, now, turn.productModelId);
-        const settled = await subscriptionCoreSettlement(provider).settleSubscriptionCoreOutcome(
-          db(),
-          settings,
-          turn.identity,
-          lease,
-          {
-            outcome,
-            refreshGeneration: loaded.credential.refreshGeneration,
-            credential,
-            refreshed,
-            request,
-            now,
-          },
-        );
-        if (outcome === null) {
-          expect(settled).toEqual({ kind: "no_failover" });
-          expect(await requestOutcome(operationId)).toBe("unknown");
-          return "unknown_outcome";
-        }
-        if (settled.kind === "retry_same_connection" && !refreshed) continue;
-        if (settled.kind === "settled") {
-          expect(settled).toEqual({ kind: "settled", receipt: true, health: true });
-          expect(await requestOutcome(operationId)).toBe("refused");
-        } else {
-          expect(settled).toEqual({ kind: "no_failover" });
-        }
-        return outcome;
       }
+      const outcome = subject.upstream.classify(failure.error, now, turn.productModelId);
+      const settled = await subscriptionCoreSettlement(provider).settleSubscriptionCoreOutcome(
+        db(),
+        settings,
+        turn.identity,
+        lease,
+        {
+          outcome,
+          refreshGeneration: loaded.credential.refreshGeneration,
+          credential,
+          refreshed,
+          request,
+          now,
+        },
+      );
+      if (outcome === null) {
+        expect(settled).toEqual({ kind: "no_failover" });
+        expect(await requestOutcome(operationId)).toBe("unknown");
+        if (!replies.some((reply) => reply.kind === "connection_lost")) {
+          throw new Error(
+            `the scripted upstream call failed without a scripted lost connection: ${describeError(failure.error)}`,
+            { cause: failure.error },
+          );
+        }
+        return "unknown_outcome";
+      }
+      if (settled.kind === "retry_same_connection" && !refreshed) continue;
+      if (settled.kind === "settled") {
+        expect(settled).toEqual({ kind: "settled", receipt: true, health: true });
+        expect(await requestOutcome(operationId)).toBe("refused");
+      } else {
+        expect(settled).toEqual({ kind: "no_failover" });
+      }
+      return outcome;
     }
+  }
+
+  /** An error's name, code and message (and its cause's), for a failure message. */
+  function describeError(error: unknown): string {
+    const parts: string[] = [];
+    for (let current: unknown = error, depth = 0; current !== undefined && depth < 3; depth += 1) {
+      if (current === null || typeof current !== "object") {
+        parts.push(String(current));
+        break;
+      }
+      const { name, code, message, cause } = current as {
+        name?: unknown;
+        code?: unknown;
+        message?: unknown;
+        cause?: unknown;
+      };
+      parts.push(
+        [name, code, message]
+          .filter((part) => part !== undefined)
+          .map(String)
+          .join(" "),
+      );
+      current = cause;
+    }
+    return parts.join(" <- ");
   }
 
   async function requestOutcome(operationId: string): Promise<string | null> {
@@ -2673,6 +2714,21 @@ export function describeSubscriptionCoreConformance<Credential>(
         subjectId: org.ownerSubjectId,
       });
       expect(organizationPool!.rows.map((row) => row.id).sort()).toEqual([a, b].sort());
+      // The list says who each account reaches, without reading its access.
+      expect(organizationPool!.reach.get(a)).toEqual({
+        ownerWorkspaceId: null,
+        everyWorkspace: true,
+        workspaceIds: [],
+        personalWorkspaces: true,
+        people: null,
+      });
+      expect(organizationPool!.reach.get(b)).toEqual({
+        ownerWorkspaceId: null,
+        everyWorkspace: false,
+        workspaceIds: [org.sharedWorkspaceId],
+        personalWorkspaces: false,
+        people: null,
+      });
       const workspacePool = await withRlsContext(
         db(),
         { accountId: org.accountId, workspaceId: org.sharedWorkspaceId },
@@ -2685,13 +2741,21 @@ export function describeSubscriptionCoreConformance<Credential>(
         },
       );
       expect(workspacePool.connections.map((entry) => entry.row.id).sort()).toEqual([a, b].sort());
-      // Rename through the workspace route (which resolves through the pool)
-      // and the organization route; the foreign provider's rows are not found.
+      // An organization account that reaches the workspace is managed on the
+      // organization's route only; the workspace route does not find it. The
+      // foreign provider's rows are found on neither route.
       expect(
         await renameSubscriptionCoreConnection(db(), provider, {
           ...workspaceRoute,
           connectionId: b,
           label: "renamed in workspace",
+        }),
+      ).toBeNull();
+      expect(
+        await renameSubscriptionCoreConnection(db(), provider, {
+          ...organizationRoute,
+          connectionId: b,
+          label: "renamed by the organization",
         }),
       ).toBe(b);
       for (const route of [workspaceRoute, organizationRoute])
@@ -2902,7 +2966,7 @@ export function describeSubscriptionCoreConformance<Credential>(
       await expectForeignUntouched(org);
     });
 
-    test("organization access and reach are edited for exactly this provider's connections of its kind", async () => {
+    test("SUB-SET-07 organization access and reach are edited for exactly this provider's connections of its kind", async () => {
       const org = await organization();
       const a = await sharedConnection(org, `access-${crypto.randomUUID()}`);
       const route = (connectionId: string) => ({

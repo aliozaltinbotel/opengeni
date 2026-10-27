@@ -1,4 +1,4 @@
-ARG BUN_VERSION=1.4.3
+ARG BUN_VERSION=1.4.4
 FROM python:3.12-slim AS checkov-runtime
 
 ARG CHECKOV_VERSION=3.2.526
@@ -155,7 +155,7 @@ COPY packages/subscriptions/package.json packages/subscriptions/package.json
 COPY packages/testing/package.json packages/testing/package.json
 COPY packages/tool-gateway/package.json packages/tool-gateway/package.json
 COPY packages/vaults/package.json packages/vaults/package.json
-COPY packages/vaults-bitwarden-bridge/package.json packages/vaults-bitwarden-bridge/package.json
+COPY packages/vaults-bitwarden/package.json packages/vaults-bitwarden/package.json
 COPY packages/vaults-keeper/package.json packages/vaults-keeper/package.json
 COPY packages/vaults-onepassword/package.json packages/vaults-onepassword/package.json
 COPY packages/vaults-protonpass/package.json packages/vaults-protonpass/package.json
@@ -234,8 +234,8 @@ ARG TARGETARCH
 RUN set -eux; \
     arch="${TARGETARCH:-$(dpkg --print-architecture)}"; \
     case "$arch" in \
-      amd64) native=agent-browser-linux-x64; expected=b7bc3dfcf0a7326c1f5a60423163259ba2349eebfa5bd2e70e111af743da4a49; lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
-      arm64) native=agent-browser-linux-arm64; expected=6ccaba1eb26a0e6f5c23c59d2c63e6e0237fde82713cfdb543ba506490cac9c1; lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
+      amd64) lightpanda_native=lightpanda-x86_64-linux; lightpanda_expected=5713d49d06e8d4948d3358b6ce859ecca8e6f07dc312134d9f54999fb6e66c52 ;; \
+      arm64) lightpanda_native=lightpanda-aarch64-linux; lightpanda_expected=8d7b3a1d7b9024beef94e7fc7ce854030ee4d6def5f802b8e0e8824731c3d93a ;; \
       *) echo "unsupported browser controller architecture=${arch}" >&2; exit 1 ;; \
     esac; \
     mkdir -p /out; \
@@ -243,8 +243,6 @@ RUN set -eux; \
       packages/browserd/src/main.ts \
       --outfile /out/opengeni-browserd; \
     chmod 0755 /out/opengeni-browserd; \
-    install -m 0755 "packages/browserd/node_modules/agent-browser/bin/${native}" /out/agent-browser; \
-    test "$(sha256sum /out/agent-browser | awk '{print $1}')" = "$expected"; \
     install -m 0755 "/lightpanda-assets/${lightpanda_native}" /out/lightpanda; \
     test "$(sha256sum /out/lightpanda | awk '{print $1}')" = "$lightpanda_expected"; \
     install -m 0644 /lightpanda-assets/lightpanda-0.3.5-source.tar.gz /out/lightpanda-0.3.5-source.tar.gz; \
@@ -253,7 +251,6 @@ RUN set -eux; \
     test "$(sha256sum /out/lightpanda-LICENSE | awk '{print $1}')" = 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef; \
     { \
       printf '%s  %s\n' "$(sha256sum /out/opengeni-browserd | awk '{print $1}')" /usr/local/bin/opengeni-browserd; \
-      printf '%s  %s\n' "$expected" /usr/local/lib/opengeni/agent-browser; \
       printf '%s  %s\n' "$lightpanda_expected" /usr/local/lib/opengeni/lightpanda; \
       printf '%s  %s\n' a5005b353a1738dd3d239234841cfcc808a7ec9faaebfcede3528f9fab3ae058 /usr/local/share/source/lightpanda-0.3.5.tar.gz; \
       printf '%s  %s\n' 8486a10c4393cee1c25392769ddd3b2d6c242d6ec7928e1414efff7dfb2f07ef /usr/local/share/licenses/lightpanda/LICENSE; \
@@ -354,7 +351,7 @@ ARG AZURE_DEVOPS_EXTENSION_VERSION=1.0.6
 ARG UV_VERSION=0.12.18
 # certifi 2026.10.19 drops the compromised emSign ECC Root CA - G3. It is newer
 # than the shared PyPI cutoff, so it alone gets a later one.
-ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6"
+ARG OPENGENI_PYTHON_PACKAGES="requests==2.34.2 certifi==2026.10.19 pandas==3.0.6 numpy==2.5.3 matplotlib==3.11.2 pytest==9.1.1 psycopg==3.3.6 psycopg-binary==3.3.6 openpyxl==3.1.5 python-docx==1.2.0 python-pptx==1.0.2"
 ARG OPENGENI_PYTHON_EXCLUDE_NEWER=2026-09-25T00:00:00Z
 ARG TTYD_VERSION=1.7.7
 ARG TARGETARCH
@@ -551,7 +548,7 @@ RUN set -eux; \
       --exclude-newer "${OPENGENI_PYTHON_EXCLUDE_NEWER}" \
       --exclude-newer-package certifi=2026-10-21T00:00:00Z ${OPENGENI_PYTHON_PACKAGES}; \
     python3 -m pip install --no-cache-dir --no-index --dry-run ${OPENGENI_PYTHON_PACKAGES}; \
-    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests'; \
+    python3 -c 'import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot, numpy, pandas, psycopg, pytest, requests, openpyxl, docx, pptx'; \
     python3 -c 'import psycopg; assert psycopg.pq.__impl__ == "binary", psycopg.pq.__impl__'; \
     pytest --version; \
     rm -rf /root/.cache /var/cache/pip /var/cache/uv
@@ -585,7 +582,6 @@ ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 ENV OPENGENI_ARTIFACT_RASTER_FONT_FILES="[\"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-Italic.ttf\",\"/usr/share/fonts/truetype/liberation/LiberationSans-BoldItalic.ttf\"]"
 ENV OPENGENI_ARTIFACT_RASTER_DEFAULT_FONT_FAMILY="Liberation Sans"
 ENV OPENGENI_BROWSERD_PORT=7682
-ENV OPENGENI_BROWSERD_AGENT_BROWSER_BINARY=/usr/local/lib/opengeni/agent-browser
 ENV OPENGENI_BROWSERD_LIGHTPANDA_BINARY=/usr/local/lib/opengeni/lightpanda
 ENV OPENGENI_BROWSERD_BROWSER_EXECUTABLE=/usr/lib/chromium/chromium
 ENV OPENGENI_BROWSERD_COMPUTER_NATIVE_BINARY=/usr/local/lib/opengeni/opengeni-computer-native
@@ -600,7 +596,6 @@ ENV OPENGENI_BROWSERD_NETWORK_ISOLATION=off
 ENV NODE_PATH=/opt/opengeni/codemode-runtime/node_modules
 
 COPY --from=browserd-build /out/opengeni-browserd /usr/local/bin/opengeni-browserd
-COPY --from=browserd-build /out/agent-browser /usr/local/lib/opengeni/agent-browser
 COPY --from=browserd-build /out/lightpanda /usr/local/lib/opengeni/lightpanda
 COPY --from=browserd-build /out/opengeni-computer-native /usr/local/lib/opengeni/opengeni-computer-native
 COPY --from=browserd-build /out/opengeni-command-supervisor /usr/local/bin/opengeni-command-supervisor
@@ -631,7 +626,7 @@ RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down \
                /usr/local/bin/opengeni-browserd-up /usr/local/bin/opengeni-browserd-down \
-               /usr/local/bin/opengeni-browserd /usr/local/lib/opengeni/agent-browser \
+               /usr/local/bin/opengeni-browserd \
                /usr/local/lib/opengeni/lightpanda \
                /usr/local/lib/opengeni/opengeni-computer-native \
                /usr/local/bin/opengeni-agent; \

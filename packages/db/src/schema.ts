@@ -25,6 +25,7 @@ import type {
   McpServerConnectionRef,
   ModelContextContributionSummary,
   ModelContextSnapshot,
+  PromptCacheDiagnostics,
   RigProviderImages,
   SessionMcpApprovalPolicy,
   SessionGoalChangeKind,
@@ -75,8 +76,11 @@ import {
   losslessText,
 } from "./lossless-columns";
 
+export * from "./automation-templates-schema";
 export * from "./editable-artifacts-schema";
+export * from "./event-triggers-schema";
 export * from "./managed-auth-session-set-schema";
+export * from "./secret-approvals-schema";
 export * from "./slack-api-rate-limit-schema";
 export * from "./organization-recovery-schema";
 
@@ -135,12 +139,20 @@ export const organizationIntegrationPolicies = pgTable(
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     mode: text("mode").$type<"unrestricted" | "restricted">().notNull(),
     allowedIntegrationKeys: jsonb("allowed_integration_keys").$type<string[]>().notNull(),
+    personalIntegrationSetup: text("personal_integration_setup")
+      .$type<"members" | "admins">()
+      .notNull()
+      .default("members"),
     revision: bigint("revision", { mode: "number" }).notNull(),
   },
   (table) => ({
     modeCheck: check(
       "organization_integration_policies_mode_check",
       sql`${table.mode} in ('unrestricted', 'restricted')`,
+    ),
+    personalIntegrationSetupCheck: check(
+      "organization_integration_policies_personal_setup_check",
+      sql`${table.personalIntegrationSetup} in ('members', 'admins')`,
     ),
     keysCheck: check(
       "organization_integration_policies_allowed_integration_keys_check",
@@ -313,6 +325,59 @@ export const siteSessionAccess = pgTable(
       columns: [table.workspaceId, table.sessionId],
       foreignColumns: [sessions.workspaceId, sessions.id],
     }).onDelete("cascade"),
+  ],
+);
+
+/** When each person last opened a Site (migration 0908); personal ordering only. */
+export const siteOpens = pgTable(
+  "site_opens",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    openedAt: timestamp("opened_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_opens_site_idx").on(table.workspaceId, table.siteId),
+  ],
+);
+
+/**
+ * Each person's sidebar state for a Site row (migration 0949): pinned, or
+ * archived (hidden from their sidebar). Personal; grants nothing.
+ */
+export const siteSidebarStates = pgTable(
+  "site_sidebar_states",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    siteId: uuid("site_id").notNull(),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.workspaceId, table.subjectId, table.siteId] }),
+    foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    foreignKey({
+      columns: [table.workspaceId, table.siteId],
+      foreignColumns: [workspaceArtifacts.workspaceId, workspaceArtifacts.id],
+    }).onDelete("cascade"),
+    index("site_sidebar_states_site_idx").on(table.workspaceId, table.siteId),
   ],
 );
 
@@ -1692,6 +1757,7 @@ export const vaultItems = pgTable(
     primaryFieldId: uuid("primary_field_id"),
     providerItemRef: text("provider_item_ref"),
     providerVersion: text("provider_version"),
+    usernameHintEncrypted: text("username_hint_encrypted"),
     passkeySignCount: bigint("passkey_sign_count", { mode: "number" }),
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     archivedAt: timestamp("archived_at", { withTimezone: true }),
@@ -4777,6 +4843,10 @@ export const organizationModelDefaults = pgTable("organization_model_defaults", 
     .$type<Record<string, number>>()
     .notNull()
     .default({}),
+  // Voice settings by realtime model id (0895); a workspace's own win.
+  realtimeVoice: jsonb("realtime_voice").$type<Record<string, unknown>>().notNull().default({}),
+  // Realtime voice model new voice conversations start with (0903); null is automatic.
+  realtimeDefaultModel: text("realtime_default_model"),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4788,6 +4858,10 @@ export const organizationAgentAdminAccess = pgTable("organization_agent_admin_ac
     .primaryKey()
     .references(() => managedAccounts.id, { onDelete: "cascade" }),
   sessionAdminAccessAllowed: boolean("session_admin_access_allowed").notNull().default(false),
+  // 0971: agents in a chat a person started may do app actions for them, each
+  // change after they confirm it in the chat. On unless an owner or admin
+  // turns it off.
+  chatActionsAllowed: boolean("chat_actions_allowed").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4805,6 +4879,7 @@ export const organizationPrivacyPreferences = pgTable("organization_privacy_pref
     .notNull()
     .default("workspace_shared"),
   adminsSeePrivateSchedules: boolean("admins_see_private_schedules").notNull().default(true),
+  personalWorkspacesEnabled: boolean("personal_workspaces_enabled").notNull().default(true),
   updatedBySubjectId: text("updated_by_subject_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -4830,6 +4905,26 @@ export const sessionAdminAccess = pgTable(
   },
   (table) => [index("session_admin_access_account_idx").on(table.accountId)],
 );
+
+// What one turn's message may do through app actions, frozen when the message
+// is accepted (0971): who sent it, whether they can confirm changes from where
+// they sent it, and at most their own access then. Written once; a turn
+// without a row runs no app actions.
+export const sessionTurnAppActionGrants = pgTable("session_turn_app_action_grants", {
+  turnId: uuid("turn_id")
+    .primaryKey()
+    .references(() => sessionTurns.id, { onDelete: "cascade" }),
+  accountId: uuid("account_id")
+    .notNull()
+    .references(() => managedAccounts.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id")
+    .notNull()
+    .references(() => workspaces.id, { onDelete: "cascade" }),
+  subjectId: text("subject_id").notNull(),
+  changes: text("changes").$type<"confirm" | "none">().notNull(),
+  permissions: text("permissions").array().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // One workspace-local short-lived holder per running Codex turn. Selection and
 // insertion happen atomically while codex_rotation_settings is locked FOR
@@ -6096,6 +6191,7 @@ export const sessionPins = pgTable(
       table.workspaceId,
       table.sessionId,
     ),
+    sessionSubject: index("session_pins_session_subject_idx").on(table.sessionId, table.subjectId),
     subjectPinned: index("session_pins_workspace_subject_pinned_idx").on(
       table.workspaceId,
       table.subjectId,
@@ -6550,6 +6646,15 @@ export const imageGenerationOperations = pgTable(
       >()
       .notNull()
       .default("prepared"),
+    /** Opengeni-credit price frozen at admission; zero when credits do not fund it. */
+    pricedCostMicros: bigint("priced_cost_micros", { mode: "number" }).notNull().default(0),
+    /** A priced operation is debited exactly once, when its image is delivered. */
+    creditState: text("credit_state")
+      .$type<"not_applicable" | "pending" | "debited">()
+      .notNull()
+      .default("not_applicable"),
+    /** The turn's canonical chat model whose plan and trial grants may pay. */
+    creditUsageModelId: text("credit_usage_model_id"),
     providerStartedAt: timestamp("provider_started_at", { withTimezone: true }),
     completedAt: timestamp("completed_at", { withTimezone: true }),
     lastError: text("last_error"),
@@ -6567,6 +6672,9 @@ export const imageGenerationOperations = pgTable(
       table.createdAt,
       table.id,
     ),
+    creditHold: index("image_generation_operations_credit_hold_idx")
+      .on(table.workspaceId, table.providerStartedAt)
+      .where(sql`${table.creditState} = 'pending' and ${table.status} = 'provider_started'`),
     workspaceAccount: foreignKey({
       columns: [table.workspaceId, table.accountId],
       foreignColumns: [workspaces.id, workspaces.accountId],
@@ -6594,6 +6702,16 @@ export const imageGenerationOperations = pgTable(
       sql`(${table.status} = 'prepared' and ${table.providerStartedAt} is null and ${table.completedAt} is null)
         or (${table.status} in ('provider_started', 'outcome_unknown', 'retention_failed') and ${table.providerStartedAt} is not null and ${table.completedAt} is null)
         or (${table.status} = 'completed' and ${table.providerStartedAt} is not null and ${table.completedAt} is not null)`,
+    ),
+    creditValid: check(
+      "image_generation_operations_credit_chk",
+      sql`(${table.pricedCostMicros} = 0 and ${table.creditState} = 'not_applicable'
+          and ${table.creditUsageModelId} is null)
+        or (${table.pricedCostMicros} between 1 and 1000000000
+          and (${table.creditUsageModelId} is null
+            or octet_length(${table.creditUsageModelId}) between 1 and 256)
+          and ((${table.creditState} = 'pending' and ${table.status} <> 'completed')
+            or (${table.creditState} = 'debited' and ${table.status} = 'completed')))`,
     ),
   }),
 );
@@ -8679,6 +8797,11 @@ export const connectorActionRequests = pgTable(
       .notNull(),
     decision: text("decision").$type<"approve" | "reject">(),
     decisionBySubjectId: text("decision_by_subject_id"),
+    // 0971: how the decider reached the card, and whether they were signed in
+    // where an app-action change may be confirmed: the app itself, or an embed
+    // the deployment opted in (never a key, chat integration or other token).
+    decisionByKind: text("decision_by_kind").$type<"human" | "api" | "agent_attempt" | "system">(),
+    decisionBySignedInPerson: boolean("decision_by_signed_in_person").notNull().default(false),
     decisionEventId: uuid("decision_event_id"),
     decidedAt: timestamp("decided_at", { withTimezone: true }),
     executionStartedAt: timestamp("execution_started_at", {
@@ -9137,11 +9260,16 @@ export const sessionSystemUpdates = pgTable(
     deliveredHistoryItemId: uuid("delivered_history_item_id"),
     deliveredAt: timestamp("delivered_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    // The personal machine's owner let this informational update from someone
+    // else's work continue under the owner's receiving context (0916). Set
+    // only by continue_session_waiting_work; the producer receipt is unchanged.
+    continuedBySubjectId: text("continued_by_subject_id"),
+    continuedAt: timestamp("continued_at", { withTimezone: true }),
   },
   (table) => ({
     kindValid: check(
       "system_updates_kind_check",
-      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress')`,
+      sql`${table.kind} in ('scheduled_occurrence', 'goal_continuation', 'agent_message', 'agent_steer_instruction', 'session_wait_timeout', 'background_command_result', 'child_terminal_result', 'media_generation_result', 'child_requires_action', 'child_requires_action_resolved', 'child_paused', 'child_waiting_capacity', 'child_progress', 'secret_use_approval_decided', 'capability_setup_completed')`,
     ),
     payloadKindValid: check(
       "system_updates_payload_kind_check",
@@ -9699,6 +9827,9 @@ export const sessionEvents = pgTable(
     // readers fall back to the payload only then, so the presented-tool filter
     // does not detoast every excluded call's arguments.
     toolName: text("tool_name"),
+    // The shared metadata trigger also extracts the exact coalesced call ID
+    // for created/output rows (0913). NULL retains the legacy payload fallback.
+    toolCallId: text("tool_call_id"),
   },
   (table) => ({
     workspaceAttempt: foreignKey({
@@ -9733,6 +9864,26 @@ export const sessionEvents = pgTable(
       table.type,
       table.sequence,
     ),
+    toolNamePage: index("session_events_tool_name_page_idx")
+      .on(table.workspaceId, table.sessionId, table.toolName, table.sequence)
+      .where(
+        sql`${table.type} = 'agent.toolCall.created' and ${table.toolName} is not null and octet_length(${table.toolName}) <= 2048`,
+      ),
+    toolNameFallbackPage: index("session_events_tool_name_fallback_page_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(
+        sql`${table.type} = 'agent.toolCall.created' and (${table.toolName} is null or octet_length(${table.toolName}) > 2048)`,
+      ),
+    toolCallPage: index("session_events_tool_call_page_idx")
+      .on(table.workspaceId, table.sessionId, table.toolCallId, table.sequence)
+      .where(
+        sql`${table.type} in ('agent.toolCall.created', 'agent.toolCall.output') and ${table.toolCallId} is not null and octet_length(${table.toolCallId}) <= 2048`,
+      ),
+    toolCallFallbackPage: index("session_events_tool_call_fallback_page_idx")
+      .on(table.workspaceId, table.sessionId, table.sequence)
+      .where(
+        sql`${table.type} in ('agent.toolCall.created', 'agent.toolCall.output') and (${table.toolCallId} is null or octet_length(${table.toolCallId}) > 2048)`,
+      ),
     // Pre-0527 attention probes (which still counted commentary) during a rolling
     // deploy. Drop it in a later rolling migration once no pre-0527 API can run.
     meaningfulAttention: index("session_events_meaningful_attention_idx")
@@ -9850,6 +10001,41 @@ export const automaticSessionTitleFanoutOutboxV1 = opengeniPrivateSchema.table(
   }),
 );
 
+/**
+ * Searchable text of each user and completed assistant message, written only
+ * by the invoker-rights AFTER INSERT trigger on session_events (admitted as an
+ * exact mirror of a visible message event). Its
+ * row-security policies are the search: rows are visible only while the
+ * transaction's `opengeni.session_message_search_pattern` matches them (or the
+ * text is losslessly encoded), so the trigram index can serve the pattern
+ * under FORCE RLS. See docs/session-message-search.md.
+ */
+export const sessionMessageSearchTexts = pgTable(
+  "session_message_search_texts",
+  {
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    sequence: integer("sequence").notNull(),
+    encoded: boolean("encoded").notNull(),
+    text: text("text").notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({
+      name: "session_message_search_texts_pkey",
+      columns: [table.workspaceId, table.sessionId, table.sequence],
+    }),
+    workspaceEvent: foreignKey({
+      name: "session_message_search_texts_event_fk",
+      columns: [table.workspaceId, table.sessionId, table.sequence],
+      foreignColumns: [sessionEvents.workspaceId, sessionEvents.sessionId, sessionEvents.sequence],
+    }).onDelete("cascade"),
+    encodedText: index("session_message_search_texts_encoded_idx")
+      .on(table.workspaceId)
+      .where(sql`${table.encoded}`),
+  }),
+);
+
 export const agentRunStates = pgTable("agent_run_states", {
   id: uuid("id").primaryKey().defaultRandom(),
   accountId: uuid("account_id")
@@ -9895,6 +10081,13 @@ export const sessionHumanInputRequests = pgTable(
     turnGeneration: integer("turn_generation").notNull(),
     creationAttemptId: uuid("creation_attempt_id").notNull(),
     toolCallId: text("tool_call_id").notNull(),
+    /**
+     * `tool_call`: asked by the agent's `request_human_input`; its turn waits
+     * and ends with it. `secret_use_approval` (0961): Opengeni's own card for
+     * a blocked secret use (`tool_call_id` is `secret-approval:<approval>`);
+     * the turn does not wait, and the card outlives the turn until answered.
+     */
+    origin: text("origin").notNull().default("tool_call"),
     status: text("status").notNull().default("pending"),
     questions: jsonb("questions").$type<HumanInputQuestion[]>().notNull(),
     allowSkip: boolean("allow_skip").notNull().default(false),
@@ -9939,6 +10132,10 @@ export const sessionHumanInputRequests = pgTable(
     status: check(
       "session_human_input_requests_status_check",
       sql`${table.status} in ('pending','answered','skipped','expired','cancelled')`,
+    ),
+    origin: check(
+      "session_human_input_requests_origin_check",
+      sql`${table.origin} in ('tool_call','secret_use_approval')`,
     ),
     generation: check(
       "session_human_input_requests_generation_check",
@@ -10016,6 +10213,13 @@ export const sessionHistoryItems = pgTable(
       table.sessionId,
       table.position,
     ),
+    // Receipt proofs page newest-first within one turn, not the whole session.
+    turnPositionIdx: index("session_history_items_turn_position_idx")
+      .on(table.turnId, table.position)
+      .where(sql`${table.turnId} IS NOT NULL`),
+    scopeTurnPositionIdx: index("session_history_items_scope_turn_position_idx")
+      .on(table.workspaceId, table.sessionId, table.turnId, table.position)
+      .where(sql`${table.turnId} IS NOT NULL`),
   }),
 );
 
@@ -11824,9 +12028,14 @@ export const enrollments = pgTable(
     organizationPubkey: uniqueIndex("enrollments_organization_pubkey_idx")
       .on(table.accountId, table.pubkey)
       .where(sql`${table.authorityScope} = 'organization'`),
-    userPubkey: uniqueIndex("enrollments_user_pubkey_idx")
-      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+    // A person's machine: one enrollment per workspace it was connected from,
+    // and at most one of them live (0996).
+    userWorkspacePubkey: uniqueIndex("enrollments_user_workspace_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey, table.workspaceId)
       .where(sql`${table.authorityScope} = 'user'`),
+    userActivePubkey: uniqueIndex("enrollments_user_active_pubkey_idx")
+      .on(table.accountId, table.ownerOrganizationMembershipId, table.pubkey)
+      .where(sql`${table.authorityScope} = 'user' and ${table.status} = 'active'`),
     // List a workspace's ACTIVE machines without scanning revoked rows.
     workspaceStatus: index("enrollments_workspace_status_idx").on(table.workspaceId, table.status),
     sandboxGroup: index("enrollments_sandbox_group_idx")
@@ -13110,6 +13319,9 @@ export const modelCallFacts = pgTable(
     timeToFirstTokenMs: integer("time_to_first_token_ms"),
     timeToFirstTextMs: integer("time_to_first_text_ms"),
     durationMs: integer("duration_ms"),
+    // Prompt-cache observation and warm-miss classification (see
+    // PromptCacheDiagnostics); null before 0979 and for repaired facts.
+    promptCacheDiagnostics: jsonb("prompt_cache_diagnostics").$type<PromptCacheDiagnostics>(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -13332,7 +13544,9 @@ export const hostExportOutbox = pgTable(
         'openai', 'azure', 'codex-subscription', 'supergrok-subscription',
         'opengeni-gateway', 'workspace-gateway', 'organization-gateway',
         'openrouter', 'workspace-openrouter', 'organization-openrouter',
-        'opper', 'workspace-opper', 'organization-opper', 'registry'
+        'opper', 'workspace-opper', 'organization-opper', 'organization-openai',
+        'organization-azure-openai',
+        'registry'
       ))
       and (${table.toolFamily} is null or ${table.toolFamily} ~
         '^(custom|integration:[a-z0-9]([a-z0-9.-]{0,150}[a-z0-9])?|[a-z][a-z0-9_]{0,63})$')`,
@@ -15237,10 +15451,26 @@ export const organizationModelProviderConnections = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     status: text("status").$type<"active" | "revoked">().notNull().default("active"),
     credentialEncrypted: text("credential_encrypted").notNull(),
+    /** Azure OpenAI only: non-secret `https://<resource>.openai.azure.com/openai/v1`. */
+    endpoint: text("endpoint"),
+    /** How the connection signs in; Microsoft Entra ID methods are Azure OpenAI only. */
+    authMethod: text("auth_method")
+      .$type<OrganizationModelProviderAuthMethod>()
+      .notNull()
+      .default("api_key"),
     claudeUsageSnapshot:
       jsonb("claude_usage_snapshot").$type<import("@opengeni/contracts").ClaudeSubscriptionUsage>(),
     version: integer("version").notNull().default(1),
@@ -15262,7 +15492,7 @@ export const organizationModelProviderConnections = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connections_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
     ),
     statusCheck: check(
       "organization_model_provider_connections_status_chk",
@@ -15280,6 +15510,14 @@ export const organizationModelProviderConnections = pgTable(
       "organization_model_provider_connections_actor_chk",
       sql`octet_length(${table.updatedBySubjectId}) between 1 and 1024`,
     ),
+    endpointCheck: check(
+      "organization_model_provider_connections_endpoint_chk",
+      sql`(${table.providerKind} = 'azure_openai') = (${table.endpoint} is not null) and (${table.endpoint} is null or ${table.endpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+    ),
+    authMethodCheck: check(
+      "organization_model_provider_connections_auth_method_chk",
+      sql`${table.authMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.authMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
+    ),
   }),
 );
 
@@ -15291,12 +15529,26 @@ export const organizationModelProviderConnectionOperations = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "elevenlabs"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     operationId: uuid("operation_id").notNull(),
     requestHash: text("request_hash").notNull(),
     resultStatus: text("result_status").$type<"active" | "revoked">().notNull(),
     resultVersion: integer("result_version").notNull(),
+    resultEndpoint: text("result_endpoint"),
+    resultAuthMethod: text("result_auth_method")
+      .$type<OrganizationModelProviderAuthMethod>()
+      .notNull()
+      .default("api_key"),
     resultCreatedAt: timestamp("result_created_at", {
       withTimezone: true,
     }).notNull(),
@@ -15313,7 +15565,7 @@ export const organizationModelProviderConnectionOperations = pgTable(
     ),
     providerKindCheck: check(
       "organization_model_provider_connection_operations_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'elevenlabs', 'openai', 'azure_openai')`,
     ),
     resultStatusCheck: check(
       "organization_model_provider_connection_operations_result_status_chk",
@@ -15327,8 +15579,22 @@ export const organizationModelProviderConnectionOperations = pgTable(
       "organization_model_provider_connection_operations_request_hash_chk",
       sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`,
     ),
+    endpointCheck: check(
+      "organization_model_provider_connection_operations_endpoint_chk",
+      sql`(${table.providerKind} = 'azure_openai') = (${table.resultEndpoint} is not null) and (${table.resultEndpoint} is null or ${table.resultEndpoint} ~ '^https://[a-z0-9-]+\\.openai\\.azure\\.com/openai/v1$')`,
+    ),
+    authMethodCheck: check(
+      "organization_model_provider_connection_operations_auth_chk",
+      sql`${table.resultAuthMethod} in ('api_key', 'entra_client_secret', 'entra_deployment_identity') and (${table.resultAuthMethod} = 'api_key' or ${table.providerKind} = 'azure_openai')`,
+    ),
   }),
 );
+
+/** How an organization model provider connection signs in. */
+export type OrganizationModelProviderAuthMethod =
+  | "api_key"
+  | "entra_client_secret"
+  | "entra_deployment_identity";
 
 export const organizationModelProviderCustomModels = pgTable(
   "organization_model_provider_custom_models",
@@ -15338,7 +15604,15 @@ export const organizationModelProviderCustomModels = pgTable(
       .notNull()
       .references(() => managedAccounts.id, { onDelete: "cascade" }),
     providerKind: text("provider_kind")
-      .$type<"vercel_gateway" | "openrouter" | "anthropic" | "claude_subscription" | "opper">()
+      .$type<
+        | "vercel_gateway"
+        | "openrouter"
+        | "anthropic"
+        | "claude_subscription"
+        | "opper"
+        | "openai"
+        | "azure_openai"
+      >()
       .notNull(),
     upstreamModelId: text("upstream_model_id").notNull(),
     label: text("label"),
@@ -15364,7 +15638,7 @@ export const organizationModelProviderCustomModels = pgTable(
       .where(sql`${table.deleteOperationId} is not null`),
     providerKindCheck: check(
       "organization_model_provider_custom_models_provider_kind_chk",
-      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper')`,
+      sql`${table.providerKind} in ('vercel_gateway', 'openrouter', 'anthropic', 'claude_subscription', 'opper', 'openai', 'azure_openai')`,
     ),
     upstreamCheck: check(
       "organization_model_provider_custom_models_upstream_chk",
@@ -15408,6 +15682,7 @@ export * from "./governed-learning-evaluator-schema";
 export * from "./governed-learning-activation-schema";
 export * from "./knowledge-source-sync-schema";
 export * from "./transcription-recordings-schema";
+export * from "./recordings-schema";
 export * from "./interaction-schema";
 export * from "./site-data-schema";
 
@@ -15426,6 +15701,10 @@ export const feedbackSubmissions = pgTable(
     sentiment: text("sentiment"),
     comment: losslessText("comment"),
     commentCodecVersion: losslessCodecVersion("comment_codec_version"),
+    /** App and device facts the report was sent with (FeedbackContext). */
+    context: jsonb("context").$type<Record<string, unknown>>(),
+    /** Screenshot metadata in send order (FeedbackScreenshot); bytes are in object storage. */
+    screenshots: jsonb("screenshots").$type<unknown[]>().notNull().default([]),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -15470,4 +15749,17 @@ export const modelCallSourceReceipts = pgTable("model_call_source_receipts", {
   receipt: jsonb("receipt").$type<import("@opengeni/contracts").ModelCallSourceReceipt>().notNull(),
   canonical: text("canonical").notNull(), digest: text("digest").notNull(),
   recordedAt: timestamp("recorded_at", {withTimezone:true}).notNull().defaultNow(),
+});
+
+/** Promotion eligibility is separate from account access and paid funding. */
+export const promotionDecisions = pgTable("promotion_decisions", {
+  accountId: uuid("account_id").primaryKey(),
+  decision: text("decision").notNull(),
+  revision: bigint("revision", { mode: "number" }).notNull(),
+  actor: text("actor").notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+export const promotionEnforcement = pgTable("promotion_enforcement", {
+  singleton: boolean("singleton").primaryKey().default(true),
+  enabled: boolean("enabled").notNull().default(false),
 });

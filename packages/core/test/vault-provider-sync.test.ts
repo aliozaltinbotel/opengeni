@@ -76,6 +76,41 @@ function offsetPage<T>(
 }
 
 describe("provider mirror planning", () => {
+  test("keeps only bounded username hints without copying provider field values", () => {
+    for (const username of [
+      undefined,
+      null,
+      "",
+      "alice@example.com",
+      "u".repeat(VAULT_LIMITS.usernameMaxChars),
+      "u".repeat(VAULT_LIMITS.usernameMaxChars + 1),
+    ]) {
+      const plan = planProviderMirror(
+        [
+          meta(1, {
+            username,
+            fields: [
+              {
+                externalFieldId: "password",
+                name: "password",
+                kind: "concealed",
+                value: "must-not-leak",
+              } as ProviderItemMeta["fields"][number],
+            ],
+          }),
+        ],
+        "1",
+      );
+      expect(plan.items[0]!.username).toBe(
+        typeof username === "string" &&
+          username.length > 0 &&
+          username.length <= VAULT_LIMITS.usernameMaxChars
+          ? username
+          : null,
+      );
+      expect(JSON.stringify(plan)).not.toContain("must-not-leak");
+    }
+  });
   test("sanitizes and de-duplicates item names deterministically", () => {
     const field = { externalFieldId: "p", name: "password", kind: "concealed" as const };
     const items = [
@@ -254,6 +289,44 @@ describe("provider mirror planning", () => {
         expect((error as Error).message).not.toContain("Payroll");
       }
     }
+  });
+
+  test("mirrors a login's passkey metadata, deduplicated and bounded", () => {
+    const credential = (index: number) => Buffer.from(`credential ${index}`).toString("base64url");
+    const plan = planProviderMirror(
+      [
+        meta(1, {
+          passkeys: [
+            {
+              credentialId: `${credential(1)}==`,
+              rpId: " Google.com ",
+              userName: "a@example.test",
+            },
+            { credentialId: credential(1), rpId: "google.com" },
+            { credentialId: "not base64url!", rpId: "bad.test" },
+            { credentialId: credential(2), rpId: "" },
+            ...Array.from({ length: 40 }, (_, index) => ({
+              credentialId: credential(100 + index),
+              rpId: "many.test",
+            })),
+          ],
+        }),
+        meta(2, { passkeys: [] }),
+        meta(3),
+      ],
+      "1",
+    );
+    const [first, second, third] = plan.items;
+    expect(first!.passkeys![0]).toEqual({
+      credentialId: credential(1),
+      rpId: "google.com",
+      userName: "a@example.test",
+    });
+    expect(first!.passkeys).toHaveLength(32);
+    expect(first!.passkeys!.filter((passkey) => passkey.rpId === "bad.test")).toEqual([]);
+    // Reported empty clears the mirror; not reported keeps it.
+    expect(second!.passkeys).toEqual([]);
+    expect(third!.passkeys).toBeUndefined();
   });
 });
 

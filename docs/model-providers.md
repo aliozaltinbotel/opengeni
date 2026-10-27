@@ -23,7 +23,14 @@ only in their own Personal workspace through the existing owner-only reader.
 A workspace with no available accounts shows no pool. Limits belong to provider
 accounts: forecasts use total account usage, including other workspaces, not a
 workspace-attributed fraction. The headline forecasts this week's included utilization, with one
-plan-size-weighted total remaining bar beneath it. Account rows and their individual
+plan-size-weighted **Available now** bar beneath it. A window's total withholds an account's
+remaining capacity while its other main limit is exhausted; it does not add weekly capacity
+that a five-hour block prevents using. Individual window readings stay unchanged. Forecasts
+withhold that capacity until the blocking window's first reset, then let it serve again;
+they do not predict future five-hour blocks. When nothing is usable now, the headline reports
+the next usable reset: the earliest account's later binding reset, not a future runout or a
+reset that leaves that account blocked. Unknown or elapsed return times wait for new readings.
+Account rows and their individual
 usage remain in the account list, not repeated in the pool card.
 Five-hour limits appear only as a muted line when currently blocking an account;
 there is no window toggle. No monetary or absolute usage unit is returned by the pooled API.
@@ -98,7 +105,7 @@ Responses; it does not become Chat Completions.
 
 |            | OpenAI                                                                                        | Azure                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`)                                                  | `OPENGENI_AZURE_OPENAI_API_KEY` or `OPENGENI_AZURE_OPENAI_AD_TOKEN`                                                  |
+| Credential | `OPENGENI_OPENAI_API_KEY` (`OPENAI_API_KEY`)                                                  | API key, static AD token, or deployment identity (below)                                                  |
 | URL        | optional `OPENGENI_OPENAI_BASE_URL` (`OPENAI_BASE_URL`); unset is `https://api.openai.com/v1` | `OPENGENI_AZURE_OPENAI_BASE_URL` (`…/openai/v1`), or `OPENGENI_AZURE_OPENAI_ENDPOINT` + `DEPLOYMENT` + `API_VERSION` |
 
 Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
@@ -106,6 +113,82 @@ Hosted GPT image generation is attached only for built-in GPT-5.6 ids on
 `OPENGENI_OPENAI_RESPONSES_TRANSPORT` (`http` default, or `websocket`),
 `OPENGENI_OPENAI_PROVIDER_ITEM_IDS`, `OPENGENI_OPENAI_REASONING_ENCRYPTED_CONTENT`,
 `OPENGENI_WEB_SEARCH_ENABLED`.
+
+**Keyless Azure OpenAI, without a console connection.** Set
+`OPENGENI_AZURE_OPENAI_AUTH_MODE` on the API and workers:
+
+- `static` (default): existing `OPENGENI_AZURE_OPENAI_API_KEY` or
+  `OPENGENI_AZURE_OPENAI_AD_TOKEN` behavior. A static token is not refreshed.
+- `deployment_identity`: the same deployment credential resolver as Azure
+  Speech and organization Azure OpenAI. Set `AZURE_TENANT_ID` and
+  `AZURE_CLIENT_ID`, plus either `AZURE_FEDERATED_TOKEN_FILE` or
+  `AZURE_CLIENT_SECRET`. The federated token file takes precedence when both
+  are configured. For an app registration on a host outside Azure, omit the
+  token-file setting and supply the app's client secret. `AZURE_AUTHORITY_HOST`
+  optionally selects the Entra authority. There is no managed-identity or
+  developer-login fallback when these credentials are missing or refused.
+- `workload_identity`: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and
+  `AZURE_FEDERATED_TOKEN_FILE` are required. The projected assertion is read
+  afresh on each token acquisition. `AZURE_AUTHORITY_HOST` optionally selects
+  the Entra authority. There is no client-secret or developer-login fallback.
+- `managed_identity`: Microsoft's MSAL SDK uses the host's managed identity
+  endpoint. Set `AZURE_CLIENT_ID` for a user-assigned identity; omit it for a
+  system-assigned identity. No tenant or projected token file is required.
+  The SDK requires Node.js 20+ when running on Node (the deployment runs Bun).
+
+All identity modes reject a simultaneously configured Azure API key or static
+AD token at startup. They acquire `https://cognitiveservices.azure.com/.default`
+tokens and send only `Authorization: Bearer …`, never `api-key`. The identity
+needs the **Cognitive Services OpenAI User** role on the target resource.
+The shared token source coalesces concurrent acquisition, refreshes on the next
+request inside the five-minute expiry margin (half the lifetime for short-lived
+tokens), and honors earlier refresh hints. An idle deployment need not refresh;
+its next call acquires a current token. No restart is required. A refused token
+is discarded without replaying the model request. These paths cover agent
+turns, compaction, and titles; separate embedding, transcription, and voice
+providers retain their own credential settings.
+
+Example for Azure Workload Identity on Kubernetes (mount the projected token
+into every API/worker pod making model calls):
+
+```dotenv
+OPENGENI_OPENAI_PROVIDER=azure
+OPENGENI_AZURE_OPENAI_BASE_URL=https://RESOURCE.openai.azure.com/openai/v1
+OPENGENI_AZURE_OPENAI_AUTH_MODE=workload_identity
+AZURE_TENANT_ID=YOUR_TENANT_ID
+AZURE_CLIENT_ID=YOUR_IDENTITY_CLIENT_ID
+AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token
+OPENGENI_OPENAI_MODEL=reasoning-deployment
+OPENGENI_OPENAI_ALLOWED_MODELS=reasoning-deployment,small-deployment
+OPENGENI_OPENAI_REASONING_EFFORT=high
+OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS=low,medium,high
+```
+
+The model names are Azure **deployment names**, and the deployed models must
+support the configured reasoning efforts. The existing endpoint + deployment +
+API-version URL mode also works. This uses the built-in catalog and billing
+policy; it does not create or grant access to an organization connection.
+`OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED` is a separate opt-in for
+organization connections and is **not needed** for the built-in provider.
+
+For an Entra app registration on a host without a projected token file or
+managed identity, keep the provider, URL, model and reasoning settings above,
+and configure:
+
+```dotenv
+OPENGENI_AZURE_OPENAI_AUTH_MODE=deployment_identity
+AZURE_TENANT_ID=YOUR_TENANT_ID
+AZURE_CLIENT_ID=YOUR_APP_CLIENT_ID
+AZURE_CLIENT_SECRET=YOUR_APP_CLIENT_SECRET
+```
+
+Unset `AZURE_FEDERATED_TOKEN_FILE`, `OPENGENI_AZURE_OPENAI_API_KEY`, and
+`OPENGENI_AZURE_OPENAI_AD_TOKEN`. Supply the secret through your deployment's
+secret mechanism to every API/worker process making model calls. The existing
+shared helper exchanges it for short-lived Cognitive Services bearer tokens
+and refreshes them automatically; it is not a static AD token. Replacing the
+secret in loaded settings creates a new client and token source. Environment
+changes still require the process to reload its settings (normally a restart).
 
 ### Extra OpenAI-compatible servers — `OPENGENI_MODEL_PROVIDERS_JSON`
 
@@ -129,7 +212,9 @@ JSON must not declare overlay kinds (`vercel-gateway-managed`,
 `opper-organization`, `xai-subscription`) or reserved provider ids (`openai`,
 `azure`, `codex-subscription`, `xai-subscription`, `opengeni-gateway`,
 `workspace-gateway`, `openrouter`, `workspace-openrouter`, `opper`,
-`workspace-opper`, `organization-opper`). `baseUrl` is origin + path (no userinfo, query,
+`workspace-opper`, `organization-opper`, `organization-openai`,
+`organization-azure-openai`; also the `direct-openai-organization` and
+`direct-azure-organization` kinds). `baseUrl` is origin + path (no userinfo, query,
 fragment). Put extra query/headers in `defaultQuery` / `defaultHeaders`;
 `Authorization` is SDK-managed. `publicDefaultQueryNames` /
 `publicDefaultHeaderNames` mark which of those appear in public definition
@@ -162,8 +247,9 @@ These connections are workspace-owned, including in the onboarding Personal
 workspace. The existing Connections API encrypts the key at rest and returns
 metadata only. Usage is externally billed to that provider account and consumes
 no Opengeni credits. Organization provider inheritance does not apply to these
-workspace connections. Replace a key, endpoint, or model by disconnecting and
-reconnecting; the new connection has a distinct model ID.
+workspace connections; to share OpenAI or Azure OpenAI across an organization's
+shared workspaces, use the organization rail below. Replace a key, endpoint, or model
+by disconnecting and reconnecting; the new connection has a distinct model ID.
 
 `directModelProvider` metadata declares the provider, model/deployment, and Azure
 endpoint. `credentialRole` is `direct_openai` or `direct_azure_openai`. Model IDs
@@ -175,11 +261,102 @@ customer connections never fall back to deployment credentials. Customer routes
 use conservative text/function capabilities; hosted tools and reasoning controls
 are not enabled implicitly for an arbitrary Azure deployment name.
 
+#### Organization OpenAI and Azure OpenAI
+
+Organization owners/admins can connect **OpenAI** and **Azure OpenAI once for
+the whole organization** in **Organization settings → Models**
+(`OrganizationModelProviderKind` `openai` and `azure_openai`).
+
+**OpenAI** stores only the encrypted API key and uses the official
+`https://api.openai.com/v1` Responses API with a bearer key. Admins add exact
+OpenAI model IDs as the organization's models; each is checked with the
+organization's key before it is saved (422 on failure, 409 when OpenAI is not
+connected). Products are `organization-openai/<model>` (provider
+`organization-openai`, kind `direct-openai-organization`) with the same
+conservative capabilities as workspace OpenAI, the same shared-workspace
+inheritance, organization billing and access policy
+(`/v1/organizations/:id/model-connections/openai/current/access`) as Azure
+below, and fail closed (`OrganizationOpenAIUnavailableError`) without a key.
+
+**Azure OpenAI** works the same way plus its resource endpoint
+(the same admin-only,
+same-origin browser routes as the other organization providers). The connection
+stores the encrypted API key plus the non-secret resource endpoint
+(`https://RESOURCE.openai.azure.com`, normalized to `…/openai/v1`; proxies are
+refused). The upsert request hash binds the key digest **and** the endpoint, so an
+idempotent replay that names another endpoint conflicts and changing the
+endpoint writes a new connection version. The endpoint is returned in
+connection responses; the key never is. Revocation clears the key and keeps the
+endpoint, so curated deployments stay listed as not ready.
+
+Admins then add **deployments** as the organization's custom models: the
+`upstreamModelId` is the exact Azure deployment name (same rule as workspace
+Azure). Before saving, the API runs the setup check above against the
+organization's endpoint and key; failures return a safe 422 (409 when Azure is
+not connected) and save nothing. Products are
+`organization-azure-openai/<deployment>` (provider `organization-azure-openai`,
+kind `direct-azure-organization`), use Responses with the `azure-openai` wire
+profile with reasoning controls (the same default and allowed efforts as the
+built-in provider), no hosted web search, and send the key as Azure's `api-key` header on
+`<endpoint>/responses`. They inherit into current and future shared workspaces
+only (Personal workspaces stay local, by the same RLS rule as the other
+organization API-key rails), are billed to the organization's Azure account with
+no Opengeni credits, and are narrowed by
+`/v1/organizations/:id/model-connections/azure_openai/current/access`. The
+workspace catalog reads the endpoint without decrypting; the worker loads the
+active key and endpoint for the turn. A missing or revoked connection fails
+closed (`OrganizationAzureOpenAIUnavailableError`) and never falls back to the
+deployment's own OpenAI/Azure credentials. The endpoint is part of each model's
+definition version, so an accepted turn never silently moves to another
+resource.
+
+**Microsoft Entra ID sign-in (Azure OpenAI only).** Azure resources that turn
+key authentication off (`disableLocalAuth`) accept only Entra ID bearer tokens,
+so the Azure connection has an `authMethod`:
+
+- `api_key` (the default, unchanged): the encrypted key, sent as `api-key`.
+- `entra_client_secret`: the organization's own app registration. Admins enter
+  the directory (tenant) ID, application (client) ID and a client secret; the
+  secret is stored in the same encrypted credential column as a key and is
+  never returned.
+- `entra_deployment_identity`: the deployment's own workload identity (the
+  standard `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE`
+  or `AZURE_CLIENT_SECRET` variables, as set by AKS workload identity). It is
+  off unless the operator sets `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED=true`;
+  only then does the console offer it and the API accept it, and the runtime
+  refuses it again at use time if the operator later turns it off. On a shared
+  deployment this lends one identity to every organization that selects it, so
+  operators enable it only where that is intended. Startup fails if it is
+  enabled without an identity.
+
+Tokens come from the Entra v2 token endpoint with scope
+`https://cognitiveservices.azure.com/.default` (client credentials with a
+secret, or a client assertion from the federated token file, which is re-read
+on every request). `@opengeni/network/azure-entra` caches one token per exact
+credential per process and renews it five minutes before expiry (or at half
+the lifetime of a shorter token), so long turns, compaction and title
+generation keep working. Every request (HTTP and the Responses WebSocket
+upgrade) carries `Authorization: Bearer …` and no `api-key`. A token Azure
+refuses is discarded so the next request signs in again; a credential Entra
+refuses fails as `OrganizationAzureOpenAIUnavailableError`. Saving a connection
+signs in once first and returns a safe 422 if Entra refuses it; the identity
+needs the `Cognitive Services OpenAI User` role on the resource. Ownership,
+reach and administration are the same as for a key connection.
+
 Canonical: `packages/contracts/src/direct-model-provider.ts`,
 `packages/core/src/domain/direct-model-provider.ts` for the setup check,
 `withDirectModelProviders` in `packages/config/src/index.ts`,
 `loadDirectModelProviderConnection` in `packages/db/src/index.ts`, and the direct
 provider form in `apps/web/src/components/direct-model-provider-connection.tsx`.
+Organization OpenAI and Azure: `withOrganizationDirectCatalogProvider` /
+`withOrganizationDirectCredential` in `packages/config/src/index.ts`,
+`packages/db/src/organization-model-providers.ts` (endpoint, digest binding,
+`loadOrganizationModelProviderCredential`), migration
+`packages/db/drizzle/0898_organization_direct_openai_model_providers.sql`,
+`settingsWithOrganizationProviderCredentials` in
+`packages/core/src/model-provider-credentials.ts`,
+`apps/api/src/routes/organization-model-providers.ts`, and the organization
+provider hook `apps/web/src/components/organization-model-provider-connection.tsx`.
 
 ### Reviewed overlays — not generic JSON
 
@@ -549,15 +726,19 @@ derives both from the provider kind:
 | Organization Vercel AI Gateway      | organization connection       | organization           | external         |
 | Organization OpenRouter             | organization connection       | organization           | external         |
 | Organization Opper                  | organization connection       | organization           | external         |
+| Organization OpenAI                 | organization connection       | organization           | external         |
+| Organization Azure OpenAI           | organization connection       | organization           | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
 credential broker.
 
 `organization_connection` is the peer organization-owned broker. Organization
-admins connect Vercel AI Gateway, OpenRouter, or Opper once in Organization
-settings and curate explicit custom model slugs. Active products use
-`organization-gateway/`, `organization-openrouter/`, or `organization-opper/`,
+admins connect Vercel AI Gateway, OpenRouter, Opper, OpenAI, or Azure OpenAI
+once in Organization settings and curate explicit custom model slugs (Azure:
+deployment names). Active products use `organization-gateway/`,
+`organization-openrouter/`, `organization-opper/`, `organization-openai/`, or
+`organization-azure-openai/`,
 are externally billed to
 the organization provider account, and inherit into current and future shared
 workspaces only. Canonical Personal workspaces remain local. Workspace provider
@@ -1446,6 +1627,14 @@ for choices. Older string-list-only clients may show the unusable hint but
 receive the ordinary rejection instead of failing bootstrap parsing.
 Billing/usage admission and a provider's live response are separate from model
 selection. Changes between listing and creating are re-evaluated at creation.
+Within each catalog resolution, `loadWorkspaceModelCatalogInputs` reads public
+workspace connection metadata, bounded workspace custom models and organization
+provider/model metadata in one short tenant-scoped transaction. It reuses the
+canonical in-scope readers, retaining each SELECT's READ COMMITTED snapshot and
+the caller's provider sets. No credentials or provider I/O enter this transaction.
+Default selection and fresh admission still load their own catalog; results are
+never cached between them or across requests. Subscription readiness, live
+availability and retained-model lookups keep their separate existing boundaries.
 Responses contain no connected-account identity, provider secrets, or execution
 topology. Child inheritance and keyed repair keep their accepted-work rules.
 
@@ -2127,18 +2316,35 @@ in order; later system items keep their conversation position. Tool names unsupp
 Native OpenAI hosted tools and opaque compaction tokens are not compatible;
 ordinary function tools and Opengeni's text compaction remain available.
 
-Claude Opus 5.5 and Sonnet 5.5 write their notes for the person between tool
-calls as progress-update `thinking` blocks, not `text` blocks. For those models
-requests use `thinking.display: "updates"` (beta
-`thinking-display-updates-2026-08-18`): reasoning blocks come back empty, and
-every `thinking` block with text is a progress update. Each non-empty one becomes
-an assistant message, streamed as output text, so it is shown as a reply and
-counts as visible text for `wait_for_input` and final-answer checks; empty
-reasoning blocks stay reasoning items. The message carries the signed block, and
-replay sends that block back unchanged in its original position, so the history
-bytes match what Claude returned. The shown text is Anthropic's short rendering
-of the note, not the verbatim note; replay gives the model its full note. Other
-Claude models keep `display: "summarized"` and their existing reasoning items.
+Claude Opus 5.5 and Sonnet 5.5 can write a progress update before a tool call
+as its own `thinking` block. For those models requests use
+`thinking.display: "updates"` (beta `thinking-display-updates-2026-08-18`):
+reasoning blocks come back empty, and only progress updates carry text. That
+text is Anthropic's summary of the update, not the words the model wrote, and it
+can claim things the model never said. It therefore stays a reasoning item,
+streamed as reasoning and shown as a thought: it is never an assistant message,
+never `agent.message.completed` or `turn.completed.reply`, and never counts as
+visible text for `wait_for_input` or final-answer checks. The model writes a
+note longer than a sentence or two before a tool call this way, so an answer
+written just before `wait_for_input` would reach the person only as that
+summary. `wait_for_input` therefore takes a `reply` argument, shown verbatim as
+the agent's message (see [run lifecycle](./run-lifecycle.md)), and the prompt
+asks for it whenever the turn answers the person. When a person's turn asks to
+wait without a `reply` and the response holds a progress update, or the turn
+has no visible text, the wait is refused (at most twice per attempt) so the
+model passes its answer in `reply`; if it still passes none, nothing is
+recorded as the reply. A `text` block is always recorded verbatim. Progress
+updates are marked `providerData.anthropic.progressUpdate` on the reasoning
+item. `display: "updates"` stays on: under `"omitted"` the notes would be
+empty and under `"summarized"` they would be summaries mixed into reasoning,
+so no display mode returns them verbatim, and because a summary is only ever a
+thought it cannot replace a reply. Replay sends
+each signed block back unchanged in its original position, so history bytes
+match what Claude returned; history stored while updates were briefly recorded
+as assistant messages replays the same signed block. Other APIs see a newly
+stored summary only as labelled historical reasoning; summaries stored as
+assistant messages during that window are not rewritten. Other Claude models keep
+`display: "summarized"` and their existing reasoning items.
 
 Native Claude HTTP and SSE errors retain status and bounded retry/request
 metadata. Documented tier-spend proof and configured-spend HTTP 400 prefixes

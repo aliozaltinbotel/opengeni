@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   computerActionText,
+  computerObservationDiff,
   computerObservationText,
   computerOpenText,
   computerTargetsText,
@@ -147,6 +148,100 @@ describe("computerObservationText", () => {
     ]);
   });
 
+  test("lists a macOS menu bar's plain items on one line", () => {
+    const item = (ref: string, name: string, extra: Partial<ComputerTextNode> = {}) =>
+      ({
+        ref,
+        role: "AXMenuBarItem",
+        name,
+        states: [],
+        actions: ["invoke", "focus"],
+        ...extra,
+      }) satisfies ComputerTextNode;
+    const roots: ComputerTextNode[] = [
+      { ref: "e1", role: "button", name: "New Tab", states: [], actions: ["invoke"] },
+      { ref: "e2", role: "AXMenuBar", states: [], actions: [] },
+      item("e3", "Apple"),
+      item("e4", "Chrome"),
+      item("e5", "File"),
+      // Open: it has something of its own to say, so it keeps its line.
+      item("e6", "Edit", { states: ["selected"] }),
+      item("e7", "View"),
+      item("e8", "Help"),
+    ];
+    const text = computerObservationText(
+      observation({ kind: "snapshot", roots, nodeCount: roots.length }),
+    );
+    expect(text.split("\n").slice(3)).toEqual([
+      '- button "New Tab" [e1]',
+      '- AXMenuBarItem "Apple" [e3], "Chrome" [e4], "File" [e5]',
+      '- AXMenuBarItem "Edit" [e6] selected',
+      '- AXMenuBarItem "View" [e7], "Help" [e8]',
+      "(1 hidden, unlabeled or repeated element not shown)",
+    ]);
+
+    // A run ends where the nesting changes.
+    const nested: ComputerTextNode[] = [
+      {
+        ref: "m1",
+        role: "AXMenuBar",
+        name: "Main",
+        states: [],
+        actions: [],
+        children: [item("m2", "Apple"), item("m3", "File")],
+      },
+      item("m4", "Wi-Fi"),
+    ];
+    const nestedText = computerObservationText(
+      observation({ kind: "snapshot", roots: nested, nodeCount: 4 }),
+    );
+    expect(nestedText.split("\n").slice(3)).toEqual([
+      '- AXMenuBar "Main" [m1]',
+      '  - AXMenuBarItem "Apple" [m2], "File" [m3]',
+      '- AXMenuBarItem "Wi-Fi" [m4]',
+    ]);
+  });
+
+  test("lists a macOS table cell once though AXColumn repeats it", () => {
+    const at = (x: number, y: number) => ({ x, y, width: 106, height: 19 });
+    const cell = (ref: string, role: string, name: string, x: number, y: number) =>
+      ({
+        ref,
+        role,
+        name,
+        ...(role === "text" ? { value: name } : {}),
+        bounds: at(x, y),
+        states: [],
+        actions: role === "link" ? ["invoke", "focus"] : [],
+      }) satisfies ComputerTextNode;
+    const roots: ComputerTextNode[] = [
+      { ref: "e1", role: "AXTable", name: "Accounts", states: [], actions: [] },
+      { ref: "e2", role: "AXRow", states: [], actions: [] },
+      cell("e3", "link", "Juniper Dental", 200, 459),
+      cell("e4", "text", "AC-FRGA", 566, 459),
+      cell("e5", "link", "Juniper Electric", 200, 494),
+      cell("e6", "text", "AC-FRGA", 566, 494),
+      { ref: "e7", role: "AXColumn", states: [], actions: [] },
+      cell("e8", "link", "Juniper Dental", 200, 459),
+      cell("e9", "link", "Juniper Electric", 200, 494),
+      { ref: "e10", role: "AXColumn", states: [], actions: [] },
+      cell("e11", "text", "AC-FRGA", 566, 459),
+      cell("e12", "text", "AC-FRGA", 566, 494),
+      // Another element with the same label elsewhere is still listed.
+      cell("e13", "link", "Juniper Dental", 200, 900),
+    ];
+    const text = computerObservationText(observation({ kind: "snapshot", roots, nodeCount: 13 }));
+    expect(text.split("\n").slice(3)).toEqual([
+      '- AXTable "Accounts" [e1]',
+      '- link "Juniper Dental" [e3]',
+      '- text "AC-FRGA"',
+      '- link "Juniper Electric" [e5]',
+      '- text "AC-FRGA"',
+      '- link "Juniper Dental" [e13]',
+      "(7 hidden, unlabeled or repeated elements not shown)",
+    ]);
+  });
+
   test("says when the platform stopped reading the tree early", () => {
     const roots = [node("e_row", "AXRow", "bun")];
     const slow = computerObservationText(
@@ -175,6 +270,22 @@ describe("computerObservationText", () => {
     expect(whole).not.toContain("Partial tree");
   });
 
+  test("points to the native window read when native tools own element reads", () => {
+    const native = observation({
+      kind: "snapshot",
+      roots: [],
+      nodeCount: 0,
+      readByNativeTools: true,
+    });
+    const text = computerObservationText(native);
+    expect(text.split("\n").at(-1)).toBe(
+      "Elements are not listed here because this session reads them with interaction__cua_get_window_state; reading them here too would invalidate its element tokens. Call interaction__cua_get_window_state for this window's elements.",
+    );
+    expect(text).not.toContain("no readable elements");
+    // Two empty native-owned readings are not "nothing changed".
+    expect(computerObservationDiff(native, { ...native, observationId: "o_2" })).toBeNull();
+  });
+
   test("reports diffs, removed elements, a missing tree and a focus outside the view", () => {
     const diff = computerObservationText(
       observation(
@@ -189,13 +300,24 @@ describe("computerObservationText", () => {
     );
     expect(diff.split("\n").slice(3)).toEqual([
       "Focused element: e_elsewhere",
-      "Changed elements since o_0:",
+      "Changed elements since o_0; elements not listed are unchanged and keep their refs:",
       '- button "OK" [e_ok]',
       "(2 earlier elements removed)",
     ]);
     expect(computerObservationText(observation(null))).toEndWith(
       "No accessibility tree is available for this target; use the screenshot.",
     );
+  });
+
+  test("says why a tree with only unlabeled elements lists none", () => {
+    const roots = [
+      { ref: "read-only:1", role: "AXGroup", states: [], actions: [] },
+      { ref: "read-only:2", role: "AXGroup", states: [], actions: [] },
+    ];
+    const text = computerObservationText(observation({ kind: "snapshot", roots, nodeCount: 2 }));
+    expect(text.split("\n").slice(3)).toEqual([
+      "No element is listed: the accessibility tree's 2 elements are all hidden, unlabeled or repeated; use the screenshot.",
+    ]);
   });
 
   test("clips long fields", () => {
@@ -266,7 +388,7 @@ describe("computer session and action text", () => {
         "2 targets:",
         'window window:1 "Calculator" pid 7 at 0,0 size 300x400',
         'window window:2 "Chrome" pid 7 at 0,0 size 300x400 off screen',
-        "A window marked off screen can be neither captured nor read until it is back on screen. A browser from browser_open runs off screen; to see and drive its window here, open it with linkedComputerSessionId set to this ComputerSession.",
+        "A window marked off screen, such as one on another Space or a full-screen app, can be neither captured nor read until it is back on screen. Minimized windows and windows of hidden apps are not marked: reading one brings it back on screen behind the person's front window.",
       ].join("\n"),
     );
     expect(computerTargetsText([target])).not.toContain("off screen");
@@ -286,5 +408,127 @@ describe("computer session and action text", () => {
         "Error locator_not_found: No element matched",
       ].join("\n"),
     );
+  });
+
+  test("says which element of another role an action pressed, and how to name it", () => {
+    const standIn = { actionIndex: 0, requestedRole: "button", role: "link", name: "Edit billing" };
+    expect(
+      computerActionText({
+        operationId: "op-1",
+        targetId: "window:1",
+        state: "completed",
+        error: null,
+        observation: null,
+        roleStandIns: [standIn],
+      }),
+    ).toBe(
+      [
+        "Action completed on window:1 (operation op-1).",
+        'The action named button "Edit billing", but no button here has that name, so it used the link "Edit billing"; name it as role "link" next time.',
+      ].join("\n"),
+    );
+    const batch = computerActionText({
+      type: "batch",
+      targetId: "window:1",
+      actionCount: 2,
+      steps: [
+        { operationId: "op-1", state: "completed", error: null },
+        { operationId: "op-2", state: "completed", error: null },
+      ],
+      observation: null,
+      roleStandIns: [{ ...standIn, actionIndex: 1 }],
+    });
+    expect(batch.split("\n").at(-1)).toBe(
+      'Action 2 named button "Edit billing", but no button here has that name, so it used the link "Edit billing"; name it as role "link" next time.',
+    );
+    // Without a stand-in, the text is unchanged.
+    expect(
+      computerActionText({
+        operationId: "op-1",
+        targetId: "window:1",
+        state: "completed",
+        error: null,
+        observation: null,
+      }),
+    ).toBe("Action completed on window:1 (operation op-1).");
+  });
+});
+
+describe("computerObservationDiff", () => {
+  const ribbon = Array.from({ length: 12 }, (_, index) =>
+    node(`e${index + 10}`, "radio", `Style ${index}`, { value: "0" }),
+  );
+  const reading = (id: string, roots: ComputerTextNode[]) => ({
+    ...observation({ kind: "snapshot", roots, nodeCount: roots.length }),
+    observationId: id,
+  });
+
+  test("an action's reading lists only what changed; unchanged refs carry over", () => {
+    const before = reading("o_1", [node("e1", "textbox", "Name", { value: "" }), ...ribbon]);
+    const after = reading("o_2", [
+      node("e1", "textbox", "Name", { value: "Ada" }),
+      ...ribbon.slice(1),
+      node("e99", "button", "Save"),
+    ]);
+    const diff = computerObservationDiff(before, after)!;
+    expect(diff.semantic).toEqual({
+      kind: "diff",
+      baseObservationId: "o_1",
+      removedRefs: ["e10"],
+      changed: [node("e1", "textbox", "Name", { value: "Ada" }), node("e99", "button", "Save")],
+    });
+    expect(computerObservationText(diff).split("\n").slice(3)).toEqual([
+      "Changed elements since o_1; elements not listed are unchanged and keep their refs:",
+      '- textbox "Name" [e1] value="Ada"',
+      '- button "Save" [e99]',
+      "(1 earlier element removed)",
+    ]);
+  });
+
+  test("an action that changed nothing says so", () => {
+    const diff = computerObservationDiff(reading("o_1", ribbon), reading("o_2", ribbon))!;
+    expect(computerObservationText(diff)).toEndWith(
+      "No element changed since o_1; its refs are still valid.",
+    );
+  });
+
+  test("keeps the whole reading when a diff would not help or could mislead", () => {
+    const base = reading("o_1", ribbon);
+    // Most elements are new: another view.
+    expect(
+      computerObservationDiff(
+        base,
+        reading(
+          "o_2",
+          ribbon.map((item, index) => ({ ...item, ref: `n${index}` })),
+        ),
+      ),
+    ).toBeNull();
+    // Another document in the same window, or another window.
+    expect(
+      computerObservationDiff(base, {
+        ...reading("o_2", ribbon),
+        target: { ...base.target, title: "Other" },
+      }),
+    ).toBeNull();
+    expect(
+      computerObservationDiff(base, {
+        ...reading("o_2", ribbon),
+        target: { ...base.target, targetGeneration: "g2" },
+      }),
+    ).toBeNull();
+    // A partial reading, or the same reading again.
+    expect(
+      computerObservationDiff(base, {
+        ...reading("o_2", ribbon),
+        semantic: {
+          kind: "snapshot",
+          roots: ribbon,
+          nodeCount: ribbon.length,
+          incomplete: { reason: "node_budget", unreadCount: 3 },
+        },
+      }),
+    ).toBeNull();
+    expect(computerObservationDiff(base, base)).toBeNull();
   });
 });

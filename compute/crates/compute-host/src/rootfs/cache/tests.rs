@@ -29,6 +29,31 @@ fn age(path: &Path, by: Duration) {
         .unwrap();
 }
 
+/// How many files `rootfs` holds, besides the use marks.
+fn images_in(rootfs: &Path) -> usize {
+    fs::read_dir(rootfs)
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().file_name() != "used")
+        .count()
+}
+
+/// Makes `image` look last used `by` ago.
+fn age_use(cache: &Cache, image: ImageId, by: Duration) {
+    age(&cache.mark(image), by);
+}
+
+/// What fetching a disk over an image trusts to say its file is unchanged.
+fn identity(path: &Path) -> (u64, u64, u64, SystemTime) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::metadata(path).unwrap();
+    (
+        metadata.dev(),
+        metadata.ino(),
+        metadata.len(),
+        metadata.modified().unwrap(),
+    )
+}
+
 #[tokio::test]
 async fn an_image_is_fetched_once_checked_and_then_kept() {
     let dir = tempfile::tempdir().unwrap();
@@ -118,11 +143,100 @@ async fn concurrent_creates_of_one_image_share_its_fetch() {
     );
     assert_eq!(first, vec![7; 1 << 20]);
     assert_eq!(first, second);
-    let names: Vec<_> = fs::read_dir(dir.path().join("rootfs"))
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name())
+    assert_eq!(images_in(&dir.path().join("rootfs")), 1);
+}
+
+/// Creates of one image copy it at the same time: none waits for another
+/// to finish its copy, an agent's first check of a kept image included.
+#[tokio::test]
+async fn copies_of_one_image_share_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let first = cache.get(image, &store).await.unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(5), cache.get(image, &store))
+        .await
+        .expect("a second create waits for none")
+        .unwrap();
+    let third = tokio::time::timeout(Duration::from_secs(5), cache.hold(image))
+        .await
+        .expect("a third create waits for none")
+        .unwrap();
+    assert!(
+        cache
+            .retire(&HashSet::new(), SystemTime::now() + WEEK * 2)
+            .await
+            .is_empty(),
+        "never removed while copied"
+    );
+    drop((first, second, third));
+
+    let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    let (one, other) = tokio::join!(reopened.hold(image), reopened.hold(image));
+    let (one, other) = (one.unwrap(), other.unwrap());
+    assert_eq!(fs::read(&one.path).unwrap(), b"an image");
+    assert_eq!(one.path, other.path);
+}
+
+/// Creates that find an image still to be checked or fetched wait for
+/// that work alone: once it is done, none waits for another's copy.
+#[tokio::test(flavor = "multi_thread")]
+async fn creates_waiting_for_a_check_or_fetch_never_wait_for_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let store = std::sync::Arc::new(store);
+    let kept = dir.path().join("rootfs");
+    {
+        let cache = Cache::open(kept.clone(), WEEK, Ownership::detached()).unwrap();
+        drop(cache.get(image, &*store).await.unwrap());
+    }
+
+    // A kept image, unchecked, wanted by two creates queued behind a
+    // removal's look at it.
+    let cache = std::sync::Arc::new(Cache::open(kept, WEEK, Ownership::detached()).unwrap());
+    let removal = cache.locks(image).file.write_owned().await;
+    let holds: Vec<_> = (0..2)
+        .map(|_| {
+            let cache = std::sync::Arc::clone(&cache);
+            tokio::spawn(async move { cache.hold(image).await })
+        })
         .collect();
-    assert_eq!(names.len(), 1, "{names:?}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(removal);
+    let mut held = Vec::new();
+    for hold in holds {
+        held.push(patient(hold).await.expect("checked and kept"));
+    }
+
+    // An image to fetch, wanted by two creates at once.
+    let fresh = std::sync::Arc::new(
+        Cache::open(dir.path().join("fresh"), WEEK, Ownership::detached()).unwrap(),
+    );
+    let locks = fresh.locks(image);
+    let work = locks.work.lock().await;
+    let gets: Vec<_> = (0..2)
+        .map(|_| {
+            let (cache, store) = (std::sync::Arc::clone(&fresh), std::sync::Arc::clone(&store));
+            tokio::spawn(async move { cache.get(image, &*store).await })
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(work);
+    for get in gets {
+        held.push(patient(get).await.expect("fetched once"));
+    }
+    assert_eq!(images_in(&dir.path().join("fresh")), 1);
+    for held in &held {
+        assert_eq!(fs::read(&held.path).unwrap(), b"an image");
+    }
+}
+
+/// What `task` ends with, which must be soon.
+async fn patient<T>(task: tokio::task::JoinHandle<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("waits for no copy")
+        .unwrap()
 }
 
 #[tokio::test]
@@ -165,20 +279,99 @@ async fn unused_images_retire_unless_kept_or_in_use() {
         panic!()
     };
     for image in [kept, held, old] {
-        age(&cache.path(image), WEEK + Duration::from_secs(60));
+        age_use(&cache, image, WEEK + Duration::from_secs(60));
     }
     let holding = cache.get(held, &NoStore).await.unwrap();
     // Getting it marked it used: age it again while it is held.
-    age(&holding.path, WEEK + Duration::from_secs(60));
+    age_use(&cache, held, WEEK + Duration::from_secs(60));
     let keep: HashSet<_> = [kept].into();
     let removed = cache.retire(&keep, SystemTime::now()).await;
     assert_eq!(removed, vec![old]);
-    assert!(!cache.has(old) && !cache.path(old).exists());
+    assert!(!cache.has(old) && !cache.path(old).exists() && !cache.mark(old).exists());
     for image in [recent, kept, held] {
         assert!(cache.has(image) && cache.path(image).exists());
     }
     drop(holding);
     assert_eq!(cache.retire(&keep, SystemTime::now()).await, vec![held]);
+}
+
+/// Fetching a sandbox's disk over its image hashes the image once per
+/// version of its file's metadata: using the image must not touch it, or
+/// every create made the next fetch download the whole disk.
+#[tokio::test]
+async fn using_an_image_never_changes_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let cache = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    drop(cache.get(image, &store).await.unwrap());
+    let path = cache.path(image);
+    age(&path, Duration::from_secs(3600));
+    let before = identity(&path);
+    for _ in 0..3 {
+        drop(cache.get(image, &store).await.unwrap());
+        drop(cache.hold(image).await.unwrap());
+    }
+    let reopened = Cache::open(dir.path().join("rootfs"), WEEK, Ownership::detached()).unwrap();
+    drop(reopened.hold(image).await.unwrap());
+    assert_eq!(identity(&path), before);
+    // The use is still counted, on the mark.
+    let marked = fs::metadata(reopened.mark(image))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert!(SystemTime::now().duration_since(marked).unwrap() < Duration::from_secs(60));
+    assert_eq!(
+        reopened.retire(&HashSet::new(), SystemTime::now()).await,
+        Vec::<ImageId>::new(),
+        "used just now"
+    );
+}
+
+/// An image an earlier agent left without a use mark was last used when
+/// its file was last modified, which is how that agent kept the time.
+#[tokio::test]
+async fn an_image_without_a_use_mark_ages_from_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let rootfs = dir.path().join("rootfs");
+    fs::create_dir_all(&rootfs).unwrap();
+    let mut images = Vec::new();
+    for bytes in [&b"old"[..], b"recent"] {
+        let image = ImageId(*blake3::hash(bytes).as_bytes());
+        fs::write(rootfs.join(format!("{image}.ext4")), bytes).unwrap();
+        images.push(image);
+    }
+    let [old, recent] = images[..] else { panic!() };
+    age(
+        &rootfs.join(format!("{old}.ext4")),
+        WEEK + Duration::from_secs(60),
+    );
+    let cache = Cache::open(rootfs, WEEK, Ownership::detached()).unwrap();
+    assert_eq!(
+        cache.retire(&HashSet::new(), SystemTime::now()).await,
+        vec![old]
+    );
+    assert!(cache.hold(recent).await.is_some());
+}
+
+/// A use mark whose image is gone (a removal stopped between the two) or
+/// that names no image is removed when the cache opens.
+#[tokio::test]
+async fn marks_without_their_image_are_removed_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, image) = stored(dir.path(), b"an image").await;
+    let rootfs = dir.path().join("rootfs");
+    let cache = Cache::open(rootfs.clone(), WEEK, Ownership::detached()).unwrap();
+    drop(cache.get(image, &store).await.unwrap());
+    let gone = ImageId(*blake3::hash(b"gone").as_bytes());
+    fs::write(cache.mark(gone), b"").unwrap();
+    fs::write(rootfs.join("used").join("not-an-image"), b"").unwrap();
+    let reopened = Cache::open(rootfs.clone(), WEEK, Ownership::detached()).unwrap();
+    let names: Vec<_> = fs::read_dir(rootfs.join("used"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(names, [image.to_string()]);
+    assert!(reopened.hold(image).await.is_some());
 }
 
 #[tokio::test]

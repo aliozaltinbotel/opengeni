@@ -84,6 +84,8 @@ export const ANALYTICS_MODEL_PROVIDERS = [
   "opper",
   "workspace-opper",
   "organization-opper",
+  "organization-openai",
+  "organization-azure-openai",
   "registry",
 ] as const;
 export const AnalyticsModelProvider = /* @__PURE__ */ defineSchema(() =>
@@ -143,6 +145,8 @@ export const TOOL_FAMILY_INTEGRATION_DOMAINS = [
   "googleapis.com",
   // Curated catalog MCP hosts.
   "gmailmcp.googleapis.com",
+  "drivemcp.googleapis.com",
+  "calendarmcp.googleapis.com",
   "mcp.slack.com",
   "api.mobbin.com",
   "mcp.linear.app",

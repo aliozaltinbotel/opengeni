@@ -30,7 +30,91 @@ export type DesktopCapability =
   /** Menu bar and keyboard commands for the web app to carry out. */
   | "commands"
   /** A shortcut sends the window the person is looking at into the composer. */
-  | "appShots";
+  | "appShots"
+  /** The web app lists its actions and keys; the shell builds the menu bar from them. */
+  | "menuActions"
+  /** The app reports a new version it found, and installs it on request. */
+  | "updates"
+  /** Record the audio other apps play (a meeting's other participants) as its own track. */
+  | "systemAudio"
+  /** Notice when a call app starts using the microphone, and offer to record the meeting. */
+  | "meetingDetection"
+  /** What Opengeni may do on this computer: switches the app enforces, and the microphone. */
+  | "computerCapabilities"
+  /** A still of the window's page, taken without a prompt (for feedback reports). */
+  | "captureWindow";
+
+export type DesktopSystemAudioErrorCode =
+  /** This computer, its OS version or this app build can't record other apps' audio. */
+  | "unavailable"
+  /** The person hasn't allowed recording other apps' audio. */
+  | "permission_denied"
+  /** Linux: no PulseAudio or PipeWire sound server to record from. */
+  | "sound_server_unavailable"
+  /** The capture failed to start or stopped unexpectedly. */
+  | "capture_failed";
+
+export interface DesktopSystemAudioError {
+  code: DesktopSystemAudioErrorCode;
+  /** A plain English sentence for people. */
+  message: string;
+  /** Technical detail for logs. */
+  detail?: string;
+}
+
+/** Call detection as the web app shows it in settings. */
+export interface DesktopMeetingDetectionStatus {
+  /** The person's switch: offer to record when a call starts. */
+  enabled: boolean;
+  /** This computer, its OS version and this app build can tell when a call starts. */
+  available: boolean;
+  /** Why detection isn't working right now, in a sentence for its row. */
+  problem?: string;
+}
+
+/**
+ * What the person chose on one of the app's meeting notifications: record the
+ * call an app just started, or stop recording because the call ended. `app`
+ * is the call app's name ("Zoom", "Google Chrome"); `title` suggests a name
+ * for the meeting.
+ */
+export type DesktopMeetingRequest =
+  | { kind: "record"; app: string; title: string }
+  | { kind: "stop"; app: string };
+
+/**
+ * The app's own updates as the web app shows them. `downloading` means a new
+ * version was found and is on its way; `ready` means it is downloaded and
+ * installs on restart. `restartWhenReady` is set once the person asked to
+ * update, so the app restarts by itself when the download ends.
+ */
+export type DesktopUpdateState =
+  | { kind: "none" }
+  | {
+      kind: "downloading";
+      version: string;
+      /** 0 to 100, or null before the download reports progress. */
+      percent: number | null;
+      restartWhenReady: boolean;
+    }
+  | { kind: "ready"; version: string; restartWhenReady: boolean };
+
+/** Which menu bar section shows an action. */
+export type DesktopMenuSection = "file" | "view" | "go" | "chat" | "help";
+
+/** One web app action as the desktop menu bar shows it. */
+export interface DesktopMenuAction {
+  /** Sent back through `menuActions.onAction` when the item or its key is used. */
+  id: string;
+  label: string;
+  section: DesktopMenuSection;
+  /**
+   * The key the item shows and owns, in Electron accelerator syntax
+   * ("CmdOrCtrl+Shift+O"). Other keys for the same action stay with the page.
+   */
+  accelerator: string | null;
+  enabled: boolean;
+}
 
 /**
  * What the app's menus and shortcuts ask the web app to do. A page that does
@@ -150,6 +234,85 @@ export type DesktopAppShotResult =
       message: string;
     };
 
+/**
+ * What the person lets Opengeni do on this computer, kept by the desktop app
+ * and enforced there: a switch that is off stops the use, not only its
+ * display. Each is on until the person turns it off, so nothing that worked
+ * before stops; the system permission each needs is asked for only when the
+ * person turns it on or first uses it.
+ */
+export interface DesktopComputerSettings {
+  /**
+   * Agents may see and control the screen of this computer (computer use).
+   * Off: the app's agent shows no screen and sends no input.
+   */
+  screenControl: boolean;
+  /**
+   * The Opengeni Browser extension in Chrome may reach this computer's agent,
+   * so agents can work in the person's own Chrome. Off: the agent removes its
+   * bridge, and the extension can't reach it.
+   */
+  browserExtension: boolean;
+  /** Dictation and voice chats may use the microphone. Off: the app refuses it. */
+  microphone: boolean;
+}
+
+/** The system's answer about a permission; `unknown` where the system has no such question. */
+export type DesktopSystemPermission = "granted" | "denied" | "notDetermined" | "unknown";
+
+export interface DesktopComputerCapabilities {
+  settings: DesktopComputerSettings;
+  /** The system's answer about the microphone for this app. */
+  microphone: DesktopSystemPermission;
+  /**
+   * This computer was connected with screen control, so turning
+   * `screenControl` on needs nothing more than the system's permissions.
+   * False: turning it on connects again with screen control.
+   */
+  screenControlConnected: boolean;
+  /**
+   * Switches the app can't enforce here, e.g. when a separately installed agent
+   * service serves this computer rather than the app's own agent, or an older
+   * agent that doesn't honour the switch.
+   */
+  unavailable: (keyof DesktopComputerSettings)[];
+  /**
+   * What went wrong with a switch, in a sentence for its row: a change that
+   * couldn't be saved or applied, settings that couldn't be read, or an agent
+   * too old to honour it. Absent from older apps.
+   */
+  problems?: Partial<Record<keyof DesktopComputerSettings, string>>;
+}
+
+/** A still of the desktop window's page: PNG bytes, base64-encoded. */
+export interface DesktopWindowCapture {
+  contentType: "image/png";
+  base64: string;
+  width: number;
+  height: number;
+}
+
+/**
+ * Other apps' audio, as mono float samples; the app leaves its own sounds out.
+ * Part of the desktop bridge, or on its own as `window.opengeniSystemAudio` in
+ * any app that hosts Opengeni pages (see {@link getDesktopSystemAudio}).
+ */
+export interface DesktopSystemAudio {
+  /**
+   * Start recording. Resolves once audio flows; rejects with a
+   * {@link DesktopSystemAudioError}. Starting again ends the page's previous
+   * capture.
+   */
+  start(): Promise<{ captureId: string; sampleRate: number }>;
+  stop(captureId: string): Promise<void>;
+  /** Samples arrive about ten times a second, silence included. */
+  onSamples(listener: (captureId: string, samples: Float32Array) => void): Unsubscribe;
+  /** The capture ended: stopped (error null) or failed. */
+  onEnded(
+    listener: (captureId: string, error: DesktopSystemAudioError | null) => void,
+  ): Unsubscribe;
+}
+
 /** `window.opengeniDesktop` inside a desktop app. */
 export interface DesktopBridge {
   readonly version: number;
@@ -157,6 +320,13 @@ export interface DesktopBridge {
   readonly capabilities: readonly DesktopCapability[];
   /** The shell's product name, e.g. "Opengeni". */
   readonly productName: string;
+  /** The app's own version, e.g. "0.1.29". Absent from older apps. */
+  readonly appVersion?: string;
+  /**
+   * A PNG of the page in the window as it is now, at the screen's pixel
+   * density, or null when nothing is shown. With the `captureWindow` capability.
+   */
+  captureWindow?(): Promise<DesktopWindowCapture | null>;
   readonly accounts: {
     list(): Promise<DesktopAccountsSnapshot>;
     /** Show another account in the window. */
@@ -193,6 +363,13 @@ export interface DesktopBridge {
     /** Carry out menu and shortcut commands; only the newest listener receives them. */
     onCommand(listener: (command: DesktopCommand) => void): Unsubscribe;
   };
+  /** The menu bar's web app actions. With the `menuActions` capability. */
+  readonly menuActions?: {
+    /** Replace the actions the menu bar shows. The shell keeps its own items (accounts, zoom, quit). */
+    set(actions: DesktopMenuAction[]): void;
+    /** Carry out an action chosen from the menu or by its key; only the newest listener receives them. */
+    onAction(listener: (id: string) => void): Unsubscribe;
+  };
   /** Follow the web app's appearance, so window materials and controls match it. */
   setAppearance(appearance: "light" | "dark" | "system"): void;
   /** App-shots. With the `appShots` capability. */
@@ -213,6 +390,80 @@ export interface DesktopBridge {
     /** Settings, permissions or the shortcut's state changed. */
     onChange(listener: () => void): Unsubscribe;
   };
+  /** The app's own updates. With the `updates` capability. */
+  readonly updates?: {
+    state(): Promise<DesktopUpdateState>;
+    /**
+     * Install the update the app found: restart into it now when it is
+     * downloaded, otherwise finish the download and then restart.
+     */
+    install(): Promise<void>;
+    onChange(listener: (state: DesktopUpdateState) => void): Unsubscribe;
+  };
+  /**
+   * Other apps' audio, as mono float samples. With the `systemAudio`
+   * capability. The app leaves its own sounds out.
+   */
+  readonly systemAudio?: DesktopSystemAudio;
+  /**
+   * Call detection. With the `meetingDetection` capability. While on, the
+   * app shows a notification when a call app (Zoom, Teams, Slack, Meet in a
+   * browser) starts using the microphone, and another when the call it is
+   * recording ends.
+   */
+  readonly meetingDetection?: {
+    status(): Promise<DesktopMeetingDetectionStatus>;
+    update(change: { enabled?: boolean }): Promise<DesktopMeetingDetectionStatus>;
+    /**
+     * Tell the app whether this page is recording a meeting, so it doesn't
+     * offer to record another and can offer to stop when the call ends.
+     */
+    setRecording(recording: boolean): void;
+    /**
+     * The person chose a notification's action. The window comes to the
+     * front first. Only the newest listener receives them.
+     */
+    onRequest(listener: (request: DesktopMeetingRequest) => void): Unsubscribe;
+    /** The switch or its state changed. */
+    onChange(listener: () => void): Unsubscribe;
+  };
+  /** What Opengeni may do on this computer. With the `computerCapabilities` capability. */
+  readonly computerCapabilities?: {
+    status(): Promise<DesktopComputerCapabilities>;
+    /** Turn switches on or off; the app applies them at once (restarting its agent if needed). */
+    update(change: Partial<DesktopComputerSettings>): Promise<DesktopComputerCapabilities>;
+    /**
+     * Ask for the microphone: the system's question while it hasn't been
+     * answered, otherwise the system's settings page for it.
+     */
+    requestMicrophone(): Promise<DesktopComputerCapabilities>;
+    /** Switches or the system's answers changed. */
+    onChange(listener: () => void): Unsubscribe;
+  };
+}
+
+/**
+ * The global an app's preload defines when it records other apps' audio for
+ * the Opengeni pages it shows, without being an Opengeni desktop shell: an
+ * Electron app that embeds Opengeni's meetings. `@opengeni/desktop` has the
+ * main-process side and the preload helper that defines it.
+ */
+export const DESKTOP_SYSTEM_AUDIO_GLOBAL = "opengeniSystemAudio";
+
+/** Other apps' audio from the app this page runs in, or null outside one that can record it. */
+export function getDesktopSystemAudio(
+  bridge: DesktopBridge | null = getDesktopBridge(),
+): DesktopSystemAudio | null {
+  if (bridge?.capabilities.includes("systemAudio") && bridge.systemAudio) return bridge.systemAudio;
+  const candidate = (globalThis as Record<string, unknown>)[DESKTOP_SYSTEM_AUDIO_GLOBAL];
+  if (!candidate || typeof candidate !== "object") return null;
+  const audio = candidate as Partial<DesktopSystemAudio>;
+  return typeof audio.start === "function" &&
+    typeof audio.stop === "function" &&
+    typeof audio.onSamples === "function" &&
+    typeof audio.onEnded === "function"
+    ? (audio as DesktopSystemAudio)
+    : null;
 }
 
 /** The bridge when the page runs inside a desktop app, else null. */
@@ -247,13 +498,32 @@ export const DESKTOP_IPC = {
   computerDisconnect: "og:computer:disconnect",
   computerChanged: "og:computer:changed",
   openExternal: "og:open-external",
+  captureWindow: "og:capture-window",
   command: "og:command",
+  menuActionsSet: "og:menu-actions:set",
+  menuAction: "og:menu-action",
   appearanceSet: "og:appearance:set",
   appShotsStatus: "og:app-shots:status",
   appShotsUpdate: "og:app-shots:update",
   appShotsRequestPermission: "og:app-shots:request-permission",
   appShotsCaptured: "og:app-shots:captured",
   appShotsChanged: "og:app-shots:changed",
+  updatesState: "og:updates:state",
+  updatesInstall: "og:updates:install",
+  updatesChanged: "og:updates:changed",
+  systemAudioStart: "og:system-audio:start",
+  systemAudioStop: "og:system-audio:stop",
+  systemAudioSamples: "og:system-audio:samples",
+  systemAudioEnded: "og:system-audio:ended",
+  meetingDetectionStatus: "og:meeting-detection:status",
+  meetingDetectionUpdate: "og:meeting-detection:update",
+  meetingDetectionRecording: "og:meeting-detection:recording",
+  meetingDetectionRequest: "og:meeting-detection:request",
+  meetingDetectionChanged: "og:meeting-detection:changed",
+  capabilitiesStatus: "og:capabilities:status",
+  capabilitiesUpdate: "og:capabilities:update",
+  capabilitiesRequestMicrophone: "og:capabilities:request-microphone",
+  capabilitiesChanged: "og:capabilities:changed",
   welcomeState: "og:welcome:state",
   welcomeSignIn: "og:welcome:sign-in",
   welcomeCancel: "og:welcome:cancel",
@@ -273,6 +543,8 @@ export interface WelcomeUnreachable {
 export interface WelcomeState {
   productName: string;
   defaultServerUrl: string;
+  /** The page offers "Use another server"; an app made for one server doesn't. */
+  otherServers?: boolean;
   /** The server a browser sign-in is waiting on. */
   pendingServer: string | null;
   error: string | null;

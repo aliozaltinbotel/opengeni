@@ -6,11 +6,10 @@ import type {
   Session,
 } from "@opengeni/contracts";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   scheduledTaskForGrant,
   scheduledTaskRunForGrant,
-  scheduledConnectionSurfaceEligibility,
   validateScheduledTaskMachineTarget,
   validateScheduledTaskTarget,
 } from "@opengeni/core";
@@ -71,22 +70,6 @@ function task(): ScheduledTask {
 afterEach(() => mock.restore());
 
 describe("scheduled existing-session authorization", () => {
-  test("empty first-party permissions disable publication while legacy null inherits defaults", () => {
-    const target = {
-      firstPartyMcpTools: ["editable_artifact_export", "editable_artifact_export_status"],
-      firstPartyMcpPermissions: [],
-    } satisfies Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions">;
-    expect(
-      scheduledConnectionSurfaceEligibility(testSettings(), target).googleDrivePublicationEnabled,
-    ).toBe(false);
-    expect(
-      scheduledConnectionSurfaceEligibility(testSettings(), {
-        ...target,
-        firstPartyMcpPermissions: null,
-      }).googleDrivePublicationEnabled,
-    ).toBe(true);
-  });
-
   test("redacts target and run session IDs without sessions:control", () => {
     expect(scheduledTaskForGrant(task(), manageOnly).targetSessionId).toBeNull();
     expect(scheduledTaskForGrant(task(), manageAndControl).targetSessionId).toBe(targetSessionId);

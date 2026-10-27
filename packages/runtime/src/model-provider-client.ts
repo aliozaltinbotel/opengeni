@@ -1,5 +1,7 @@
 import {
   configuredModels,
+  azureOpenAIDeploymentIdentityAvailable,
+  deploymentAzureEntraCredential,
   opperMaxOutputTokens,
   type ResolvedModelProvider,
   type Settings,
@@ -21,6 +23,11 @@ import {
   withModelTransportObservation,
 } from "@opengeni/network/responses-websocket";
 import {
+  AzureEntraTokenError,
+  sharedAzureEntraAccessTokenSource,
+  type AzureEntraAccessTokenSource,
+} from "@opengeni/network/azure-entra";
+import {
   XAI_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   xaiSubscriptionFetch,
 } from "@opengeni/xai-subscription";
@@ -36,6 +43,8 @@ import {
   OrganizationGatewayUnavailableError,
   OrganizationOpenRouterUnavailableError,
   OrganizationOpperUnavailableError,
+  OrganizationOpenAIUnavailableError,
+  OrganizationAzureOpenAIUnavailableError,
   WorkspaceGatewayUnavailableError,
   WorkspaceOpenRouterUnavailableError,
   WorkspaceOpperUnavailableError,
@@ -52,6 +61,7 @@ import {
   recordModelTransportStarted,
 } from "./model-preparation-diagnostics";
 import { authorizeModelSourceProviderDispatch, captureProviderRequestBody } from "./model-request-capture";
+import { observePromptCacheRequestBody } from "./prompt-cache-fingerprint";
 import { streamIdleTimeoutModelFetch } from "./model-stream-idle-timeout";
 import { withoutQuotaExhaustedRetries } from "./provider-quota";
 import {
@@ -114,6 +124,16 @@ export function buildOpenAIClientFromSettings(
 ): OpenAI {
   if (settings.openaiProvider === "azure") {
     const baseURL = settings.azureOpenaiBaseUrl ?? azureDeploymentBaseUrl(settings);
+    const identityTokenSource =
+      settings.azureOpenaiAuthMode === "managed_identity"
+        ? sharedAzureEntraAccessTokenSource({
+            source: "managed_identity",
+            clientId: settings.azureClientId,
+          })
+        : settings.azureOpenaiAuthMode === "workload_identity" ||
+            settings.azureOpenaiAuthMode === "deployment_identity"
+          ? sharedAzureEntraAccessTokenSource(deploymentAzureEntraCredential(settings)!)
+          : null;
     const apiKey = settings.azureOpenaiApiKey ?? settings.azureOpenaiAdToken ?? "azure-ad-token";
     return new ReplayableJsonOpenAI(
       {
@@ -133,7 +153,9 @@ export function buildOpenAIClientFromSettings(
             modelStreamIdlePolicy(settings),
             instrumentedModelFetch(
               providerId,
-              openAIResponsesFetch(settings),
+              identityTokenSource
+                ? azureEntraBearerFetch(openAIResponsesFetch(settings), identityTokenSource, false)
+                : openAIResponsesFetch(settings),
               settings.openaiResponsesWebSocketEnabled,
             ),
           ),
@@ -309,6 +331,16 @@ function providerClientCacheKey(
                 azureOpenaiDeployment: settings.azureOpenaiDeployment ?? null,
                 azureOpenaiApiVersion: settings.azureOpenaiApiVersion ?? null,
                 usesAdToken: Boolean(settings.azureOpenaiAdToken && !settings.azureOpenaiApiKey),
+                azureOpenaiAuthMode: settings.azureOpenaiAuthMode,
+                azureIdentity: {
+                  tenantId: settings.azureTenantId,
+                  clientId: settings.azureClientId,
+                  federatedTokenFile: settings.azureFederatedTokenFile,
+                  authorityHost: settings.azureAuthorityHost,
+                  clientSecretDigest: settings.azureClientSecret
+                    ? createHash("sha256").update(settings.azureClientSecret).digest("hex")
+                    : null,
+                },
               }
             : null,
       }),
@@ -382,12 +414,124 @@ function withoutAuthenticationHeaders(inner: typeof fetch): typeof fetch {
   }) as typeof fetch;
 }
 
+/**
+ * Send the key as Azure OpenAI's documented `api-key` header instead of the
+ * SDK's bearer, the same authentication the setup check uses, so a verified
+ * organization deployment is called exactly as it was checked.
+ */
+function azureApiKeyHeaderFetch(inner: typeof fetch): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    const authorization = headers.get("authorization");
+    if (authorization && /^bearer /iu.test(authorization)) {
+      headers.set("api-key", authorization.slice("bearer ".length));
+      headers.delete("authorization");
+    }
+    return await inner(input, { ...init, headers });
+  }) as typeof fetch;
+}
+
+/**
+ * The cached Microsoft Entra ID token source for an organization Azure OpenAI
+ * route that signs in without a key: the organization's own app, or the
+ * deployment's identity only while the operator offers it. Null when the
+ * route has no usable Entra credential, so it fails closed.
+ */
+function organizationAzureEntraTokenSource(
+  provider: ResolvedModelProvider,
+  settings: Settings,
+): AzureEntraAccessTokenSource | null {
+  const credential = provider.azureEntra;
+  if (!credential || provider.kind !== "direct-azure-organization") return null;
+  if (credential.source === "client_secret") {
+    return sharedAzureEntraAccessTokenSource({
+      tenantId: credential.tenantId,
+      clientId: credential.clientId,
+      clientSecret: credential.clientSecret,
+    });
+  }
+  const identity = azureOpenAIDeploymentIdentityAvailable(settings)
+    ? deploymentAzureEntraCredential(settings)
+    : null;
+  return identity ? sharedAzureEntraAccessTokenSource(identity) : null;
+}
+
+/**
+ * Sign each Azure OpenAI request (HTTP and the Responses WebSocket upgrade,
+ * which takes its handshake headers from this request) with a current Entra
+ * bearer token instead of the SDK's placeholder key. Tokens are renewed
+ * before they expire; a token Azure still refuses (401) is discarded so the
+ * next request signs in again, and the refusal is returned as is (model
+ * request bodies are streams, so the request itself is not resent). A
+ * credential Entra refuses answers as a 401 with the connection's
+ * reconnect guidance, so the SDK neither retries it nor reports a
+ * connection failure; a transient token failure still surfaces as one and
+ * is retried like any network error.
+ */
+function azureEntraBearerFetch(
+  inner: typeof fetch,
+  tokenSource: AzureEntraAccessTokenSource,
+  organizationCredential = true,
+): typeof fetch {
+  const send = async (
+    input: Parameters<typeof fetch>[0],
+    init: Parameters<typeof fetch>[1],
+    token: string,
+  ) => {
+    const headers = new Headers(input instanceof Request ? input.headers : undefined);
+    new Headers(init?.headers).forEach((value, name) => headers.set(name, value));
+    headers.delete("api-key");
+    headers.set("authorization", `Bearer ${token}`);
+    return await inner(input, { ...init, headers });
+  };
+  return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    let token: string;
+    try {
+      token = await tokenSource();
+    } catch (error) {
+      if (organizationCredential && error instanceof AzureEntraTokenError && !error.retryable)
+        return azureEntraRefusedResponse();
+      throw error;
+    }
+    const response = await send(input, init, token);
+    if (response.status === 401) tokenSource.discard(token);
+    return response;
+  }) as typeof fetch;
+}
+
+function azureEntraRefusedResponse(): Response {
+  return Response.json(
+    {
+      error: {
+        message: new OrganizationAzureOpenAIUnavailableError().message,
+        type: "invalid_request_error",
+        code: "azure_entra_sign_in_refused",
+      },
+    },
+    { status: 401 },
+  );
+}
+
 export function buildProviderClient(provider: ResolvedModelProvider, settings: Settings): OpenAI {
   if (
     (provider.kind === "direct-openai-workspace" || provider.kind === "direct-azure-workspace") &&
     !provider.apiKey?.trim()
   ) {
     throw new Error("OpenAI or Azure OpenAI workspace key is unavailable");
+  }
+  // A missing or revoked organization connection fails closed; it never
+  // falls back to the deployment's own Azure or OpenAI credentials.
+  if (provider.kind === "direct-openai-organization" && !provider.apiKey?.trim()) {
+    throw new OrganizationOpenAIUnavailableError();
+  }
+  const azureEntraTokenSource = organizationAzureEntraTokenSource(provider, settings);
+  if (
+    provider.kind === "direct-azure-organization" &&
+    !provider.apiKey?.trim() &&
+    !azureEntraTokenSource
+  ) {
+    throw new OrganizationAzureOpenAIUnavailableError();
   }
   const workspaceGateway = provider.kind === "vercel-gateway-workspace";
   const scopedCredentialProvider =
@@ -430,7 +574,7 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
   if (cached) {
     return cached;
   }
-  if (scopedCredentialProvider && !provider.apiKey) {
+  if (scopedCredentialProvider && !provider.apiKey && !azureEntraTokenSource) {
     if (provider.api === "anthropic-messages")
       throw new Error(
         "Claude is not connected. Ask someone who manages this connection to connect it in Models.",
@@ -537,7 +681,15 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                   }
                 : provider.apiKey
                   ? { apiKey: provider.apiKey }
-                  : {}),
+                  : azureEntraTokenSource
+                    ? {
+                        // The SDK requires a constructor credential; every
+                        // request is re-signed with a current Entra token.
+                        apiKey: "opengeni-azure-entra",
+                        organization: null,
+                        project: null,
+                      }
+                    : {}),
               ...(provider.baseUrl ? { baseURL: provider.baseUrl } : {}),
               maxRetries: registryMaxRetries,
               ...(provider.defaultQuery ? { defaultQuery: provider.defaultQuery } : {}),
@@ -560,11 +712,22 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
                           instrumentedModelFetch(provider.id, globalThis.fetch),
                           gatewayPolicies,
                         )
-                      : instrumentedModelFetch(
-                          provider.id,
-                          openAIResponsesFetch(settings),
-                          settings.openaiResponsesWebSocketEnabled,
-                        ),
+                      : provider.kind === "direct-azure-organization"
+                        ? instrumentedModelFetch(
+                            provider.id,
+                            azureEntraTokenSource
+                              ? azureEntraBearerFetch(
+                                  openAIResponsesFetch(settings),
+                                  azureEntraTokenSource,
+                                )
+                              : azureApiKeyHeaderFetch(openAIResponsesFetch(settings)),
+                            settings.openaiResponsesWebSocketEnabled,
+                          )
+                        : instrumentedModelFetch(
+                            provider.id,
+                            openAIResponsesFetch(settings),
+                            settings.openaiResponsesWebSocketEnabled,
+                          ),
                 ),
               ),
             },
@@ -598,6 +761,7 @@ export function instrumentedModelFetch(
     await authorizeModelSourceProviderDispatch();
     await recordModelTransportStarted();
     const capture = captureProviderRequestBody(provider, input, init);
+    observePromptCacheRequestBody(init?.body);
     const started = performance.now();
     // A request whose bearer a subscription core leased is admitted by its
     // custody as the last awaited step before the fetch, then settled from

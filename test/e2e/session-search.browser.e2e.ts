@@ -10,16 +10,11 @@ import {
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import type { SessionMessageSearchResponse } from "../../packages/sdk/src/session-message-search";
 import { acquireSearchTestDatabase } from "../../packages/db/test/session-message-search-fixture";
-import {
-  freePort,
-  MemoryEventBus,
-  runCommand,
-  startProcess,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { runCommand, startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
+import { type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   chromium,
   type Browser,
@@ -257,12 +252,7 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         );
         expect(await search.evaluate((element) => element === document.activeElement)).toBe(true);
         await page.keyboard.press("Space");
-        const input = dialog.getByRole("searchbox", {
-          name: "Search session titles and messages",
-          exact: true,
-        });
-        await input.waitFor();
-        expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
+        await expectCommandMenuFocused(page);
       } finally {
         releaseDraft();
         await page.unrouteAll({ behavior: "wait" });
@@ -303,14 +293,12 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
               true,
             );
             await page.keyboard.press(key);
-            const input = dialog.getByRole("searchbox", {
-              name: "Search session titles and messages",
-              exact: true,
-            });
-            await input.waitFor();
-            expect(await input.evaluate((element) => element === document.activeElement)).toBe(
-              true,
+            await expectCommandMenuFocused(page);
+            await page.waitForFunction(
+              () =>
+                document.querySelector('[aria-label="Search sessions"]') === document.activeElement,
             );
+            await openSearchDialog(page);
           }
         } finally {
           await context.close();
@@ -713,7 +701,29 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
         if (fixture.name === "markdown-long") {
           const find = conversationFind(page);
           const scroller = page.locator("[data-og-timeline-scroller]");
-          const beforeClose = await scroller.evaluate((node) => node.scrollTop);
+          // The open Find strip sits above the timeline, so closing it gives the
+          // timeline that height back. The reader's place must not move on
+          // screen: the passage keeps its position and the timeline scrolls by
+          // exactly the height it gained, no more.
+          const readingPoint = () =>
+            scroller.evaluate((node) => {
+              const walker = node.ownerDocument.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+              let passageTop: number | null = null;
+              while (walker.nextNode()) {
+                // While Find is open the match sits in its own highlight node.
+                if (!walker.currentNode.textContent?.includes("final passage")) continue;
+                const range = node.ownerDocument.createRange();
+                range.selectNodeContents(walker.currentNode);
+                passageTop = range.getBoundingClientRect().top;
+              }
+              return {
+                passageTop,
+                scrollTop: node.scrollTop,
+                timelineTop: node.getBoundingClientRect().top,
+              };
+            });
+          const beforeClose = await readingPoint();
+          expect(beforeClose.passageTop).not.toBeNull();
           await find
             .getByRole("button", { name: "Close conversation search", exact: true })
             .click();
@@ -722,8 +732,17 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
             // Closing Find retains the bounded source excerpt. Verify both
             // scroll position and the reading point, not only scrollTop.
             await expectTextInTimelineView(page, /farneedle final passage/);
+            const afterClose = await readingPoint();
+            expect(afterClose.passageTop).not.toBeNull();
+            expect(Math.abs(afterClose.passageTop! - beforeClose.passageTop!)).toBeLessThanOrEqual(
+              2,
+            );
             expect(
-              Math.abs((await scroller.evaluate((node) => node.scrollTop)) - beforeClose),
+              Math.abs(
+                afterClose.scrollTop -
+                  beforeClose.scrollTop -
+                  (afterClose.timelineTop - beforeClose.timelineTop),
+              ),
             ).toBeLessThanOrEqual(2);
             expect(
               await page.evaluate(() => {
@@ -787,6 +806,10 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/sessions/${session.id}`);
       const scroller = page.locator("[data-og-timeline-scroller]");
       await scroller.getByText(/third-ember/).waitFor({ timeout: 30_000 });
+      // Loading a chat with nothing focused puts the cursor in its composer,
+      // so the composer is what opens Find below.
+      const composer = page.getByRole("textbox", { name: "Message the agent", exact: true });
+      await expectFocused(composer);
 
       // Keyboard entry point: Ctrl+F (Cmd+F on macOS) opens the strip.
       await page.keyboard.press("Control+f");
@@ -850,13 +873,13 @@ describe("session search browser e2e (real API + non-superuser PostgreSQL)", () 
       await waitFor(async () => (await readOrdinal()) === 2, { timeoutMs: 10_000 });
 
       // Closing the strip must not move the conversation: no scroll, and
-      // focus returns to the chat Find button.
+      // focus returns to the composer that opened it.
       const scrollBefore = await scroller.evaluate((node) => node.scrollTop);
       await find.getByRole("button", { name: "Close conversation search", exact: true }).click();
       await find.waitFor({ state: "detached" });
       const scrollAfter = await scroller.evaluate((node) => node.scrollTop);
       expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThanOrEqual(2);
-      await expectFocused(page.getByRole("button", { name: "Find in conversation", exact: true }));
+      await expectFocused(composer);
 
       // A closed strip leaves no stale target: reopening starts clean.
       await page.keyboard.press("Control+f");
@@ -1363,14 +1386,34 @@ function fillerTurns(count: number): SeededTurn[] {
 let dbRef: ReturnType<typeof createDb>["db"] | null = null;
 
 async function openSearchDialog(page: Page): Promise<Locator> {
+  // The sidebar's search button opens the command menu; full message search is
+  // its "Search messages" action.
   const button = page.getByRole("button", { name: "Search sessions", exact: true }).first();
   await button.waitFor({ timeout: 15_000 });
   await button.click();
-  const dialog = page.getByRole("dialog");
+  await commandMenu(page)
+    .getByRole("option", { name: "Search messages", exact: true })
+    .click({ timeout: 15_000 });
+  const dialog = page.getByRole("dialog", { name: "Search sessions", exact: true });
   await dialog
     .getByRole("searchbox", { name: "Search session titles and messages", exact: true })
     .waitFor({ timeout: 15_000 });
   return dialog;
+}
+
+function commandMenu(page: Page): Locator {
+  return page.getByRole("dialog", { name: "Command menu", exact: true });
+}
+
+async function expectCommandMenuFocused(page: Page): Promise<void> {
+  const input = commandMenu(page).getByRole("combobox", {
+    name: "Search chats, Sites and actions",
+    exact: true,
+  });
+  await input.waitFor();
+  expect(await input.evaluate((element) => element === document.activeElement)).toBe(true);
+  await page.keyboard.press("Escape");
+  await commandMenu(page).waitFor({ state: "hidden" });
 }
 
 function conversationFind(page: Page): Locator {

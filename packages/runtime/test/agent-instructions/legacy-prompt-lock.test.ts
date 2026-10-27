@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { FIRST_PARTY_MCP_TOOL_NAMES } from "@opengeni/contracts";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { inspectPersistentAgentInstructions } from "../../src/index";
 import { LEGACY_PROMPT_CASES } from "./legacy-cases";
 
@@ -15,40 +15,40 @@ import { LEGACY_PROMPT_CASES } from "./legacy-cases";
  */
 const LOCKED: Record<string, { chars: number; sha256: string; layers: string }> = {
   default: {
-    chars: 32853,
-    sha256: "dcc71efee71c94865b92d6bf79f83b19e8c6e2d1fb0141647dc8d2f976febaf1",
+    chars: 33910,
+    sha256: "e1e2d1c47a3d0ebbdaf5ee4c646f73a08fcb27483f77f0624b59edfdeb1ea596",
     layers: "operational_contract,persona_and_core",
   },
   environment_and_rig: {
-    chars: 33727,
-    sha256: "e5c3c6db16109879bc07cd3ca131d02ad14b63f0d0d7556ec0ed42a2b9af3e2b",
+    chars: 34784,
+    sha256: "d8e4e7da7c6fe6fbaf4b2efd63693c572850b5d66c9393591d24ce96d9e72370",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_with_marker: {
-    chars: 31443,
-    sha256: "e691bc6f43034dcbf0a517656400496470a63c85253e9d5fba5c1000cc6df325",
+    chars: 32500,
+    sha256: "9ace8534c33fb3c2c47404f4e5dad455e49d2785c17f92c8594be642e9271163",
     layers: "operational_contract,persona_and_core",
   },
   custom_template_without_marker: {
-    chars: 31443,
-    sha256: "e691bc6f43034dcbf0a517656400496470a63c85253e9d5fba5c1000cc6df325",
+    chars: 32500,
+    sha256: "9ace8534c33fb3c2c47404f4e5dad455e49d2785c17f92c8594be642e9271163",
     layers: "operational_contract,persona_and_core",
   },
   extras_without_governance: {
-    chars: 37570,
-    sha256: "1bf3cdd453cf69b61419b62377ace6afb9d9398b7ffd20c0be4f8d18957c84bd",
+    chars: 38627,
+    sha256: "b0cf1f9d95286c5e66da6bd56c2707fd2eb65c1aff4b1bc9533dfcceded78ff1",
     layers:
       "operational_contract,persona_and_core,codemode,code_search,git_bindings,workspace_memory,skill_catalog,session_instructions",
   },
   extras_with_governance: {
-    chars: 36669,
-    sha256: "5c7d7c4b477a56439489fd433a2f15ef42c7a7bb86bdf6d468dca9c2b1d23472",
+    chars: 37726,
+    sha256: "68a960b1f08d9a1b46d751fd6b836ed4163b51dc07e030b269694f66ad161651",
     layers:
       "operational_contract,persona_and_core,workspace_governance,session_instructions,codemode,code_search,workspace_memory",
   },
   selfhosted_with_bindings: {
-    chars: 32853,
-    sha256: "dcc71efee71c94865b92d6bf79f83b19e8c6e2d1fb0141647dc8d2f976febaf1",
+    chars: 33910,
+    sha256: "e1e2d1c47a3d0ebbdaf5ee4c646f73a08fcb27483f77f0624b59edfdeb1ea596",
     layers: "operational_contract,persona_and_core",
   },
 };

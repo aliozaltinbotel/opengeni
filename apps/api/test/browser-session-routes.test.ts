@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { CreateBrowserSessionRequest, type AccessGrant, type FileAsset } from "@opengeni/contracts";
 import { HTTPException } from "hono/http-exception";
 import { BrowserControlRequestError } from "@opengeni/runtime/sandbox";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 import { allowedCorsOrigin, validateInteractionRequestOrigin } from "../src/http/cors";
 import { USER_CONTENT_SECURITY_POLICY } from "../src/http/user-content";
@@ -17,6 +17,7 @@ import {
   browserScreenshotResponse,
   browserScreenshotError,
   browserTabDiagnosisError,
+  browserRouteError,
   browserCreateInput,
   withInitialView,
 } from "../src/routes/browser-sessions";
@@ -707,6 +708,79 @@ function httpStatus(operation: () => unknown): number | "resolved" {
 }
 
 describe("BrowserSession route discipline", () => {
+  test("a controller resource that is gone for good is a conflict with its guidance, not a retry", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const reconnected = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message:
+        "The browser profile reconnected to Opengeni, so this browser session can no longer control it; open a new browser session",
+      retryable: false,
+    });
+    const transient = new BrowserControlRequestError(503, {
+      code: "resource_unavailable",
+      message: "browser controller is stopping",
+      retryable: true,
+    });
+    app.get("/v1/test/reconnected", () => {
+      throw browserTabDiagnosisError(reconnected);
+    });
+    const response = await app.request("http://localhost/v1/test/reconnected", {
+      headers: { "x-opengeni-correlation-id": "reconnected-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: reconnected.error.message,
+        retryable: false,
+        requestId: "reconnected-request",
+      },
+    });
+    // A transient outage keeps its retryable envelope.
+    expect(browserTabDiagnosisError(transient)).toBe(transient);
+  });
+
+  test("a controller change of unknown outcome stays unknown in the API envelope", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const uncertain = new BrowserControlRequestError(409, {
+      code: "outcome_unknown",
+      message:
+        "The browser profile's connection ended while closing this tab, so whether it closed is unknown; list the tabs again once the profile is connected",
+      retryable: false,
+    });
+    app.delete("/v1/test/close", () => {
+      throw browserRouteError(uncertain);
+    });
+    const response = await app.request("http://localhost/v1/test/close", {
+      method: "DELETE",
+      headers: { "x-opengeni-correlation-id": "close-request" },
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({
+      error: {
+        status: 409,
+        code: "conflict",
+        message: uncertain.error.message,
+        retryable: false,
+        outcomeUnknown: true,
+        requestId: "close-request",
+      },
+    });
+  });
+
   test("preserves a definite tab diagnosis in GET and DOM-read POST API envelopes", async () => {
     const app = createApp({
       settings: testSettings(),
@@ -1397,14 +1471,17 @@ describe("BrowserSession route discipline", () => {
       '"/v1/workspaces/:workspaceId/browser-sessions/:browserSessionId/end"',
     );
     const route = source.slice(start, source.indexOf("async function withBrowserPlacement", start));
-    const gone = route.indexOf(
-      "browserControllerGone(grant, workspaceId, record.session.placement)",
-    );
+    const gone = route.indexOf("browserControllerGone(");
     expect(gone).toBeGreaterThan(route.indexOf("const binding = record.session.controller"));
     // The gone check runs before any controller dispatch, and the server-side
     // completion keeps the bound generation so that controller stays fenced.
     expect(gone).toBeLessThan(route.indexOf("dispatchBrowserSessionOperation"));
     expect(gone).toBeLessThan(route.indexOf("withBrowserPlacement("));
+    // Pinned to the session's stored profile workspace and bound Chrome
+    // generation, so a restarted, deleted or unshared profile counts as gone.
+    const check = route.slice(gone, route.indexOf("completeBrowserSessionEnd", gone));
+    expect(check).toContain("record.deviceWorkspaceId");
+    expect(check).toContain("binding.placementInstanceId");
     const completion = route.slice(gone, route.indexOf("requireSourceSession", gone));
     expect(completion).toContain(
       "expectedControllerGeneration: binding?.controllerGeneration ?? null",

@@ -2,12 +2,9 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test }
 import { signDelegatedAccessToken, type Session } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import { bootstrapWorkspace, createDb, createSession, type DbClient } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
 const secret = "session-effective-tools-route-test";
@@ -133,6 +130,49 @@ describe("effectiveTools on session responses (PostgreSQL)", () => {
       expect(rows.find((row) => row.id === created.id)?.effectiveTools).toEqual(
         created.effectiveTools,
       );
+    }
+
+    // The admin action forwards these exact query parameters. Compact scanning
+    // must avoid response enrichment, not merely strip tools after computing it.
+    const fullPageResponse = await app.request(`${path}?view=page&limit=50`, {
+      headers: { authorization },
+    });
+    expect(fullPageResponse.status).toBe(200);
+    const fullPageText = await fullPageResponse.text();
+    const fullPage = JSON.parse(fullPageText) as { pinned: Session[]; sessions: Session[] };
+    const workspaceReadsForSummary = spyOn(opengeniDb, "requireWorkspace");
+    try {
+      const compactResponse = await app.request(`${path}?view=page&projection=summary&limit=50`, {
+        headers: { authorization },
+      });
+      expect(compactResponse.status).toBe(200);
+      const compactText = await compactResponse.text();
+      const compact = JSON.parse(compactText) as {
+        projection: string;
+        pinned: Array<{ id: string; title: string }>;
+        sessions: Array<{ id: string; title: string }>;
+      };
+      expect(compact.projection).toBe("summary");
+      const identity = (row: { id: string; title: string }) => ({ id: row.id, title: row.title });
+      expect(compact.pinned.map(identity)).toEqual(fullPage.pinned.map(identity));
+      expect(compact.sessions.map(identity)).toEqual(fullPage.sessions.map(identity));
+      for (const row of [...compact.pinned, ...compact.sessions]) {
+        expect(Object.hasOwn(row, "effectiveTools")).toBe(false);
+        expect(Object.hasOwn(row, "agent")).toBe(false);
+      }
+      expect(workspaceReadsForSummary.mock.calls).toHaveLength(0);
+      expect(Buffer.byteLength(compactText)).toBeLessThan(Buffer.byteLength(fullPageText));
+      if (process.env.OPENGENI_BENCH_SESSION_SUMMARY === "1") {
+        console.log(
+          JSON.stringify({
+            fixtureSessions: compact.pinned.length + compact.sessions.length,
+            fullResponseBytes: Buffer.byteLength(fullPageText),
+            compactResponseBytes: Buffer.byteLength(compactText),
+          }),
+        );
+      }
+    } finally {
+      workspaceReadsForSummary.mockRestore();
     }
 
     // "none" freezes no bundled guides unless the request lists them; "all"

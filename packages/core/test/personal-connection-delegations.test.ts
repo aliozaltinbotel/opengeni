@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { acquireBlankTestDatabase, testSettings } from "@opengeni/testing";
+import { acquireBlankTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import type { ConnectionMetadata, McpPersonalConnectionDelegation } from "@opengeni/contracts";
 import {
@@ -27,8 +28,6 @@ import { migrate } from "@opengeni/db/migrate";
 import {
   freezePersonalConnectionDelegations,
   listOwnConnectionAccountsForGrant,
-  googleDrivePublicationDelegationFromVisibleConnections,
-  personalAtlassianDelegationsFromVisibleConnections,
   personalConnectionDelegationSourceForGrant,
   personalConnectionDelegationsFromParent,
   personalConnectionDelegationsFromVisibleConnections,
@@ -1136,29 +1135,6 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([social]);
   });
 
-  test("retired native Atlassian accounts never become execution authority", () => {
-    const authorityId = crypto.randomUUID();
-    const atlassian = googleDriveConnection({
-      id: crypto.randomUUID(),
-      providerDomain: "api.atlassian.com",
-      grantedScopes: [],
-      metadata: {},
-      authorityId,
-    });
-    expect(
-      personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [atlassian],
-      }),
-    ).toEqual([]);
-    expect(
-      personalAtlassianDelegationsFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [{ ...atlassian, authorityId: null }],
-      }),
-    ).toEqual([]);
-  });
-
   test("children drop native Atlassian authority while retaining the hosted MCP binding", () => {
     const hosted = {
       ...personalServer,
@@ -1192,103 +1168,33 @@ describe("personal MCP connection delegation", () => {
     ).toEqual([hostedGrant]);
   });
 
-  test("freezes, inherits, and composes one exact Google Drive publication connection", async () => {
-    const drive = googleDriveConnection();
-    const delegation = googleDrivePublicationDelegationFromVisibleConnections({
-      subjectId: "user:owner",
-      connections: [drive],
-    });
-    expect(delegation).toEqual({
-      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      connectionId: drive.id,
-      originWorkspaceId: drive.workspaceId,
-      ownerSubjectId: "user:owner",
-      providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
-      kind: "oauth2",
-      // The exact destination frozen at acceptance: a later
-      // connection-settings change can never redirect an already-accepted
-      // turn's publication.
-      outputDestination: {
-        folderId: "folder-1",
-        folderName: "Published",
-        driveId: null,
-        location: "my_drive",
-        selectedAt: "2026-08-14T00:00:00.000Z",
-      },
-    });
-    const inherited = personalConnectionDelegationsFromParent({
-      servers: [],
-      parentDelegations: [delegation!],
-    });
-    expect(inherited).toEqual([delegation]);
-    const received: ResolveConnectionCredentialInput[] = [];
-    const resolver = withFrozenPersonalConnectionDelegations({
-      settings: { mcpServers: [] },
-      personalConnectionDelegations: inherited,
-      ownerHasWorkspaceMembership: async (subjectId) => subjectId === "user:owner",
-      resolveCredential: async (input) => {
-        received.push(input);
-        return {
-          status: "ok",
-          headers: { authorization: "Bearer exact-frozen-drive" },
-          connectionId: input.connectionRef.connectionId!,
-        };
-      },
-    });
-    await resolver({
-      workspaceId: drive.workspaceId,
-      subjectId: "worker:first-party-mcp",
-      serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-      toolName: "google_drive_publish_file",
-      destinationUrl: "https://www.googleapis.com/upload/drive/v3/files",
-      connectionRef: {
-        providerDomain: GOOGLE_DRIVE_PROVIDER_DOMAIN,
-        kind: "oauth2",
-        subjectScope: "subject",
-        scopes: [GOOGLE_DRIVE_FILE_SCOPE],
-      },
-    });
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({
-      subjectId: "user:owner",
-      connectionRef: { connectionId: drive.id },
-    });
-  });
-
-  test("fails closed when Google Drive publication authority is missing or ambiguous", () => {
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [
-          googleDriveConnection({ grantedScopes: [] }),
-          googleDriveConnection({ subjectId: "user:other" }),
+  test("an explicit retired publication selection is rejected before reading credentials", async () => {
+    await expect(
+      freezePersonalConnectionDelegations({
+        db: {} as Parameters<typeof freezePersonalConnectionDelegations>[0]["db"],
+        workspaceId: "workspace-1",
+        settings: { mcpServers: [] },
+        tools: [],
+        source: { kind: "subject", subjectId: "user:owner", accountId: "account-1" },
+        authoritySelections: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: "11111111-1111-4111-8111-111111111111",
+          },
         ],
       }),
-    ).toBeNull();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [googleDriveConnection(), googleDriveConnection()],
-      }),
-    ).toBeNull();
-    const selected = googleDriveConnection();
-    const other = googleDriveConnection();
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [selected],
-      }),
-    ).toMatchObject({ connectionId: selected.id, originWorkspaceId: selected.workspaceId });
-    expect(
-      googleDrivePublicationDelegationFromVisibleConnections({
-        subjectId: "user:owner",
-        connections: [other, selected],
-        authoritySelection: {
-          serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
-          connectionId: selected.id,
-        },
-      }),
-    ).toMatchObject({ connectionId: selected.id });
+    ).rejects.toMatchObject({
+      diagnostic: {
+        reason: "selected_account_unavailable",
+        accounts: [
+          {
+            serverId: GOOGLE_DRIVE_PUBLICATION_SERVER_ID,
+            connectionId: "11111111-1111-4111-8111-111111111111",
+            reason: "connector_unavailable",
+          },
+        ],
+      },
+    });
   });
 
   test("pins every caller surface to the same exact owner, UUID, provider, and kind", async () => {

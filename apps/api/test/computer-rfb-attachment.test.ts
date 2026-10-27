@@ -6,7 +6,8 @@ import {
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
 import type { ComputerSessionControlRecord } from "@opengeni/db";
-import { MemoryEventBus, testSettings } from "@opengeni/testing";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { InteractionFrameProxyTransport } from "../src/interaction-frame-proxy";
@@ -296,7 +297,7 @@ async function attach(instance: Hono, targetId = "screen-1") {
   );
 }
 
-function input(instance: Hono) {
+function input(instance: Hono, frameId = "frame-painted-1") {
   return instance.request(
     `https://api.example.test/v1/workspaces/${workspaceId}/computer-sessions/${computerSessionId}/actions`,
     {
@@ -308,13 +309,23 @@ function input(instance: Hono) {
         expectedTargetGeneration: "target-1",
         expectedObservationId: null,
         expectedFrameId: "frame-painted-1",
-        action: { type: "pointer", frameId: "frame-painted-1", action: "click", x: 10, y: 20 },
+        action: { type: "pointer", frameId, action: "click", x: 10, y: 20 },
       }),
     },
   );
 }
 
 describe("registered canonical ComputerSession attachment and action authority", () => {
+  test("an invalid action body names the rejected field", async () => {
+    const instance = app();
+    const response = await input(instance, "frame-painted-l");
+    expect(response.status).toBe(400);
+    expect(await response.text()).toBe(
+      "invalid request body: expectedFrameId: pointer action frameId must match expectedFrameId",
+    );
+    expect(dispatchedActions).toEqual([]);
+  });
+
   test("app posture rechecks attached-machine screen consent while retaining read permission", async () => {
     permissions = ["sessions:read", "sessions:control"];
     attachedPlacement = true;

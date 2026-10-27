@@ -2,7 +2,7 @@ import { afterAll, beforeAll, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import { createDocumentActivities } from "../../../apps/worker/src/activities/documents";
 import type { ControlActivityServices } from "../../../apps/worker/src/activities/types";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import {
   createDb,
   getKnowledgeEntry,

@@ -49,11 +49,13 @@ export interface InteractionPasskeyStore {
     principal: AttemptSecretPrincipal,
     input: { credential: BrowserPasskeyCredentialMaterial; origin: string | null },
   ): Promise<{ itemId: string }>;
-  /** Monotonic write-back (`greatest(existing, new)`). */
+  /** Monotonic write-back (`greatest(existing, new)`). `credentialId` names
+   * the passkey when the item is a connected login that may hold several. */
   updateSignCount(
     principal: AttemptSecretPrincipal,
     itemId: string,
     signCount: number,
+    credentialId?: string,
   ): Promise<void>;
   release(holder: string): Promise<void>;
 }
@@ -190,11 +192,13 @@ export async function resolveInteractionSecretValues(input: {
       const foreign = error as unknown as {
         failures: SecretReferenceFailure[];
         askCard?: SecretReferenceError["askCard"];
+        approval?: SecretReferenceError["approval"];
       };
       throw secretReferenceHttpError(
         new SecretReferenceError(
           foreign.failures,
           foreign.askCard ?? buildMissingSecretAskCard(foreign.failures, { hasActingHuman: false }),
+          foreign.approval ?? null,
         ),
       );
     }
@@ -385,7 +389,7 @@ async function syncBrowserPasskeysNow(input: PasskeySyncInput): Promise<PasskeyS
         } else {
           const itemId = event.itemId ?? itemByCredential.get(event.credentialId) ?? null;
           if (itemId !== null) {
-            await store.updateSignCount(principal, itemId, event.signCount);
+            await store.updateSignCount(principal, itemId, event.signCount, event.credentialId);
             asserted += 1;
           } else {
             input.log?.("browser.passkey.assertion_unmatched", { rpId: event.rpId });

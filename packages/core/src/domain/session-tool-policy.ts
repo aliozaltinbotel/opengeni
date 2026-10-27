@@ -35,9 +35,9 @@ import {
 import { codeSearchEnabledForTurn } from "@opengeni/contracts/code-search";
 import {
   getSandbox,
-  listSkillDescriptors,
+  hasWorkspaceManagedSkill,
   requireWorkspace,
-  sessionHasToolRouterHistory,
+  sessionsWithToolRouterHistory,
   type Database,
 } from "@opengeni/db";
 import { resolveWorkspaceCatalogSettings } from "../model-catalog";
@@ -359,7 +359,7 @@ export async function workspaceSessionEffectiveToolsContext(
     objectStorageAvailable: Boolean(deps.objectStorage),
   };
   if (configured.length === 0) return baseline;
-  const [workspace, catalog, descriptors, sandboxes, routerHistory] = await Promise.all([
+  const [workspace, catalog, hasWorkspaceSkills, sandboxes, routerHistory] = await Promise.all([
     workspaceRead ?? requireWorkspace(deps.db, workspaceId),
     resolveWorkspaceCatalogSettings(deps.db, deps.settings, {
       accountId: configured[0]!.accountId,
@@ -367,12 +367,12 @@ export async function workspaceSessionEffectiveToolsContext(
       retainedProductModelIds: configured.map((session) => session.model),
     }),
     configured.some((session) => session.agent?.capabilities.skills === "read")
-      ? listSkillDescriptors(deps.db, {
+      ? hasWorkspaceManagedSkill(deps.db, {
           accountId: configured[0]!.accountId,
           workspaceId,
           subjectId,
         })
-      : Promise.resolve([]),
+      : Promise.resolve(false),
     deps.settings.sandboxSelfhostedEnabled
       ? Promise.all(
           sortedIds(configured.flatMap((session) => session.activeSandboxId ?? [])).map(
@@ -388,34 +388,24 @@ export async function workspaceSessionEffectiveToolsContext(
           ),
         )
       : Promise.resolve([]),
-    Promise.all(
-      [...new Map(configured.map((session) => [session.id, session])).values()].map(
-        async (session) =>
-          [
-            session.id,
-            await sessionHasToolRouterHistory(deps.db, {
-              accountId: session.accountId,
-              workspaceId,
-              sessionId: session.id,
-            }),
-          ] as const,
-      ),
-    ),
+    sessionsWithToolRouterHistory(deps.db, {
+      accountId: configured[0]!.accountId,
+      workspaceId,
+      sessionIds: [...new Set(configured.map((session) => session.id))],
+    }),
   ]);
   return {
     ...baseline,
     settings: catalog.settings,
     workspaceSettings: workspace.settings,
     humanInputEnabled: resolveWorkspaceAgentHumanInputEnabled(workspace.settings),
-    hasWorkspaceSkills: descriptors.some((entry) => entry.activationMode === "workspace_managed"),
+    hasWorkspaceSkills,
     activeSandboxBackends: new Map(
       sandboxes.flatMap(([id, sandbox]) =>
         sandbox?.kind === "selfhosted" ? [[id, "selfhosted" as const]] : [],
       ),
     ),
-    routerHistorySessionIds: new Set(
-      routerHistory.filter(([, present]) => present).map(([id]) => id),
-    ),
+    routerHistorySessionIds: routerHistory,
     modelProviders: new Map(
       [...new Set(configured.map((session) => session.model))].map((modelId) => [
         modelId,
@@ -450,6 +440,9 @@ function sessionHasSkills(session: Session, context: SessionEffectiveToolsContex
       return context.mediaAttachments?.get(session.id)?.video === true;
     }
     if (id === "builtin:secrets") return tools.has("secret_search");
+    if (id === "builtin:event-triggers") {
+      return tools.has("scheduled_tasks_create") && tools.has("event_sources_list");
+    }
     return true;
   });
 }

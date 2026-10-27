@@ -34,11 +34,8 @@ import {
 import { createProviderCommandRetainer } from "@opengeni/db/retained-provider-commands";
 import { appendSessionCommandOutput } from "@opengeni/db/session-command-output";
 import { createObservability, type Observability } from "@opengeni/observability";
-import {
-  acquireSharedTestDatabase,
-  type SharedTestDatabase,
-  testSettings,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { createSandboxLeaseActivities, type TerminateBoxFn } from "../src/activities/sandbox-lease";
 import type { ActivityServices } from "../src/activities/types";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
@@ -714,6 +711,8 @@ describe("idle command containment", () => {
   for (const [label, outcome, reconcileAttempts] of [
     ["a healthy provider_running", "provider_running", 3],
     ["a repeatedly provider_error (no stop intent)", "provider_error", 9],
+    ["an unavailable exact observation", "process_observation_unavailable", 3],
+    ["a quarantined unavailable observation", "quarantined_process_observation_unavailable", 9],
   ] as const) {
     test(`${label} command in an idle singleton group is contained after the window`, async () => {
       const fixture = await idleFixture({ outcome, reconcileAttempts });

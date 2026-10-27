@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   acquireOwnerMigratedTestDatabase,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import postgres from "postgres";
 import { createDb, withSessionRlsActorContext } from "../src/database";
 import {
@@ -50,6 +50,7 @@ import { knowledgeMigrationId } from "../src/knowledge-migration";
 import { toPostgresLosslessText } from "../src/lossless-json";
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
 
 const migration = "0461_unified_knowledge.sql";
@@ -85,6 +86,7 @@ const forwardMigrations = [
   "0657_session_archive_purge_retained_evidence.sql",
   // The list notification projection includes withheld archive/import fields.
   "0888_session_list_invalidation.sql",
+  "0905_schedule_timing_session_list_hints.sql",
   "0660_session_archive_preference_snapshot_export.sql",
   // Resolves the Knowledge claim installed by the withheld 0461 migration.
   "0730_maintenance_work_probes.sql",
@@ -102,6 +104,8 @@ const forwardMigrations = [
   // Patches the account-binding fence as rewritten by withheld 0501.
   "0873_mcp_binding_delegation_revocation.sql",
   ...strictOwnerMaintenanceMigrationTail,
+  // Rewrites keys on the Knowledge tables 0461 creates; replay after it.
+  ...workspaceDeletionMigrationTail,
 ];
 const sourceTaskId = crypto.randomUUID();
 let owned: OwnerMigratedTestDatabase | null = null;

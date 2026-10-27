@@ -4,11 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserActionCommand, BrowserLocator } from "@opengeni/contracts";
 import { BrowserInteractionController } from "@opengeni/interaction";
-import {
-  AgentBrowserDriver,
-  AgentBrowserJsonRunner,
-  resolvePinnedAgentBrowserBinary,
-} from "../src";
+import { AgentBrowserDriver, ManagedBrowserRunner } from "../src";
 import { CdpConnection, CdpProtocolError } from "../src/cdp";
 
 const e2e =
@@ -39,19 +35,9 @@ for (const mode of [
       const ids: string[] = paths.map(() => randomUUID());
       const browserSessionId = randomUUID(),
         controllerGeneration = randomUUID();
-      const runner = await AgentBrowserJsonRunner.create({
-        namespace: `upload_${randomUUID().slice(0, 8)}`,
-        sessionName: "s",
-        socketDirectory: join(directory, "s"),
+      const runner = await ManagedBrowserRunner.create({
         profileDirectory: join(directory, "profile"),
-        downloadDirectory: join(directory, "downloads"),
-        screenshotDirectory: join(directory, "screenshots"),
         headed: process.env.OPENGENI_BROWSERD_HEADED_E2E === "1",
-        binary: await resolvePinnedAgentBrowserBinary(
-          process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY
-            ? { binaryPath: process.env.OPENGENI_BROWSERD_AGENT_BROWSER_BINARY }
-            : {},
-        ),
         ...(process.env.OPENGENI_BROWSER_EXECUTABLE
           ? { browserExecutablePath: process.env.OPENGENI_BROWSER_EXECUTABLE }
           : {}),
@@ -194,9 +180,10 @@ for (const mode of [
           },
         };
         const receipt = await controller.run(command);
-        const rejected = mode === "single input rejects multiple";
-        const uncertain =
-          mode === "no chooser" || mode === "dialog" || mode === "navigated" || mode === "covered";
+        // A covered control is refused before any input or scroll, as a
+        // covered click is, so nothing happened and the refusal is definite.
+        const rejected = mode === "single input rejects multiple" || mode === "covered";
+        const uncertain = mode === "no chooser" || mode === "dialog" || mode === "navigated";
         expect(receipt.state).toBe(
           rejected ? "failed" : uncertain ? "outcome_unknown" : "completed",
         );
@@ -205,7 +192,7 @@ for (const mode of [
         );
         expect(await controller.run(command)).toEqual(receipt);
         if (mode === "covered") {
-          // The wrapped receipt must still say why the action failed.
+          // The receipt says why the action was refused.
           expect(receipt.error?.message).toContain("covered by div at its center");
         }
         if (mode === "dialog") {
@@ -253,7 +240,11 @@ for (const mode of [
           changes: rejected || uncertain ? 0 : 1,
           uploaded: rejected || uncertain ? [] : multiple ? ["one.txt", "two.txt"] : ["one.txt"],
         });
-        expect(interceptions).toEqual(mode === "direct" || rejected ? [] : [true, false]);
+        // A covered control is refused after the chooser interception was set
+        // up, and the interception is still undone.
+        expect(interceptions).toEqual(
+          mode === "direct" || mode === "single input rejects multiple" ? [] : [true, false],
+        );
         expect((await driver.observe(page.target.id)).target.targetGeneration).toBe(
           page.target.targetGeneration,
         );

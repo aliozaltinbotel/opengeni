@@ -24,6 +24,7 @@ import type { EventBus } from "@opengeni/events";
 import { publishDurableSessionEvents } from "./session-event-fanout";
 import {
   effectiveSandboxLifecycle,
+  sandboxProviderMaxRemainingLifetimeMs,
   sandboxArchiveCaptureTimeoutMs,
   sandboxLifecycleTransitionWaitMs,
   sandboxWarmRateMicrosPerSecond,
@@ -58,8 +59,8 @@ import {
   SandboxLeaseRecoveryBlockedError,
   SandboxLeaseSupersededError,
   SandboxLeaseTransitionError,
+  waitWhileLeaseWarming,
   type Database,
-  type LeaseHolderKind,
 } from "@opengeni/db";
 import {
   captureWorkspaceArchiveForStorage,
@@ -77,6 +78,7 @@ import {
   parseWorkspaceArchiveDescriptor,
   providerWorkspaceCapturePolicy,
   SandboxProviderContinuityUnavailableError,
+  SandboxProviderWorkspaceAbsentError,
   requirePersistableReplacementSandboxEnvelope,
   renewSandboxProviderExpiration,
   modalSessionMatchesCheckpointProviderBinding,
@@ -106,9 +108,6 @@ import {
   persistWorkspaceArchiveCandidate,
   putVersion1TarArchiveOrInline,
 } from "./sandbox-archive-storage";
-
-// Re-exported for callers that just want the ack-kind union.
-export type ResumeHolderKind = LeaseHolderKind;
 
 /**
  * The durable identity of a turn holding a shared sandbox lease.
@@ -2136,6 +2135,9 @@ async function resumeBoxForTurnOnce(
       // tracked backstops, and we must not erase the only provider pointer.
       if (terminated) {
         const continuityUnavailable = error instanceof SandboxProviderContinuityUnavailableError;
+        // Only proof that the workspace itself is gone ends its lineage as a
+        // loss; otherwise the receipt is retired for an archive restore.
+        const workspaceAbsent = error instanceof SandboxProviderWorkspaceAbsentError;
         if (rematerialization && !createdEstablished?.providerContinuity) {
           await failSandboxRematerialization(db, {
             accountId: ids.accountId,
@@ -2154,6 +2156,7 @@ async function resumeBoxForTurnOnce(
                 ? error.retryable
                 : true,
             ...(continuityUnavailable ? { discardContinuity: true } : {}),
+            ...(workspaceAbsent ? { providerWorkspaceAbsent: true } : {}),
           });
         } else {
           await failWarmingToCold(db, {
@@ -2162,6 +2165,7 @@ async function resumeBoxForTurnOnce(
             sandboxGroupId: ids.sandboxGroupId,
             expectedEpoch,
             ...(continuityUnavailable ? { discardContinuity: true } : {}),
+            ...(workspaceAbsent ? { providerWorkspaceAbsent: true } : {}),
           });
         }
       }
@@ -2252,6 +2256,10 @@ async function resumeBoxForTurnOnce(
         expectedEpoch: leaseEpoch,
         expectedInstanceId: live.instanceId,
         expectedBackend: ids.backend,
+        providerMaxRemainingLifetimeMs: sandboxProviderMaxRemainingLifetimeMs(
+          settings,
+          ids.backend as Settings["sandboxBackend"],
+        ),
       });
       if (marked.status === "marked") {
         await publishDurableSessionEvents(
@@ -2299,59 +2307,59 @@ async function waitForWarm(
   ids: ResumeBoxIds,
 ): Promise<{ leaseEpoch: number }> {
   const { db, settings } = services;
-  const deadline = Date.now() + settings.sandboxWarmingTimeoutMs;
-  let instanceId: string | null = null;
-  while (Date.now() < deadline) {
+  let lease: Awaited<ReturnType<typeof waitWhileLeaseWarming>>;
+  try {
     // A cancelled waiter owns no box and must not keep polling for up to the
     // warming budget: its activity finalizer joins this exact promise.
-    if (!(await sleepUnlessCancelled(WARMING_POLL_INTERVAL_MS, services.cancellationSignal))) {
-      throw services.cancellationSignal?.reason instanceof Error
-        ? services.cancellationSignal.reason
-        : new Error("Sandbox warming wait was cancelled with its owning turn attempt");
-    }
-    const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    if (!lease) {
-      // Lease vanished (cold-reaped). Re-dispatch from scratch.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, 0);
-    }
-    instanceId = lease.instanceId;
-    if (lease.liveness === "warm") {
-      return { leaseEpoch: lease.leaseEpoch };
-    }
-    if (lease.liveness === "draining") {
-      // The warming attempt either failed into drain or committed+released before
-      // this waiter observed it. Re-dispatch so acquireLease can re-arm or spawn
-      // through the normal path.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
-    }
-    if (lease.liveness === "cold") {
-      if (isRetryableDegradedRestore(lease.recovery.restore)) {
-        // The elected spawner hit a transient archive verification failure.
-        // Re-enter admission so one caller can become the next fenced spawner;
-        // the archive remains authoritative and must not become terminal.
-        throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
-      }
-      if (
-        lease.recovery.restore.status === "degraded" ||
-        lease.recovery.restore.status === "unrecoverable"
-      ) {
-        throw new SandboxLeaseRecoveryBlockedError(
-          ids.sandboxGroupId,
-          lease.leaseEpoch,
-          lease.recovery.restore.status === "degraded"
-            ? "restore_degraded"
-            : "restore_unrecoverable",
-          lease.recovery,
-        );
-      }
-      // The spawner died; re-dispatch so the normal acquireLease path can win
-      // cold->warming and run the full spawner branch.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
-    }
-    // still warming — keep polling.
+    lease = await waitWhileLeaseWarming(db, ids.workspaceId, ids.sandboxGroupId, {
+      timeoutMs: settings.sandboxWarmingTimeoutMs,
+      pollMs: WARMING_POLL_INTERVAL_MS,
+      signal: services.cancellationSignal,
+    });
+  } catch (error) {
+    if (!services.cancellationSignal?.aborted) throw error;
+    throw services.cancellationSignal.reason instanceof Error
+      ? services.cancellationSignal.reason
+      : new Error("Sandbox warming wait was cancelled with its owning turn attempt");
   }
+  if (!lease) {
+    // Lease vanished (cold-reaped). Re-dispatch from scratch.
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, 0);
+  }
+  if (lease.liveness === "warm") {
+    return { leaseEpoch: lease.leaseEpoch };
+  }
+  if (lease.liveness === "draining") {
+    // The warming attempt either failed into drain or committed+released before
+    // this waiter observed it. Re-dispatch so acquireLease can re-arm or spawn
+    // through the normal path.
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+  }
+  if (lease.liveness === "cold") {
+    if (isRetryableDegradedRestore(lease.recovery.restore)) {
+      // The elected spawner hit a transient archive verification failure.
+      // Re-enter admission so one caller can become the next fenced spawner;
+      // the archive remains authoritative and must not become terminal.
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+    }
+    if (
+      lease.recovery.restore.status === "degraded" ||
+      lease.recovery.restore.status === "unrecoverable"
+    ) {
+      throw new SandboxLeaseRecoveryBlockedError(
+        ids.sandboxGroupId,
+        lease.leaseEpoch,
+        lease.recovery.restore.status === "degraded" ? "restore_degraded" : "restore_unrecoverable",
+        lease.recovery,
+      );
+    }
+    // The spawner died; re-dispatch so the normal acquireLease path can win
+    // cold->warming and run the full spawner branch.
+    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+  }
+  // Still warming once the warming budget is spent.
   throw new SandboxSiblingWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs, {
     sandboxGroupId: ids.sandboxGroupId,
-    instanceId,
+    instanceId: lease.instanceId,
   });
 }

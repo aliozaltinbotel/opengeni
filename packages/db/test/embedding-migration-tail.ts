@@ -1,12 +1,16 @@
 import { allowanceMigrationTail } from "./allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "./knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "./workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "./strict-owner-maintenance-migration-tail";
+import { eventTriggerMigrationTail } from "./event-trigger-migration-tail";
 
 /** These migrations extend the post-0299 lifecycle and accepted-work ledgers.
  * Historical cutover fixtures must withhold and replay this entire ordered tail. */
 export const embeddingMigrationTail = [
   // Session list notifications reference the final imported/archive/site fields.
   "0888_session_list_invalidation.sql",
+  // Adds a schedule-spec hint using 0888's notify function; replay after it.
+  "0905_schedule_timing_session_list_hints.sql",
   "0437_organization_scoped_external_workspaces.sql",
   "0438_durable_connect_attempts.sql",
   "0439_external_identity_provisioning.sql",
@@ -171,6 +175,8 @@ export const embeddingMigrationTail = [
   // Rewrites the inbox projection and push triggers after 0674 and resolves
   // the session's person through 0661; replay after both so its bodies win.
   "0678_inbox_mute_session_replies.sql",
+  // Adds the schedule column to 0678's mute table and redefines its functions.
+  "0915_inbox_mute_scheduled_runs.sql",
   // Redefines 0674's session_hands_back_v1, which reads sessions.input_wait_turn_id
   // from withheld 0402; replay after 0674 so its body wins.
   "0694_inbox_skip_live_call_replies.sql",
@@ -290,6 +296,8 @@ export const embeddingMigrationTail = [
   "0775_session_usage_limit_attention_cursor.sql",
   // Patches the semantic projection in the cursor trigger restored by 0775.
   "0877_single_semantic_event_projection.sql",
+  // Splits the semantic projection 0877 installed, by exact text; replay after it.
+  "0904_infrastructure_events_keep_session_activity.sql",
   // Reads subscription_connections and the owner-capability routine from
   // withheld 0645/0707 and later subscription-core migrations.
   "0777_workspace_admin_subscription_connections.sql",
@@ -366,4 +374,38 @@ export const embeddingMigrationTail = [
   // Patches the owner reader withheld 0707 creates (as 0715 rewrites it).
   "0884_subscription_core_personal_quarantine_expiry.sql",
   ...strictOwnerMaintenanceMigrationTail,
+  // Rewrites the subscription and vault routines and 0777's policies; replay
+  // after all of them.
+  "0897_workspace_owner_administers_subscriptions.sql",
+  // Restricts the predicate 0897 creates.
+  "0900_workspace_admin_predicate_privileges.sql",
+  // Patches the scheduled admission and live-authority routines from withheld
+  // 0275/0478/0534/0539/0622/0864 by exact anchors; replay after all of them.
+  "0906_scheduled_shared_slack_authority.sql",
+  // Folds the pool rows and rewrites the auto-assignment routine 0713 creates.
+  "0907_subscription_connection_one_owner.sql",
+  // Patches the inbox fence created by withheld 0608 (as 0843 rewrites it) and
+  // replaces the machine-access reader; replay after both.
+  "0917_continue_waiting_work.sql",
+  // Redefines 0718's inbox recipient and 0677's person resolver, which read
+  // scheduled_tasks.owner_subject_id from withheld 0478; replay after them.
+  "0923_external_user_inbox.sql",
+  // Patches ensure_external_identity, transition_session_visibility and both
+  // fork_session_content bodies by exact anchors; replay after all of them.
+  "0925_membership_fences_allow_key_checks.sql",
+  // Patches the command-containment inventory withheld 0839 rewrites, by exact
+  // anchor; replay after it.
+  "0961_secret_use_approval_host_cards.sql",
+  // Extends 0961's containment update kinds by exact anchor; replay after it.
+  "0972_capability_setup_continuations.sql",
+  // Wraps the withheld subscription-plan eligibility and credit-allocation
+  // routines; detector evaluation also depends on the session-tenancy fence.
+  "0981_promotion_funding_decisions.sql",
+  "0982_promotion_abuse_detection.sql",
+  // Calls 0345's tenancy fence routines on connected commands; replay after it.
+  "0984_connected_commands_rearm_on_runner_report.sql",
+  // Rewrites keys on the withheld Knowledge tables by name; replay last.
+  ...workspaceDeletionMigrationTail,
+  // Builds on withheld 0275, 0345 and 0761; replay after all of them.
+  ...eventTriggerMigrationTail,
 ];

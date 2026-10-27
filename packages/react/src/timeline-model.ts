@@ -33,6 +33,12 @@ export type { ActivityGroup, ReadableWorkOptions, TurnGroup } from "./timeline/w
 export { timelineGroupContainsPresentedImage } from "./timeline/presented-image";
 export { mcpToolLeaf, toolDisplayName } from "./timeline/tool-display-name";
 export {
+  connectorLogo,
+  connectorLogoIndex,
+  normalizeConnectorDomain,
+} from "./timeline/connector-logo-index";
+export type { ConnectorLogoSource } from "./timeline/connector-logo-index";
+export {
   BUILT_IN_TOOL_STEP_NAMES,
   builtInToolStep,
   builtInToolStepLabel,
@@ -154,3 +160,21 @@ export {
   parseNotificationText,
 } from "./notification-text";
 export type { NotificationBlock, NotificationSpan } from "./notification-text";
+export {
+  ANNOTATION_MAX_NOTE_LENGTH,
+  ANNOTATION_MAX_QUOTE_BYTES,
+  ANNOTATION_SOURCE_CONTEXT_BYTES,
+  annotationDisplayOrdinal,
+  annotationFromSelection,
+  annotationHasNote,
+  bestQuoteOccurrence,
+  matchingQuoteInSource,
+  occurrenceOffsets,
+  truncateAnnotationQuote,
+} from "./timeline/annotation-model";
+export type { AnnotationSelection } from "./timeline/annotation-model";
+export { annotationNoteNeedsDisclosure } from "./components/timeline-annotation-layout";
+export {
+  agentWorkHumanInputSummary,
+  isAgentWorkHumanInput,
+} from "./timeline/agent-work-human-input";

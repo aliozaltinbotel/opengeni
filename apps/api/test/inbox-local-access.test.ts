@@ -10,12 +10,9 @@ import {
   createSession,
   type DbClient,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
 import { createApp } from "../src/app";
 import { registerInboxRoutes } from "../src/routes/inbox";
@@ -142,10 +139,10 @@ describe("inbox access on a local install", () => {
       body: JSON.stringify({ repliesMuted: true }),
     });
     expect(muted.status).toBe(200);
-    expect(await muted.json()).toEqual({ repliesMuted: true });
+    expect(await muted.json()).toEqual({ repliesMuted: true, scope: "session" });
     const read = await app.request(url);
     expect(read.status).toBe(200);
-    expect(await read.json()).toEqual({ repliesMuted: true });
+    expect(await read.json()).toEqual({ repliesMuted: true, scope: "session" });
 
     const missing = await app.request(
       `http://example.test/v1/workspaces/${local.workspaceId}/sessions/${crypto.randomUUID()}/inbox-mute`,
@@ -202,11 +199,14 @@ describe("inbox access on a local install", () => {
       });
     const initial = await app.request(path);
     expect(initial.status).toBe(200);
-    expect(await initial.json()).toEqual({ repliesMuted: false });
+    expect(await initial.json()).toEqual({ repliesMuted: false, scope: "session" });
     const muted = await write(true);
     expect(muted.status).toBe(200);
-    expect(await muted.json()).toEqual({ repliesMuted: true });
-    expect(await (await app.request(path)).json()).toEqual({ repliesMuted: true });
+    expect(await muted.json()).toEqual({ repliesMuted: true, scope: "session" });
+    expect(await (await app.request(path)).json()).toEqual({
+      repliesMuted: true,
+      scope: "session",
+    });
     expect(operations).toEqual(["session.read", "session.attention.write", "session.read"]);
 
     const delegatedUser = `user:${crypto.randomUUID()}`;
@@ -232,9 +232,15 @@ describe("inbox access on a local install", () => {
     expect((await write(false)).status).toBe(404);
     allowSession = true;
     // Refused callers and revoked visibility cannot change the person's preference.
-    expect(await (await app.request(path)).json()).toEqual({ repliesMuted: true });
+    expect(await (await app.request(path)).json()).toEqual({
+      repliesMuted: true,
+      scope: "session",
+    });
     expect((await write(false)).status).toBe(200);
-    expect(await (await app.request(path)).json()).toEqual({ repliesMuted: false });
+    expect(await (await app.request(path)).json()).toEqual({
+      repliesMuted: false,
+      scope: "session",
+    });
     expect((await app.request(path.replace(session.id, crypto.randomUUID()))).status).toBe(404);
   });
 

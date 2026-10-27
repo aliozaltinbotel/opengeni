@@ -2,7 +2,13 @@
 // backs it with its TanStack router (see `configurePageAppHost`), so links,
 // history and URLs there are exactly the router's own. An embed backs it with
 // its own routing or in-memory state.
-import type { AnchorHTMLAttributes, ComponentType, ReactNode, Ref } from "react";
+import {
+  forwardRef,
+  type AnchorHTMLAttributes,
+  type ComponentType,
+  type ReactNode,
+  type Ref,
+} from "react";
 
 import { useAppHost } from "./app-host";
 
@@ -55,6 +61,10 @@ export type LinkProps = NavigateOptions &
       | undefined;
     preload?: false | "intent" | "viewport" | "render" | undefined;
     disabled?: boolean | undefined;
+    /** When the link counts as the current page (`aria-current`); the router's default otherwise. */
+    activeOptions?:
+      | { exact?: boolean | undefined; includeSearch?: boolean | undefined }
+      | undefined;
     ref?: Ref<HTMLAnchorElement> | undefined;
   };
 
@@ -99,6 +109,10 @@ export type NavigationHost = Readonly<{
   /** Live, non-reactive read for event handlers. */
   useRouter: () => { readonly state: NavigationState };
   useSearch: (options: { strict: false }) => NavigationSearch;
+  /**
+   * Renders an anchor and attaches `ref` to it. React 18 passes a ref only to
+   * a `forwardRef` component, so wrap the host's link in one there.
+   */
   Link: ComponentType<LinkProps>;
   stringifySearch: (search: NavigationSearch) => string;
   page: PageHost;
@@ -163,10 +177,12 @@ export function useSearch(options: { strict: false }): NavigationSearch {
   return useNavigationHost().useSearch(options);
 }
 
-export function Link(props: LinkProps) {
-  const HostLink = useNavigationHost().Link;
-  return <HostLink {...props} />;
-}
+export const Link = /* @__PURE__ */ forwardRef<HTMLAnchorElement, Omit<LinkProps, "ref">>(
+  function Link(props, ref) {
+    const HostLink = useNavigationHost().Link;
+    return <HostLink {...props} ref={ref} />;
+  },
+);
 
 /** The page around the session UI; the browser window unless a host scopes another. */
 export function usePage(): PageHost {

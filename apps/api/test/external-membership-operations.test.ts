@@ -13,10 +13,10 @@ import {
 import { ExternalLinkWorkSnapshot } from "@opengeni/contracts/external-identities";
 import {
   acquireOwnerMigratedTestDatabase,
-  testSettings,
-  MemoryEventBus,
   type OwnerMigratedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
   createDb,
   createWorkspace,

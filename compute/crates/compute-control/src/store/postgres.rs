@@ -9,7 +9,7 @@ use std::str::FromStr as _;
 
 use compute_fleet::{AnsweredAt, HostEpoch, HostId, HostState, OwnerEpoch, Ownership, Sends};
 use compute_protocol::fleet::{Capacity, HostInfo, Register, Renew, Report, Ruling};
-use compute_protocol::host::Id;
+use compute_protocol::host::{Id, ImageId};
 use deadpool_postgres::{ClientWrapper, Manager, ManagerConfig, Pool, RecyclingMethod};
 use serde_json::Value;
 use tokio_postgres::Row;
@@ -21,6 +21,7 @@ use super::{
 };
 use crate::e2b::lifecycle::Record;
 
+mod images;
 mod schema;
 
 /// The advisory lock the leader holds for as long as its connection lives.
@@ -34,14 +35,17 @@ const LIFECYCLE_COLUMNS: &str = "id, team, record, version";
 
 const HOST_COLUMNS: &str = "id, info, epoch, state, renewals, seq, capacity, changed";
 
-/// The owner a sandbox write names, its parameter `param`, locked against
-/// giving up on it: a write waits for a give-up under way and then sees the
-/// host lost, and a give-up waits for the write and then clears the owner
-/// it wrote.
+/// Whether the owner a sandbox write names, its parameter `param`, is
+/// lost: given up on, or not a host the store has (one given up on and
+/// since forgotten). The live row is locked against giving up on it: a
+/// write waits for a give-up under way and then sees the host lost, and a
+/// give-up waits for the write and then clears the owner it wrote. A write
+/// naming no owner is never refused.
 fn owner_lost(param: u8) -> String {
     format!(
-        "owner as (select state = 'lost' as lost from compute_hosts \
-         where id = ${param} for share)"
+        "owner as (select true as lost where ${param}::bigint is not null \
+         and not exists (select 1 from compute_hosts \
+         where id = ${param}::bigint and state <> 'lost' for share))"
     )
 }
 
@@ -456,9 +460,10 @@ impl PostgresStore {
              (id, name, info, epoch, state, renewals, seq, attempt, answer, capacity, changed) \
              values ($1, $2, $3, $4, 'live', 1, 0, $5, $6, $7, nextval('compute_changes')) \
              on conflict (id) do update set info = excluded.info, epoch = excluded.epoch, \
-             state = 'live', renewals = compute_hosts.renewals + 1, seq = 0, \
+             state = case when compute_hosts.drained then 'draining' else 'live' end, \
+             renewals = compute_hosts.renewals + 1, seq = 0, \
              attempt = excluded.attempt, answer = excluded.answer, \
-             capacity = excluded.capacity, changed = excluded.changed",
+             capacity = excluded.capacity, changed = excluded.changed, gone_ms = null",
             &[
                 &id,
                 &register.info.name,
@@ -523,18 +528,19 @@ impl Store for PostgresStore {
     }
 
     async fn renew(&self, renew: &Renew, names: &[String]) -> Result<bool> {
+        // A renewal without a capacity keeps the one last heard.
         let updated = self
             .client()
             .await?
             .execute(
                 "update compute_hosts set renewals = renewals + 1, seq = greatest(seq, $3), \
-                 capacity = $4, changed = nextval('compute_changes') \
+                 capacity = coalesce($4, capacity), changed = nextval('compute_changes') \
                  where id = $1 and epoch = $2 and state <> 'lost' and name = any($5)",
                 &[
                     &big(renew.host)?,
                     &big(renew.epoch)?,
                     &big(renew.seq)?,
-                    &Json(&renew.capacity),
+                    &renew.capacity.as_ref().map(Json),
                     &names,
                 ],
             )
@@ -592,15 +598,16 @@ impl Store for PostgresStore {
             .collect()
     }
 
-    async fn give_up(&self, host: HostId, renewals: u64) -> Result<Option<usize>> {
+    async fn give_up(&self, host: HostId, renewals: u64, at_ms: u64) -> Result<Option<usize>> {
         let mut client = self.client().await?;
         let tx = client.transaction().await.map_err(database)?;
         let id = big(host.0)?;
         let lost = tx
             .execute(
-                "update compute_hosts set state = 'lost', changed = nextval('compute_changes') \
+                "update compute_hosts set state = 'lost', gone_ms = $3, \
+                 changed = nextval('compute_changes') \
                  where id = $1 and renewals = $2 and state <> 'lost'",
-                &[&id, &big(renewals)?],
+                &[&id, &big(renewals)?, &big(at_ms)?],
             )
             .await
             .map_err(database)?;
@@ -619,13 +626,39 @@ impl Store for PostgresStore {
         Ok(Some(usize::try_from(cleared).map_err(corrupt)?))
     }
 
+    async fn prune_hosts(&self, before_ms: u64) -> Result<u64> {
+        // A host given up on with no date (before the column, or by an
+        // older build during a rollout) is dated now, by the database's
+        // clock, and forgotten a whole retention later. Giving up cleared
+        // every owner naming it, and no write names a host given up on, so
+        // none should still name it; one that did would be kept rather than
+        // stop the others from being forgotten.
+        self.client()
+            .await?
+            .execute(
+                "with dated as (update compute_hosts \
+                 set gone_ms = (extract(epoch from now()) * 1000)::bigint \
+                 where state = 'lost' and gone_ms is null) \
+                 delete from compute_hosts where state = 'lost' and gone_ms < $1 \
+                 and not exists (select 1 from compute_sandboxes \
+                 where owner = compute_hosts.id)",
+                &[&big(before_ms)?],
+            )
+            .await
+            .map_err(database)
+    }
+
     async fn set_state(&self, host: HostId, from: HostState, to: HostState) -> Result<bool> {
         let updated = self
             .client()
             .await?
             .execute(
-                "update compute_hosts set state = $3, changed = nextval('compute_changes') \
-                 where id = $1 and state = $2",
+                "update compute_hosts \
+                 set state = case when state = 'lost' then state else $3 end, \
+                 drained = $3 = 'draining', changed = nextval('compute_changes') \
+                 where id = $1 and (state = $2 \
+                 or (state = $3 and drained <> ($3 = 'draining')) \
+                 or (state = 'lost' and drained and $2 = 'draining' and $3 = 'live'))",
                 &[&big(host.0)?, &state_name(from), &state_name(to)],
             )
             .await
@@ -1030,6 +1063,24 @@ impl Store for PostgresStore {
             .iter()
             .map(lifecycle_row)
             .collect()
+    }
+
+    async fn image_built(&self, source: &str) -> Result<Option<ImageId>> {
+        self.image_built_now(source).await
+    }
+
+    async fn record_built(
+        &self,
+        source: &str,
+        name: &str,
+        image: ImageId,
+        at_ms: u64,
+    ) -> Result<ImageId> {
+        self.record_built_now(source, name, image, at_ms).await
+    }
+
+    async fn latest_built(&self, name: &str) -> Result<Option<ImageId>> {
+        self.latest_built_now(name).await
     }
 }
 

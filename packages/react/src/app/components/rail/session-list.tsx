@@ -1,3 +1,8 @@
+import {
+  archiveActionLabel,
+  requestSessionArchive,
+  useArchiveConfirmation,
+} from "../../lib/archive-session";
 // The session list — the rail's home. Uses workspace discovery for search and
 // independently paged project folders for browsing, with pins above the tree.
 // Supports ArrowUp/Down + Enter keyboard navigation. Each row is a status
@@ -5,6 +10,7 @@
 // active session (from the URL) is highlighted with an accent bar.
 import { t } from "../../lib/console-text";
 import { useSessionListHintRefresh } from "../../lib/use-session-list-hint-refresh";
+import { useSiteOpenedListener } from "../../lib/site-opened";
 import { useOpenGeni } from "../../../session-context";
 import { useChannels } from "../../../hooks/use-channels";
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
@@ -15,9 +21,18 @@ import {
   sessionListGroupRevision,
 } from "../../lib/session-list-dirty-scopes";
 import { SiteOriginLink } from "../session/site-origin-link";
-import { SiteSessionGroupHeading } from "./site-session-group-heading";
+import { sessionSiteOrigin, type SessionSiteOrigin } from "../../lib/session-site-origin";
+import {
+  SiteRowActionsContext,
+  SiteSessionGroupHeading,
+  type SiteRowActions,
+} from "./site-session-group-heading";
+import {
+  RAIL_ROW_OVERFLOW_TRIGGER_CLASS,
+  RAIL_ROW_QUICK_ACTIONS_CLASS,
+  RailRowQuickAction,
+} from "./rail-row-quick-actions";
 import { SessionBrowseOrderControls } from "./session-browse-order-controls";
-import { requestSessionSearch } from "../../lib/session-search-route";
 import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
@@ -40,10 +55,14 @@ import {
   PlusIcon,
   SearchIcon,
   Trash2Icon,
+  LinkIcon,
 } from "lucide-react";
 import { toast } from "../../lib/toast";
 import {
+  createContext,
+  forwardRef,
   useCallback,
+  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -51,6 +70,7 @@ import {
   useRef,
   useState,
   useSyncExternalStore,
+  type ComponentPropsWithoutRef,
   type MouseEvent,
   type DragEvent,
   type ReactNode,
@@ -75,6 +95,7 @@ import {
   ContextMenuItem,
   ContextMenuLabel,
   ContextMenuSeparator,
+  ContextMenuShortcut,
   ContextMenuTrigger,
 } from "../../../ui/context-menu";
 import {
@@ -84,6 +105,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "../../../ui/dropdown-menu";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "../../../ui/hover-card";
@@ -150,6 +172,7 @@ import {
   sessionInputWait,
   visualTreeDepth,
 } from "../../lib/session-rail";
+import { sessionAutomationWaitWords } from "../../../components/automations/automation-model";
 import {
   cancelSessionRowRevealIntent,
   consumeSessionRowRevealIntent,
@@ -185,9 +208,11 @@ import {
   projectRailSessions,
   groupSessionsForRail,
   mergeSessionForRail,
+  parseSiteRowKey,
   relativeTimeLabel,
   sessionBrowseResultCount,
   selectedDescendantNode,
+  siteRowConversationCount,
   sessionCreatorLabelMap,
   visibleForestRows,
   visibleTreeRows,
@@ -202,6 +227,7 @@ import {
   type SessionForest,
   type SessionRecencyGroup,
 } from "../../lib/sessions-group";
+import { railRouteSelection } from "../../lib/routes";
 import {
   readSessionBrowsePreferences,
   DEFAULT_SESSION_BROWSE_PREFERENCES,
@@ -237,7 +263,14 @@ import { cn } from "../../lib/utils";
 import type { Channel, Session as SessionDetails } from "../../types";
 import type { RailSession as Session } from "../../lib/session-list-entry";
 import { useUiEventTarget } from "../../lib/ui-events";
-import { useSessionUiFeature } from "../../lib/session-ui-features";
+import { useActionShortcut } from "../../lib/actions/actions-provider";
+import { chordLabel, currentPlatform } from "../../lib/actions/chords";
+import { useHeldModifier } from "../../lib/actions/held-modifier";
+import { requestCommandMenu } from "../../lib/actions/events";
+import { rememberChats, setSidebarOrder } from "../../lib/actions/chat-directory";
+import { rememberSidebarSites } from "../../lib/actions/site-directory";
+import { useChatOperations } from "../../lib/actions/chat-operations";
+import { TooltipWithKeys } from "../command-menu/keycaps";
 
 /** True when the browser should own navigation (new tab / window / modified click). */
 function isModifiedNavigationClick(
@@ -246,38 +279,45 @@ function isModifiedNavigationClick(
   return event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0;
 }
 
-/** Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab. */
-export function NewSessionLink(props: {
-  className?: string | undefined;
-  "aria-label"?: string | undefined;
-  channelId?: string | null | undefined;
-  children: ReactNode;
-}) {
+/**
+ * Composer / sessions-index entry — real link so Cmd/Ctrl-click opens a new tab.
+ * It takes anchor props and a ref, so a tooltip trigger or `Button asChild` can
+ * wrap it.
+ */
+export const NewSessionLink = /* @__PURE__ */ forwardRef<
+  HTMLAnchorElement,
+  Omit<ComponentPropsWithoutRef<"a">, "href" | "children"> & {
+    channelId?: string | null | undefined;
+    children: ReactNode;
+  }
+>(function NewSessionLink({ channelId, children, onClick, ...anchor }, ref) {
   const windowEvents = useUiEventTarget("window");
-  const newChatShortcut = useSessionUiFeature("newChatShortcut");
+  const newChatShortcut = useActionShortcut("chat.new");
   const rail = useRail();
   const context = useAppContext();
   return (
     <Link
+      {...anchor}
+      ref={ref}
       to="/workspaces/$workspaceId/sessions"
       params={{ workspaceId: rail.workspaceId }}
-      search={props.channelId === undefined ? {} : { channelId: props.channelId ?? "default" }}
-      aria-label={props["aria-label"]}
-      aria-keyshortcuts={newChatShortcut ? "Meta+Shift+O Control+Shift+O" : undefined}
-      className={props.className}
+      search={channelId === undefined ? {} : { channelId: channelId ?? "default" }}
+      aria-keyshortcuts={newChatShortcut?.ariaKeys}
       {...analyticsAction("new_session")}
       onClick={(event) => {
+        onClick?.(event);
+        if (event.defaultPrevented) return;
         if (isModifiedNavigationClick(event)) return;
         context.resetSessionView();
         rail.setDrawerOpen(false);
         // Same-route Link may not remount the index or rerun search-keyed effects.
-        queueMicrotask(() => requestCreateComposerFocus(windowEvents, props.channelId));
+        queueMicrotask(() => requestCreateComposerFocus(windowEvents, channelId));
       }}
     >
-      {props.children}
+      {children}
     </Link>
   );
-}
+});
 
 type RenameFn = (
   workspaceId: string,
@@ -340,6 +380,7 @@ export function SessionList() {
   const windowEvents = useUiEventTarget("window");
   const rail = useRail();
   const context = useAppContext();
+  const confirmArchive = useArchiveConfirmation();
   const { workspaceSessionListEvent, workspaceControlEvent } = useOpenGeni();
   const listHintsAvailable =
     workspaceSessionListEvent?.workspaceId === rail.workspaceId &&
@@ -351,10 +392,11 @@ export function SessionList() {
   const setContextSession = context.setSession;
   const navigate = useNavigate();
   const activeSessionId = useRouterState({
-    select: (state): string | null => {
-      const match = /\/sessions\/([^/]+)/.exec(state.location.pathname);
-      return match?.[1] ?? null;
-    },
+    select: (state): string | null => railRouteSelection(state.location).sessionId,
+  });
+  // The Site view marks its Site row, or the conversation open beside it.
+  const activeSiteId = useRouterState({
+    select: (state): string | null => railRouteSelection(state.location).siteId,
   });
   const [documentForeground, setDocumentForeground] = useState(() =>
     Boolean(document.visibilityState === "visible" && document.hasFocus()),
@@ -375,11 +417,8 @@ export function SessionList() {
   // Poll so running sessions surface and move to the top without a manual
   // refresh; the previous index relied on a one-shot load.
   const [searchDraft, setSearchDraft] = useState("");
-  const openSearchDialog = useCallback(
-    (event: MouseEvent<HTMLButtonElement>) =>
-      requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget),
-    [rail.workspaceId, windowEvents],
-  );
+  const openSearchDialog = useCallback(() => requestCommandMenu(windowEvents), [windowEvents]);
+  const searchShortcut = useActionShortcut("commandMenu.open");
   const [search, setSearch] = useState("");
   const browsePreferenceStorageId = useMemo(
     () => sessionBrowsePreferenceStorageId(context.accessContext.subjectId, rail.workspaceId),
@@ -446,6 +485,9 @@ export function SessionList() {
     mineOnly,
     search,
     ...(hierarchyMode ? { parentSessionId: null } : {}),
+    // Sites are rows of their own: their conversations nest under them and
+    // arrive as complete Site rows. Search and Archived list them as rows.
+    siteConversations: hierarchyMode && browseStatus !== "archived" ? "group" : "include",
     archiveStatus: browseStatus,
     ...(browseStatus === "archived" ? {} : { sortBy: browseSortBy }),
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
@@ -459,6 +501,7 @@ export function SessionList() {
     projection: "summary",
     limit: 1,
     pinsOnly: true,
+    siteConversations: "include",
     includeTotals: !hierarchyMode || browseStatus === "archived",
     pollIntervalMs: listHintsAvailable ? undefined : 15_000,
     beginRead: context.sessionChannelProjectionAuthority.beginRead,
@@ -520,10 +563,37 @@ export function SessionList() {
     },
     [refresh, refreshGlobalPins, refreshChannels],
   );
+  // Opening a Site moves its row: only the grouped root page carries Site rows.
+  const refreshSiteRows = useCallback(
+    (siteId: string) => {
+      // Opening a Site brings it back to the sidebar after an archive.
+      setArchivedSiteIds((current) => {
+        if (!current.has(siteId)) return current;
+        const next = new Set(current);
+        next.delete(siteId);
+        return next;
+      });
+      void refresh();
+    },
+    [refresh],
+  );
+  useSiteOpenedListener(
+    rail.workspaceId,
+    refreshSiteRows,
+    hierarchyMode && browseStatus !== "archived",
+  );
   useEffect(() => {
     if (workspaceSessionListEvent?.workspaceId !== rail.workspaceId) return;
-    if (workspaceSessionListEvent.available)
-      void refreshSessionPages(workspaceSessionListEvent.sessionIds);
+    if (!workspaceSessionListEvent.available) return;
+    const { sessionIds, siteSessionIds = [] } = workspaceSessionListEvent;
+    // A Site conversation the rail has not loaded sits in a collapsed Site
+    // row, whose summary arrives with the root page this always re-reads.
+    // Only loaded ones dirty their own branch; none forces a full reload.
+    void refreshSessionPages(
+      sessionIds === null
+        ? null
+        : [...sessionIds, ...siteSessionIds.filter((id) => knownListSessions.current.has(id))],
+    );
   }, [workspaceSessionListEvent, rail.workspaceId, refreshSessionPages]);
   useEffect(() => {
     if (workspaceControlEvent) void refreshSessionPages();
@@ -586,18 +656,38 @@ export function SessionList() {
       (groupFill.generation === pageGeneration ? groupFill.counts.get(key) : undefined) ?? 0,
     [groupFill, pageGeneration],
   );
+  const [archiveWindowReductions, setArchiveWindowReductions] = useState<{
+    generation: number;
+    counts: ReadonlyMap<string, number>;
+  }>({ generation: -1, counts: new Map() });
+  const archiveFillFreeze = useRef<{ generation: number; height: number } | null>(null);
+  const archiveReduction = useCallback(
+    (key: string) =>
+      archiveWindowReductions.generation === pageGeneration
+        ? (archiveWindowReductions.counts.get(key) ?? 0)
+        : 0,
+    [archiveWindowReductions, pageGeneration],
+  );
   const baseCountForGroup = useCallback(
     (key: string) => activeGroupWindows.get(key) ?? SESSION_GROUP_VISIBLE_STEP,
     [activeGroupWindows],
   );
   const visibleCountForGroup = useCallback(
-    (key: string) => baseCountForGroup(key) + fillCountForGroup(key),
-    [baseCountForGroup, fillCountForGroup],
+    (key: string) =>
+      Math.max(0, baseCountForGroup(key) + fillCountForGroup(key) - archiveReduction(key)),
+    [baseCountForGroup, fillCountForGroup, archiveReduction],
   );
   const visibleNodesForGroup = useCallback(
     (key: string, nodes: SessionTreeNode[]) =>
-      search ? nodes : sessionGroupWindowNodes(nodes, visibleCountForGroup(key), activeSessionId),
-    [activeSessionId, search, visibleCountForGroup],
+      search
+        ? nodes
+        : sessionGroupWindowNodes(
+            nodes,
+            visibleCountForGroup(key),
+            activeSessionId,
+            archiveReduction(key) > 0 ? 0 : SESSION_GROUP_VISIBLE_STEP,
+          ),
+    [activeSessionId, search, visibleCountForGroup, archiveReduction],
   );
   const [archiveFolder, setArchiveFolder] = useState({
     generation: pageGeneration,
@@ -712,10 +802,35 @@ export function SessionList() {
     branchSummaryKeys.current.clear();
     activeBranchHydration.current = null;
     setChildPages(new Map());
-  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus]);
+    // Site rows list root conversations, so the root filters scope them too.
+  }, [rail.workspaceId, hierarchyMode, browseSortBy, browseStatus, needsYouOnly, mineOnly]);
   // Short-lived optimistic projections only. The page returned by the server
   // remains canonical; after each mutation we replace the projection with that
   // returned row and refresh once to reconcile tabs/devices/offline recovery.
+  // Site rows: this person's pins in flight, and Sites archived from this rail
+  // (kept until restored or opened, so a loaded conversation never rebuilds
+  // the hidden row).
+  const [sitePinOverrides, setSitePinOverrides] = useState<
+    ReadonlyMap<string, { pinned: boolean; pinnedAt: string | null; operation: number }>
+  >(() => new Map());
+  const [archivedSiteIds, setArchivedSiteIds] = useState<ReadonlySet<string>>(() => new Set());
+  const siteArchivesInFlight = useRef(new Map<string, number>());
+  // A Site the server lists again was restored (here or elsewhere): stop
+  // hiding it, unless this rail is still archiving it.
+  useEffect(() => {
+    const listed = rootPage.siteGroups;
+    if (!listed) return;
+    const listedIds = new Set(listed.map((group) => group.siteId));
+    setArchivedSiteIds((current) => {
+      let next: Set<string> | null = null;
+      for (const siteId of current) {
+        if (!listedIds.has(siteId) || siteArchivesInFlight.current.has(siteId)) continue;
+        next ??= new Set(current);
+        next.delete(siteId);
+      }
+      return next ?? current;
+    });
+  }, [rootPage.siteGroups]);
   const [pinOverrides, setPinOverrides] = useState<ReadonlyMap<string, PinOverride>>(
     () => new Map(),
   );
@@ -766,6 +881,35 @@ export function SessionList() {
     refreshLocalDeliveryAttention();
     return subscribeToLocalSessionDeliveryAttention(refreshLocalDeliveryAttention);
   }, [rail.workspaceId]);
+  const archivedWindowRows = useRef(new Map<string, string[]>());
+  useEffect(() => {
+    archivedWindowRows.current.clear();
+  }, [pageGeneration]);
+  const preserveArchiveWindow = useCallback(
+    (sessionId: string, archived: boolean, capturedKeys?: string[]) => {
+      if (archived && archivedWindowRows.current.has(sessionId)) return;
+      const keys = archived
+        ? (capturedKeys ??
+          fillTargetsRef.current
+            .filter((target) => target.visibleSessionIds.includes(sessionId))
+            .map((target) => target.key))
+        : (archivedWindowRows.current.get(sessionId) ?? []);
+      if (archived) archivedWindowRows.current.set(sessionId, keys);
+      else archivedWindowRows.current.delete(sessionId);
+      if (keys.length === 0) return;
+      const height = listRef.current?.closest<HTMLElement>(
+        "[data-rail-scroll-viewport]",
+      )?.clientHeight;
+      if (height !== undefined) archiveFillFreeze.current = { generation: pageGeneration, height };
+      setArchiveWindowReductions((current) => {
+        const counts = new Map(current.generation === pageGeneration ? current.counts : []);
+        for (const key of keys)
+          counts.set(key, Math.max(0, (counts.get(key) ?? 0) + (archived ? 1 : -1)));
+        return { generation: pageGeneration, counts };
+      });
+    },
+    [pageGeneration],
+  );
   const archiving = useRef(new Set<string>());
   useEffect(
     () =>
@@ -774,9 +918,11 @@ export function SessionList() {
         // its optimistic transition. Other mounted producers, including For
         // You Dismiss/Stop, need the same prompt re-read immediately.
         if (archiving.current.has(invalidation.sessionId)) return;
+        if (invalidation.archived !== undefined)
+          preserveArchiveWindow(invalidation.sessionId, invalidation.archived);
         void refreshSessionPages();
       }),
-    [rail.workspaceId, refreshSessionPages],
+    [rail.workspaceId, refreshSessionPages, preserveArchiveWindow],
   );
   const moveRequestOwner = useRef({});
   const pinOperation = useRef(0);
@@ -1078,6 +1224,18 @@ export function SessionList() {
     serverSessions,
     browseStatus,
   ]);
+  // A spawned row archives its workstream, so its row reads the root's state.
+  const workstreamRoots = useMemo(
+    () =>
+      new Map(
+        allSessions
+          .filter((session) => session.parentSessionId === null)
+          .map((session) => [session.id, session]),
+      ),
+    [allSessions],
+  );
+  const workstreamRootsRef = useRef(workstreamRoots);
+  workstreamRootsRef.current = workstreamRoots;
 
   const verifySessionChannelMove = useCallback(
     (sessionId: string, operation: number): Promise<void> => {
@@ -1466,14 +1624,42 @@ export function SessionList() {
       (a, b) => compareSessionArchiveOrder(a.session, b.session),
     );
   }, [browseSessions, browseStatus, hierarchyMode]);
+  // A Site pin in flight shows at once; the next read confirms it.
+  const siteGroups = useMemo(
+    () =>
+      rootPage.siteGroups?.map((group) => {
+        const override = sitePinOverrides.get(group.siteId);
+        if (!override) return group;
+        const { pinned: _pinned, pinnedAt: _pinnedAt, ...unpinned } = group;
+        return override.pinned
+          ? { ...unpinned, pinned: true as const, pinnedAt: override.pinnedAt }
+          : unpinned;
+      }),
+    [rootPage.siteGroups, sitePinOverrides],
+  );
   // The helper builds all three projections together so explicit nested pins
   // never disappear into an ancestor shortcut.
   const railSections = useMemo(
     () =>
       buildPinnedRailSections(projectedSessions, new Date(), {
-        groupSites: hierarchyMode && browseGroupBy === "project",
+        // Sites are stable rows whenever the rail is a hierarchy. Search is
+        // flat: a matching conversation is listed as itself.
+        groupSites: hierarchyMode,
+        siteGroups,
+        archivedSiteIds,
+        siteRowsByProject: channelMode,
+        workspaceId: rail.workspaceId,
+        creator: { kind: "subject", subjectId: context.accessContext.subjectId },
       }),
-    [projectedSessions, hierarchyMode, browseGroupBy],
+    [
+      projectedSessions,
+      hierarchyMode,
+      siteGroups,
+      archivedSiteIds,
+      channelMode,
+      rail.workspaceId,
+      context.accessContext.subjectId,
+    ],
   );
   const forest = useMemo(
     () =>
@@ -1510,6 +1696,11 @@ export function SessionList() {
         children: sortSessionForest({ running: node.children, grouped: [] }, browseSortBy).running,
       })),
     [railSections.pinned, browseSortBy],
+  );
+  // ⌘1 to ⌘9 and next/previous chat open chats; a pinned Site row is not one.
+  const pinnedChatNodes = useMemo(
+    () => pinnedNodes.filter((node) => !node.siteGroup),
+    [pinnedNodes],
   );
   // The hierarchy rail always has the same shape: unfiled Recents first, then
   // workstreams. A workspace with no created workstreams should not fall back
@@ -1773,6 +1964,27 @@ export function SessionList() {
   );
   const onArchive = useCallback<ArchiveFn>(
     async function archiveSession(session, archived, restoreFocusTo = "row") {
+      // Archive belongs to a whole workstream: a spawned row archives its root,
+      // exactly as archiving the root row would.
+      if (session.parentSessionId !== null) {
+        // The root may sit on a page this rail has not loaded (a pinned
+        // spawned row, say): read it so the archive acts on the real root.
+        const root: Session | null =
+          workstreamRootsRef.current.get(session.rootSessionId) ??
+          (await context.client
+            .getSession(session.workspaceId, session.rootSessionId)
+            .catch((): SessionDetails | null => null));
+        if (!root || root.parentSessionId !== null) {
+          toast.error(
+            archived ? "Couldn't archive the workstream." : "Couldn't restore the workstream.",
+          );
+          return;
+        }
+        return await archiveSession(root, archived, restoreFocusTo);
+      }
+      const archiveWindowKeys = fillTargetsRef.current
+        .filter((target) => target.visibleSessionIds.includes(session.id))
+        .map((target) => target.key);
       if (archiving.current.has(session.id)) return;
       const acceptedTransition = context.captureWorkspaceInvocation(session.workspaceId);
       if (!acceptedTransition) return;
@@ -1785,14 +1997,28 @@ export function SessionList() {
         settled: false,
       };
       archiving.current.add(session.id);
+      if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
       setArchiveTransitions((current) => new Set(current).add(session.id));
       let archivedResult: Session | undefined;
       try {
-        const updated = await context.client.updateSessionArchive(rail.workspaceId, session.id, {
-          archived,
-          expectedVersion: session.archiveVersion ?? 0,
+        const updated = await requestSessionArchive(context, session, archived, async (input) => {
+          // A confirmation is not an archive: retain the row and its window while deciding.
+          if (archived) preserveArchiveWindow(session.id, false);
+          setArchiveTransitions((current) => {
+            const next = new Set(current);
+            next.delete(session.id);
+            return next;
+          });
+          const confirmed = await confirmArchive(input);
+          if (confirmed) {
+            if (archived) preserveArchiveWindow(session.id, true, archiveWindowKeys);
+            setArchiveTransitions((current) => new Set(current).add(session.id));
+          }
+          return confirmed;
         });
+        if (!updated) return;
         if (!context.ownsWorkspaceInvocation(session.workspaceId, acceptedTransition)) return;
+        preserveArchiveWindow(session.id, archived, archiveWindowKeys);
         const completedGeneration = context.sessionChannelProjectionAuthority.beginRead();
         setArchiveOverrides((current) => {
           const next = new Map(current).set(updated.id, { session: updated, completedGeneration });
@@ -1818,6 +2044,7 @@ export function SessionList() {
         });
         await refreshSessionPages();
       } finally {
+        if (archived && !archivedResult) preserveArchiveWindow(session.id, false);
         archiving.current.delete(session.id);
         const pending = pendingSessionFocus.current;
         if (
@@ -1855,7 +2082,146 @@ export function SessionList() {
         }
       }
     },
+    [context, rail.workspaceId, refreshSessionPages, confirmArchive, preserveArchiveWindow],
+  );
+  // Site rows pin and archive for this person only, like sessions: a pin
+  // moves the row to Pinned and archive only hides it from this sidebar.
+  const sitePinOperation = useRef(0);
+  const onPinSite = useCallback(
+    async (origin: SessionSiteOrigin, nextPinned: boolean) => {
+      const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
+      if (!acceptedTransition) return;
+      const operation = ++sitePinOperation.current;
+      const setOverride = (sitePinned: boolean, pinnedAt: string | null) =>
+        setSitePinOverrides((current) => {
+          const existing = current.get(origin.siteId);
+          if (existing && existing.operation > operation) return current;
+          return new Map(current).set(origin.siteId, {
+            pinned: sitePinned,
+            pinnedAt,
+            operation,
+          });
+        });
+      setOverride(nextPinned, nextPinned ? new Date().toISOString() : null);
+      try {
+        const updated = await context.client.updateSiteSidebarState(
+          rail.workspaceId,
+          origin.siteId,
+          { pinned: nextPinned },
+        );
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
+        setOverride(updated.pinned, updated.pinnedAt);
+        await refreshSessionPages();
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
+        announcePinResult(`${nextPinned ? "Pinned" : "Unpinned"} ${origin.title}.`);
+      } catch (pinError) {
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
+        toast.error(nextPinned ? "Couldn't pin the Site." : "Couldn't unpin the Site.", {
+          description: pinError instanceof Error ? pinError.message : String(pinError),
+        });
+      } finally {
+        setSitePinOverrides((current) => {
+          if (current.get(origin.siteId)?.operation !== operation) return current;
+          const next = new Map(current);
+          next.delete(origin.siteId);
+          return next;
+        });
+      }
+    },
+    [announcePinResult, context, rail.workspaceId, refreshSessionPages],
+  );
+  const onArchiveSite = useCallback(
+    async function archiveSite(origin: SessionSiteOrigin, archived: boolean) {
+      const acceptedTransition = context.captureWorkspaceInvocation(rail.workspaceId);
+      if (!acceptedTransition) return;
+      // The row leaves the list: keep keyboard focus on the row after it,
+      // whether the quick button, the context menu or the overflow menu ran it.
+      const list = listRef.current;
+      const rowLinks = list
+        ? [...list.querySelectorAll<HTMLElement>("a[data-session-row], [data-site-row] > a")]
+        : [];
+      const inArchivedRow = (link: Element) =>
+        link.closest("[data-site-row]")?.getAttribute("data-site-row") === origin.siteId;
+      const rowIndex = rowLinks.findIndex(inArchivedRow);
+      const nextFocus =
+        archived && rowIndex >= 0
+          ? (rowLinks.slice(rowIndex + 1).find((link) => !inArchivedRow(link)) ??
+            rowLinks.slice(0, rowIndex).at(-1))
+          : undefined;
+      // Focus moves only if it was on the row or its menu, and is now lost.
+      const focusWasOnRow =
+        document.activeElement instanceof Element &&
+        (inArchivedRow(document.activeElement) ||
+          document.activeElement.closest('[role="menu"]') !== null);
+      const setArchived = (hidden: boolean) =>
+        setArchivedSiteIds((current) => {
+          if (current.has(origin.siteId) === hidden) return current;
+          const next = new Set(current);
+          if (hidden) next.add(origin.siteId);
+          else next.delete(origin.siteId);
+          return next;
+        });
+      const inFlight = siteArchivesInFlight.current;
+      inFlight.set(origin.siteId, (inFlight.get(origin.siteId) ?? 0) + 1);
+      setArchived(archived);
+      if (nextFocus && focusWasOnRow) {
+        // A closing menu returns focus to its trigger first; wait for that.
+        requestAnimationFrame(() =>
+          requestAnimationFrame(() => {
+            const active = document.activeElement;
+            if (!active || active === document.body || !active.isConnected || inArchivedRow(active))
+              nextFocus.focus();
+          }),
+        );
+      }
+      try {
+        await context.client.updateSiteSidebarState(rail.workspaceId, origin.siteId, {
+          archived,
+        });
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
+        await refreshSessionPages();
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
+        toast.success(archived ? "Site archived" : "Site restored", {
+          ...(archived
+            ? {
+                // The Site stays published; only this sidebar changes.
+                description: "Hidden from your sidebar only.",
+                duration: 8000,
+                action: {
+                  label: "Undo",
+                  onClick: () => {
+                    if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition))
+                      return;
+                    void archiveSite(origin, false);
+                  },
+                },
+              }
+            : {}),
+        });
+      } catch (archiveError) {
+        if (!context.ownsWorkspaceInvocation(rail.workspaceId, acceptedTransition)) return;
+        setArchived(!archived);
+        toast.error(archived ? "Couldn't archive the Site." : "Couldn't restore the Site.", {
+          description: archiveError instanceof Error ? archiveError.message : String(archiveError),
+        });
+      } finally {
+        const remaining = (inFlight.get(origin.siteId) ?? 1) - 1;
+        if (remaining > 0) inFlight.set(origin.siteId, remaining);
+        else inFlight.delete(origin.siteId);
+      }
+    },
     [context, rail.workspaceId, refreshSessionPages],
+  );
+  const siteRowActions = useMemo<SiteRowActions | null>(
+    () =>
+      // An embed's older client may predate Site sidebar state.
+      typeof context.client.updateSiteSidebarState === "function"
+        ? {
+            pin: (origin, nextPinned) => void onPinSite(origin, nextPinned),
+            archive: (origin) => void onArchiveSite(origin, true),
+          }
+        : null,
+    [context.client, onArchiveSite, onPinSite],
   );
   const onDeleteSession = useCallback(async (): Promise<boolean> => {
     if (!sessionPendingDelete) return false;
@@ -1935,8 +2301,15 @@ export function SessionList() {
       for (const node of bucket.sessions) visit(node);
     }
     for (const node of archivedNodes) visit(node);
+    // Site rows are presentation-only; register them by key for disclosure.
+    for (const node of [
+      ...railSections.ordinary.running,
+      ...railSections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+    ]) {
+      if (node.siteGroup && !result.has(node.session.id)) result.set(node.session.id, node);
+    }
     return result;
-  }, [archivedNodes, railSections.complete]);
+  }, [archivedNodes, railSections.complete, railSections.ordinary]);
 
   // Manual state is separate from the small derived active-path expansion.
   // Polls can therefore never reopen a branch the user explicitly collapsed.
@@ -2003,11 +2376,24 @@ export function SessionList() {
       );
       try {
         const readGeneration = context.sessionChannelProjectionAuthority.beginRead();
+        // A Site row's "children" are the Site's own root conversations.
+        const siteRow = parseSiteRowKey(parentSessionId);
         const page = await readLoadedSessionBranchWindow(
           (pageCursor) =>
             context.client.listSessionSummaryPage(rail.workspaceId, {
               limit: 50,
-              parentSessionId,
+              ...(siteRow
+                ? {
+                    parentSessionId: null,
+                    originSiteId: siteRow.siteId,
+                    ...(siteRow.channelId !== undefined ? { channelId: siteRow.channelId } : {}),
+                    // Its conversations are roots: list exactly the set the
+                    // Site row's count was computed over.
+                    ...(needsYouOnly ? { needsYouOnly: true } : {}),
+                    ...(mineOnly ? { mineOnly: true } : {}),
+                  }
+                : // Work spawned by a Site conversation runs inside the Site too.
+                  { parentSessionId, siteConversations: "include" as const }),
               ...(pageCursor ? { cursor: pageCursor } : {}),
               archiveStatus: browseStatus,
               sortBy: browseSortBy,
@@ -2047,6 +2433,8 @@ export function SessionList() {
       branchReadRevision,
       browseSortBy,
       browseStatus,
+      needsYouOnly,
+      mineOnly,
     ],
   );
   // The active route supplies exact child + ancestor detail even before the
@@ -2142,6 +2530,46 @@ export function SessionList() {
       });
     }
   }, [allSessions, childPages, context.session, expanded, loadChildPage, branchReadRevision]);
+  // A loaded Site row follows its complete server summary: a new or newly
+  // active conversation reloads an open Site and marks a closed one stale.
+  const siteRowSummaryKeys = useRef(new Map<string, string>());
+  useEffect(() => {
+    const newlyStale = new Set<string>();
+    for (const [key, page] of childPages) {
+      if (!parseSiteRowKey(key)) continue;
+      const summary = nodesById.get(key)?.siteSummary;
+      // Membership and status always matter; activity time only when the
+      // rows are ordered by it.
+      const next = summary
+        ? [
+            summary.conversations,
+            summary.total,
+            summary.attention,
+            summary.failed,
+            summary.active,
+            summary.queued,
+            summary.waiting,
+            summary.unread,
+            browseSortBy === "updatedAt" ? summary.updatedAt : "",
+          ].join(":")
+        : "";
+      const previous = siteRowSummaryKeys.current.get(key);
+      if (page.loading) continue;
+      siteRowSummaryKeys.current.set(key, next);
+      if (previous === undefined || previous === next) continue;
+      if (expanded.has(key)) void loadChildPage(key, undefined, { feedbackVisible: false });
+      else if (!page.stale) newlyStale.add(key);
+    }
+    if (newlyStale.size === 0) return;
+    setChildPages((current) => {
+      const next = new Map(current);
+      for (const key of newlyStale) {
+        const page = next.get(key);
+        if (page) next.set(key, { ...page, stale: true });
+      }
+      return next;
+    });
+  }, [childPages, expanded, loadChildPage, nodesById, browseSortBy]);
   const toggleExpand = useCallback(
     (sessionId: string) => {
       const opening = !expanded.has(sessionId);
@@ -2158,9 +2586,9 @@ export function SessionList() {
         return next;
       });
       const node = nodesById.get(sessionId);
-      if (sessionId.startsWith("site:")) return;
-      const knownDirectChildren =
-        node?.session.treeStats?.directChildren ?? node?.children.length ?? 0;
+      const knownDirectChildren = node?.siteGroup
+        ? siteRowConversationCount(node)
+        : (node?.session.treeStats?.directChildren ?? node?.children.length ?? 0);
       if (
         opening &&
         hierarchyMode &&
@@ -2174,6 +2602,30 @@ export function SessionList() {
     },
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
+  // Opening one of a Site's conversations opens its Site row once per visit
+  // to that Site, as a person's own expansion would: it stays open when
+  // another session is selected, and closing it again is respected while
+  // switching between the Site's conversations.
+  const openSiteId =
+    activeSiteId ??
+    (activeSessionId &&
+    context.session?.id === activeSessionId &&
+    context.session.parentSessionId === null
+      ? (sessionSiteOrigin(context.session)?.siteId ?? null)
+      : null);
+  const siteRouteExpansion = useRef<string | null>(null);
+  useEffect(() => {
+    if (!hierarchyMode || !openSiteId) {
+      siteRouteExpansion.current = null;
+      return;
+    }
+    // The Site itself is marked without opening its row.
+    if (!activeSessionId || siteRouteExpansion.current === openSiteId) return;
+    const rows = [...nodesById.values()].filter((node) => node.siteGroup?.siteId === openSiteId);
+    if (rows.length === 0) return;
+    siteRouteExpansion.current = openSiteId;
+    for (const row of rows) if (!expanded.has(row.session.id)) toggleExpand(row.session.id);
+  }, [activeSessionId, expanded, hierarchyMode, nodesById, openSiteId, toggleExpand]);
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
     // Channel mode replaces the ordinary recency forest with channel sections;
@@ -2231,6 +2683,37 @@ export function SessionList() {
     pinnedNodes,
   ]);
   const flat = useMemo<Session[]>(() => visibleRows.map((row) => row.node.session), [visibleRows]);
+
+  // The ⌘K menu answers from the chats loaded here, and next or previous chat
+  // and ⌘1 to ⌘9 follow the order shown here.
+  const directorySubject = context.accessContext.subjectId;
+  useEffect(() => {
+    rememberChats(directorySubject, [...pinned, ...sessions]);
+  }, [directorySubject, pinned, sessions]);
+  // ⌘K lists the Site rows shown here too: recent ones before anything is
+  // typed, and the ones whose title matches. Filtered views (archived, needs
+  // you, mine only) are left out so they never replace the full list.
+  const sidebarSiteGroups =
+    hierarchyMode && browseStatus !== "archived" && !needsYouOnly && !mineOnly
+      ? rootPage.siteGroups
+      : null;
+  useEffect(() => {
+    if (sidebarSiteGroups)
+      rememberSidebarSites(directorySubject, rail.workspaceId, sidebarSiteGroups);
+  }, [directorySubject, rail.workspaceId, sidebarSiteGroups]);
+  useEffect(() => {
+    setSidebarOrder(
+      directorySubject,
+      rail.workspaceId,
+      flat.map((session) => session.id),
+      pinnedChatNodes.map((node) => node.session.id),
+    );
+  }, [directorySubject, rail.workspaceId, flat, pinnedChatNodes]);
+  // ⌘1 to ⌘9 open the pinned chats in the order shown; holding ⌘ shows which.
+  const pinnedJumpNumbers = useMemo(
+    () => new Map(pinnedChatNodes.slice(0, 9).map((node, index) => [node.session.id, index + 1])),
+    [pinnedChatNodes],
+  );
 
   useLayoutEffect(() => {
     const pending = pendingSessionFocus.current;
@@ -2880,6 +3363,11 @@ export function SessionList() {
         // A current failure keeps its Retry control, but never advances the
         // disclosure window. Stale/no-op loads still return no focus outcome.
         if (result.failed) return false;
+        setArchiveWindowReductions((current) => {
+          const counts = new Map(current.counts);
+          counts.delete(group.key);
+          return { ...current, counts };
+        });
         // Manual disclosure stacks on the automatic fill shown when clicked.
         setGroupWindows((current) => ({
           generation: pageGeneration,
@@ -2967,6 +3455,7 @@ export function SessionList() {
   const fillTargets: (SessionGroupFillCandidate & {
     group: SessionPaginationGroup | null;
     loading: boolean;
+    visibleSessionIds: string[];
   })[] = [];
   const addFillTarget = (
     key: string,
@@ -2980,7 +3469,13 @@ export function SessionList() {
       key,
       group,
       loaded: nodes.length,
-      base: baseCountForGroup(key),
+      base: Math.max(0, baseCountForGroup(key) - archiveReduction(key)),
+      visibleSessionIds: sessionGroupWindowNodes(
+        nodes,
+        visibleCountForGroup(key),
+        activeSessionId,
+        0,
+      ).map((node) => node.session.id),
       // Failed pages keep their Retry control. Active sessions are filtered
       // client-side across the whole workspace, so fill uses only loaded rows.
       hasMore:
@@ -3042,6 +3537,10 @@ export function SessionList() {
     const gap = rows[1] ? rows[1].top - first.top : 0;
     const rowHeight = gap > first.height && gap < first.height * 2 ? gap : first.height;
     const viewportHeight = viewport.clientHeight;
+    const frozen = archiveFillFreeze.current;
+    if (frozen?.generation === fillGenerationRef.current && frozen.height === viewportHeight)
+      return;
+    archiveFillFreeze.current = null;
     const previousHeight = lastFillViewportHeight.current;
     lastFillViewportHeight.current = viewportHeight;
     const contentBottom =
@@ -3279,333 +3778,278 @@ export function SessionList() {
   }, [browseControlsActive, browseSessions, hierarchyMode, loading, search]);
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
-        <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
-          {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
-        </span>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              onClick={openSearchDialog}
-              aria-label="Search sessions"
-              aria-haspopup="dialog"
-              className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
-            >
-              <SearchIcon aria-hidden="true" className="size-3.5" />
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom">Search sessions</TooltipContent>
-        </Tooltip>
-        {channelMode ? (
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="New project"
-                onClick={() => setChannelDialogOpen(true)}
-                className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
-              >
-                <FolderPlusIcon className="size-3.5" />
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent side="right">New project</TooltipContent>
-          </Tooltip>
-        ) : null}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label={
-                needsYouOnly
-                  ? "Session view, showing sessions that need you"
-                  : needsYouCount > 0
-                    ? `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`
-                    : browseControlsActive
-                      ? "Session view, customized"
-                      : "Session view"
-              }
-              className="relative shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
-            >
-              <ListFilterIcon className="size-3.5" />
-              {needsYouCount > 0 && !needsYouOnly ? (
-                <span
-                  data-needs-you-dot
-                  className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-status-waiting"
-                />
-              ) : browseControlsActive ? (
-                <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-brand" />
-              ) : null}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-56">
-            <SessionBrowseOrderControls
-              groupBy={browseGroupBy}
-              onGroupByChange={(groupBy) => updateBrowsePreferences({ groupBy })}
-              sortBy={browseSortBy}
-              onSortByChange={(sortBy) => updateBrowsePreferences({ sortBy })}
-              status={browseStatusPreference}
-              needsYouCount={needsYouCount}
-              onStatusChange={(status) => updateBrowsePreferences({ status })}
-              mineOnly={mineOnly}
-              onMineOnlyChange={(next) => updateBrowsePreferences({ mineOnly: next })}
-              showEmptyGroups={showEmptyGroups}
-              onShowEmptyGroupsChange={(show) => updateBrowsePreferences({ showEmptyGroups: show })}
-            />
-            {context.clientConfig.sessionArchive ? (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onSelect={() =>
-                    void navigate({
-                      to: "/workspaces/$workspaceId/read-only-chats",
-                      params: { workspaceId: rail.workspaceId },
-                    })
-                  }
+    <SiteRowActionsContext.Provider value={siteRowActions}>
+      <WorkstreamRootsContext.Provider value={workstreamRoots}>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="mb-1 flex min-w-0 shrink-0 items-center gap-1 pl-[18px] pr-3 pt-1">
+            <span className="min-w-0 flex-1 truncate text-sm font-normal text-fg-label">
+              {search ? "Search results" : browseControlsActive ? "Browse sessions" : "Sessions"}
+            </span>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  onClick={openSearchDialog}
+                  aria-label="Search sessions"
+                  aria-haspopup="dialog"
+                  aria-keyshortcuts={searchShortcut?.ariaKeys}
+                  className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
                 >
-                  Read-only chats
-                </DropdownMenuItem>
-              </>
+                  <SearchIcon aria-hidden="true" className="size-3.5" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">
+                <TooltipWithKeys label="Search sessions" shortcut={searchShortcut} />
+              </TooltipContent>
+            </Tooltip>
+            {channelMode ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label="New project"
+                    onClick={() => setChannelDialogOpen(true)}
+                    className="shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
+                  >
+                    <FolderPlusIcon className="size-3.5" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="right">New project</TooltipContent>
+              </Tooltip>
             ) : null}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      <div
-        ref={listRef}
-        role="region"
-        tabIndex={-1}
-        aria-label={search ? "Session search results" : "Sessions"}
-        data-sessionpin-session-list
-        onKeyDown={onKeyDown}
-        onPointerDown={() => {
-          // Direct reader input cancels a reveal whose target has not mounted
-          // yet. A generic scroll handler cannot distinguish that input from
-          // browser anchoring caused by page merges and other DOM reflow.
-          cancelSessionRowRevealIntent(rowRevealIntent);
-        }}
-        onTouchStart={() => {
-          cancelSessionRowRevealIntent(rowRevealIntent);
-        }}
-        onWheel={() => {
-          cancelSessionRowRevealIntent(rowRevealIntent);
-        }}
-        className="min-w-0 pb-2 pl-2 pr-3"
-      >
-        <p className="sr-only" aria-live="polite" aria-atomic="true">
-          {announcement}
-        </p>
-        {(loading && allSessions.length === 0) ||
-        (channelMode && channelsQuery.loading && channels.length === 0) ? (
-          // The second clause holds the skeleton until the initial channels
-          // read resolves, so the rail paints Recents/workstreams directly
-          // instead of flashing the old recency layout first.
-          <SessionListSkeleton />
-        ) : error && allSessions.length === 0 ? (
-          <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
-            Session history is unavailable.{" "}
-            <button
-              type="button"
-              className="underline hover:text-fg"
-              onClick={() => void refresh()}
-            >
-              Retry
-            </button>
-          </div>
-        ) : flat.length === 0 &&
-          !showEmptyGroups &&
-          (search || browseControlsActive) &&
-          (search || browseStatus === "active") ? (
-          <div className="px-2 py-4 text-center text-xs text-fg-subtle">
-            <p>
-              {needsYouOnly && !search
-                ? "Nothing needs you right now."
-                : "No sessions match this view."}
-            </p>
-            {matchingResultsPagination ? (
-              <SessionGroupPaginationControl {...matchingResultsPagination} className="mt-2" />
-            ) : null}
-            <button
-              type="button"
-              className="mt-2 min-h-8 rounded px-2 underline hover:text-fg pointer-coarse:min-h-11"
-              onClick={() => {
-                updateSearchDraft("");
-                clearBrowseControls();
-              }}
-            >
-              {needsYouOnly && !search ? "Show all sessions" : "Clear search and filters"}
-            </button>
-          </div>
-        ) : (browseSessions.length === 0 && !hierarchyMode) ||
-          (!search &&
-            !browseControlsActive &&
-            allSessions.length === 0 &&
-            pinnedNodes.length === 0) ? (
-          <EmptySessions />
-        ) : (
-          <>
-            {pinnedNodes.length > 0 ? (
-              <>
-                <SessionGroup
-                  label="Pinned"
-                  nodes={pinnedNodes}
-                  localDeliveryAttention={localDeliveryAttention}
-                  flat={flat}
-                  activeSessionId={activeSessionId}
-                  focusIndex={focusIndex}
-                  onFocusSession={setFocusedSessionId}
-                  expanded={expanded}
-                  onToggleExpand={toggleExpand}
-                  childPages={childPages}
-                  onLoadMoreChildren={loadChildPage}
-                  onRename={context.updateSessionTitle}
-                  onPin={onPin}
-                  channels={channels}
-                  onMoveToChannel={onMoveToChannel}
-                  onUpdateAttention={onUpdateAttention}
-                  onArchive={onArchive}
-                  onRequestDelete={setSessionPendingDelete}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={
+                    needsYouOnly
+                      ? "Session view, showing sessions that need you"
+                      : needsYouCount > 0
+                        ? `Session view, ${needsYouCount} ${needsYouCount === 1 ? "session needs" : "sessions need"} you`
+                        : browseControlsActive
+                          ? "Session view, customized"
+                          : "Session view"
+                  }
+                  className="relative shrink-0 text-fg-label hover:text-fg pointer-coarse:size-11"
+                >
+                  <ListFilterIcon className="size-3.5" />
+                  {needsYouCount > 0 && !needsYouOnly ? (
+                    <span
+                      data-needs-you-dot
+                      className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-status-waiting"
+                    />
+                  ) : browseControlsActive ? (
+                    <span className="absolute right-0.5 top-0.5 size-1.5 rounded-full bg-brand" />
+                  ) : null}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-56">
+                <SessionBrowseOrderControls
+                  groupBy={browseGroupBy}
+                  onGroupByChange={(groupBy) => updateBrowsePreferences({ groupBy })}
+                  sortBy={browseSortBy}
+                  onSortByChange={(sortBy) => updateBrowsePreferences({ sortBy })}
+                  status={browseStatusPreference}
+                  needsYouCount={needsYouCount}
+                  onStatusChange={(status) => updateBrowsePreferences({ status })}
+                  mineOnly={mineOnly}
+                  onMineOnlyChange={(next) => updateBrowsePreferences({ mineOnly: next })}
+                  showEmptyGroups={showEmptyGroups}
+                  onShowEmptyGroupsChange={(show) =>
+                    updateBrowsePreferences({ showEmptyGroups: show })
+                  }
                 />
-                {pinnedTruncated ? (
-                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
-                    Showing the 100 most recently pinned sessions. Older pins are omitted.
-                  </p>
+                {context.clientConfig.sessionArchive ? (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() =>
+                        void navigate({
+                          to: "/workspaces/$workspaceId/read-only-chats",
+                          params: { workspaceId: rail.workspaceId },
+                        })
+                      }
+                    >
+                      Read-only chats
+                    </DropdownMenuItem>
+                  </>
                 ) : null}
-              </>
-            ) : null}
-            {browseStatus === "archived" ? null : channelMode ? (
-              renderedChannelSections.map((section) => (
-                <SessionGroup
-                  key={section.key}
-                  label={section.name}
-                  channelId={section.channelId}
-                  sectionId={`channel-${section.key}`}
-                  channelHeader
-                  completeCounts={projectTotals?.get(section.channelId)}
-                  project={
-                    section.channelId
-                      ? channels.find((project) => project.id === section.channelId)
-                      : undefined
-                  }
-                  onToggleProjectPin={onToggleProjectPin}
-                  onRenameProject={(project) => {
-                    setProjectRenameDraft(project.name);
-                    setProjectPendingRename(project);
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+
+          <div
+            ref={listRef}
+            role="region"
+            tabIndex={-1}
+            aria-label={search ? "Session search results" : "Sessions"}
+            data-sessionpin-session-list
+            onKeyDown={onKeyDown}
+            onPointerDown={() => {
+              // Direct reader input cancels a reveal whose target has not mounted
+              // yet. A generic scroll handler cannot distinguish that input from
+              // browser anchoring caused by page merges and other DOM reflow.
+              cancelSessionRowRevealIntent(rowRevealIntent);
+            }}
+            onTouchStart={() => {
+              cancelSessionRowRevealIntent(rowRevealIntent);
+            }}
+            onWheel={() => {
+              cancelSessionRowRevealIntent(rowRevealIntent);
+            }}
+            className="min-w-0 pb-2 pl-2 pr-3"
+          >
+            <p className="sr-only" aria-live="polite" aria-atomic="true">
+              {announcement}
+            </p>
+            {(loading && allSessions.length === 0) ||
+            (channelMode && channelsQuery.loading && channels.length === 0) ? (
+              // The second clause holds the skeleton until the initial channels
+              // read resolves, so the rail paints Recents/workstreams directly
+              // instead of flashing the old recency layout first.
+              <SessionListSkeleton />
+            ) : error && allSessions.length === 0 ? (
+              <div role="alert" className="px-2 py-3 text-xs text-fg-subtle">
+                Session history is unavailable.{" "}
+                <button
+                  type="button"
+                  className="underline hover:text-fg"
+                  onClick={() => void refresh()}
+                >
+                  Retry
+                </button>
+              </div>
+            ) : flat.length === 0 &&
+              !showEmptyGroups &&
+              (search || browseControlsActive) &&
+              (search || browseStatus === "active") ? (
+              <div className="px-2 py-4 text-center text-xs text-fg-subtle">
+                <p>
+                  {needsYouOnly && !search
+                    ? "Nothing needs you right now."
+                    : "No sessions match this view."}
+                </p>
+                {matchingResultsPagination ? (
+                  <SessionGroupPaginationControl {...matchingResultsPagination} className="mt-2" />
+                ) : null}
+                <button
+                  type="button"
+                  className="mt-2 min-h-8 rounded px-2 underline hover:text-fg pointer-coarse:min-h-11"
+                  onClick={() => {
+                    updateSearchDraft("");
+                    clearBrowseControls();
                   }}
-                  onDeleteProject={setProjectPendingDelete}
-                  draggedProjectId={draggedProjectId}
-                  dragOverProjectId={dragOverProjectId}
-                  onProjectDragStart={setDraggedProjectId}
-                  onProjectDragOver={setDragOverProjectId}
-                  onProjectDrop={(sourceProjectId, targetProjectId) => {
-                    void onReorderProjects(sourceProjectId, targetProjectId);
-                    setDraggedProjectId(null);
-                    setDragOverProjectId(null);
-                  }}
-                  onProjectDragEnd={() => {
-                    setDraggedProjectId(null);
-                    setDragOverProjectId(null);
-                  }}
-                  sectionExpanded={!collapsedChannelSections.has(section.key)}
-                  onToggleSection={() => toggleChannelSection(section.key)}
-                  nodes={section.sessions}
-                  visibleNodes={visibleNodesForGroup(
-                    sessionPaginationProjectGroup(section.channelId, section.name).key,
-                    section.sessions,
-                  )}
-                  pagination={
-                    search
-                      ? undefined
-                      : paginationForGroup(
-                          sessionPaginationProjectGroup(section.channelId, section.name),
-                          null,
-                          true,
-                          section.sessions,
-                        )
-                  }
-                  localDeliveryAttention={localDeliveryAttention}
-                  flat={flat}
-                  activeSessionId={activeSessionId}
-                  focusIndex={focusIndex}
-                  onFocusSession={setFocusedSessionId}
-                  expanded={expanded}
-                  onToggleExpand={toggleExpand}
-                  childPages={childPages}
-                  onLoadMoreChildren={loadChildPage}
-                  onRename={context.updateSessionTitle}
-                  onPin={onPin}
-                  channels={channels}
-                  onMoveToChannel={onMoveToChannel}
-                  onUpdateAttention={onUpdateAttention}
-                  onArchive={onArchive}
-                  onRequestDelete={setSessionPendingDelete}
-                />
-              ))
+                >
+                  {needsYouOnly && !search ? "Show all sessions" : "Clear search and filters"}
+                </button>
+              </div>
+            ) : (browseSessions.length === 0 && !hierarchyMode) ||
+              (!search &&
+                !browseControlsActive &&
+                allSessions.length === 0 &&
+                pinnedNodes.length === 0) ? (
+              <EmptySessions />
             ) : (
               <>
-                {browseGroupBy !== "none" &&
-                (forest.running.length > 0 || (showEmptyGroups && activePagination)) ? (
-                  <SessionGroup
-                    label="Active"
-                    nodes={forest.running}
-                    visibleNodes={visibleForest.running}
-                    pagination={paginationForGroup(
-                      {
-                        key: "activity:active",
-                        label: "Active",
-                        kind: "activity",
-                        group: "active",
-                      },
-                      nextCursor,
-                      false,
-                      forest.running,
-                    )}
-                    localDeliveryAttention={localDeliveryAttention}
-                    flat={flat}
-                    activeSessionId={activeSessionId}
-                    focusIndex={focusIndex}
-                    onFocusSession={setFocusedSessionId}
-                    expanded={expanded}
-                    onToggleExpand={toggleExpand}
-                    childPages={childPages}
-                    onLoadMoreChildren={loadChildPage}
-                    onRename={context.updateSessionTitle}
-                    onPin={onPin}
-                    channels={channels}
-                    onMoveToChannel={onMoveToChannel}
-                    onUpdateAttention={onUpdateAttention}
-                    onArchive={onArchive}
-                    onRequestDelete={setSessionPendingDelete}
-                  />
+                {pinnedNodes.length > 0 ? (
+                  <>
+                    <PinnedJumpNumbers.Provider value={pinnedJumpNumbers}>
+                      <SessionGroup
+                        label="Pinned"
+                        nodes={pinnedNodes}
+                        localDeliveryAttention={localDeliveryAttention}
+                        flat={flat}
+                        activeSessionId={activeSessionId}
+                        focusIndex={focusIndex}
+                        onFocusSession={setFocusedSessionId}
+                        expanded={expanded}
+                        onToggleExpand={toggleExpand}
+                        childPages={childPages}
+                        onLoadMoreChildren={loadChildPage}
+                        onRename={context.updateSessionTitle}
+                        onPin={onPin}
+                        channels={channels}
+                        onMoveToChannel={onMoveToChannel}
+                        onUpdateAttention={onUpdateAttention}
+                        onArchive={onArchive}
+                        onRequestDelete={setSessionPendingDelete}
+                      />
+                    </PinnedJumpNumbers.Provider>
+                    {pinnedTruncated ? (
+                      <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                        Showing the 100 most recently pinned sessions. Older pins are omitted.
+                      </p>
+                    ) : null}
+                  </>
                 ) : null}
-                {renderedGroupedBuckets.map((bucket) => {
-                  const paginationGroup = paginationGroupForBucket(bucket);
-                  return (
+                {hierarchyMode && browseStatus !== "archived" && rootPage.siteGroupsTruncated ? (
+                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                    Some older Sites aren&apos;t shown. Find them in{" "}
+                    <Link
+                      to="/workspaces/$workspaceId/artifacts"
+                      params={{ workspaceId: rail.workspaceId }}
+                      className="underline underline-offset-2 hover:text-fg"
+                    >
+                      Artifacts
+                    </Link>
+                    .
+                  </p>
+                ) : null}
+                {browseStatus === "archived" ? null : channelMode ? (
+                  renderedChannelSections.map((section) => (
                     <SessionGroup
-                      key={bucket.group}
-                      label={bucket.label}
-                      hideHeading={browseGroupBy === "none"}
-                      nodes={bucket.sessions}
+                      key={section.key}
+                      label={section.name}
+                      channelId={section.channelId}
+                      sectionId={`channel-${section.key}`}
+                      channelHeader
+                      completeCounts={projectTotals?.get(section.channelId)}
+                      project={
+                        section.channelId
+                          ? channels.find((project) => project.id === section.channelId)
+                          : undefined
+                      }
+                      onToggleProjectPin={onToggleProjectPin}
+                      onRenameProject={(project) => {
+                        setProjectRenameDraft(project.name);
+                        setProjectPendingRename(project);
+                      }}
+                      onDeleteProject={setProjectPendingDelete}
+                      draggedProjectId={draggedProjectId}
+                      dragOverProjectId={dragOverProjectId}
+                      onProjectDragStart={setDraggedProjectId}
+                      onProjectDragOver={setDragOverProjectId}
+                      onProjectDrop={(sourceProjectId, targetProjectId) => {
+                        void onReorderProjects(sourceProjectId, targetProjectId);
+                        setDraggedProjectId(null);
+                        setDragOverProjectId(null);
+                      }}
+                      onProjectDragEnd={() => {
+                        setDraggedProjectId(null);
+                        setDragOverProjectId(null);
+                      }}
+                      sectionExpanded={!collapsedChannelSections.has(section.key)}
+                      onToggleSection={() => toggleChannelSection(section.key)}
+                      nodes={section.sessions}
                       visibleNodes={visibleNodesForGroup(
-                        paginationGroup?.key ?? bucket.group,
-                        bucket.sessions,
+                        sessionPaginationProjectGroup(section.channelId, section.name).key,
+                        section.sessions,
                       )}
                       pagination={
-                        paginationGroup
-                          ? paginationForGroup(
-                              paginationGroup,
-                              nextCursor,
-                              browseGroupBy === "creator",
-                              bucket.sessions,
+                        search
+                          ? undefined
+                          : paginationForGroup(
+                              sessionPaginationProjectGroup(section.channelId, section.name),
+                              null,
+                              true,
+                              section.sessions,
                             )
-                          : undefined
                       }
                       localDeliveryAttention={localDeliveryAttention}
                       flat={flat}
@@ -3624,13 +4068,137 @@ export function SessionList() {
                       onArchive={onArchive}
                       onRequestDelete={setSessionPendingDelete}
                     />
-                  );
-                })}
-                {creatorDiscoveryPagination ? (
+                  ))
+                ) : (
+                  <>
+                    {browseGroupBy !== "none" &&
+                    (forest.running.length > 0 || (showEmptyGroups && activePagination)) ? (
+                      <SessionGroup
+                        label="Active"
+                        nodes={forest.running}
+                        visibleNodes={visibleForest.running}
+                        pagination={paginationForGroup(
+                          {
+                            key: "activity:active",
+                            label: "Active",
+                            kind: "activity",
+                            group: "active",
+                          },
+                          nextCursor,
+                          false,
+                          forest.running,
+                        )}
+                        localDeliveryAttention={localDeliveryAttention}
+                        flat={flat}
+                        activeSessionId={activeSessionId}
+                        focusIndex={focusIndex}
+                        onFocusSession={setFocusedSessionId}
+                        expanded={expanded}
+                        onToggleExpand={toggleExpand}
+                        childPages={childPages}
+                        onLoadMoreChildren={loadChildPage}
+                        onRename={context.updateSessionTitle}
+                        onPin={onPin}
+                        channels={channels}
+                        onMoveToChannel={onMoveToChannel}
+                        onUpdateAttention={onUpdateAttention}
+                        onArchive={onArchive}
+                        onRequestDelete={setSessionPendingDelete}
+                      />
+                    ) : null}
+                    {renderedGroupedBuckets.map((bucket) => {
+                      const paginationGroup = paginationGroupForBucket(bucket);
+                      return (
+                        <SessionGroup
+                          key={bucket.group}
+                          label={bucket.label}
+                          hideHeading={browseGroupBy === "none"}
+                          nodes={bucket.sessions}
+                          visibleNodes={visibleNodesForGroup(
+                            paginationGroup?.key ?? bucket.group,
+                            bucket.sessions,
+                          )}
+                          pagination={
+                            paginationGroup
+                              ? paginationForGroup(
+                                  paginationGroup,
+                                  nextCursor,
+                                  browseGroupBy === "creator",
+                                  bucket.sessions,
+                                )
+                              : undefined
+                          }
+                          localDeliveryAttention={localDeliveryAttention}
+                          flat={flat}
+                          activeSessionId={activeSessionId}
+                          focusIndex={focusIndex}
+                          onFocusSession={setFocusedSessionId}
+                          expanded={expanded}
+                          onToggleExpand={toggleExpand}
+                          childPages={childPages}
+                          onLoadMoreChildren={loadChildPage}
+                          onRename={context.updateSessionTitle}
+                          onPin={onPin}
+                          channels={channels}
+                          onMoveToChannel={onMoveToChannel}
+                          onUpdateAttention={onUpdateAttention}
+                          onArchive={onArchive}
+                          onRequestDelete={setSessionPendingDelete}
+                        />
+                      );
+                    })}
+                    {creatorDiscoveryPagination ? (
+                      <SessionGroup
+                        label="More creators"
+                        nodes={[]}
+                        pagination={creatorDiscoveryPagination}
+                        localDeliveryAttention={localDeliveryAttention}
+                        flat={flat}
+                        activeSessionId={activeSessionId}
+                        focusIndex={focusIndex}
+                        onFocusSession={setFocusedSessionId}
+                        expanded={expanded}
+                        onToggleExpand={toggleExpand}
+                        childPages={childPages}
+                        onLoadMoreChildren={loadChildPage}
+                        onRename={context.updateSessionTitle}
+                        onPin={onPin}
+                        channels={channels}
+                        onMoveToChannel={onMoveToChannel}
+                        onUpdateAttention={onUpdateAttention}
+                        onArchive={onArchive}
+                        onRequestDelete={setSessionPendingDelete}
+                      />
+                    ) : null}
+                  </>
+                )}
+                {browseStatus !== "archived" &&
+                browseGroupBy !== "none" &&
+                browseGroupBy !== "creator" &&
+                (!channelMode || search) &&
+                workspacePagination ? (
+                  <SessionGroupPaginationControl {...workspacePagination} />
+                ) : null}
+                {browseStatus !== "active" ? (
                   <SessionGroup
-                    label="More creators"
-                    nodes={[]}
-                    pagination={creatorDiscoveryPagination}
+                    label="Archived"
+                    sectionId="archived"
+                    channelHeader
+                    allowNewSession={false}
+                    showSummary={false}
+                    emptyLabel="No archived sessions"
+                    sectionExpanded={archiveExpanded}
+                    onToggleSection={() =>
+                      setArchiveFolder({ generation: pageGeneration, expanded: !archiveExpanded })
+                    }
+                    nodes={archivedNodes}
+                    visibleNodes={visibleNodesForGroup("archived", archivedNodes)}
+                    pagination={paginationForGroup(
+                      ARCHIVED_SESSION_GROUP,
+                      null,
+                      !search,
+                      archivedNodes,
+                    )}
                     localDeliveryAttention={localDeliveryAttention}
                     flat={flat}
                     activeSessionId={activeSessionId}
@@ -3651,108 +4219,66 @@ export function SessionList() {
                 ) : null}
               </>
             )}
-            {browseStatus !== "archived" &&
-            browseGroupBy !== "none" &&
-            browseGroupBy !== "creator" &&
-            (!channelMode || search) &&
-            workspacePagination ? (
-              <SessionGroupPaginationControl {...workspacePagination} />
-            ) : null}
-            {browseStatus !== "active" ? (
-              <SessionGroup
-                label="Archived"
-                sectionId="archived"
-                channelHeader
-                allowNewSession={false}
-                showSummary={false}
-                emptyLabel="No archived sessions"
-                sectionExpanded={archiveExpanded}
-                onToggleSection={() =>
-                  setArchiveFolder({ generation: pageGeneration, expanded: !archiveExpanded })
-                }
-                nodes={archivedNodes}
-                visibleNodes={visibleNodesForGroup("archived", archivedNodes)}
-                pagination={paginationForGroup(
-                  ARCHIVED_SESSION_GROUP,
-                  null,
-                  !search,
-                  archivedNodes,
-                )}
-                localDeliveryAttention={localDeliveryAttention}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-                channels={channels}
-                onMoveToChannel={onMoveToChannel}
-                onUpdateAttention={onUpdateAttention}
-                onArchive={onArchive}
-                onRequestDelete={setSessionPendingDelete}
-              />
-            ) : null}
-          </>
-        )}
-      </div>
-      <ChannelCreateDialog
-        key={projectPendingRename?.id ?? "rename-project"}
-        mode="rename"
-        open={projectPendingRename !== null}
-        name={projectRenameDraft}
-        busy={channelsQuery.mutating}
-        onNameChange={setProjectRenameDraft}
-        onOpenChange={(open) => {
-          if (!open) setProjectPendingRename(null);
-        }}
-        onSubmit={() => void submitRenameProject()}
-      />
-      <ChannelCreateDialog
-        open={channelDialogOpen}
-        name={channelNameDraft}
-        busy={channelsQuery.mutating}
-        onNameChange={setChannelNameDraft}
-        onOpenChange={(open) => {
-          setChannelDialogOpen(open);
-          if (!open) setChannelNameDraft("");
-        }}
-        onSubmit={() => void submitCreateChannel()}
-      />
-      <ConfirmDialog
-        open={sessionPendingDelete !== null}
-        onOpenChange={(open) => {
-          if (!open) setSessionPendingDelete(null);
-        }}
-        title={
-          <>Delete “{sessionPendingDelete ? sessionDisplayTitle(sessionPendingDelete) : ""}”?</>
-        }
-        description={
-          sessionPendingDelete?.treeStats?.totalDescendants
-            ? `This permanently deletes the chat and its ${sessionPendingDelete.treeStats.totalDescendants} sub-chats. A running chat is stopped first. This cannot be undone.`
-            : "This permanently deletes the chat and its history. A running chat is stopped first. This cannot be undone."
-        }
-        confirmLabel="Delete"
-        cancelAutoFocus
-        onConfirm={onDeleteSession}
-      />
-      <ConfirmDialog
-        open={projectPendingDelete !== null}
-        onOpenChange={(open) => {
-          if (!open) setProjectPendingDelete(null);
-        }}
-        title={<>Delete project “{projectPendingDelete?.name}”?</>}
-        description="Its sessions will remain available in Default. This cannot be undone."
-        confirmLabel="Delete project"
-        cancelAutoFocus
-        onConfirm={onDeleteProject}
-      />
-    </div>
+          </div>
+          <ChannelCreateDialog
+            key={projectPendingRename?.id ?? "rename-project"}
+            mode="rename"
+            open={projectPendingRename !== null}
+            name={projectRenameDraft}
+            busy={channelsQuery.mutating}
+            onNameChange={setProjectRenameDraft}
+            onOpenChange={(open) => {
+              if (!open) setProjectPendingRename(null);
+            }}
+            onSubmit={() => void submitRenameProject()}
+          />
+          <ChannelCreateDialog
+            open={channelDialogOpen}
+            name={channelNameDraft}
+            busy={channelsQuery.mutating}
+            onNameChange={setChannelNameDraft}
+            onOpenChange={(open) => {
+              setChannelDialogOpen(open);
+              if (!open) setChannelNameDraft("");
+            }}
+            onSubmit={() => void submitCreateChannel()}
+          />
+          <ConfirmDialog
+            open={sessionPendingDelete !== null}
+            onOpenChange={(open) => {
+              if (!open) setSessionPendingDelete(null);
+            }}
+            title={
+              <>Delete “{sessionPendingDelete ? sessionDisplayTitle(sessionPendingDelete) : ""}”?</>
+            }
+            description={
+              sessionPendingDelete?.treeStats?.totalDescendants
+                ? `This permanently deletes the chat and its ${sessionPendingDelete.treeStats.totalDescendants} sub-chats. A running chat is stopped first. This cannot be undone.`
+                : "This permanently deletes the chat and its history. A running chat is stopped first. This cannot be undone."
+            }
+            confirmLabel="Delete"
+            cancelAutoFocus
+            onConfirm={onDeleteSession}
+          />
+          <ConfirmDialog
+            open={projectPendingDelete !== null}
+            onOpenChange={(open) => {
+              if (!open) setProjectPendingDelete(null);
+            }}
+            title={<>Delete project “{projectPendingDelete?.name}”?</>}
+            description="Its sessions will remain available in Default. This cannot be undone."
+            confirmLabel="Delete project"
+            cancelAutoFocus
+            onConfirm={onDeleteProject}
+          />
+        </div>
+      </WorkstreamRootsContext.Provider>
+    </SiteRowActionsContext.Provider>
   );
 }
+
+/** Top-level sessions by id, so a spawned row can act on its workstream. */
+const WorkstreamRootsContext = createContext<ReadonlyMap<string, Session> | null>(null);
 
 type SessionGroupPaginationProps = {
   group: SessionPaginationGroup;
@@ -4187,25 +4713,38 @@ function SessionGroup(props: {
   );
 }
 
-/** A node plus, when expanded, its spawned children rendered one level deeper. */
+/**
+ * A Site row. Its conversations stay nested under it whichever session is
+ * open: collapsed it shows only the selected one, expanded it lists them all.
+ */
 function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
   const { node } = props;
   const origin = node.siteGroup!;
-  const key = `site:${origin.siteId}`;
+  const key = node.session.id;
   const expanded = props.expanded.has(key);
-  const summary = summarizeRailNodes(node.children, props.localDeliveryAttention);
+  const summary = summarizeRailNodes([node], props.localDeliveryAttention);
   const selected = selectedDescendantNode(node, props.activeSessionId);
   const children = expanded ? node.children : selected ? [selected] : [];
+  const page = props.childPages.get(key);
+  const count = siteRowConversationCount(node);
+  const activeSiteId = useRouterState({
+    select: (state): string | null => railRouteSelection(state.location).siteId,
+  });
   return (
     <div role="listitem" className="min-w-0">
       <SiteSessionGroupHeading
         origin={origin}
         workspaceId={node.session.workspaceId}
+        active={activeSiteId === origin.siteId && props.activeSessionId === null}
         expanded={expanded}
         onToggle={() => props.onToggleExpand(key)}
         summary={summary}
+        count={count}
+        relativeTime={relativeTimeLabel(t, node.session.updatedAt)}
+        depth={props.depth}
+        pinned={node.session.pinned === true}
       />
-      {children.length > 0 && (
+      {children.length > 0 || (expanded && page) ? (
         <div role="list" aria-label={`Conversations from ${origin.title}`}>
           {children.map((child) => (
             <SessionTreeRow
@@ -4213,10 +4752,28 @@ function SiteSessionGroupRow(props: Parameters<typeof SessionTreeRow>[0]) {
               {...props}
               node={child}
               depth={props.depth + 1}
+              nestedInSiteId={origin.siteId}
             />
           ))}
+          {expanded && page?.loading && page.feedbackVisible ? (
+            <TreeLoadRow depth={props.depth + 1} text="Loading conversations…" />
+          ) : null}
+          {expanded && page?.failed && page.feedbackVisible ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Retry loading conversations"
+              onClick={() => void props.onLoadMoreChildren(key, page.retryCursor ?? undefined)}
+            />
+          ) : null}
+          {expanded && !page?.loading && !page?.failed && page?.nextCursor ? (
+            <TreeLoadRow
+              depth={props.depth + 1}
+              text="Show more"
+              onClick={() => void props.onLoadMoreChildren(key, page.nextCursor!)}
+            />
+          ) : null}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -4240,6 +4797,8 @@ function SessionTreeRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
+  /** Listed under its Site row: opens in that Site's view, which names the Site. */
+  nestedInSiteId?: string | undefined;
 }) {
   const { node } = props;
   if (node.siteGroup) return <SiteSessionGroupRow {...props} />;
@@ -4284,6 +4843,7 @@ function SessionTreeRow(props: {
         onUpdateAttention={props.onUpdateAttention}
         onArchive={props.onArchive}
         onRequestDelete={props.onRequestDelete}
+        nestedInSiteId={props.nestedInSiteId}
       />
       {hasVisibleChildRegion ? (
         <div role="list" aria-label={`Spawned sessions from ${title}`}>
@@ -4389,6 +4949,23 @@ function TreeLoadRow({
   );
 }
 
+/** The ⌘1 to ⌘9 number of each top-level pinned row; absent outside the Pinned section. */
+const PinnedJumpNumbers = createContext<ReadonlyMap<string, number> | null>(null);
+
+/** "⌘3" while ⌘ is held on a pinned row that ⌘3 opens; otherwise nothing. */
+function usePinnedJumpKey(sessionId: string, depth: number, mobile: boolean): string | undefined {
+  const jumpNumber = useContext(PinnedJumpNumbers)?.get(sessionId);
+  // Only where ⌘1 to ⌘9 work: browsers keep those keys for their own tabs.
+  const pinnedKeys = useActionShortcut("go.pinnedChat");
+  const platform = currentPlatform();
+  const held = useHeldModifier(
+    platform,
+    Boolean(pinnedKeys && jumpNumber && depth === 0 && !mobile),
+  );
+  if (!held || !pinnedKeys || !jumpNumber) return undefined;
+  return chordLabel({ ...pinnedKeys.chord, code: `Digit${jumpNumber}` }, platform);
+}
+
 function SessionRow(props: {
   session: Session;
   index: number;
@@ -4413,15 +4990,34 @@ function SessionRow(props: {
   onUpdateAttention: UpdateAttentionFn;
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
+  nestedInSiteId?: string | undefined;
 }) {
   const rail = useRail();
   const context = useAppContext();
   const title = sessionDisplayTitle(props.session);
+  const archiveTarget = useWorkstreamArchiveTarget(props.session);
   const rename = useInlineRename(props.session, props.onRename);
   const contextPinSelection = useRef(false);
+  const chatOps = useChatOperations();
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
   const hasChildren = props.hasChildren;
   const focusEvents = useUiEventTarget("window");
   const creator = railRowCreator(props.session);
+  const jumpKey = usePinnedJumpKey(props.session.id, props.depth, rail.isMobile);
+  // A key press puts the person's attention elsewhere (⌘K right after opening a
+  // chat, with the pointer still on its row), so the hover card gives way, as
+  // tooltips do.
+  const [hoverOpen, setHoverOpen] = useState(false);
+  useEffect(() => {
+    if (!hoverOpen || typeof document === "undefined") return;
+    const close = () => setHoverOpen(false);
+    document.addEventListener("keydown", close, true);
+    return () => document.removeEventListener("keydown", close, true);
+  }, [hoverOpen]);
+  // The right-click menu replaces the preview: it would otherwise stay drawn
+  // over the menu, since the pointer is still on the row.
+  const [contextMenuOpen, setContextMenuOpen] = useState(false);
   // Who started a session only adds information where other people work too.
   const personalWorkspace = isPersonalWorkspace(
     context.workspaces?.find((workspace) => workspace.id === rail.workspaceId) ?? null,
@@ -4451,6 +5047,7 @@ function SessionRow(props: {
   const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
   const relativeTime = relativeTimeLabel(t, props.session.updatedAt);
+  const automationWait = sessionAutomationWaitWords(t, props.session, { now: new Date() });
   // Indent nested rows without changing the root title column. Parents and
   // leaves reserve the same compact disclosure slot, so the chevron does not
   // push a parent title away from the leaf titles beside it.
@@ -4525,7 +5122,8 @@ function SessionRow(props: {
         />
         <RailTrailingMetadata
           summary={props.aggregateStatus}
-          scheduled={props.session.hasSchedules === true}
+          automationWait={automationWait?.kind ?? null}
+          automationWaitLabel={automationWait?.label}
           relativeTime={rail.isMobile ? undefined : relativeTime}
           creator={creator}
         />
@@ -4534,15 +5132,34 @@ function SessionRow(props: {
   }
 
   return (
-    <ContextMenu>
+    <ContextMenu
+      onOpenChange={(open) => {
+        setContextMenuOpen(open);
+        if (open) setHoverOpen(false);
+      }}
+    >
       <ContextMenuTrigger asChild>
         <div className={rowClassName}>
           {lead}
-          <SiteOriginLink session={props.session} compact />
-          <HoverCard openDelay={100} closeDelay={80}>
+          {props.nestedInSiteId ? null : <SiteOriginLink session={props.session} compact />}
+          <HoverCard
+            openDelay={100}
+            closeDelay={80}
+            open={hoverOpen && !contextMenuOpen}
+            onOpenChange={(open) => setHoverOpen(open && !contextMenuOpen)}
+          >
             <HoverCardTrigger asChild>
               <Link
-                to="/workspaces/$workspaceId/sessions/$sessionId"
+                {...(props.nestedInSiteId
+                  ? {
+                      to: "/workspaces/$workspaceId/sites/$siteId",
+                      params: { workspaceId: rail.workspaceId, siteId: props.nestedInSiteId },
+                      search: { conversation: props.session.id },
+                    }
+                  : {
+                      to: "/workspaces/$workspaceId/sessions/$sessionId",
+                      params: { workspaceId: rail.workspaceId, sessionId: props.session.id },
+                    })}
                 draggable={props.session.parentSessionId === null && !props.session.archived}
                 onDragStart={(event) => {
                   if (props.session.parentSessionId !== null || props.session.archived) {
@@ -4553,7 +5170,6 @@ function SessionRow(props: {
                   event.dataTransfer.effectAllowed = "move";
                   event.dataTransfer.setData(SESSION_DRAG_TYPE, props.session.id);
                 }}
-                params={{ workspaceId: rail.workspaceId, sessionId: props.session.id }}
                 data-session-index={props.index}
                 data-session-focus
                 data-session-row={props.session.id}
@@ -4635,17 +5251,17 @@ function SessionRow(props: {
                 className="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm text-left outline-hidden focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
               >
                 <SessionRowContent
-                  quickActionSlots={
-                    Number(!props.session.archived) + Number(props.session.parentSessionId === null)
-                  }
+                  quickActionSlots={Number(!props.session.archived) + 1}
                   title={title}
                   stateLabel={stateLabel}
                   depthLabel={depthLabel}
                   descendantLabel={descendantLabel}
                   mobile={rail.isMobile}
                   summary={props.aggregateStatus}
-                  scheduled={props.session.hasSchedules === true}
+                  automationWait={automationWait?.kind ?? null}
+                  automationWaitLabel={automationWait?.label}
                   relativeTime={rail.isMobile ? undefined : relativeTime}
+                  jumpKey={jumpKey}
                   creator={creator}
                 />
               </Link>
@@ -4702,9 +5318,18 @@ function SessionRow(props: {
           <PencilIcon className="size-4" />
           Rename
         </ContextMenuItem>
+        <ContextMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(props.session)}
+        >
+          <LinkIcon className="size-4" />
+          Copy link
+          {copyLinkKeys ? <ContextMenuShortcut>{copyLinkKeys.label}</ContextMenuShortcut> : null}
+        </ContextMenuItem>
         {!props.session.archived ? (
           <>
             <ContextMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               onSelect={() => {
                 contextPinSelection.current = true;
                 void props.onPin(props.session, !props.session.pinned, "row");
@@ -4712,6 +5337,7 @@ function SessionRow(props: {
             >
               <PinIcon className={props.session.pinned ? "size-4 fill-current" : "size-4"} />
               {props.session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <ContextMenuShortcut>{pinKeys.label}</ContextMenuShortcut> : null}
             </ContextMenuItem>
             <ContextMenuItem
               onSelect={() =>
@@ -4737,14 +5363,12 @@ function SessionRow(props: {
             </ContextMenuItem>
           </>
         ) : null}
-        {props.session.parentSessionId === null ? (
-          <ContextMenuItem
-            onSelect={() => void props.onArchive(props.session, !props.session.archived)}
-          >
-            <ArchiveIcon className="size-4" />
-            {props.session.archived ? "Restore" : "Archive"}
-          </ContextMenuItem>
-        ) : null}
+        <ContextMenuItem
+          onSelect={() => void props.onArchive(archiveTarget, !archiveTarget.archived)}
+        >
+          <ArchiveIcon className="size-4" />
+          {rowArchiveLabel(context, props.session, archiveTarget)}
+        </ContextMenuItem>
         {props.session.parentSessionId === null && props.session.archived ? (
           <ContextMenuItem
             variant="destructive"
@@ -4799,9 +5423,32 @@ function sessionDescendantLabel(session: Session): string | null {
 }
 
 /**
- * The two common row actions stay one click away on desktop. Keyboard focus
- * reveals the same controls as hover; right-click still opens the complete
- * context menu owned by SessionRow.
+ * What archive acts on for a row: a top-level session itself, a spawned one
+ * its workstream's root (archive belongs to the whole workstream). The root
+ * is the loaded one when known; otherwise the row, resolved on archive.
+ */
+function useWorkstreamArchiveTarget(session: Session): Session {
+  const roots = useContext(WorkstreamRootsContext);
+  return session.parentSessionId === null
+    ? session
+    : (roots?.get(session.rootSessionId) ?? session);
+}
+
+/** "Archive", "Hide for me" or "Restore", naming the workstream on a spawned row. */
+function rowArchiveLabel(
+  context: Parameters<typeof archiveActionLabel>[0],
+  session: Session,
+  target: Session,
+): string {
+  const label = archiveActionLabel(context, target);
+  if (session.parentSessionId === null) return label;
+  return label === "Hide for me" ? "Hide workstream for me" : `${label} workstream`;
+}
+
+/**
+ * The two common row actions stay one click away on desktop, over the row's
+ * time and status. Keyboard focus reveals the same controls as hover;
+ * right-click still opens the complete context menu owned by SessionRow.
  */
 export function RowQuickActions({
   session,
@@ -4812,53 +5459,42 @@ export function RowQuickActions({
   onPin: PinFn;
   onArchive: ArchiveFn;
 }) {
+  const archiveContext = useAppContext();
+  const target = useWorkstreamArchiveTarget(session);
   const canPin = !session.archived;
-  const canArchive = session.parentSessionId === null;
-  if (!canPin && !canArchive) return null;
+  const archiveLabel = rowArchiveLabel(archiveContext, session, target);
 
   return (
-    <div
-      className="absolute right-1 top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:hidden [&>button]:w-6 [&>button:last-child]:w-10"
-      data-session-quick-actions={session.id}
-    >
+    <div className={RAIL_ROW_QUICK_ACTIONS_CLASS} data-session-quick-actions={session.id}>
       {canPin ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label={session.pinned ? "Unpin session" : "Pin session"}
-          aria-pressed={Boolean(session.pinned)}
-          title={session.pinned ? "Unpin" : "Pin"}
+        <RailRowQuickAction
+          label={session.pinned ? "Unpin session" : "Pin session"}
+          tooltip={session.pinned ? "Unpin" : "Pin"}
           data-session-actions={session.id}
           data-session-actions-mode="quick"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onPin(session, !session.pinned, "actions");
-          }}
-          className="text-fg-subtle hover:text-fg"
+          onActivate={() => void onPin(session, !session.pinned, "actions")}
         >
           <PinIcon className={session.pinned ? "size-3.5 fill-current" : "size-3.5"} />
-        </Button>
+        </RailRowQuickAction>
       ) : null}
-      {canArchive ? (
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-xs"
-          aria-label={session.archived ? "Restore session" : "Archive session"}
-          title={session.archived ? "Restore" : "Archive"}
-          data-session-actions={session.id}
-          data-session-actions-mode="quick"
-          data-session-action="archive"
-          onClick={(event) => {
-            event.stopPropagation();
-            void onArchive(session, !session.archived, "actions");
-          }}
-          className="text-fg-subtle hover:text-fg"
-        >
-          <ArchiveIcon className="size-3.5" />
-        </Button>
-      ) : null}
+      <RailRowQuickAction
+        label={
+          session.parentSessionId !== null
+            ? archiveLabel
+            : archiveLabel === "Hide for me"
+              ? "Hide for me"
+              : session.archived
+                ? "Restore session"
+                : "Archive session"
+        }
+        tooltip={archiveLabel}
+        data-session-actions={session.id}
+        data-session-actions-mode="quick"
+        data-session-action="archive"
+        onActivate={() => void onArchive(target, !target.archived, "actions")}
+      >
+        <ArchiveIcon className="size-3.5" />
+      </RailRowQuickAction>
     </div>
   );
 }
@@ -4886,7 +5522,12 @@ function RowActionsMenu({
   onArchive: ArchiveFn;
   onRequestDelete: RequestDeleteFn;
 }) {
+  const archiveContext = useAppContext();
+  const archiveTarget = useWorkstreamArchiveTarget(session);
   const remountSelection = useRef(false);
+  const chatOps = useChatOperations();
+  const copyLinkKeys = useActionShortcut("chat.copyLink");
+  const pinKeys = useActionShortcut("chat.pin");
   // Filing is a root-session concept: the rail groups a whole tree by its
   // root's channel, so children offer no move affordance.
   const canMove = channels.length > 0 && session.parentSessionId === null && !session.archived;
@@ -4901,7 +5542,7 @@ function RowActionsMenu({
           data-session-actions={session.id}
           data-session-actions-mode="overflow"
           onClick={(event) => event.stopPropagation()}
-          className="absolute right-0 top-1/2 z-10 hidden size-11 -translate-y-1/2 bg-surface-2 text-fg-subtle hover:text-fg pointer-coarse:inline-flex"
+          className={RAIL_ROW_OVERFLOW_TRIGGER_CLASS}
         >
           <EllipsisIcon className="size-3.5" />
         </Button>
@@ -4928,9 +5569,19 @@ function RowActionsMenu({
           <PencilIcon className="size-4" />
           Rename
         </DropdownMenuItem>
+        <DropdownMenuItem
+          aria-keyshortcuts={copyLinkKeys?.ariaKeys}
+          onSelect={() => void chatOps.copyLink(session)}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <LinkIcon className="size-4" />
+          Copy link
+          {copyLinkKeys ? <DropdownMenuShortcut>{copyLinkKeys.label}</DropdownMenuShortcut> : null}
+        </DropdownMenuItem>
         {!session.archived ? (
           <>
             <DropdownMenuItem
+              aria-keyshortcuts={pinKeys?.ariaKeys}
               onSelect={() => {
                 remountSelection.current = true;
                 void onPin(session, !session.pinned, "actions");
@@ -4939,6 +5590,7 @@ function RowActionsMenu({
             >
               <PinIcon className={session.pinned ? "size-4 fill-current" : "size-4"} />
               {session.pinned ? "Unpin" : "Pin"}
+              {pinKeys ? <DropdownMenuShortcut>{pinKeys.label}</DropdownMenuShortcut> : null}
             </DropdownMenuItem>
             <DropdownMenuItem
               onSelect={() => void onUpdateAttention(session, { unread: !session.unread })}
@@ -4962,15 +5614,13 @@ function RowActionsMenu({
             </DropdownMenuItem>
           </>
         ) : null}
-        {session.parentSessionId === null ? (
-          <DropdownMenuItem
-            onSelect={() => void onArchive(session, !session.archived)}
-            onClick={(event) => event.stopPropagation()}
-          >
-            <ArchiveIcon className="size-4" />
-            {session.archived ? "Restore" : "Archive"}
-          </DropdownMenuItem>
-        ) : null}
+        <DropdownMenuItem
+          onSelect={() => void onArchive(archiveTarget, !archiveTarget.archived)}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <ArchiveIcon className="size-4" />
+          {rowArchiveLabel(archiveContext, session, archiveTarget)}
+        </DropdownMenuItem>
         {session.parentSessionId === null && session.archived ? (
           <DropdownMenuItem
             variant="destructive"
@@ -5038,6 +5688,7 @@ function EmptySessions({ archived = false }: { archived?: boolean | undefined })
  */
 export function CollapsedSessionsButton() {
   const windowEvents = useUiEventTarget("window");
+  const searchShortcut = useActionShortcut("commandMenu.open");
   const rail = useRail();
   const { workspaceSessionListEvent } = useOpenGeni();
   const hintsAvailable =
@@ -5065,15 +5716,16 @@ export function CollapsedSessionsButton() {
             variant="ghost"
             size="icon-sm"
             aria-label="Search sessions"
-            onClick={(event) =>
-              requestSessionSearch(windowEvents, rail.workspaceId, event.currentTarget)
-            }
+            aria-keyshortcuts={searchShortcut?.ariaKeys}
+            onClick={() => requestCommandMenu(windowEvents)}
             className="text-fg-label hover:text-fg"
           >
             <SearchIcon className="size-4" />
           </Button>
         </TooltipTrigger>
-        <TooltipContent side="right">Search sessions</TooltipContent>
+        <TooltipContent side="right">
+          <TooltipWithKeys label="Search sessions" shortcut={searchShortcut} />
+        </TooltipContent>
       </Tooltip>
       <Tooltip>
         <TooltipTrigger asChild>

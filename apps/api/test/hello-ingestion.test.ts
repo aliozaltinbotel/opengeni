@@ -1,10 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { AgentEvent, Hello } from "@opengeni/agent-proto";
 import {
   claimEnrollmentConnection,
@@ -767,6 +764,87 @@ describe("refreshEnrollmentDisplay — the Hello reconciles has_display", () => 
       errorCode: "accepting_process_replaced",
       retryable: true,
     });
+  });
+
+  test("an update another operation installed settles once the successor proves its target", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, enrollment, connectionInstanceId } =
+      await seedEnrollment(false);
+    const current = await getEnrollment(db, workspaceId, enrollment.id);
+    const fence = {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      connectionGeneration: current!.connectionGeneration,
+    };
+    // The process was already updating for another enrollment and refused
+    // this one, which records a postponement.
+    const operationId = crypto.randomUUID();
+    await beginEnrollmentAgentUpdate(db, { ...fence, operationId, targetVersion: "0.1.16" });
+    await advanceEnrollmentAgentUpdate(db, {
+      ...fence,
+      operationId,
+      status: "failed",
+      errorCode: "update_busy_updating",
+      retryable: true,
+      rolledBack: false,
+    });
+    await releaseEnrollmentConnection(db, {
+      accountId,
+      workspaceId,
+      enrollmentId: enrollment.id,
+      connectionInstanceId,
+      reason: "GOING_OFFLINE_REASON_USER_STOP",
+    });
+    const successorConnectionInstanceId = crypto.randomUUID();
+    const claim = await claimEnrollmentConnection(db, {
+      workspaceId,
+      enrollmentId: enrollment.id,
+      credentialGeneration: enrollment.credentialGeneration,
+      connectionInstanceId: successorConnectionInstanceId,
+      leaseMs: 60_000,
+    });
+    expect(claim.claimed).toBe(true);
+    const targetDigest = "cd".repeat(32);
+    const successorHello = (binarySha256: string, receiptTargetVersion: string) =>
+      handleHelloPayload(
+        db,
+        undefined,
+        helloPayload(enrollment.id, workspaceId, {
+          agentVersion: "0.1.16",
+          binarySha256,
+          updateChannel: "stable",
+          // The receipt names the operation another enrollment requested.
+          completedUpdate: {
+            operationId: crypto.randomUUID(),
+            targetVersion: receiptTargetVersion,
+            binarySha256: targetDigest,
+          },
+        }),
+        helloSubject(workspaceId, enrollment.id, successorConnectionInstanceId),
+      );
+
+    // Neither a different running binary nor a receipt for another version
+    // proves this target.
+    await successorHello("ef".repeat(32), "0.1.16");
+    await successorHello(targetDigest, "0.1.17");
+    expect((await getEnrollment(db, workspaceId, enrollment.id))?.agentUpdate).toMatchObject({
+      operationId,
+      status: "failed",
+      errorCode: "update_busy_updating",
+    });
+
+    await successorHello(targetDigest, "0.1.16");
+    const after = await getEnrollment(db, workspaceId, enrollment.id);
+    expect(after?.agentUpdate).toMatchObject({
+      operationId,
+      status: "succeeded",
+      errorCode: null,
+      retryable: false,
+      targetVersion: "0.1.16",
+    });
+    expect(after?.agentUpdate?.completedAt).not.toBeNull();
   });
 
   test("update blocker custody clears on progress and rejects stale process replacements", async () => {

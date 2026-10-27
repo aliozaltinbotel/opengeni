@@ -10,6 +10,9 @@ index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2
 diff --git a/node_modules/@openai/agents-core/.bun-tag-2da6ec976600e880 b/.bun-tag-2da6ec976600e880
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@openai/agents-core/.bun-tag-34013d846a17e8af b/.bun-tag-34013d846a17e8af
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@openai/agents-core/.bun-tag-36e825f6e7410141 b/.bun-tag-36e825f6e7410141
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -2168,38 +2171,52 @@ index e512db81769570ddd61957d4c6e12835025559f1..ef1024121867d155415264c4f1314c89
          return results;
      }
      catch (e) {
-@@ -285,6 +285,46 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
+@@ -285,6 +285,60 @@ async function executeFunctionToolCalls(agent, toolRuns, runner, state, toolErro
              : state);
      }
  }
 +/**
 + * A function tool marked `exclusiveExecution` (for example a file edit) runs in
 + * model order: it starts only after every earlier call from the same response
-+ * has settled, and every later call starts only after it has settled. Other
-+ * calls still run concurrently with each other.
++ * has settled, and every later call starts only after it has settled. A tool's
++ * `executionOrderKeys` orders only the calls that share a resource: a call
++ * starts after the earlier calls of the response whose keys conflict with its
++ * own, that is the same key or one key extending the other after a `:` (so
++ * `computer` is ordered with `computer:a`, while `computer:a` and `computer:b`
++ * stay concurrent). Other calls still run concurrently with each other.
 + */
 +function orderExclusiveToolRuns(toolRuns, executeToolRun) {
-+    if (!toolRuns.some((toolRun) => toolRun.tool?.exclusiveExecution === true)) {
++    const exclusive = (toolRun) => toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true);
++    const keysOf = (toolRun) => {
++        const keys = typeof toolRun.tool?.executionOrderKeys === "function" ? toolRun.tool.executionOrderKeys(toolRun.toolCall) : undefined;
++        return Array.isArray(keys) && keys.length > 0 ? keys : null;
++    };
++    const runs = toolRuns.map((toolRun) => ({ toolRun, exclusive: exclusive(toolRun), keys: keysOf(toolRun) }));
++    if (!runs.some((run) => run.exclusive || run.keys)) {
 +        return executeToolRun;
 +    }
++    const conflict = (left, right) => left.some((a) => right.some((b) => a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`)));
 +    const gates = new Map();
 +    const settle = new Map();
 +    let barrier = Promise.resolve();
 +    let sinceBarrier = [];
-+    for (const toolRun of toolRuns) {
++    for (const run of runs) {
 +        let markSettled = () => { };
 +        const settled = new Promise((resolve) => {
 +            markSettled = resolve;
 +        });
-+        settle.set(toolRun, markSettled);
-+        if (toolRun.tool?.exclusiveExecution === true) {
-+            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
++        settle.set(run.toolRun, markSettled);
++        if (run.exclusive) {
++            gates.set(run.toolRun, Promise.all([barrier, ...sinceBarrier.map((earlier) => earlier.settled)]));
 +            barrier = settled;
 +            sinceBarrier = [];
 +        }
 +        else {
-+            gates.set(toolRun, barrier);
-+            sinceBarrier.push(settled);
++            const keys = run.keys;
++            gates.set(run.toolRun, keys
++                ? Promise.all([barrier, ...sinceBarrier.filter((earlier) => earlier.keys && conflict(keys, earlier.keys)).map((earlier) => earlier.settled)])
++                : barrier);
++            sinceBarrier.push({ settled, keys });
 +        }
 +    }
 +    return async (toolRun, signal) => {
@@ -2228,38 +2245,52 @@ index afe9d23168c0aff1474008da0b267a04312b2c12..847ce99450b9ec1c4f83f7c25ddc7375
          return results;
      }
      catch (e) {
-@@ -242,6 +242,46 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
+@@ -242,6 +242,60 @@ export async function executeFunctionToolCalls(agent, toolRuns, runner, state, t
              : state);
      }
  }
 +/**
 + * A function tool marked `exclusiveExecution` (for example a file edit) runs in
 + * model order: it starts only after every earlier call from the same response
-+ * has settled, and every later call starts only after it has settled. Other
-+ * calls still run concurrently with each other.
++ * has settled, and every later call starts only after it has settled. A tool's
++ * `executionOrderKeys` orders only the calls that share a resource: a call
++ * starts after the earlier calls of the response whose keys conflict with its
++ * own, that is the same key or one key extending the other after a `:` (so
++ * `computer` is ordered with `computer:a`, while `computer:a` and `computer:b`
++ * stay concurrent). Other calls still run concurrently with each other.
 + */
 +function orderExclusiveToolRuns(toolRuns, executeToolRun) {
-+    if (!toolRuns.some((toolRun) => toolRun.tool?.exclusiveExecution === true)) {
++    const exclusive = (toolRun) => toolRun.tool?.exclusiveExecution === true || (typeof toolRun.tool?.exclusiveExecution === "function" && toolRun.tool.exclusiveExecution(toolRun.toolCall) === true);
++    const keysOf = (toolRun) => {
++        const keys = typeof toolRun.tool?.executionOrderKeys === "function" ? toolRun.tool.executionOrderKeys(toolRun.toolCall) : undefined;
++        return Array.isArray(keys) && keys.length > 0 ? keys : null;
++    };
++    const runs = toolRuns.map((toolRun) => ({ toolRun, exclusive: exclusive(toolRun), keys: keysOf(toolRun) }));
++    if (!runs.some((run) => run.exclusive || run.keys)) {
 +        return executeToolRun;
 +    }
++    const conflict = (left, right) => left.some((a) => right.some((b) => a === b || a.startsWith(`${b}:`) || b.startsWith(`${a}:`)));
 +    const gates = new Map();
 +    const settle = new Map();
 +    let barrier = Promise.resolve();
 +    let sinceBarrier = [];
-+    for (const toolRun of toolRuns) {
++    for (const run of runs) {
 +        let markSettled = () => { };
 +        const settled = new Promise((resolve) => {
 +            markSettled = resolve;
 +        });
-+        settle.set(toolRun, markSettled);
-+        if (toolRun.tool?.exclusiveExecution === true) {
-+            gates.set(toolRun, Promise.all([barrier, ...sinceBarrier]));
++        settle.set(run.toolRun, markSettled);
++        if (run.exclusive) {
++            gates.set(run.toolRun, Promise.all([barrier, ...sinceBarrier.map((earlier) => earlier.settled)]));
 +            barrier = settled;
 +            sinceBarrier = [];
 +        }
 +        else {
-+            gates.set(toolRun, barrier);
-+            sinceBarrier.push(settled);
++            const keys = run.keys;
++            gates.set(run.toolRun, keys
++                ? Promise.all([barrier, ...sinceBarrier.filter((earlier) => earlier.keys && conflict(keys, earlier.keys)).map((earlier) => earlier.settled)])
++                : barrier);
++            sinceBarrier.push({ settled, keys });
 +        }
 +    }
 +    return async (toolRun, signal) => {
@@ -2331,6 +2362,96 @@ index e4b43a344a81c50b1dce9b9e9adba292f711c7e0..20f71ccc6c7113ceea4db70cea1e7314
          rawResponses: state._modelResponses,
          lastAgent: agent,
          state,
+diff --git a/dist/sandbox/agent.d.ts b/dist/sandbox/agent.d.ts
+index 9edff38fd63c9f5e2e8074d3ec77753bebe42d8b..0e7c83d118ea068b0a210de03319ad85e8bdeadf 100644
+--- a/dist/sandbox/agent.d.ts
++++ b/dist/sandbox/agent.d.ts
+@@ -11,6 +11,13 @@ export type SandboxAgentOptions<TContext = UnknownContext, TOutput extends Agent
+     baseInstructions?: SandboxBaseInstructions<TContext, TOutput>;
+     capabilities?: Capability[];
+     runAs?: string | SandboxUser;
++    /**
++     * Projection of the runtime manifest used only to render the remote mount
++     * policy and filesystem layout instructions. The session still materializes
++     * the full manifest. Use it to keep per-turn entries out of the cached
++     * instruction prefix.
++     */
++    instructionManifest?: (manifest: Manifest) => Manifest;
+ };
+ export declare class SandboxAgent<TContext = UnknownContext, TOutput extends AgentOutputType = TextOutput> extends Agent<TContext, TOutput> {
+     readonly [SANDBOX_AGENT_BRAND] = true;
+@@ -19,6 +26,7 @@ export declare class SandboxAgent<TContext = UnknownContext, TOutput extends Age
+     capabilities: Capability[];
+     runAs?: string | SandboxUser;
+     runtimeManifest: Manifest;
++    instructionManifest?: (manifest: Manifest) => Manifest;
+     constructor(config: SandboxAgentOptions<TContext, TOutput>);
+     clone(config: Partial<SandboxAgentOptions<TContext, TOutput>>): SandboxAgent<TContext, TOutput>;
+ }
+diff --git a/dist/sandbox/agent.js b/dist/sandbox/agent.js
+index 165f9ae11e7fa1e7f2be06d04f1e51660987ecb5..7d8eec855abb66031a0d3cb98248a5e742218216 100644
+--- a/dist/sandbox/agent.js
++++ b/dist/sandbox/agent.js
+@@ -13,6 +13,7 @@ class SandboxAgent extends agent_1.Agent {
+     capabilities;
+     runAs;
+     runtimeManifest;
++    instructionManifest;
+     constructor(config) {
+         super(config);
+         if (config.baseInstructions !== undefined &&
+@@ -26,6 +27,11 @@ class SandboxAgent extends agent_1.Agent {
+         this.baseInstructions = config.baseInstructions;
+         this.capabilities = config.capabilities ?? capabilities_1.Capabilities.default();
+         this.runAs = normalizeRunAs(config.runAs);
++        if (config.instructionManifest !== undefined &&
++            typeof config.instructionManifest !== 'function') {
++            throw new TypeError('SandboxAgent instructionManifest must be a function.');
++        }
++        this.instructionManifest = config.instructionManifest;
+         this.runtimeManifest = this.defaultManifest ?? new manifest_1.Manifest();
+     }
+     clone(config) {
+@@ -49,6 +55,7 @@ class SandboxAgent extends agent_1.Agent {
+             baseInstructions: config.baseInstructions ?? this.baseInstructions,
+             capabilities: config.capabilities ?? this.capabilities,
+             runAs: config.runAs ?? this.runAs,
++            instructionManifest: config.instructionManifest ?? this.instructionManifest,
+         });
+     }
+ }
+diff --git a/dist/sandbox/agent.mjs b/dist/sandbox/agent.mjs
+index 9858b77ba8b20d6d12e0aa08256d3b57fb1a4044..a58bd1d8bd2efea18993b778d7a288d149acf7f0 100644
+--- a/dist/sandbox/agent.mjs
++++ b/dist/sandbox/agent.mjs
+@@ -10,6 +10,7 @@ export class SandboxAgent extends Agent {
+     capabilities;
+     runAs;
+     runtimeManifest;
++    instructionManifest;
+     constructor(config) {
+         super(config);
+         if (config.baseInstructions !== undefined &&
+@@ -23,6 +24,11 @@ export class SandboxAgent extends Agent {
+         this.baseInstructions = config.baseInstructions;
+         this.capabilities = config.capabilities ?? Capabilities.default();
+         this.runAs = normalizeRunAs(config.runAs);
++        if (config.instructionManifest !== undefined &&
++            typeof config.instructionManifest !== 'function') {
++            throw new TypeError('SandboxAgent instructionManifest must be a function.');
++        }
++        this.instructionManifest = config.instructionManifest;
+         this.runtimeManifest = this.defaultManifest ?? new Manifest();
+     }
+     clone(config) {
+@@ -46,6 +52,7 @@ export class SandboxAgent extends Agent {
+             baseInstructions: config.baseInstructions ?? this.baseInstructions,
+             capabilities: config.capabilities ?? this.capabilities,
+             runAs: config.runAs ?? this.runAs,
++            instructionManifest: config.instructionManifest ?? this.instructionManifest,
+         });
+     }
+ }
 diff --git a/dist/sandbox/capabilities/filesystem.js b/dist/sandbox/capabilities/filesystem.js
 index 54de1bee2ad8b7f0986d3ab9c8f67e4a7a8c2ea5..f68d5839453404f28394d9d9e9f85502bdeaf310 100644
 --- a/dist/sandbox/capabilities/filesystem.js
@@ -2494,6 +2615,54 @@ index 37b655b60d16747b5b2aa72b0f827e7b05604a92..4938c08c6239dee1ac6714fe919fddc5
  function joinAbsolutePath(root, relativePath) {
      const normalizedRoot = normalizeRoot(root);
      const normalizedRelativePath = normalizeRelativePath(relativePath);
+diff --git a/dist/sandbox/runtime/agentPreparation.js b/dist/sandbox/runtime/agentPreparation.js
+index 45655d50c827ddbe18f1f6ff9ab3bfebbc990612..c96f28d3343fe4a7d3d92893602f8ece706c186c 100644
+--- a/dist/sandbox/runtime/agentPreparation.js
++++ b/dist/sandbox/runtime/agentPreparation.js
+@@ -71,11 +71,17 @@ function prepareSandboxAgent({ agent, session, capabilities, runConfigModel, pro
+             if (capabilityFragments.length > 0) {
+                 segments.push((0, prompts_1.renderInstructionSection)('Sandbox capability instructions', capabilityFragments.join('\n\n')));
+             }
+-            const remoteMountPolicy = (0, prompts_1.renderRemoteMountPolicyInstructions)(runtimeManifest, canEditorAccessPath);
++            // Rendering may use a projection of the manifest (for example without
++            // per-turn entries) so the instructions stay stable across turns; the
++            // session still materializes the full runtime manifest.
++            const instructionManifest = agent.instructionManifest
++                ? agent.instructionManifest(runtimeManifest)
++                : runtimeManifest;
++            const remoteMountPolicy = (0, prompts_1.renderRemoteMountPolicyInstructions)(instructionManifest, canEditorAccessPath);
+             if (remoteMountPolicy) {
+                 segments.push((0, prompts_1.renderInstructionSection)('Sandbox remote mount policy', remoteMountPolicy));
+             }
+-            segments.push((0, prompts_1.renderFilesystemInstructions)(runtimeManifest));
++            segments.push((0, prompts_1.renderFilesystemInstructions)(instructionManifest));
+             return segments.join('\n\n');
+         },
+     });
+diff --git a/dist/sandbox/runtime/agentPreparation.mjs b/dist/sandbox/runtime/agentPreparation.mjs
+index 16e5f2880c65589ad4dc3e2455a333a42e35b073..ccbbab321285dfa5ffa00ac29538d1adb678e8bf 100644
+--- a/dist/sandbox/runtime/agentPreparation.mjs
++++ b/dist/sandbox/runtime/agentPreparation.mjs
+@@ -65,11 +65,17 @@ export function prepareSandboxAgent({ agent, session, capabilities, runConfigMod
+             if (capabilityFragments.length > 0) {
+                 segments.push(renderInstructionSection('Sandbox capability instructions', capabilityFragments.join('\n\n')));
+             }
+-            const remoteMountPolicy = renderRemoteMountPolicyInstructions(runtimeManifest, canEditorAccessPath);
++            // Rendering may use a projection of the manifest (for example without
++            // per-turn entries) so the instructions stay stable across turns; the
++            // session still materializes the full runtime manifest.
++            const instructionManifest = agent.instructionManifest
++                ? agent.instructionManifest(runtimeManifest)
++                : runtimeManifest;
++            const remoteMountPolicy = renderRemoteMountPolicyInstructions(instructionManifest, canEditorAccessPath);
+             if (remoteMountPolicy) {
+                 segments.push(renderInstructionSection('Sandbox remote mount policy', remoteMountPolicy));
+             }
+-            segments.push(renderFilesystemInstructions(runtimeManifest));
++            segments.push(renderFilesystemInstructions(instructionManifest));
+             return segments.join('\n\n');
+         },
+     });
 diff --git a/dist/sandbox/workspacePaths.js b/dist/sandbox/workspacePaths.js
 index 30fb71f0d5b40c0361d1bbbf0caa80bf3b3e2a34..711435ff36469ea29f71ccae93ab309b2989c680 100644
 --- a/dist/sandbox/workspacePaths.js
@@ -2713,7 +2882,7 @@ index fc2aa3141933c96cc080d65b05f7cffb13ee18d7..c4324d271c7bc90128dad0285198f687
  //# sourceMappingURL=workspacePaths.mjs.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.js b/dist/shims/mcp-server/node.js
-index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c7281247610fe01 100644
+index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..4b11edb6fe3b8021e264a9221db3e949fc0f8b78 100644
 --- a/dist/shims/mcp-server/node.js
 +++ b/dist/shims/mcp-server/node.js
 @@ -35,6 +35,8 @@ var __importStar = (this && this.__importStar) || (function () {
@@ -2735,7 +2904,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              throw error;
          }
          throw (0, mcpLogging_1.sanitizeMcpTransportError)(error, endpoint, operation);
-@@ -573,6 +576,215 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
+@@ -573,6 +576,236 @@ class NodeMCPServerSSE extends mcpShared_1.BaseMCPServerSSE {
      }
  }
  exports.NodeMCPServerSSE = NodeMCPServerSSE;
@@ -2844,12 +3013,33 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
 +    if (era !== 'legacy') {
 +        return;
 +    }
++    rememberLegacyEra(endpoint);
++}
++function rememberLegacyEra(endpoint) {
++    legacyEraByEndpoint.delete(endpoint);
 +    if (legacyEraByEndpoint.size >= LEGACY_ERA_MEMORY_MAX_ENTRIES) {
 +        const oldest = legacyEraByEndpoint.keys().next().value;
 +        legacyEraByEndpoint.delete(oldest);
 +    }
 +    legacyEraByEndpoint.set(endpoint, Date.now());
 +}
++// A server can answer the `server/discover` probe yet send 2025-era results
++// without the `resultType` that protocol revision 2026-07-28 requires. Every
++// result from it then fails validation, so in practice it is a 2025-era
++// server: auto negotiation reconnects it over the 2025 handshake (and
++// remembers that, like any legacy verdict) instead of losing its results.
++function isModernEraResultMismatch(clientModule, client, error) {
++    try {
++        return (client.getProtocolEra() === 'modern' &&
++            clientModule.SdkError.isInstance(error) &&
++            error.code === clientModule.SdkErrorCode.InvalidResult &&
++            error.data?.violation === 'missing-resultType');
++    }
++    catch {
++        return false;
++    }
++}
++const LEGACY_ERA_RECONNECT = Symbol('legacy-era-reconnect');
 +function validateMaxListPages(value) {
 +    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
 +        throw new errors_1.UserError('maxListPages must be a positive integer.');
@@ -2951,7 +3141,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
  class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHttp {
      session = null;
      _cacheDirty = true;
-@@ -581,6 +793,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -581,6 +814,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      serverInitializeResult = null;
      clientSessionTimeoutSeconds;
      timeout;
@@ -2959,7 +3149,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      params;
      _name;
      transport = null;
-@@ -590,18 +803,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -590,18 +824,25 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      connectionStateVersion = 0;
      constructor(params) {
          super(params);
@@ -2991,7 +3181,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      }
      createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
          const transportOptions = {
-@@ -620,16 +840,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -620,16 +861,44 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
      async createConnectedStreamableHttpClient(options = {}) {
          const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
@@ -3036,7 +3226,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              return { client, transport };
          }
          catch (error) {
-@@ -647,25 +895,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -647,25 +916,13 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      getClientSessionTimeoutMs() {
          return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
      }
@@ -3063,7 +3253,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              this._toolsList = [];
          }
          await (0, mcpToolCache_1.invalidateServerToolsCache)(this.name);
-@@ -698,7 +934,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -698,7 +955,10 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              });
              try {
                  if (typeof detachedTransport.terminateSession === 'function') {
@@ -3075,7 +3265,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  }
              }
              finally {
-@@ -740,18 +979,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -740,18 +1000,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
      }
      async callToolWithClient(client, toolName, args, meta, options) {
@@ -3103,7 +3293,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      }
      async closeStreamableHttpClient(args, options) {
          const { client, transport } = args;
-@@ -771,6 +1012,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -771,6 +1033,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
          });
      }
@@ -3115,7 +3305,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      async reconnectExistingStreamableHttpClient(args) {
          const { transportModule } = await this.loadStreamableHttpRuntime();
          const { StreamableHTTPClientTransport } = transportModule;
-@@ -781,7 +1027,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -781,7 +1048,8 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          try {
              const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
              await args.client.connect(transport, requestOptions);
@@ -3125,7 +3315,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  // Reconnecting with an existing session skips initialize(), so resend
                  // initialized to reopen the shared SSE stream for async responses.
                  await this.reopenSharedStreamableHttpSession(args.client);
-@@ -838,14 +1085,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -838,14 +1106,21 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
              }
              try {
@@ -3155,7 +3345,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  const recovered = await this.reconnectExistingStreamableHttpClient({
                      client: previousClient,
                      protocolVersion,
-@@ -872,7 +1126,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -872,7 +1147,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  await this.publishConnectedStreamableHttpClient({
                      client: recovered.client,
                      transport: recovered.transport,
@@ -3164,7 +3354,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
                  });
                  return recovered.client;
              }
-@@ -909,13 +1163,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -909,13 +1184,20 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          if (this.params.sessionId !== undefined) {
              return 'none';
          }
@@ -3190,7 +3380,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              ? 'reconnect-only'
              : 'none';
      }
-@@ -948,7 +1209,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -948,7 +1230,6 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              await this.publishConnectedStreamableHttpClient({
                  client,
                  transport,
@@ -3198,7 +3388,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              });
              this.serverInitializeResult = {
                  serverInfo: { name: this._name, version: '1.0.0' },
-@@ -967,7 +1227,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -967,7 +1248,7 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          catch (e) {
              // A losing concurrent connect can fail after another connect already
              // published a healthy shared session, so avoid closing shared state here.
@@ -3207,7 +3397,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              (0, logger_1.logToolActionError)(this.logger, 'Error initializing MCP server:', error);
              throw error;
          }
-@@ -975,11 +1235,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -975,11 +1256,11 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
      async invalidateToolsCache() {
          this._toolsCacheGeneration += 1;
@@ -3221,7 +3411,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
          if (!this.session) {
              throw new Error('Server not initialized. Make sure you call connect() first.');
          }
-@@ -988,19 +1248,17 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -988,19 +1269,34 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
          }
          const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
          const session = this.session;
@@ -3230,9 +3420,25 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
 -        const tools = await listAllMcpTools({
 -            fetchPage: (cursor) => runMcpTransportOperation(this.params.url, 'streamable HTTP list tools', () => requestMcpToolsPage(session, ListToolsResultSchema, requestOptions, cursor)),
 -            onPage: (response) => this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`),
--        });
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
-+        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', () => listMcpTools(clientModule, session, requestOptions, this.maxListPages));
++        const probing = ((this.params.versionNegotiation ?? { mode: 'auto' }).mode ?? 'legacy') === 'auto';
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', async () => {
++            try {
++                return await listMcpTools(clientModule, session, requestOptions, this.maxListPages);
++            }
++            catch (error) {
++                if (probing && isModernEraResultMismatch(clientModule, session, error)) {
++                    return LEGACY_ERA_RECONNECT;
++                }
++                throw error;
++            }
+         });
++        if (response === LEGACY_ERA_RECONNECT) {
++            rememberLegacyEra(this.params.url);
++            this.debugLog(() => `MCP server ${this._name} sent 2025-era results after negotiating 2026-07-28; reconnecting over the 2025 handshake.`);
++            await this.connect();
++            return await this.listTools();
++        }
 +        this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`);
          assertMcpToolListingIsCurrent({
              listedClient: session,
@@ -3245,7 +3451,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
          this._toolsList = tools;
          this._cacheDirty = false;
          return tools;
-@@ -1022,18 +1280,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1022,18 +1318,18 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
              if (isCallerAbortReason(error, options?.signal)) {
                  throw error;
              }
@@ -3268,7 +3474,7 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
              }
              try {
                  result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
-@@ -1042,41 +1300,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1042,41 +1338,38 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
                  if (isCallerAbortReason(retryError, options?.signal)) {
                      throw retryError;
                  }
@@ -3318,14 +3524,14 @@ index 78c8a67d53abff6ecb88f530e3a6bc319e059b09..c694d43d8f3df99afd11b0702c728124
      }
      get name() {
          return this._name;
-@@ -1130,4 +1385,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
+@@ -1130,4 +1423,3 @@ class NodeMCPServerStreamableHttp extends mcpShared_1.BaseMCPServerStreamableHtt
      }
  }
  exports.NodeMCPServerStreamableHttp = NodeMCPServerStreamableHttp;
 -//# sourceMappingURL=node.js.map
 \ No newline at end of file
 diff --git a/dist/shims/mcp-server/node.mjs b/dist/shims/mcp-server/node.mjs
-index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df403b651c8 100644
+index f5f1dc3e616690fc91032d545369333f95f49944..7cf9dd1b1bc47eb98197816a494227db4b920c76 100644
 --- a/dist/shims/mcp-server/node.mjs
 +++ b/dist/shims/mcp-server/node.mjs
 @@ -1,9 +1,12 @@
@@ -3351,7 +3557,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              throw error;
          }
          throw sanitizeMcpTransportError(error, endpoint, operation);
-@@ -535,6 +539,214 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
+@@ -535,6 +539,235 @@ export class NodeMCPServerSSE extends BaseMCPServerSSE {
          });
      }
  }
@@ -3459,12 +3665,33 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
 +    if (era !== 'legacy') {
 +        return;
 +    }
++    rememberLegacyEra(endpoint);
++}
++function rememberLegacyEra(endpoint) {
++    legacyEraByEndpoint.delete(endpoint);
 +    if (legacyEraByEndpoint.size >= LEGACY_ERA_MEMORY_MAX_ENTRIES) {
 +        const oldest = legacyEraByEndpoint.keys().next().value;
 +        legacyEraByEndpoint.delete(oldest);
 +    }
 +    legacyEraByEndpoint.set(endpoint, Date.now());
 +}
++// A server can answer the `server/discover` probe yet send 2025-era results
++// without the `resultType` that protocol revision 2026-07-28 requires. Every
++// result from it then fails validation, so in practice it is a 2025-era
++// server: auto negotiation reconnects it over the 2025 handshake (and
++// remembers that, like any legacy verdict) instead of losing its results.
++function isModernEraResultMismatch(clientModule, client, error) {
++    try {
++        return (client.getProtocolEra() === 'modern' &&
++            clientModule.SdkError.isInstance(error) &&
++            error.code === clientModule.SdkErrorCode.InvalidResult &&
++            error.data?.violation === 'missing-resultType');
++    }
++    catch {
++        return false;
++    }
++}
++const LEGACY_ERA_RECONNECT = Symbol('legacy-era-reconnect');
 +function validateMaxListPages(value) {
 +    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
 +        throw new UserError('maxListPages must be a positive integer.');
@@ -3566,7 +3793,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
  export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      session = null;
      _cacheDirty = true;
-@@ -543,6 +755,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -543,6 +776,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      serverInitializeResult = null;
      clientSessionTimeoutSeconds;
      timeout;
@@ -3574,7 +3801,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      params;
      _name;
      transport = null;
-@@ -552,18 +765,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -552,18 +786,25 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      connectionStateVersion = 0;
      constructor(params) {
          super(params);
@@ -3606,7 +3833,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      }
      createStreamableHttpTransport(StreamableHTTPClientTransport, options = {}) {
          const transportOptions = {
-@@ -582,16 +802,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -582,16 +823,44 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      }
      async createConnectedStreamableHttpClient(options = {}) {
          const { clientModule, transportModule } = await this.loadStreamableHttpRuntime();
@@ -3651,7 +3878,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              return { client, transport };
          }
          catch (error) {
-@@ -609,25 +857,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -609,25 +878,13 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      getClientSessionTimeoutMs() {
          return Math.max(1, (this.clientSessionTimeoutSeconds ?? 5) * 1000);
      }
@@ -3678,7 +3905,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              this._toolsList = [];
          }
          await invalidateServerToolsCache(this.name);
-@@ -660,7 +896,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -660,7 +917,10 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              });
              try {
                  if (typeof detachedTransport.terminateSession === 'function') {
@@ -3690,7 +3917,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  }
              }
              finally {
-@@ -702,18 +941,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -702,18 +962,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          await this.terminateDetachedStreamableHttpSession(transport, terminateWarningMessage);
      }
      async callToolWithClient(client, toolName, args, meta, options) {
@@ -3718,7 +3945,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      }
      async closeStreamableHttpClient(args, options) {
          const { client, transport } = args;
-@@ -733,6 +974,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -733,6 +995,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              logMcpTransportWarning(this.logger, this.params.url, 'streamable HTTP cleanup', options.closeWarningMessage, error);
          });
      }
@@ -3730,7 +3957,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
      async reconnectExistingStreamableHttpClient(args) {
          const { transportModule } = await this.loadStreamableHttpRuntime();
          const { StreamableHTTPClientTransport } = transportModule;
-@@ -743,7 +989,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -743,7 +1010,8 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          try {
              const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
              await args.client.connect(transport, requestOptions);
@@ -3740,7 +3967,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  // Reconnecting with an existing session skips initialize(), so resend
                  // initialized to reopen the shared SSE stream for async responses.
                  await this.reopenSharedStreamableHttpSession(args.client);
-@@ -800,14 +1047,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -800,14 +1068,21 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  throw new Error('Cannot reconnect streamable HTTP MCP server without an active client.');
              }
              try {
@@ -3770,7 +3997,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  const recovered = await this.reconnectExistingStreamableHttpClient({
                      client: previousClient,
                      protocolVersion,
-@@ -834,7 +1088,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -834,7 +1109,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  await this.publishConnectedStreamableHttpClient({
                      client: recovered.client,
                      transport: recovered.transport,
@@ -3779,7 +4006,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
                  });
                  return recovered.client;
              }
-@@ -871,13 +1125,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -871,13 +1146,20 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          if (this.params.sessionId !== undefined) {
              return 'none';
          }
@@ -3805,7 +4032,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              ? 'reconnect-only'
              : 'none';
      }
-@@ -910,7 +1171,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -910,7 +1192,6 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              await this.publishConnectedStreamableHttpClient({
                  client,
                  transport,
@@ -3813,7 +4040,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              });
              this.serverInitializeResult = {
                  serverInfo: { name: this._name, version: '1.0.0' },
-@@ -929,7 +1189,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -929,7 +1210,7 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          catch (e) {
              // A losing concurrent connect can fail after another connect already
              // published a healthy shared session, so avoid closing shared state here.
@@ -3822,7 +4049,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              logToolActionError(this.logger, 'Error initializing MCP server:', error);
              throw error;
          }
-@@ -937,11 +1197,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -937,11 +1218,11 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
      }
      async invalidateToolsCache() {
          this._toolsCacheGeneration += 1;
@@ -3836,7 +4063,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
          if (!this.session) {
              throw new Error('Server not initialized. Make sure you call connect() first.');
          }
-@@ -950,19 +1210,17 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -950,19 +1231,34 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
          }
          const requestOptions = buildRequestOptions(this.clientSessionTimeoutSeconds);
          const session = this.session;
@@ -3845,9 +4072,25 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
 -        const tools = await listAllMcpTools({
 -            fetchPage: (cursor) => runMcpTransportOperation(this.params.url, 'streamable HTTP list tools', () => requestMcpToolsPage(session, ListToolsResultSchema, requestOptions, cursor)),
 -            onPage: (response) => this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`),
--        });
 +        const { clientModule } = await this.loadStreamableHttpRuntime();
-+        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', () => listMcpTools(clientModule, session, requestOptions, this.maxListPages));
++        const probing = ((this.params.versionNegotiation ?? { mode: 'auto' }).mode ?? 'legacy') === 'auto';
++        const response = await this.runLegacyMcpTransportOperation('streamable HTTP list tools', async () => {
++            try {
++                return await listMcpTools(clientModule, session, requestOptions, this.maxListPages);
++            }
++            catch (error) {
++                if (probing && isModernEraResultMismatch(clientModule, session, error)) {
++                    return LEGACY_ERA_RECONNECT;
++                }
++                throw error;
++            }
+         });
++        if (response === LEGACY_ERA_RECONNECT) {
++            rememberLegacyEra(this.params.url);
++            this.debugLog(() => `MCP server ${this._name} sent 2025-era results after negotiating 2026-07-28; reconnecting over the 2025 handshake.`);
++            await this.connect();
++            return await this.listTools();
++        }
 +        this.debugLog(() => `Listed tools: ${JSON.stringify(response)}`);
          assertMcpToolListingIsCurrent({
              listedClient: session,
@@ -3860,7 +4103,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
          this._toolsList = tools;
          this._cacheDirty = false;
          return tools;
-@@ -984,18 +1242,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -984,18 +1280,18 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
              if (isCallerAbortReason(error, options?.signal)) {
                  throw error;
              }
@@ -3883,7 +4126,7 @@ index f5f1dc3e616690fc91032d545369333f95f49944..77bdc821a206ee111b700c6932cd8df4
              }
              try {
                  result = await this.callToolWithClient(recoveredClient, toolName, args, meta, options);
-@@ -1004,41 +1262,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
+@@ -1004,41 +1300,38 @@ export class NodeMCPServerStreamableHttp extends BaseMCPServerStreamableHttp {
                  if (isCallerAbortReason(retryError, options?.signal)) {
                      throw retryError;
                  }
@@ -3937,15 +4180,22 @@ diff --git a/dist/tool.d.ts b/dist/tool.d.ts
 index b0e0743ce55d1e5475ea91eb652879a9cdc0cf0f..ef965a36fe56c8419ab99d49d96b26b0101c1ca3 100644
 --- a/dist/tool.d.ts
 +++ b/dist/tool.d.ts
-@@ -195,6 +195,11 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput
+@@ -195,6 +195,18 @@ export type FunctionTool<Context = UnknownContext, TParameters extends ToolInput
       * Responses API only. Hides a top-level function tool definition until tool search loads it.
       */
      deferLoading?: boolean;
 +    /**
 +     * Run this tool in model order: it starts after every earlier call from the
-+     * same model response has settled, and later calls start after it settles.
++     * same model response has settled, and later calls start after it settles; a function orders only the calls it returns true for.
 +     */
-+    exclusiveExecution?: boolean;
++    exclusiveExecution?: boolean | ((toolCall: { name: string; arguments: string }) => boolean);
++    /**
++     * Order this tool's calls only against the calls of the same model
++     * response that use the same resource: a call starts after every earlier
++     * call whose keys conflict with its own (equal, or one extending the other
++     * after a `:`). Calls without keys, or with other keys, stay concurrent.
++     */
++    executionOrderKeys?: (toolCall: { name: string; arguments: string }) => readonly string[] | null | undefined;
      /**
       * Additional provider-specific metadata forwarded with the function tool definition.
       */

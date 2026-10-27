@@ -47,6 +47,8 @@ test('the native output bound reaches the actual SDK agent without replacing oth
  const spies=[spyOn(db,'getSandboxRecoveryDiscontinuity').mockResolvedValue(null),
   spyOn(db,'getWorkspaceVideoGenerationPolicy').mockResolvedValue({schemaVersion:1,revision:0,fundingSource:'workspace_gateway',enabledModelIds:[],defaultModelId:null}),
   spyOn(db,'ensureSessionSkillCatalog').mockImplementation(async(_db,value)=>value.catalog),
+  // Upstream persists workspace governance beside the catalog (same attempt fence).
+  spyOn(db,'ensureSessionWorkspaceGovernance').mockImplementation(async(_db,value)=>value.governance),
   spyOn(db,'getExternalLinkTurnAuthorization').mockResolvedValue(null)];
  try{
   const deps:Partial<BuildTurnAgentDeps>={...context,input:{accountId:'account',workspaceId:'workspace',sessionId:'session',attemptId:'attempt',workflowId:'workflow',workflowRunId:'run',trigger:{kind:'next'}},

@@ -320,6 +320,22 @@ pub struct MoveBody {
     /// The host to adopt it; the next wake places it when omitted.
     #[serde(default)]
     pub to: Option<String>,
+    /// Move it even while it is awake: it is saved where it stands,
+    /// memory and all, and its open connections end. Without it, a
+    /// sandbox something keeps awake is refused as busy.
+    #[serde(default)]
+    pub awake: bool,
+}
+
+/// A drain.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DrainBody {
+    /// Hand off the sandboxes that stay awake too, each saved where it
+    /// stands, memory and all, its open connections ending. Without it,
+    /// those stay on the host and are counted `left`.
+    #[serde(default)]
+    pub awake: bool,
 }
 
 /// A host as the operator sees it.
@@ -333,6 +349,9 @@ pub struct HostView {
     pub epoch: u64,
     pub memory_mib: u64,
     pub memory_free_mib: u64,
+    /// Memory in MiB it frees at once for a wake by ending idle VM
+    /// processes whose state is saved; placement counts it as free.
+    pub memory_reclaimable_mib: u64,
     /// Processor time in millicores it guarantees sandboxes at once now.
     pub cpu_millis: u64,
     /// Processor time in millicores a wake can still reserve on it.
@@ -388,8 +407,17 @@ async fn create<S: Store>(
         }
         _ => service.create(&team, spec, body.metadata).await?,
     };
-    if let Some(init) = &init {
-        crate::init::give(service, &team, row.id, &init.guest()).await?;
+    if let Some(init) = &init
+        && let Err(error) = crate::init::give(service, &team, row.id, &init.guest()).await
+    {
+        // A create that fails leaves no sandbox behind, unless its request
+        // id lets the caller ask again, which gives the init again.
+        if body.request_id.is_none()
+            && let Err(failure) = service.delete(&team, row.id).await
+        {
+            tracing::warn!(sandbox = %row.id, %failure, "removing a sandbox whose init failed");
+        }
+        return Err(error.into());
     }
     Ok((StatusCode::CREATED, Json(SandboxView::of(service, row))))
 }
@@ -530,9 +558,9 @@ async fn move_to<S: Store>(
 ) -> Result<Json<SandboxView>, ApiError> {
     let team = api.team(&headers).await?;
     let service = &api.0.service;
-    let to = body.and_then(|Json(body)| body.to);
+    let body = body.map(|Json(body)| body).unwrap_or_default();
     let row = service
-        .move_to(&team, parse_id(&id)?, to.as_deref())
+        .move_to(&team, parse_id(&id)?, body.to.as_deref(), body.awake)
         .await?;
     Ok(Json(SandboxView::of(service, row)))
 }
@@ -612,6 +640,7 @@ async fn hosts<S: Store>(
             epoch: known.target.epoch.0,
             memory_mib: known.info.memory_mib,
             memory_free_mib: known.capacity.memory_free_mib,
+            memory_reclaimable_mib: known.capacity.memory_reclaimable_mib,
             cpu_millis: known.capacity.cpu_millis,
             cpu_free_millis: known.capacity.cpu_free_millis,
             disk_free_mib: known.capacity.disk_free_mib,
@@ -626,9 +655,11 @@ async fn drain<S: Store>(
     State(api): State<Api<S>>,
     headers: HeaderMap,
     Path(name): Path<String>,
+    body: Option<Json<DrainBody>>,
 ) -> Result<Json<Drained>, ApiError> {
     api.operator(&headers).await?;
-    Ok(Json(api.0.service.drain(&name).await?))
+    let awake = body.is_some_and(|Json(body)| body.awake);
+    Ok(Json(api.0.service.drain(&name, awake).await?))
 }
 
 async fn undrain<S: Store>(

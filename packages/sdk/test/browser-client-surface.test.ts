@@ -23,7 +23,6 @@ const legacyBrowserUnusedMethods = [
   "codexAccountUsage",
   "codexDisconnect",
   "codexStatus",
-  "codexUsage",
   "createDocumentBase",
   "createWorkspaceInstructionPolicyOnboardingProposal",
   "createOrganization",
@@ -137,6 +136,10 @@ const integrationMethods = [
   // admin scripts; the web console sets limits per Site.
   "getSiteLimitProfile",
   "updateSiteLimitProfile",
+  // The Excel add-in reaches its workbook tickets and list through a host's
+  // session proxy; the web console has no Office surface.
+  "createOfficeWorkbookTicket",
+  "listOfficeWorkbooks",
 ];
 
 // The native app exchanges its sign-in code, signs out and manages its push
@@ -165,10 +168,37 @@ const retiredSettingsMethods = [
   "supersedePreferenceRegistry",
 ];
 
+// The web stopped calling the native Google Drive lifecycle methods when Drive
+// became one MCP connection; they remain on the SDK for existing callers.
+const retiredGoogleDriveNativeMethods = [
+  "disconnectGoogleDriveConnection",
+  "transitionGoogleDriveLifecycle",
+];
+
 // These browser-facing account APIs landed before their separately reviewed
 // settings (#4123) and picker (#4169) UI. Keep the pending surface explicit;
 // remove each entry when its browser consumer lands (the equality below enforces it).
 const pendingModelAccountMethods = ["getOrganizationModelAccountSettings"];
+
+// Dictation is recorded as a recording since #6022; the resumable transcription
+// recording methods are deprecated and stay only for existing SDK callers.
+const deprecatedTranscriptionRecordingMethods = [
+  "createTranscriptionRecording",
+  "discardTranscriptionRecording",
+  "finalizeTranscriptionRecording",
+  "getTranscriptionRecording",
+  "processNextTranscriptionRecordingSegment",
+  "uploadTranscriptionRecordingChunk",
+];
+
+// #6256 deleted the unreachable web components that called these (the Atlassian
+// source dialog, schedule Slack posting and sandbox artifact download). The
+// public SDK methods stay for existing callers.
+const retiredDeadWebComponentMethods = [
+  "listScheduledTaskSlackChannels",
+  "publishSandboxFileArtifact",
+  "saveAtlassianSources",
+];
 
 function countIdentifier(source: string, identifier: string): number {
   const escaped = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -235,7 +265,10 @@ describe("browser client runtime surface", () => {
         ...integrationMethods,
         ...nativeAppMethods,
         ...retiredSettingsMethods,
+        ...retiredGoogleDriveNativeMethods,
         ...pendingModelAccountMethods,
+        ...deprecatedTranscriptionRecordingMethods,
+        ...retiredDeadWebComponentMethods,
       ].sort(),
     );
   });

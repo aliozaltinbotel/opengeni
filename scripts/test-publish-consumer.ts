@@ -401,6 +401,7 @@ try {
       "packages/codex",
       "packages/config",
       "packages/contracts",
+      "packages/decisions",
       "packages/interaction",
       "packages/network",
       "packages/observability",
@@ -469,6 +470,8 @@ try {
     "package/dist/session-titles.d.ts",
     "package/dist/connection-account-label.js",
     "package/dist/connection-account-label.d.ts",
+    "package/dist/personal-integration-setup.js",
+    "package/dist/personal-integration-setup.d.ts",
   ]) {
     if (!contractsTarballContents.split("\n").includes(artifact)) {
       throw new Error(`contracts tarball is missing ${artifact}`);
@@ -496,6 +499,7 @@ try {
     "github-repository",
     "github-repository-contracts",
     "connection-account-label",
+    "personal-integration-setup",
   ] as const) {
     const entry = contracts.manifest.exports?.[`./${subpath}`];
     if (

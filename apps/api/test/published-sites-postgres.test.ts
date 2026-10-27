@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
+import { afterAll, beforeAll, expect, setSystemTime, spyOn, test } from "bun:test";
+import * as codex from "@opengeni/codex";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -19,7 +20,11 @@ import {
   requireSessionAuthorization,
   SessionAuthorizationDeniedError,
 } from "@opengeni/core";
-import { environmentsEncryptionKeyBytes } from "@opengeni/config";
+import {
+  configuredModels,
+  environmentsEncryptionKeyBytes,
+  withCodexCatalogProvider,
+} from "@opengeni/config";
 import {
   appendSessionEvents,
   claimSessionWorkForAttempt,
@@ -45,13 +50,10 @@ import {
   type DbClient,
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  startTestMcpServer,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
+import { startTestMcpServer } from "@opengeni/testing/mcp";
 import { createApp, type AppDependencies } from "../src/app";
 import { buildOpenGeniMcpServer } from "../src/mcp/server";
 import { buildOrganizationMcpServer } from "../src/organization-mcp";
@@ -335,6 +337,45 @@ test("guest agents are confined by native authority without a Site-agent write a
     if (method !== "GET") expect(text.toLowerCase()).toContain("permission");
   }
 }, 30_000);
+
+test("a Site viewer's time zone reaches each message they send", async () => {
+  const f = await fixture();
+  const site = await f.live("Zones", { access: "members", agent: { enabled: true } });
+  const session = await f.signIn(await f.person(memberPermissions), site.host);
+  const created = await f.gateway(site.host, "POST", "/sessions", {
+    session,
+    body: { initialMessage: "Remind me tomorrow at 9", timeZone: "Europe/Oslo" },
+  });
+  expect(created.status, JSON.stringify(created.json)).toBe(202);
+  const sessionId = String(created.json.id);
+  const zones = async () =>
+    (
+      await shared.admin<{ metadata: Record<string, unknown> }[]>`
+        select metadata from session_turns where session_id = ${sessionId} order by created_at`
+    ).map((turn) => turn.metadata.messageTimeZone ?? null);
+  expect(await zones()).toEqual(["Europe/Oslo"]);
+
+  await finishConversation(sessionId);
+  const sent = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    session,
+    body: { type: "user.message", payload: { text: "And Friday?", timeZone: "Asia/Tokyo" } },
+  });
+  expect(sent.status, JSON.stringify(sent.json)).toBe(202);
+  await finishConversation(sessionId);
+  const steered = await f.gateway(site.host, "POST", `/sessions/${sessionId}/steer`, {
+    session,
+    body: { text: "Make it 10", clientEventId: crypto.randomUUID(), timeZone: "America/Denver" },
+  });
+  expect(steered.status, JSON.stringify(steered.json)).toBeLessThan(300);
+  expect(await zones()).toEqual(["Europe/Oslo", "Asia/Tokyo", "America/Denver"]);
+
+  const malformed = await f.gateway(site.host, "POST", `/sessions/${sessionId}/events`, {
+    session,
+    body: { type: "user.message", payload: { text: "Hi", timeZone: "../etc/passwd" } },
+  });
+  expect(malformed.status).toBeGreaterThanOrEqual(400);
+  expect(malformed.status).toBeLessThan(500);
+});
 
 test("Site execution respects member control permission and explicitly refuses disabled private conversations", async () => {
   const f = await fixture();
@@ -824,6 +865,32 @@ test("publishing is off without a Sites domain", async () => {
   expect(config.json.sites).toBeNull();
 });
 
+test("a public Site on a login-only deployment carries a sign-in notice in its publication", async () => {
+  const f = await fixture({ sitesLoginOnly: true });
+  const site = await f.publish("Family recipes");
+  const members = await f.publication(f.owner, site.id, "PUT", {});
+  expect(members.status, JSON.stringify(members.json)).toBe(201);
+  expect(members.json.warnings).toEqual([]);
+  const opened = await f.publication(f.owner, site.id, "PUT", { access: "public" });
+  expect(opened.status, JSON.stringify(opened.json)).toBe(200);
+  expect(opened.json).toMatchObject({ access: "public", status: "active" });
+  expect(opened.json.warnings).toEqual([
+    expect.objectContaining({
+      code: "public_sign_in_required",
+      message: "On this deployment, public Sites still ask visitors to sign in to Opengeni.",
+      fix: null,
+    }),
+  ]);
+  const again = await f.publication(f.owner, site.id, "GET");
+  expect(again.json.warnings).toEqual(opened.json.warnings);
+  // Without login-only, the same public Site has nothing to say.
+  const open = await fixture();
+  const openSite = await open.publish("Family recipes");
+  await open.publication(open.owner, openSite.id, "PUT", {});
+  const openPublic = await open.publication(open.owner, openSite.id, "PUT", { access: "public" });
+  expect(openPublic.json.warnings).toEqual([]);
+});
+
 test("managers publish workspace Sites under globally unique, held hostnames", async () => {
   const f = await fixture();
   const other = await fixture();
@@ -960,6 +1027,67 @@ test("managers publish workspace Sites under globally unique, held hostnames", a
   expect(unknown.status).toBe(404);
   expect(code(unknown)).toBe("site_not_found");
 }, 60_000);
+
+test("anyone who can open a Site reads where it is published; its settings stay with managers", async () => {
+  const f = await fixture();
+  const site = await f.publish("Newsletter");
+  const viewer = await f.person(["workspace:read", "artifacts:read"]);
+  const link = (who: Who, siteId = site.id) =>
+    f.publication(who, siteId, "GET", undefined, "/link");
+
+  // Not published yet: no address, for anyone.
+  const before = await link(viewer);
+  expect(before.status).toBe(404);
+  expect(code(before)).toBe("site_not_published");
+
+  const created = await f.publication(f.owner, site.id, "PUT", { access: "invited" });
+  expect(created.status, JSON.stringify(created.json)).toBe(201);
+  // A viewer without artifacts:publish gets the primary address and status only.
+  const published = await link(viewer);
+  expect(published.status, JSON.stringify(published.json)).toBe(200);
+  expect(published.json).toEqual({
+    siteId: site.id,
+    hostname: created.json.hostname,
+    url: created.json.url,
+    status: "active",
+  });
+  // The publication's settings (access, invitations, moderation) stay with managers.
+  const settings = await f.publication(viewer, site.id, "GET");
+  expect(settings.status).toBe(403);
+  expect(code(settings)).toBe("site_manager_required");
+  expect((await link(f.owner)).json).toEqual(published.json);
+
+  // Without artifacts:read there is no Site to open, and an Only me Site stays hidden.
+  const outsider = await f.person(["workspace:read"]);
+  expect((await link(outsider)).status).toBe(403);
+  // Another person's Only me Site answers as if it didn't exist (site_not_found, not
+  // site_not_published), while its owner learns it isn't published.
+  const mine = await f.publish("Mine only", "private");
+  const unseen = await link(viewer, mine.id);
+  expect(unseen.status).toBe(404);
+  expect(code(unseen)).toBe("site_not_found");
+  expect(code(await link(f.owner, mine.id))).toBe("site_not_published");
+  // A Site in another workspace is not reachable through this one.
+  const elsewhere = await fixture();
+  const theirs = await elsewhere.live("Theirs");
+  const foreign = await link(viewer, theirs.id);
+  expect(foreign.status).toBe(404);
+  expect(code(foreign)).toBe("site_not_found");
+
+  // Taken-down and unpublished Sites say so, without the moderation details.
+  const takedown = await f.publication(
+    f.owner,
+    site.id,
+    "POST",
+    { reason: "Testing" },
+    "/takedown",
+  );
+  expect(takedown.status, JSON.stringify(takedown.json)).toBe(200);
+  expect((await link(viewer)).json).toEqual({ ...published.json, status: "suspended" });
+  expect((await f.publication(f.owner, site.id, "POST", {}, "/restore")).status).toBe(200);
+  await f.publication(f.owner, site.id, "DELETE");
+  expect((await link(viewer)).json).toEqual({ ...published.json, status: "unpublished" });
+});
 
 test("site-runtime checks the gateway signature before anything else", async () => {
   const f = await fixture();
@@ -3525,6 +3653,111 @@ test("a member's conversation from before members were uncapped keeps working, u
       .map((window) => Number(window.agent_micros)),
   ).toEqual([50_000, 50_000]);
 });
+
+test("published Site models follow the database catalog for members and guests without a restart", async () => {
+  const [previous] = await shared.admin`select document, version from deployment_model_catalog`;
+  const model = "codex/gpt-6.1-sol";
+  const creditModel = "gpt-6.1-sol";
+  const key = Buffer.alloc(32, 71);
+  const liveModels = spyOn(codex, "fetchCodexModels").mockResolvedValue({
+    ok: true,
+    status: 200,
+    slugs: ["gpt-6.1-sol"],
+  });
+  try {
+    const f = await fixture({
+      modelCatalogSource: "database",
+      codexSubscriptionEnabled: true,
+      environmentsEncryptionKey: key.toString("base64"),
+    });
+    const capabilities = configuredModels(withCodexCatalogProvider(f.settings)).find(
+      (entry) => entry.id === "codex/gpt-6-sol",
+    )!.capabilities;
+    const document = {
+      schemaVersion: 1,
+      builtInModels: [creditModel],
+      codexModels: [{ id: model, upstreamModelId: "gpt-6.1-sol", capabilities }],
+    };
+    const install = async (catalog: typeof document, version: number) => {
+      await shared.admin`insert into deployment_model_catalog (singleton, document, version)
+        values (true, ${shared.admin.json(catalog)}, ${version})
+        on conflict (singleton) do update set document=excluded.document, version=excluded.version`;
+    };
+    await install(document, 1);
+    // Metadata-only subscription fixture. No provider inference or real credential is used.
+    const credential = encryptEnvironmentValue(
+      key,
+      JSON.stringify({ access_token: "fixture-access", refresh_token: "fixture-refresh" }),
+    );
+    await shared.admin`insert into subscription_connections (
+      account_id, provider, kind, credential_encrypted, ownership, scope_kind,
+      provider_account_id, plan_type, provider_state, expires_at, last_refresh_at, label
+    ) values (
+      ${f.accountId}, 'codex', 'subscription', ${credential}, 'shared', 'organization',
+      'catalog-fixture', 'pro', ${shared.admin.json({ isFedramp: false })},
+      ${new Date(Date.now() + 86_400_000).toISOString()}, now(), 'Catalog fixture'
+    )`;
+    const site = await f.live("Database models", {
+      access: "public",
+      agent: { enabled: true, model },
+    });
+    const session = await f.signIn(f.member, site.host);
+    const consoleCatalog = await f.api(
+      f.member,
+      "GET",
+      `/v1/config/client?workspaceId=${f.workspace.id}`,
+    );
+    expect(consoleCatalog.status, JSON.stringify(consoleCatalog.json)).toBe(200);
+    expect(consoleCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);
+    const memberCatalog = await f.gateway(site.host, "GET", "/model-catalog", { session });
+    expect(memberCatalog.status, JSON.stringify(memberCatalog.json)).toBe(200);
+    expect(memberCatalog.json.models.map((entry: { id: string }) => entry.id)).toContain(model);
+    const member = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Hello", model },
+    });
+    expect(member.status, JSON.stringify(member.json)).toBe(202);
+
+    const visitor = visitorId();
+    const guestCatalog = await f.gateway(site.host, "GET", "/model-catalog", { visitor });
+    expect(guestCatalog.status, JSON.stringify(guestCatalog.json)).toBe(200);
+    expect(guestCatalog.json.defaultModel).toBe(creditModel);
+    expect(guestCatalog.json.models.map((entry: { id: string }) => entry.id)).toEqual([
+      creditModel,
+    ]);
+    const guest = await f.gateway(site.host, "POST", "/sessions", {
+      visitor,
+      body: { initialMessage: "Hello" },
+    });
+    expect(guest.status, JSON.stringify(guest.json)).toBe(202);
+    const rows = await shared.admin`select id, model from sessions
+      where id in (${member.json.id}, ${guest.json.id})`;
+    expect(rows.find((row) => row.id === member.json.id)?.model).toBe(model);
+    expect(rows.find((row) => row.id === guest.json.id)?.model).toBe(creditModel);
+    const forbidden = await f.gateway(site.host, "POST", "/sessions", {
+      visitor,
+      body: { initialMessage: "Hello", model },
+    });
+    expect(forbidden.status).toBe(403);
+
+    // Hot removal is observed by the same app instance; old fallback models stay absent.
+    await install({ ...document, codexModels: [] }, 2);
+    const changed = await f.gateway(site.host, "GET", "/model-catalog", { session });
+    expect(changed.json.models.map((entry: { id: string }) => entry.id)).toEqual([creditModel]);
+    const removed = await f.gateway(site.host, "POST", "/sessions", {
+      session,
+      body: { initialMessage: "Hello", model },
+    });
+    expect(removed.status).toBe(403);
+  } finally {
+    liveModels.mockRestore();
+    await shared.admin`delete from deployment_model_catalog`;
+    if (previous) {
+      await shared.admin`insert into deployment_model_catalog (singleton, document, version)
+        values (true, ${shared.admin.json(previous.document)}, ${previous.version})`;
+    }
+  }
+}, 60_000);
 
 test("the model follows the viewer: people outside the workspace never use a subscription", async () => {
   const f = await fixture();

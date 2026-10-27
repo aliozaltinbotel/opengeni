@@ -5,11 +5,16 @@ import {
   applySessionPinToLists,
   groupSessionsByProject,
   groupSessionsForRail,
+  homeSessionSections,
   recentSessionModelPresentation,
   recentSessionStatus,
   recentSessionsForHome,
   relativeTimeLabel,
+  sessionAutomationWait,
+  sessionHasPendingWake,
+  sessionHasUpcomingSchedule,
   sessionRepoLabel,
+  withLineageAutomationFacts,
 } from "../src/session-list-model";
 import { createOpenGeniText } from "../src/messages/runtime";
 
@@ -67,9 +72,15 @@ describe("session-list-model", () => {
 
   test("relative time labels", () => {
     expect(relativeTimeLabel(englishText, "2026-10-03T11:59:30Z", now)).toBe("now");
+    expect(relativeTimeLabel(englishText, "2026-10-03T11:59:10Z", now)).toBe("1m");
     expect(relativeTimeLabel(englishText, "2026-10-03T11:55:00Z", now)).toBe("5m");
     expect(relativeTimeLabel(englishText, "2026-10-03T09:00:00Z", now)).toBe("3h");
     expect(relativeTimeLabel(englishText, "2026-10-01T12:00:00Z", now)).toBe("2d");
+    // Calendar days in local time, as the long form counts them: from 20:00
+    // three days back to 12:00 today is 2 days 16 hours, and reads 3d.
+    const localNoon = new Date(2026, 9, 3, 12, 0);
+    const threeEveningsAgo = new Date(2026, 8, 30, 20, 0).toISOString();
+    expect(relativeTimeLabel(englishText, threeEveningsAgo, localNoon)).toBe("3d");
     expect(relativeTimeLabel(englishText, "not a date", now)).toBe("");
   });
 
@@ -109,6 +120,31 @@ describe("session-list-model", () => {
         (row) => row.id,
       ),
     ).toEqual(["mine"]);
+  });
+
+  test("phone home sections: every pin, then recent work that pins never crowd out", () => {
+    const pins = Array.from({ length: 7 }, (_, index) =>
+      session(`pin-${index}`, { pinned: true, updatedAt: "2026-10-03T11:40:00Z" }),
+    );
+    const pinnedAgent = session("pinned-agent", { pinned: true, parentSessionId: "mine" });
+    const running = session("r", { status: "running", updatedAt: "2026-10-01T00:00:00Z" });
+    const recent = session("a", { updatedAt: "2026-10-03T11:30:00Z" });
+    const older = session("b", { updatedAt: "2026-09-01T00:00:00Z" });
+    const agent = session("agent", { status: "running", parentSessionId: "a" });
+    const sections = homeSessionSections(
+      englishText,
+      [older, ...pins, recent, agent, running],
+      [...pins, pinnedAgent],
+      15,
+      now,
+    );
+    expect(sections.pinned.map((row) => row.id)).toEqual(pins.map((pin) => pin.id));
+    expect(sections.recent.map((row) => row.id)).toEqual(["r", "a", "b"]);
+    expect(
+      homeSessionSections(englishText, [older, recent, running], [], 2, now).recent.map(
+        (row) => row.id,
+      ),
+    ).toEqual(["r", "a"]);
   });
 
   test("status dot: background commands read as running", () => {
@@ -196,5 +232,75 @@ describe("applySessionPinToLists", () => {
     );
     expect(ids(restored)).toEqual(ids(lists));
     expect(restored.sessions[0]).toMatchObject({ pinned: false, pinVersion: 0 });
+  });
+});
+
+describe("sessionHasUpcomingSchedule", () => {
+  test("only a schedule that can still fire shows as upcoming", () => {
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: true })).toBe(
+      true,
+    );
+    // Paused, or a one-time schedule whose time passed: still linked, not upcoming.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    expect(sessionHasUpcomingSchedule({ hasSchedules: false, hasUpcomingSchedules: false })).toBe(
+      false,
+    );
+    // Servers that predate the upcoming flag keep the earlier meaning.
+    expect(sessionHasUpcomingSchedule({ hasSchedules: true })).toBe(true);
+    expect(sessionHasUpcomingSchedule({})).toBe(false);
+  });
+});
+
+describe("sessionHasPendingWake", () => {
+  const wait = { deadlineAt: "2026-10-03T12:30:00Z", reason: "Waiting for CI" };
+  test("a timed wait or an automation that can still run wakes the session", () => {
+    expect(sessionHasPendingWake(session("a"))).toBe(false);
+    expect(sessionHasPendingWake(session("a", { inputWait: wait }))).toBe(true);
+    expect(sessionHasPendingWake(session("a", { hasUpcomingSchedules: true }))).toBe(true);
+    expect(sessionHasPendingWake(session("a", { waitingForEvents: true }))).toBe(true);
+    // A spent schedule wakes nothing, and a wait only counts while idle and active.
+    expect(
+      sessionHasPendingWake(session("a", { hasSchedules: true, hasUpcomingSchedules: false })),
+    ).toBe(false);
+    expect(sessionHasPendingWake(session("a", { status: "running", inputWait: wait }))).toBe(false);
+  });
+
+  test("the lineage read's automation facts replace the session's own", () => {
+    const plain = session("a", { hasSchedules: false, hasUpcomingSchedules: false });
+    expect(withLineageAutomationFacts(plain, null)).toBe(plain);
+    expect(withLineageAutomationFacts(plain, {})).toBe(plain);
+    const merged = withLineageAutomationFacts(plain, {
+      sessionHasSchedules: true,
+      sessionHasUpcomingSchedules: true,
+    });
+    expect(merged).toMatchObject({
+      hasSchedules: true,
+      hasUpcomingSchedules: true,
+      waitingForEvents: false,
+    });
+    expect(sessionHasPendingWake(merged)).toBe(true);
+    // An older server sends only the schedules flag, which keeps its meaning.
+    expect(withLineageAutomationFacts(plain, { sessionHasSchedules: true })).toMatchObject({
+      hasUpcomingSchedules: true,
+    });
+  });
+});
+
+describe("sessionAutomationWait", () => {
+  test("an event that can still arrive outranks the next scheduled run", () => {
+    expect(sessionAutomationWait({ waitingForEvents: true, hasUpcomingSchedules: true })).toBe(
+      "event",
+    );
+    expect(sessionAutomationWait({ waitingForEvents: true })).toBe("event");
+    expect(sessionAutomationWait({ waitingForEvents: false, hasUpcomingSchedules: true })).toBe(
+      "schedule",
+    );
+    // A finished once-automation or a paused schedule waits for nothing.
+    expect(sessionAutomationWait({ waitingForEvents: false, hasUpcomingSchedules: false })).toBe(
+      null,
+    );
+    expect(sessionAutomationWait({})).toBe(null);
   });
 });

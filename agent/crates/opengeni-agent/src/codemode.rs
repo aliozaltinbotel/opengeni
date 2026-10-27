@@ -72,10 +72,16 @@ fn running_native_client_path() -> Option<PathBuf> {
 /// Connected Machine link carrying it. The control plane cannot safely infer
 /// this route: one runner may serve several deployments, while `localhost` has
 /// a different meaning on each host.
+///
+/// Only the origin comes from the link. The workspace stays the one the
+/// control plane addressed, because the attempt's token is minted for the
+/// chat's workspace: a personal machine serves its owner in every workspace
+/// they use, so that can differ from the workspace that enrolled the machine.
+/// The link's workspace is the fallback when the request names none.
 pub fn bind_connection_origin(
     request: &mut ControlRequest,
     api_base_url: &str,
-    workspace_id: &str,
+    link_workspace_id: &str,
 ) {
     let Some(exec) = request_exec_mut(request) else {
         return;
@@ -89,11 +95,34 @@ pub fn bind_connection_origin(
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
         return;
     }
+    let workspace_id = exec
+        .env
+        .get(URL_ENV)
+        .and_then(|requested| requested_workspace_id(requested))
+        .unwrap_or_else(|| link_workspace_id.to_string());
     let prefix = url.path().trim_end_matches('/');
     url.set_path(&format!("{prefix}/v1/workspaces/{workspace_id}/codemode"));
     url.set_query(None);
     url.set_fragment(None);
     exec.env.insert(URL_ENV.to_string(), url.to_string());
+}
+
+/// The workspace in a control-plane Codemode URL (`…/workspaces/<id>/codemode`).
+fn requested_workspace_id(requested: &str) -> Option<String> {
+    let url = Url::parse(requested).ok()?;
+    let segments: Vec<&str> = url
+        .path_segments()?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let [.., workspaces, workspace_id, codemode] = segments.as_slice() else {
+        return None;
+    };
+    let valid = *workspaces == "workspaces"
+        && *codemode == "codemode"
+        && workspace_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    valid.then(|| (*workspace_id).to_string())
 }
 
 fn request_exec_mut(request: &mut ControlRequest) -> Option<&mut ExecRequest> {
@@ -361,10 +390,11 @@ fn materialize_images(
             .chars()
             .take(6)
             .collect();
-        let directory = std::env::temp_dir().join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+        let root = std::env::temp_dir();
+        let directory = root.join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
         create_private_directory(&directory)
             .map_err(|error| local(format!("could not create an image directory: {error}")))?;
-        prune_expired_private_images(&directory);
+        prune_expired_private_images(&root, &directory);
         Some(directory)
     } else {
         None
@@ -435,18 +465,19 @@ fn create_private_directory(path: &std::path::Path) -> std::io::Result<()> {
     builder.create(path)
 }
 
-/// Best-effort removal of this client's temporary image directories older
-/// than a day. Only private (0700-style) directories owned by the same user
-/// as the directory just created are removed, as in the JavaScript client.
-/// Paths named with --save-image are never touched.
+/// Best-effort removal of this client's temporary image directories in `root`
+/// (the temporary directory) older than a day. Only private (0700-style)
+/// directories owned by the same user as the directory just created are
+/// removed, as in the JavaScript client. Paths named with --save-image are
+/// never touched.
 #[cfg(unix)]
-fn prune_expired_private_images(own_directory: &std::path::Path) {
+fn prune_expired_private_images(root: &std::path::Path, own_directory: &std::path::Path) {
     use std::os::unix::fs::MetadataExt as _;
     const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
     let Ok(owner) = std::fs::symlink_metadata(own_directory).map(|metadata| metadata.uid()) else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) else {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
     let mut removed = 0;
@@ -492,7 +523,7 @@ fn prune_expired_private_images(own_directory: &std::path::Path) {
 /// Without Unix ownership and modes there is no safe way to tell this
 /// client's directories from anyone else's, so nothing is pruned.
 #[cfg(not(unix))]
-fn prune_expired_private_images(_own_directory: &std::path::Path) {}
+fn prune_expired_private_images(_root: &std::path::Path, _own_directory: &std::path::Path) {}
 
 fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
@@ -1360,6 +1391,15 @@ mod tests {
     #[test]
     fn image_pruning_removes_only_expired_private_directories() {
         use std::os::unix::fs::PermissionsExt as _;
+        // A root of its own: tests writing temporary images prune the shared
+        // temporary directory concurrently. One midway through removing this
+        // test's private directory has unlinked its file, which makes the
+        // directory look new, so this prune skips it and the assertion runs
+        // before that removal finishes.
+        let root = tempfile::Builder::new()
+            .prefix("opengeni-prune-root-")
+            .tempdir()
+            .expect("root");
         let aged = |mode: u32| {
             let suffix: String = Uuid::new_v4()
                 .simple()
@@ -1367,7 +1407,7 @@ mod tests {
                 .chars()
                 .take(6)
                 .collect();
-            let path = std::env::temp_dir().join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
+            let path = root.path().join(format!("{TEMP_IMAGE_PREFIX}{suffix}"));
             std::fs::create_dir(&path).expect("create");
             std::fs::write(path.join("frame.png"), b"x").expect("file");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).expect("mode");
@@ -1382,9 +1422,9 @@ mod tests {
         let private = aged(0o700);
         let own = tempfile::Builder::new()
             .prefix("opengeni-prune-owner-")
-            .tempdir()
+            .tempdir_in(root.path())
             .expect("own");
-        prune_expired_private_images(own.path());
+        prune_expired_private_images(root.path(), own.path());
         assert!(shared.exists(), "a non-private directory is never pruned");
         assert!(!private.exists(), "an expired private directory is pruned");
         std::fs::remove_dir_all(&shared).expect("cleanup");
@@ -2054,6 +2094,60 @@ mod tests {
             exec.env.get(URL_ENV).map(String::as_str),
             Some("https://machine.example.test/opengeni/v1/workspaces/workspace-1/codemode")
         );
+    }
+
+    fn bind_on_link(requested_url: &str) -> Option<String> {
+        let mut exec = ExecRequest::default();
+        exec.env
+            .insert(TOKEN_ENV.to_string(), "attempt-secret".to_string());
+        exec.env
+            .insert(URL_ENV.to_string(), requested_url.to_string());
+        let mut request = ControlRequest {
+            op: Some(v1::control_request::Op::OpStart(v1::OpStart {
+                op: Some(v1::op_start::Op::Exec(exec)),
+                ..v1::OpStart::default()
+            })),
+            ..ControlRequest::default()
+        };
+        bind_connection_origin(
+            &mut request,
+            "https://machine.example.test/opengeni",
+            "home-workspace",
+        );
+        let Some(v1::control_request::Op::OpStart(start)) = request.op else {
+            panic!("op start request");
+        };
+        let Some(v1::op_start::Op::Exec(exec)) = start.op else {
+            panic!("streamed exec request");
+        };
+        exec.env.get(URL_ENV).cloned()
+    }
+
+    #[test]
+    fn personal_machine_keeps_the_chat_workspace_the_token_was_minted_for() {
+        // A personal machine enrolled in its owner's home workspace, used from
+        // a chat in another workspace: only the origin follows the link.
+        assert_eq!(
+            bind_on_link("https://public.example.test/v1/workspaces/chat-workspace/codemode")
+                .as_deref(),
+            Some("https://machine.example.test/opengeni/v1/workspaces/chat-workspace/codemode")
+        );
+    }
+
+    #[test]
+    fn unrecognised_codemode_routes_fall_back_to_the_link_workspace() {
+        for requested in [
+            "https://public.example.test/custom/codemode",
+            "https://public.example.test/v1/workspaces/a%2Fb/codemode",
+            "https://public.example.test/v1/workspaces/chat-workspace/mcp",
+            "not a url",
+        ] {
+            assert_eq!(
+                bind_on_link(requested).as_deref(),
+                Some("https://machine.example.test/opengeni/v1/workspaces/home-workspace/codemode"),
+                "{requested}"
+            );
+        }
     }
 
     #[tokio::test]

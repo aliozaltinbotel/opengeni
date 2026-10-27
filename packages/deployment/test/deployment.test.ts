@@ -24,6 +24,7 @@ import {
   WORKSPACE_CONTROL_PASSTHROUGH_ENV,
   CHILD_LIFECYCLE_NOTICES_PASSTHROUGH_ENV,
   SESSION_USAGE_LIMITS_PASSTHROUGH_ENV,
+  EVENT_TRIGGERS_PASSTHROUGH_ENV,
   MCP_OAUTH_PASSTHROUGH_ENV,
   API_REQUEST_SOURCE_PASSTHROUGH_ENV,
   SLACK_WORKSPACE_ROUTING_PASSTHROUGH_ENV,
@@ -44,6 +45,43 @@ const maintenanceImageDigests = {
 };
 
 describe("deployment contract", () => {
+  test("signup verification survives managed runtime rendering without exposing its secret in Helm values", () => {
+    const contract = contractForProfile("azure-existing-services", "managed-saas-staging");
+    const keys = [
+      "OPENGENI_SIGNUP_CHALLENGE_SITE_KEY",
+      "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY",
+      "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES",
+    ];
+    const disabled = generateRuntimeArtifacts(contract, {}, {});
+    expect(disabled.runtimeEnv).toContain("OPENGENI_SIGNUP_CHALLENGE_ENABLED=false");
+    expect(disabled.requiredEnvVars).not.toContain(keys[1]);
+    const enabled = { OPENGENI_SIGNUP_CHALLENGE_ENABLED: "true" };
+    const missing = generateRuntimeArtifacts(contract, {}, enabled);
+    for (const key of keys) {
+      expect(requiredRuntimeEnvVars(contract, enabled)).toContain(key);
+      expect(missing.missingEnvVars).toContain(key);
+    }
+    const configured = generateRuntimeArtifacts(
+      contract,
+      {},
+      {
+        ...enabled,
+        OPENGENI_SIGNUP_CHALLENGE_SITE_KEY: "synthetic-public-key",
+        OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY: "synthetic-private-key",
+        OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES: "staging.example.test",
+      },
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_SIGNUP_CHALLENGE_SECRET_KEY=synthetic-private-key",
+    );
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_SIGNUP_CHALLENGE_HOSTNAMES=staging.example.test",
+    );
+    expect(configured.helmValuesYaml).not.toContain("synthetic-private-key");
+    expect(configured.summary).not.toHaveProperty("signupChallengeSecretKey");
+    for (const key of keys) expect(configured.missingEnvVars).not.toContain(key);
+  });
+
   test("ships valid built-in profiles", () => {
     for (const profile of Object.values(deploymentProfiles)) {
       expect(parseDeploymentContract(profile).profile).toBe(profile.profile);
@@ -1096,6 +1134,14 @@ describe("deployment contract", () => {
         OPENGENI_SLACK_SIGNING_SECRET: "slack-staging-signing-secret",
         OPENGENI_SLACK_BOT_DISPLAY_NAME: "Opengeni Staging",
         OPENGENI_SLACK_COMMAND: "/opengeni-staging",
+        OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS: "b2a93667-d2ce-4468-8b65-3c773b701ad7",
+        OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS: "00000000-0000-4000-8000-000000000001",
+        OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS:
+          "00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+        OPENGENI_TEAMS_BOT_CLIENT_ID: "teams-pilot-client",
+        OPENGENI_TEAMS_BOT_CLIENT_SECRET: "teams-pilot-secret",
+        OPENGENI_TEAMS_BOT_TENANT_ID: "teams-home-tenant",
+
         OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED: "true",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_ID: "github-personal-staging",
         OPENGENI_GITHUB_PERSONAL_OAUTH_CLIENT_SECRET: "github-personal-secret",
@@ -1156,6 +1202,19 @@ describe("deployment contract", () => {
       "OPENGENI_SLACK_SIGNING_SECRET=slack-staging-signing-secret",
     );
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_BOT_DISPLAY_NAME=Opengeni Staging");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_MICROSOFT_TEAMS_TOOLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_CHANNEL_IDS=00000000-0000-4000-8000-000000000001:19:pilot@thread.tacv2",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_MICROSOFT_TEAMS_ALLOWED_WORKSPACE_IDS=b2a93667-d2ce-4468-8b65-3c773b701ad7",
+    );
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEAMS_BOT_ALLOWED_TENANT_IDS=00000000-0000-4000-8000-000000000001",
+    );
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEAMS_BOT_CLIENT_SECRET=teams-pilot-secret");
+
     expect(artifacts.runtimeEnv).toContain("OPENGENI_SLACK_COMMAND=/opengeni-staging");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_GITHUB_PERSONAL_OAUTH_ENABLED=true");
     expect(artifacts.runtimeEnv).toContain(
@@ -1814,6 +1873,31 @@ describe("deployment contract", () => {
     const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
     expect(absent.runtimeEnv).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED=");
     expect(absent.missingEnvVars).not.toContain("OPENGENI_SESSION_USAGE_LIMITS_ENABLED");
+  });
+
+  test("renders the event triggers flag and webhook address only when configured", () => {
+    expect(EVENT_TRIGGERS_PASSTHROUGH_ENV).toEqual([
+      "OPENGENI_EVENT_TRIGGERS_ENABLED",
+      "OPENGENI_WEBHOOK_BASE_URL",
+    ]);
+    const outputs = {
+      temporal_host: { value: "host:7233" },
+      object_storage_bucket: { value: "opengeni-files" },
+      object_storage_azure_connection_string: { value: "x", sensitive: true },
+      helm_set_values: { value: {} },
+    };
+    const configured = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {
+      OPENGENI_EVENT_TRIGGERS_ENABLED: "true",
+      OPENGENI_WEBHOOK_BASE_URL: "https://hooks.opengeni.example.com",
+    });
+    expect(configured.runtimeEnv).toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=true");
+    expect(configured.runtimeEnv).toContain(
+      "OPENGENI_WEBHOOK_BASE_URL=https://hooks.opengeni.example.com",
+    );
+    const absent = generateRuntimeArtifacts(withSandboxBackend("docker"), outputs, {});
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED=");
+    expect(absent.missingEnvVars).not.toContain("OPENGENI_EVENT_TRIGGERS_ENABLED");
+    expect(absent.runtimeEnv).not.toContain("OPENGENI_WEBHOOK_BASE_URL=");
   });
 
   test("renders configured external browser providers without making them mandatory", () => {

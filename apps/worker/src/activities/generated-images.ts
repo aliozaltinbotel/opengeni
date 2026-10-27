@@ -279,6 +279,8 @@ export async function retainGeneratedImage(input: {
   providerId: string;
   providerBindingHash: string;
   output: GeneratedImageOutput;
+  /** The adapter operation completes, and is charged, as the image turns ready. */
+  operation?: { operationId: string; operationKey: string };
   now?: Date;
 }): Promise<RetainedGeneratedImage> {
   if (!input.objectStorage) {
@@ -373,6 +375,7 @@ export async function retainGeneratedImage(input: {
       workspaceId: input.workspaceId,
       artifactId: identity.artifactId,
       settlementKey: identity.settlementKey,
+      ...(input.operation ? { operation: input.operation } : {}),
     });
     return retainedGeneratedImageFromArtifact(settled);
   } catch (error) {
@@ -598,29 +601,6 @@ function compactGeneratedImageRunStateItems(
   return serializedReceipt ? serialized : compacted;
 }
 
-export function collectGeneratedImageRunStateArtifactReceipts(
-  serialized: string,
-  target: Map<string, GeneratedImageReceipt> = new Map(),
-): Map<string, GeneratedImageReceipt> {
-  try {
-    const value: unknown = JSON.parse(serialized);
-    if (!value || typeof value !== "object" || Array.isArray(value)) return target;
-    visitRunStateProtocolItems(value as Record<string, unknown>, (items) => {
-      collectGeneratedImageArtifactReceipts(items, target);
-    });
-    visitRunStateItemWrappers(value as Record<string, unknown>, (wrappers) => {
-      for (const wrapper of wrappers) {
-        if (isRecord(wrapper) && isRecord(wrapper.rawItem)) {
-          collectGeneratedImageArtifactReceipts([wrapper.rawItem], target);
-        }
-      }
-    });
-  } catch {
-    // A provider-owned or legacy state format is opaque to this collector.
-  }
-  return target;
-}
-
 export function generatedImageReceiptFromUnknown(value: unknown): GeneratedImageReceipt | null {
   if (typeof value === "string" && value.length <= 4_096) {
     try {
@@ -786,6 +766,7 @@ export async function recoverGeneratedImageArtifact(input: {
   accountId: string;
   workspaceId: string;
   artifact: GeneratedImageArtifact;
+  operation?: { operationId: string; operationKey: string };
 }): Promise<GeneratedImageArtifact | null> {
   const { artifact } = input;
   if (artifact.status === "ready") {
@@ -812,6 +793,7 @@ export async function recoverGeneratedImageArtifact(input: {
     workspaceId: input.workspaceId,
     artifactId: artifact.artifactId,
     settlementKey: artifact.settlementKey,
+    ...(input.operation ? { operation: input.operation } : {}),
   });
 }
 

@@ -67,7 +67,7 @@ describe("fail-closed change impact", () => {
     for (const path of [
       SESSION_LOADING_STARTUP_E2E,
       "apps/web/src/context.tsx",
-      "packages/react/src/app/lib/session-startup.tsx",
+      "packages/react/src/lib/session-startup.tsx",
       "packages/react/src/components/session-status.tsx",
       "packages/sdk/src/client.ts",
       "packages/testing/src/process.ts",
@@ -849,7 +849,6 @@ describe("fail-closed change impact", () => {
 
   test("Personal workspace accessibility coverage follows only its web dependency", () => {
     for (const path of [
-      "apps/web/src/components/personal-workspace-badge.tsx",
       "apps/web/src/components/rail/switcher-block.tsx",
       "apps/web/src/components/rail/workspace-scope-nav.tsx",
       "apps/web/src/lib/workspace-scope-context.ts",
@@ -1139,6 +1138,8 @@ function requiredResult(
     artifactRuntime: boolean;
     build: number;
     bakeImages?: boolean;
+    preImage?: boolean;
+    attested?: boolean | undefined;
   },
 ): boolean {
   const result = spawnSync(
@@ -1175,6 +1176,13 @@ function requiredResult(
       "--argjson",
       "build",
       String(options.build),
+      "--argjson",
+      "preImage",
+      String(options.preImage ?? false),
+      // Omitted for old callers: the filter defaults to the unattested rules.
+      ...(options.attested === undefined
+        ? []
+        : ["--argjson", "attested", String(options.attested)]),
       "-f",
       "scripts/ci/required-results.jq",
     ],
@@ -1331,6 +1339,146 @@ describe("workflow fail-closed contracts", () => {
       false,
     );
     expect(requiredResult(results, { ...options, mode: "focused" })).toBe(false);
+  });
+
+  test("a Batch-attested main push requires skipped test lanes and real artifacts", () => {
+    const lanes = [
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ];
+    const results: Record<string, { result: string }> = {
+      plan: { result: "success" },
+      "artifact-runtime": { result: "success" },
+      deployment: { result: "success" },
+      images: { result: "success" },
+      ...Object.fromEntries(lanes.map((name) => [name, { result: "skipped" }])),
+    };
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 900,
+      integration: 20,
+      e2e: 10,
+      browser: 4,
+      artifactRuntime: true,
+      build: 30,
+      attested: true,
+    };
+    expect(requiredResult(results, options)).toBe(true);
+    // The same skipped lanes are a failure for an ordinary or omitted-attestation run.
+    expect(requiredResult(results, { ...options, attested: false })).toBe(false);
+    expect(requiredResult(results, { ...options, attested: undefined })).toBe(false);
+    // A lane that ran (even green) means the run was not uniformly attested.
+    for (const name of lanes)
+      for (const result of ["success", "failure", "cancelled"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const name of ["plan", "artifact-runtime", "deployment", "images"])
+      for (const result of ["failure", "cancelled", "skipped"])
+        expect(requiredResult({ ...results, [name]: { result } }, options)).toBe(false);
+    for (const extra of [
+      { event: "pull_request" as const },
+      { event: "schedule" as const },
+      { event: "workflow_dispatch" as const },
+      { mode: "focused" as const },
+      { bakeImages: false },
+    ])
+      expect(requiredResult(results, { ...options, ...extra })).toBe(false);
+    const { images: _images, ...preImage } = results;
+    expect(requiredResult(preImage, { ...options, preImage: true })).toBe(true);
+    expect(requiredResult(results, { ...options, preImage: true })).toBe(false);
+  });
+
+  test("pre-image validation requires every non-image lane exactly and never sees images", () => {
+    const lanes = [
+      "plan",
+      "source-contracts",
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "artifact-runtime",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+      "deployment",
+    ];
+    const full = Object.fromEntries(lanes.map((name) => [name, { result: "success" }]));
+    const options: Parameters<typeof requiredResult>[1] = {
+      event: "push",
+      mode: "full",
+      unit: 1,
+      integration: 1,
+      e2e: 1,
+      browser: 1,
+      artifactRuntime: true,
+      build: 1,
+      bakeImages: true,
+      preImage: true,
+    };
+    expect(requiredResult(full, options)).toBe(true);
+    // Every lane a full main push selects must have succeeded: a failure, a
+    // cancellation or a skip of a selected lane stops the release image.
+    for (const name of lanes) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(requiredResult({ ...full, [name]: { result } }, options), `${name}/${result}`).toBe(
+          false,
+        );
+      }
+    }
+    // A missing lane result is never treated as success.
+    for (const name of lanes) {
+      const { [name]: _omitted, ...missing } = full;
+      expect(requiredResult(missing, options), `${name}/missing`).toBe(false);
+    }
+    // The gate runs before any image job; an image result in its input means
+    // the topology changed and fails closed.
+    expect(requiredResult({ ...full, images: { result: "success" } }, options)).toBe(false);
+    // The final aggregate is unchanged: without preImage, images stay required.
+    expect(requiredResult(full, { ...options, preImage: false })).toBe(false);
+    expect(
+      requiredResult({ ...full, images: { result: "success" } }, { ...options, preImage: false }),
+    ).toBe(true);
+
+    // A docs main push still bakes images; unselected test lanes must be skipped.
+    const docsOptions = {
+      ...options,
+      mode: "docs" as const,
+      unit: 0,
+      integration: 0,
+      e2e: 0,
+      browser: 0,
+      build: 0,
+    };
+    const docs = { ...full };
+    for (const name of [
+      "unit-shards",
+      "integration-shards",
+      "e2e-shards",
+      "test-suite",
+      "browser-acceptance",
+      "browserd-real-e2e",
+      "package-contracts",
+    ]) {
+      docs[name] = { result: "skipped" };
+    }
+    expect(requiredResult(docs, { ...docsOptions, browserdRealE2e: false })).toBe(true);
+    for (const name of ["source-contracts", "artifact-runtime", "deployment"]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        expect(
+          requiredResult(
+            { ...docs, [name]: { result } },
+            { ...docsOptions, browserdRealE2e: false },
+          ),
+          `docs/${name}/${result}`,
+        ).toBe(false);
+      }
+    }
   });
 
   test("CI preserves trusted admission while planning candidate jobs from the exact head", () => {

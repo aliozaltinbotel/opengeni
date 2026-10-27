@@ -7,8 +7,8 @@ import {
   assertMcpToolListWithinBounds,
 } from "@opengeni/runtime/mcp-network";
 import {
-  connectMcpStreamableHttpClient,
   legacyMcpClientError,
+  withMcpStreamableHttpClient,
   type McpStreamableHttpClient,
 } from "./mcp-streamable-http-client";
 import { createPinnedIntegrationTransport } from "@opengeni/capabilities";
@@ -41,10 +41,15 @@ import {
 import { HTTPException } from "hono/http-exception";
 import {
   GMAIL_REST_MCP_TOOLS,
+  GOOGLE_CALENDAR_REST_MCP_TOOLS,
   gmailToolAvailableOnDeployment,
   gmailToolSupportsScopes,
+  googleCalendarToolSupportsScopes,
   isOfficialGmailMcpConfig,
+  isOfficialGoogleCalendarMcpConfig,
   isOfficialSlackMcpConfig,
+  isOfficialDriveMcpConfig,
+  mergeDriveMcpTools,
   sessionMcpApprovalConnectionId,
 } from "@opengeni/runtime";
 import { hasPermission } from "../access";
@@ -141,9 +146,12 @@ async function resolveTarget(input: Input) {
         (!input.connectionId || accountId(candidate) === input.connectionId),
     );
     if (!integration) throw new HTTPException(404, { message: "Integration account unavailable" });
-    const server = settingsWithApiIntegrationServers({ ...input.settings, mcpServers: [] }, [
-      integration,
-    ]).mcpServers[0]!;
+    const server = settingsWithApiIntegrationServers(
+      { ...input.settings, mcpServers: [] },
+      [integration],
+      input.workspaceId,
+    ).mcpServers[0];
+    if (!server) throw new HTTPException(404, { message: "Integration account unavailable" });
     const connection = integration.connectionRef?.connectionId
       ? await getConnectionMetadata(
           input.db,
@@ -282,9 +290,13 @@ export function reviewedConnectorToolCatalog(
             watchTopicName: deployment.gmailWatchTopicName,
           }),
       )
-    : isOfficialSlackMcpConfig(server.url, server.connectionRef)
-      ? slackRestMcpToolsForScopes(grantedScopes)
-      : null;
+    : isOfficialGoogleCalendarMcpConfig(server.url, server.connectionRef)
+      ? GOOGLE_CALENDAR_REST_MCP_TOOLS.filter((tool) =>
+          googleCalendarToolSupportsScopes(tool.name, grantedScopes),
+        )
+      : isOfficialSlackMcpConfig(server.url, server.connectionRef)
+        ? slackRestMcpToolsForScopes(grantedScopes)
+        : null;
   return (
     tools?.filter((tool) => !server.allowedTools || server.allowedTools.includes(tool.name)) ?? null
   );
@@ -324,9 +336,8 @@ async function listTools(
   }
   const pinned = createPinnedIntegrationTransport({ network: input.settings });
   const deadline = AbortSignal.timeout(15_000);
-  let client: McpStreamableHttpClient | undefined;
-  try {
-    client = await connectMcpStreamableHttpClient({
+  const tools = await withMcpStreamableHttpClient(
+    {
       url: target.server.url,
       clientName: "opengeni-tool-permissions",
       clientVersion: "0.1.0",
@@ -340,16 +351,16 @@ async function listTools(
           }),
           MCP_MAX_RESPONSE_BYTES,
         ),
-    });
-    const tools = await collectConnectorToolPages(client, deadline).catch((error: unknown) => {
-      throw legacyMcpClientError(error);
-    });
-    return tools.filter(
-      (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
-    );
-  } finally {
-    await client?.close().catch(() => undefined);
-  }
+    },
+    (client) =>
+      collectConnectorToolPages(client, deadline).catch((error: unknown) => {
+        throw legacyMcpClientError(error);
+      }),
+  );
+  const completeTools = isOfficialDriveMcpConfig(target.server) ? mergeDriveMcpTools(tools) : tools;
+  return completeTools.filter(
+    (tool) => !target.server.allowedTools || target.server.allowedTools.includes(tool.name),
+  );
 }
 
 /** Collect discovery pages without changing the caller's connection or authority. */

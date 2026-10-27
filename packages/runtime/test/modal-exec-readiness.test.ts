@@ -10,9 +10,13 @@ import { ModalSandboxSession } from "@openai/agents-extensions/sandbox/modal";
 import {
   verifySandboxExecReadiness,
   SandboxExecReadinessError,
+  isSandboxExecReadinessProbeLostError,
   isModalTaskExecStartPreDispatchUnavailableError,
 } from "../src/sandbox";
-import { ModalCommandControl } from "../src/sandbox/providers/modal-command-control";
+import {
+  ModalCommandControl,
+  ModalExecReadinessProbeLostError,
+} from "../src/sandbox/providers/modal-command-control";
 import { installModalCommandSession } from "../src/sandbox/providers/modal-command-session";
 import {
   ModalCommandRouterWire,
@@ -55,7 +59,13 @@ type Mode =
   | "lost-read"
   | "unobservable"
   | "rejected"
-  | "nonzero";
+  | "nonzero"
+  | "lost-exec"
+  | "forgotten-exec"
+  | "precondition-other";
+// Verbatim production reply (2026-10-05, first shell command of a fresh session).
+const EXEC_NOT_FOUND_DETAILS =
+  "Failed to poll exec process: exec not found. If the exec already completed, its output and exit status were discarded; exec state is retained for 10 minutes after the exec completes. Read exec output promptly after completion.";
 let mode: Mode = "success";
 let starts: Array<{ execId: string; commandArgs: string[]; workdir: string; env: object }> = [];
 let observations: string[] = [];
@@ -144,7 +154,7 @@ beforeAll(async () => {
                   code: mode === "unknown-start" ? status.UNKNOWN : status.INTERNAL,
                   details: "accepted probe, lost response",
                 }
-              : mode === "lost-start" || mode === "unobservable"
+              : mode === "lost-start" || mode === "unobservable" || mode === "lost-exec"
                 ? {
                     code: status.UNAVAILABLE,
                     details: "Name resolution failed for target dns:task-spoof.w.modal.host:443",
@@ -221,6 +231,14 @@ beforeAll(async () => {
         }
         if (foregroundPollFailure) {
           callback({ code: status.UNAVAILABLE, details: "poll DNS unavailable" });
+          return;
+        }
+        if (mode === "lost-exec" || mode === "forgotten-exec") {
+          callback({ code: status.FAILED_PRECONDITION, details: EXEC_NOT_FOUND_DETAILS });
+          return;
+        }
+        if (mode === "precondition-other") {
+          callback({ code: status.FAILED_PRECONDITION, details: "Modal Sandbox is shutting down" });
           return;
         }
         callback(null, { code: mode === "nonzero" ? 127 : 0 });
@@ -530,7 +548,11 @@ test("supervised cancellation uncertainty retains intent, writer and partial hel
   }
 }, 15_000);
 
-function foregroundTools(f: ReturnType<typeof fixture>, stdoutOffset = 0) {
+function foregroundTools(
+  f: ReturnType<typeof fixture>,
+  stdoutOffset = 0,
+  recoverDuringCleanup = true,
+) {
   let stored: ModalRouterProviderCommand;
   let adoptions = 0;
   let retained = true;
@@ -579,8 +601,10 @@ function foregroundTools(f: ReturnType<typeof fixture>, stdoutOffset = 0) {
       execCommandForProcessControl: async (handle) => {
         expect(handle).toBe(73);
         cleanupHelpers++;
-        foregroundPollPending = false;
-        foregroundPollFailure = false;
+        if (recoverDuringCleanup) {
+          foregroundPollPending = false;
+          foregroundPollFailure = false;
+        }
         // Physical helper behavior is independently exercised by the real
         // local-process cancellation suite; this fixture owns the RPC abort.
         return "Chunk ID: cleanup\nWall time: 0 seconds\nProcess exited with code 0\nOutput:\n";
@@ -659,7 +683,9 @@ test.each(["aggregate", "cause", "unreadable"] as const)(
       expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
       expect(tools.stored().streams.stdout.byteOffset).toBe(17);
       expect(tools.stored().streams.stdout.eof).toBe(false);
-      expect(tools.adoptions()).toBe(0);
+      expect(tools.adoptions()).toBe(1);
+      await tools.fence.waitForQuiescence();
+      expect(tools.cleanupHelpers()).toBe(0);
     } finally {
       await f.close();
     }
@@ -811,9 +837,9 @@ test("foreground cancellation aborts an already-in-flight exact poll", async () 
   }
 });
 
-test("post-start real gRPC poll exhaustion is an unknown tool result after the requested wait", async () => {
+test("post-start real gRPC poll exhaustion hands the unknown command off before finalization", async () => {
   const f = fixture();
-  const tools = foregroundTools(f);
+  const tools = foregroundTools(f, 0, false);
   foregroundPollFailure = true;
   const began = performance.now();
   try {
@@ -827,7 +853,47 @@ test("post-start real gRPC poll exhaustion is an unknown tool result after the r
     expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
     expect(tools.stored().streams.stdout.byteOffset).toBe(0);
     expect(tools.stored().streams.stdout.eof).toBe(false);
-    expect(tools.adoptions()).toBe(0);
+    expect(
+      await Promise.race([
+        tools.fence.waitForQuiescence().then(() => "drained"),
+        Bun.sleep(100).then(() => "stalled"),
+      ]),
+    ).toBe("drained");
+    expect(tools.adoptions()).toBe(1);
+    expect(tools.cleanupHelpers()).toBe(0);
+    expect(starts).toHaveLength(1);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
+  } finally {
+    // Also let the old implementation's deliberately stalled fence recover
+    // after the regression assertion, so it cannot leak into later tests.
+    foregroundPollFailure = false;
+    await tools.fence.waitForQuiescence();
+    await f.close();
+  }
+});
+
+test("a forgotten acknowledged exec is retained and adopted, never replayed or treated as physical exit", async () => {
+  const f = fixture("forgotten-exec");
+  const tools = foregroundTools(f);
+  try {
+    const result = await tools.exec.invoke(
+      {},
+      JSON.stringify({ cmd: "work", yield_time_ms: 1_000 }),
+    );
+    expect(result).toContain("observation unavailable");
+    expect(result).toContain("Command ID:");
+    expect(result).not.toContain("Process exited");
+    const failure = await f.control.read(tools.stored(), 1_000).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ProviderCommandObservationUnavailableError);
+    expect(failure).toMatchObject({
+      readRetryAllowed: false,
+      cause: { code: status.FAILED_PRECONDITION },
+    });
+    expect(tools.adoptions()).toBe(1);
+    await tools.fence.waitForQuiescence();
+    expect(tools.cleanupHelpers()).toBe(0);
+    expect(starts).toHaveLength(1);
+    expect(tools.stored().streams.stdout.eof).toBe(false);
   } finally {
     await f.close();
   }
@@ -959,6 +1025,57 @@ test("persistent uncertainty times out without another Start or fallback to SDK"
     );
     expect(starts).toHaveLength(1);
     expect(f.sdkStarts()).toBe(0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a probe exec the router no longer tracks is a typed lost probe, never a raw reply or a replayed Start", async () => {
+  // lost-exec: the Start reply was lost (ambiguous), then the exact probe's
+  // poll answers "exec not found". forgotten-exec: Start was acknowledged and
+  // the router later lost the exec state. Both are box-level readiness failure.
+  for (const selected of ["lost-exec", "forgotten-exec"] as const) {
+    const f = fixture(selected);
+    const begun = performance.now();
+    try {
+      const error = await waitForSandboxExecReadiness(f.established, 5_000).catch(
+        (caught) => caught,
+      );
+      expect(error).toBeInstanceOf(SandboxExecReadinessError);
+      expect(isSandboxExecReadinessProbeLostError(error)).toBe(true);
+      expect(error).toMatchObject({
+        code: "exec_probe_lost",
+        backend: "modal",
+        instanceId: "sb-readiness",
+      });
+      expect(error.message).not.toContain("FAILED_PRECONDITION");
+      expect(error.message).not.toContain("exec not found");
+      // The exact provider reply is retained for diagnostics on the cause chain.
+      expect(error.cause).toBeInstanceOf(ModalExecReadinessProbeLostError);
+      expect(error.cause.cause).toMatchObject({
+        code: status.FAILED_PRECONDITION,
+        details: EXEC_NOT_FOUND_DETAILS,
+      });
+      // Fails fast instead of burning the readiness budget, with exactly one
+      // Start (no replay) observed only by its own identity.
+      expect(performance.now() - begun).toBeLessThan(2_500);
+      expect(starts).toHaveLength(1);
+      expect(new Set(observations)).toEqual(new Set([starts[0]!.execId]));
+      expect(f.sdkStarts()).toBe(0);
+    } finally {
+      await f.close();
+    }
+  }
+});
+
+test("other FAILED_PRECONDITION probe replies are not exec-state loss", async () => {
+  const f = fixture("precondition-other");
+  try {
+    const error = await waitForSandboxExecReadiness(f.established, 2_000).catch((caught) => caught);
+    expect(error).not.toBeInstanceOf(SandboxExecReadinessError);
+    expect(isSandboxExecReadinessProbeLostError(error)).toBe(false);
+    expect(error).toMatchObject({ code: status.FAILED_PRECONDITION });
+    expect(starts).toHaveLength(1);
   } finally {
     await f.close();
   }

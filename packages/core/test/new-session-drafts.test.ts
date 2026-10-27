@@ -16,12 +16,9 @@ import {
   type DbClient,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  MemoryEventBus,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import type { ApiRouteDeps, SessionWorkflowClient } from "../src";
 import { createSessionForRequest } from "../src/domain/sessions";
 import {
@@ -561,6 +558,7 @@ describe("core new-session draft hydration", () => {
       authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
       authorityNonce: `core-new-session-drafts-${crypto.randomUUID()}`,
       repositoryIds: [42],
+      eventRouteSecret: null,
     });
 
     const resources: ResourceRef[] = [

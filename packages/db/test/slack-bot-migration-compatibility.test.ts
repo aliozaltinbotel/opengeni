@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { OPENGENI_SLACK_BOT_REQUIRED_SCOPES } from "@opengeni/contracts";
-import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing";
+import { acquireOwnerMigratedTestDatabase } from "@opengeni/testing/shared-pg";
 import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -236,7 +236,9 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ) and acl.grantee = 0 and acl.privilege_type = 'EXECUTE'`;
     expect(publicAccess).toEqual({ grants: 0 });
     // At the historical 0864 boundary, the current runtime still needs the
-    // withheld usage-history routines and the later 0890 reconciliation
+    // withheld usage-history routines, the later 0890 reconciliation tables,
+    // the 0909 message search text table, Site opens, the six Teams tables, and
+    // the 0948 attempt machine-authorization helper and 0981–0982 promotion
     // tables. The previous runtime remains ready.
     expect(
       evaluateRuntimeDatabasePosture(
@@ -245,8 +247,15 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
       ),
     ).toEqual([
       ...ABSENT_USAGE_HISTORY_POSTURE,
-      "runtime privilege tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
-      "protected tables are missing: model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress",
+      "runtime privilege tables are missing: automation_templates, event_deliveries, event_ingress_routes, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, promotion_decisions, promotion_enforcement, promotion_machine_proofs, recording_chunks, recording_events, recording_live_segments, recording_notes, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, secret_approval_rules, secret_use_approvals, session_message_search_texts, session_turn_app_action_grants, site_opens, site_sidebar_states, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "protected tables are missing: automation_templates, event_deliveries, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, promotion_decisions, promotion_enforcement, promotion_machine_proofs, recording_chunks, recording_events, recording_live_segments, recording_notes, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, secret_approval_rules, secret_use_approvals, session_message_search_texts, session_turn_app_action_grants, site_opens, site_sidebar_states, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "owner-internal target-schema helper carry_session_attempt_machine_authorization(uuid, uuid, uuid) is missing or ambiguous",
+      // Nor the shared unbilled allowance counter (0976).
+      "owner-internal target-schema helper count_unbilled_allowance_usage(uuid, uuid, text, bigint, text) is missing or ambiguous",
+      // Nor the machine-owner lookup for personal-machine chats (0978).
+      "runtime definer session_machine_owner_subject_v1(uuid, uuid, uuid) is missing or ambiguous",
+      // Nor the connected-command re-arm (0984).
+      "runtime definer rearm_unanswered_connected_commands(uuid, uuid, text) is missing or ambiguous",
     ]);
     expect(
       previous.evaluateRuntimeDatabasePosture(
@@ -264,10 +273,74 @@ test("0864 preserves old runtime readiness and grants selected-workspace capabil
     await provisionRoles(owned.adminUrl, roles);
     const currentPosture = await inspectRuntimeDatabasePosture(client.db, options);
     expect(evaluateRuntimeDatabasePosture(currentPosture, options)).toEqual([]);
-    // The pinned pre-0864 binary is checked only at the 0864 boundary above.
-    // It predates forward-compatible posture (#5263), so tables later
-    // migrations add are unknown to it; readiness of the actual previous
-    // release against the complete schema is the pinned-readiness job's check.
+    // This pre-0864 binary predates forward-compatible posture (#5263): later
+    // new tables make it unready. Keep the exact incompatibilities as a
+    // negative control so additional known-object or grant regressions fail.
+    // This is not rolling-readiness evidence: pre-compatibility fleets need a
+    // compatibility-first or maintenance rollout. The pinned-readiness job's
+    // bootstrap baseline is not the deployed previous release; only a verified
+    // production pin can provide that separate full-chain readiness proof.
+    expect(
+      previous.evaluateRuntimeDatabasePosture(
+        await previous.inspectRuntimeDatabasePosture(client.db, options),
+        options,
+      ),
+    ).toEqual([
+      "RLS tables are absent from the declared contract: automation_templates, event_deliveries, event_source_feeds, event_sources, event_triggers, inbound_events, mcp_event_subscriptions, model_call_fact_reconciliation_candidates, model_call_fact_reconciliation_progress, promotion_decisions, promotion_enforcement, promotion_machine_proofs, recording_chunks, recording_events, recording_live_segments, recording_notes, recording_people, recording_segment_edits, recording_speaker_assignments, recording_speaker_voices, recording_tracks, recording_transcript_segments, recording_transcript_versions, recording_voice_rejections, recording_voiceprints, recordings, scheduled_task_event_inbox, scheduled_task_event_occurrences, scheduled_task_event_settings, secret_approval_rules, secret_use_approvals, session_message_search_texts, session_turn_app_action_grants, site_opens, site_sidebar_states, teams_bot_inbox, teams_bot_installations, teams_bot_links, teams_bot_outbox, teams_bot_proofs, teams_bot_routes",
+      "table automation_templates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table event_deliveries grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table event_ingress_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table event_source_feeds grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table event_sources grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table event_triggers grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table inbound_events grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table mcp_event_subscriptions grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table model_call_fact_reconciliation_candidates grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table model_call_fact_reconciliation_progress grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table promotion_decisions grants excess runtime privileges: SELECT",
+      "table promotion_enforcement grants excess runtime privileges: SELECT",
+      "table promotion_machine_proofs grants excess runtime privileges: SELECT, INSERT",
+      "table recording_chunks grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_events grants excess runtime privileges: SELECT, INSERT",
+      "table recording_live_segments grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_notes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_people grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_segment_edits grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_speaker_assignments grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_speaker_voices grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_tracks grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_transcript_segments grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_transcript_versions grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_voice_rejections grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recording_voiceprints grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table recordings grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table scheduled_task_event_inbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table scheduled_task_event_occurrences grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table scheduled_task_event_settings grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table secret_approval_rules grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table secret_use_approvals grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table session_message_search_texts grants excess runtime privileges: SELECT, INSERT",
+      "table session_turn_app_action_grants grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table site_opens grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table site_sidebar_states grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_inbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_installations grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_links grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_outbox grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_proofs grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      "table teams_bot_routes grants excess runtime privileges: SELECT, INSERT, UPDATE, DELETE",
+      // 0978's machine-owner lookup and 0984's connected-command re-arm
+      // withhold runtime grants for previous-release compatibility. Promotion
+      // administration also stays owner-only; the old evaluator reports each
+      // missing EXECUTE grant and those denials must remain intact.
+      "runtime role lacks EXECUTE on private routine evaluate_promotion_abuse(uuid)",
+      "runtime role lacks EXECUTE on private routine rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "runtime role lacks EXECUTE on private routine session_machine_owner_subject_v1(uuid, uuid, uuid)",
+      "runtime role lacks EXECUTE on private routine set_promotion_decision(uuid, text, text, text, jsonb, text, bigint)",
+      "runtime role lacks EXECUTE on private routine set_promotion_detector_mode(text, text)",
+      "runtime role lacks EXECUTE on private routine set_promotion_enforcement(boolean, text, text, boolean)",
+      "runtime role lacks EXECUTE on private routine wake_teams_route_for_session_event()",
+    ]);
   } finally {
     await client?.close();
     await staging.end();

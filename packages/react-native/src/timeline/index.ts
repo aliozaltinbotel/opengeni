@@ -24,8 +24,10 @@ export {
 export { Icon } from "./icon";
 export type { NativeIconName } from "./icon";
 export {
+  BAR_MAX_FONT_SCALE,
   createNativeTimelineTheme,
   fontStyle,
+  HEADING_MAX_FONT_SCALE,
   NativeTimelineThemeProvider,
   useNativeTimelineTheme,
 } from "./theme";
@@ -47,6 +49,8 @@ export type { NativeTimelineMessages } from "./messages";
 export { ComposerPill, SessionComposer } from "./composer";
 export { ModelPickerSheet } from "./model-picker";
 export { BottomSheet } from "./sheet";
+export { AnnotationsChip, AnnotationsSheet } from "./annotations";
+export type { AnnotationReveal, NativeAnnotationLike } from "./annotations";
 export { SessionActionsButton } from "./session-actions";
 export type { SessionAction, SessionActionsClient, SessionActionsProps } from "./session-actions";
 export type { ModelPickerSheetProps } from "./model-picker";
@@ -54,6 +58,18 @@ export type { ComposerCall, SessionComposerProps } from "./composer";
 export { ApprovalStrip, defaultApprovalStripMessages, HumanInputCard } from "./decisions";
 export type { ApprovalStripMessages, ApprovalStripProps, HumanInputCardProps } from "./decisions";
 export { Button, IconButton } from "./controls";
+export {
+  NativeAuthNeededRow,
+  NativeConnectSetup,
+  NativeIntegrationCapabilityCard,
+  NativeMcpCapabilityCard,
+  NativePreparedMcpSetupCard,
+  nativeConnectWindowHost,
+  useNativeInChatConnect,
+  type NativeConnectBrowser,
+  type NativeInChatConnectOptions,
+} from "./in-chat-connect";
+export { SecureValueInput, type SecureValueInputProps } from "./secret-field";
 export {
   NativeInboxList,
   isNeedsYouKind,

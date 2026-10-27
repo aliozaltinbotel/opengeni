@@ -134,6 +134,12 @@ jobs:
             echo "APPLE_API_ISSUER=$(printf '%s' "$APPLE_ASC_KEY" | jq -r .issuer_id)"
           } >> "$GITHUB_ENV"
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System audio helper
+        working-directory: apps/desktop
+        run: bun scripts/build-audio-capture.ts
+
       - name: Build, sign and notarize
         working-directory: apps/desktop
         env:
@@ -147,15 +153,29 @@ jobs:
         run: |
           app="$(find . -maxdepth 2 -name 'Opengeni.app' -type d | head -1)"
           codesign --verify --deep --strict --verbose=2 "$app"
+          helper="$app/Contents/Resources/audio-capture/opengeni-audio-capture"
+          lipo -archs "$helper" | grep -q arm64
+          lipo -archs "$helper" | grep -q x86_64
+          codesign --verify --strict --verbose=2 "$helper"
           spctl --assess --type execute --verbose "$app"
           xcrun stapler validate "$app"
           ls -la
+
+      # For apps that embed Opengeni's meetings (docs/recordings.md); they
+      # sign it with their own bundle.
+      - name: System audio helper assets
+        working-directory: apps/desktop
+        run: |
+          for dir in mac-arm64 mac-x64; do
+            cp "build/audio-capture/$dir/opengeni-audio-capture" "release/opengeni-audio-capture-$dir"
+          done
 
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-macos
           if-no-files-found: error
           path: |
+            apps/desktop/release/opengeni-audio-capture-*
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.dmg
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.zip
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-mac.zip.blockmap
@@ -185,6 +205,16 @@ jobs:
           (cd packages/desktop && bun run typecheck)
           (cd apps/desktop && bun run typecheck)
 
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Built against glibc 2.28 with cargo-zigbuild, like the agent's Linux helpers.
+      - name: System audio helper
+        working-directory: apps/desktop
+        run: |
+          pip install ziglang
+          cargo install --locked cargo-zigbuild
+          bun scripts/build-audio-capture.ts
+
       - name: Build
         working-directory: apps/desktop
         env:
@@ -207,6 +237,7 @@ jobs:
             dpkg-deb --contents "$deb" > "$RUNNER_TEMP/deb-contents.txt"
             grep -q './usr/share/applications/opengeni.desktop' "$RUNNER_TEMP/deb-contents.txt"
             grep -q './opt/Opengeni/opengeni' "$RUNNER_TEMP/deb-contents.txt"
+            grep -q './opt/Opengeni/resources/audio-capture/opengeni-audio-capture' "$RUNNER_TEMP/deb-contents.txt"
             # Desktops look icons up in the standard hicolor sizes, which stop at 512.
             grep -q './usr/share/icons/hicolor/512x512/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
             grep -q './usr/share/icons/hicolor/48x48/apps/opengeni.png' "$RUNNER_TEMP/deb-contents.txt"
@@ -232,11 +263,19 @@ jobs:
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.deb
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.rpm
 
+      - name: System audio helper assets
+        working-directory: apps/desktop
+        run: |
+          for dir in linux-x64 linux-arm64; do
+            cp "build/audio-capture/$dir/opengeni-audio-capture" "release/opengeni-audio-capture-$dir"
+          done
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-linux
           if-no-files-found: error
           path: |
+            apps/desktop/release/opengeni-audio-capture-*
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.AppImage
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.deb
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-linux-*.rpm
@@ -264,10 +303,16 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Check
+        # Typechecking is platform-independent and already runs in the macOS and
+        # Linux jobs; the typechecker has no Windows binary.
         run: |
           bun test ./packages/desktop/test
-          (cd packages/desktop && bun run typecheck)
-          (cd apps/desktop && bun run typecheck)
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: System audio helper
+        working-directory: apps/desktop
+        run: bun scripts/build-audio-capture.ts
 
       - name: Sign in to Azure for code signing
         if: env.SIGN == 'true'
@@ -320,6 +365,8 @@ jobs:
           grep -q "version: $VERSION" latest.yml
           test -f win-unpacked/Opengeni.exe
           test -f win-arm64-unpacked/Opengeni.exe
+          test -f win-unpacked/resources/audio-capture/opengeni-audio-capture.exe
+          test -f win-arm64-unpacked/resources/audio-capture/opengeni-audio-capture.exe
 
       - name: Verify signatures
         if: env.SIGN == 'true'
@@ -349,11 +396,19 @@ jobs:
         with:
           subject-path: apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
 
+      # The copies electron-builder signed with the app.
+      - name: System audio helper assets
+        working-directory: apps/desktop/release
+        run: |
+          cp win-unpacked/resources/audio-capture/opengeni-audio-capture.exe opengeni-audio-capture-win-x64.exe
+          cp win-arm64-unpacked/resources/audio-capture/opengeni-audio-capture.exe opengeni-audio-capture-win-arm64.exe
+
       - uses: actions/upload-artifact@v7.0.1
         with:
           name: desktop-windows
           if-no-files-found: error
           path: |
+            apps/desktop/release/opengeni-audio-capture-*
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe
             apps/desktop/release/Opengeni-${{ needs.version.outputs.version }}-windows*.exe.blockmap
             apps/desktop/release/latest.yml
@@ -378,7 +433,10 @@ jobs:
         run: |
           set -euo pipefail
           ls -la
-          sha256sum Opengeni-* > SHA256SUMS
+          for dir in mac-arm64 mac-x64 linux-x64 linux-arm64 win-x64.exe win-arm64.exe; do
+            test -f "opengeni-audio-capture-$dir"
+          done
+          sha256sum Opengeni-* opengeni-audio-capture-* > SHA256SUMS
           tag="desktop-v$VERSION"
           if gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
             echo "$tag is already published; releases are immutable, so build a new version." >&2
@@ -397,6 +455,8 @@ jobs:
           - **Ubuntu, Debian:** download the \`.deb\` for your machine (\`amd64\` or \`arm64\`) and run \`sudo apt install ./Opengeni-$VERSION-linux-amd64.deb\`.
           - **Fedora, RHEL, openSUSE:** download the \`.rpm\` (\`x86_64\` or \`aarch64\`) and run \`sudo dnf install ./Opengeni-$VERSION-linux-x86_64.rpm\`.
           - **Any Linux:** download the \`.AppImage\`, make it executable (\`chmod +x\`) and open it. It adds itself to your apps and updates itself.
+
+          \`opengeni-audio-capture-*\` is the computer audio helper, for apps that embed Opengeni's meetings ([docs/recordings.md](https://github.com/$GH_REPO/blob/main/docs/recordings.md)).
 
           Check a Windows or Linux download with \`gh attestation verify <file> --repo $GH_REPO\` or against \`SHA256SUMS\`.
           NOTES

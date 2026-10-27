@@ -167,6 +167,11 @@ model instead, and when the workspace has none they are refused
 existing conversation holds a subscription model. The publication's
 `outsideAgentModel` names the model they get.
 
+Published model lists, admission checks, and the outside-workspace fallback
+resolve the current deployment and workspace catalog, as the console does.
+Database catalog changes take effect without restarting the API; the viewer's
+credential readiness, workspace policy, and subscription restrictions still apply.
+
 Direct page tools (`site.tools`) work for signed-in workspace members on the
 published host, including pages with older bundled SDKs. Catalog, declarations
 and calls, plus targeted resolve/invoke, use the same gateway as the console.
@@ -221,6 +226,12 @@ or a named query's audience. Members-only Sites have no warnings.
 | `site_sql_query_managers`          | A managers-only query the page runs (fixable)                         |
 | `agent_model_outside_unavailable`  | Outsiders get no agent: no credit-billed model                        |
 | `page_not_checked`                 | The page is over 2 MB, so what it uses was not checked                |
+| `public_sign_in_required`          | A public Site on a login-only deployment: every visitor signs in first |
+
+`public_sign_in_required` is a notice, not a problem: nothing on the Site can
+change it (it follows `OPENGENI_SITES_LOGIN_ONLY`). The Publish page shows it
+on its own line instead of counting it, and the agent tools tell the agent to
+mention it when sharing the link rather than treat the sign-in page as broken.
 
 When the agent's model is a subscription and outsiders use a credit-billed
 model instead, that is not a warning: the publication's `outsideAgentModel`

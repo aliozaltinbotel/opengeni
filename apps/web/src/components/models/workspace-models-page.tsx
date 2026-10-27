@@ -19,11 +19,11 @@ import { ElevenLabsVoiceConnection } from "@/components/models/elevenlabs-voice-
 import { RealtimeVoiceSettingsRows } from "@/components/models/realtime-voice-settings";
 import type {
   ModelAccountSettingValues,
-  OrganizationModelProviderKind,
+  OrganizationModelCatalogProviderKind,
   WorkspaceModelCatalogModel,
 } from "@opengeni/sdk";
 import { KeyRoundIcon, PlusIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
 import {
@@ -52,12 +52,8 @@ import {
   CodexAccountPage,
   CodexAccountRows,
   CodexConnectPage,
-  CodexPoolNotice,
-  type KeptForPeopleReport,
-  type KeptForPeopleReporter,
   CodexSettingRows,
   codexListedCount,
-  organizationNoticeCodexCount,
   codexSectionVisible,
   type CodexPlaces,
   type OrganizationCodexPool,
@@ -89,7 +85,8 @@ import {
   readyOrganizationKeyModels,
   type ModelsWorkspace,
 } from "@/components/models/organization-models-list";
-import { OpenGeniCreditsRow, useOpenGeniCredits } from "@/components/models/opengeni-credits-row";
+import { OpenGeniCreditsRow } from "@/components/models/opengeni-credits-row";
+import { useOpenGeniCredits } from "@/lib/opengeni-credits";
 import {
   OrgCodexAccessPage,
   OrgCodexAccountPage,
@@ -133,6 +130,7 @@ import {
   accountKeyOf,
   connectStepOf,
   type GatewayId,
+  type WorkspaceGatewayId,
   type ModelsView,
 } from "@opengeni/react/app/lib/models-route";
 import { useFocusOnNavigation } from "@/lib/use-focus-on-navigation";
@@ -169,10 +167,12 @@ import { compactionSummary } from "./model-compaction-page";
    -------------------------------------------------------------------------- */
 
 /** The organization connection kind behind each API-key provider. */
-const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelProviderKind> = {
+const ORGANIZATION_KIND: Record<GatewayId, OrganizationModelCatalogProviderKind> = {
   vercel: "vercel_gateway",
   openrouter: "openrouter",
   opper: "opper",
+  openai: "openai",
+  azure_openai: "azure_openai",
   anthropic: "anthropic",
   claude_subscription: "claude_subscription",
 };
@@ -215,11 +215,14 @@ export function useOrganizationModelAccounts({
     organizationId: orgId,
     providerKind: ORGANIZATION_KIND[id],
     enabled: enabled && on,
+    azureDeploymentIdentity: clientConfig.azureOpenAIDeploymentIdentity === true,
   });
   const orgGateways: Record<GatewayId, ProviderConnection> = {
     vercel: useOrganizationProviderConnection(organizationGateway("vercel")),
     openrouter: useOrganizationProviderConnection(organizationGateway("openrouter")),
     opper: useOrganizationProviderConnection(organizationGateway("opper")),
+    openai: useOrganizationProviderConnection(organizationGateway("openai")),
+    azure_openai: useOrganizationProviderConnection(organizationGateway("azure_openai")),
     anthropic: useOrganizationProviderConnection(organizationGateway("anthropic")),
     claude_subscription: useOrganizationProviderConnection({
       ...organizationGateway("claude_subscription", claudeEnabled),
@@ -306,21 +309,6 @@ export function WorkspaceModelsPageBody({
   const nav = useModelsNavigation(scope, { account, view });
   const [revision, setRevision] = useState(0);
   const [claudeSigningIn, setClaudeSigningIn] = useState(false);
-  // Organization accounts this workspace keeps as its own, limited to chosen
-  // people: its pool doesn't list them, so their rows report them to the notice.
-  const [keptReports, setKeptReports] = useState<ReadonlyMap<string, KeptForPeopleReport>>(
-    () => new Map(),
-  );
-  const reportKeptForPeople = useCallback<KeptForPeopleReporter>((accountId, report) => {
-    setKeptReports((current) => {
-      const previous = current.get(accountId);
-      if (JSON.stringify(previous) === JSON.stringify(report)) return current;
-      const next = new Map(current);
-      if (report) next.set(accountId, report);
-      else next.delete(accountId);
-      return next;
-    });
-  }, []);
   const connectionChanged = () => {
     setRevision((value) => value + 1);
     onConnectionChange();
@@ -341,7 +329,7 @@ export function WorkspaceModelsPageBody({
   // A shared workspace's provider key decides what every session runs on: a
   // setting. Members connect their own accounts instead.
   const canManageWorkspaceKeys = canManageConnections && (personal || canManageSettings);
-  const workspaceGateway = (id: GatewayId, enabled = true) => ({
+  const workspaceGateway = (id: WorkspaceGatewayId, enabled = true) => ({
     client,
     config: PROVIDER_CONNECTION_CONFIGS[id],
     workspaceId,
@@ -354,6 +342,21 @@ export function WorkspaceModelsPageBody({
     vercel: useProviderConnection(workspaceGateway("vercel")),
     openrouter: useProviderConnection(workspaceGateway("openrouter")),
     opper: useProviderConnection(workspaceGateway("opper")),
+    // OpenAI and Azure OpenAI keys are the organization's here; a workspace's
+    // own key is a direct connection (OpenAI and Azure OpenAI below). Hidden,
+    // reads nothing.
+    openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "openai",
+      enabled: false,
+    }),
+    azure_openai: useOrganizationProviderConnection({
+      client,
+      organizationId: organizationId ?? "",
+      providerKind: "azure_openai",
+      enabled: false,
+    }),
     anthropic: useProviderConnection(workspaceGateway("anthropic")),
     claude_subscription: useProviderConnection({
       ...workspaceGateway("claude_subscription", claudeEnabled),
@@ -369,19 +372,6 @@ export function WorkspaceModelsPageBody({
   const orgId = organizationId ?? "";
   const { orgCodex, orgGrok, orgClaude, orgGateways, audiences, setAudiences } =
     organizationAccounts;
-  // Named in the order the rows list them, not the order their reads finish.
-  const orgCodexOrder = new Map(orgCodex.accounts.map((candidate, index) => [candidate.id, index]));
-  const keptForPeople = [...keptReports.entries()]
-    .sort(
-      ([left], [right]) =>
-        (orgCodexOrder.get(left) ?? Number.MAX_SAFE_INTEGER) -
-        (orgCodexOrder.get(right) ?? Number.MAX_SAFE_INTEGER),
-    )
-    .flatMap(([, report]) => (!report.pending && report.keptName ? [report.keptName] : []));
-  // Until the organization's list (and so its rows) is read, a kept copy isn't known either.
-  const keptForPeoplePending =
-    (organizationAdmin && (orgCodex.loading || Boolean(orgCodex.loadError))) ||
-    [...keptReports.values()].some((report) => report.pending);
   const catalog = useWorkspaceModelCatalog(workspaceId);
   const credits = useOpenGeniCredits(organizationId);
   // What every workspace follows until it changes it: owners and admins only.
@@ -474,14 +464,21 @@ export function WorkspaceModelsPageBody({
     openAccess: (id) => nav.openView("model-access", accountKey("claude", id, true)),
     backToList,
   };
+  const workspaceNameOf = (id: string) => workspaces.find((candidate) => candidate.id === id)?.name;
   const claudePool: OrganizationClaudePool | null =
     organizationAdmin && claudeEnabled && !orgClaude.unavailable
-      ? { pool: orgClaude, workspace: here, openAccount: orgClaudePlaces.openAccount }
+      ? {
+          pool: orgClaude,
+          workspace: here,
+          workspaceName: workspaceNameOf,
+          openAccount: orgClaudePlaces.openAccount,
+        }
       : null;
   const codexPool: OrganizationCodexPool | null = organizationAdmin
     ? {
         codex: orgCodex,
         workspace: here,
+        workspaceName: workspaceNameOf,
         openAccount: orgCodexPlaces.openAccount,
       }
     : null;
@@ -490,6 +487,7 @@ export function WorkspaceModelsPageBody({
       ? {
           grok: orgGrok,
           workspace: here,
+          workspaceName: workspaceNameOf,
           openAccount: orgGrokPlaces.openAccount,
         }
       : null;
@@ -777,6 +775,8 @@ export function WorkspaceModelsPageBody({
         {workspacePage &&
         personal &&
         canManageConnections &&
+        provider !== "openai" &&
+        provider !== "azure_openai" &&
         (GATEWAYS as readonly string[]).includes(provider) ? (
           // An organization key can't reach a Personal workspace, so a key for
           // your own chats here is connected for this workspace instead.
@@ -1090,7 +1090,10 @@ export function WorkspaceModelsPageBody({
         state={orgGateways[key.id]}
         labels={labels}
         footnote={
-          organizationAdmin && canManageConnections ? (
+          organizationAdmin &&
+          canManageConnections &&
+          key.id !== "openai" &&
+          key.id !== "azure_openai" ? (
             <WorkspaceKeyFootnote
               title={orgGateways[key.id].config.title}
               workspaceName={workspaceName}
@@ -1166,9 +1169,9 @@ export function WorkspaceModelsPageBody({
     const listed = [
       // Credits pay for credit models, so the list is never "nothing pays" on such a deployment.
       credits.visible ? 1 : 0,
-      codexListedCount(codex, codexPool),
-      superGrokListedCount(grok, grokPool),
-      claudeEnabled ? claudeListedCount(claude, claudePool) : 0,
+      codexListedCount(codex),
+      superGrokListedCount(grok),
+      claudeEnabled ? claudeListedCount(claude) : 0,
       listedGateways.length,
       listedOrgGateways.length,
       readyOrgKeys.length,
@@ -1214,20 +1217,6 @@ export function WorkspaceModelsPageBody({
             onEditAllowed={() => nav.openView("allowed-models")}
             onEditCompaction={() => nav.openView("compaction")}
             onConnect={() => nav.openView("connect")}
-            accountsNote={
-              <CodexPoolNotice
-                codex={codex}
-                places={codexPlaces}
-                organizationAccountCount={
-                  codex.source?.organizationCount ??
-                  (organizationAdmin
-                    ? organizationNoticeCodexCount(orgCodex.accounts, codex, here.id)
-                    : undefined)
-                }
-                keptForPeople={keptForPeople}
-                keptForPeoplePending={keptForPeoplePending}
-              />
-            }
             accounts={
               <RowList label="Model providers" columns={ACCOUNT_COLUMNS} flush>
                 {subscriptionsListed > 0 ? (
@@ -1239,12 +1228,7 @@ export function WorkspaceModelsPageBody({
                   id={workspaceId}
                   provider="codex"
                 />
-                <CodexAccountRows
-                  codex={codex}
-                  places={codexPlaces}
-                  organization={codexPool}
-                  onKeptForPeople={reportKeptForPeople}
-                />
+                <CodexAccountRows codex={codex} places={codexPlaces} organization={codexPool} />
                 {claudeEnabled ? (
                   <ConnectedSubscriptionUsagePool
                     client={client}
@@ -1319,18 +1303,24 @@ export function WorkspaceModelsPageBody({
                 {workspacePage ? (
                   <Section
                     title="Voice"
-                    description="Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens in this workspace."
+                    description={
+                      personal
+                        ? "Connect ElevenLabs for Eleven Realtime voices, and choose how each voice model sounds and listens."
+                        : `How each voice model sounds and listens in this workspace. Anything not set here follows ${possessive(organizationName)} defaults.`
+                    }
                   >
                     <ElevenLabsVoiceConnection
                       key={workspaceId}
                       workspaceId={workspaceId}
                       canManage={canManageWorkspaceKeys}
+                      organizationName={organizationName}
                       onConnectionChange={connectionChanged}
                     />
                     <RealtimeVoiceSettingsRows
                       key={`voice-settings:${workspaceId}`}
                       workspaceId={workspaceId}
                       canManage={canManageSettings}
+                      organizationName={organizationName}
                     />
                   </Section>
                 ) : null}
@@ -1386,14 +1376,17 @@ export function WorkspaceModelsPageBody({
       <div ref={root} className="min-w-0">
         {!key && !view ? <ModelsRefreshControl client={client} /> : null}
         {organizationAdmin
-          ? orgCodex.accounts.map((candidate) => (
-              <OrganizationCodexDetailPrefetch
-                key={candidate.id}
-                client={client}
-                organizationId={orgId}
-                account={candidate}
-              />
-            ))
+          ? orgCodex.accounts
+              // A workspace's own account opens on that workspace's page.
+              .filter((candidate) => !candidate.reach?.ownerWorkspaceId)
+              .map((candidate) => (
+                <OrganizationCodexDetailPrefetch
+                  key={candidate.id}
+                  client={client}
+                  organizationId={orgId}
+                  account={candidate}
+                />
+              ))
           : null}
         {page}
       </div>
@@ -1597,7 +1590,7 @@ function ModelsList({
   workspaceId: string;
   /** "Design", or "your Personal workspace". */
   workspaceName: string;
-  /** The default sharing rules, when this person can read them. */
+  /** The default subscription rules, when this person can read them. */
   defaultRules?: ModelAccountSettingValues | undefined;
   accountRules: WorkspaceModelAccountSettingsState;
   organizationId: string | undefined;
@@ -1758,7 +1751,9 @@ type ConnectChoice =
   | "supergrok"
   | "vercel"
   | "openrouter"
-  | "opper";
+  | "opper"
+  | "openai"
+  | "azure_openai";
 
 /**
  * Connect account: every provider as a row (logo, name, how you pay). A row
@@ -1876,6 +1871,8 @@ export function ConnectPickerPage({
               (choice.id === "vercel" ||
                 choice.id === "openrouter" ||
                 choice.id === "opper" ||
+                choice.id === "openai" ||
+                choice.id === "azure_openai" ||
                 choice.id === "anthropic" ||
                 choice.id === "claude_subscription")
                 ? onOpenConnected?.(choice.id)

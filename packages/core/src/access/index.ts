@@ -23,6 +23,10 @@ import {
   type Workspace,
 } from "@opengeni/contracts";
 import {
+  PERSONAL_INTEGRATION_SETUP_PERMISSION,
+  permissionSetCovers,
+} from "@opengeni/contracts/personal-integration-setup";
+import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
   getManagedUserProfilesByIds,
@@ -44,6 +48,7 @@ import {
   getWorkspace,
   resolveNamedManagedPersonalWorkspaceGrant,
   validateCanonicalHumanSession,
+  externalPersonPersonalWorkspaceId,
   type Database,
 } from "@opengeni/db";
 import type { Context } from "hono";
@@ -228,7 +233,7 @@ export function requireApiKeyDelegationContext(
   // Q-16 aliases apply to delegation as to access; explicit mode never borrows an admin wildcard.
   if (
     ceiling?.permissionMode === "explicit" &&
-    permissions.some((permission) => !hasPermission(ceiling.permissions, permission, "explicit"))
+    permissions.some((permission) => !ceilingCovers(ceiling.permissions, permission))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -240,7 +245,7 @@ export function requireApiKeyDelegationContext(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !hasPermission(ceiling.permissions, permission, "explicit"),
+        !ceilingCovers(ceiling.permissions, permission),
     )
   ) {
     throw new HTTPException(403, {
@@ -285,7 +290,7 @@ export function requireExplicitPermissionDelegation(
 ): void {
   if (
     grant.permissionMode === "explicit" &&
-    requested.some((permission) => !hasPermission(grant.permissions, permission, "explicit"))
+    requested.some((permission) => !ceilingCovers(grant.permissions, permission))
   ) {
     throw new HTTPException(403, {
       message: "cannot delegate a permission outside the organization key policy",
@@ -297,7 +302,7 @@ export function requireExplicitPermissionDelegation(
     organizationAccessPresetPermissions("full").some(
       (permission) =>
         !accountScopedApiKeyWorkspaceExcludedPermissions.has(permission) &&
-        !hasPermission(grant.permissions, permission, "explicit"),
+        !ceilingCovers(grant.permissions, permission),
     )
   ) {
     throw new HTTPException(403, {
@@ -327,7 +332,8 @@ const delegatedHumanAuthorizationSchema = z.object({
 
 const delegatedHumanRequests = new WeakMap<Request, DelegatedHumanAuthorization>();
 const delegatedHumanContexts = new WeakMap<AccessContext, DelegatedHumanAuthorization>();
-const verifiedSiteViewerProofs = new WeakSet<DelegatedHumanAuthorization>();
+/** Exact-workspace proofs for external users (see stampWorkspacePersonAuthorization). */
+const workspaceExternalPersonProofs = new WeakSet<DelegatedHumanAuthorization>();
 const delegatedHumanProfileSchema = z.object({
   id: z.string(),
   name: z.string().nullable(),
@@ -411,6 +417,28 @@ export function stampSiteViewerSessionAuthorization(
     permissions: Permission[];
   },
 ): void {
+  stampWorkspacePersonAuthorization(request, input);
+}
+
+/**
+ * TRUSTED VERIFIED DISPATCH ONLY: act as one person in exactly one workspace.
+ * The caller has already verified who the person is (a published Site's signed
+ * viewer, or the person who sent a chat turn, frozen when it was accepted) and
+ * caps the permissions. Native people use the delegated-human resolver limited
+ * to that workspace. External users (people of a product that embeds Opengeni)
+ * reload their live access to that one workspace, intersected with these
+ * permissions, and get no organization-level authority; no identity is
+ * provisioned. Never call it with headers, token claims or other unverified input.
+ */
+export function stampWorkspacePersonAuthorization(
+  request: Request,
+  input: {
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    permissions: Permission[];
+  },
+): void {
   if (input.subjectId.startsWith("user:")) {
     stampDelegatedHumanAuthorization(request, {
       ...input,
@@ -433,7 +461,7 @@ export function stampSiteViewerSessionAuthorization(
   Object.freeze(parsed.workspaceScope.workspaceIds);
   Object.freeze(parsed.workspaceScope);
   const proof = Object.freeze(parsed);
-  verifiedSiteViewerProofs.add(proof);
+  workspaceExternalPersonProofs.add(proof);
   delegatedHumanRequests.set(request, proof);
 }
 
@@ -1431,11 +1459,21 @@ function isCanonicalManagedHumanSession(context: AccessContext, grant: AccessGra
  * {@link accessContextHasInbox}. An agent acting as a person (verified
  * in-process dispatch) reads that person's inbox within its organization and
  * workspaces: the inbox routes check each item's workspace on this context.
+ * An external user (`external_user:`) reads their own inbox only through the
+ * organization key that resolved them as an external actor, within that
+ * organization; a linked native identity acts as its `user:` person, whose
+ * inbox is read by signing in to Opengeni, not through a product's key.
  */
 export function inboxSubjectForContext(context: AccessContext): string | null {
   if (!accessContextHasInbox(context)) return null;
   if (context.subjectId.startsWith("user:")) {
     return canonicalManagedCookieContexts.has(context) || delegatedHumanContexts.has(context)
+      ? context.subjectId
+      : null;
+  }
+  if (context.subjectId.startsWith("external_user:")) {
+    const external = externalActorContexts.get(context);
+    return external && !external.linked && external.identity.subjectId === context.subjectId
       ? context.subjectId
       : null;
   }
@@ -1521,13 +1559,40 @@ export function hasPermission(
   if (permission === "secrets:read") {
     return permissions.includes("secrets:read");
   }
-  const granted = permissions.includes(permission) || grantsSecretAlias(permissions, permission);
+  const granted =
+    permissions.includes(permission) ||
+    grantsSecretAlias(permissions, permission) ||
+    grantsPersonalIntegrationSetup(permissions, permission);
   if (permissionMode === "explicit" || explicitPermissionSets.has(permissions)) return granted;
   // Variable-set metadata, plaintext read, write/rotation, attachment, and
   // runtime use are independent capabilities. Deprecated broad permissions
   // remain parseable but do not imply any of the exact permissions.
   return granted || permissions.includes("workspace:admin");
 }
+
+/**
+ * `connections:write` (connect accounts, including one's own) includes the
+ * narrow personal setup permission, so roles, keys and policies that hold it
+ * keep their meaning when a route asks for `connections:personal`.
+ */
+function grantsPersonalIntegrationSetup(
+  permissions: readonly Permission[],
+  permission: Permission,
+): boolean {
+  return (
+    permission === PERSONAL_INTEGRATION_SETUP_PERMISSION &&
+    permissionSetCovers(permissions, permission)
+  );
+}
+
+/**
+ * A ceiling (organization key policy) covers a requested permission. Cendra
+ * fork (5b32e0b7c): explicit-mode coverage, so Q-16 secret aliases delegate as
+ * they authorize; it includes upstream's personal setup rule and never borrows
+ * the admin wildcard.
+ */
+const ceilingCovers = (ceiling: readonly Permission[], permission: Permission): boolean =>
+  hasPermission(ceiling, permission, "explicit");
 
 /**
  * Stored roles and API keys keep their legacy variable-set names (Q-16): a
@@ -1688,13 +1753,13 @@ async function resolveDelegatedHumanAccessContext(
       message: "delegated humans require native organization access",
     });
   }
-  if (verifiedSiteViewerProofs.has(proof)) {
+  if (workspaceExternalPersonProofs.has(proof)) {
     const workspaceId =
       proof.workspaceScope.kind === "selected" && proof.workspaceScope.workspaceIds.length === 1
         ? proof.workspaceScope.workspaceIds[0]
         : null;
     if (!workspaceId)
-      throw new HTTPException(403, { message: "Site viewer workspace unavailable" });
+      throw new HTTPException(403, { message: "this person's workspace is unavailable" });
     const grant = await withWorkspaceSubjectRls(
       deps.db,
       workspaceId,
@@ -1708,13 +1773,32 @@ async function resolveDelegatedHumanAccessContext(
           }))
         )
           return null;
-        return getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
+        const membership = await getWorkspaceGrant(tx, proof.subjectId, workspaceId, {
           principalKind: "human_session",
         });
+        if (membership) return membership;
+        // Otherwise only the person's own workspace, as their active
+        // organization membership names it: the same access their own
+        // requests get there.
+        if (
+          (await externalPersonPersonalWorkspaceId(tx, {
+            accountId: proof.organizationId,
+            subjectId: proof.subjectId,
+          })) !== workspaceId
+        )
+          return null;
+        const own: AccessGrant = {
+          accountId: proof.organizationId,
+          workspaceId,
+          subjectId: proof.subjectId,
+          principalKind: "human_session",
+          permissions: [...managedPersonalWorkspacePermissions],
+        };
+        return own;
       },
     );
     if (!grant || grant.accountId !== proof.organizationId)
-      throw new HTTPException(403, { message: "Site viewer membership unavailable" });
+      throw new HTTPException(403, { message: "this person can no longer use this workspace" });
     const bounded = Object.freeze({
       ...grant,
       permissionMode: "explicit" as const,

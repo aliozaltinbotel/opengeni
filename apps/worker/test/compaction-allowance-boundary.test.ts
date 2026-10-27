@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import * as db from "@opengeni/db";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import * as runInput from "../src/activities/run-input";
 import * as openSuffix from "../src/activities/open-suffix-resume";
 import { BudgetExhaustedError } from "../src/activities/agent-turn/admission";
@@ -74,12 +74,15 @@ test("stream component retains the completed compaction checkpoint before refusi
           executionGeneration: 1,
           model: "scripted-model",
           initiatingHumanSubjectId: "user:frozen-initiator",
+          resources: [],
         },
         turnExecutionPolicy: { providerId: "openai" },
         providerTurn: {},
         trigger: { type: "user.message" },
         eventing: { modelRunSettings: settings },
         historySink: {
+          seedHistoryFootprint: () => undefined,
+          historyFootprintCompactionSignal: () => null,
           seedHistory: (history: unknown) => {
             expect(history).toEqual(checkpoint);
             order.push("checkpoint");

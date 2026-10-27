@@ -126,7 +126,7 @@ run them.
 
 Canonical code: `packages/core/src/domain/scheduled-task-access.ts`,
 `packages/db/src/scheduled-task-access.ts`, the routes in
-`apps/api/src/routes/scheduled-tasks.ts`, and the Schedules pages
+`apps/api/src/routes/scheduled-tasks.ts`, and the Automations pages
 (`apps/web/src/components/schedules/`, with the notices in
 `schedule-access-notices.tsx`).
 
@@ -202,7 +202,7 @@ The plan, for an agent-turn task (connector-source tasks are excluded):
   (`missingOpenGeniTools`) and added. Permissions stay least-privilege: a
   frozen permission is kept only while the refreshing person holds it, and the
   only permissions added are the ones the newly added tools need
-  (`FIRST_PARTY_TOOL_AUTHORIZATION` in `apps/api/src/mcp/first-party-tool-permissions.ts`),
+  (`FIRST_PARTY_TOOL_AUTHORIZATION` in `packages/contracts/src/first-party-tool-authorization.ts`),
   within the default worker set and that person's grant. A refresh therefore
   never lifts a deliberately narrowed permission boundary (for example a
   read-only operator session that created the task) for tools the task already
@@ -387,8 +387,8 @@ in-app:
   connector clears a run failure; pausing the schedule removes it. Each item
   carries the task's `executionDigest`, so the web can tell a new blocked
   notice (after a refresh or edit) from one the owner has already seen.
-- **Where the owner sees it.** A dot on the Schedules item in the navigation
-  rail, shown until the owner opens Schedules (the "seen" marker is per
+- **Where the owner sees it.** A dot on the Automations item in the navigation
+  rail, shown until the owner opens Automations (the "seen" marker is per
   browser; the durable truth stays on the server). A new failed run is a new
   notice; so is a blocked account on a new task head. The schedule's row in
   the list shows a "Needs attention" badge (or, for its owner, "Access out of
@@ -413,7 +413,7 @@ finishes), but it is no longer indistinguishable from a running one:
 - The attention list includes an active schedule whose latest run waits on a
   person, with the same `awaitingHuman`, for the same viewers as the other
   notices (the owner, or schedule managers for an ownerless schedule). The web
-  shows it on the Schedules item and on the schedule's page. The session itself
+  shows it on the Automations item and on the schedule's page. The session itself
   carries the usual `session.requiresAction` event.
 - `since` is when the current unanswered wait began. A person's decision
   restarts it; the scheduler's own timeout decisions do not.

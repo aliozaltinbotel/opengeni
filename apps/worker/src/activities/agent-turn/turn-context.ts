@@ -16,6 +16,7 @@ import type {
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,
+  InputWaitRequest,
   OpenGeniRuntime,
   RunCredentialCommandSession,
   SelfhostedSession,
@@ -180,7 +181,7 @@ export type EventingState = {
   turnStartedPublished: boolean;
   stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
   /** Set by the stream attempt: refuses a wait that would leave a person unanswered. */
-  inputWaitReplyGuard: (() => Promise<string | null>) | null;
+  inputWaitReplyGuard: ((request: InputWaitRequest) => Promise<string | null>) | null;
   modelRunSettings: Settings;
   firstModelRequestPreparationStartedAt: number | null;
   firstModelRequestPreparationRecorded: boolean;

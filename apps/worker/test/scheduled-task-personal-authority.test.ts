@@ -1,6 +1,7 @@
 import { migrate } from "@opengeni/db/migrate";
 import { allowanceMigrationTail } from "../../../packages/db/test/allowance-migration-tail";
 import { knowledgeActorMigrationTail } from "../../../packages/db/test/knowledge-actor-migration-tail";
+import { workspaceDeletionMigrationTail } from "../../../packages/db/test/workspace-deletion-migration-tail";
 import { strictOwnerMaintenanceMigrationTail } from "../../../packages/db/test/strict-owner-maintenance-migration-tail";
 import { restorePreRetirementGrants } from "../../../packages/db/test/fixtures/pre-retirement-grants";
 import { readFile } from "node:fs/promises";
@@ -19,7 +20,6 @@ import {
 } from "@opengeni/contracts";
 import { resolveFirstPartyMcpToolPolicy } from "@opengeni/config";
 import {
-  captureScheduledTaskRestoreState,
   defaultSessionMcpServerIds,
   mcpAccountRouteId,
   resolveSessionToolPolicy,
@@ -60,10 +60,10 @@ import { createLegacyVariableSet } from "../../../packages/db/test/helpers/legac
 import {
   acquireSharedTestDatabase,
   acquireBlankTestDatabase,
-  MemoryEventBus,
-  testSettings,
   type SharedTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { testSettings } from "@opengeni/testing/settings";
 import postgres from "postgres";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { ControlRequest, ControlResponse } from "@opengeni/agent-proto";
@@ -1915,13 +1915,18 @@ describe("scheduled task personal MCP authority", () => {
       // 0873 patches the account-binding fence as rewritten by withheld 0501.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
         ('0873_mcp_binding_delegation_revocation.sql')`;
-      // The list invalidation triggers read visibility from withheld 0501.
+      // The list invalidation triggers read visibility from withheld 0501;
+      // 0905 adds one more on 0888's notify function.
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
-        ('0888_session_list_invalidation.sql')`;
+        ('0888_session_list_invalidation.sql'),
+        ('0905_schedule_timing_session_list_hints.sql')`;
       // These learning-scope repairs rewrite routines installed by withheld
       // 0461 (and each other). This pre-cutover producer-fence fixture must
       // withhold the dependent tail too, not fabricate modern Knowledge SQL.
       for (const name of knowledgeActorMigrationTail)
+        await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
+      // Rewrites keys on the withheld Knowledge tables by name.
+      for (const name of workspaceDeletionMigrationTail)
         await historicalAdmin`INSERT INTO schema_migrations(name) VALUES(${name})`;
       // 0832 also extends the producer fence (generated default tool policy).
       await historicalAdmin`INSERT INTO schema_migrations(name) VALUES
@@ -2552,7 +2557,7 @@ describe("scheduled task personal MCP authority", () => {
       await expect(
         syncUpdatedScheduledTask({
           db: client.db,
-          previous: await captureScheduledTaskRestoreState(client.db, original),
+          previous: { task: original },
           task: changed,
           workflowClient: {
             syncScheduledTask: async ({
@@ -2660,7 +2665,7 @@ describe("scheduled task personal MCP authority", () => {
     const original = await updateScheduledTask(client.db, workspace.workspaceId, created.id, {
       reusableSessionId: reusableSession.id,
     });
-    const restoreState = await captureScheduledTaskRestoreState(client.db, original);
+    const restoreState = { task: original };
     const changedDelegations = delegation(workspace.subjectId, "github", "github.com");
     const changed = await updateScheduledTask(client.db, workspace.workspaceId, original.id, {
       name: "changed name",

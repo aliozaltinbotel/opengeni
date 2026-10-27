@@ -1,5 +1,575 @@
 # @opengeni/runtime
 
+## 5.3.1
+
+### Patch Changes
+
+- c8ddf55: A browser or computer action batch that legitimately runs longer than a minute (for example waiting for an upload, filling a field, pressing Enter and then waiting up to 90 seconds for a reply) now completes and returns its normal receipt instead of failing with "The workspace is temporarily unavailable". Each action request gets a deadline derived from its own declared waits: the sum of each action's longest wait, plus the settle after page input, plus a fixed margin. It is never less than the previous one minute and never more than 20 minutes. Every layer that carries the request honours that deadline: the API's controller request on every transport, the Connected Machine runner (whose cap rises from 15 to 20 minutes) and its reply timer, the socket idle timers of the API-to-controller and tool-to-API requests, and the API and browser controller servers, which no longer apply their idle timeout to a running action. A request that still outlives its deadline (or an older runner's 15-minute cap) is not retried and returns `504 action_timeout`, telling the agent that the action may still be running and to check the page or window before doing anything again. `@opengeni/contracts` exports the shared wait and settle bounds and `browserActionDeadlineMs` / `computerActionDeadlineMs`.
+- 1988e97: A person can now have the agent do in the chat what they would otherwise do in settings: switch this chat's model, invite someone or share the chat, check their plan, credits and usage, or change a workspace preference. In a chat a person started, `admin_actions_search`, `admin_action_describe` and `admin_action_call` are listed by default and run as the person who sent the message, never with more than that message itself could do: what it may do is frozen with its turn when it is accepted, capped to the chat's workspace. Reads run at once; every change first shows that person a plain confirmation card in the chat ("Invite anna@example.com to your organization as an admin?", one line of the key values, Allow and Cancel, the raw call behind Details), and the API refuses a change that person did not confirm. Only someone signed in to the app itself can confirm changes; with any delegated sign-in (an embed's host-issued token, an external user, another integration's person token) the route only reads unless the deployment sets `OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES=true`, which applies to all of them. An Allow given through an API key, a Slack button or a delegated sign-in that isn't turned on never confirms: approvals now record who decided (`decision_by_kind`) and whether they were signed in to the app (`decision_by_signed_in_person`), both fixed with the decision. Calls that create, show, copy or rotate keys, passwords, tokens or other secrets, or carry one in their body, are left to the app unless the session has full access. Contract schemas mark secret fields with the new `secretValue(...)` helper (registry `secretValues`); the catalog generator records them, plus secret-sounding field names, as `secretFields` on catalog entries. Codex and SuperGrok device sign-in starts now have a response schema (`SubscriptionDeviceSignInStart`). A session with full access behaves as before. Scheduled, goal and other unattended turns, API-key and service turns, child sessions and service sessions gain nothing.
+
+  This is on by default for every organization, including existing ones: migration `0971` adds `chatActionsAllowed` (default true) to the agent admin-access setting. Owners and admins turn it off under Security & data > Agents, or with `PATCH /v1/organizations/:organizationId/agent-admin-access` (which now accepts either field). Embedding hosts that draw approvals with `ApprovalSurface` get the same card, with `approvalSurface.allow` and `approvalSurface.cancel` messages to translate; a host can leave the route off by not selecting these tools. The app-action catalog moved to `@opengeni/contracts/app-actions`. `SESSION_ADMIN_ACCESS_TOOL_NAMES` and `SESSION_ADMIN_ACCESS_TOOL_NAME_SET` are deprecated aliases of `SESSION_APP_ACTION_TOOL_NAMES` and `SESSION_APP_ACTION_TOOL_NAME_SET`. `toolReviewFields` takes an optional tool name.
+
+- 4b3f4b7: Closing the last tab of an attached Chrome profile no longer disconnects the profile. Chrome closes a profile with its last window, which stopped the extension and ended the profile's connection while Chrome kept running; the extension now opens a new tab page in that window before closing the profile's only tab. A new tab in a Chrome that is running with no window open (common on macOS) opens in a new unfocused window instead of failing. A tab close whose profile connection ends before the extension answers is reported as `outcome_unknown` (HTTP 409) telling the agent to list the tabs again, instead of an unexpected internal error, and a tab Chrome says is already gone is `target_not_found`. `interaction_discover` now shows the model a compact inventory: each BrowserSession and ComputerSession keeps what is needed to reuse it (id, name, lifecycle, placement, engine or platform, identity, last use, whether it belongs to this chat and the capabilities it lacks), and at most 50 sessions and identities of each kind, this chat's own first and then usable ones by most recent use, with a note naming how many were left out; the whole result stays within a fixed byte budget (768 KiB) and each session keeps only its association with this chat, so it never needs a spill. A large workspace used to produce a result of megabytes that the model could not read. Closing a tab that is already gone no longer makes the agent forget its current browser, and a close whose connection ends before the remaining tabs are listed is `outcome_unknown` too. Code Mode programs still receive every full record.
+
+  A tool result too large for the model (over 1 MiB) is now always readable where the agent runs. Its receipt names the copy's absolute path on the machine it was written to (a Connected Machine's own folder or the sandbox's root), so it opens from any working directory; before the turn's sandbox has started it names the path the copy gets when it starts, instead of none; and a text line after the receipt says to read parts with the shell and, when there is no copy, to fetch the file by its id with `files_get_download_url`.
+
+- e7f5d38: A new chat that starts with a file attached now reuses the cached prompt of a chat without one. Before, a turn with a file added an "Attached files" section to the system instructions and the sandbox's mount policy and filesystem layout listed the file, so the whole request missed the provider's prompt cache. The instructions no longer depend on the turn's files; that guidance now ends the turn's attachment notice, after history. Uploads completed without a client sha256 now get one computed from the stored bytes (files up to 20 MiB), so an image uploaded through the plain REST flow reaches the model inline like an SDK upload instead of only as a mounted file.
+- 4c6bf32: An organization's Azure OpenAI connection can now sign in with Microsoft Entra ID instead of an API key, so Azure resources that turn key authentication off can run agent turns. Admins choose the sign-in method when connecting: an API key (unchanged), the organization's own Entra app registration with a client secret, or, when the operator sets `OPENGENI_AZURE_OPENAI_DEPLOYMENT_IDENTITY_ENABLED=true` and configures the standard `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE` or `AZURE_CLIENT_SECRET` variables, the deployment's own workload identity. Tokens for the `https://cognitiveservices.azure.com/.default` scope are cached per credential and renewed before they expire. The upsert request accepts `authentication` in place of `apiKey`, connection responses report `authMethod`, and the client config reports `azureOpenAIDeploymentIdentity`. `@opengeni/network/azure-entra` exports the shared token source.
+- f6f112a: Saving a browser recording now works when the browser runs on a machine with a slow link to storage. Previously a save waited for the whole recording to upload inside one request; anything that took longer than a minute failed, and every retry started the upload from scratch.
+
+  The browser host now uploads the recording in the background. A save waits up to 45 seconds and then answers `202` with `retryAfterMs`. Repeating the save with the same `operationId` joins the upload that is already running. The SDK's `saveBrowserRecording` repeats the request until the save completes, or until its signal aborts.
+
+  Staged recording objects are scheduled for deletion on a durable deadline, so a save that is never repeated leaves nothing behind. Controllers that predate background uploads are still waited on in a single request.
+
+- 2ae88c7: browser_act now tells the agent to run the remaining records of a repeated procedure several to a batch, or in one Code Mode loop, instead of one batch per record.
+- 6e50f56: browser_act and computer_act accept `role:name` as a bare locator string (`"link:Sign in"`, `"push button:Save"`), meaning the element with that role and exact name, next to a bare element ref. In browser_act, `label:` and `placeholder:` name those locator kinds instead. computer_act actions may also leave out `type`: an action with a locator is semantic and one with actions is a batch. Exact names now compare whole names in any case and spacing, the same way in the browser and in computer readings. A repeated form fill needs about a third fewer output tokens per record.
+- 8b08c70: Computer readings on Linux and Windows now show whether a checkbox or switch is on (value "1" or "0", as on macOS); before, browserd dropped the state CUA reports, so agents could not see it and set_value true or false on one was refused. Linux switches and toggle buttons now report their state too. The computer_act description says that set_value true or false on a checkbox or switch leaves it in that state and presses it only when needed, so one batch can cover a whole record without reading the checkbox first.
+- 7023400: computer_act batches on a computer that runs them as one operation no longer read two recorded receipts before every batch (each one a 404 on a first try); a retry is answered by the computer's journal, or by its recorded receipt when the journal refuses the retry's new fence or the window is gone. CUA batch steps named by role and name now find their element again when the page re-renders just before the press, and several matches of the named role wait for the window to settle before they are reported (without searching other windows), so a list a search is still filtering narrows to the one meant; a later action of a batch whose name its observation shows on several elements now reaches that wait instead of failing at once. computer_act's description mentions looping over many records in one Code Mode program once one has worked.
+- cccd692: Computer tools that omit targetId now keep working in the window the computer was last observed or acted on in, also in a later turn. The remembered window lived for one turn attempt, so the first such call of a follow-up turn ("do the rest") failed with computer_target_required and the agent had to resend both identifiers. A computer's target list now marks that window with `current: true`, and a call that omits targetId before its attempt used a window of the computer uses it. A window this attempt used still wins, and when the computer has no current window the call still asks for targetId.
+- 3e52c3c: Computer tools may omit `computerSessionId` and `targetId` to keep working in the computer and window the agent used last, the way browser tools keep using the current tab. With nothing used yet in the turn, `computerSessionId` resolves to the session's most recently used live computer; a window must be named once. An action that opens a window makes that window the current one. `computer_act` also takes a bare element ref as a locator, including inside a batch. Fewer identifiers per step means fewer output tokens and faster steps.
+- 7ccc761: computer_observe without a targetId on a computer the agent has not used yet starts in its focused window, or its only screen when no window is focused, instead of failing. Actions still need a window the agent has seen or named.
+
+  On macOS and isolated Linux desktops, the frontmost ordinary window (highest stacking order, menus, overlays and minimized windows aside) is now marked focused in computer target lists. Windows desktops mark none yet, because their window listing stacks cloaked and always-on-top windows as ordinary ones.
+
+- f8ed9e5: When a computer call that relied on the remembered window finds the computer itself gone, the next call without identifiers now resolves the computer afresh, instead of answering that no window of the gone computer has been used yet. A call that finds only its window gone keeps the computer, as before.
+- 22cfb09: Computer readings list a macOS menu bar's plain items on one line (`- AXMenuBarItem "Apple" [e3], "File" [e5], …`) instead of one line each. An item with a state, value or action of its own keeps its own line.
+- a59ecc1: A macOS table no longer reads as three tables. macOS lists every cell again under each AXColumn, as new elements with the same role, label and bounds. A computer reading now lists such an element once, and a step that names it by role and name finds one element instead of an ambiguous pair. This holds in browserd's own lookup and in CUA's (fork pin 7e98e221e). Same-named elements at different places still count as separate elements.
+- 392db50: Native CUA run_steps calls work again on macOS and Linux: their bundled tool definitions now include the `toggle_to` step field the pinned CUA worker publishes, so the worker's schema matches this release instead of every run_steps call being refused as a version mismatch. Windows runs the published driver, which has no such field, so its definitions are unchanged.
+
+  The model's one native run_steps schema merges a step field only some platforms have into the step schema, instead of repeating the whole steps schema once per platform.
+
+- 5c4cf54: Gmail search, thread and draft-list results now reach the model as compact mail cards (sender, recipients, date, subject, labels, attachment names and the start of the body, with `contentTruncated` when cut), sized to the current model's tool-output budget, so a 50-message full-content search is about 47 KB of model-visible text instead of a 3.5 MB result that had to spill to a file. `get_message` stays complete but drops the HTML body when a plain-text body exists, and replaces an HTML-only body that does not fit the budget with its readable text. Codemode and the spill file still receive the exact results. Local MCP bridges can supply such a model-only copy through the new optional `projectModelToolResult` hook. Cards keep a Reply-To that names another address than the sender. A spilled tool result that arrives before the turn's lazy sandbox has started now starts it and copies the file, so its receipt gives the shell path instead of `null`; the path is given only once the copy is really there.
+- 627b2f1: Google Calendar can now be connected from the chat or the Capabilities page, like Gmail: each person connects their own calendar with the deployment's existing Google sign-in app, and the agent can list events in a time range, read one event, check free/busy times, and create, move or delete events. Changes ask first by default, guests are emailed only when asked, and every answer uses the calendar's own time zone. Operators enable it with `OPENGENI_GOOGLE_CALENDAR_ENABLED=true` after enabling the Google Calendar API and adding the `calendar.calendarlist.readonly`, `calendar.events` and `calendar.freebusy` scopes to their Google consent screen.
+- ae5963e: `computer_open` and `browser_open` with a placement naming a Connected Machine reuse an earlier session there only while the chat is working on that machine. Before, they reused a session left on a machine the chat had moved away from, and the agent got "This Desktop belonged to a previous task placement and was retired. Open a new Desktop.", which a new open could not fix. Now the open goes straight to the message that says to move the chat to that machine first.
+- 8bd2c99: macOS asks about fewer privacy permissions. The desktop window grants the microphone (dictation, voice chats and meeting recordings) but no longer the camera, refuses USB, serial, HID and Bluetooth devices, and turns off Web Bluetooth; the app's own local pages get no permissions. On a Connected Mac whose agent works from the home folder, code search skips Library, Music, Pictures, Movies and the Trash unless a path names them, and each of Desktop, Documents and Downloads until the owner has allowed the app to open it. Repository discovery does the same as a safeguard. The Connected Machine instructions tell the agent not to scan those folders unasked.
+- e0f94c2: Record credential preparation, client publication and sandbox client readiness in startup timings. Overlap independent lazy post-provision prerequisites while awaiting all started work before failure or cleanup. Batch timing receipts without changing model input or credential authority.
+- f9f0607: Event sources that need no setting up are ready to use. An MCP server the person is signed in to that offers events, a Gmail account they connected and "This workspace" are listed by `GET /v1/workspaces/:workspaceId/event-sources/ready` (`client.listReadyEventSources`) with a key such as `mcp-server:<serverId>`, `gmail:<connectionId>` or `workspace`. A trigger's `sourceId` can be that key: saving adds the person's own source behind it, or reuses the one they have. Agents see them under `readyToAdd` in `event_sources_list` and can set up an automation on one without anyone adding a source first. `AutomationsPanel` and the web app's form offer them in the source picker; `useEventSourceStandIns` takes `readySources`, and stand-in ids are now the ready keys.
+- 48cb71a: Preserve run_on secret references through the tool gateway so the existing target-shell delivery path sends values only through per-command environment variables or private files, never inline command text. Restore secretfile support and single-pass escaping for one-off machine operations.
+
+  Return the canonical gateway secret-error envelope and preserve its missing-secret or per-use approval cards at the run_on MCP boundary, with correct target attribution.
+
+- a6f6c56: An agent that searches the web before answering now first writes one short sentence about what it will check, so the person sees text within a few seconds instead of only "Working" until every search has finished.
+- a9809ee: A blocked "ask before each use" secret use now reaches the person through Opengeni itself instead of depending on the agent to relay a card. The resolver posts Opengeni's own approval card as a human-input request with the new `origin: "secret_use_approval"`, so it appears in the chat, the inbox, a phone notification (without an inline answer) and the Slack thread; an identical blocked use while the request is pending reuses it and never notifies again. The card outlives the turn that hit it. When the signed-in person answers, the grant or denial is recorded and the agent receives the new immediate `secret_use_approval_decided` update telling it to retry the call, or not to, which wakes an idle chat. `SessionHumanInputRequest` gains optional `origin`, `SessionSystemUpdateKind` gains `secret_use_approval_decided`, and `SecretReferenceError` carries `approval: { approvalId, asked }` instead of `approvalCard`; the `approval_required` tool output no longer includes a card and its hint says the person was asked. `request_human_input` refuses `secret-approval:` questions, and agent-relayed approval questions no longer carry authority. Migration 0961 (rolling) adds the request `origin` column and the new update kind, and keeps pending approval cards open in the inbox when a turn ends.
+- f3d19a2: Vault items, or single fields of them, can be marked "ask me each time". Agents still see and reference a marked item, but a use that no approval covers stops before any value is read and fails with the new `approval_required` code, and Opengeni asks the person with its own card describing the blocked use (item and field, surface, tool and destination). Only the person the run acts for can answer it, and the answer becomes a grant: allow once, allow in this chat, allow for an hour across the person's chats in the workspace, or deny. The check runs in the shared resolver, so hosted and connected vaults and every surface behave the same. New routes `GET`/`PUT /v1/workspaces/:workspaceId/vaults/:vaultId/items/:itemId/approval` and `POST …/approval/grants/:grantId/revoke` (people only for changes), SDK methods `getItemApproval`, `setItemApproval` and `revokeItemGrant`, an "Ask before each use" section on the item page, and migration 0952 (rolling) adding the `secret_approval_rules` and `secret_use_approvals` tables. `SecretUseContext` gains optional `destination` and `lookupDestination`, and secret-use audit rows list the approvals a use relied on.
+- 0383280: User messages can now carry the sender's IANA time zone (`timeZone`) on `user.message` events, steer requests, composer submits and the initial message of a new session. The server validates the name, freezes it with the accepted turn, and the agent sees the sender's local time first, for example `[Message sent Sunday 2026-10-25 09:08 Europe/Oslo (08:08 UTC) by Ada]`. Messages without a zone render exactly as before. The zone is not part of a message's idempotency identity, so a retry that names another zone (or none) replays the original message. Published Sites forward their viewer's zone the same way.
+
+  The SDK client fills the zone automatically on a person's device (browser, desktop app, React Native) from `Intl.DateTimeFormat().resolvedOptions().timeZone` when the caller did not pass one. Server-side callers never attach their own zone. Pass `messageTimeZone: false` in the client options to opt out. When an older server rejects the field, the client retries the message once without it.
+
+  Schedules an agent creates or edits without a `timeZone` now use the zone of the message that asked for them instead of UTC (or, in a turn no person's message started, the chat's latest message that had a zone); an edited schedule keeps its current zone, and UTC applies only when there is neither. The create and update receipts report the zone that was used (`facts.scheduleTimeZone`). Requests from people and schedules that name a zone are unchanged.
+
+- 1a7c434: An answer the agent gives before waiting is now shown exactly as written. `wait_for_input` takes a `reply` argument that becomes the agent's message, and agents are told to use it whenever the turn answers someone. Before, Claude Opus 5.5 and Sonnet 5.5 returned an answer written just before the wait as a progress update, so people saw only a one-paragraph summary of it, without its images or tables.
+- 7c02dbd: Windows computer use can type into and click the app it just opened. Before input, the Windows backend brings the target window to the front itself: it dismisses Start or Search if one of them holds the foreground, restores a minimized window, activates it while attached to the foreground thread, and as a last resort clicks the window's own title bar. Only when all of that fails does it refuse, naming the window that kept the front, and none of the action's input is sent. After keyboard input the foreground goes back to the window that had it, as CUA itself does. After a click the clicked window deliberately stays in front, unlike CUA, so a menu or popup the click opened is not closed. Nothing is given back to a dismissed Start or Search, the desktop or the taskbar. A Windows "window was not in front" error from CUA is reported as retryable with nothing sent only when CUA says no input was sent; after a click CUA already sent, it is an unknown outcome to check before acting again.
+
+  The Windows CUA tool catalog is regenerated from the bundled CUA 0.37 driver, so the native `cua_*` tools no longer fail with "CUA tool schema differs from this release". Each generated catalog now records the CUA version it came from, and a test fails unless every catalog names the `@trycua/cua-driver` version browserd pins.
+
+  `computer_open` accepts `includeScreenshot`, like `browser_open`: the result then also carries a still image of the screen with its frame id and pixel size. With several screens it captures the one the computer works in, else the focused one or the one showing the focused window, and it returns no image when the screen changed while it was captured.
+
+  A rejected computer session request body now names the first rejected field, for example `invalid request body: expectedFrameId: pointer action frameId must match expectedFrameId`.
+
+- Updated dependencies [c8ddf55]
+- Updated dependencies [e0b3ccf]
+- Updated dependencies [1988e97]
+- Updated dependencies [e7f5d38]
+- Updated dependencies [c5974ea]
+- Updated dependencies [15b4701]
+- Updated dependencies [e3782bb]
+- Updated dependencies [e1838ff]
+- Updated dependencies [eb30cb4]
+- Updated dependencies [ce72530]
+- Updated dependencies [4c6bf32]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [f6f112a]
+- Updated dependencies [2dc5e41]
+- Updated dependencies [9f6cab2]
+- Updated dependencies [6f6c356]
+- Updated dependencies [d502ba3]
+- Updated dependencies [cccd692]
+- Updated dependencies [3fa5c6e]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [bbc8f6d]
+- Updated dependencies [dca33ef]
+- Updated dependencies [392db50]
+- Updated dependencies [3b9f0e5]
+- Updated dependencies [dcbe25d]
+- Updated dependencies [31bca3c]
+- Updated dependencies [1d5bc4e]
+- Updated dependencies [6acfbd3]
+- Updated dependencies [21e7ecf]
+- Updated dependencies [fb90446]
+- Updated dependencies [5c4cf54]
+- Updated dependencies [0826dfd]
+- Updated dependencies [627b2f1]
+- Updated dependencies [bd57ea7]
+- Updated dependencies [c307566]
+- Updated dependencies [a97c71b]
+- Updated dependencies [8bd2c99]
+- Updated dependencies [406d1b9]
+- Updated dependencies [2c34440]
+- Updated dependencies [c992791]
+- Updated dependencies [87d1b8a]
+- Updated dependencies [1cac78f]
+- Updated dependencies [826b002]
+- Updated dependencies [4998a79]
+- Updated dependencies [4695d41]
+- Updated dependencies [d6c7c4a]
+- Updated dependencies [68b195d]
+- Updated dependencies [f9f0607]
+- Updated dependencies [75348a5]
+- Updated dependencies [cc319f3]
+- Updated dependencies [314522c]
+- Updated dependencies [3b1d8c1]
+- Updated dependencies [ee4df07]
+- Updated dependencies [3c486ea]
+- Updated dependencies [7d419e2]
+- Updated dependencies [e5446f1]
+- Updated dependencies [83682c3]
+- Updated dependencies [a9809ee]
+- Updated dependencies [acac580]
+- Updated dependencies [f3d19a2]
+- Updated dependencies [31c3308]
+- Updated dependencies [e509f04]
+- Updated dependencies [34f54fe]
+- Updated dependencies [4e44f04]
+- Updated dependencies [b7a14bd]
+- Updated dependencies [119f33d]
+- Updated dependencies [c194abb]
+- Updated dependencies [0383280]
+- Updated dependencies [1534f12]
+- Updated dependencies [286058a]
+- Updated dependencies [7c02dbd]
+  - @opengeni/contracts@5.3.0
+  - @opengeni/observability@5.3.0
+  - @opengeni/config@5.3.0
+  - @opengeni/sdk@5.3.0
+  - @opengeni/network@5.3.0
+  - @opengeni/vaults@5.3.0
+  - @opengeni/capabilities@5.3.0
+  - @opengeni/codemode@5.3.0
+  - @opengeni/codex@5.3.0
+  - @opengeni/interaction@5.3.0
+  - @opengeni/tool-gateway@5.3.0
+  - @opengeni/xai-subscription@5.3.0
+  - @opengeni/agent-proto@5.3.0
+  - @opengeni/decisions@5.3.0
+
+## 5.2.1
+
+### Patch Changes
+
+- Updated dependencies [e1126c2]
+- Updated dependencies [fb72b9d]
+- Updated dependencies [2d6484c]
+  - @opengeni/codex@5.2.0
+  - @opengeni/contracts@5.2.0
+  - @opengeni/sdk@5.2.0
+  - @opengeni/config@5.2.0
+  - @opengeni/capabilities@5.2.0
+  - @opengeni/codemode@5.2.0
+  - @opengeni/interaction@5.2.0
+  - @opengeni/observability@5.2.0
+  - @opengeni/tool-gateway@5.2.0
+  - @opengeni/vaults@5.2.0
+  - @opengeni/agent-proto@5.2.0
+  - @opengeni/decisions@5.2.0
+  - @opengeni/network@5.2.0
+  - @opengeni/xai-subscription@5.2.0
+
+## 5.1.2
+
+### Patch Changes
+
+- 442354f: A `computer_act` batch on macOS and in Linux sandboxes can now cross a page or form change. A later action whose role, label or text locator names an element the batch's observation does not show yet is sent to CUA by role and name; CUA finds it when that step runs, after waiting up to 10 seconds for it to appear and enable. Element-targeted actions after it are found by name too (an exact name for a ref), since CUA's lookup retires the observation's tokens. CUA is pinned to a revision whose lookups and checks accept `exact`. The tool description tells agents to do each record of a repeated procedure in one batch.
+- Updated dependencies [5d377a7]
+  - @opengeni/sdk@5.1.0
+  - @opengeni/codemode@5.1.0
+  - @opengeni/agent-proto@5.1.0
+  - @opengeni/capabilities@5.1.0
+  - @opengeni/codex@5.1.0
+  - @opengeni/config@5.1.0
+  - @opengeni/contracts@5.1.0
+  - @opengeni/decisions@5.1.0
+  - @opengeni/interaction@5.1.0
+  - @opengeni/network@5.1.0
+  - @opengeni/observability@5.1.0
+  - @opengeni/tool-gateway@5.1.0
+  - @opengeni/vaults@5.1.0
+  - @opengeni/xai-subscription@5.1.0
+
+## 5.0.2
+
+### Patch Changes
+
+- b331283: Connected ChatGPT apps (Outlook, SharePoint and the other Codex apps) are available in chats again. ChatGPT's apps server answers the newer protocol probe but returns tool lists in the older format, so every list was rejected and turns silently ran without those apps. Opengeni now connects to it with the older handshake, as it does for its own servers.
+- 960ae8d: `excel_run` is no longer loaded up front in every chat. Agents in chats with no workbook read "here" as an open workbook and probed Excel; in the Excel add-in, each message names the tool, so the agent loads it by exact name.
+- Updated dependencies [ca3f931]
+- Updated dependencies [487bd43]
+- Updated dependencies [a9d20b3]
+- Updated dependencies [171cdb7]
+- Updated dependencies [3083c1e]
+- Updated dependencies [6d29c01]
+- Updated dependencies [f975174]
+- Updated dependencies [4afe92f]
+- Updated dependencies [217ed52]
+  - @opengeni/sdk@5.0.0
+  - @opengeni/contracts@5.0.0
+  - @opengeni/codemode@5.0.0
+  - @opengeni/capabilities@5.0.0
+  - @opengeni/codex@5.0.0
+  - @opengeni/config@5.0.0
+  - @opengeni/interaction@5.0.0
+  - @opengeni/observability@5.0.0
+  - @opengeni/tool-gateway@5.0.0
+  - @opengeni/vaults@5.0.0
+  - @opengeni/agent-proto@5.0.0
+  - @opengeni/decisions@5.0.0
+  - @opengeni/network@5.0.0
+  - @opengeni/xai-subscription@5.0.0
+
+## 4.8.0
+
+### Patch Changes
+
+- 85fb89e: Live views of a Connected Machine (browser, desktop, terminal) work when the machine is connected in a different workspace than the chat using it. The relay viewer token used to carry the chat's workspace, so the relay refused it with "viewer token workspace does not match the channel key". The token now names the machine's relay channel (its workspace, machine and stream), and the relay only accepts it for that exact stream.
+- Updated dependencies [3089aaf]
+- Updated dependencies [e2a641c]
+- Updated dependencies [85fb89e]
+  - @opengeni/sdk@4.8.0
+  - @opengeni/contracts@4.8.0
+  - @opengeni/codemode@4.8.0
+  - @opengeni/capabilities@4.8.0
+  - @opengeni/codex@4.8.0
+  - @opengeni/config@4.8.0
+  - @opengeni/interaction@4.8.0
+  - @opengeni/observability@4.8.0
+  - @opengeni/tool-gateway@4.8.0
+  - @opengeni/vaults@4.8.0
+  - @opengeni/agent-proto@4.8.0
+  - @opengeni/decisions@4.8.0
+  - @opengeni/network@4.8.0
+  - @opengeni/xai-subscription@4.8.0
+
+## 4.7.2
+
+### Patch Changes
+
+- c6499fc: An agent asked to use the person's own Chrome without naming a profile now opens a connected profile on the computer the agent's session runs on, when there is one, instead of the most recently active profile on any computer. The opened profile and the other connected profiles now say which computer each is on, and mark the one the session runs on, so an agent can tell when it landed on another machine and pick a different profile. Discovering attached Chrome profiles shows the same. The attached-browser list gives each bridge's `sandboxId` and `machineName`.
+- 9efd9b3: On Claude Opus 5.5 and Sonnet 5.5, a progress update is no longer shown or recorded as the agent's message or reply. Claude returns only a summary of it, which could claim things the agent never wrote. It now shows as a thought, and when a person's turn has no real reply before `wait_for_input`, the agent is asked to write one instead of the summary being used.
+- a6a1dac: Once an agent uses the native `cua_*` computer tools in a session, `computer_act` and `computer_observe` stop reading elements themselves so the native element tokens stay valid. Their results used to say "The accessibility tree has no readable elements; use the screenshot", which sent agents to pixel clicks on windows full of controls. They now say the session reads elements with `interaction__cua_get_window_state` and to call it, and two such readings are no longer reported as "no element changed". Semantic snapshots carry this as `readByNativeTools: true`.
+- 8301382: A sub-session's question can now be answered by the person or by the parent agent, and the first answer wins. The parent's `child_requires_action` notice now carries each question's id, kind, prompt and option ids and labels (never secret specs), so the parent can answer with `session_human_input_respond` without reading the sub-session's history. The notice now also wakes an idle parent that has no goal. An agent whose answer arrives after someone else's gets `outcome: "unchanged"` with `alreadyAnswered: true`, who answered, and a warning not to answer again; before, it got a success-looking `replayed` result. The `user.humanInputResponse` event records whether a person, API key, agent or the system answered. The agent instructions and the `request_human_input` and `session_human_input_respond` descriptions now say that a parent answers when it can from its task context, leaves questions only a person can answer (decisions, preferences, credentials, approvals) to the person, and never answers on the person's behalf. The conversation now says "Agent answered" instead of "You answered" when an agent gave the answer.
+- Updated dependencies [c6499fc]
+- Updated dependencies [a6a1dac]
+- Updated dependencies [8301382]
+  - @opengeni/contracts@4.7.2
+  - @opengeni/sdk@4.7.2
+  - @opengeni/codemode@4.7.2
+  - @opengeni/capabilities@4.7.2
+  - @opengeni/codex@4.7.2
+  - @opengeni/config@4.7.2
+  - @opengeni/interaction@4.7.2
+  - @opengeni/observability@4.7.2
+  - @opengeni/tool-gateway@4.7.2
+  - @opengeni/vaults@4.7.2
+  - @opengeni/agent-proto@4.7.2
+  - @opengeni/decisions@4.7.2
+  - @opengeni/network@4.7.2
+  - @opengeni/xai-subscription@4.7.2
+
+## 4.7.1
+
+### Patch Changes
+
+- @opengeni/agent-proto@4.7.1
+- @opengeni/capabilities@4.7.1
+- @opengeni/codemode@4.7.1
+- @opengeni/codex@4.7.1
+- @opengeni/config@4.7.1
+- @opengeni/contracts@4.7.1
+- @opengeni/decisions@4.7.1
+- @opengeni/interaction@4.7.1
+- @opengeni/network@4.7.1
+- @opengeni/observability@4.7.1
+- @opengeni/sdk@4.7.1
+- @opengeni/tool-gateway@4.7.1
+- @opengeni/vaults@4.7.1
+- @opengeni/xai-subscription@4.7.1
+
+## 4.7.0
+
+### Minor Changes
+
+- 31095f1: Add a single personal Google Drive MCP connection with reviewed file-management extensions and ordinary agent scheduling. Retire native Drive source-sync and publishing setup while preserving historical connections, imported documents and run history. Keep Drive MCP setup disabled by default until provider prerequisites and OAuth verification are complete.
+
+### Patch Changes
+
+- bf88717: Native CUA tools are easier to find and batch. Disclosing any `interaction__cua_*` tool now also discloses `interaction__cua_get_window_state` and `interaction__cua_run_steps`, so an agent that found `cua_click` can send a whole form as one batch instead of one call per field. Their descriptions say how the CUA tools they mention are named (`interaction__cua_<name>`, `interaction.cua.<name>` in Code Mode, plain names inside `run_steps` steps), and their Code Mode path moves from `computer.<name>` to `interaction.cua.<name>`. A computer observation whose accessibility tree has only hidden or unlabeled elements now says so instead of claiming the tree has no readable elements.
+- 0e9e59e: Reuse the JSON already serialized for model-context inspector byte accounting when estimating its tokens. This avoids repeated schema and provider-body traversals without changing model requests, captured bodies, token estimates or persistence.
+- Updated dependencies [31ef5b7]
+- Updated dependencies [31095f1]
+- Updated dependencies [7308de5]
+  - @opengeni/config@4.7.0
+  - @opengeni/contracts@4.7.0
+  - @opengeni/capabilities@4.7.0
+  - @opengeni/codemode@4.7.0
+  - @opengeni/codex@4.7.0
+  - @opengeni/interaction@4.7.0
+  - @opengeni/observability@4.7.0
+  - @opengeni/sdk@4.7.0
+  - @opengeni/tool-gateway@4.7.0
+  - @opengeni/vaults@4.7.0
+  - @opengeni/agent-proto@4.7.0
+  - @opengeni/decisions@4.7.0
+  - @opengeni/network@4.7.0
+  - @opengeni/xai-subscription@4.7.0
+
+## 4.6.1
+
+### Patch Changes
+
+- Updated dependencies [e7ca55f]
+  - @opengeni/sdk@4.6.0
+  - @opengeni/codemode@4.6.0
+  - @opengeni/agent-proto@4.6.0
+  - @opengeni/capabilities@4.6.0
+  - @opengeni/codex@4.6.0
+  - @opengeni/config@4.6.0
+  - @opengeni/contracts@4.6.0
+  - @opengeni/decisions@4.6.0
+  - @opengeni/interaction@4.6.0
+  - @opengeni/network@4.6.0
+  - @opengeni/observability@4.6.0
+  - @opengeni/tool-gateway@4.6.0
+  - @opengeni/vaults@4.6.0
+  - @opengeni/xai-subscription@4.6.0
+
+## 4.5.0
+
+### Minor Changes
+
+- f838cb7: A deployment that ships its own branded build of the browser extension can now name and link it. Set `OPENGENI_BROWSER_EXTENSION_NAME` and `OPENGENI_BROWSER_EXTENSION_INSTALL_URL`. Agent tool descriptions, setup notes and errors, `/v1/config/client` (`browserExtension`), the machine card's Chrome step and the browser panel's install hint then use that name and install link. Without them, everything still says Opengeni Browser and links its Chrome Web Store page, unchanged.
+
+### Patch Changes
+
+- 6c7b552: Downloads now work in attached Chrome. A file that a tab Opengeni controls downloads appears in `browser_downloads` like a managed browser's download, and `browser_download_save` saves it into the session's workspace. Chrome still saves it in the person's own downloads folder, where it stays untouched; the session keeps a verified copy. The extension asks for Chrome's `downloads` permission so it can tell where Chrome saved a controlled tab's download (it looks up only completed downloads of that address since the download began). With an older extension, such a download is listed as failed with `download_location_unavailable`.
+- 65fc9ab: `sandbox_file_publish` is on the first model request, like the other harness control tools, so a task that hands the person a file no longer spends a tool search to find it. Its description is also shorter (about 20% fewer characters) and names the session's workspace instead of a fixed /workspace path.
+- Updated dependencies [6c7b552]
+- Updated dependencies [f838cb7]
+- Updated dependencies [e142b9e]
+- Updated dependencies [debd64e]
+- Updated dependencies [3e4426e]
+- Updated dependencies [68c3907]
+- Updated dependencies [e38f20d]
+- Updated dependencies [e22eeca]
+- Updated dependencies [4e8a749]
+- Updated dependencies [d0bc2d6]
+- Updated dependencies [60e9756]
+  - @opengeni/codemode@4.5.0
+  - @opengeni/config@4.5.0
+  - @opengeni/contracts@4.5.0
+  - @opengeni/sdk@4.5.0
+  - @opengeni/interaction@4.5.0
+  - @opengeni/capabilities@4.5.0
+  - @opengeni/codex@4.5.0
+  - @opengeni/observability@4.5.0
+  - @opengeni/tool-gateway@4.5.0
+  - @opengeni/vaults@4.5.0
+  - @opengeni/agent-proto@4.5.0
+  - @opengeni/decisions@4.5.0
+  - @opengeni/network@4.5.0
+  - @opengeni/xai-subscription@4.5.0
+
+## 4.4.1
+
+### Minor Changes
+
+- e697879: Make Knowledge search eager for new configured sessions where search is already
+  available, without changing existing sessions' saved tool selections. Reduce
+  search schema overhead and default MCP searches to five results instead of 20.
+  Model callers receive discovery cards with short snippets; use knowledge_get
+  for full text, citation revision IDs and update versions. Codemode retains the
+  complete result shape, HTTP list defaults are unchanged, and previously stored
+  model results are never re-rendered. Existing explicitly eager search tools can
+  incur a one-time schema-prefix cache miss after upgrade.
+
+### Patch Changes
+
+- d948555: Browser actions with a role, label, text, placeholder, test id or CSS locator now wait up to 10 seconds for their element to appear, and input actions wait while the element is disabled. One browser_act batch can therefore open a record, wait for its form and save it across page changes. browser_act's description tells agents to do a repeated procedure's later records as one batch each, or as a Code Mode loop.
+- 11e56da: The computer targets note and the off-screen error now say what off screen means on macOS since minimized and hidden windows became readable: a window on another Space, such as a full-screen app. The note no longer points a browser from browser_open to linkedComputerSessionId, because its page windows are no longer listed.
+- 7c8a57d: Avoid unused Skill preparation for turns with Skills disabled or no bundled Skills selected, reuse caller-scoped metadata within full-detail session MCP reads, and repair stranded reasoning runs in one pass. Existing tool selection, live authority checks, model inputs and recoverable tool-call pairing remain unchanged.
+- 926e0b8: The Excel add-in now has its own Capabilities tile, "Microsoft Excel". The tile explains the add-in, shows the three setup steps and links to the deployment's install page. It uses the deployment's own add-in name and install URL (`OPENGENI_OFFICE_ADDIN_NAME`, `OPENGENI_OFFICE_ADDIN_INSTALL_URL`).
+
+  Agents can find it with `capability_catalog_search` (excel, spreadsheet, xlsx) and post its install card with `capability_authorization_request` (`api:excel-addin`). The card reports ready when the person already has a workbook open with the add-in. `excel_run` and the spreadsheets Skill tell agents to offer the add-in when someone works on a spreadsheet and no workbook is connected. `excelAddin`, `excelAddinCatalogItem` and `EXCEL_ADDIN_CAPABILITY_ID` are exported from `@opengeni/core`.
+
+- a9a54f4: When Modal loses the sandbox readiness check during startup, the failure now reads "lost its command-readiness probe" instead of the raw gRPC `FAILED_PRECONDITION: Failed to poll exec process: exec not found` reply. The original reply is kept on the error cause for diagnostics. Retry and recovery behaviour is unchanged.
+- f1a619f: When an optional integration can't connect or list its tools because its connection was rejected with HTTP 401 or 403, tool search now says so and suggests signing it in again. Before, these rejections showed only as "code 401" without that suggestion, because the MCP client's HTTP transport reports the HTTP status as an error code. A JSON-RPC error code returned by the server is still shown as a code, even when it is a number like 403.
+- 9979e45: When an optional integration (a connected MCP server) can't connect or list its tools during a turn, tool search and tool list results now name it with a short reason, such as "connected but could not list its tools (HTTP 401); its connection may need to be signed in again". Before, its tools simply vanished: a search found nothing, and the agent told the person it had no access instead of saying the integration was failing.
+- 81e817c: Sandbox agents are no longer told to look for AGENTS.md files, so a task in a sandbox with no repository no longer spends its first step scanning for them.
+- 2581842: Requested Word, Excel and PowerPoint files are made with fewer steps. The documents, spreadsheets and presentations Skills now say that managed sandboxes already include python-docx, openpyxl and python-pptx, so agents use them directly instead of checking first, and that document artifacts are not exported to DOCX or PDF, so agents no longer load artifact tools just to check.
+- ea21aa0: Browser, computer and file work on a connected machine no longer fails while its agent updates itself. The agent now downloads and verifies the new release before it stops taking new work, so it refuses new requests only for the few seconds the swap takes instead of for the whole download. Requests refused during that window are retried patiently until the updated agent takes them, whatever their kind.
+- a75f55e: A lost sandbox now recovers by itself on every managed backend, not only Modal. Docker, compute and the other hosted providers restore their latest verified checkpoint automatically, with the same "files may be older" warning Modal already gives. A session continues on an empty workspace only with proof that the lost sandbox is really gone: the compute control plane's own answer, a Docker workspace directory that the same daemon shows deleted, or a provider lifetime that has run out. A single transient or false "not found" (for example during host memory pressure) can therefore at most restore a checkpoint and never empties a workspace by itself. A failed rebuild after a loss keeps that loss on record instead of silently starting the session on an empty workspace, so the person who controls the chat can still choose Retry or an empty workspace without any database repair. `SandboxRecoverySelection.artifactId` is now nullable, because a portable checkpoint has no native artifact.
+- 9850b5b: The documents and presentations Skills no longer say that managed sandboxes already include pandoc and LibreOffice. Only python-docx, python-pptx and openpyxl are preinstalled, so those are the only tools agents are told to use without checking first.
+- Updated dependencies [e697879]
+- Updated dependencies [11e56da]
+- Updated dependencies [524ddde]
+- Updated dependencies [b58a428]
+- Updated dependencies [25d1500]
+- Updated dependencies [dbc847f]
+- Updated dependencies [d295544]
+- Updated dependencies [614c744]
+- Updated dependencies [81a516c]
+- Updated dependencies [60e031c]
+- Updated dependencies [9c0c6d1]
+- Updated dependencies [a75f55e]
+- Updated dependencies [84c8b32]
+- Updated dependencies [84b1a18]
+- Updated dependencies [47dbfdf]
+  - @opengeni/contracts@4.4.0
+  - @opengeni/sdk@4.4.0
+  - @opengeni/config@4.4.0
+  - @opengeni/tool-gateway@4.4.0
+  - @opengeni/capabilities@4.4.0
+  - @opengeni/codemode@4.4.0
+  - @opengeni/codex@4.4.0
+  - @opengeni/interaction@4.4.0
+  - @opengeni/observability@4.4.0
+  - @opengeni/vaults@4.4.0
+  - @opengeni/agent-proto@4.4.0
+  - @opengeni/decisions@4.4.0
+  - @opengeni/network@4.4.0
+  - @opengeni/xai-subscription@4.4.0
+
+## 4.3.1
+
+### Minor Changes
+
+- 49f2177: Agents can record a browser flow as a video. The new `browser_record` tool starts a recording of a managed or attached browser tab and stops it into an MP4 in the chat's workspace, with a log of when each action happened beside it, and publishes the MP4 so it plays in the chat. Frames are captured only when the page changes, so recording costs almost nothing while a page is still, and the video is encoded on the server, so browser hosts need no video encoder. The SDK adds `startBrowserRecording`, `getBrowserRecording` and `saveBrowserRecording`.
+- 5e32e0f: Improve deferred tool discovery with field-aware retrieval, best-match-first schema
+  loading and compact alternatives, an optional generic decision model for ambiguous
+  queries, exact-name loading,
+  and a paginated tool-group directory. Freeze disclosures in append-only history and
+  keep the first-request tool block stable. Preserve native Responses search and direct
+  function loading. Add retrieval and live generic discovery evaluations.
+
+  Introduce a shared typed decision-model category for tool discovery and code search,
+  with the existing Jev client and OpenAI/OpenRouter Decisions adapters. Use explicit
+  deployment credentials, preserve legacy code-search configuration, and retain
+  provider usage provenance without customer-credit debits. Code-search stats, usage
+  events and metrics use decision rather than Jev names.
+
+- 2acb52c: Add deployment-wide environment instructions that survive workspace and session persona overrides.
+
+### Patch Changes
+
+- 75101c9: Agents answer requested briefs, letters, plans and reports in chat, and create a document only when the person asks for a document or file (for example a DOCX or PDF), asks to edit an existing document, or the result is too long to read comfortably in chat. Before, "clearly meant to be kept or shared" let an agent turn a request like "write a one-page project brief" into a document: about 80 seconds and several document tool calls instead of a 15-second chat answer, with only a link left in the conversation.
+- 3d83bfd: On Claude Opus 5.5 and Sonnet 5.5, a note the agent writes for the person right before a tool call now shows as a normal assistant message and counts as a visible reply. Before, it showed as a collapsed thought. These models request Claude's progress-update thinking display, and each update's signed block is replayed unchanged in its original position.
+- d142e5b: A fresh managed box installs the Codemode client in one command. The worker publishes the release's client bundle once to object storage under its digest and hands the box a short-lived signed URL; the box checks its existing copy, otherwise downloads, verifies the digest and installs, all in one provider command. Before, the 1.15 MB bundle was staged through the provider file API in about eight sequential round trips on every new box. If the download fails for any reason, the box falls back to the old staging path, and Connected Machines are unchanged.
+- f1fd83b: Attached files now arrive on sandbox backends that cannot mount object storage, such as the compute backend. Capability descriptors replace `nativeBucketMount: boolean` with `bucketMount: "native" | "in-container" | "none"`; a `"none"` backend always receives files as pre-signed downloads before the first model request, as Connected Machines already did.
+- ed3a64c: On computers whose CUA driver supports it (macOS and Linux), a computer_act batch of semantic and keyboard actions now runs as one CUA operation checked against one observation, instead of one operation per action, which roughly halves the time of a long batch. Whether a computer session runs batches this way is fixed for the session's life, so every try of one batch, including tries on either side of an agent update, runs it the same way and never repeats its actions. CUA Driver is updated to 0.37.
+- 659c01a: Computer targets now mark a macOS window that is off screen (minimized, hidden, or on another Space or display), which can be neither captured nor read, so an agent sees it in the listing instead of finding out from a failed read. When any listed window is off screen, the listing adds one fixed note that a browser from browser_open runs off screen and can be shown on the computer by opening it with linkedComputerSessionId.
+- c8c2ca9: Attached files reach the sandbox faster. Each attached file used to download in its own sandbox command, one after another, and each command cost a full provider round trip even for a tiny file, so a turn with ten attachments waited about ten seconds before the model could start. Independent files now download up to six at a time. Downloads that write the same path still run in order, and any failures are reported in the same order and wording as before.
+- d776a1f: Sandbox setup before the first command is shorter. The artifact runtime check and the managed Codemode client install used to run one after another with credential setup and the repository clone, and each costs at least one provider round trip (on a fresh Modal box the client install alone takes several). They depend on no other setup step, so they now run alongside the ordered steps. Ordered steps keep their order, setup still waits for everything it started, and a failure is reported for the earliest failing step in the same order as before.
+- bf39d5e: Show ambiguous Connected Machine command outcomes as uncertain instead of successful, including when command details are hidden. Preserve the existing warning to inspect effects before retrying; command execution and retry behavior are unchanged.
+- fda625e: Upgrade the Bun runtime, bundler, test runner and package-manager pins to 1.4.3,
+  and use exact-pinned tsrs for CLI typechecks while retaining stable TypeScript
+  for declaration emission and editor/tooling compatibility. Preserve strict
+  protobuf partial-constructor checks under TypeScript 7.1 without changing the
+  wire codec, and make existing source annotations compatible with the new checker.
+  Regenerate the checked-in Site browser runtime with the pinned Bun bundler.
+- c2cbeae: An idle sandbox now drains even when an API request (Files, Terminal, Browser and similar) died mid-operation and left its request open. Before, the holder reaper removed the dead request's holder but kept its request, and that request refused every capture of the box: Modal boxes ran until the provider deadline, and Docker boxes stayed draining forever. Docker drains also capture requests left by a crashed turn worker now: the drain removes the exact container before it reads the host workspace, so the capture is a point-in-time image, as Modal snapshots already are.
+- d1de8b4: Honor explicit provider-dispatch catalog preparation even when all MCP servers
+  are already connected. Keep eager schemas available before the first request,
+  and join the same catalog completion fence before tool execution and cleanup.
+  Use the shared transport's dispatch notification after admission and transport
+  setup on both native subscription and generic model routes.
+  Compile a tool's input and output validators together on its first call, before
+  authorization or execution, instead of compiling every unused tool at startup.
+  Malformed schemas now fail that tool's call rather than catalog preparation.
+- ec0855c: Stop trusting the compromised emSign root certificates in every runtime Opengeni ships. In October 2026 the private keys of eight eMudhra intermediate CAs chaining to emSign roots became recoverable, so anyone on the network path could impersonate any HTTPS host to a client that still trusts those roots. Bun and Node trust a root list compiled into their executables regardless of the operating system store, and Bun 1.4.3 and Node 22.22.0 still include all four emSign roots. Image builds now rewrite those four certificates inside the shipped Bun and Node binaries (and verify the compiled browser controller and artifact materializer) so no chain can reach them, while every other root keeps working. The Rust agent and relay move to webpki-roots 1.0.10, and the sandbox and desktop images pin Python certifi 2026.10.19; both drop emSign ECC Root CA - G3, the root of the compromised intermediates.
+- 46a2ef3: A computer or browser driver failure (`driver_failed`) now tells operators what failed. The controller sends the failing error class and function beside the unchanged error, and server logs record them with the driver message's code-written part, with window titles, page text, paths and free-text reasons redacted. The controller's own log line for a failed request is redacted the same way and now also covers known driver failures. What callers and agents are shown does not change.
+- ffe09c2: An embedding product can give its agent a few of its own tools from the first request: `toolServer.eager` (and `eager` on a session's `mcpServers` entry or tool reference) now takes a list of tool names. Listed tools are visible from the start and stay visible; the server's other tools remain behind tool search.
+- 8c58607: Without a placement, computer_open and browser_open reuse only a live session on the machine the chat is routed to now, so a chat that swapped machines no longer reattaches to a session left on the previous one.
+- eeab39f: Keep accepted turns recovering while required first-party MCP setup cannot reach the internal API, instead of failing after five attempts during a deployment outage.
+- 5934780: Remote MCP servers that answer the 2026-07-28 `server/discover` probe but send 2025-era results (no `resultType`) are reconnected over the 2025 handshake instead of losing every tool. This covers agent turns, connector tool permissions, capability probes and OAuth connection checks. A best-effort server's failed `tools/list` warning now names its structural cause (error class, SDK or numeric code, validation violation) without message text.
+- 9eae8df: A Modal command whose output reads keep failing now reports that its output is unavailable instead of quietly looking like it is still running. After a failed read, the retry often had only a few milliseconds of the read's budget left, so it timed out before the provider could answer, and that timeout was treated as "no new output". Setup commands could then poll indefinitely without surfacing the outage. A retry now counts only when it actually returns output, end of output or the exit code.
+- d3996f9: Share one Modal client per credential across sandbox creates and resumes, and cache the Modal app and image lookups, so creating a sandbox no longer pays a fresh auth handshake and three lookup round trips, and reattaching a warm sandbox no longer builds a new client.
+- fa5347a: Use prefetched receiver-issued monotonic delivery tokens for Connected Machine reply recovery and streamed command deadlines, without an extra round trip on warm calls. Machine clock skew and corrections no longer reject valid control requests or poison replay admission. Expired and conflicting deliveries return prompt, non-retryable errors preserving uncertain prior outcomes. Mixed protocol versions retain conservative one-shot delivery.
+- 7517fbc: Organization owners and admins can now connect OpenAI and Azure OpenAI once for the whole organization in Organization settings → Models, next to the other organization providers. OpenAI stores an encrypted API key; Azure OpenAI stores an encrypted key plus the Azure resource endpoint. Admins add the organization's OpenAI model IDs or Azure deployments as its models, and each is checked with the organization's key (and Azure endpoint) before it is saved. The models (`organization-openai/<model>` and `organization-azure-openai/<deployment>`) inherit into the organization's current and future shared workspaces (Personal workspaces stay local), work for sessions created through the web app and the public API, and are billed to the organization's own provider account with no Opengeni credits. `OrganizationModelProviderKind` and `ModelConnectionAccessKind` gain `openai` and `azure_openai`; organization provider connection requests and responses gain an optional `endpoint` (Azure only). A missing or revoked connection fails closed and never falls back to deployment credentials. Host `OPENGENI_MODEL_PROVIDERS_JSON` can no longer use the reserved `organization-openai` or `organization-azure-openai` provider ids. Rolling migration `0898_organization_direct_openai_model_providers.sql` widens the provider-kind, lifecycle-fact and analytics allow-lists and adds the nullable endpoint columns.
+
+  An organization ElevenLabs key no longer counts as an OpenRouter access policy when a workspace's model restrictions are read.
+
+- 9ff7e74: Retain long-running attempt-owned Connected Machine one-offs in the existing command ledger, returning a command ID after a bounded observation without imposing a process deadline or tying cancellation to HTTP lifetime. Preserve terminal result fields, Unix update handover, existing update diagnostics and the Windows exec_command shell default.
+- 726c332: Repository setup on a fresh sandbox now takes one command. The clone program travels compressed inside the launcher, which installs it under its content hash and runs it in the same command; programs unique to one turn (Smart-Git broker routes) decode, run and remove themselves in one command too, and a successful run no longer pays a separate seed-cleanup round trip. Before, a fresh box probed for the program, then bootstrapped, uploaded 2 KiB chunks, decoded and launched again: seven sequential sandbox round trips. On a Modal box in the EU, cloning three small repositories on a new box went from about 2.8–3.3 s to about 2.0–2.2 s (six fewer round trips, about 0.9 s); the rest is the box finishing its boot and the clone itself. Boxes without gzip keep the staged path, and staged chunks are now 12 KiB instead of 2 KiB.
+- b1a2e5b: Agents now edit a Word, Excel, PDF or PowerPoint file the user sends to be changed directly in the sandbox with ordinary tools (python-docx, openpyxl, pandoc, LibreOffice), check it and publish it, and make a newly requested file in such a format the same way unless the artifact export tool lists that format. Before, an agent asked for a Word or Excel file built a native artifact and then reported that export was unavailable, and a sent file the document importer could not read was returned unchanged.
+- 4199cd5: A move to another machine that the running turn attempt cannot serve (another workspace root, or a home it cannot reach) now ends the attempt cleanly between tool batches, before the model is asked for its next step. Previously the next batch's first sandbox call failed the attempt, discarding that whole model response, including sibling calls that had already run. A sandbox call in the same batch as the move that is refused before it reaches any machine now returns a result saying it did not start, so every call in the batch has a certain outcome.
+- 7851b64: Changing the sandbox image no longer strands sandboxes that were running during the upgrade. Docker checked that it still owned a running container by comparing it with the newly configured image, so after an image change every live container failed that check: chats could not save their sandbox state and the reaper could not drain the container, and every turn failed until the database was repaired by hand. OpenSandbox likewise refused to resume, save or delete a sandbox whose recorded image or pool differed from the new configuration. Both now verify an existing sandbox against the image (and ports or pool) it was created with; the new image applies to sandboxes created after the upgrade, including the replacement started when a live sandbox rotates to the new image.
+- cc0d008: Keep the Modal sandbox leaf free of agent-loop imports when it reports that a stopped sandbox cannot be resumed.
+- 72e00f6: Sandbox setup makes far fewer round trips. Run credentials used to take five sandbox commands per file plus six more, each a full provider round trip, so a session with several repositories spent tens of seconds writing credentials before its first command. A credential generation is now packed into as few commands as fit the provider's command-size limit, usually one, with the same atomic activation and verification. The shell wrapper that makes commands cancellable now carries each command once instead of three times, which is what kept those commands small. Modal command starts also reuse the sandbox's task id instead of asking Modal's control plane for it on every command.
+- 72e032c: Sandbox setup step timing now covers fresh Modal boxes. Modal creates boxes through its lifecycle-aware create call, which the setup-operation metric did not wrap, so `opengeni_sandbox_setup_operation_duration_seconds` stayed empty for every newly created Modal sandbox. Every client method that returns a new session is now measured.
+- b95784c: Support multiple personal Slack identities with exact-account reconnect, selected-workspace bot availability, and the same bot posting capabilities in scheduled and interactive work. Preserve existing schedule destinations as defaults without adding excluded tools.
+
+  Keep role provisioning compatible with database schemas that predate selected-workspace bot access.
+
+  Add workspace default machines for new chats and schedules that follow the workspace. Preserve accepted execution placement across retries and report unavailable machines without silently choosing another computer.
+
+- 22e3585: A tool call that fails while it is being prepared for approval no longer ends the whole turn with "The session stopped unexpectedly". Before, an error in that step, such as Gmail rejecting a malformed message ID while loading the approval preview, a connector's argument check, or a temporary policy lookup failure, failed the turn and left the call marked as having an unknown outcome even though nothing ran. Now the call returns to the model as an ordinary tool error saying it was not run and nothing was changed, so the model can correct it and continue. Gmail's approval preview also leaves out a message it cannot read for a malformed ID, rate limit or outage instead of refusing the action; authentication and access refusals still stop the call.
+- db09421: The web and artifact outbox dispatcher images trust Debian's current CA store, which distrusts the compromised emSign ECC Root CA - G3 and Comodo AAA Services roots, instead of their base image's older one.
+- Updated dependencies [e907c46]
+- Updated dependencies [49f2177]
+- Updated dependencies [bb438b0]
+- Updated dependencies [3d83bfd]
+- Updated dependencies [0e135b2]
+- Updated dependencies [03947ed]
+- Updated dependencies [5e32e0f]
+- Updated dependencies [f1fd83b]
+- Updated dependencies [659c01a]
+- Updated dependencies [bf39d5e]
+- Updated dependencies [fda625e]
+- Updated dependencies [d1de8b4]
+- Updated dependencies [2acb52c]
+- Updated dependencies [2963eca]
+- Updated dependencies [374dd81]
+- Updated dependencies [91329fc]
+- Updated dependencies [46a2ef3]
+- Updated dependencies [579239a]
+- Updated dependencies [ffe09c2]
+- Updated dependencies [1b57d74]
+- Updated dependencies [277c99c]
+- Updated dependencies [b20c9b2]
+- Updated dependencies [70f0522]
+- Updated dependencies [c236847]
+- Updated dependencies [23fed2a]
+- Updated dependencies [e4915c1]
+- Updated dependencies [fa5347a]
+- Updated dependencies [16781e5]
+- Updated dependencies [7517fbc]
+- Updated dependencies [6f150d1]
+- Updated dependencies [9976132]
+- Updated dependencies [427f2a5]
+- Updated dependencies [724b529]
+- Updated dependencies [2058cd3]
+- Updated dependencies [3915617]
+- Updated dependencies [908c0d3]
+- Updated dependencies [4fadd37]
+- Updated dependencies [9508318]
+- Updated dependencies [017121f]
+- Updated dependencies [b95784c]
+- Updated dependencies [83a467d]
+- Updated dependencies [b603f10]
+- Updated dependencies [67262de]
+  - @opengeni/observability@4.3.0
+  - @opengeni/sdk@4.3.0
+  - @opengeni/config@4.3.0
+  - @opengeni/decisions@4.3.0
+  - @opengeni/contracts@4.3.0
+  - @opengeni/agent-proto@4.3.0
+  - @opengeni/network@4.3.0
+  - @opengeni/tool-gateway@4.3.0
+  - @opengeni/codex@4.3.0
+  - @opengeni/codemode@4.3.0
+  - @opengeni/capabilities@4.3.0
+  - @opengeni/interaction@4.3.0
+  - @opengeni/vaults@4.3.0
+  - @opengeni/xai-subscription@4.3.0
+
 ## 4.2.0
 
 ### Minor Changes

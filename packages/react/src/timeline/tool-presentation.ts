@@ -19,7 +19,13 @@ import {
 import { invokedToolCall } from "./invoked-tool";
 import { rawTypeOf } from "./registry";
 import { mcpToolLeaf, toolDisplayName } from "./tool-display-name";
-import { toolStepLabel, toolStepPhase, type ToolStepPhase } from "./tool-steps";
+import {
+  builtInToolStep,
+  toolStepLabel,
+  toolStepPhase,
+  type ToolStepId,
+  type ToolStepPhase,
+} from "./tool-steps";
 import type { ToolCallItem } from "./types";
 import { type OpenGeniText } from "../messages/runtime";
 
@@ -53,6 +59,33 @@ export type ToolIconKind =
   | "file-search"
   | "package-search"
   | "plug"
+  | "browser"
+  | "screen"
+  | "spreadsheet"
+  | "wait"
+  | "download"
+  | "clipboard"
+  | "image"
+  | "video"
+  | "record"
+  | "document"
+  | "file"
+  | "attachment"
+  | "archive"
+  | "folder"
+  | "site"
+  | "skill"
+  | "settings"
+  | "bell"
+  | "inbox"
+  | "help"
+  | "model"
+  | "progress"
+  | "helper"
+  | "sign-in"
+  | "code"
+  | "accounting"
+  | "rename"
   | "wrench";
 
 export type ToolIconTone = "accent" | "failed" | "running" | "muted";
@@ -766,49 +799,242 @@ export function goalToolPreview(name: string, args: unknown): string | null {
   return text ? truncatePreview(text, 90) : null;
 }
 
-/** Explicit first-party leaf/prefix → canonical product icon kind. */
+const SKILL_TOOLS: ReadonlySet<string> = new Set([
+  "skill_read",
+  "repository_skill_read",
+  "skill_checkout",
+  "skill_search",
+  "skill_save",
+  "skill_publish",
+  "skill_install",
+  "skill_remove",
+]);
+const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** "operate-smart-home" → "Operate smart home"; "builtin:documents" → "Documents". */
+function readableSkillName(name: string): string | null {
+  const bare = name.trim().replace(/^builtin:/, "");
+  if (!bare || UUID_LIKE.test(bare)) return null;
+  const plain = bare.replace(/[-_]+/g, " ").replace(/\s+/g, " ").trim();
+  if (!plain) return null;
+  return plain.charAt(0).toUpperCase() + plain.slice(1);
+}
+
+/** The `name:` in a returned SKILL.md's front matter, read from raw or JSON-escaped text. */
+function skillNameInOutput(output: unknown): string | null {
+  const { text } = unwrapMcpOutput(output);
+  const head = text
+    .slice(0, 4_000)
+    .replace(/\\r/g, "")
+    .replace(/\r/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\"/g, '"');
+  const start = /(?:^|\n|")---[ \t]*\n/.exec(head);
+  if (!start) return null;
+  const rest = head.slice(start.index + start[0].length);
+  const end = /\n---[ \t]*(?:\n|$)/.exec(rest);
+  const frontMatter = end ? rest.slice(0, end.index + 1) : rest;
+  const match = /(?:^|\n)name:[ \t]*["']?([^"'\n\\]+?)["']?[ \t]*(?:\n|$)/.exec(frontMatter);
+  return match?.[1]?.trim() || null;
+}
+
+/**
+ * Which skill a skill step used: the name in the SKILL.md it returned, else the
+ * name or query it was called with. A bare id is never shown.
+ */
+export function skillToolPreview(item: ToolCallItem): string | null {
+  const leaf = mcpToolLeaf(item.name);
+  if (!SKILL_TOOLS.has(leaf)) return null;
+  const args = parseToolArgs(item.arguments);
+  if (leaf === "skill_search") {
+    return typeof args.query === "string" && args.query.trim()
+      ? truncatePreview(args.query, 72)
+      : null;
+  }
+  const returned = item.status === "running" ? null : skillNameInOutput(item.output);
+  const requested =
+    typeof args.skill === "string"
+      ? args.skill
+      : typeof args.name === "string"
+        ? args.name
+        : typeof args.skillId === "string"
+          ? args.skillId
+          : null;
+  const name = readableSkillName(returned ?? requested ?? "");
+  return name ? truncatePreview(name, 72) : null;
+}
+
+/**
+ * The icon for each built-in step. Tools that read as the same step share its
+ * icon, so a row's icon always matches its words ("Opened the browser" draws
+ * the browser). Typed as a full record: a new step without an icon fails to
+ * compile.
+ */
+const TOOL_STEP_ICONS: Readonly<Record<ToolStepId, ToolIconKind>> = {
+  // Chats, goals and notifications
+  nameChat: "rename",
+  notify: "bell",
+  withdrawNotification: "bell",
+  tidyInbox: "inbox",
+  setGoal: "target",
+  noteProgress: "target",
+  completeGoal: "target",
+  pauseGoal: "target",
+  resumeGoal: "target",
+  wait: "wait",
+  askYou: "question",
+  askForHelp: "help",
+  // Notes, knowledge and instructions
+  checkNotes: "brain",
+  checkMeetings: "record",
+  saveMeetingNotes: "record",
+  saveNote: "brain",
+  archiveNote: "brain",
+  proposeUpdate: "brain",
+  confirmUpdate: "brain",
+  updateInstructions: "brain",
+  coordinateWork: "sessions",
+  // Guides (Skills)
+  readGuide: "skill",
+  findGuides: "skill",
+  saveGuide: "skill",
+  removeGuide: "skill",
+  // Computers
+  findComputers: "server",
+  switchComputer: "server",
+  useComputer: "server",
+  setUpComputer: "server",
+  removeComputer: "server",
+  runCommand: "terminal",
+  runCode: "code",
+  editFile: "file-diff",
+  lookAtImage: "image",
+  searchCode: "search",
+  searchFiles: "file-search",
+  openFile: "file",
+  // Screens and the browser
+  checkScreens: "screen",
+  openScreen: "screen",
+  lookAtScreen: "screen",
+  useScreen: "screen",
+  enableScreenControl: "screen",
+  useClipboard: "clipboard",
+  openBrowser: "browser",
+  useBrowser: "browser",
+  readPage: "browser",
+  lookAtPage: "browser",
+  workInBrowser: "browser",
+  download: "download",
+  recordBrowser: "record",
+  signIn: "sign-in",
+  manageSignIns: "sign-in",
+  shareBrowser: "share",
+  workInExcel: "spreadsheet",
+  // Projects, other chats and helpers
+  checkProjects: "folder",
+  organizeProjects: "folder",
+  checkChats: "sessions",
+  chooseChat: "sessions",
+  checkProgress: "progress",
+  changeModel: "model",
+  startHelper: "helper",
+  messageAssistant: "sessions",
+  manageChat: "sessions",
+  // Workspace administration and setup
+  manageWorkspace: "settings",
+  manageSetup: "server-cog",
+  checkModels: "model",
+  // Passwords and settings
+  findPassword: "key",
+  savePassword: "key",
+  deletePassword: "key",
+  checkSettings: "settings",
+  updateSettings: "settings",
+  // Tools and connections
+  findTools: "package-search",
+  useTool: "plug",
+  requestAccess: "plug",
+  listRepositories: "git",
+  // Web, images and video
+  searchWeb: "search",
+  createImage: "image",
+  createVideo: "video",
+  // Social accounts
+  checkAccounts: "share",
+  readPosts: "share",
+  syncPosts: "share",
+  replyToPost: "share",
+  // Scheduled tasks
+  checkSchedules: "calendar",
+  checkEvents: "calendar",
+  createSchedule: "calendar",
+  updateSchedule: "calendar",
+  runSchedule: "calendar",
+  // Slack
+  readSlack: "message",
+  postSlack: "message",
+  deleteMessage: "message",
+  // Accounting
+  readAccounting: "accounting",
+  updateAccounting: "accounting",
+  // Documents, files and Sites
+  searchDocuments: "file-search",
+  checkDocuments: "document",
+  createDocument: "document",
+  editDocument: "document",
+  exportDocument: "document",
+  restoreDocument: "document",
+  archiveDocument: "archive",
+  shareFile: "attachment",
+  checkSite: "site",
+  updateSite: "site",
+};
+
+/**
+ * The icon for a tool by name: a built-in tool draws its step's icon; other
+ * tools fall back to their family's icon, then the generic wrench.
+ */
 export function genericToolIconKind(name: string): ToolIconKind {
   const leaf = mcpToolLeaf(name);
-  return leaf === "request_human_input"
-    ? "question"
-    : leaf.startsWith("goal_")
-      ? "target"
-      : leaf.startsWith("memory_") ||
-          leaf === "preference_registry_summary" ||
-          leaf === "preference_registry_get"
-        ? "brain"
-        : leaf.startsWith("session_") ||
-            leaf === "sessions_list" ||
-            leaf === "set_session_title" ||
-            leaf === "set_other_session_title"
-          ? "sessions"
-          : leaf.startsWith("sandbox") || leaf === "sandboxes_list" || leaf === "run_on"
-            ? "server"
-            : leaf.startsWith("rig_")
-              ? "server-cog"
-              : leaf.startsWith("scheduled_")
-                ? "calendar"
-                : leaf.startsWith("artifacts_")
-                  ? "panels"
-                  : leaf.startsWith("social_")
-                    ? "share"
-                    : leaf.startsWith("slack_")
-                      ? "message"
-                      : leaf.startsWith("github_")
-                        ? "git"
-                        : leaf.startsWith("variable_")
-                          ? "box"
-                          : leaf.startsWith("environment_")
-                            ? "key"
-                            : leaf.includes("document") ||
-                                leaf.includes("knowledge") ||
-                                leaf === "list_document_bases"
-                              ? "file-search"
-                              : leaf === "tool_search"
-                                ? "package-search"
-                                : leaf.startsWith("skill_")
-                                  ? "plug"
-                                  : "wrench";
+  const step = builtInToolStep(leaf);
+  if (step) return TOOL_STEP_ICONS[step];
+  return leaf.startsWith("goal_")
+    ? "target"
+    : leaf.startsWith("memory_") || leaf.startsWith("knowledge_")
+      ? "brain"
+      : leaf.startsWith("session_") || leaf.startsWith("sessions_")
+        ? "sessions"
+        : leaf.startsWith("sandbox") || leaf.startsWith("connected_machine_")
+          ? "server"
+          : leaf.startsWith("rig_")
+            ? "server-cog"
+            : leaf.startsWith("scheduled_")
+              ? "calendar"
+              : leaf.startsWith("artifacts_") || leaf.startsWith("editable_artifact_")
+                ? "document"
+                : leaf.startsWith("site_")
+                  ? "site"
+                  : leaf.startsWith("browser_")
+                    ? "browser"
+                    : leaf.startsWith("computer_") || leaf.startsWith("cua_")
+                      ? "screen"
+                      : leaf.startsWith("secret_")
+                        ? "key"
+                        : leaf.startsWith("social_") ||
+                            leaf.startsWith("x_") ||
+                            leaf.startsWith("reddit_")
+                          ? "share"
+                          : leaf.startsWith("slack_")
+                            ? "message"
+                            : leaf.startsWith("github_")
+                              ? "git"
+                              : leaf.startsWith("variable_") || leaf.startsWith("environment_")
+                                ? "settings"
+                                : leaf.includes("document")
+                                  ? "file-search"
+                                  : leaf.startsWith("skill_")
+                                    ? "skill"
+                                    : "wrench";
 }
 
 type McpRowOptions = {
@@ -947,7 +1173,7 @@ export function machinePresentation(t: OpenGeniText, item: ToolCallItem): ToolRo
     (item.status === "failed" || unwrapMcpOutput(item.output).isError);
   return mcpRowPresentation(t, item, {
     tool: "machine",
-    icon: isScreenTool(leaf) ? "panels" : "server",
+    icon: genericToolIconKind(item.name),
     title: failed ? machineFailureTitle(t, leaf) : machineTitle(t, leaf, args, action, item.output),
     runningPreview: preview,
     runningFallback: t("timeline.toolPresentation.running"),
@@ -956,10 +1182,6 @@ export function machinePresentation(t: OpenGeniText, item: ToolCallItem): ToolRo
     plainRunningPreview: true,
     quietError: true,
   });
-}
-
-function isScreenTool(leaf: string): boolean {
-  return leaf.startsWith("computer_") || leaf.startsWith("cua_") || leaf === "interaction_discover";
 }
 
 function machineFailureTitle(t: OpenGeniText, leaf: string): string {
@@ -1054,7 +1276,8 @@ function computerActPreview(action: ComputerActAction): string | undefined {
  * status preview (Running… / Done / error snippet).
  */
 export function genericToolPresentation(t: OpenGeniText, item: ToolCallItem): ToolRowPresentation {
-  const goalPreview = goalToolPreview(item.name, parseToolArgs(item.arguments));
+  const goalPreview =
+    goalToolPreview(item.name, parseToolArgs(item.arguments)) ?? skillToolPreview(item);
   const title = toolDisplayName(t, item.name, item.display, callStepPhase(item));
   if (item.status !== "running") {
     const { text: outText, isError } = unwrapMcpOutput(item.output);
@@ -1434,7 +1657,7 @@ export function sessionTitlePresentation(t: OpenGeniText, item: ToolCallItem): T
   const previewTitle = titleArg ? truncatePreview(titleArg, 72) : "";
   const base = {
     tool: "session_title" as const,
-    icon: "sessions" as const,
+    icon: genericToolIconKind(item.name),
     title: toolDisplayName(t, item.name, item.display, callStepPhase(item)),
   };
   if (item.status === "running") {

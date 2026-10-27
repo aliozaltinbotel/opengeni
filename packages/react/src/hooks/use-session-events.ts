@@ -1,6 +1,8 @@
 import {
   isPresentedSessionToolName,
+  isRetryableStreamError,
   isSessionModelResponsePhase,
+  isTransientRequestError,
   SESSION_EVENT_COMPAT_EXCLUDED_STEP_TYPES,
   SESSION_EVENT_CONTENT_STEP_TYPES,
   SESSION_EVENT_CONVERSATION_FILTER_VERSION,
@@ -21,7 +23,12 @@ import type { TimelineItem, TurnStepsItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";
 import { normalizeError } from "../lib/error-message";
 import { joinSessionDetailRead, sessionDetailReadMark } from "../lib/session-detail-read";
-import { usePageLiveActivity } from "./internal";
+import {
+  DEFAULT_TRANSIENT_READ_RETRY,
+  transientReadRetryStep,
+  usePageLiveActivity,
+} from "./internal";
+import { subscribePageWake } from "./page-wake";
 import { deniesRetainedView, useRetainedSessionView } from "./session-view-cache";
 import { markTurnlessOutputGap } from "./turnless-output-gaps";
 import type { LatestQuestionOptions } from "./latest-question";
@@ -130,12 +137,22 @@ const BOUNDARY_PAGE_CAP = 1;
 // The first window keeps the plain caps, so opening a chat stays one read.
 const FILTERED_PAGE_CAP = 32;
 // Rejoining the live tip (first open of a working turn, a return to a hidden
-// tab, catching up from history) replays a tiny raw gap over SSE. A larger gap
-// catches up the conversation only and reads the working turn's latest steps,
-// instead of replaying every step since the last conversation event. Only a
-// gap of more than this many pages of conversation reloads the latest window.
+// tab or from a sleep, any stream reconnect, catching up from history)
+// replays a tiny raw gap over SSE. A larger gap catches up the conversation
+// only and reads the working turn's latest steps, instead of replaying every
+// step since the last conversation event. Only a gap of more than this many
+// pages of conversation reloads the latest window.
 const DIRECT_REPLAY_MAX_SEQUENCES = 16;
 const CATCHUP_MAX_PAGES = 2;
+// Rejoining the tip after a reconnect or a wake is bounded: an attempt that
+// completes no read for REJOIN_STALL_TIMEOUT_MS is abandoned (a slow but
+// progressing catch-up is never cut short), a transient failure retries (with
+// backoff) only this many times in a row, and after that the stream replays
+// exactly from where the view stands rather than staying stuck "reconnecting".
+const STRICT_REJOIN_ATTEMPTS = 5;
+export const REJOIN_STALL_TIMEOUT_MS = 30_000;
+const FOREGROUND_REJOIN_RETRY_MS = 500;
+const FOREGROUND_REJOIN_RETRY_MAX_MS = 8_000;
 const EMPTY_EVENTS: SessionEvent[] = [];
 const encoder = new TextEncoder();
 // Durable history remains on the server and is available through bounded
@@ -299,6 +316,13 @@ export function useSessionEvents(
   const [presentedPass, setPresentedPass] = useState(0);
   // A return to the live tip from history: catch up without replaying steps.
   const rejoinPendingRef = useRef(false);
+  // Consecutive transient failures to open this stream (a deploy or network
+  // blip): they restart it quietly before an error is shown.
+  const streamTransientStreakRef = useRef<{
+    since: number;
+    attempts: number;
+    surfaced: boolean;
+  } | null>(null);
 
   const commitStepStores = useCallback((next: TurnStepStores) => {
     stepStoresRef.current = next;
@@ -647,6 +671,7 @@ export function useSessionEvents(
       initialWindowLoadedRef.current = false;
       reconcileAfterPageResumeRef.current = false;
       rejoinPendingRef.current = false;
+      streamTransientStreakRef.current = null;
       stepGenerationRef.current += 1;
       stepStoresRef.current = EMPTY_STEP_STORES;
       setStepStores(EMPTY_STEP_STORES);
@@ -666,6 +691,9 @@ export function useSessionEvents(
     const generation = generationRef.current + 1;
     generationRef.current = generation;
     if (!sessionId || !streamEnabled) {
+      // A suspended stream starts a fresh transient streak when it resumes: a
+      // failure right after a wake must not count the hidden time.
+      streamTransientStreakRef.current = null;
       // A page that stayed hidden beyond the live-activity grace deliberately
       // closed its SSE connection. Replaying from the old cursor on return can
       // drip a large background backlog through React in many fast batches and
@@ -705,6 +733,15 @@ export function useSessionEvents(
       navigationIdentityRef.current.streamKey === streamKey &&
       navigationIdentityRef.current.enabled === enabled;
     streamAbortRef.current = controller;
+    // A quiet restart or reconciliation retry scheduled by this effect instance.
+    let transientRetryTimer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleTransientRetry = (delayMs: number, retry: () => void) => {
+      if (transientRetryTimer !== null) clearTimeout(transientRetryTimer);
+      transientRetryTimer = setTimeout(() => {
+        transientRetryTimer = null;
+        if (isCurrent()) retry();
+      }, delayMs);
+    };
     // Batch yielded events into one React update per flush window so a long
     // replay (thousands of events) does not render per event. Project every
     // event before retaining it here and synchronously flush at independent
@@ -827,52 +864,68 @@ export function useSessionEvents(
      * append (the caller then loads the latest window).
      */
     // The durable head: the conversation's fresh detail read when one started
-    // since this stream began loading (the session view's own), else a new one.
-    const readSessionHead = async () => {
-      const joined = joinSessionDetailRead(client, workspaceId, sessionId, detailReadMark);
+    // since `mark` (the session view's own), else a new one.
+    const effectScope: RejoinScope = { signal: controller.signal, isCurrent };
+    const readSessionHead = async (mark: number, scope: RejoinScope) => {
+      const joined = joinSessionDetailRead(client, workspaceId, sessionId, mark);
       if (joined) {
         try {
           return await joined;
         } catch (cause) {
-          if (controller.signal.aborted) throw cause;
+          if (scope.signal.aborted) throw cause;
         }
       }
       return await client.getSession(workspaceId, sessionId, {
         fresh: true,
-        signal: controller.signal,
+        signal: scope.signal,
       });
     };
-    const rejoinLive = async (force: boolean): Promise<"joined" | "reload"> => {
+    // `strict` (a stream reconnect) fails on a transient read failure, so the
+    // stream backs off and retries the whole check instead of replaying a
+    // backlog it could not size; any other failed read replays the gap.
+    const rejoinLive = async (
+      force: boolean,
+      {
+        strict = false,
+        mark = detailReadMark,
+        scope = effectScope,
+      }: { strict?: boolean; mark?: number; scope?: RejoinScope } = {},
+    ): Promise<RejoinOutcome> => {
       const activeTurn = activeConversationTurn(eventWindowRef.current.events);
       if (!force && !activeTurn) return "joined";
       const cursor = streamResumeSequenceRef.current;
       let head: number;
       let sessionActiveTurn: string | null = null;
       try {
-        const session = await readSessionHead();
+        const session = await readSessionHead(mark, scope);
+        scope.progress?.();
         head = session.lastSequence;
         sessionActiveTurn = session.activeTurnId;
       } catch (cause) {
-        if (controller.signal.aborted) throw cause;
+        if (!scope.isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
         // An optimization read: replay from the exact cursor instead.
         return "joined";
       }
-      if (!isCurrent()) throw abortError();
+      if (!scope.isCurrent()) throw abortError();
       // A head the client does not report is unknown: replay from the cursor.
       if (!Number.isSafeInteger(head) || head - cursor <= DIRECT_REPLAY_MAX_SEQUENCES) {
         return "joined";
       }
       let catchup: SessionEvent[] | null;
       try {
-        catchup = await loadConversationCatchup(client, workspaceId, sessionId, cursor, head, {
-          signal: controller.signal,
-          isCurrent,
-        });
+        catchup = await loadConversationCatchup(
+          client,
+          workspaceId,
+          sessionId,
+          cursor,
+          head,
+          scope,
+        );
       } catch (cause) {
-        if (!isCurrent()) throw cause;
+        if (!scope.isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
         return "joined";
       }
-      if (!isCurrent()) throw abortError();
+      if (!scope.isCurrent()) throw abortError();
       if (catchup === null) return "reload";
       // Continuity broke: steps of turns still working before the catch-up
       // may be missing, so those stores go (the working one is re-read).
@@ -889,13 +942,242 @@ export function useSessionEvents(
       return "joined";
     };
 
+    // Replace the browser window with the newest conversation window. The
+    // previous window stays on screen until the replacement is installed.
+    const loadLatestWindow = async (scope: RejoinScope = effectScope): Promise<boolean> => {
+      // First paint is ONE compact fetch of the conversation — the newest
+      // window, revealed at the bottom in a few hundred ms. Deeper history
+      // loads only when the reader scrolls up (the sentinel drives
+      // loadOlder); a turn's steps load when the reader opens it.
+      const window = await loadEventWindow(t, client, workspaceId, sessionId, {
+        before: Number.MAX_SAFE_INTEGER,
+        pageSize: SESSION_HISTORY_PAGE_SIZE,
+        targetGroups: Number.POSITIVE_INFINITY,
+        maxFetches: INITIAL_FETCH_CAP,
+        boundaryPageCap: BOUNDARY_PAGE_CAP,
+        signal: scope.signal,
+        ...(scope.progress ? { progress: scope.progress } : {}),
+        filter: CONVERSATION_FILTER,
+      });
+      if (!scope.isCurrent()) {
+        return false;
+      }
+      const status = observeSessionStatus(window.events, sessionStatusRef);
+      const retained = boundBrowserSessionEventWindow(window.events);
+      // A replacement tail retires requests against the discarded window.
+      // Ordinary SSE reconnects preserve navigation, but splicing an old
+      // page into this new tail could leave an inaccessible history gap.
+      navigationGenerationRef.current += 1;
+      loadingOlderRef.current = false;
+      loadingNewerRef.current = false;
+      loadingOldestRef.current = false;
+      setLoadingOlder(false);
+      setLoadingNewer(false);
+      setLoadingOldest(false);
+      const previous = eventWindowRef.current.events;
+      eventWindowRef.current = retained;
+      pruneStepStores(retained.events, previous);
+      oldestSequenceRef.current =
+        retained.events[0]?.sequence ?? window.oldestSequence ?? window.scanCursor;
+      newestSequenceRef.current = maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
+      hasOlderRef.current = window.hasOlder || retained.truncated;
+      hasNewerRef.current = false;
+      lastSequenceRef.current = Math.max(lastSequenceRef.current, window.newestSequence);
+      streamResumeSequenceRef.current = window.newestSequence;
+      skippedStepsThroughRef.current =
+        retained.events.length === 0 && window.newestSequence > 0 ? window.newestSequence : null;
+      initialWindowLoadedRef.current = true;
+      streamTransientStreakRef.current = null;
+      setInitialHistoryReady(true);
+      setError(null);
+      if (status !== undefined) {
+        setSessionStatusProjection(status);
+      }
+      setEventWindow(retained);
+      setHasOlder(window.hasOlder || retained.truncated);
+      setHasNewer(false);
+      setInitialLoading(false);
+      return true;
+    };
+
+    // The stream starts past what it last delivered: a window load,
+    // catch-up, page or jump moved the cursor with conversation reads, which
+    // carry no terminal output, so the sandbox terminal reads it again.
+    const noteStreamResume = () => {
+      if (!fullReplay && streamResumeSequenceRef.current > liveThroughRef.current) {
+        markTurnlessOutputGap(workspaceId, sessionId);
+      }
+      liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
+    };
+
+    // Reconciliation after an open re-reads the API contract and projections.
+    // A transient failure (a reconnect during an API rollout often lands on a
+    // pod that is still starting) retries quietly; the error is shown only
+    // when it is definitive or outlasts the quiet window.
+    const reconcileAfterOpen = (
+      initialOpen: boolean,
+      streak: { since: number; attempts: number; surfaced: boolean } | null = null,
+    ) => {
+      void Promise.resolve()
+        .then(() => reconcileSession(sessionId, { initialOpen }))
+        .catch((cause) => {
+          if (!isCurrent()) return;
+          if (isTransientRequestError(cause)) {
+            const now = Date.now();
+            const current = streak ?? { since: now, attempts: 0, surfaced: false };
+            const step = transientReadRetryStep(current, now, DEFAULT_TRANSIENT_READ_RETRY, cause);
+            if (step.quiet) {
+              scheduleTransientRetry(step.delayMs, () => reconcileAfterOpen(initialOpen, current));
+              return;
+            }
+          }
+          setError(normalizeError(cause));
+        });
+    };
+
+    // One bounded rejoin attempt: it is abandoned once no read completes for
+    // REJOIN_STALL_TIMEOUT_MS, and a late result is fenced out of the view
+    // (reads without a signal can only be outwaited). A `strict` attempt
+    // that failed transiently or stalled resolves the cause so the caller
+    // retries; a lenient one that stalled resolves "joined", which replays
+    // exactly from where the view stands. Read failures are translated where
+    // they happen, so anything else is a bug applying the result: it throws
+    // rather than passing for a rejoin.
+    const boundedRejoin = async (
+      strict: boolean,
+      join: (scope: RejoinScope) => Promise<RejoinOutcome>,
+    ): Promise<RejoinOutcome | { retry: unknown }> => {
+      if (!isCurrent()) throw abortError();
+      const attempt = new AbortController();
+      let timedOut = false;
+      const abortAttempt = () => attempt.abort();
+      controller.signal.addEventListener("abort", abortAttempt, { once: true });
+      const stalled = () => {
+        timedOut = true;
+        attempt.abort();
+      };
+      let timer = setTimeout(stalled, REJOIN_STALL_TIMEOUT_MS);
+      let stopWaiting: (() => void) | undefined;
+      const stopped = new Promise<never>((_resolve, reject) => {
+        stopWaiting = () => reject(abortError());
+        attempt.signal.addEventListener("abort", stopWaiting, { once: true });
+      });
+      const scope: RejoinScope = {
+        signal: attempt.signal,
+        isCurrent: () => isCurrent() && !attempt.signal.aborted,
+        progress: () => {
+          if (attempt.signal.aborted) return;
+          clearTimeout(timer);
+          timer = setTimeout(stalled, REJOIN_STALL_TIMEOUT_MS);
+        },
+      };
+      try {
+        return await Promise.race([join(scope), stopped]);
+      } catch (cause) {
+        if (!isCurrent()) throw cause;
+        if (timedOut) {
+          return strict
+            ? {
+                retry: new TypeError(
+                  `rejoining the live session stalled for ${REJOIN_STALL_TIMEOUT_MS}ms`,
+                ),
+              }
+            : "joined";
+        }
+        if (strict && isRetryableStreamError(cause)) return { retry: cause };
+        throw cause;
+      } finally {
+        clearTimeout(timer);
+        controller.signal.removeEventListener("abort", abortAttempt);
+        if (stopWaiting) attempt.signal.removeEventListener("abort", stopWaiting);
+      }
+    };
+    // A bounded rejoin whose failure replays exactly (the first open after
+    // a window load, or a return from history: their gaps are short).
+    const leniently = async (
+      join: (scope: RejoinScope) => Promise<RejoinOutcome>,
+    ): Promise<RejoinOutcome> => {
+      const result = await boundedRejoin(false, join);
+      return typeof result === "string" ? result : "joined";
+    };
+
+    // Every reconnect after the stream first opened (a dropped connection, a
+    // heartbeat timeout, a sleep) joins the tip like a hidden-tab return: a
+    // short gap replays over SSE, a long one is caught up or reloaded instead
+    // of being poured through the live stream. A transient failure makes the
+    // SDK back off and call this again, at most STRICT_REJOIN_ATTEMPTS times
+    // in a row (until a connection opens); after that the reconnect replays
+    // exactly rather than staying stuck.
+    let strictFailures = 0;
+    const beforeReconnect = async (cursor: number): Promise<number> => {
+      // Deliver what the broken connection already yielded first.
+      flush();
+      if (!isCurrent()) throw abortError();
+      const strict = strictFailures < STRICT_REJOIN_ATTEMPTS;
+      const mark = sessionDetailReadMark();
+      let result: RejoinOutcome | { retry: unknown };
+      try {
+        result = await boundedRejoin(strict, async (scope) => {
+          if ((await rejoinLive(true, { strict, mark, scope })) === "joined") return "joined";
+          let loaded: boolean;
+          try {
+            loaded = await loadLatestWindow(scope);
+          } catch (cause) {
+            if (!scope.isCurrent() || (strict && isRetryableStreamError(cause))) throw cause;
+            // A window that cannot be read: replay exactly instead.
+            return "joined";
+          }
+          if (!loaded) throw abortError();
+          // The fresh window's own gap is short: join its head the same way.
+          if ((await rejoinLive(true, { strict, mark, scope })) === "reload" && strict) {
+            throw new TypeError("the session outran a fresh window while rejoining it");
+          }
+          return "joined";
+        });
+      } catch (cause) {
+        if (!isCurrent()) throw abortError();
+        // Not a read failure: end the stream visibly instead of letting the
+        // SDK retry it forever.
+        if (!isRetryableStreamError(cause)) throw cause;
+        throw new Error(
+          `rejoining the live session failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          { cause },
+        );
+      }
+      if (!isCurrent()) throw abortError();
+      if (typeof result === "object") {
+        strictFailures += 1;
+        throw result.retry;
+      }
+      noteStreamResume();
+      return Math.max(cursor, streamResumeSequenceRef.current);
+    };
+
     void (async () => {
       try {
         if (reconcileForegroundResume) {
           setConnectionState("connecting");
           // A short gap replays over SSE into the loaded steps; a longer one
           // drops the steps of turns that were working and re-reads the tail.
-          if ((await rejoinLive(true)) === "reload") {
+          // A transient failure (the network often returns just after a wake)
+          // retries with backoff instead of replaying the backlog it could
+          // not size; only after that does the stream replay exactly.
+          let outcome: RejoinOutcome;
+          for (let attempt = 0; ; attempt += 1) {
+            const strict = attempt < STRICT_REJOIN_ATTEMPTS;
+            const result = await boundedRejoin(strict, (scope) =>
+              rejoinLive(true, { strict, scope }),
+            );
+            if (typeof result === "string") {
+              outcome = result;
+              break;
+            }
+            await abortableDelay(
+              Math.min(FOREGROUND_REJOIN_RETRY_MS * 2 ** attempt, FOREGROUND_REJOIN_RETRY_MAX_MS),
+              controller.signal,
+            );
+          }
+          if (outcome === "reload") {
             // Keep the last known window visible until the bounded latest
             // replacement is ready, then install that replacement below.
             initialWindowLoadedRef.current = false;
@@ -903,7 +1185,7 @@ export function useSessionEvents(
           }
         } else if (!fullReplay && initialWindowLoadedRef.current && rejoinPendingRef.current) {
           rejoinPendingRef.current = false;
-          if ((await rejoinLive(false)) === "reload") {
+          if ((await leniently((scope) => rejoinLive(false, { scope }))) === "reload") {
             initialWindowLoadedRef.current = false;
           }
         }
@@ -917,80 +1199,29 @@ export function useSessionEvents(
           attempt += 1
         ) {
           setConnectionState("connecting");
-          // First paint is ONE compact fetch of the conversation — the newest
-          // window, revealed at the bottom in a few hundred ms. Deeper history
-          // loads only when the reader scrolls up (the sentinel drives
-          // loadOlder); a turn's steps load when the reader opens it.
-          const window = await loadEventWindow(t, client, workspaceId, sessionId, {
-            before: Number.MAX_SAFE_INTEGER,
-            pageSize: SESSION_HISTORY_PAGE_SIZE,
-            targetGroups: Number.POSITIVE_INFINITY,
-            maxFetches: INITIAL_FETCH_CAP,
-            boundaryPageCap: BOUNDARY_PAGE_CAP,
-            signal: controller.signal,
-            filter: CONVERSATION_FILTER,
-          });
-          if (!isCurrent()) {
+          if (!(await loadLatestWindow())) {
             return;
           }
-          const status = observeSessionStatus(window.events, sessionStatusRef);
-          const retained = boundBrowserSessionEventWindow(window.events);
-          // A replacement tail retires requests against the discarded window.
-          // Ordinary SSE reconnects preserve navigation, but splicing an old
-          // page into this new tail could leave an inaccessible history gap.
-          navigationGenerationRef.current += 1;
-          loadingOlderRef.current = false;
-          loadingNewerRef.current = false;
-          loadingOldestRef.current = false;
-          setLoadingOlder(false);
-          setLoadingNewer(false);
-          setLoadingOldest(false);
-          const previous = eventWindowRef.current.events;
-          eventWindowRef.current = retained;
-          pruneStepStores(retained.events, previous);
-          oldestSequenceRef.current =
-            retained.events[0]?.sequence ?? window.oldestSequence ?? window.scanCursor;
-          newestSequenceRef.current =
-            maxResumeSequenceOrNull(retained.events) ?? window.newestSequence;
-          hasOlderRef.current = window.hasOlder || retained.truncated;
-          hasNewerRef.current = false;
-          lastSequenceRef.current = Math.max(lastSequenceRef.current, window.newestSequence);
-          streamResumeSequenceRef.current = window.newestSequence;
-          skippedStepsThroughRef.current =
-            retained.events.length === 0 && window.newestSequence > 0
-              ? window.newestSequence
-              : null;
-          initialWindowLoadedRef.current = true;
-          setInitialHistoryReady(true);
-          setError(null);
-          if (status !== undefined) {
-            setSessionStatusProjection(status);
-          }
-          setEventWindow(retained);
-          setHasOlder(window.hasOlder || retained.truncated);
-          setHasNewer(false);
-          setInitialLoading(false);
           // Join at the durable head rather than replaying every row since the
           // window's last conversation event: a working turn's steps (its
           // latest are read), or terminal output written after the last turn,
           // which only the sandbox dock reads.
-          if ((await rejoinLive(true)) === "reload" && attempt === 0) {
+          if (
+            (await leniently((scope) => rejoinLive(true, { scope }))) === "reload" &&
+            attempt === 0
+          ) {
             initialWindowLoadedRef.current = false;
           }
         }
         if (fullReplay) {
           setInitialLoading(false);
         }
-        // The stream starts past what it last delivered: a window load,
-        // catch-up, page or jump moved the cursor with conversation reads, which
-        // carry no terminal output, so the sandbox terminal reads it again.
-        if (!fullReplay && streamResumeSequenceRef.current > liveThroughRef.current) {
-          markTurnlessOutputGap(workspaceId, sessionId);
-        }
-        liveThroughRef.current = Math.max(liveThroughRef.current, streamResumeSequenceRef.current);
+        noteStreamResume();
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: streamResumeSequenceRef.current,
           signal: controller.signal,
+          // Full replay keeps the SDK's exactly-once reconnects.
+          ...(fullReplay ? {} : { beforeReconnect }),
           onOpen: () => {
             // The first open after this mount's initial tail: every read hook
             // read its projection alongside that tail, and the shared feed
@@ -998,16 +1229,14 @@ export function useSessionEvents(
             // foreground resumes) repair every projection.
             const initialOpen = openedStreamKeyRef.current !== streamKey;
             openedStreamKeyRef.current = streamKey;
+            strictFailures = 0;
+            // The outage is over: drop an error a long transient streak surfaced.
+            if (streamTransientStreakRef.current?.surfaced) setError(null);
+            streamTransientStreakRef.current = null;
             // Reconciliation repairs projections, but it must not block reading
             // the already-open SSE body. Otherwise live events accumulate in the
             // browser and appear as one delayed burst after every reconciler ends.
-            void Promise.resolve()
-              .then(() => reconcileSession(sessionId, { initialOpen }))
-              .catch((cause) => {
-                if (isCurrent()) {
-                  setError(normalizeError(cause));
-                }
-              });
+            reconcileAfterOpen(initialOpen);
           },
           onStateChange: (state) => {
             if (isCurrent()) {
@@ -1046,7 +1275,32 @@ export function useSessionEvents(
       } catch (cause) {
         if (isCurrent()) {
           flush();
-          setError(normalizeError(cause));
+          let announce = true;
+          if (isTransientRequestError(cause)) {
+            // The tail read or the stream failed transiently (an API rollout
+            // or a network blip). Restart quietly, keeping the loading state
+            // or the current view, and show the error only if it outlasts the
+            // quiet window. Afterwards keep retrying in the background.
+            const now = Date.now();
+            const streak = (streamTransientStreakRef.current ??= {
+              since: now,
+              attempts: 0,
+              surfaced: false,
+            });
+            const step = transientReadRetryStep(streak, now, DEFAULT_TRANSIENT_READ_RETRY, cause);
+            scheduleTransientRetry(step.delayMs, () => setStreamEpoch((epoch) => epoch + 1));
+            if (step.quiet) {
+              setConnectionState("connecting");
+              return;
+            }
+            // One stable error per streak: background retries that fail the
+            // same way must not re-announce it.
+            announce = !streak.surfaced;
+            streak.surfaced = true;
+          } else {
+            streamTransientStreakRef.current = null;
+          }
+          if (announce) setError(normalizeError(cause));
           setConnectionState("error");
           // A failed first compact-tail request has no later success path in
           // this effect instance. End the loading gate so hosts can render the
@@ -1058,6 +1312,7 @@ export function useSessionEvents(
 
     return () => {
       controller.abort();
+      if (transientRetryTimer !== null) clearTimeout(transientRetryTimer);
       if (generationRef.current === generation) {
         generationRef.current = generation + 1;
       }
@@ -1087,6 +1342,22 @@ export function useSessionEvents(
     presentedCallIds,
     startupTurns,
   ]);
+
+  // A sleep, frozen tab or lost network usually killed the stream without the
+  // page ever going hidden. Rejoin at once, like a hidden-tab return, instead
+  // of waiting for the heartbeat timeout and then replaying the backlog.
+  useEffect(() => {
+    if (!sessionId || !streamEnabled) return;
+    return subscribePageWake(() => {
+      const stream = streamAbortRef.current;
+      // History views and paused streams have no live connection to restore.
+      if (!stream || stream.signal.aborted || viewModeRef.current !== "live") return;
+      if (!fullReplay && initialWindowLoadedRef.current) {
+        reconcileAfterPageResumeRef.current = true;
+      }
+      setStreamEpoch((epoch) => epoch + 1);
+    });
+  }, [sessionId, streamEnabled, fullReplay]);
 
   const navigationBusy = (): boolean =>
     loadingTargetRef.current ||
@@ -1988,7 +2259,7 @@ async function loadConversationCatchup(
   sessionId: string,
   cursor: number,
   head: number,
-  options: { signal?: AbortSignal; isCurrent: () => boolean },
+  options: { signal?: AbortSignal; isCurrent: () => boolean; progress?: () => void },
 ): Promise<SessionEvent[] | null> {
   const events: SessionEvent[] = [];
   let after = cursor;
@@ -2003,6 +2274,7 @@ async function loadConversationCatchup(
       payloadMode: "full",
     });
     if (!options.isCurrent()) throw abortError();
+    options.progress?.();
     const fresh = page.filter((event) => eventResumeSequence(event) > after);
     assertAscending(fresh);
     events.push(...fresh);
@@ -2047,6 +2319,8 @@ async function loadEventWindow(
     filteredPageCap?: number;
     signal?: AbortSignal;
     isCurrent?: () => boolean;
+    /** Called after each completed page read. */
+    progress?: () => void;
     filter?: HistoryFilter | undefined;
   },
 ): Promise<LoadedEventWindow> {
@@ -2073,6 +2347,7 @@ async function loadEventWindow(
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (options.isCurrent?.() === false) throw abortError();
+    options.progress?.();
     if (page.raw.oldest === null) {
       reachedStart = true;
       break;
@@ -2106,6 +2381,7 @@ async function loadEventWindow(
       ...(options.signal ? { signal: options.signal } : {}),
     });
     if (options.isCurrent?.() === false) throw abortError();
+    options.progress?.();
     if (page.raw.oldest === null) {
       reachedStart = true;
       break;
@@ -2440,6 +2716,32 @@ function abortError(): Error {
   error.name = "AbortError";
   return error;
 }
+
+function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(abortError());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError());
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * One rejoin attempt's cancellation: its signal, whether it still owns state,
+ * and `progress`, reported after each completed read (it keeps a slow but
+ * progressing attempt from being abandoned as stalled).
+ */
+type RejoinScope = { signal: AbortSignal; isCurrent: () => boolean; progress?: () => void };
+type RejoinOutcome = "joined" | "reload";
 
 /* ----------------------------------------------------------------------------
    Conversation-first history

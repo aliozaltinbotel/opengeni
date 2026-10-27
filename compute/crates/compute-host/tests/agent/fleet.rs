@@ -9,19 +9,19 @@ use std::sync::atomic::Ordering;
 
 use std::time::Duration;
 
-use compute_core::{HostPolicy, Level, Priority};
+use compute_core::{DiskPolicy, DiskSpace, HostPolicy, Level, Priority};
 use compute_engine::{CancellationToken, EngineError};
 use compute_host::fleet::{Admission, LeaseGate, boot_now};
 use compute_host::protocol::{
-    ErrorCode, Id, LevelName, Reply, Request, SandboxConfig, SleepConfig,
+    DiskStatus, ErrorCode, Id, LevelName, PriorityName, Reply, Request, SandboxConfig, SleepConfig,
 };
 use compute_host::{
-    Archive, Claimed, Directory, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch, Receipt,
-    SavedFiles, Stamp, Store,
+    Archive, Claimed, Directory, DiskGauge, FetchInto, FetchedMemory, HostError, Owned, OwnerEpoch,
+    Receipt, SavedFiles, Stamp, Store,
 };
 use compute_protocol::fleet::{Answered, Ruling, Verdict};
 use tokio::sync::Semaphore;
-use tokio::time::sleep;
+use tokio::time::{Instant, sleep};
 
 use super::{Delays, Lab, NEVER, PAUSE_SOON, id};
 
@@ -63,7 +63,22 @@ fn ruling(id: Id, verdict: Verdict) -> Ruling {
 
 async fn hand_off(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
     lab.client
-        .call(&Request::HandOff { id, owner_epoch })
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: false,
+        })
+        .await
+        .unwrap()
+}
+
+async fn hand_off_awake(lab: &Lab, id: Id, owner_epoch: u64) -> Reply {
+    lab.client
+        .call(&Request::HandOff {
+            id,
+            owner_epoch,
+            awake: true,
+        })
         .await
         .unwrap()
 }
@@ -127,6 +142,134 @@ async fn a_sandbox_handed_off_by_one_host_wakes_on_another_with_its_files_and_pr
         two.run(sandbox, &["get", "disk"]).await,
         ["kept", "on-disk"],
         "programs and files moved with it"
+    );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A sandbox something keeps awake for good, as a desktop someone watches
+/// or a program that never stops working, still leaves a host being
+/// drained when asked to go awake: its holds end, it is saved where it
+/// stands, and it carries on, programs and all, on the host that adopts
+/// it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_sandbox_held_awake_is_handed_off_with_its_programs_when_asked_to_go_awake() {
+    let (one, two, shelf) = hosts().await;
+    let sandbox = id(3);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept", "write on-disk"]).await;
+    let hold = Request::Hold {
+        id: sandbox,
+        generation: None,
+        hold: "watched".into(),
+        ttl_ms: None,
+        priority: PriorityName::default(),
+    };
+    assert_eq!(one.client.call(&hold).await.unwrap(), Reply::Done);
+    // A stream carrying traffic holds it too, under a lease of its own.
+    let lease = one
+        .handle
+        .acquire(sandbox, None, compute_core::Priority::Interactive)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy),
+        "held awake, it stays unless asked to go awake"
+    );
+    assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
+    assert_eq!(one.status().await.sandboxes, Vec::new());
+    assert!(shelf.join(sandbox.to_string()).exists());
+    // The stream's lease ends after the sandbox has gone, as a stream's
+    // does at its next write.
+    drop(lease);
+    assert_eq!(code(&one.wake(sandbox).await), Some(ErrorCode::NotFound));
+
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert!(
+        two.current(sandbox).await.memory_saved,
+        "it was saved with its memory"
+    );
+    assert_eq!(
+        two.run(sandbox, &["get", "disk"]).await,
+        ["kept", "on-disk"],
+        "programs and files moved with it"
+    );
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// Asked to go awake, a sandbox kept running by its own work and held by
+/// nothing is handed off too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_running_sandbox_is_handed_off_when_asked_to_go_awake() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(4);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy)
+    );
+    assert_eq!(hand_off_awake(&one, sandbox, 1).await, Reply::Done);
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["get"]).await, ["kept"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// A sandbox asked to wake, whose wake keeps failing for now, is wanted
+/// awake though nothing holds it: a drain of what sleeps leaves it, and
+/// one asked to go awake ends the wake, tells whoever waits for it here
+/// that it is going, and saves it where it stands instead of waiting for
+/// a wake to get through.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hand_off_asked_to_go_awake_ends_a_wake_still_retrying() {
+    let (one, two, _shelf) = hosts().await;
+    let sandbox = id(5);
+    one.create(sandbox, NEVER).await;
+    one.run(sandbox, &["set kept"]).await;
+    assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+    one.wait_level(sandbox, LevelName::Paused).await;
+    one.world.refuse_resumes.store(true, Ordering::SeqCst);
+    let touch = Request::Touch {
+        id: sandbox,
+        generation: None,
+        priority: PriorityName::Interactive,
+    };
+    assert_eq!(one.client.call(&touch).await.unwrap(), Reply::Done);
+    one.wait_until("a refused resume", |status| {
+        status
+            .steps
+            .iter()
+            .any(|(name, stats)| name == "resume" && stats.failed > 0)
+    })
+    .await;
+    assert_eq!(
+        code(&hand_off(&one, sandbox, 1).await),
+        Some(ErrorCode::Busy),
+        "wanted awake, it stays unless asked to go awake"
+    );
+
+    let (woken, handed) = tokio::join!(
+        one.handle.acquire(sandbox, None, Priority::Interactive),
+        async {
+            sleep(Duration::from_millis(50)).await;
+            hand_off_awake(&one, sandbox, 1).await
+        },
+    );
+    let Err(error) = woken else {
+        panic!("a wait for it to wake here got through");
+    };
+    assert!(matches!(error, HostError::HandingOff(_)), "{error:?}");
+    assert_eq!(handed, Reply::Done);
+    assert_eq!(one.status().await.sandboxes, Vec::new());
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(
+        two.run(sandbox, &["get"]).await,
+        ["kept"],
+        "its programs moved with it"
     );
     one.assert_clean();
     two.assert_clean();
@@ -234,7 +377,7 @@ async fn a_sandbox_being_handed_off_takes_no_wake() {
         one.wait_level(sandbox, LevelName::Paused).await;
         let handle = one.handle.clone();
         let handing =
-            tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST).await });
+            tokio::spawn(async move { handle.hand_off(sandbox, OwnerEpoch::FIRST, false).await });
         // A wake the agent takes before the hand-off wakes the sandbox and
         // turns the hand-off down, so probe only once the hand-off has
         // begun its sleep: nothing else would, with sleep left to requests.
@@ -424,6 +567,166 @@ async fn an_adopt_without_a_stored_copy_leaves_nothing() {
     assert!(!one.sandbox_dir(sandbox).exists());
 }
 
+/// Has the agent of `lab` read `bytes` free on its disk, and inodes to
+/// spare, then tells what its disk book holds.
+async fn read_disk(lab: &Lab, gauge: &DiskGauge, bytes: u64) -> DiskStatus {
+    gauge.give(DiskSpace {
+        bytes,
+        inodes: 1 << 40,
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !gauge.taken() {
+        assert!(Instant::now() < deadline, "no sample took the reading");
+        sleep(Duration::from_millis(5)).await;
+    }
+    lab.status().await.disk.expect("a disk policy")
+}
+
+/// Two hosts sharing a store, the second of which reads its free disk
+/// from the gauge returned, and a sandbox of the first's per id, written
+/// to, paused and handed off through the store.
+async fn handed_to_a_gauged_host(sandboxes: &[Id]) -> (Lab, Lab, DiskGauge, PathBuf) {
+    let a = Lab::root();
+    let shelf = a.join("shelf");
+    let one = Lab::start_stored(a, Arc::default(), Directory::new(&shelf)).await;
+    let gauge = DiskGauge::default();
+    let reading = gauge.clone();
+    let two = Lab::start_stored_configured(
+        Lab::root(),
+        Arc::default(),
+        Directory::new(&shelf),
+        move |config| {
+            config.policy.disk = Some(DiskPolicy {
+                reserve: 0,
+                reserve_inodes: 0,
+            });
+            config.disk_reading = Some(reading);
+        },
+    )
+    .await;
+    for &sandbox in sandboxes {
+        one.create(sandbox, NEVER).await;
+        one.run(sandbox, &["write on-disk"]).await;
+        assert_eq!(one.sleep_to(sandbox, LevelName::Paused).await, Reply::Done);
+        one.wait_level(sandbox, LevelName::Paused).await;
+    }
+    (one, two, gauge, shelf)
+}
+
+/// An adopt books the first wake without the copy's disk before it claims
+/// the store's copy, then books it again with the copy's own disk: a copy
+/// this host has no disk for is refused there, before anything of it is
+/// made here, leaving the store's copy whole for another host.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_whose_copy_needs_more_disk_than_is_free_is_refused_and_leaves_the_copy() {
+    const GROWN: u64 = 64 << 20;
+    const PLENTY: u64 = 1 << 50;
+    let (small, grown) = (id(1), id(2));
+    let (one, two, gauge, shelf) = handed_to_a_gauged_host(&[small, grown]).await;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(one.sandbox_dir(grown).join("root/disk.ext4"))
+        .unwrap()
+        .set_len(GROWN)
+        .unwrap();
+    for sandbox in [small, grown] {
+        assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    }
+
+    // What the first wake of the small copy books.
+    let empty = read_disk(&two, &gauge, PLENTY).await.free;
+    assert_eq!(adopt(&two, small, 2).await, Reply::Done);
+    let first = empty - two.status().await.disk.unwrap().free;
+    assert!(first > 0);
+    // Room for one more such wake, but not for the grown disk's.
+    let booked = PLENTY - empty + first;
+    let disk = read_disk(&two, &gauge, booked + first + (16 << 20)).await;
+    assert_eq!(disk.free, first + (16 << 20));
+
+    let reply = adopt(&two, grown, 2).await;
+    assert_eq!(code(&reply), Some(ErrorCode::HostFull), "{reply:?}");
+    assert!(
+        !two.sandbox_dir(grown).exists(),
+        "the refused adopt made files"
+    );
+    let status = two.status().await;
+    assert!(status.sandboxes.iter().all(|sandbox| sandbox.id != grown));
+    assert!(status.blocked.is_empty(), "{:?}", status.blocked);
+    assert_eq!(
+        status.disk.unwrap().free,
+        first + (16 << 20),
+        "its booking ended"
+    );
+    assert!(shelf.join(grown.to_string()).exists(), "the store keeps it");
+
+    // With room, a later ownership adopts the very copy.
+    read_disk(&two, &gauge, PLENTY).await;
+    assert_eq!(adopt(&two, grown, 3).await, Reply::Done);
+    assert_eq!(two.record(grown)["allocation"]["disk_bytes"], GROWN);
+    let files = two.run(grown, &["disk"]).await;
+    assert_eq!(
+        files[0].trim_end_matches('\0'),
+        "on-disk",
+        "its files moved"
+    );
+    assert_eq!(two.run(small, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopt never takes over or deletes a directory already there for its
+/// sandbox, which belongs to a sandbox this agent does not know: it is
+/// refused as existing and leaves the directory as it was, and the same
+/// adopt goes through once the directory is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_leaves_an_unknown_directory_of_its_sandbox_alone() {
+    let sandbox = id(4);
+    let (one, two, gauge, _shelf) = handed_to_a_gauged_host(&[sandbox]).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    read_disk(&two, &gauge, 1 << 40).await;
+    let unknown = two.sandbox_dir(sandbox);
+    std::fs::create_dir_all(&unknown).unwrap();
+    std::fs::write(unknown.join("theirs"), b"kept").unwrap();
+
+    let reply = adopt(&two, sandbox, 2).await;
+    assert_eq!(code(&reply), Some(ErrorCode::Exists), "{reply:?}");
+    assert_eq!(std::fs::read(unknown.join("theirs")).unwrap(), b"kept");
+    let status = two.status().await;
+    assert!(status.sandboxes.is_empty() && status.blocked.is_empty());
+
+    std::fs::remove_dir_all(&unknown).unwrap();
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
+/// An adopt judges disk by the store's copy alone, never by the adopting
+/// host's base image: a host with room for the copy's first wake but not
+/// for one of a disk as long as its base image, far longer than the
+/// copy's, takes the copy and books only what it needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_adopt_judges_disk_by_the_copy_never_by_the_base_image() {
+    const LONG: u64 = 8 << 30;
+    let sandbox = id(3);
+    let (one, two, gauge, _shelf) = handed_to_a_gauged_host(&[sandbox]).await;
+    assert_eq!(hand_off(&one, sandbox, 1).await, Reply::Done);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(two.root.join("base.img"))
+        .unwrap()
+        .set_len(LONG)
+        .unwrap();
+
+    let free = read_disk(&two, &gauge, LONG / 2).await.free;
+    assert_eq!(adopt(&two, sandbox, 2).await, Reply::Done);
+    let booked = free - two.status().await.disk.unwrap().free;
+    assert!(booked > 0 && booked < LONG / 4, "booked {booked}");
+    assert_eq!(two.run(sandbox, &["disk"]).await, ["on-disk"]);
+    one.assert_clean();
+    two.assert_clean();
+}
+
 /// Once its lease runs out a host's VMs are frozen by its guard, so the
 /// agent takes no decision by time, its own tools only read, and it goes
 /// on where it was once the lease is renewed.
@@ -545,7 +848,7 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
         Err(HostError::NotAdmitted)
     ));
     assert!(matches!(
-        stale.hand_off(sandbox, OwnerEpoch::FIRST).await,
+        stale.hand_off(sandbox, OwnerEpoch::FIRST, false).await,
         Err(HostError::NotAdmitted)
     ));
     assert!(
@@ -569,7 +872,9 @@ async fn a_request_that_waited_past_its_admission_does_nothing() {
         Err(HostError::NotAdmitted)
     ));
     assert!(matches!(
-        admitted(3, 13).hand_off(sandbox, OwnerEpoch::FIRST).await,
+        admitted(3, 13)
+            .hand_off(sandbox, OwnerEpoch::FIRST, false)
+            .await,
         Err(HostError::NotAdmitted)
     ));
     assert!(
@@ -801,7 +1106,7 @@ async fn a_hand_off_during_a_change_of_owner_is_never_answered_not_found() {
     let owned = one.handle.owned(later);
     let (created, handed) = tokio::join!(
         owned.create(sandbox, config(NEVER)),
-        one.handle.hand_off(sandbox, later),
+        one.handle.hand_off(sandbox, later, false),
     );
     created.unwrap();
     assert!(
@@ -809,7 +1114,7 @@ async fn a_hand_off_during_a_change_of_owner_is_never_answered_not_found() {
         "{handed:?}"
     );
     if handed.is_err() {
-        one.handle.hand_off(sandbox, later).await.unwrap();
+        one.handle.hand_off(sandbox, later, false).await.unwrap();
     }
     assert_eq!(one.status().await.sandboxes, Vec::new());
     assert!(shelf.join(sandbox.to_string()).exists());
@@ -845,6 +1150,12 @@ async fn a_hand_off_during_a_removal_is_told_to_try_again() {
         let handle = one.handle.clone();
         async move { handle.remove(sandbox, None).await }
     });
+    // The removal is under way once the host no longer lists the sandbox;
+    // a hand-off sent before it reached the host would just be done.
+    one.wait_until(&format!("{sandbox} being removed"), |status| {
+        status.sandboxes.iter().all(|listed| listed.id != sandbox)
+    })
+    .await;
     let mut busy = 0;
     loop {
         match hand_off(&one, sandbox, 1).await {

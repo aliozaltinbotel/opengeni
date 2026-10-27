@@ -109,6 +109,59 @@ describe("control reply recovery", () => {
     expect(probes).toBe(3);
   });
 
+  test("an older token stays usable when the caller's clock runs faster than the machine's", async () => {
+    // Time synchronization may steer two hosts' elapsed clocks apart by up to
+    // 500 ppm. Model the worst case with no network latency at all: the
+    // machine refuses any offset that would place the call after its present.
+    let callerNow = 1_000_000;
+    const machineNow = () => callerNow * (1 - 0.0005);
+    const clock = spyOn(performance, "now").mockImplementation(() => callerNow);
+    try {
+      const issued = new Map<string, number>();
+      const offsets: number[] = [];
+      const connection = {
+        supportsHeaders: true,
+        async request(target: string) {
+          if (target === subject) {
+            const reply = leaseReply();
+            const ping = ControlResponse.decode(reply.data).result;
+            if (ping?.$case === "ping")
+              for (const token of ping.ping.controlReplayTokens) issued.set(token, machineNow());
+            return reply;
+          }
+          const [token, age] = target.split(".replay.")[1]!.split(".");
+          offsets.push(Number(age));
+          if (issued.get(token!)! + Number(age) > machineNow()) {
+            return {
+              data: ControlResponse.encode(
+                ControlResponse.fromPartial({
+                  requestId: mutation.requestId,
+                  error: {
+                    code: ErrorCode.ERROR_CODE_PROTOCOL,
+                    message: "future offset",
+                    detail: { failure_code: "control_delivery_expired" },
+                  },
+                }),
+              ).finish(),
+            };
+          }
+          return { data: result };
+        },
+      };
+      const recovery = new ControlReplyRecovery();
+      const payload = ControlRequest.encode(mutation).finish();
+      await recovery.request(connection, subject, payload, 100);
+      // The same batch, one hundred seconds later: still inside its window.
+      callerNow += 100_000;
+      const reply = await recovery.request(connection, subject, payload, 100);
+      expect(ControlResponse.decode(reply.data).error).toBeUndefined();
+      // Understated by 1%, so the machine charges more elapsed time, never less.
+      expect(offsets.at(-1)).toBe(99_000);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   test("wall-clock jumps and correction do not change lease identity or the retry budget", async () => {
     const realNow = Date.now();
     const wall = spyOn(Date, "now");
@@ -175,6 +228,44 @@ describe("control reply recovery", () => {
     expect(deliveries).toBe(2);
     expect(probes).toBe(1); // Never mint a new identity to retry the mutation.
     expect(refusal.error?.detail.never_sent).toBeUndefined();
+  });
+
+  test("an expired refusal is never reissued, even when it answers the attempt's only request call", async () => {
+    // One request call is not one transmission: the transport resends the same
+    // delivery on the agent's hello and on its own reconnect, and resolves with
+    // whatever answers the resend. After a self-update handover the predecessor
+    // may have run the delivery and lost its reply; the successor, which never
+    // issued the token, then refuses the resend as expired. That refusal cannot
+    // prove nothing ran, so minting a fresh token would run the mutation twice.
+    let probes = 0;
+    const deliveries: Array<{ target: string; resendOn?: string }> = [];
+    const refusal = ControlResponse.fromPartial({
+      requestId: mutation.requestId,
+      error: {
+        code: ErrorCode.ERROR_CODE_PROTOCOL,
+        message: "receipt expired or unknown; earlier execution may have occurred",
+        retryable: false,
+        detail: { failure_code: "control_delivery_expired", outcome_unknown: "true" },
+      },
+    });
+    const rpc = new NatsControlRpc(async () => ({
+      supportsHeaders: true,
+      async request(target, _payload, options) {
+        if (target === subject) {
+          probes++;
+          return leaseReply();
+        }
+        // The predecessor ran this delivery; the successor answered its resend.
+        deliveries.push({ target, resendOn: options.resendOn });
+        return { data: ControlResponse.encode(refusal).finish() };
+      },
+    }));
+    expect(await rpc.request(subject, mutation, { timeoutMs: 100 })).toEqual(refusal);
+    expect(deliveries).toHaveLength(1);
+    // The delivery was resendable on the agent's hello, so one call may carry
+    // several transmissions.
+    expect(deliveries[0]?.resendOn).toBe(subject.replace(/\.rpc$/, ".hello"));
+    expect(probes).toBe(1); // Never mint a new identity to retry the mutation.
   });
 
   test("a v2 peer that omits its lease fails before publishing the mutation", async () => {

@@ -1,4 +1,9 @@
 import {
+  GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE,
+  isRetiredNativeGoogleDriveSource,
+  isRetiredNativeGoogleDriveTask,
+} from "@opengeni/contracts/google-drive-native-retirement";
+import {
   getSessionTurnClaudeProviderAccountAuthoritySnapshot,
   getScheduledTaskClaudeProviderAccountAuthoritySnapshot,
 } from "@opengeni/db";
@@ -12,7 +17,6 @@ import {
   SCHEDULED_TASK_OCCURRENCE_PAYLOAD_INGRESS_HEADROOM_BYTES,
 } from "@opengeni/contracts";
 import {
-  allowedFirstPartyMcpToolsForSession,
   resolveSessionFirstPartyMcpTools,
   resolveFirstPartyMcpToolPolicy,
   type FirstPartyMcpToolPolicySettings,
@@ -60,6 +64,7 @@ import {
   type KnowledgeContext,
   dbSql,
   deleteScheduledTask,
+  wakeScheduledTaskEventSubscriptions,
   getConnectionMetadata,
   getEnrollment,
   getLiveEnrollmentConnection,
@@ -90,7 +95,6 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { GOOGLE_DRIVE_PUBLICATION_SERVER_ID } from "@opengeni/contracts/google-drive";
 import { PERSONAL_GITHUB_CONNECTION_SURFACE_ID } from "@opengeni/contracts/personal-github";
 import {
   currentSiteSessionOrigin,
@@ -130,6 +134,14 @@ import {
   workspaceSessionToolPolicyDefaultServerIds,
 } from "./session-tool-policy";
 import { prepareExternalLinkTaskAdmission } from "../application/external-link-work-admission";
+import {
+  rearmScheduledTaskEventsOnResume,
+  scheduledTaskFinishedOnce,
+  validateScheduledTaskEvents,
+  validateScheduleForExistingEvents,
+  writeScheduledTaskEvents,
+} from "./event-triggers/automation-events";
+import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
 import { variableSetsRemovedError } from "./encryption-key";
 import {
   freezeConnectionAccounts,
@@ -252,39 +264,13 @@ export async function scheduledConnectionTools(
       ...settings.mcpServers.map(({ id }) => id),
       ...target.mcpServers.map(({ id }) => id),
     ],
-    defaultMcpServerIds: await workspaceSessionToolPolicyDefaultServerIds(
-      db,
-      workspaceId,
-      settings,
-      subjectId,
-    ),
+    // Explicit and inherited selections ignore workspace defaults. Their current
+    // registry is already supplied above; account authority is resolved by callers.
+    defaultMcpServerIds:
+      target.toolPolicy.mode === "workspace_default"
+        ? await workspaceSessionToolPolicyDefaultServerIds(db, workspaceId, settings, subjectId)
+        : [],
   }).toolRefs;
-}
-
-export function scheduledConnectionSurfaceEligibility(
-  settings: Settings,
-  target:
-    | (Pick<Session, "firstPartyMcpTools" | "firstPartyMcpPermissions"> &
-        Partial<Pick<Session, "toolPolicy" | "agent">>)
-    | null,
-  workspaceSettings: unknown = {},
-): { googleDrivePublicationEnabled: boolean; atlassianEnabled: boolean } {
-  const tools = target?.toolPolicy
-    ? resolveSessionFirstPartyMcpTools(
-        settings,
-        { ...target, toolPolicy: target.toolPolicy },
-        workspaceSettings,
-      )
-    : allowedFirstPartyMcpToolsForSession(settings, target?.firstPartyMcpTools);
-  const permissions = target?.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS;
-  return {
-    googleDrivePublicationEnabled:
-      tools.includes("editable_artifact_export") &&
-      tools.includes("editable_artifact_export_status") &&
-      permissions.includes("artifacts:read") &&
-      permissions.includes("artifacts:publish"),
-    atlassianEnabled: false,
-  };
 }
 
 /**
@@ -372,6 +358,8 @@ export async function createValidatedScheduledTask(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
+  /** Reads event sources (MCP servers and Gmail) while checking triggers; for tests. */
+  eventSourceFetch?: typeof fetch | undefined;
 }): Promise<ScheduledTask> {
   // Variable Sets were replaced by vaults (RM-1).
   if (input.payload.variableSetId) throw variableSetsRemovedError("variableSetId");
@@ -433,6 +421,13 @@ export async function createValidatedScheduledTask(input: {
     ...input,
     workspaceId: input.grant.workspaceId,
   });
+  // Nobody starts a new schedule in a Personal workspace the organization
+  // turned off; schedules made before keep running. Checked after the
+  // model allow-list guard, which must reject a curated-out model first.
+  await requirePersonalWorkspaceOpenToNewWork(input, {
+    accountId: input.grant.accountId,
+    workspaceId: input.grant.workspaceId,
+  });
   // A schedule created from a Site page records which Site. Each run's
   // session copies this provenance, without changing its authority.
   // Callers never supply it themselves.
@@ -468,7 +463,11 @@ export async function createValidatedScheduledTask(input: {
     reusableSessionCanPost: null,
     verifySlackChannel: input.verifySlackChannel,
   });
-  if (knowledgeAction && input.payload.overlapPolicy === "allow_concurrent")
+  if (
+    knowledgeAction &&
+    input.payload.overlapPolicy !== "skip" &&
+    input.payload.overlapPolicy !== "buffer_one"
+  )
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
@@ -587,11 +586,6 @@ export async function createValidatedScheduledTask(input: {
       resources: mergeResourceRefs(target?.resources ?? [], agentConfig.resources),
       source: personalConnectionDelegationSourceForGrant(input.grant),
       authoritySelections: requestedPins ?? [],
-      ...scheduledConnectionSurfaceEligibility(
-        effectiveRuntimeSettings,
-        target,
-        creationWorkspaceSettings,
-      ),
     });
   }
   const storedAgentConfig = knowledgeAction
@@ -640,6 +634,25 @@ export async function createValidatedScheduledTask(input: {
           claudeAuthoritySnapshot: claudeProviderAccountAuthoritySnapshot,
         })
       : undefined;
+  const ownerSubjectId =
+    action.kind === "agent_turn"
+      ? (await scheduledTaskViewerForGrant(input.db, input.grant, input.settings)).subjectId
+      : null;
+  const requestedEvents = "events" in input.payload ? input.payload.events : undefined;
+  const events = requestedEvents
+    ? await validateScheduledTaskEvents({
+        settings: input.settings,
+        db: input.db,
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        ownerSubjectId,
+        actorSubjectId: input.grant.subjectId,
+        schedule: input.payload.schedule,
+        action,
+        events: requestedEvents,
+        ...(input.eventSourceFetch ? { fetch: input.eventSourceFetch } : {}),
+      })
+    : null;
   const visibility = await resolveScheduledTaskVisibility({
     db: input.db,
     settings: input.settings,
@@ -648,10 +661,7 @@ export async function createValidatedScheduledTask(input: {
     current: null,
     targetSessionId: target?.id ?? null,
     personalKnowledge: agentConfig.knowledgeSource?.destination.kind === "personal",
-    ownerSubjectId:
-      action.kind === "agent_turn"
-        ? (await scheduledTaskViewerForGrant(input.db, input.grant, input.settings)).subjectId
-        : null,
+    ownerSubjectId,
   });
   await requirePersonalMachineAudience({
     db: input.db,
@@ -697,6 +707,8 @@ export async function createValidatedScheduledTask(input: {
         before: null,
         after: task.agentConfig,
       });
+      if (events && events.triggers.length > 0)
+        await writeScheduledTaskEvents(transaction, task, events);
       if (learning && learningContext)
         await saveAgentLearningSettings(transaction, learningContext, {
           scope: learning.scope,
@@ -1006,6 +1018,8 @@ export async function triggerScheduledTaskForGrant(
 ): Promise<void> {
   await db.transaction(async (tx) => {
     await assertScheduledTaskMutationOwner(tx, grant, input.task.id);
+    if (isRetiredNativeGoogleDriveTask(input.task))
+      throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
     if (isRetiredNativeAtlassianTask(input.task))
       throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
     // The worker never runs a paused schedule. Refuse here so the caller is
@@ -1401,7 +1415,65 @@ export async function validatedScheduledTaskUpdate(
   });
   const current = input.existing.visibility === "private" ? "user_private" : "workspace_shared";
   const audited = withScheduledTaskAccountChoiceAudit(input.grant, input.existing, update);
-  return visibility === current ? audited : { ...audited, visibility };
+  const withEvents = await withScheduledTaskEventsUpdate(input, audited);
+  return visibility === current ? withEvents : { ...withEvents, visibility };
+}
+
+/**
+ * Validate an edit's event triggers with the rest of it and write them in the
+ * transaction that commits it. Resuming an automation re-arms its events, and
+ * so does turning on a run-once automation that already ran.
+ */
+async function withScheduledTaskEventsUpdate(
+  input: Pick<
+    Parameters<typeof validatedScheduledTaskUpdateWithoutAudience>[0],
+    "settings" | "db" | "grant" | "existing" | "payload" | "eventSourceFetch"
+  >,
+  update: UpdateScheduledTaskInput,
+): Promise<UpdateScheduledTaskInput> {
+  const { existing } = input;
+  const schedule = update.schedule ?? existing.schedule;
+  const events = input.payload.events
+    ? await validateScheduledTaskEvents({
+        settings: input.settings,
+        db: input.db,
+        accountId: existing.accountId,
+        workspaceId: existing.workspaceId,
+        ownerSubjectId: existing.ownerSubjectId,
+        actorSubjectId: input.grant.subjectId,
+        taskId: existing.id,
+        schedule,
+        action: update.action ?? existing.action,
+        events: input.payload.events,
+        ...(input.eventSourceFetch ? { fetch: input.eventSourceFetch } : {}),
+      })
+    : null;
+  if (!events && update.schedule) {
+    await validateScheduleForExistingEvents({
+      db: input.db,
+      workspaceId: existing.workspaceId,
+      taskId: existing.id,
+      schedule,
+    });
+  }
+  const resumes =
+    update.status === "active" &&
+    (existing.status !== "active" || (await scheduledTaskFinishedOnce(input.db, existing)));
+  const statusChanges = update.status !== undefined && update.status !== existing.status;
+  if (!events && !statusChanges && !resumes) return update;
+  const prior = update.beforeUpdateCommit;
+  return {
+    ...update,
+    beforeUpdateCommit: async (tx) => {
+      await prior?.(tx);
+      if (events) await writeScheduledTaskEvents(tx, existing, events);
+      if (resumes) await rearmScheduledTaskEventsOnResume(tx, existing);
+      // A paused automation ends its MCP subscriptions; resuming starts them again.
+      else if (statusChanges) {
+        await wakeScheduledTaskEventSubscriptions(tx, existing.workspaceId, existing.id);
+      }
+    },
+  };
 }
 
 /**
@@ -1446,6 +1518,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   authorizationSurface?: SessionAuthorizationSurface | undefined;
   /** Proves the bot may post in a newly chosen task Slack channel. */
   verifySlackChannel?: ScheduledTaskSlackChannelVerifier | undefined;
+  /** See createValidatedScheduledTask. */
+  eventSourceFetch?: typeof fetch | undefined;
 }): Promise<UpdateScheduledTaskInput> {
   const requestedPrompt =
     input.payload.prompt ??
@@ -1580,6 +1654,11 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
   };
   const requestedKnowledgeSource = input.payload.agentConfig?.knowledgeSource ?? null;
   if (
+    isRetiredNativeGoogleDriveTask(input.existing) &&
+    (input.payload.status === "active" || requestedKnowledgeSource)
+  )
+    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
+  if (
     isRetiredNativeAtlassianTask(input.existing) &&
     (input.payload.status === "active" || requestedKnowledgeSource)
   )
@@ -1619,10 +1698,8 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
       action: knowledgeSource,
     });
   }
-  if (
-    knowledgeSource &&
-    (input.payload.overlapPolicy ?? input.existing.overlapPolicy) === "allow_concurrent"
-  )
+  const nextOverlapPolicy = input.payload.overlapPolicy ?? input.existing.overlapPolicy;
+  if (knowledgeSource && nextOverlapPolicy !== "skip" && nextOverlapPolicy !== "buffer_one")
     throw new HTTPException(422, { message: "Source tasks require skip or buffer_one overlap" });
   if (
     knowledgeSource?.destination.kind === "personal" &&
@@ -1994,13 +2071,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         .filter((tool) => tool.kind === "mcp")
         .map((tool) => tool.id),
     );
-    const nextSurfaceEligibility = scheduledConnectionSurfaceEligibility(
-      runtimeSettings,
-      nextTarget,
-      (await requireWorkspace(input.db, input.grant.workspaceId)).settings,
-    );
-    if (nextSurfaceEligibility.googleDrivePublicationEnabled)
-      nextAccountSurfaceIds.add(GOOGLE_DRIVE_PUBLICATION_SERVER_ID);
     if (personalGitHubRepositoryResources(nextConnectionResources).length)
       nextAccountSurfaceIds.add(PERSONAL_GITHUB_CONNECTION_SURFACE_ID);
     // Removing a connector or repository also removes its pin. Pins the
@@ -2026,7 +2096,6 @@ async function validatedScheduledTaskUpdateWithoutAudience(input: {
         ? { kind: "subject", subjectId: ownerSubjectId, accountId: input.existing.accountId }
         : { kind: "none" },
       authoritySelections: input.payload.pinnedAccounts ?? [],
-      ...nextSurfaceEligibility,
     });
     update.agentConfig = withScheduledTaskPins(
       nextAgentConfig,
@@ -2138,13 +2207,6 @@ export type ScheduledTaskRestoreState = {
   };
 };
 
-export async function captureScheduledTaskRestoreState(
-  _db: Database,
-  task: ScheduledTask,
-): Promise<ScheduledTaskRestoreState> {
-  return { task };
-}
-
 export async function restoreScheduledTask(
   db: Database,
   previous: ScheduledTaskRestoreState,
@@ -2173,6 +2235,8 @@ async function validateKnowledgeSourceSyncAction(input: {
   grant: AccessGrant;
   action: KnowledgeSourceSyncAction;
 }): Promise<void> {
+  if (isRetiredNativeGoogleDriveSource(input.action))
+    throw new HTTPException(410, { message: GOOGLE_DRIVE_NATIVE_RETIRED_MESSAGE });
   if (isRetiredNativeAtlassianSource(input.action))
     throw new HTTPException(410, { message: ATLASSIAN_NATIVE_RETIRED_MESSAGE });
   if (input.action.initiatingSubjectId !== input.grant.subjectId) {
@@ -2294,6 +2358,7 @@ export async function deleteScheduledTaskLifecycle(input: {
             });
           })()
         : await deleteScheduledTask(tx, input.workspaceId, task.id);
+      if (wasLive) await wakeScheduledTaskEventSubscriptions(tx, input.workspaceId, task.id);
       return { task, deletion };
     },
   );

@@ -1,9 +1,28 @@
 import { afterAll, beforeAll, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act, type ReactNode } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot as createReactRoot } from "react-dom/client";
 
+import { AppContext, type AppContextValue } from "../../app-context";
 import type { Session } from "../../types";
+
+// The header only renders inside the session shell, which always has the app
+// context; its chat actions (copy link, pin) run through it. This test runs
+// none of them, so any read of the context fails loudly.
+const appContext = new Proxy({} as AppContextValue, {
+  get(_target, key) {
+    throw new Error(`The SessionHeader mute test's app context has no ${String(key)}`);
+  },
+});
+
+function createRoot(container: Element) {
+  const root = createReactRoot(container);
+  return {
+    render: (node: ReactNode) =>
+      root.render(<AppContext.Provider value={appContext}>{node}</AppContext.Provider>),
+    unmount: () => root.unmount(),
+  };
+}
 
 // The menu's items, rendered inline so the test reads what the person sees.
 mock.module("../../../ui/dropdown-menu", () => ({
@@ -12,6 +31,9 @@ mock.module("../../../ui/dropdown-menu", () => ({
   DropdownMenuContent: ({ children }: { children: ReactNode }) => <div>{children}</div>,
   DropdownMenuSeparator: () => <hr />,
   DropdownMenuMeta: ({ children }: { children: ReactNode }) => <span>{children}</span>,
+  DropdownMenuShortcut: ({ children }: { children: ReactNode }) => (
+    <span aria-hidden>{children}</span>
+  ),
   DropdownMenuItem: ({
     children,
     onSelect,
@@ -66,7 +88,7 @@ test("the session menu mutes and unmutes replies only where it applies", async (
   document.body.append(container);
   const root = createRoot(container);
   const toggles: boolean[] = [];
-  const render = (repliesMute: { muted: boolean } | null) => (
+  const render = (repliesMute: { muted: boolean; scope?: "session" | "schedule" } | null) => (
     <SessionHeader
       session={session}
       ancestors={[]}
@@ -103,6 +125,14 @@ test("the session menu mutes and unmutes replies only where it applies", async (
     await act(async () => root.render(render({ muted: true })));
     expect(items()).toContain("Unmute replies");
     expect(items()).not.toContain("Mute replies");
+    // A run of a schedule that starts a new chat each time: the mute covers
+    // the schedule, and the menu says so.
+    await act(async () => root.render(render({ muted: false, scope: "schedule" })));
+    await act(async () => item("Mute this automation's replies")!.click());
+    expect(toggles).toEqual([false, false]);
+    await act(async () => root.render(render({ muted: true, scope: "schedule" })));
+    expect(items()).toContain("Unmute this automation's replies");
+    expect(items()).not.toContain("Unmute replies");
   } finally {
     await act(async () => root.unmount());
     container.remove();

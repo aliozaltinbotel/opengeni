@@ -14,6 +14,7 @@ import {
 import { ArrowLeftIcon, LoaderCircleIcon, LockIcon, XIcon } from "lucide-react";
 import { Dialog as DialogPrimitive } from "radix-ui";
 
+import { useOpenGeniText } from "../messages/runtime";
 import { Button } from "./button";
 import { TechnicalDetails } from "./error-message";
 import { Notice } from "./notice";
@@ -167,7 +168,7 @@ export function FormFrame({
   submitLabel,
   pendingLabel,
   submitAnalyticsAction,
-  cancelLabel = "Cancel",
+  cancelLabel,
   tone = "default",
   onSubmit,
   onSubmitted,
@@ -187,10 +188,21 @@ export function FormFrame({
   className,
   bodyClassName,
 }: FormFrameProps) {
+  const msg = useOpenGeniText();
+  const cancelText = cancelLabel === undefined ? msg("formDialog.cancel") : cancelLabel;
   const chrome = useContext(FormChromeContext);
   const [internalPending, setInternalPending] = useState(false);
   const [thrown, setThrown] = useState<ReactNode>(null);
   const bodyRef = useRef<HTMLDivElement>(null);
+  // A submit that finishes after the person left the form (a page they
+  // navigated away from) must not act on it: closing it would navigate back.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
   const reasonId = useId();
   const pending = pendingProp ?? internalPending;
   const shownError = error ?? thrown;
@@ -221,10 +233,14 @@ export function FormFrame({
       const result = await onSubmit(event);
       succeeded = result !== false;
     } catch (caught) {
-      setThrown(errorMessage(caught));
+      if (mountedRef.current) setThrown(errorMessage(caught));
     } finally {
-      setPending(false);
+      // The owner's bookkeeping outlives the form: a dialog closed by its
+      // owner during the save refuses Escape until it hears the save ended.
+      if (mountedRef.current) setPending(false);
+      else onPendingChange?.(false);
     }
+    if (!mountedRef.current) return;
     if (succeeded) onSubmitted?.();
     else focusInvalid();
   };
@@ -253,7 +269,7 @@ export function FormFrame({
             type="button"
             variant="ghost"
             size="icon-sm"
-            aria-label="Close"
+            aria-label={msg("formDialog.close")}
             disabled={pending}
             className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
           >
@@ -265,7 +281,7 @@ export function FormFrame({
           type="button"
           variant="ghost"
           size="icon-sm"
-          aria-label="Close"
+          aria-label={msg("formDialog.close")}
           disabled={pending}
           onClick={onCancel}
           className="shrink-0 text-fg-muted hover:text-fg pointer-coarse:size-11"
@@ -288,7 +304,7 @@ export function FormFrame({
             "@max-[26rem]/form:w-full @max-[26rem]/form:flex-col-reverse @max-[26rem]/form:items-stretch",
         )}
       >
-        {cancelLabel !== null ? (
+        {cancelText !== null ? (
           <Button
             type="button"
             variant="ghost"
@@ -297,7 +313,7 @@ export function FormFrame({
             data-autofocus={initialFocus === "cancel" ? true : undefined}
             className="pointer-coarse:h-11"
           >
-            {cancelLabel}
+            {cancelText}
           </Button>
         ) : null}
         <Button
@@ -505,8 +521,13 @@ export function FormFrame({
 
 /** Label and control placeholders, the shape of the fields that are loading. */
 function FieldPlaceholders({ count }: { count: number }) {
+  const msg = useOpenGeniText();
   return (
-    <div role="status" aria-label="Loading" className="flex min-w-0 flex-col gap-6">
+    <div
+      role="status"
+      aria-label={msg("formDialog.loading")}
+      className="flex min-w-0 flex-col gap-6"
+    >
       {Array.from({ length: count }, (_, index) => (
         // oxlint-disable-next-line react/no-array-index-key -- fixed placeholders, never reordered
         <div key={index} aria-hidden="true" className="flex flex-col gap-2">
@@ -708,7 +729,7 @@ export function FormDialog({
    FormPage and FormInline: the same frame without an overlay.
    -------------------------------------------------------------------------- */
 
-/** A full-page create form, for example /schedules/new. The footer sticks to the bottom. */
+/** A full-page create form, for example /automations/new. The footer sticks to the bottom. */
 export function FormPage(props: Omit<FormFrameProps, "variant">) {
   return <FormFrame variant="page" {...props} />;
 }

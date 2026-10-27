@@ -1,9 +1,13 @@
 import { NativeTimelineMessagesProvider, type NativeTimelineMessages } from "./messages";
 import {
   conversationTimeline,
+  personalMachineCopy,
+  useSessionStart,
   type AgentMessageItem,
+  type AuthNeededItem,
   type UserMessageItem,
 } from "@opengeni/react/session";
+import { machineDisplayName } from "@opengeni/react/sandbox-label-model";
 import {
   useCallback,
   useEffect,
@@ -13,7 +17,16 @@ import {
   type ComponentRef,
   type ReactNode,
 } from "react";
-import { ActivityIndicator, Image, Pressable, Text, View, type TextInput } from "react-native";
+import {
+  ActivityIndicator,
+  Alert,
+  Image,
+  Pressable,
+  Text,
+  View,
+  type TextInput,
+} from "react-native";
+import { annotationHasNote } from "@opengeni/react/timeline-model";
 import {
   defaultChatComposerMessages,
   type ChatComposerMessages,
@@ -33,9 +46,16 @@ import {
 } from "./decisions";
 import { NativeMessageAttachments } from "./message-attachments";
 import { QueueDock } from "./queue-dock";
+import {
+  AnnotationsChip,
+  AnnotationsSheet,
+  type AnnotationReveal,
+  type NativeAnnotationLike,
+} from "./annotations";
 import { SessionCommandsList, SessionSignals } from "./session-signals";
-import type { ClientModel, OpenGeniClient, SessionBackgroundCommand } from "@opengeni/sdk";
+import type { ClientModel, OpenGeniClient, Session, SessionBackgroundCommand } from "@opengeni/sdk";
 import { MessageTimeline, type NativeMessageTimelineProps } from "./message-timeline";
+import { useNativeInChatConnect, type NativeInChatConnectOptions } from "./in-chat-connect";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
 import { SingleSendWording, useOpenGeniText } from "@opengeni/react/messages";
@@ -83,6 +103,14 @@ export interface NativeSessionScreenProps extends Omit<
   approvalMessages?: ApprovalStripProps["messages"];
   /** Reads the commands panel (the full client; omit to hide command details). */
   client?: OpenGeniClient | undefined;
+  /**
+   * Let people finish an agent's "connect your account" request in the chat,
+   * with the web conversation's cards: sign-in opens the system sign-in
+   * browser and comes back to the app, keys go into the secure field, and the
+   * agent continues once setup is done. Needs `client`; omit to show the
+   * request as a row.
+   */
+  inChatConnect?: NativeInChatConnectOptions | undefined;
   /** Model catalog for the agents panel rows. */
   models?: readonly ClientModel[] | undefined;
   /** Translations for the strings the native surfaces draw (merged over any provider above). */
@@ -107,6 +135,7 @@ export function NativeSessionScreen({
   humanInputMessages,
   approvalMessages,
   client,
+  inChatConnect,
   models,
   timelineMessages,
   renderComposer,
@@ -129,6 +158,7 @@ export function NativeSessionScreen({
           humanInputMessages={humanInputMessages}
           approvalMessages={approvalMessages}
           client={client}
+          inChatConnect={inChatConnect}
           models={models}
           renderComposer={renderComposer}
           renderMessageActions={hostMessageActions}
@@ -150,20 +180,53 @@ function SessionScreenBody({
   humanInputMessages,
   approvalMessages,
   client,
+  inChatConnect,
   models,
   renderComposer,
   renderMessageActions: hostMessageActions,
   ...timelineProps
 }: Omit<NativeSessionScreenProps, "timelineMessages">) {
   const theme = useNativeTimelineTheme();
+  const t = useOpenGeniText();
   const m = useNativeTimelineMessages();
   const { composer, queue, humanInput, approvals, control, attachments } = controller;
   const composerInput = useRef<ComponentRef<typeof TextInput>>(null);
+  const annotationReveal = useRef<AnnotationReveal | null>(null);
+  const draftAnnotations = composer.annotations ?? [];
+  const annotationsIncomplete = draftAnnotations.some(
+    (annotation) => annotation.note.trim().length === 0,
+  );
+  const reviewTargetId = composer.annotationReviewTargetId ?? null;
+  const [reviewOpen, setReviewOpen] = useState(false);
+  // A new quote, a marker tap or a send with an empty note opens its note.
+  useEffect(() => {
+    if (reviewTargetId) setReviewOpen(true);
+  }, [reviewTargetId]);
+  const closeReview = useCallback(() => {
+    setReviewOpen(false);
+    composer.clearAnnotationReviewTarget?.();
+  }, [composer]);
+  const [queuedReview, setQueuedReview] = useState<readonly NativeAnnotationLike[] | null>(null);
+  // Each send brings the conversation back to its latest row.
+  const [followLatestSignal, setFollowLatestSignal] = useState(0);
+  const followLatest = useCallback(() => setFollowLatestSignal((value) => value + 1), []);
   // The composer floats over the conversation; its occupied height insets the timeline.
   const [composerHeight, setComposerHeight] = useState(120);
   const items = useMemo(
     () => conversationTimeline(controller.timeline, queue, composer),
     [controller.timeline, queue, composer],
+  );
+  const stockAuthNeeded = useNativeInChatConnect({
+    client,
+    workspaceId: controller.workspaceId,
+    sessionId: controller.sessionId,
+    items,
+    options: inChatConnect,
+  });
+  const hostAuthNeeded = timelineProps.renderAuthNeeded;
+  const renderAuthNeeded = useCallback(
+    (item: AuthNeededItem) => hostAuthNeeded?.(item) ?? stockAuthNeeded?.(item),
+    [hostAuthNeeded, stockAuthNeeded],
   );
   const status = controller.sessionStatus;
   const paused = queue.effectiveControl?.state === "paused";
@@ -201,6 +264,11 @@ function SessionScreenBody({
     <View style={{ flex: 1, backgroundColor: theme.colors.bg }}>
       {topBar}
       <MessageTimeline
+        onAnnotate={composer.addAnnotation}
+        draftAnnotations={composer.annotations}
+        onDraftAnnotationSelect={composer.requestAnnotationReview}
+        annotationRevealRef={annotationReveal}
+        followLatestSignal={followLatestSignal}
         {...timelineProps}
         hasOlder={controller.hasOlder}
         loadingOlder={controller.loadingOlder}
@@ -208,6 +276,7 @@ function SessionScreenBody({
         contentInsetBottom={composerHeight + 20}
         overlayInsetBottom={composerHeight}
         renderMessageActions={feedback || hostMessageActions ? renderMessageActions : undefined}
+        renderAuthNeeded={renderAuthNeeded}
         renderUserAttachments={
           timelineProps.renderUserAttachments ??
           (client
@@ -239,19 +308,12 @@ function SessionScreenBody({
         }
         trailing={
           <>
-            {controller.admissionBlocked && !paused ? (
+            {controller.admissionBlocked && !paused && controller.session.session ? (
               <StuckCard
-                needsAccess={
-                  controller.session.session?.admissionBlock?.reason ===
-                    "initiator_membership_required" ||
-                  controller.session.session?.admissionBlock?.reason ===
-                    "personal_resource_grant_required"
-                }
+                session={controller.session.session}
                 busy={composer.resuming || control.controlling}
-                onRetry={async () => {
-                  const result = await control.resume();
+                onSessionChanged={async () => {
                   await Promise.all([controller.session.refresh(), queue.refresh()]);
-                  if (!result) throw new Error("Resume was not accepted");
                 }}
               />
             ) : null}
@@ -261,6 +323,7 @@ function SessionScreenBody({
                 respondingRequestId={humanInput.respondingRequestId}
                 error={humanInput.mutationError?.message}
                 messages={humanInputMessages}
+                renderMarkdown={timelineProps.renderMarkdown}
                 onSubmit={(requestId, response) =>
                   humanInput.respond(requestId, response).then(() => undefined)
                 }
@@ -276,14 +339,31 @@ function SessionScreenBody({
         onActionFeedback: composerSlots?.onActionFeedback,
         value: composer.value,
         onChangeText: composer.setValue,
-        onSend: () => void composer.send(),
+        // A quote without its note cannot be sent: Send opens that note instead
+        // of staying disabled with no reason given.
+        onSend: () => {
+          if (annotationsIncomplete) composer.requestAnnotationReview?.();
+          else {
+            followLatest();
+            void composer.send();
+          }
+        },
         // The other choice beside Send while the agent works: Queue when
         // Send steers, Steer when Send queues.
         alternateSend: composer.alternateSend ?? null,
         ...(composer.sendAlternate
-          ? { onAlternateSend: () => void composer.sendAlternate?.() }
+          ? {
+              onAlternateSend: () => {
+                if (annotationsIncomplete) {
+                  composer.requestAnnotationReview?.();
+                  return;
+                }
+                followLatest();
+                void composer.sendAlternate?.();
+              },
+            }
           : {}),
-        canSend: composer.canSend && !busy,
+        canSend: (composer.canSend || (annotationsIncomplete && !composer.sending)) && !busy,
         sending: composer.sending,
         running: controller.runActive,
         paused: paused,
@@ -311,6 +391,44 @@ function SessionScreenBody({
           <>
             {composerSlots?.header}
             <AttachmentChips attachments={attachments} />
+            {draftAnnotations.length > 0 && composer.removeAnnotation ? (
+              <View style={{ paddingHorizontal: 12, paddingTop: 10 }}>
+                <AnnotationsChip
+                  annotations={draftAnnotations}
+                  onPress={() => composer.requestAnnotationReview?.()}
+                  onClear={() => {
+                    const removeAll = () => {
+                      for (const annotation of draftAnnotations) {
+                        composer.removeAnnotation?.(annotation.id);
+                      }
+                    };
+                    // Bare quotes go at once; written notes are worth one confirm,
+                    // since the × sits right beside the chip.
+                    if (!draftAnnotations.some((item) => annotationHasNote(item.note))) {
+                      removeAll();
+                      return;
+                    }
+                    Alert.alert(
+                      t("native.timeline.annotations.removeAllTitle", {
+                        count: draftAnnotations.length,
+                      }),
+                      t("native.timeline.annotations.removeAllMessage", {
+                        count: draftAnnotations.filter((item) => annotationHasNote(item.note))
+                          .length,
+                      }),
+                      [
+                        { text: t("native.timeline.annotations.cancel"), style: "cancel" },
+                        {
+                          text: t("native.timeline.annotations.removeAllConfirm"),
+                          style: "destructive",
+                          onPress: removeAll,
+                        },
+                      ],
+                    );
+                  }}
+                />
+              </View>
+            ) : null}
           </>
         ),
         above: (
@@ -320,6 +438,7 @@ function SessionScreenBody({
               composer={composer}
               singleSend={composer.singleSend === true}
               onComposerFocus={() => composerInput.current?.focus()}
+              onReviewAnnotations={setQueuedReview}
               leading={
                 <SessionSignals
                   goal={controller.goal}
@@ -354,6 +473,28 @@ function SessionScreenBody({
           </>
         ),
       })}
+      <AnnotationsSheet
+        open={reviewOpen}
+        onClose={closeReview}
+        annotations={draftAnnotations}
+        editable={Boolean(composer.updateAnnotation)}
+        focusId={reviewTargetId}
+        onFocusConsumed={composer.clearAnnotationReviewTarget}
+        onUpdate={composer.updateAnnotation}
+        onRemove={composer.removeAnnotation}
+        onReveal={(source, quote) => annotationReveal.current?.(source, quote) ?? false}
+        onCommit={() => {
+          closeReview();
+          setTimeout(() => composerInput.current?.focus(), 250);
+        }}
+      />
+      <AnnotationsSheet
+        open={queuedReview !== null}
+        onClose={() => setQueuedReview(null)}
+        annotations={queuedReview ?? []}
+        editable={false}
+        onReveal={(source, quote) => annotationReveal.current?.(source, quote) ?? false}
+      />
     </View>
   );
 }
@@ -423,18 +564,38 @@ function LoadFailure({ message, onRetry }: { message?: string | undefined; onRet
  * starts the kept work again.
  */
 function StuckCard({
+  session,
   busy,
-  needsAccess,
-  onRetry,
+  onSessionChanged,
 }: {
+  session: Session;
   busy: boolean;
-  needsAccess: boolean;
-  onRetry: () => Promise<void>;
+  onSessionChanged: () => Promise<void>;
 }) {
   const theme = useNativeTimelineTheme();
   const m = useNativeTimelineMessages();
+  const t = useOpenGeniText();
+  // The same state as the web notice: why the saved message didn't start, the
+  // machines this person may move the chat to, and one fenced recheck.
+  const start = useSessionStart({ session, onSessionChanged });
   const [failed, setFailed] = useState(false);
+  // The recheck is one fenced Resume outside the session control runner, so
+  // the card holds its own pending state: busy while it runs, and a second tap
+  // before the first settles sends nothing (as the web notice does).
+  const [rechecking, setRechecking] = useState(false);
+  const recheckPending = useRef(false);
+  const [moving, setMoving] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
   const c = theme.colors;
+  const reason = start.reason;
+  const machine =
+    start.needsDifferentMachine && start.machineAccess
+      ? personalMachineCopy(t, start.machineAccess, { queued: true })
+      : null;
+  const needsAccess =
+    reason?.reason === "initiator_membership_required" ||
+    reason?.reason === "personal_resource_grant_required";
+  const textStyle = { ...fontStyle(theme), fontSize: 14, lineHeight: 20, color: c["fg-muted"] };
   return (
     <View
       accessibilityRole="summary"
@@ -449,18 +610,63 @@ function StuckCard({
     >
       <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
         <Icon name="circle-alert" size={16} color={c["status-failed"]} />
-        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg }}>{m.stuckTitle}</Text>
+        <Text style={{ ...fontStyle(theme, 600), fontSize: 15, color: c.fg, flexShrink: 1 }}>
+          {machine ? t("sessionAdmission.needsDifferentMachineTitle") : m.stuckTitle}
+        </Text>
       </View>
-      <Text
-        style={{
-          ...fontStyle(theme),
-          fontSize: 14,
-          lineHeight: 20,
-          color: c["fg-muted"],
-        }}
-      >
-        {needsAccess ? m.stuckAccessBody : m.stuckBody}
-      </Text>
+      {machine ? (
+        <>
+          <Text style={textStyle}>{machine.explanation}</Text>
+          <Text style={textStyle}>{machine.next}</Text>
+          {start.canChooseMachine ? (
+            <View
+              style={{ gap: 6 }}
+              accessibilityLabel={t("sessionAdmission.chooseAMachineForThisChat")}
+            >
+              {start.machineChoices.length === 0 ? (
+                <Text style={textStyle}>{t("sessionAdmission.noMachineChoices")}</Text>
+              ) : (
+                start.machineChoices.map((choice) => (
+                  <Button
+                    key={choice.sandboxId}
+                    label={
+                      moving === choice.sandboxId
+                        ? t("sessionAdmission.moving")
+                        : machineDisplayName(t, choice)
+                    }
+                    busy={moving === choice.sandboxId}
+                    disabled={busy || moving !== null}
+                    style={{ alignSelf: "stretch" }}
+                    onPress={() => {
+                      setMoving(choice.sandboxId);
+                      setMoveError(null);
+                      start
+                        .chooseMachine(choice)
+                        .then(setMoveError, () =>
+                          setMoveError(t("sessionAdmission.machineChangeFailed")),
+                        )
+                        .finally(() => setMoving(null));
+                    }}
+                  />
+                ))
+              )}
+              <Text style={{ ...textStyle, fontSize: 13 }}>
+                {t("sessionAdmission.savedMessageMachineNote")}
+              </Text>
+            </View>
+          ) : null}
+          {moveError ? (
+            <Text
+              accessibilityLiveRegion="polite"
+              style={{ ...fontStyle(theme), fontSize: 13, color: c["status-failed"] }}
+            >
+              {start.machineChoiceError || moveError}
+            </Text>
+          ) : null}
+        </>
+      ) : (
+        <Text style={textStyle}>{needsAccess ? m.stuckAccessBody : m.stuckBody}</Text>
+      )}
       {failed ? (
         <Text
           accessibilityLiveRegion="polite"
@@ -473,17 +679,28 @@ function StuckCard({
           {m.stuckRetryFailed}
         </Text>
       ) : null}
-      <Button
-        label={m.stuckRetry}
-        variant="primary"
-        busy={busy}
-        disabled={busy}
-        style={{ alignSelf: "flex-start" }}
-        onPress={() => {
-          setFailed(false);
-          onRetry().catch(() => setFailed(true));
-        }}
-      />
+      {machine ? null : (
+        <Button
+          label={m.stuckRetry}
+          variant="primary"
+          busy={busy || rechecking}
+          disabled={busy || rechecking}
+          style={{ alignSelf: "flex-start" }}
+          onPress={() => {
+            if (recheckPending.current) return;
+            recheckPending.current = true;
+            setRechecking(true);
+            setFailed(false);
+            start
+              .recheck()
+              .catch(() => setFailed(true))
+              .finally(() => {
+                recheckPending.current = false;
+                setRechecking(false);
+              });
+          }}
+        />
+      )}
     </View>
   );
 }

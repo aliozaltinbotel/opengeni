@@ -87,6 +87,41 @@ function awaitRouterAccess<T>(pending: Promise<T>, signal?: AbortSignal): Promis
   });
 }
 
+/** Modal's task command router answers an observation of an exec id it does
+ * not hold with FAILED_PRECONDITION and this fixed detail prefix (live text:
+ * "Failed to poll exec process: exec not found. If the exec already completed,
+ * its output and exit status were discarded; ..."). Exact code + anchored
+ * prefix only; other FAILED_PRECONDITION replies are not exec-state evidence. */
+const MODAL_ROUTER_EXEC_NOT_FOUND_DETAILS =
+  /^Failed to (?:poll|read) exec [a-z ]*: exec not found\b/;
+
+function isModalRouterExecNotFound(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const record = error as Error & { code?: unknown; details?: unknown };
+  return (
+    record.code === status.FAILED_PRECONDITION &&
+    typeof record.details === "string" &&
+    MODAL_ROUTER_EXEC_NOT_FOUND_DETAILS.test(record.details)
+  );
+}
+
+/**
+ * The fixed `/bin/true` readiness probe's exact exec identity is unknown to the
+ * box's command router: its Start never registered (a lost or timed-out Start
+ * reply) or the router lost its exec state. Either way the box has not proved
+ * command readiness. This is NOT replay authority for the probe; the caller
+ * discards the never-published box instead. The only retained cause is the
+ * router's observation reply: an ambiguous probe Start is contained to that
+ * discarded box and must not leak start-uncertainty into turn settlement.
+ */
+export class ModalExecReadinessProbeLostError extends Error {
+  readonly name = "ModalExecReadinessProbeLostError";
+
+  constructor(cause: Error) {
+    super("Modal command router no longer tracks the readiness probe exec", { cause });
+  }
+}
+
 /** New commands use replayable task-router byte offsets. Legacy identifiers
  * never cross that protocol boundary and are never used for new starts. */
 export class ModalCommandControl {
@@ -520,6 +555,8 @@ export class ModalCommandControl {
           if (exit !== null && streams.stdout.eof && streams.stderr.eof) return exit;
         } catch (error) {
           signal.throwIfAborted();
+          if (isModalRouterExecNotFound(error))
+            throw new ModalExecReadinessProbeLostError(error as Error);
           if (!transientObservation(error)) throw error;
         }
         await pause();
@@ -793,6 +830,17 @@ export class ModalCommandControl {
           );
         } catch (error) {
           signal?.throwIfAborted();
+          if (isModalRouterExecNotFound(error)) {
+            // The router has discarded this invocation's observation state.
+            // That is not proof its process group stopped, nor authority to
+            // replay Start. Keep the locator/cursors for ordinary retained
+            // ownership and lifecycle containment, without a hot read retry.
+            throw new ProviderCommandObservationUnavailableError(
+              structuredClone(command),
+              error,
+              false,
+            );
+          }
           if (!budget.signal.aborted && !isModalCommandObservationTransportError(error)) {
             // Containment is not retry permission. A structural provider fault
             // dominates nested missing-handle prose, but mixed/unreadable

@@ -40,6 +40,7 @@ import {
 } from "./primitives";
 import { fontStyle, useNativeTimelineTheme } from "./theme";
 import { useNativeTimelineMessages } from "./messages";
+import { annotationSourceTestId } from "./text-selection";
 
 /* ----------------------------------------------------------------------------
    Native activity rows. Tool rows draw from the shared presentation model
@@ -101,6 +102,33 @@ const TOOL_ICON: Record<ToolIconKind, NativeIconName> = {
   "file-search": "file-search",
   "package-search": "package-search",
   plug: "plug",
+  browser: "globe",
+  screen: "monitor",
+  spreadsheet: "file-spreadsheet",
+  wait: "hourglass",
+  download: "download",
+  clipboard: "clipboard",
+  image: "image",
+  video: "video",
+  record: "circle-dot",
+  document: "file-text",
+  file: "file",
+  attachment: "paperclip",
+  archive: "archive",
+  folder: "folder",
+  site: "app-window",
+  skill: "graduation-cap",
+  settings: "settings",
+  bell: "bell",
+  inbox: "inbox",
+  help: "hand",
+  model: "sparkles",
+  progress: "activity",
+  helper: "bot",
+  "sign-in": "log-in",
+  code: "code",
+  accounting: "receipt",
+  rename: "pencil",
   wrench: "wrench",
 };
 
@@ -519,20 +547,23 @@ function ReasoningRow({ item, compact }: { item: ReasoningItem; compact: boolean
       accessibilityLabel={item.streaming ? m.thinking : m.thought}
       preview={plain || undefined}
     >
-      {options.renderMarkdown ? (
-        options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
-      ) : (
-        <Text
-          style={{
-            ...fontStyle(theme),
-            fontSize: theme.size.base,
-            lineHeight: 24,
-            color: theme.colors["fg-muted"],
-          }}
-        >
-          {item.text}
-        </Text>
-      )}
+      <View testID={annotationSourceTestId(undefined)} collapsable={false}>
+        {options.renderMarkdown ? (
+          options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
+        ) : (
+          <Text
+            selectable
+            style={{
+              ...fontStyle(theme),
+              fontSize: theme.size.base,
+              lineHeight: 24,
+              color: theme.colors["fg-muted"],
+            }}
+          >
+            {item.text}
+          </Text>
+        )}
+      </View>
     </ActivityDisclosure>
   );
 }
@@ -717,11 +748,16 @@ function ActivityNoteRow({ item }: { item: AgentMessageItem }) {
       <View style={{ marginTop: 4 }}>
         <Icon name="message-square-text" size={14} color={theme.colors["fg-subtle"]} />
       </View>
-      <View style={{ flex: 1, minWidth: 0 }}>
+      <View
+        testID={annotationSourceTestId(item.annotationSource?.eventId)}
+        collapsable={false}
+        style={{ flex: 1, minWidth: 0 }}
+      >
         {options.renderMarkdown ? (
           options.renderMarkdown(item.text, { tone: "muted", streaming: item.streaming })
         ) : (
           <Text
+            selectable
             style={{
               ...fontStyle(theme),
               fontSize: theme.size.sm,

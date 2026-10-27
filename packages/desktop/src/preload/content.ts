@@ -13,9 +13,15 @@ import {
   type DesktopAppShotStatus,
   type DesktopBridge,
   type DesktopCommand,
+  type DesktopComputerCapabilities,
+  type DesktopMeetingDetectionStatus,
+  type DesktopMeetingRequest,
+  type DesktopMenuAction,
   type DesktopPlatform,
+  type DesktopUpdateState,
   type ThisComputerStatus,
 } from "../contract";
+import { systemAudioBridge } from "./system-audio";
 
 function argument(name: string): string | null {
   const prefix = `--${name}=`;
@@ -37,22 +43,34 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 }
 
 const origin = argument("opengeni-origin");
+const systemAudio = process.argv.includes("--opengeni-system-audio");
 
 if (origin && window.location.origin === origin) {
   // Menu commands go to the page's newest listener. A page without one (an
   // older server) still gets the navigation commands as a page load.
   let commandListener: ((command: DesktopCommand) => void) | null = null;
-  ipcRenderer.on(DESKTOP_IPC.command, (_event, command: DesktopCommand) => {
-    if (commandListener) {
-      commandListener(command);
-      return;
-    }
-    const workspaceId = /^\/workspaces\/([0-9a-f-]{36})(?:\/|$)/iu.exec(
-      window.location.pathname,
-    )?.[1];
-    if (!workspaceId) return;
-    if (command === "newSession") window.location.assign(`/workspaces/${workspaceId}/sessions`);
-    if (command === "openInbox") window.location.assign(`/workspaces/${workspaceId}/inbox`);
+  ipcRenderer.on(
+    DESKTOP_IPC.command,
+    (_event, command: DesktopCommand, fallbackPath: string | null | undefined) => {
+      if (commandListener) {
+        commandListener(command);
+        return;
+      }
+      // The shell's page for the command, on this origin only.
+      if (typeof fallbackPath === "string" && /^\/(?![/\\])/u.test(fallbackPath))
+        window.location.assign(fallbackPath);
+    },
+  );
+  // Menu bar actions: the page lists them, the shell runs the chosen one back
+  // through the newest listener. Leaving the page drops its actions, so the
+  // menu falls back to its own items until the next page reports again.
+  let menuActionListener: ((id: string) => void) | null = null;
+  let reportedMenuActions = false;
+  ipcRenderer.on(DESKTOP_IPC.menuAction, (_event, id: string) => {
+    menuActionListener?.(id);
+  });
+  window.addEventListener("pagehide", () => {
+    if (reportedMenuActions) ipcRenderer.send(DESKTOP_IPC.menuActionsSet, []);
   });
   // Captures go to the page's newest listener. One that arrives before the
   // page listens (the window was just opened for it) waits briefly for it.
@@ -62,6 +80,14 @@ if (origin && window.location.origin === origin) {
     if (appShotListener) appShotListener(result);
     else waitingAppShot = { result, at: Date.now() };
   });
+  // Likewise a meeting notification's choice, which can arrive as the page loads.
+  let meetingListener: ((request: DesktopMeetingRequest) => void) | null = null;
+  let waitingMeeting: { request: DesktopMeetingRequest; at: number } | null = null;
+  ipcRenderer.on(DESKTOP_IPC.meetingDetectionRequest, (_event, request: DesktopMeetingRequest) => {
+    if (meetingListener) meetingListener(request);
+    else waitingMeeting = { request, at: Date.now() };
+  });
+  const appVersion = argument("opengeni-app-version");
   const bridge: DesktopBridge = {
     version: DESKTOP_BRIDGE_VERSION,
     platform: platform(),
@@ -73,8 +99,16 @@ if (origin && window.location.origin === origin) {
       "openExternal",
       "commands",
       "appShots",
+      "menuActions",
+      "updates",
+      ...(systemAudio ? (["systemAudio"] as const) : []),
+      ...(systemAudio ? (["meetingDetection"] as const) : []),
+      "computerCapabilities",
+      "captureWindow",
     ],
     productName: argument("opengeni-product") ?? "Opengeni",
+    ...(appVersion ? { appVersion } : {}),
+    captureWindow: () => ipcRenderer.invoke(DESKTOP_IPC.captureWindow),
     accounts: {
       list: () => ipcRenderer.invoke(DESKTOP_IPC.accountsList) as Promise<DesktopAccountsSnapshot>,
       switchTo: (accountId) => ipcRenderer.invoke(DESKTOP_IPC.accountsSwitch, accountId),
@@ -108,6 +142,18 @@ if (origin && window.location.origin === origin) {
         };
       },
     },
+    menuActions: {
+      set: (actions: DesktopMenuAction[]) => {
+        reportedMenuActions = true;
+        ipcRenderer.send(DESKTOP_IPC.menuActionsSet, actions);
+      },
+      onAction: (listener) => {
+        menuActionListener = listener;
+        return () => {
+          if (menuActionListener === listener) menuActionListener = null;
+        };
+      },
+    },
     setAppearance: (appearance) => ipcRenderer.send(DESKTOP_IPC.appearanceSet, appearance),
     appShots: {
       status: () => ipcRenderer.invoke(DESKTOP_IPC.appShotsStatus) as Promise<DesktopAppShotStatus>,
@@ -126,6 +172,56 @@ if (origin && window.location.origin === origin) {
         };
       },
       onChange: (listener) => subscribe(DESKTOP_IPC.appShotsChanged, () => listener()),
+    },
+    updates: {
+      state: () => ipcRenderer.invoke(DESKTOP_IPC.updatesState) as Promise<DesktopUpdateState>,
+      install: () => ipcRenderer.invoke(DESKTOP_IPC.updatesInstall),
+      onChange: (listener) => subscribe(DESKTOP_IPC.updatesChanged, listener),
+    },
+    ...(systemAudio
+      ? {
+          systemAudio: systemAudioBridge(ipcRenderer),
+          meetingDetection: {
+            status: () =>
+              ipcRenderer.invoke(
+                DESKTOP_IPC.meetingDetectionStatus,
+              ) as Promise<DesktopMeetingDetectionStatus>,
+            update: (change: { enabled?: boolean }) =>
+              ipcRenderer.invoke(
+                DESKTOP_IPC.meetingDetectionUpdate,
+                change,
+              ) as Promise<DesktopMeetingDetectionStatus>,
+            setRecording: (recording: boolean) =>
+              ipcRenderer.send(DESKTOP_IPC.meetingDetectionRecording, recording),
+            onRequest: (listener: (request: DesktopMeetingRequest) => void) => {
+              meetingListener = listener;
+              const waiting = waitingMeeting;
+              waitingMeeting = null;
+              if (waiting && Date.now() - waiting.at < 60_000) {
+                queueMicrotask(() => meetingListener?.(waiting.request));
+              }
+              return () => {
+                if (meetingListener === listener) meetingListener = null;
+              };
+            },
+            onChange: (listener: () => void) =>
+              subscribe(DESKTOP_IPC.meetingDetectionChanged, () => listener()),
+          },
+        }
+      : {}),
+    computerCapabilities: {
+      status: () =>
+        ipcRenderer.invoke(DESKTOP_IPC.capabilitiesStatus) as Promise<DesktopComputerCapabilities>,
+      update: (change) =>
+        ipcRenderer.invoke(
+          DESKTOP_IPC.capabilitiesUpdate,
+          change,
+        ) as Promise<DesktopComputerCapabilities>,
+      requestMicrophone: () =>
+        ipcRenderer.invoke(
+          DESKTOP_IPC.capabilitiesRequestMicrophone,
+        ) as Promise<DesktopComputerCapabilities>,
+      onChange: (listener) => subscribe(DESKTOP_IPC.capabilitiesChanged, () => listener()),
     },
   };
   contextBridge.exposeInMainWorld(DESKTOP_BRIDGE_GLOBAL, bridge);

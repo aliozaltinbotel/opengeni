@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import type postgres from "postgres";
+import { sql } from "drizzle-orm";
 import {
   CLAUDE_CONNECTION_KINDS,
   claudeProviderId,
@@ -16,19 +17,20 @@ import {
   getWorkspaceProviderApiKeyConnectionMetadata,
   getWorkspaceConnectionModelRestrictions,
   listConnectionsMetadata,
+  loadWorkspaceModelCatalogInputs,
+  getOrganizationModelProviderCatalogForWorkspace,
+  listWorkspaceProviderCustomModelsByKind,
   listOrganizationModelProviderCustomModelsForWorkspace,
   listWorkspaceProviderCustomModels,
   organizationModelProviderConnectionActiveForWorkspace,
   withDatabaseTimingObserver,
+  withWorkspaceSubjectRls,
   workspaceProviderApiKeyConnectionSpec,
   type DbClient,
   type WorkspaceCustomModelProviderKind,
 } from "@opengeni/db";
-import {
-  acquireSharedTestDatabase,
-  testSettings,
-  type SharedTestDatabase,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { testSettings } from "@opengeni/testing/settings";
 import { loadWorkspaceModelSelectionInput } from "../src/default-session-model";
 import { resolveWorkspaceCatalogSettings } from "../src/model-catalog";
 
@@ -51,6 +53,7 @@ let client: DbClient;
 let scope: { accountId: string; workspaceId: string };
 let otherScope: typeof scope;
 const directQueries: string[] = [];
+let capturedStatements: string[] | null = null;
 let directModelIds: string[];
 
 beforeAll(async () => {
@@ -59,6 +62,7 @@ beforeAll(async () => {
   client = createDb(shared.appUrl);
   const driver = (client.db as unknown as { $client: postgres.Sql }).$client;
   driver.options.debug = (_id, query) => {
+    capturedStatements?.push(query);
     if (query.includes('from "connections"') && query.includes("direct_azure_openai")) {
       directQueries.push(query);
     }
@@ -271,7 +275,7 @@ test("a disabled Claude subscription still omits only its catalog entry", async 
   expect(loaded.claudeConnections?.anthropic?.models).toHaveLength(1);
 });
 
-test("the loader reads the catalog families in three transactions instead of fourteen", async () => {
+test("the loader reads the catalog families in one transaction instead of fourteen", async () => {
   const context = { ...scope, subjectId: actor };
   const [, batched] = await transactionsDuring(() =>
     loadWorkspaceModelSelectionInput(client.db, settings, context, {
@@ -301,10 +305,212 @@ test("the loader reads the catalog families in three transactions instead of fou
   );
   expect(perProvider).toBe(14);
   // 13 non-catalog reads (restrictions, readiness, policy, Codex), one Claude
-  // route receipt read, and the three catalog-family reads. Claude shares one
+  // route receipt read, and one public catalog read. Claude shares one
   // readiness projection with the restriction loader rather than rereading
   // its route there. The per-provider loader took 13 + 14 = 27.
-  expect(batched).toBeLessThanOrEqual(17);
+  expect(batched).toBeLessThanOrEqual(15);
+});
+
+test("the public catalog keeps existing readers and filters in one scope with no credentials", async () => {
+  const input = {
+    ...scope,
+    providerKinds,
+    organizationProviderKinds: [...providerKinds, "openai", "azure_openai"] as const,
+  };
+  const [original, originalTransactions] = await transactionsDuring(async () => ({
+    workspaceConnections: await listConnectionsMetadata(client.db, scope.workspaceId, null),
+    workspaceCustomModels: await listWorkspaceProviderCustomModelsByKind(client.db, input),
+    organizationProviders: await getOrganizationModelProviderCatalogForWorkspace(client.db, {
+      ...input,
+      providerKinds: [...providerKinds, "openai", "azure_openai"],
+    }),
+  }));
+  const [batched, batchedTransactions] = await transactionsDuring(() =>
+    loadWorkspaceModelCatalogInputs(client.db, input),
+  );
+  expect(originalTransactions).toBe(3);
+  expect(batchedTransactions).toBe(1);
+  expect(batched).toEqual(original);
+  expect(JSON.stringify(batched)).not.toContain("fixture-ciphertext-not-a-key");
+  expect(batched.workspaceConnections.every((row) => row.subjectId === null)).toBe(true);
+  expect(batched.workspaceConnections.every((row) => row.workspaceId === scope.workspaceId)).toBe(
+    true,
+  );
+
+  // A later request reads the committed change: this is scoped batching, not a cache.
+  await shared!.admin`
+    update organization_model_provider_custom_models set label = 'Fresh batch label'
+    where account_id = ${scope.accountId} and provider_kind = 'openrouter'
+      and upstream_model_id = 'fixture/openrouter-org'`;
+  const fresh = await loadWorkspaceModelCatalogInputs(client.db, input);
+  expect(fresh.organizationProviders.openrouter.models[0]!.label).toBe("Fresh batch label");
+  expect(batched.organizationProviders.openrouter.models[0]!.label).not.toBe("Fresh batch label");
+});
+
+test("a later catalog invocation observes provider revocation and model retirement", async () => {
+  const input = {
+    ...scope,
+    providerKinds,
+    organizationProviderKinds: [...providerKinds, "openai", "azure_openai"] as const,
+  };
+  const previous = await loadWorkspaceModelCatalogInputs(client.db, input);
+  expect(previous.organizationProviders.openrouter.active).toBe(true);
+  expect(previous.organizationProviders.openrouter.models).toHaveLength(1);
+  try {
+    await shared!.admin`
+      update organization_model_provider_connections set status = 'revoked'
+      where account_id = ${scope.accountId} and provider_kind = 'openrouter'`;
+    await shared!.admin`
+      update organization_model_provider_custom_models set retired_at = now()
+      where account_id = ${scope.accountId} and provider_kind = 'openrouter'
+        and upstream_model_id = 'fixture/openrouter-org'`;
+    const next = await loadWorkspaceModelCatalogInputs(client.db, input);
+    expect(next.organizationProviders.openrouter.active).toBe(false);
+    expect(next.organizationProviders.openrouter.models).toEqual([]);
+    expect(previous.organizationProviders.openrouter.active).toBe(true);
+    expect(previous.organizationProviders.openrouter.models).toHaveLength(1);
+  } finally {
+    await shared!.admin`
+      update organization_model_provider_connections set status = 'active'
+      where account_id = ${scope.accountId} and provider_kind = 'openrouter'`;
+    await shared!.admin`
+      update organization_model_provider_custom_models set retired_at = null
+      where account_id = ${scope.accountId} and provider_kind = 'openrouter'
+        and upstream_model_id = 'fixture/openrouter-org'`;
+  }
+});
+
+test("nested catalog reads restore the enclosing account, workspace and subject", async () => {
+  await withWorkspaceSubjectRls(client.db, otherScope.workspaceId, actor, async (tx) => {
+    const readScopeSettings = () =>
+      tx.execute(sql`select
+      current_setting('opengeni.account_id', true) as account_id,
+      current_setting('opengeni.workspace_id', true) as workspace_id,
+      current_setting('opengeni.subject_id', true) as subject_id`);
+    const before = await readScopeSettings();
+    const catalog = await loadWorkspaceModelCatalogInputs(tx, {
+      ...scope,
+      providerKinds,
+      organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+    });
+    expect(catalog.workspaceConnections.length).toBeGreaterThan(0);
+    expect(
+      catalog.workspaceConnections.every(
+        (row) =>
+          row.accountId === scope.accountId &&
+          row.workspaceId === scope.workspaceId &&
+          row.subjectId === null,
+      ),
+    ).toBe(true);
+    expect(await readScopeSettings()).toEqual(before);
+    expect(before[0]).toEqual({
+      account_id: otherScope.accountId,
+      workspace_id: otherScope.workspaceId,
+      subject_id: actor,
+    });
+  });
+});
+
+test("missing and deleted workspaces fail even when the organization catalog is empty", async () => {
+  const access = await bootstrapWorkspace(client.db, {
+    accountExternalSource: "test",
+    accountExternalId: crypto.randomUUID(),
+    accountName: "Empty catalog scope",
+    workspaceExternalSource: "test",
+    workspaceExternalId: crypto.randomUUID(),
+    workspaceName: "Empty catalog scope",
+    subjectId: actor,
+  });
+  const empty = access.workspaceGrants[0]!;
+  const deletedWorkspaceId = empty.workspaceId;
+  await shared!.admin`delete from workspaces where id = ${deletedWorkspaceId}::uuid`;
+  for (const workspaceId of [crypto.randomUUID(), deletedWorkspaceId]) {
+    const input = {
+      accountId: empty.accountId,
+      workspaceId,
+      providerKinds,
+      organizationProviderKinds: [...providerKinds, "openai", "azure_openai"] as const,
+    };
+    await expect(listConnectionsMetadata(client.db, workspaceId, null)).rejects.toThrow(
+      `Workspace not found: ${workspaceId}`,
+    );
+    await expect(loadWorkspaceModelCatalogInputs(client.db, input)).rejects.toThrow(
+      `Workspace not found: ${workspaceId}`,
+    );
+    await expect(resolveWorkspaceCatalogSettings(client.db, settings, input)).rejects.toThrow(
+      `Workspace not found: ${workspaceId}`,
+    );
+  }
+});
+
+test("a catalog scope cannot pair one organization's account with another workspace", async () => {
+  await expect(
+    loadWorkspaceModelCatalogInputs(client.db, {
+      accountId: otherScope.accountId,
+      workspaceId: scope.workspaceId,
+      providerKinds,
+      organizationProviderKinds: [...providerKinds, "openai", "azure_openai"],
+    }),
+  ).rejects.toThrow(`Workspace not found: ${scope.workspaceId}`);
+});
+
+test("public catalog scope cost compared with the previous parallel family reads", async () => {
+  if (process.env.OPENGENI_BENCH_CATALOG_SCOPE !== "1") return;
+  const input = {
+    ...scope,
+    providerKinds,
+    organizationProviderKinds: [...providerKinds, "openai", "azure_openai"] as const,
+  };
+  const original = async () => {
+    const [workspaceConnections, workspaceCustomModels, organizationProviders] = await Promise.all([
+      listConnectionsMetadata(client.db, scope.workspaceId, null),
+      listWorkspaceProviderCustomModelsByKind(client.db, input),
+      getOrganizationModelProviderCatalogForWorkspace(client.db, {
+        ...input,
+        providerKinds: [...providerKinds, "openai", "azure_openai"],
+      }),
+    ]);
+    return { workspaceConnections, workspaceCustomModels, organizationProviders };
+  };
+  const readers = { original, batched: () => loadWorkspaceModelCatalogInputs(client.db, input) };
+  const samples: Record<string, { ms: number; cpuMs: number; statements: number }[]> = {
+    original: [],
+    batched: [],
+  };
+  const expected = await original();
+  for (let round = -5; round < 40; round++) {
+    const order =
+      round % 2 === 0 ? (["original", "batched"] as const) : (["batched", "original"] as const);
+    for (const kind of order) {
+      capturedStatements = [];
+      const cpu = process.cpuUsage();
+      const started = performance.now();
+      const value = await readers[kind]();
+      const ms = performance.now() - started;
+      const used = process.cpuUsage(cpu);
+      const statements = capturedStatements.length;
+      capturedStatements = null;
+      expect(value).toEqual(expected);
+      if (round >= 0)
+        samples[kind]!.push({ ms, cpuMs: (used.user + used.system) / 1000, statements });
+    }
+  }
+  const median = (values: number[]) => values.sort((a, b) => a - b)[Math.floor(values.length / 2)];
+  console.log(
+    JSON.stringify({
+      catalogScopeBenchmark: Object.fromEntries(
+        Object.entries(samples).map(([kind, rows]) => [
+          kind,
+          {
+            samples: rows.length,
+            medianMs: median(rows.map((row) => row.ms)),
+            medianCpuMs: median(rows.map((row) => row.cpuMs)),
+            statements: [...new Set(rows.map((row) => row.statements))],
+          },
+        ]),
+      ),
+    }),
+  );
 });
 
 test("workspace catalog settings expose the same active and retained custom models", async () => {
@@ -338,9 +544,9 @@ test("workspace catalog settings expose the same active and retained custom mode
     retainedWorkspaceAnthropic,
   ])
     expect(activeIds.has(id)).toBe(false);
-  // Deployment-default (code) catalog: workspace custom models, organization
-  // catalog and workspace connection metadata — one transaction per family.
-  expect(activeTransactions).toBe(3);
+  // Deployment-default (code) catalog: all three public metadata families
+  // share one scope, independent of provider discovery.
+  expect(activeTransactions).toBe(1);
 
   const retained = await resolveWorkspaceCatalogSettings(client.db, settings, {
     ...scope,
@@ -376,6 +582,72 @@ test("workspace catalog settings expose the same active and retained custom mode
       `${claudeProviderId("claude_subscription", "workspace")}/fixture/claude_subscription-a`,
     ),
   ).toBe(false);
+});
+
+test("repeated session models read each retained Claude model only once per response", async () => {
+  const models = CLAUDE_CONNECTION_KINDS.flatMap((kind) => [
+    `${claudeProviderId(kind)}/fixture/${kind}-org-retired`,
+    `${claudeProviderId(kind, "workspace")}/fixture/${kind}-retired`,
+  ]);
+  const [single, singleTransactions] = await transactionsDuring(() =>
+    resolveWorkspaceCatalogSettings(client.db, settings, {
+      ...scope,
+      retainedProductModelIds: models,
+    }),
+  );
+  const started = performance.now();
+  capturedStatements = [];
+  const [repeated, repeatedTransactions] = await transactionsDuring(() =>
+    resolveWorkspaceCatalogSettings(client.db, settings, {
+      ...scope,
+      // A response page can contain many sessions using the same model.
+      // The singular compatibility field must not add another read either.
+      retainedProductModelIds: Array.from(
+        { length: 50 },
+        (_, index) => models[index % models.length],
+      ),
+      retainedProductModelId: models[0],
+    }),
+  );
+  const statements = capturedStatements;
+  capturedStatements = null;
+  const retainedReads = statements.filter(
+    (query) =>
+      /from "(?:organization_model_provider_custom_models|workspace_gateway_custom_models)"/.test(
+        query,
+      ) &&
+      query.includes('"upstream_model_id" =') &&
+      query.includes("limit"),
+  );
+  console.log(
+    JSON.stringify({
+      retainedModelBudget: {
+        singleTransactions,
+        repeatedTransactions,
+        statements: statements.length,
+        retainedReads: retainedReads.length,
+        elapsedMs: performance.now() - started,
+      },
+    }),
+  );
+  expect(JSON.stringify(repeated)).toBe(JSON.stringify(single));
+  expect(singleTransactions).toBe(1 + models.length);
+  expect(repeatedTransactions).toBe(singleTransactions);
+  expect(retainedReads).toHaveLength(models.length);
+
+  // This is input normalization, not a catalog cache. A later request must
+  // observe a retained model's updated metadata through the ordinary read.
+  await shared!.admin`
+    update organization_model_provider_custom_models set label = 'Updated retained model'
+    where account_id = ${scope.accountId} and provider_kind = 'anthropic'
+      and upstream_model_id = 'fixture/anthropic-org-retired'`;
+  const updated = await resolveWorkspaceCatalogSettings(client.db, settings, {
+    ...scope,
+    retainedProductModelIds: [models[0], models[0]],
+  });
+  expect(configuredModels(updated.settings).find((model) => model.id === models[0])?.label).toBe(
+    "Updated retained model",
+  );
 });
 
 const directRestrictions = (restrictions: Record<string, string[] | null>) =>

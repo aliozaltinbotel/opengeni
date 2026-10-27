@@ -7,7 +7,7 @@ import type {
   UpdateMachineOperationPolicyRequest,
   UpdateMachineAgentResponse,
 } from "@opengeni/sdk";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 import { EMPTY_MACHINES, useSharedMachinesList } from "./shared-machines-list";
 import type { MachinesResponse, MachineView, MetricSample } from "../types/machines";
@@ -172,6 +172,11 @@ function swapFailureMessage(t: OpenGeniText, result: SwapActiveSandboxResponse):
       return t("hooks.useMachines.theMachineSOwnerHas");
     case "personal_machine_not_permitted":
       return t("hooks.useMachines.onlyTheMachineSOwner");
+    // Neither is fixed by trying again: say what to do instead.
+    case "workspace_root_unavailable":
+      return t("hooks.useMachines.thatMachineHasntReported");
+    case "invalid_working_directory":
+      return t("hooks.useMachines.thisChatSWorkingFolder");
     default:
       return t("hooks.useMachines.tryAgain");
   }

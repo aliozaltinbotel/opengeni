@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { resolve } from "node:path";
+import type postgres from "postgres";
 import {
   acquireRestrictedRuntimeTestDatabase,
   type RestrictedRuntimeTestDatabase,
-} from "@opengeni/testing";
+} from "@opengeni/testing/shared-pg";
 import { createDb, type DbClient } from "../src/database";
 import {
   assertRuntimeDatabasePosture,
@@ -49,6 +50,31 @@ afterAll(async () => {
 }, 180_000);
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
+
+realTest("readiness inspects both namespaces once without caching posture", async () => {
+  const driver = (client!.db as unknown as { $client: postgres.Sql }).$client;
+  const originalDebug = driver.options.debug;
+  try {
+    // Warm the driver before counting protocol statements.
+    await assertRuntimeDatabasePosture(client!.db, options);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const statements: string[] = [];
+      driver.options.debug = (_connection, query) => statements.push(query);
+      const posture = await assertRuntimeDatabasePosture(client!.db, options);
+      expect(posture.tables.length).toBeGreaterThan(0);
+      expect(posture.privateTables.length).toBeGreaterThan(0);
+      expect(posture.targetRoutines.length).toBeGreaterThan(0);
+      expect(posture.privateRoutines.length).toBeGreaterThan(0);
+      expect(statements).toHaveLength(13);
+      expect(
+        statements.filter((query) => query.includes("row_security_active(c.oid)")),
+      ).toHaveLength(1);
+      expect(statements.filter((query) => query.includes("as trigger_callable"))).toHaveLength(1);
+    }
+  } finally {
+    driver.options.debug = originalDebug;
+  }
+});
 
 realTest(
   "pinned previous inspector AND evaluator accept all current migrations and role provisioning",
@@ -331,6 +357,40 @@ realTest(
       DROP FUNCTION IF EXISTS future_posture_invoker(), opengeni_private.future_posture_invoker(), opengeni_private.future_posture_definer(), opengeni_private.future_posture_trigger();
     `);
     }
+  },
+  180_000,
+);
+
+realTest(
+  "this binary requires the definer and table grants 0947 and 0950 make",
+  async () => {
+    const admin = database!.admin;
+    const current = async () =>
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      );
+    expect(await current()).toEqual([]);
+    try {
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_due_recording_retention_v1(integer)",
+      );
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+      await admin`REVOKE EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) FROM opengeni_app`;
+      expect(await current()).toContain(
+        "runtime role lacks EXECUTE on private routine list_stalled_recording_work_v1(integer)",
+      );
+      await admin`REVOKE DELETE ON TABLE event_ingress_routes FROM opengeni_app`;
+      expect(await current()).toContain(
+        "table event_ingress_routes lacks required runtime privileges: DELETE",
+      );
+    } finally {
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
+      await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
+      await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+    }
+    expect(await current()).toEqual([]);
   },
   180_000,
 );

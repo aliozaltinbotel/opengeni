@@ -63,6 +63,8 @@ describe("session-only entry", () => {
       "@opengeni/sdk/model-picker-order",
       // The new-conversation controller imports only the voice model type.
       "@opengeni/sdk/realtime",
+      // Unsent answers drop Other on a secret approval card: an id-only leaf.
+      "@opengeni/sdk/secret-use-approval",
       // The timeline's task usage-limit stop: a zod-free refusal leaf.
       "@opengeni/sdk/session-usage-limits",
       "react",
@@ -156,7 +158,43 @@ describe("session-only entry", () => {
     expect(reactSources.some((id) => id.endsWith("/src/hooks/tool-output-reads.ts"))).toBe(true);
     // The live stream's head read joins the conversation's fresh detail read.
     expect(reactSources.some((id) => id.endsWith("/src/lib/session-detail-read.ts"))).toBe(true);
-    expect(reactSources.length).toBe(45);
+    // Dependency-free wake detection: the live stream rejoins after a sleep.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/page-wake.ts"))).toBe(true);
+    // Why a message can't start: the pure admission model, its headless hook and the
+    // provider-neutral machine read it uses to offer allowed machines.
+    expect(reactSources.some((id) => id.endsWith("/src/session-admission-model.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-session-start.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-machines.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/shared-machines-list.ts"))).toBe(true);
+    // Dependency-free unsent-answer store the pending-question read prunes.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-draft-store.ts"))).toBe(true);
+    // The startup row projection shared by the web app and embedded conversations.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/session-startup-timeline.tsx"))).toBe(
+      true,
+    );
+    // The projection shows a `tool_invoke` call as the tool it ran, reading its
+    // arguments with the pure tool-argument parser (tree-shaken to that read).
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/invoked-tool.ts"))).toBe(true);
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/parsers.ts"))).toBe(true);
+    // The renderer-free transient-failure rules the composer uses to hold a
+    // send calmly while Opengeni is updating.
+    expect(reactSources.some((id) => id.endsWith("/src/lib/transient-retry.ts"))).toBe(true);
+    // Pure rule for questions another agent answered: the projection folds them into work.
+    expect(reactSources.some((id) => id.endsWith("/src/timeline/agent-work-human-input.ts"))).toBe(
+      true,
+    );
+    // Up-arrow recall of the person's latest waiting prompt.
+    expect(reactSources.some((id) => id.endsWith("/src/hooks/use-queued-prompt-recall.ts"))).toBe(
+      true,
+    );
+    // The draft store asks the pure human-input rules which questions offer Other.
+    expect(reactSources.some((id) => id.endsWith("/src/human-input-model.ts"))).toBe(true);
+    // Pure startup-step titles: an unclassified turn failure is named by the
+    // step it failed at ("Sandbox didn't start") instead of its recorded text.
+    expect(
+      reactSources.some((id) => id.endsWith("/src/timeline/platform-activity-presentation.ts")),
+    ).toBe(true);
+    expect(reactSources.length).toBe(60);
 
     const chunks = result.output.filter((item) => item.type === "chunk");
     expect(chunks).toHaveLength(1);

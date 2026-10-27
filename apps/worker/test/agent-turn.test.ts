@@ -22,6 +22,7 @@ import { createObservability } from "@opengeni/observability";
 import * as opengeniDb from "@opengeni/db";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
   type CodexRequestContext,
@@ -53,6 +54,7 @@ import {
   EmptyCompactionSummaryError,
   SandboxConfigError,
   SandboxExecReadinessError,
+  TurnSandboxCommandCancelledError,
   UNKNOWN_MODEL_FINISH_REASON_CODE,
   UnknownModelFinishReasonError,
   WorkspaceArchiveIntegrityError,
@@ -62,7 +64,7 @@ import {
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { guardedMcpFetch } from "@opengeni/runtime/mcp-network";
-import { testSettings } from "@opengeni/testing";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
@@ -168,7 +170,10 @@ import {
   sandboxLeaseHolderIdForAttempt,
 } from "../src/sandbox-resume";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
-import { attachPendingUpdatesBeforePreparingModelInput } from "../src/activities/agent-turn/stream-attempt";
+import {
+  attachPendingUpdatesBeforePreparingModelInput,
+  prepareHistoryWithStartupPhase,
+} from "../src/activities/agent-turn/stream-attempt";
 import { useNoSessionUsageLimitForFakeDatabases } from "@opengeni/testing/session-usage-limits";
 // Fake databases have no per-task usage limit state.
 useNoSessionUsageLimitForFakeDatabases();
@@ -241,6 +246,107 @@ describe("approval RunState materialization boundary", () => {
     ).text();
     expect(source).not.toMatch(/\bgetLatestRunState\s*\(/);
     expect(source).toContain("Open suffix resume has no interruption rows");
+  });
+});
+
+describe("conversation history startup phase", () => {
+  type Published = Parameters<Parameters<typeof prepareHistoryWithStartupPhase>[0]["publish"]>[0];
+  const recorder = () => {
+    const published: Published[] = [];
+    return {
+      published,
+      publish: async (events: Published) => {
+        published.push(events);
+      },
+    };
+  };
+
+  test("a fast history load publishes nothing", async () => {
+    const { published, publish } = recorder();
+    let prepared = false;
+    await prepareHistoryWithStartupPhase({
+      publish,
+      prepare: async () => {
+        prepared = true;
+      },
+      visibleAfterMs: 50,
+    });
+    await Bun.sleep(80);
+    expect(prepared).toBe(true);
+    expect(published).toEqual([]);
+  });
+
+  test("a slow history load is shown as running, then completed with its full duration", async () => {
+    const { published, publish } = recorder();
+    await prepareHistoryWithStartupPhase({
+      publish,
+      prepare: async () => {
+        await Bun.sleep(80);
+      },
+      visibleAfterMs: 20,
+    });
+    expect(published.map((events) => events.map((event) => event.type))).toEqual([
+      ["turn.startup.phase.started"],
+      ["turn.startup.phase.completed"],
+    ]);
+    expect(published[0]![0]!.payload).toEqual({ phase: "history" });
+    const completed = published[1]![0]!.payload;
+    expect(completed.phase).toBe("history");
+    expect(completed.durationMs).toBeGreaterThanOrEqual(70);
+  });
+
+  test("a slow failing load reports the failed phase and rethrows the original error", async () => {
+    const { published, publish } = recorder();
+    const failure = new Error("storage read failed");
+    await expect(
+      prepareHistoryWithStartupPhase({
+        publish,
+        prepare: async () => {
+          await Bun.sleep(60);
+          throw failure;
+        },
+        visibleAfterMs: 20,
+      }),
+    ).rejects.toBe(failure);
+    expect(published.map((events) => events.map((event) => event.type))).toEqual([
+      ["turn.startup.phase.started"],
+      ["turn.startup.phase.failed"],
+    ]);
+  });
+
+  test("the completion waits for a still-pending start publish", async () => {
+    const order: string[] = [];
+    let releaseStart: () => void = () => undefined;
+    await prepareHistoryWithStartupPhase({
+      publish: async (events) => {
+        const type = events[0]!.type;
+        if (type === "turn.startup.phase.started") {
+          await new Promise<void>((resolve) => {
+            releaseStart = resolve;
+          });
+        }
+        order.push(type);
+      },
+      prepare: async () => {
+        await Bun.sleep(40);
+        setTimeout(() => releaseStart(), 30);
+      },
+      visibleAfterMs: 10,
+    });
+    expect(order).toEqual(["turn.startup.phase.started", "turn.startup.phase.completed"]);
+  });
+
+  test("the first model input of a turn loads through the history phase", async () => {
+    const source = await Bun.file(
+      new URL("../src/activities/agent-turn/stream-attempt.ts", import.meta.url),
+    ).text();
+    const firstPreparation = source.indexOf(
+      "await attachPendingUpdatesBeforePreparingModelInput({",
+    );
+    expect(firstPreparation).toBeGreaterThan(-1);
+    expect(source.indexOf("prepareHistoryWithStartupPhase({", firstPreparation)).toBeGreaterThan(
+      firstPreparation,
+    );
   });
 });
 
@@ -3569,7 +3675,7 @@ describe("lazy sandbox provisioner single-flight", () => {
       "sandboxState.turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>",
     );
     const lazyCredentialAttachAt = establishSource.indexOf(
-      "await attachRunCredentialRenewal(",
+      "attachRunCredentialRenewal(",
       provisionerAt,
     );
     const lazyProvisionerPrefix = establishSource.slice(
@@ -3714,9 +3820,6 @@ describe("lazy sandbox provisioner single-flight", () => {
     ).text();
     expect(toolsSource).toContain("namedSubjectHasLiveWorkspaceAuthority");
     expect(toolsSource).not.toContain("getWorkspaceGrant");
-    expect(toolsSource).toMatch(
-      /resolveGoogleDrivePublicationTarget\(\s*db,\s*\{\s*accountId: input\.accountId,\s*workspaceId: input\.workspaceId\s*\}/,
-    );
   });
 
   test("resuming journaled work starts deferred preparation before joining it", async () => {
@@ -3960,6 +4063,19 @@ describe("lazy sandbox provisioner single-flight", () => {
         new SandboxExecReadinessError("modal", "exec_probe_failed", 60_000, 1, "sb-1"),
       ),
     ).toMatchObject({ category: "exec_readiness", code: "exec_probe_failed" });
+    // Provider exec-state loss on the probe is a typed readiness failure (not
+    // "create_failed"), with unchanged retry semantics.
+    expect(
+      classifySandboxLogicalProvisionFailure(
+        "modal",
+        new SandboxExecReadinessError("modal", "exec_probe_lost", 60_000, null, "sb-1"),
+      ),
+    ).toMatchObject({ category: "exec_readiness", code: "exec_probe_lost", retryable: false });
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxExecReadinessError("modal", "exec_probe_lost", 60_000, null, "sb-1"),
+      ),
+    ).toBe(false);
     expect(
       classifySandboxLogicalProvisionFailure(
         "modal",
@@ -4257,6 +4373,26 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(cancellation).toBeInstanceOf(CancelledFailure);
     expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
     expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+  });
+
+  test("a sandbox command cancelled by a worker shutdown recovers like the shutdown itself", () => {
+    // A shutdown during startup file downloads reaches settlement through the
+    // turn tool fence's command error. Its cause is the activity's own
+    // cancellation, so the turn recovers instead of failing as "WORKER_SHUTDOWN".
+    const shutdown = new CancelledFailure("WORKER_SHUTDOWN");
+    const commandCancelled = new TurnSandboxCommandCancelledError(shutdown);
+    expect(commandCancelled.message).toBe("WORKER_SHUTDOWN");
+    expect(turnOperationCancellationFailure(commandCancelled)).toBe(shutdown);
+    expect(isWorkerShutdownCancellation(turnOperationCancellationFailure(commandCancelled))).toBe(
+      true,
+    );
+    // Any other command cancellation keeps its existing settlement.
+    expect(
+      turnOperationCancellationFailure(new TurnSandboxCommandCancelledError(new Error("STEER"))),
+    ).toBeNull();
+    expect(
+      turnOperationCancellationFailure(new TurnSandboxCommandCancelledError("deadline")),
+    ).toBeNull();
   });
 
   test("a committed control outranks a same-checkpoint provider failure", async () => {
@@ -5471,7 +5607,7 @@ describe("transient provider error classifier", () => {
     });
   });
 
-  test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
+  test("a null accepted Codex stream settles terminally; only a checkpoint retries it", async () => {
     const observed = await actualCodexNullBodyFailure();
     expect(observed.calls).toBe(1);
     expect(agentRunFailurePayload(observed.error)).toEqual({
@@ -5480,16 +5616,20 @@ describe("transient provider error classifier", () => {
       retryable: false,
     });
 
+    // A checkpoint request has no tool or output effects to repeat.
     const wrapped = new CompactionProviderResponseError(
       { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
       observed.error,
     );
     expect(agentRunFailurePayload(wrapped)).toEqual({
-      error: "The Codex response stream ended without a terminal response",
-      code: "invalid_sse_terminal",
-      retryable: false,
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: wrapped.message,
+      providerCondition: "unavailable",
     });
-    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
+    expect(wrapped.message).toContain('"code":"invalid_sse_terminal"');
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
   });
 
   test("an actual streamed Codex server failure preserves exact detail during same-turn recovery", async () => {
@@ -6287,7 +6427,7 @@ describe("transient provider error classifier", () => {
       agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
     ).toEqual({
       error:
-        "The session's active conversation history exceeds the worker's safe materialization envelope. Clear the session context before retrying; an oversized history cannot be compacted safely in a serving worker.",
+        "The session's active context is too large to load safely, even with inline images and older items left out, so it cannot be compacted. Clear the session context (/clear in chat, or the clearSessionContext action) to restart the model from an empty context, then send the next message; earlier messages stay in the timeline. Alternatively, start a new session.",
       code: "active_history_too_large",
       retryable: false,
       detail:
@@ -6331,6 +6471,74 @@ describe("transient provider error classifier", () => {
       ),
     ).toBe(false);
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a checkpoint stream that ends early or times out retries the same turn", () => {
+    // Ordinary requests keep these terminal because replay could repeat model
+    // or tool effects. A checkpoint request only summarizes, so it is safe to
+    // send again on the same logical turn.
+    const truncated = Object.assign(new Error("stream ended without a terminal event"), {
+      name: "CodexStreamingTerminalError",
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const timedOut = new CodexResponseTimeoutError("idle_stream", "attempt:2:1:4", true);
+    for (const cause of [truncated, timedOut]) {
+      const wrapped = new CompactionProviderResponseError(
+        compactionProviderFailureDiagnostics(cause),
+        cause,
+      );
+      expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(true);
+      expect(agentRunFailurePayload(wrapped)).toMatchObject({
+        code: "provider_unavailable",
+        retryable: true,
+      });
+      // The same failures on an ordinary model request stay terminal.
+      expect(agentRunFailurePayload(cause, { isCodexTurn: true }).retryable).toBe(false);
+    }
+  });
+
+  test("a retried checkpoint keeps its transport cause, timeout class and request", () => {
+    const truncated = Object.assign(new Error("stream ended without a terminal event"), {
+      name: "CodexStreamingTerminalError",
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+      request_id: "req_checkpoint_sse",
+      headers: new Headers({ [CODEX_TRANSPORT_ERROR_HEADER]: "1" }),
+    });
+    const sse = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(truncated),
+      truncated,
+    );
+    expect(sse.message).toContain('"code":"invalid_sse_terminal"');
+    expect(sse.message).toContain("req_checkpoint_sse");
+    expect(agentRunFailurePayload(sse)).toEqual({
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      detail: sse.message,
+      providerCondition: "unavailable",
+    });
+
+    // The cause's own timeout class, not the wrapper's default.
+    const timedOut = new CodexResponseTimeoutError("idle_stream", "attempt:2:1:4", true);
+    const timeout = new CompactionProviderResponseError(
+      compactionProviderFailureDiagnostics(timedOut),
+      timedOut,
+    );
+    expect(agentRunFailurePayload(timeout)).toEqual({
+      error: "The context checkpoint request did not finish. The same turn will retry it.",
+      code: "provider_unavailable",
+      retryable: true,
+      timeoutClass: "idle_stream",
+      responseObserved: true,
+      requestId: "attempt:2:1:4",
+      detail: timeout.message,
+      providerCondition: "unresponsive",
+    });
   });
 
   test("a Codex encrypted-content rejection of the compaction request recovers through artifact invalidation", () => {

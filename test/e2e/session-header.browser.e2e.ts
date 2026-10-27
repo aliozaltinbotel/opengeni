@@ -14,17 +14,11 @@ import {
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import {
-  acquireSharedTestDatabase,
-  freePort,
-  MemoryEventBus,
-  runCommand,
-  startProcess,
-  testSettings,
-  waitFor,
-  type SharedTestDatabase,
-  type StartedProcess,
-} from "@opengeni/testing";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import { freePort } from "@opengeni/testing/compose";
+import { MemoryEventBus } from "@opengeni/testing/fakes";
+import { runCommand, startProcess, waitFor, type StartedProcess } from "@opengeni/testing/process";
+import { testSettings } from "@opengeni/testing/settings";
 import {
   chromium,
   type Browser,
@@ -252,9 +246,15 @@ describe("responsive production session header", () => {
       const page = await context.newPage();
       await page.goto(`${webBaseUrl}/workspaces/${fixture.workspaceId}/sessions/${session.id}`);
       const header = page.locator("header");
-      const waitStatus = page.locator("[data-session-wait-status]");
+      // The wait is the first chip of the status row above the composer.
+      const waitStatus = page.getByTestId("session-chrome-wait");
       await waitStatus.getByText("Waiting for CI to finish", { exact: true }).waitFor();
-      expect(await waitStatus.innerText()).toContain("Checks again at");
+      expect(await waitStatus.getAttribute("aria-label")).toMatch(
+        /^Waiting for CI to finish\. Checks again at /,
+      );
+      await waitStatus.click();
+      const waitPanel = page.locator('[data-og-session-chrome-panel="wait"]');
+      expect(await waitPanel.innerText()).toContain("resumes sooner if an update arrives");
       expect(await header.locator("[data-session-wait-badge]").innerText()).toBe("Waiting");
       const waitLabel = page
         .locator(`a[href="/workspaces/${fixture.workspaceId}/sessions/${session.id}"]`)
@@ -272,9 +272,12 @@ describe("responsive production session header", () => {
         disposition: "timeout",
       });
       await publishDurableSessionEvents(bus, fixture.workspaceId, session.id, settled.events);
-      await header.getByText("Queued", { exact: true }).waitFor();
+      // The visible queued status badge reads "Starting" while the turn awaits a
+      // worker (#2979), and its startup feedback lives in the conversation (#3530).
+      await header.locator('[data-status="queued"]:visible', { hasText: /^Starting$/ }).waitFor();
       await waitStatus.waitFor({ state: "detached" });
-      await page.locator("[data-session-dispatch-wait]").waitFor();
+      await header.locator("[data-session-wait-badge]").waitFor({ state: "detached" });
+      await page.locator(".og-genie-loading").waitFor();
       expect(await header.innerText()).not.toContain("Waiting ·");
       expect(await header.innerText()).not.toContain("Idle");
     } finally {
@@ -316,11 +319,16 @@ describe("responsive production session header", () => {
       try {
         const page = await context.newPage();
         await page.goto(sessionUrl({ ...fixture, sessionId: session.id }));
-        const status = page.locator("[data-session-dispatch-wait]");
+        // Startup feedback for a queued turn lives in the conversation (#3530):
+        // a failed dispatch says so at once, and its details carry the error.
+        const startup = page.locator(".og-genie-loading");
+        await startup.getByText("Unable to start yet. Your messages are saved.").first().waitFor();
+        await startup.getByRole("button", { name: /Behind the magic/ }).click();
+        const status = page.locator("[data-og-startup-dispatch-details]");
         await status.waitFor();
         expect(await status.innerText()).toContain("No agent turn is running");
-        await status.getByText("Start details", { exact: true }).click();
         expect(await status.innerText()).toContain("Control worker unavailable");
+        expect(await startup.locator(".animate-spin").count()).toBe(0);
         expect(await status.locator(".animate-spin").count()).toBe(0);
         expect(await status.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
           true,

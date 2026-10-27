@@ -49,6 +49,7 @@ function facts(
       reusableSessionId: chatId,
       updatedAt: edited,
       schedule: hourly,
+      events: null,
       ...overrides.task,
     },
     review: overrides.review ?? null,
@@ -114,6 +115,29 @@ describe("decideScheduledTaskBlocker", () => {
       state: "paused",
       reason: "machine_enrollment_inactive",
     });
+  });
+
+  test("an owner whose saved access changed pauses at once and is told to save it again", () => {
+    // The admission fence refuses the run, or the claim fence fails it after
+    // admission; both hold for every later run of the same saved revision.
+    for (const error of [
+      "scheduled_run_authority_proof_rejected",
+      "scheduled_causal_membership_changed",
+    ]) {
+      const refused = run("failed", { error });
+      const decision = decideScheduledTaskBlocker(facts([run("succeeded"), refused]));
+      expect(decision).toMatchObject({ kind: "block", state: "paused", reason: error });
+      if (decision.kind !== "block") throw new Error("expected a block");
+      expect(decision.message).toContain("The access it was saved with has changed");
+      expect(decision.message).toContain("open it and save it");
+    }
+    const refusal = run("failed", {
+      error: "scheduled_authority_unavailable",
+      admissionRefusal: { reason: "scheduled_authority_unavailable", retryable: false },
+    });
+    const decision = decideScheduledTaskBlocker(facts([refusal]));
+    if (decision.kind !== "block") throw new Error("expected a block");
+    expect(decision.message).toContain("open it and save it");
   });
 
   test("one ended chat does not block a schedule that starts a new chat each run", () => {
@@ -213,6 +237,35 @@ describe("decideScheduledTaskBlocker", () => {
       kind: "block",
       state: "notified",
       reviewedRunId: failed.id,
+    });
+  });
+
+  test("event triggers decide whether runs follow: repeating ones keep going, a finished once-automation stops", () => {
+    const failed = run("failed", { error: "scheduled_turn_failed" });
+    const manual = { type: "manual" };
+    const spent = { type: "once", runAt: edited.toISOString(), timeZone: "UTC" };
+    const message = (schedule: unknown, events: ScheduledTaskBlockerFacts["task"]["events"]) => {
+      const decision = decideScheduledTaskBlocker(facts([failed], { task: { schedule, events } }));
+      if (decision.kind !== "block") throw new Error("expected a block");
+      return decision.message;
+    };
+    expect(message(manual, { once: true, completed: true })).toBe(
+      "The last scheduled run failed or was skipped. Open the latest run to see why. It has no more runs scheduled.",
+    );
+    expect(message(daily, { once: true, completed: true })).toContain(
+      "It has no more runs scheduled.",
+    );
+    expect(message(manual, { once: false, completed: false })).toContain(
+      "The schedule keeps trying.",
+    );
+    expect(message(spent, { once: false, completed: false })).toContain(
+      "The schedule keeps trying.",
+    );
+    expect(message(spent, null)).toContain("It has no more runs scheduled.");
+    // Repeating triggers keep a frequent schedule's tolerance for a short streak.
+    expect(scheduledTaskBlockerCadence(hourly, failed, { once: false, completed: false })).toEqual({
+      streak: SCHEDULED_TASK_BLOCKER_STREAK,
+      laterRuns: true,
     });
   });
 

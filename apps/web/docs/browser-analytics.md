@@ -54,7 +54,7 @@ once that lookup has finished.
 `/workspaces/<id>/`: `sessions`, `agents`, `variable-sets`, `environments`,
 `rigs`, `machines`, `insights`, `priority`, `plugins`, `capabilities`,
 `schedules`, `documents`, `memory`, `state`, `artifacts`, `settings`,
-`organization`, `files`, `playground`, `read-only-chats`, and `inbox`; a session page also carries
+`organization`, `files`, `playground`, `read-only-chats`, `inbox`, and `sites`; a session page also carries
 `session_id`.
 `environments`, `capabilities`, `agents` and `priority` are legacy redirects, so they appear only
 when an old link or bookmark opens them. Pages outside a workspace are matched by
@@ -121,7 +121,7 @@ vocabulary and UUIDs.
   `bitbucket`, `google`, `microsoft`, `linear`, `atlassian`, `notion`,
   `supabase`, `datadog`, `posthog`, `openai`, `x`, `other`, and the model classes
   `codex`, `supergrok`, `vercel_gateway`, `openrouter`, `anthropic`,
-  `claude_subscription`, `opper`. Domains and MCP hosts map like the server function
+  `claude_subscription`, `opper`, `azure_openai`. Domains and MCP hosts map like the server function
   (`mcp.linear.app` is `linear`); custom MCP servers, custom APIs, Fiken and
   Reddit are `other`.
 - `method`: `oauth`, `api_key`, `device_code`, `app_install`, `custom`.
@@ -137,7 +137,8 @@ used by the Plugins page and the in-chat capability card), the Plugins page MCP
 OAuth dialog, custom MCP servers and custom APIs, in-chat reconnect redirects,
 personal GitHub sign-in, Codex and SuperGrok (workspace and organization),
 Vercel AI Gateway, OpenRouter, Opper, Anthropic and Claude-subscription keys, Claude
-subscription sign-in, organization model providers, and the onboarding model
+subscription sign-in, organization model providers (including organization
+Azure OpenAI), and the onboarding model
 step. The inline OAuth card in a session (`SessionMcpCapabilityCard`) is not
 covered because it lives in `@opengeni/react`.
 
@@ -363,7 +364,14 @@ and retried once when the browser fires `online`; it is never retried twice.
 
 `chunk_load` counts documents that failed to load a lazy module or stylesheet,
 which after a deploy usually means the tab still references replaced hashed
-assets. The signal is Vite's `vite:preloadError` event
+assets. The production server keeps serving the hashed assets of the previous
+web builds the Helm chart carries (`web.previousAssets`), and ingress-nginx
+retries an asset 404 on another pod during a rollout
+(`ingress.webAssetsIngress`; see "Web assets across rollouts" in
+`docs/deployment.md`). A `chunk_load` after a deploy then means a tab older
+than every carried build, or a deployment that carries nothing, such as an
+offline `helm template` render without `web.previousAssets.images`. The signal
+is Vite's `vite:preloadError` event
 (`installVitePreloadErrorReporting`), which fires before the recovery listener
 in `vite-preload-recovery.ts` decides whether to reload, so it counts both tabs
 that recover through the automatic one-time reload and tabs that cannot.

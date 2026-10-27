@@ -1,22 +1,3 @@
-/**
- * Per-channel and per-DM Slack workspace routing.
- *
- * Routing is decided BEFORE any agent runs, from durable facts only, so it can
- * never be a model judgement. The resolver is pure with respect to the database
- * reads it is handed: it returns a decision, and the caller persists and acts on
- * it.
- *
- * Two rules are load-bearing and easy to break by accident:
- *
- *   A mapped thread keeps the workspace it was created in, unconditionally,
- *   including after the channel has been re-pointed. Otherwise a live
- *   conversation would silently change tenants mid-thread.
- *
- *   A subject who lacks access to the routed workspace is NEVER quietly served
- *   from another workspace they happen to belong to. Every failure is explicit
- *   and creates no session.
- */
-import type { AccessGrant } from "@opengeni/contracts";
 import type {
   SlackChannelRoute,
   SlackInteractionInboxEntry,
@@ -160,6 +141,31 @@ export type SlackRouteInputs = {
   /** Whether the first-use picker exists yet. Until it does, ambiguity keeps home. */
   askEnabled: boolean;
 };
+
+/**
+ * What a Slack message may route to once the organization turned Personal
+ * workspaces off: no Personal candidate, and a remembered DM answer that
+ * points at one is forgotten, so the DM goes where a channel message would.
+ * Mapped threads are decided before this and keep their workspace.
+ */
+export function slackRouteChoicesForPersonalWorkspaces(input: {
+  personalWorkspacesEnabled: boolean;
+  candidates: readonly SlackRoutableWorkspace[];
+  dmRoute: SlackUserDmRoute | null;
+}): { candidates: SlackRoutableWorkspace[]; dmRoute: SlackUserDmRoute | null } {
+  if (input.personalWorkspacesEnabled) {
+    return { candidates: [...input.candidates], dmRoute: input.dmRoute };
+  }
+  const personal = new Set(
+    input.candidates
+      .filter((candidate) => candidate.personal)
+      .map((candidate) => candidate.workspaceId),
+  );
+  return {
+    candidates: input.candidates.filter((candidate) => !candidate.personal),
+    dmRoute: input.dmRoute && personal.has(input.dmRoute.targetWorkspaceId) ? null : input.dmRoute,
+  };
+}
 
 function labelFor(
   candidates: readonly SlackRoutableWorkspace[],
@@ -331,7 +337,3 @@ export function slackRoutedRequestText(
   const parsed = parseSlackWorkspacePrefix(rest);
   return parsed ? `${lead}${parsed.remainder}` : text;
 }
-
-export type SlackRouteAuthorization =
-  | { kind: "authorized"; grant: AccessGrant; tenancy: SlackRouteTenancy; label: string | null }
-  | { kind: "denied"; reason: "no_access_to_route"; tenancy: SlackRouteTenancy };

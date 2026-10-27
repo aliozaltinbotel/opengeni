@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/react",
-  "version": "4.2.0",
+  "version": "5.3.1",
   "description": "React hooks and styled components for Opengeni: live session streaming, chat composer, message timeline, session status, and fleet views — token-themed (CSS variables), dark-first, built on Tailwind v4 + Radix + Motion.",
   "license": "Apache-2.0",
   "repository": {
@@ -40,6 +40,10 @@
     "./native-previews": {
       "types": "./src/native-previews.ts",
       "default": "./src/native-previews.ts"
+    },
+    "./markdown-math": {
+      "types": "./src/markdown-math.ts",
+      "default": "./src/markdown-math.ts"
     },
     "./connect.css": {
       "types": "./styles/connect.d.ts",
@@ -136,6 +140,18 @@
       "types": "./src/realtime.ts",
       "default": "./src/realtime.ts"
     },
+    "./recordings": {
+      "types": "./src/recordings.ts",
+      "default": "./src/recordings.ts"
+    },
+    "./meetings": {
+      "types": "./src/meetings.ts",
+      "default": "./src/meetings.ts"
+    },
+    "./meetings-recorder": {
+      "types": "./src/meetings-recorder.ts",
+      "default": "./src/meetings-recorder.ts"
+    },
     "./artifacts": {
       "types": "./src/artifacts.ts",
       "default": "./src/artifacts.ts"
@@ -143,6 +159,10 @@
     "./artifacts/spreadsheet": {
       "types": "./src/artifacts-spreadsheet.ts",
       "default": "./src/artifacts-spreadsheet.ts"
+    },
+    "./automations": {
+      "types": "./src/automations.ts",
+      "default": "./src/automations.ts"
     },
     "./artifacts/document": {
       "types": "./src/artifacts-document.ts",
@@ -189,6 +209,10 @@
       "types": "./src/testing/session-scenarios.ts",
       "default": "./src/testing/session-scenarios.ts"
     },
+    "./testing/meetings": {
+      "types": "./src/testing/meetings-fixture.ts",
+      "default": "./src/testing/meetings-fixture.ts"
+    },
     "./timeline-model": {
       "types": "./src/timeline-model.ts",
       "default": "./src/timeline-model.ts"
@@ -217,6 +241,10 @@
       "types": "./src/session-list-model.ts",
       "default": "./src/session-list-model.ts"
     },
+    "./session-admin-access-model": {
+      "types": "./src/session-admin-access-model.ts",
+      "default": "./src/session-admin-access-model.ts"
+    },
     "./model-mark-paths": {
       "types": "./src/model-mark-paths.ts",
       "default": "./src/model-mark-paths.ts"
@@ -228,6 +256,14 @@
     "./session-attention-model": {
       "types": "./src/session-attention-model.ts",
       "default": "./src/session-attention-model.ts"
+    },
+    "./in-chat-connect-model": {
+      "types": "./src/in-chat-connect-model.ts",
+      "default": "./src/in-chat-connect-model.ts"
+    },
+    "./approval-review-model": {
+      "types": "./src/approval-review-model.ts",
+      "default": "./src/approval-review-model.ts"
     }
   },
   "publishConfig": {
@@ -258,12 +294,15 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dequal": "2.0.3",
+    "katex": "^0.16.47",
     "lucide-react": "^1.8.0",
     "motion": "^12.0.0",
     "radix-ui": "^1.4.3",
     "react-markdown": "^10.1.0",
     "react-resizable-panels": "^4.11.2",
+    "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.5.0",
     "thinking-orbs": "^0.3.1",
@@ -298,7 +337,9 @@
     "postcss": "8.5.26",
     "postcss-selector-parser": "7.1.0",
     "react": "^19.2.5",
+    "react-18": "npm:react@18.3.1",
     "react-dom": "^19.2.5",
+    "react-dom-18": "npm:react-dom@18.3.1",
     "tailwindcss": "4.2.4",
     "tsup": "^8.5.0",
     "typescript": "7.0.2",
@@ -312,7 +353,7 @@
     "@codemirror/lang-markdown": "^6.0.0",
     "@codemirror/lang-python": "^6.0.0",
     "@novnc/novnc": "^1.7.0",
-    "@opengeni/artifact-tool": "^4.0.0",
+    "@opengeni/artifact-tool": "^5.0.0",
     "@pierre/diffs": "^1.2.11",
     "@uiw/react-codemirror": "^4.23.0",
     "@xterm/addon-fit": "^0.11.0",
