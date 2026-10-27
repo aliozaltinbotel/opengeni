@@ -1192,7 +1192,20 @@ type OrganizationSessionPolicy = {
   `bootstrapWorkspace({ ..., governedSessionPolicy: true })` stores it in the
   bootstrap transaction. The worker, which has no port, treats a missing row as
   stock; because every governed entry stores the row first, a governed
-  organization's work never reaches the worker without one. Nothing is stored
+  organization's work never reaches the worker without one.
+- **Organizations governed before 1018.** Whether a host governs an
+  organization is the port's answer at run time, not a fact in the database,
+  so migration 1018 backfills the governed default only for organizations the
+  database shows governed (those that already ran a host command). When the API
+  starts with its port bound it stores the default for every other
+  organization the port governs that has none
+  (`storeGovernedOrganizationSessionPolicyDefaults`; idempotent, paged). **So
+  schedules and triggers a governed organization saved before 1018 start
+  running under the governed default after the migration and that startup
+  pass**: no attachments (a saved file reference makes the run
+  `attachments_disabled`) and no generic tool families. A worker that fires one
+  in the seconds between the migration and the API's startup pass still runs
+  it as stock; a drained cutover has no such window. Nothing is stored
   for an ungoverned organization, and without a bound port the API reads
   nothing, so stock deployments are unchanged.
 - **Who may write the row.** The runtime may read it and insert only the
@@ -1230,8 +1243,10 @@ type OrganizationSessionPolicy = {
   - `POST /v1/workspaces/:ws/knowledge/drops` (text or file);
   - a person's `sessions/:id/fs/write`, `fs/move` and `fs/mkdir`;
   - a schedule or automation trigger whose template attaches a file, at create,
-    update, resume and run. When the worker fires one saved before attachments
-    were turned off, it refuses it (`attachments_disabled`).
+    update, resume and run (REST `trigger`, first-party MCP
+    `scheduled_tasks_trigger`), and a manual automation event or webhook that
+    would start such a trigger. When the worker fires one saved before
+    attachments were turned off, it refuses it (`attachments_disabled`).
 
   The workspace-scoped `GET /v1/config/client?workspaceId=` reports
   `fileUploads.enabled: false`, and the console hides its attach controls for
@@ -1246,7 +1261,8 @@ type OrganizationSessionPolicy = {
   first-party MCP server never registers a denied tool whatever the token's
   signed selection names, and these routes answer `403` with `details.code
   SESSION_TOOL_FAMILY_DENIED` and `details.family`, after authenticating the
-  caller: `/codemode/*`; `browser-sessions` and `computer-sessions`
+  caller (these guards only read the policy, so an unauthenticated or refused
+  request writes nothing): `/codemode/*`; `browser-sessions` and `computer-sessions`
   (mutations); `machines/:id/screen-control`; `enrollments/token` and
   `enrollments/device/approve` (a Connected Machine is both `shell` and
   `computerUse`); `sessions/:id/terminal/*`, `sessions/:id/fs/*` and
