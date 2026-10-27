@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { readFile } from "node:fs/promises";
 import {
   EMPTY_HOST_EXTENSION,
   type HostExtension,
@@ -90,6 +91,36 @@ describe("host extension registry", () => {
   ])("refuses the malformed route path %p", (path) => {
     expectInvalid(extensionWith({ routes: [route(path)] }), "routes[0].path");
   });
+
+  test("refuses a route under every first segment App.tsx registers below the workspace", async () => {
+    const app = await readFile(new URL("../App.tsx", import.meta.url), "utf8");
+    const parentCount = app.split("getParentRoute: () => workspaceRoute,").length - 1;
+    // Each workspace child's path, read up to the end of its own createRoute call.
+    const paths = Array.from(
+      app.matchAll(
+        /getParentRoute: \(\) => workspaceRoute,((?:(?!createRoute\()[\s\S])*?)\bpath: "([^"]+)"/g,
+      ),
+      (match) => match[2] ?? "",
+    );
+    expect(paths.length).toBe(parentCount);
+    const segments = new Set(
+      paths.map((path) => path.split("/")[0] ?? "").filter((segment) => segment !== ""),
+    );
+    expect(segments.size).toBeGreaterThanOrEqual(27);
+    for (const segment of segments) {
+      expectInvalid(
+        extensionWith({ routes: [route(`${segment}/extension-page`)] }),
+        "routes[0].path",
+      );
+    }
+  });
+
+  test.each(["reports/$workspaceId", "reports/$itemId/lines/$itemId"])(
+    "refuses the route path %p that redeclares a param",
+    (path) => {
+      expectInvalid(extensionWith({ routes: [route(path)] }), "routes[0].path");
+    },
+  );
 
   test("refuses two routes with one path", () => {
     expectInvalid(

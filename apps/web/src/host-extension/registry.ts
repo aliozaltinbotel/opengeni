@@ -13,7 +13,11 @@ import {
 /** Lowercase segments with optional `$param` segments, relative to the workspace. */
 const ROUTE_PATH = /^[a-z][a-z0-9-]*(\/(\$?[a-zA-Z][a-zA-Z0-9]*|[a-z0-9-]+))*$/;
 
-/** First path segments the native console owns under workspaces/$workspaceId/. */
+/**
+ * First path segments the native console owns under workspaces/$workspaceId/,
+ * including redirect-only ones. Kept static (App.tsx's routes are built after
+ * this module runs); registry.test.ts fails when App.tsx adds one not listed.
+ */
 const NATIVE_SEGMENTS: ReadonlySet<string> = new Set([
   ...NATIVE_DESTINATIONS,
   "sessions",
@@ -23,7 +27,17 @@ const NATIVE_SEGMENTS: ReadonlySet<string> = new Set([
   "inbox",
   "capabilities",
   "state",
+  "agent",
+  "agents",
+  "priority",
+  "schedules",
+  "documents",
+  "memory",
+  "sites",
 ]);
+
+/** The workspace route's own param, which an extension path must not redeclare. */
+const WORKSPACE_PARAM = "$workspaceId";
 
 export class HostExtensionInvalidError extends Error {
   readonly code = "HOST_EXTENSION_INVALID";
@@ -77,6 +91,20 @@ function list(value: unknown, field: string): readonly unknown[] {
   return Array.isArray(value) ? value : fail(field, "must be an array");
 }
 
+function checkRoutePath(path: string, field: string): void {
+  if (!ROUTE_PATH.test(path)) fail(field, `"${path}" is not a lowercase relative route path`);
+  const segments = path.split("/");
+  const first = segments[0] ?? "";
+  if (NATIVE_SEGMENTS.has(first))
+    fail(field, `"${path}" collides with the native "${first}" route`);
+  const params = new Set<string>();
+  for (const param of segments.filter((segment) => segment.startsWith("$"))) {
+    if (param === WORKSPACE_PARAM) fail(field, `"${path}" redeclares the workspace's ${param}`);
+    if (params.has(param)) fail(field, `"${path}" declares ${param} twice`);
+    params.add(param);
+  }
+}
+
 function routePaths(value: unknown): ReadonlySet<string> {
   const paths = new Set<string>();
   list(value, "routes").forEach((entry, index) => {
@@ -84,11 +112,7 @@ function routePaths(value: unknown): ReadonlySet<string> {
     const route = record(entry, field);
     const path =
       typeof route.path === "string" ? route.path : fail(`${field}.path`, "must be a string");
-    if (!ROUTE_PATH.test(path))
-      fail(`${field}.path`, `"${path}" is not a lowercase relative route path`);
-    const segment = path.split("/")[0] ?? "";
-    if (NATIVE_SEGMENTS.has(segment))
-      fail(`${field}.path`, `"${path}" collides with the native "${segment}" route`);
+    checkRoutePath(path, `${field}.path`);
     if (paths.has(path)) fail(`${field}.path`, `"${path}" is registered twice`);
     if (typeof route.load !== "function") fail(`${field}.load`, "must be a function");
     if (route.mode !== undefined && route.mode !== "rail" && route.mode !== "settings") {
