@@ -1374,6 +1374,7 @@ export * from "./insights-usage-bundle";
 export * from "./insights-unified";
 export * from "./organization-membership-lifecycle";
 export * from "./organization-host-command-attributions";
+export * from "./organization-host-identity-lookup";
 import {
   assertActiveManagedHumanOrganizationMembership,
   getOrganizationAdministrationOverview,

@@ -11,8 +11,11 @@ import {
   HOST_COMMAND_OPERATION_CONFLICT,
   HOST_COMMAND_PERMISSION_REQUIRED,
   HOST_COMMAND_SERVICE_TOKEN_REQUIRED,
+  HOST_IDENTITY_NOT_IN_ORGANIZATION,
   HostChangeOrganizationMemberRoleRequest,
   HostInviteOrganizationMemberRequest,
+  HostLookupOrganizationIdentityRequest,
+  HostOrganizationIdentity,
   HostOrganizationMemberLifecycleRequest,
   HostReactivateOrganizationMemberRequest,
   HostRevokeOrganizationInvitationRequest,
@@ -22,11 +25,17 @@ import {
   type ActingExternalUser,
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
-import { applyGovernedOrganizationPolicy, hasPermission, type ApiRouteDeps } from "@opengeni/core";
+import {
+  applyGovernedOrganizationPolicy,
+  hasPermission,
+  organizationGovernedByHost,
+  type ApiRouteDeps,
+} from "@opengeni/core";
 import {
   createOrganizationInvitation,
   getOrganizationInvitationForAdministration,
   getWorkspace,
+  lookupOrganizationHostIdentity,
   putOrganizationWorkspaceMember,
   recordOrganizationHostCommandAttribution,
   revokeOrganizationInvitation,
@@ -63,7 +72,8 @@ type HostCommandAuthority = {
 };
 
 /**
- * Host commands for organizations an embedding host governs. Each one runs the
+ * Host commands for organizations an embedding host governs, and the host's
+ * identity lookup. Each command runs the
  * same membership, invitation or workspace-access operation as the native
  * route, so its receipt and lifecycle event are the native ones; the acting
  * external user is recorded next to them under the same operation id.
@@ -279,6 +289,39 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       rethrowMembershipError(error);
     }
   });
+
+  // A read: no governed mutation to decide and no attribution to record.
+  app.post(`${base}/identities/lookup`, async (context) => {
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
+    const { identityId } = await parseCommand(
+      context,
+      HostLookupOrganizationIdentityRequest,
+      "invalid host identity lookup",
+    );
+    let identity: HostOrganizationIdentity | null;
+    try {
+      identity = await lookupOrganizationHostIdentity(deps.db, {
+        organizationId: authority.organizationId,
+        actorSubjectId: authority.actorSubjectId,
+        identityId: identityId.toLowerCase(),
+      });
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+    // An identity elsewhere and an unknown one get this same answer.
+    if (!identity)
+      throw new ApiHttpError(404, {
+        code: "not_found",
+        message: "This identity is not in this organization.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: HOST_IDENTITY_NOT_IN_ORGANIZATION },
+      });
+    context.header("cache-control", "no-store");
+    return context.json(HostOrganizationIdentity.parse(identity));
+  });
 }
 
 async function transitionMember(
@@ -324,6 +367,37 @@ async function requireHostCommand(
   deps: ApiRouteDeps,
   mutation: GovernedMutation,
 ): Promise<HostCommandAuthority> {
+  const authority = await requireHostService(context, deps);
+  const { organizationId } = authority;
+  const decision = await organizationGovernanceDecision(deps, {
+    organizationId,
+    mutation,
+    via: "host",
+  });
+  if (decision === "ungoverned") throw organizationNotHostGoverned();
+  if (decision === "refuse") throw organizationGovernedByHostError(mutation);
+  // A host provisions its organizations out of band, so its first command is
+  // where the fork learns this one is governed: no Personal workspaces there.
+  try {
+    await applyGovernedOrganizationPolicy(deps, {
+      organizationId,
+      actorSubjectId: authority.actorSubjectId,
+    });
+  } catch (error) {
+    rethrowMembershipError(error);
+  }
+  return authority;
+}
+
+/**
+ * A service token for the addressed organization, for one of its workspaces,
+ * that may manage members. Whether the host governs the organization is the
+ * caller's check.
+ */
+async function requireHostService(
+  context: Context,
+  deps: ApiRouteDeps,
+): Promise<HostCommandAuthority> {
   const organizationId = parsePathId(context, "organizationId");
   const authorization = context.req.header("authorization");
   const token = authorization?.startsWith("Bearer ")
@@ -352,30 +426,6 @@ async function requireHostCommand(
       outcomeUnknown: false,
       details: { code: HOST_COMMAND_PERMISSION_REQUIRED },
     });
-  const decision = await organizationGovernanceDecision(deps, {
-    organizationId,
-    mutation,
-    via: "host",
-  });
-  if (decision === "ungoverned")
-    throw new ApiHttpError(403, {
-      code: "forbidden",
-      message: "This organization is not managed by a host application.",
-      retryable: false,
-      outcomeUnknown: false,
-      details: { code: ORGANIZATION_NOT_HOST_GOVERNED },
-    });
-  if (decision === "refuse") throw organizationGovernedByHostError(mutation);
-  // A host provisions its organizations out of band, so its first command is
-  // where the fork learns this one is governed: no Personal workspaces there.
-  try {
-    await applyGovernedOrganizationPolicy(deps, {
-      organizationId,
-      actorSubjectId: payload.subjectId,
-    });
-  } catch (error) {
-    rethrowMembershipError(error);
-  }
   return {
     organizationId,
     actorSubjectId: payload.subjectId,
@@ -413,9 +463,10 @@ async function recordAttribution(
 async function parseCommand<Schema extends z.ZodTypeAny>(
   context: Context,
   schema: Schema,
+  invalidMessage = "invalid host command",
 ): Promise<z.infer<Schema>> {
   const parsed = schema.safeParse(await readRequestJson(context));
-  if (!parsed.success) throw new HTTPException(422, { message: "invalid host command" });
+  if (!parsed.success) throw new HTTPException(422, { message: invalidMessage });
   return parsed.data;
 }
 
@@ -423,6 +474,16 @@ function parsePathId(context: Context, name: string): string {
   const parsed = Uuid.safeParse(context.req.param(name));
   if (!parsed.success) throw new HTTPException(422, { message: `invalid ${name}` });
   return parsed.data.toLowerCase();
+}
+
+function organizationNotHostGoverned(): ApiHttpError {
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: "This organization is not managed by a host application.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: ORGANIZATION_NOT_HOST_GOVERNED },
+  });
 }
 
 function serviceTokenRequired(): ApiHttpError {

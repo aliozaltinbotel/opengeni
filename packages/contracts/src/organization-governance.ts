@@ -1,6 +1,7 @@
 import { z } from "zod";
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { CanonicalHumanIdentityStatus } from "./canonical-human-identities";
 import {
   CreateOrganizationInvitationRequest,
   OrganizationMembershipRole,
@@ -91,6 +92,7 @@ export const HOST_COMMAND_PERMISSION_REQUIRED = "HOST_COMMAND_PERMISSION_REQUIRE
 export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT";
 export const GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE =
   "GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE";
+export const HOST_IDENTITY_NOT_IN_ORGANIZATION = "HOST_IDENTITY_NOT_IN_ORGANIZATION";
 
 const encoder = new TextEncoder();
 function boundedOpaqueText(maxBytes: number) {
@@ -196,3 +198,53 @@ export const HostRevokeOrganizationWorkspaceMemberRequest = /* @__PURE__ */ defi
 export type HostRevokeOrganizationWorkspaceMemberRequest = z.infer<
   typeof HostRevokeOrganizationWorkspaceMemberRequest
 >;
+
+/**
+ * Host identity lookup (`POST /v1/host/organizations/:id/identities/lookup`):
+ * `identityId` is a native identity id, the `sub` of a host session token.
+ * A read, so it takes no `actingExternalUser` and writes no attribution.
+ */
+export const HostLookupOrganizationIdentityRequest = /* @__PURE__ */ defineSchema(() =>
+  z.object({ identityId: primitives.uuid }).strict(),
+);
+export type HostLookupOrganizationIdentityRequest = z.infer<
+  typeof HostLookupOrganizationIdentityRequest
+>;
+
+/**
+ * What the organization knows about one native identity that is, or was, its
+ * member (any membership status). An identity with no membership here answers
+ * 404 `HOST_IDENTITY_NOT_IN_ORGANIZATION`, the same as an unknown one.
+ *
+ * - `verifiedEmail`: the sign-in email of the identity's account, or null
+ *   while that email is unverified.
+ * - `activeLoginBinding`: the identity's active login binding, or null when it
+ *   has none in the `active` state (see `identityStatus`). `id` changes when
+ *   another sign-in method becomes the active binding; `revision` increases
+ *   whenever that binding's own state changes (stale, recovery, revoked).
+ * - `acceptedInvitations`: this organization's invitations the identity
+ *   accepted, newest first. `acceptedAt` is the acceptance time: an accepted
+ *   invitation never changes again.
+ */
+export const HostOrganizationIdentity = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      identityStatus: CanonicalHumanIdentityStatus,
+      verifiedEmail: z.string().email().max(320).nullable(),
+      activeLoginBinding: z
+        .object({ id: primitives.uuid, revision: primitives.positiveInteger })
+        .strict()
+        .nullable(),
+      acceptedInvitations: z.array(
+        z
+          .object({
+            id: primitives.uuid,
+            acceptedMembershipId: primitives.uuid,
+            acceptedAt: primitives.dateTime,
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+);
+export type HostOrganizationIdentity = z.infer<typeof HostOrganizationIdentity>;

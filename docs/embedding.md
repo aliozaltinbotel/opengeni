@@ -976,6 +976,37 @@ of that is `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`:
 The host's `PUT workspaces/:ws/members/:id` command only grants or changes
 access; `DELETE workspaces/:ws/members/:id` removes it.
 
+To link one of its people to the native identity that accepted its
+invitation, the host reads `POST /v1/host/organizations/:id/identities/lookup`
+with `{ identityId }`, the `sub` of a host session token
+(`HostLookupOrganizationIdentityRequest`). It authenticates like the host
+commands (the same service token, `members:manage`, an administrator subject
+and `403 ORGANIZATION_NOT_HOST_GOVERNED`), but it is a read: no `decide`, no
+`actingExternalUser` and no attribution row. The answer
+(`HostOrganizationIdentity`, sent with `cache-control: no-store`) is:
+
+```ts
+{
+  identityStatus: "active" | "recovery_required" | "disputed" | "disabled";
+  verifiedEmail: string | null; // null while the account's email is unverified
+  activeLoginBinding: { id: string; revision: number } | null;
+  acceptedInvitations: { id: string; acceptedMembershipId: string; acceptedAt: string }[];
+}
+```
+
+`activeLoginBinding` is the identity's active canonical login binding, or
+`null` when it has none in the `active` state. Its `id` changes when another
+sign-in method becomes the active binding, and its `revision` increases
+whenever that binding's state changes. `acceptedInvitations` lists only this
+organization's invitations, newest first; `acceptedAt` is the acceptance time,
+since an accepted invitation never changes again. An identity with a
+membership in the organization, in any status (an offboarded member included),
+answers `200`. An identity with no membership there answers `404` with
+`error.details.code = "HOST_IDENTITY_NOT_IN_ORGANIZATION"`, the same answer as
+an identity that does not exist. The identity is resolved among the
+organization's own members, so the read costs one identity projection per
+member and one invitation page per 100 invitations.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 
