@@ -528,6 +528,10 @@ describe("web bundle budget with a host extension", () => {
     const page = readFileSync(path.join(extensionFixture, "chunks/today-page.js"), "utf8");
     expect(page).toContain(PAGE_CLASS_MARKER);
     expect(page).toContain("className: pageClassName");
+    // The page shares an icon module with the console's direct chat route, so
+    // the fixture build exercises how the bundler places a module both graphs
+    // import.
+    expect(page).toMatch(/^import \{ PencilIcon \} from "lucide-react";$/m);
   });
 
   test.skipIf(!fixtureBuildRequested)(

@@ -1824,6 +1824,14 @@ that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
 
+Bundle the extension's own icon set (for example `lucide-react`) into its
+build rather than leaving it external to share the console's modules. The
+console's startup and direct chat route load some of the same icon modules.
+When a lazy extension chunk imports many of them as well, the bundler can merge
+the shared modules into a lazy chunk that startup then has to load, and the
+build's eager-graph check refuses it. Bundled icons cost a few duplicate
+drawings and share no state, since the console mounts no icon provider.
+
 ## Trust model
 
 The embed boundary has a deliberate split of authority. Getting this wrong in
