@@ -1,4 +1,5 @@
 import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
+import { deniedSessionToolFamiliesForOrganization } from "./http/organization-session-policy";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -939,9 +940,18 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     staticIds: staticServerIds,
     configuredIds: gatewayServerIds,
   });
+  // The organization's session policy: refused families are never registered.
+  const deniedToolFamilies = gatewayServerIds.has("opengeni")
+    ? await deniedSessionToolFamiliesForOrganization(routeDeps, grant.accountId)
+    : [];
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
-      ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
+      ? [
+          inMemoryMcpRegistration(
+            "opengeni",
+            buildOpenGeniMcpServer(deps, grant, { deniedToolFamilies }),
+          ),
+        ]
       : []),
     ...(gatewayServerIds.has("files")
       ? [inMemoryMcpRegistration("files", buildFilesMcpServer(deps, grant))]

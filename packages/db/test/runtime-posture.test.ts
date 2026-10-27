@@ -1908,6 +1908,13 @@ describe("runtime database posture evaluator", () => {
           tables === RUNTIME_DML_TABLES
             ? 1
             : 0) +
+          // 1017 organization session policies: one organization-scoped,
+          // read, insert and update FORCE-RLS table.
+          (tables === FORCE_RLS_TABLES ||
+          tables === RUNTIME_READ_INSERT_UPDATE_TABLES ||
+          tables === RUNTIME_DML_TABLES
+            ? 1
+            : 0) +
           (tables === FORCE_RLS_TABLES || tables === PROTECTED_NO_DIRECT_DML_TABLES
             ? length +
               personalResourceProtectedTableCount +
@@ -1972,7 +1979,8 @@ describe("runtime database posture evaluator", () => {
         1 + // 1013 host session token signing keys: deployment-wide, read and insert, FORCE-RLS.
         1 + // 1014 re-authentication events: deployment-wide, read and insert, FORCE-RLS.
         1 + // 1014 TOTP factors: deployment-wide, full-DML, FORCE-RLS.
-        1; // 1015 host command attributions: organization-scoped, read and insert, FORCE-RLS.
+        1 + // 1015 host command attributions: organization-scoped, read and insert, FORCE-RLS.
+        1; // 1017 organization session policies: organization-scoped, read/insert/update, FORCE-RLS.
       expect(FORCE_RLS_TABLES).toContain("auth_jwks");
       expect(RUNTIME_READ_INSERT_TABLES).toContain("auth_jwks");
       expect(FORCE_RLS_TABLES).toContain("auth_session_authentications");
@@ -1981,6 +1989,8 @@ describe("runtime database posture evaluator", () => {
       expect(RUNTIME_FULL_DML_TABLES).toContain("auth_two_factors");
       expect(FORCE_RLS_TABLES).toContain("organization_host_command_attributions");
       expect(RUNTIME_READ_INSERT_TABLES).toContain("organization_host_command_attributions");
+      expect(FORCE_RLS_TABLES).toContain("organization_session_policies");
+      expect(RUNTIME_READ_INSERT_UPDATE_TABLES).toContain("organization_session_policies");
       expect(FORCE_RLS_TABLES).toContain("scheduled_task_event_inbox");
       expect(FORCE_RLS_TABLES).toContain("mcp_event_subscriptions");
       expect(FORCE_RLS_TABLES).toContain("event_source_feeds");

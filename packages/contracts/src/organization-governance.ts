@@ -17,9 +17,11 @@ import {
  * Every native route that changes who belongs to an organization, what they may
  * do there, or which credentials act in it (including connected MCP agents),
  * the organization recovery operations that hand ownership to a member, and
- * workspace deletion, which removes every grant in that workspace. An
- * embedding host that governs an organization decides each one
- * (`OrganizationGovernancePort.decide`). The list may grow in later releases.
+ * workspace deletion, which removes every grant in that workspace, and the
+ * organization's session policy (attachments and generic tool families), which
+ * only a host command changes. An embedding host that governs an organization
+ * decides each one (`OrganizationGovernancePort.decide`). The list may grow in
+ * later releases.
  */
 export const GOVERNED_MUTATIONS = [
   "invitation.create",
@@ -50,6 +52,8 @@ export const GOVERNED_MUTATIONS = [
   "organization_recovery.cancel",
   "organization_recovery.execute",
   "workspace.delete",
+  // Host command only: no native route writes an organization's session policy.
+  "session_policy.update",
 ] as const;
 export type GovernedMutation = (typeof GOVERNED_MUTATIONS)[number];
 

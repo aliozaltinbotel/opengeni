@@ -301,6 +301,7 @@ import {
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
+import { requireOrganizationAttachmentsAllowed } from "../application/organization-session-policy";
 import {
   requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
@@ -3488,6 +3489,13 @@ async function createSessionForRequestInFileScope(
           message: "object storage is not configured",
         });
       }
+      // A person's attached file is refused where the organization turns
+      // attachments off; an agent passes on files it produced.
+      if (
+        resources.some((resource) => resource.kind === "file") &&
+        grant.principalKind !== "agent_attempt"
+      )
+        await requireOrganizationAttachmentsAllowed(unresolvedDeps, grant.accountId);
       // The outer creation scope already established the caller's file actor.
       // Only attached files need a second live ownership read at validation.
       const ownerContext = !resources.some((resource) => resource.kind === "file")
@@ -4867,6 +4875,11 @@ async function acceptSessionUserMessageInFileScope(
         message: "object storage is not configured",
       });
     }
+    if (
+      requestedResources.some((resource) => resource.kind === "file") &&
+      grant.principalKind !== "agent_attempt"
+    )
+      await requireOrganizationAttachmentsAllowed(deps, grant.accountId);
     const attachmentOwnerContext = input.authorization
       ? await fileOwnerContextForAccess({ db }, input.authorization, "sessions:control")
       : grant.principalKind === "agent_attempt"

@@ -1382,6 +1382,7 @@ export {
   hostOrganizationOwnerGranted,
   type HostOrganizationOwnerResult,
 } from "./organization-host-owner";
+export * from "./organization-session-policies";
 import {
   assertActiveManagedHumanOrganizationMembership,
   getOrganizationAdministrationOverview,

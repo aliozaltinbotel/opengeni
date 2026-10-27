@@ -172,6 +172,7 @@ export * from "./application/archived-session-imports";
 export * from "./application/session-tenancy";
 export * from "./application/organization-privacy";
 export * from "./application/organization-governance";
+export * from "./application/organization-session-policy";
 export * from "./application/sandbox-recovery";
 export * from "./application/user-resource-grants";
 export * from "./application/api-integration-servers";

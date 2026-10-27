@@ -36,9 +36,14 @@ import {
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
 import {
+  HostPutOrganizationSessionPolicyRequest,
+  OrganizationSessionPolicyView,
+} from "@opengeni/contracts/organization-session-policy";
+import {
   applyGovernedOrganizationPolicy,
   hasPermission,
   organizationGovernedByHost,
+  resolveOrganizationSessionPolicy,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -49,6 +54,7 @@ import {
   hostOrganizationOwnerGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
+  putHostOrganizationSessionPolicy,
   putOrganizationWorkspaceMember,
   recordOrganizationHostCommandAttribution,
   revokeOrganizationInvitation,
@@ -418,6 +424,47 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         details: { code: HOST_IDENTITY_NOT_IN_ORGANIZATION },
       });
     return context.json(HostOrganizationIdentity.parse(identity));
+  });
+
+  // The organization's session policy: attachments and generic tool families
+  // for every session in its workspaces. No native route writes it.
+  app.get(`${base}/session-policy`, async (context) => {
+    const authority = await requireHostCommand(context, deps, "session_policy.update");
+    context.header("cache-control", "no-store");
+    return context.json(
+      OrganizationSessionPolicyView.parse(
+        await resolveOrganizationSessionPolicy(deps, authority.organizationId),
+      ),
+    );
+  });
+
+  app.put(`${base}/session-policy`, async (context) => {
+    const authority = await requireHostCommand(context, deps, "session_policy.update");
+    const { actingExternalUser, command } = await parseCommand(
+      context,
+      HostPutOrganizationSessionPolicyRequest,
+    );
+    await recordAttribution(deps, authority, {
+      mutation: "session_policy.update",
+      operationId: command.operationId,
+      actingExternalUser,
+    });
+    const { stored } = await putHostOrganizationSessionPolicy(deps.db, {
+      organizationId: authority.organizationId,
+      policy: command.policy,
+      operationId: command.operationId,
+      actorSubjectId: authority.actorSubjectId,
+    });
+    context.header("cache-control", "no-store");
+    return context.json(
+      OrganizationSessionPolicyView.parse({
+        organizationId: stored.organizationId,
+        policy: stored.policy,
+        source: stored.source,
+        revision: stored.revision,
+        updatedAt: stored.updatedAt.toISOString(),
+      }),
+    );
   });
 }
 
