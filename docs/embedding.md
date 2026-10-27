@@ -1034,9 +1034,11 @@ with `error.code = "conflict"` and one of two refusal codes:
   revision other than `expectedRevision`. Read it back and retry at its current
   revision.
 - `error.details.code = "HOST_INVITATION_NOT_PENDING"` with `details.status`
-  `"accepted"`, `"revoked"` or `"expired"`: no revoke can succeed, at any
-  revision. An `accepted` invitation made a membership; offboard that member if
-  the person must go.
+  `"accepted"`, `"revoked"` or `"expired"`. For `accepted` and `revoked` no
+  revoke can succeed, at any revision; an `accepted` invitation made a
+  membership, so offboard that member if the person must go. An `expired`
+  invitation can no longer be accepted and the host may treat it as settled; a
+  revoke at its current revision still records it as `revoked`.
 
 Every other answer is the native one. An unknown invitation is `404`. An
 expired invitation revoked at its current revision is revoked (`200`), because

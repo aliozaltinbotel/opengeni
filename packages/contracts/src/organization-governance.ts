@@ -110,8 +110,10 @@ export const HOST_INVITATION_NOT_IN_ORGANIZATION = "HOST_INVITATION_NOT_IN_ORGAN
 export const HOST_INVITATION_REVISION_CONFLICT = "HOST_INVITATION_REVISION_CONFLICT";
 /**
  * A host invitation revoke refused because the invitation is no longer
- * pending: `details.status` is `"accepted"`, `"revoked"` or `"expired"`. Final:
- * no retry can revoke it.
+ * pending at the expected revision: `details.status` is `"accepted"`,
+ * `"revoked"` or `"expired"`. `accepted` and `revoked` are final: no revoke can
+ * succeed. `expired` can no longer be accepted, so the host may treat it as
+ * settled; a revoke at its current revision still records it as `revoked`.
  */
 export const HOST_INVITATION_NOT_PENDING = "HOST_INVITATION_NOT_PENDING";
 

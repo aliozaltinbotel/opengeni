@@ -235,10 +235,11 @@ async function stored(invitationId: string) {
       revision: string;
       accepted_membership_id: string | null;
       updated_at: Date;
+      accepted_at: Date | null;
       expires_at: Date;
     }[]
   >`
-    select revision, accepted_membership_id, updated_at, expires_at
+    select revision, accepted_membership_id, updated_at, accepted_at, expires_at
     from organization_membership_invitations where id = ${invitationId}`;
   return row!;
 }
@@ -317,6 +318,10 @@ describe("the host reads back one of its organization's invitations", () => {
       acceptedAt: row.updated_at.toISOString(),
       expiresAt: row.expires_at.toISOString(),
     });
+    // The read derives acceptedAt from updated_at; this pins the invariant that
+    // it equals the accepting write's accepted_at (1016), so a later writer
+    // that touches an accepted row fails here.
+    expect(row.accepted_at?.toISOString()).toBe(row.updated_at.toISOString());
   }, 120_000);
 
   test("a revoked and an expired invitation answer their status", async () => {
