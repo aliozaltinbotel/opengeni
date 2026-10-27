@@ -6,7 +6,7 @@
 import { statSync } from "node:fs";
 import path from "node:path";
 
-import type { Alias, Plugin } from "vite";
+import { normalizePath, type Alias, type Plugin } from "vite";
 
 export type HostExtensionFiles = Readonly<{ entry: string; style: string }>;
 
@@ -94,11 +94,13 @@ export function hostExtensionTailwindSource(
   const directory = configured?.trim();
   if (!directory) return undefined;
   const source = `\n@source ${JSON.stringify(directory)};\n`;
+  // Vite's ids are normalized paths; compare like with like.
+  const target = normalizePath(stylesheet);
   return {
     name: "opengeni-host-extension-tailwind-source",
     enforce: "pre",
     transform(code, id) {
-      return id.split("?")[0] === stylesheet ? code + source : null;
+      return normalizePath(id.split("?")[0] ?? id) === target ? code + source : null;
     },
   };
 }

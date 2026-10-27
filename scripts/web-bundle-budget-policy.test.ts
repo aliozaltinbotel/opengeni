@@ -3,12 +3,15 @@ import { spawnSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  mkdirSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   rmdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
@@ -432,27 +435,34 @@ const EXTENSION_ONLY_CLASS = "tracking-[0.4242em]";
 // Tailwind minifies the generated value to `.4242em`.
 const EXTENSION_ONLY_CSS = "letter-spacing:.4242em";
 
-/** Copies the fixture to its ignored staging directory, its page using EXTENSION_ONLY_CLASS. */
-function stageFixture(): string {
-  if (existsSync(stagedFixture)) {
-    throw new Error(`${stagedFixture} already exists; remove it before the fixture budget build`);
+/**
+ * Copies the fixture to `target` (its ignored staging directory by default),
+ * its page using EXTENSION_ONLY_CLASS, runs `use` with that path, then
+ * removes what staging created: the copy, and its parent only when staging
+ * created the parent. Refuses, before anything is written or removed, a
+ * target that already exists, so someone else's directory is never deleted.
+ */
+function withStagedFixture<T>(use: (staged: string) => T, target = stagedFixture): T {
+  if (existsSync(target)) {
+    throw new Error(`${target} already exists; remove it before the fixture budget build`);
   }
-  cpSync(extensionFixture, stagedFixture, { recursive: true });
-  const page = path.join(stagedFixture, "chunks/today-page.js");
-  const source = readFileSync(page, "utf8");
-  if (!source.includes(PAGE_CLASS_MARKER)) throw new Error(`${page} has no page class marker`);
-  writeFileSync(
-    page,
-    source.replace(PAGE_CLASS_MARKER, `const pageClassName = "${EXTENSION_ONLY_CLASS}";`),
-  );
-  return stagedFixture;
-}
-
-/** Removes the staged copy, and its parent when the copy was all it held. */
-function removeStagedFixture(): void {
-  rmSync(stagedFixture, { recursive: true, force: true });
-  const parent = path.dirname(stagedFixture);
-  if (existsSync(parent) && readdirSync(parent).length === 0) rmdirSync(parent);
+  const parent = path.dirname(target);
+  const parentExisted = existsSync(parent);
+  try {
+    cpSync(extensionFixture, target, { recursive: true });
+    const page = path.join(target, "chunks/today-page.js");
+    const source = readFileSync(page, "utf8");
+    if (!source.includes(PAGE_CLASS_MARKER)) throw new Error(`${page} has no page class marker`);
+    writeFileSync(
+      page,
+      source.replace(PAGE_CLASS_MARKER, `const pageClassName = "${EXTENSION_ONLY_CLASS}";`),
+    );
+    return use(target);
+  } finally {
+    rmSync(target, { recursive: true, force: true });
+    if (!parentExisted && existsSync(parent) && readdirSync(parent).length === 0)
+      rmdirSync(parent);
+  }
 }
 
 function bun(args: string[], env: Record<string, string> = {}) {
@@ -516,6 +526,59 @@ function staticImportGraph(manifest: Record<string, ManifestChunk>): Set<string>
   return graph;
 }
 
+describe("staging the host extension fixture", () => {
+  function scratch(): string {
+    return mkdtempSync(path.join(tmpdir(), "web-bundle-fixture-"));
+  }
+
+  test("a directory already at the staging path is refused and left alone", () => {
+    const root = scratch();
+    try {
+      const target = path.join(root, "tmp/host-extension-fixture");
+      mkdirSync(target, { recursive: true });
+      writeFileSync(path.join(target, "keep.txt"), "someone else's");
+      let built = false;
+      expect(() =>
+        withStagedFixture(() => {
+          built = true;
+        }, target),
+      ).toThrow("already exists");
+      expect(built).toBe(false);
+      expect(readFileSync(path.join(target, "keep.txt"), "utf8")).toBe("someone else's");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a staging parent that already existed is kept; one staging created is removed", () => {
+    const root = scratch();
+    try {
+      const existingParent = path.join(root, "existing");
+      mkdirSync(existingParent);
+      const kept = path.join(existingParent, "host-extension-fixture");
+      expect(
+        withStagedFixture((staged) => {
+          expect(readFileSync(path.join(staged, "chunks/today-page.js"), "utf8")).toContain(
+            EXTENSION_ONLY_CLASS,
+          );
+          return staged;
+        }, kept),
+      ).toBe(kept);
+      expect(existsSync(kept)).toBe(false);
+      expect(existsSync(existingParent)).toBe(true);
+      const createdParent = path.join(root, "created");
+      expect(() =>
+        withStagedFixture(() => {
+          throw new Error("build failed");
+        }, path.join(createdParent, "host-extension-fixture")),
+      ).toThrow("build failed");
+      expect(existsSync(createdParent)).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("web bundle budget with a host extension", () => {
   test("the prebuilt extension fixture keeps its page and card body behind import()", () => {
     const descriptor = readFileSync(path.join(extensionFixture, "index.js"));
@@ -545,12 +608,7 @@ describe("web bundle budget with a host extension", () => {
         ignored: true,
       });
       const stub = buildAndMeasure("");
-      let fixture: BuildMeasure;
-      try {
-        fixture = buildAndMeasure(stageFixture());
-      } finally {
-        removeStagedFixture();
-      }
+      const fixture = withStagedFixture(buildAndMeasure);
       // The descriptor is eager startup code. It may join an existing startup
       // chunk or, if the bundler splits it, become one small file of its own;
       // its pages and cards must add nothing else to the initial load.

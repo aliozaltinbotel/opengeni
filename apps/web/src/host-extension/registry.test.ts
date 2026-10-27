@@ -170,6 +170,7 @@ describe("host extension registry", () => {
       value?: unknown;
       source?: AstNode | null;
       specifiers?: readonly AstNode[];
+      declaration?: AstNode | null;
     }>;
     const FUNCTION_NODES: ReadonlySet<string> = new Set([
       "FunctionDeclaration",
@@ -209,17 +210,29 @@ describe("host extension registry", () => {
         : undefined;
     }
 
-    /** The local names a module binds to readers: aliased named imports and namespace imports. */
-    function readerBindings(program: AstNode): { readers: Set<string>; namespaces: Set<string> } {
+    /**
+     * The local names a module binds to readers: aliased named imports and
+     * namespace imports (`registryNamespaces`: those of the registry itself).
+     */
+    function readerBindings(
+      file: string,
+      program: AstNode,
+    ): { readers: Set<string>; namespaces: Set<string>; registryNamespaces: Set<string> } {
       const readers = new Set(EXTENSION_READERS);
       const namespaces = new Set<string>();
+      const registryNamespaces = new Set<string>();
       const body: unknown = Reflect.get(program, "body");
       for (const statement of Array.isArray(body) ? body : []) {
         if (!isAstNode(statement) || statement.type !== "ImportDeclaration") continue;
+        const fromRegistry =
+          moduleOf(file, nameOf(statement.source ?? undefined) ?? "") === "host-extension/registry";
         for (const specifier of statement.specifiers ?? []) {
           const local = nameOf(specifier.local);
           if (!local) continue;
-          if (specifier.type === "ImportNamespaceSpecifier") namespaces.add(local);
+          if (specifier.type === "ImportNamespaceSpecifier") {
+            namespaces.add(local);
+            if (fromRegistry) registryNamespaces.add(local);
+          }
           if (
             specifier.type === "ImportSpecifier" &&
             EXTENSION_READERS.has(nameOf(specifier.imported) ?? "")
@@ -228,7 +241,7 @@ describe("host extension registry", () => {
           }
         }
       }
-      return { readers, namespaces };
+      return { readers, namespaces, registryNamespaces };
     }
 
     /**
@@ -242,7 +255,7 @@ describe("host extension registry", () => {
       const { program, errors } = parseSync(file, source);
       expect(errors).toEqual([]);
       const root = program as unknown as AstNode;
-      const { readers, namespaces } = readerBindings(root);
+      const { readers, namespaces, registryNamespaces } = readerBindings(file, root);
       const reads = new Set<number>();
       const lineOf = (node: AstNode): number => source.slice(0, node.start).split("\n").length;
       const isReader = (callee: AstNode | undefined): boolean => {
@@ -256,15 +269,23 @@ describe("host extension registry", () => {
           EXTENSION_READERS.has(nameOf(target.property) ?? "")
         );
       };
+      // A local binding that reaches a reader: an imported reader, or a
+      // namespace import of the registry.
+      const bindsReader = (local: string): boolean =>
+        readers.has(local) || registryNamespaces.has(local);
       const reExportsReader = (node: AstNode): boolean => {
         if (node.type === "ExportAllDeclaration") {
           const from = nameOf(node.source ?? undefined) ?? "";
           return moduleOf(file, from) === "host-extension/registry";
         }
+        if (node.type === "ExportDefaultDeclaration") {
+          const declaration = unwrapParentheses(node.declaration ?? undefined);
+          return declaration?.type === "Identifier" && bindsReader(declaration.name ?? "");
+        }
         if (node.type !== "ExportNamedDeclaration") return false;
         const exported = (node.specifiers ?? []).map((specifier) => nameOf(specifier.local) ?? "");
         return exported.some((local) =>
-          node.source ? EXTENSION_READERS.has(local) : readers.has(local),
+          node.source ? EXTENSION_READERS.has(local) : bindsReader(local),
         );
       };
       // An IIFE's own body runs while the module loads.
@@ -333,12 +354,15 @@ describe("host extension registry", () => {
         "void (async () => { await Promise.resolve(); extensionSettingsPaths(); })();",
         "const later = (() => () => currentHostExtension())();",
         "(function () { currentHostExtension(); }).call(null);",
+        "(function () { hiddenNativeDestinations(); }).apply(null, []);",
+        "const deferred = (function () { return () => extensionSettingsPaths(); }).apply(null);",
       ].join("\n");
       expect(moduleScopeReads("probe.ts", source)).toEqual([
         "probe.ts:1",
         "probe.ts:2",
         "probe.ts:3",
         "probe.ts:5",
+        "probe.ts:6",
       ]);
     });
 
@@ -351,6 +375,14 @@ describe("host extension registry", () => {
         'export * from "./registry.ts";',
         'export * as registry from "../host-extension/registry";',
         'export { productName } from "./brand";',
+        "export default paths;",
+        'import * as extensionRegistry from "./registry";',
+        "export { extensionRegistry };",
+        "export { extensionRegistry as readers };",
+        'import { productName } from "./brand";',
+        "export default productName;",
+        'import * as brand from "./brand";',
+        "export { brand };",
       ].join("\n");
       expect(moduleScopeReads("host-extension/probe.ts", source)).toEqual([
         "host-extension/probe.ts:1",
@@ -358,6 +390,9 @@ describe("host extension registry", () => {
         "host-extension/probe.ts:4",
         "host-extension/probe.ts:5",
         "host-extension/probe.ts:6",
+        "host-extension/probe.ts:8",
+        "host-extension/probe.ts:10",
+        "host-extension/probe.ts:11",
       ]);
       expect(moduleScopeReads("host-extension/registry.ts", source)).toEqual([]);
     });
