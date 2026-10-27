@@ -13,7 +13,13 @@ import {
   createDb,
   createOrganizationApiKey,
   deleteWorkspace,
+  enableCapabilityInstallation,
+  installApiIntegration,
+  integrationBindingKey,
+  integrationRuntimeKey,
+  upsertCapabilityCatalogItem,
   type DbClient,
+  type InstallApiIntegrationInput,
 } from "@opengeni/db";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime/workspace-tool-gateway";
 import { startTestMcpServer } from "@opengeni/testing/mcp";
@@ -113,6 +119,7 @@ function acmeServer(
 }
 
 type World = {
+  owner: AccessGrant;
   workspaceId: string;
   apiKeySubjectId: string;
   post: (body: unknown) => Promise<{ status: number; body: JsonRpcBody }>;
@@ -143,7 +150,7 @@ async function world(
     permissions: ["workspace:read"],
   });
   const app = createApp({
-    settings: testSettings({ productAccessMode: "configured", mcpServers }),
+    settings: settingsFor(mcpServers),
     db: client!.db,
     bus: {} as never,
     workflowClient: {} as never,
@@ -165,11 +172,97 @@ async function world(
     return { status: response.status, body: (text ? JSON.parse(text) : {}) as JsonRpcBody };
   };
   return {
+    owner: owner as AccessGrant,
     workspaceId: owner.workspaceId,
     apiKeySubjectId: `api_key:${key.id}`,
     post,
     cleanup: async () => {
       await deleteWorkspace(client!.db, owner.workspaceId);
+    },
+  };
+}
+
+const encryptionKey = Buffer.alloc(32, 44).toString("base64");
+const settingsFor = (mcpServers: Settings["mcpServers"]) =>
+  testSettings({
+    productAccessMode: "configured",
+    environmentsEncryptionKey: encryptionKey,
+    mcpServers,
+  });
+
+/** A workspace MCP capability that explicitly claims server id `mcpServerId`. */
+async function claimingCapability(grant: AccessGrant, mcpServerId: string) {
+  const capabilityId = `mcp:claims-${mcpServerId}`;
+  await upsertCapabilityCatalogItem(client!.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    id: capabilityId,
+    kind: "mcp",
+    source: "manual",
+    name: capabilityId,
+    endpointUrl: remote.url,
+    category: "custom",
+    tags: ["mcp"],
+    metadata: { mcpServerId },
+  });
+  await enableCapabilityInstallation(client!.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    capabilityId,
+    kind: "mcp",
+    metadata: { mcpConnectivity: { status: "ok" } },
+  });
+}
+
+/** A workspace OpenAPI integration published under server id `serverId`. */
+function integrationClaiming(grant: AccessGrant, serverId: string): InstallApiIntegrationInput {
+  return {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
+    capabilityId: `api:claims-${serverId}`,
+    pluginKey: `integration/claims-${serverId}`,
+    serverId,
+    name: `Claims ${serverId}`,
+    description: "Read inventory.",
+    category: "operations",
+    tags: ["inventory", "openapi"],
+    definitionId: `claims-${serverId}`,
+    definitionProvenance: "workspace",
+    providerDomain: "inventory.example.com",
+    protocol: "openapi",
+    baseUrl: "https://inventory.example.com/v1/",
+    sourceUrl: "https://inventory.example.com/openapi.json",
+    authScheme: { kind: "none" },
+    requiredScopes: [],
+    ownership: "workspace",
+    revision: {
+      id: "openapi:222222222222222222222222",
+      protocol: "openapi",
+      definitionId: `claims-${serverId}`,
+      contentSha256: "2".repeat(64),
+      source: { url: "https://inventory.example.com/openapi.json" },
+      title: "Inventory API",
+      tools: [
+        {
+          id: "list_items",
+          operationKey: "listItems",
+          name: "List items",
+          description: "List inventory items.",
+          inputSchema: { type: "object", properties: {} },
+          safety: "read",
+          approvalMode: "never",
+          deprecated: false,
+        },
+      ],
+      bindings: {
+        list_items: {
+          method: "get",
+          pathTemplate: "/items",
+          serverUrl: "https://inventory.example.com/v1/",
+          parameters: [],
+        },
+      },
     },
   };
 }
@@ -330,7 +423,7 @@ describe("workspace tool-server host port", () => {
       subjectId: `human:${suffix}`,
     });
     const grant = access.workspaceGrants[0]! as AccessGrant;
-    const settings = testSettings({ mcpServers: [remoteServer, acmeEntry] });
+    const settings = settingsFor([remoteServer, acmeEntry]);
     const deps = (
       workspaceToolServers: WorkspaceToolServersPort,
     ): Parameters<typeof prepareWorkspaceToolGatewayForGrant>[0] =>
@@ -338,7 +431,7 @@ describe("workspace tool-server host port", () => {
         typeof prepareWorkspaceToolGatewayForGrant
       >[0];
     try {
-      for (const ids of [["opengeni"], ["files"], ["docs"], ["acme", "acme"]]) {
+      for (const ids of [["opengeni"], ["files"], ["docs"], ["codex_apps"], ["acme", "acme"]]) {
         const refused = prepareWorkspaceToolGatewayForGrant(
           deps(async ({ grant: caller }) =>
             Promise.all(ids.map((id) => hostRegistration(id, acmeServer(id, caller, [])))),
@@ -350,6 +443,85 @@ describe("workspace tool-server host port", () => {
     } finally {
       await deleteWorkspace(client!.db, grant.workspaceId);
     }
+  });
+
+  test("a workspace capability claiming a static host id cannot adopt the host server", async () => {
+    const calls: HostCall[] = [];
+    const w = await world(
+      [remoteServer, { ...acmeEntry, allowedTools: ["lookup"] }],
+      async ({ grant }) => [await hostRegistration("acme", acmeServer("acme", grant, calls))],
+    );
+    try {
+      await claimingCapability(w.owner, "acme");
+      const listed = await w.post(listTools);
+      expect(listed.status).toBe(200);
+      // The static entry's configuration governs the host server, not the capability's.
+      expect(toolNames(listed.body)).toEqual([
+        "acme__lookup",
+        "remote__fetch_document",
+        "remote__search_documents",
+      ]);
+      const called = await w.post(callTool("acme__lookup", { sku: "B-2" }));
+      expect(JSON.stringify(called.body.result)).toContain("acme:lookup:B-2");
+      expect(calls).toHaveLength(1);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("a workspace API integration with a static host id is dropped, not a gateway-wide failure", async () => {
+    // The integration's runtime server id is derived from its base id; a static
+    // host entry with exactly that id is the collision.
+    const hostId = integrationRuntimeKey("acme", integrationBindingKey(null));
+    const calls: HostCall[] = [];
+    const w = await world([remoteServer, { ...acmeEntry, id: hostId }], async ({ grant }) => [
+      await hostRegistration(hostId, acmeServer(hostId, grant, calls)),
+    ]);
+    try {
+      await installApiIntegration(client!.db, integrationClaiming(w.owner, "acme"));
+      const listed = await w.post(listTools);
+      expect(listed.status).toBe(200);
+      expect(toolNames(listed.body)).toEqual([
+        `${hostId}__lookup`,
+        `${hostId}__reserve`,
+        "remote__fetch_document",
+        "remote__search_documents",
+      ]);
+      const called = await w.post(callTool(`${hostId}__lookup`, { sku: "C-3" }));
+      expect(JSON.stringify(called.body.result)).toContain(`${hostId}:lookup:C-3`);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("a host id that only a workspace-installed server claims is refused, never adopted", async () => {
+    const { prepareWorkspaceToolGatewayForGrant } = await import("../src/workspace-tool-gateway");
+    const adopted: HostCall[] = [];
+    const betaId = {
+      capability: "beta",
+      integration: integrationRuntimeKey("beta", integrationBindingKey(null)),
+    };
+    for (const install of ["capability", "integration"] as const) {
+      const w = await world([remoteServer], undefined);
+      try {
+        if (install === "capability") await claimingCapability(w.owner, "beta");
+        else await installApiIntegration(client!.db, integrationClaiming(w.owner, "beta"));
+        const deps = {
+          db: client!.db,
+          settings: settingsFor([remoteServer]),
+          workspaceToolServers: async ({ grant }: { grant: AccessGrant }) => [
+            await hostRegistration(betaId[install], acmeServer(betaId[install], grant, adopted)),
+          ],
+        } as unknown as Parameters<typeof prepareWorkspaceToolGatewayForGrant>[0];
+        await expect(prepareWorkspaceToolGatewayForGrant(deps, w.owner)).rejects.toMatchObject({
+          code: HOST_TOOL_SERVER_ID_CONFLICT,
+        });
+      } finally {
+        await w.cleanup();
+      }
+    }
+    expect(adopted).toHaveLength(0);
   });
 
   test("startApi forwards the port only when it is given", () => {

@@ -890,6 +890,24 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       ...input,
       ...(input.connectionRef.subjectScope === "subject" ? { subjectId: grant.subjectId } : {}),
     });
+  // Host servers bind only to deployment-static entries, never to an entry a
+  // workspace installed. A workspace-installed id the host also returns is
+  // refused unless a static entry already shadows it (the static entry wins).
+  const staticServerIds = new Set(resolvedCatalog.settings.mcpServers.map(({ id }) => id));
+  const hostServers = await workspaceHostToolServers(routeDeps, {
+    grant,
+    signal: options.signal,
+    reservedIds: [
+      ...FIRST_PARTY_GATEWAY_SERVER_IDS,
+      CODEX_APPS_MCP_SERVER_ID,
+      ...[
+        ...capabilityServers.map(({ id }) => id),
+        ...integrations.map(({ serverId }) => serverId),
+      ].filter((id) => !staticServerIds.has(id)),
+    ],
+    staticIds: staticServerIds,
+    configuredIds: gatewayServerIds,
+  });
   const firstPartyServers = await Promise.all([
     ...(gatewayServerIds.has("opengeni")
       ? [inMemoryMcpRegistration("opengeni", buildOpenGeniMcpServer(deps, grant))]
@@ -921,7 +939,8 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
   const apiIntegrationServers = buildApiIntegrationMcpServers({
     settings: gatewaySettings,
     integrations: expandApiIntegrationAccountRoutes({
-      integrations,
+      // A static host entry wins over a workspace integration of the same id.
+      integrations: integrations.filter(({ serverId }) => !hostServers.staticIds.has(serverId)),
       bindings: accountBindings,
       tools: allGatewayToolRefs(gatewaySettings),
     }),
@@ -950,13 +969,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         codexAppsDesignation,
       )
     : undefined;
-  const hostServers = await workspaceHostToolServers(routeDeps, {
-    grant,
-    signal: options.signal,
-    reservedIds: [...FIRST_PARTY_GATEWAY_SERVER_IDS, ...apiIntegrationServers.map(({ id }) => id)],
-    configuredIds: gatewayServerIds,
-  });
-  const localMcpServers = [...firstPartyServers, ...apiIntegrationServers, ...hostServers];
+  const localMcpServers = [
+    ...firstPartyServers,
+    ...apiIntegrationServers,
+    ...hostServers.registrations,
+  ];
   const policyTargets = new Map(
     gatewaySettings.mcpServers.map((config) => {
       const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
@@ -1599,9 +1616,11 @@ const FIRST_PARTY_GATEWAY_SERVER_IDS = ["opengeni", "files", "docs"] as const;
 
 /**
  * The embedding host's in-process servers for this grant. Every registration is
- * checked for an id conflict first, so a first-party id is refused even when the
- * grant's settings omit that server; only ids configured for this gateway are
- * then kept. Registrations the gateway will not own are closed here.
+ * checked for an id conflict first, so a reserved id is refused even when the
+ * grant's settings omit that server. Only ids with a deployment-static entry
+ * configured for this gateway are then kept; `staticIds` names every returned
+ * id with a static entry, for any target. Registrations the gateway will not
+ * own are closed here.
  */
 async function workspaceHostToolServers(
   routeDeps: Pick<ApiRouteDeps, "workspaceToolServers">,
@@ -1609,11 +1628,12 @@ async function workspaceHostToolServers(
     grant: AccessGrant;
     signal: AbortSignal | undefined;
     reservedIds: readonly string[];
+    staticIds: ReadonlySet<string>;
     configuredIds: ReadonlySet<string>;
   },
-): Promise<LocalMcpServerRegistration[]> {
+): Promise<{ registrations: LocalMcpServerRegistration[]; staticIds: ReadonlySet<string> }> {
   const port = routeDeps.workspaceToolServers;
-  if (!port) return [];
+  if (!port) return { registrations: [], staticIds: new Set() };
   const registrations = await port({
     grant: input.grant,
     ...(input.signal ? { signal: input.signal } : {}),
@@ -1629,8 +1649,12 @@ async function workspaceHostToolServers(
     }
     seen.add(registration.id);
   }
-  await close(registrations.filter(({ id }) => !input.configuredIds.has(id)));
-  return registrations.filter(({ id }) => input.configuredIds.has(id));
+  const owned = (id: string) => input.staticIds.has(id) && input.configuredIds.has(id);
+  await close(registrations.filter(({ id }) => !owned(id)));
+  return {
+    registrations: registrations.filter(({ id }) => owned(id)),
+    staticIds: new Set(registrations.map(({ id }) => id).filter((id) => input.staticIds.has(id))),
+  };
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {
