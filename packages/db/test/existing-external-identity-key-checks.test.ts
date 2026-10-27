@@ -120,5 +120,7 @@ test("the existing-only identity fence locks the membership row FOR NO KEY UPDAT
       p.prosrc ~* 'from\\s+organization_memberships\\M[^;]*\\mfor\\s+update\\M' as "blocks"
     from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'public' and p.proname = 'read_existing_external_identity'`;
-  expect(rows).toEqual([{ fence: true, blocks: false }]);
+  expect(rows.map((row) => ({ fence: row.fence, blocks: row.blocks }))).toEqual([
+    { fence: true, blocks: false },
+  ]);
 });

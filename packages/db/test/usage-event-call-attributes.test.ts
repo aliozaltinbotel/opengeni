@@ -167,15 +167,16 @@ describe("model.call usage attributes (real PostgreSQL)", () => {
       "utf8",
     );
     const start = predecessor.indexOf(
-      "ALTER TABLE usage_events\n  ADD CONSTRAINT usage_events_call_attributes_check CHECK (",
+      // Inside 1000's absent-object branch since its 2026-10-26 post-image guard.
+      "ALTER TABLE usage_events\n      ADD CONSTRAINT usage_events_call_attributes_check CHECK (",
     );
-    const end = predecessor.indexOf("\n  ) NOT VALID;", start);
+    const end = predecessor.indexOf("\n      ) NOT VALID;", start);
     if (start < 0 || end < 0) throw new Error("1000 call constraint not found");
     const rollback = new Error("ROLL_BACK_PREDECESSOR_CONTROL");
     await expect(
       shared.admin.begin(async (sql) => {
         await sql`ALTER TABLE usage_events DROP CONSTRAINT usage_events_call_attributes_check`;
-        await sql.unsafe(predecessor.slice(start, end + "\n  ) NOT VALID;".length));
+        await sql.unsafe(predecessor.slice(start, end + "\n      ) NOT VALID;".length));
         for (const fixture of fixtures) {
           const { schema: _schema, ...missingSchema } = fixture.attributes;
           await sql`INSERT INTO usage_events (account_id, workspace_id, event_type, quantity, unit, idempotency_key, occurred_at, attributes)
