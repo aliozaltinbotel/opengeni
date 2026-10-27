@@ -8,7 +8,6 @@ import {
   readCredentialPasswordHash,
   readTotpFactor,
   recordSessionAuthentication,
-  signInAuthenticationMethod,
   type AuthenticationMethod,
 } from "../auth/session-authentication";
 import { admitManagedSignInMutation } from "./managed-sign-in-methods";
@@ -62,6 +61,11 @@ export const REAUTH_REFUSALS = {
     status: 400,
     code: "REAUTH_TOTP_REQUIRED",
     message: "Enter the code from your authenticator app",
+  },
+  totpLocked: {
+    status: 429,
+    code: "REAUTH_TOTP_LOCKED",
+    message: "Too many wrong codes. Your authenticator app is locked for a while.",
   },
   rateLimited: {
     status: 429,
@@ -129,50 +133,50 @@ async function reauthenticate(
   await throttleStepUpPerson(context, deps, session.email, REAUTH_REFUSALS.rateLimited);
 
   const firstFactor = await verifyFirstFactor(deps, session, password);
-  const amr: AuthenticationMethod[] = [firstFactor];
+  const amr: AuthenticationMethod[] = [firstFactor.method];
   // The password is checked first, so the response never reveals whether a
   // person enrolled TOTP to someone who does not know their password.
   if (deps.settings.managedAuthTotpEnabled) {
     const factor = await readTotpFactor(deps.db, session.authUserId);
     if (factor?.verified) {
       if (totp === undefined) throw new StepUpRefusalError(REAUTH_REFUSALS.totpRequired);
-      if (!(await consumeTotpCode(deps.db, auth, factor, totp))) {
-        throw new StepUpRefusalError(REAUTH_REFUSALS.failed);
+      const outcome = await consumeTotpCode(deps.db, auth, factor, totp);
+      if (outcome.kind === "locked") {
+        throw new StepUpRefusalError(REAUTH_REFUSALS.totpLocked, outcome.retryAfterSeconds);
       }
+      if (outcome.kind !== "accepted") throw new StepUpRefusalError(REAUTH_REFUSALS.failed);
       amr.push("otp");
     }
   }
-  // A social proof is the sign-in that started this session: without a second
-  // factor nothing new was proven, so the event keeps that sign-in's time.
+  // The authentication is as old as its primary factor: a code added to an
+  // earlier social sign-in keeps that sign-in's time.
   const authenticatedAt = await recordSessionAuthentication(deps.db, {
     authSessionId: session.authSessionId,
     amr,
-    ...(firstFactor === "oauth" && amr.length === 1
-      ? { authenticatedAt: session.authentication.signedInAt }
-      : {}),
+    ...(firstFactor.authenticatedAt ? { authenticatedAt: firstFactor.authenticatedAt } : {}),
   });
   return { authTime: authenticatedAt.toISOString(), amr };
 }
 
-/** The password, or else a social sign-in that started this session moments ago. */
+/**
+ * The password (checked now), or else a Google/GitHub authentication of this
+ * session at most five minutes old, which keeps its own time.
+ */
 async function verifyFirstFactor(
   deps: ApiRouteDeps,
   session: StepUpSession,
   password: string | undefined,
-): Promise<"pwd" | "oauth"> {
+): Promise<{ method: "pwd" | "oauth"; authenticatedAt?: Date }> {
   if (password !== undefined) {
     const hash = await readCredentialPasswordHash(deps.db, session.authUserId);
     if (!hash || !(await verifyManagedAuthPassword(password, hash))) {
       throw new StepUpRefusalError(REAUTH_REFUSALS.failed);
     }
-    return "pwd";
+    return { method: "pwd" };
   }
-  const { loginBindingId, signedInRecently } = session.authentication;
-  const signInMethod = signInAuthenticationMethod(
-    loginBindingId ? session.bindingProviders.get(loginBindingId) : undefined,
-  );
-  if (signInMethod !== "oauth" || !signedInRecently) {
+  const latest = session.authentication.latest;
+  if (!latest?.recent || !latest.amr.includes("oauth")) {
     throw new StepUpRefusalError(REAUTH_REFUSALS.failed);
   }
-  return "oauth";
+  return { method: "oauth", authenticatedAt: latest.authenticatedAt };
 }

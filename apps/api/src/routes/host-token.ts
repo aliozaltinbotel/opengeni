@@ -17,7 +17,6 @@ import { HTTPException } from "hono/http-exception";
 import { hostSessionTokenJwks, signHostSessionToken } from "../auth/managed-auth";
 import {
   readSessionAuthentication,
-  signInAuthenticationMethod,
   type AuthenticationMethod,
   type SessionAuthenticationRecord,
 } from "../auth/session-authentication";
@@ -58,10 +57,10 @@ export const HOST_TOKEN_REFUSALS = {
     code: "HOST_TOKEN_IDENTITY_NOT_ACTIVE",
     message: "Your account identity is not active",
   },
-  amrUnknown: {
+  authenticationUnknown: {
     status: 403,
-    code: "HOST_TOKEN_AMR_UNKNOWN",
-    message: "How this session signed in is unknown. Sign in again.",
+    code: "HOST_TOKEN_AUTHENTICATION_UNKNOWN",
+    message: "This session has no recorded sign-in. Confirm it's you, or sign in again.",
   },
 } as const satisfies Record<
   string,
@@ -179,10 +178,7 @@ async function mintHostSessionToken(
     },
   );
   const organizationId = activeOrganizationOf(authorization, human.authUserId, workspaceId);
-  const binding = projection.loginBindings.find(
-    (candidate) => candidate.id === authentication.loginBindingId,
-  );
-  const latest = latestAuthentication(authentication, binding?.providerId);
+  const latest = latestAuthentication(authentication);
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + configuration.ttlSeconds;
   const token = await signHostSessionToken(configuration.auth, {
@@ -222,19 +218,20 @@ function activeOrganizationOf(
 }
 
 /**
- * The session's latest authentication: its latest re-authentication, else its
- * own sign-in. Better Auth's sliding renewal moves `updated_at`/`expires_at`,
- * never `created_at`, so refreshing a session never advances `auth_time`. A
- * sign-in whose method is unknown refuses minting: `amr` is never empty.
+ * The session's latest recorded authentication: its sign-in, a
+ * re-authentication, or the authentication it inherited from the session that
+ * approved it. The session's creation time is never used, and a refresh
+ * records nothing, so `auth_time` moves only with a real authentication. A
+ * session without one refuses minting: `amr` is never empty.
  */
-function latestAuthentication(
-  authentication: SessionAuthenticationRecord,
-  signInProviderId: string | undefined,
-): { authenticatedAt: Date; amr: AuthenticationMethod[] } {
-  if (authentication.latestReauthentication) return authentication.latestReauthentication;
-  const method = signInAuthenticationMethod(signInProviderId);
-  if (!method) throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.amrUnknown);
-  return { authenticatedAt: authentication.signedInAt, amr: [method] };
+function latestAuthentication(authentication: SessionAuthenticationRecord): {
+  authenticatedAt: Date;
+  amr: AuthenticationMethod[];
+} {
+  if (!authentication.latest) {
+    throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.authenticationUnknown);
+  }
+  return authentication.latest;
 }
 
 async function refuseOnHttpStatus<T>(

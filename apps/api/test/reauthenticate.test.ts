@@ -19,6 +19,8 @@ import { createOTP } from "@better-auth/utils/otp";
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet } from "jose";
 import { sql } from "drizzle-orm";
 
+import { createHash, randomBytes } from "node:crypto";
+
 import { createApp } from "../src/app";
 import { MANAGED_AUTH_PRODUCT_CREDENTIAL_RATE_LIMIT } from "../src/auth/managed-auth-rate-limits";
 import { apiRequestBindingsForTransportPeer } from "../src/http/request-source";
@@ -110,8 +112,8 @@ function sessionCookie(response: Response): string {
   return cookie.split(";", 1)[0]!;
 }
 
-async function signIn(app: ManagedApp, email: string): Promise<Response> {
-  return await app.request("/v1/auth/sign-in/email", {
+async function signIn(app: ManagedApp, email: string, peer = freshPeer()): Promise<Response> {
+  return await call({ app, peer }, "/v1/auth/sign-in/email", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email, password, rememberMe: true }),
@@ -121,13 +123,16 @@ async function signIn(app: ManagedApp, email: string): Promise<Response> {
 /** A signed-up member of their own organization, signed in an hour ago. */
 async function member(app: ManagedApp, name: string) {
   const email = `reauth-${crypto.randomUUID()}@example.test`;
-  await app.request("/v1/auth/sign-up/email", {
+  // Each member signs up from its own address, so Better Auth's per-address
+  // sign-up and sign-in limits never mix across tests.
+  const peer = freshPeer();
+  await call({ app, peer }, "/v1/auth/sign-up/email", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ name, email, password }),
   });
   await shared.admin`update auth_users set email_verified = true where email = ${email}`;
-  const cookie = sessionCookie(await signIn(app, email));
+  const cookie = sessionCookie(await signIn(app, email, peer));
   const [user] = await shared.admin<
     { id: string }[]
   >`select id from auth_users where email = ${email}`;
@@ -147,8 +152,16 @@ async function member(app: ManagedApp, name: string) {
     (grant) => grant.accountId === organizationId,
   )!.workspaceId;
   const session = await sessionRow(cookie);
+  // The sign-in recorded exactly one authentication, at the session's creation.
+  expect(await authentications(session.id)).toEqual([
+    { amr: ["pwd"], authenticated_at: session.created_at },
+  ]);
   const signedInAt = new Date(Math.floor((Date.now() - 60 * 60_000) / 1000) * 1000);
   await shared.admin`update auth_sessions set created_at = ${signedInAt} where id = ${session.id}`;
+  await shared.admin`
+    update auth_session_authentications set authenticated_at = ${signedInAt}
+    where auth_session_id = ${session.id}
+  `;
   return {
     app,
     cookie,
@@ -159,6 +172,13 @@ async function member(app: ManagedApp, name: string) {
     sessionId: session.id,
     signedInAt,
   };
+}
+
+async function authentications(sessionId: string) {
+  return await shared.admin<{ amr: string[]; authenticated_at: Date }[]>`
+    select amr, authenticated_at from auth_session_authentications
+    where auth_session_id = ${sessionId} order by authenticated_at, recorded_at
+  `;
 }
 
 async function sessionRow(cookie: string) {
@@ -372,11 +392,8 @@ describe("host token auth_time and amr", () => {
     );
     // No password and no fresh social sign-in proves nothing either.
     await expectRefusal(await post(person, "/v1/auth/reauthenticate", {}), 401, "REAUTH_FAILED");
-    const [events] = await shared.admin<{ count: number }[]>`
-      select count(*)::int as count from auth_session_authentications
-      where auth_session_id = ${person.sessionId}
-    `;
-    expect(events!.count).toBe(0);
+    // Only the sign-in is recorded.
+    expect(await authentications(person.sessionId)).toHaveLength(1);
     const claims = await hostTokenClaims(person);
     expect(claims.auth_time).toBe(epochSeconds(person.signedInAt));
   }, 60_000);
@@ -419,24 +436,29 @@ describe("host token auth_time and amr", () => {
     );
   }, 60_000);
 
-  test("a session whose sign-in method is unknown is refused HOST_TOKEN_AMR_UNKNOWN", async () => {
+  test("a session without a recorded authentication is refused HOST_TOKEN_AUTHENTICATION_UNKNOWN", async () => {
     const app = stepUpApp();
-    const person = await member(app, "Unknown Method Person");
-    const [binding] = await shared.admin<{ login_binding_id: string }[]>`
-      select login_binding_id from auth_sessions where id = ${person.sessionId}
-    `;
-    // The session's login binding now names a provider with no RFC 8176 method.
+    const person = await member(app, "Unknown Authentication Person");
+    // A session that predates the event store, or that no sign-in created:
+    // its creation time is not evidence, so nothing is minted.
     await shared.admin`
-      update canonical_human_login_bindings set provider_id = 'test-oidc'
-      where id = ${binding!.login_binding_id}
+      delete from auth_session_authentications where auth_session_id = ${person.sessionId}
     `;
-    const response = await call(
-      person,
-      `/v1/auth/host-token?workspace=${encodeURIComponent(person.workspaceId)}`,
-      { headers: { cookie: person.cookie } },
-    );
-    const body = await expectRefusal(response, 403, "HOST_TOKEN_AMR_UNKNOWN");
+    await shared.admin`update auth_sessions set created_at = now() where id = ${person.sessionId}`;
+    const mint = () =>
+      call(person, `/v1/auth/host-token?workspace=${encodeURIComponent(person.workspaceId)}`, {
+        headers: { cookie: person.cookie },
+      });
+    const body = await expectRefusal(await mint(), 403, "HOST_TOKEN_AUTHENTICATION_UNKNOWN");
     expect(body).not.toHaveProperty("token");
+    // Sign-in method changes do not count it as fresh either.
+    const methods = (await (
+      await call(person, "/v1/auth/sign-in-methods", { headers: { cookie: person.cookie } })
+    ).json()) as { freshAuthenticationRequired: boolean };
+    expect(methods.freshAuthenticationRequired).toBe(true);
+    // Re-authenticating records one.
+    expect((await post(person, "/v1/auth/reauthenticate", { password })).status).toBe(200);
+    expect((await hostTokenClaims(person)).amr).toEqual(["pwd"]);
   }, 60_000);
 });
 
@@ -778,4 +800,213 @@ describe("re-authentication in a browser session set", () => {
     expect(after.sid).toBe(before.sid);
     expect(after.auth_time).toBeGreaterThanOrEqual(before.auth_time);
   }, 60_000);
+});
+
+/** A code that matches no step in the accepted window. */
+async function wrongTotpCode(secret: string): Promise<string> {
+  const accepted = new Set([
+    await totpCode(secret, -1),
+    await totpCode(secret, 0),
+    await totpCode(secret, 1),
+    await totpCode(secret, 2),
+  ]);
+  for (let candidate = 0; ; candidate++) {
+    const code = String(candidate).padStart(6, "0");
+    if (!accepted.has(code)) return code;
+  }
+}
+
+/** Approve a native app device from the caller's browser, then sign its window in. */
+async function nativeDevice(caller: Caller) {
+  const verifier = randomBytes(48).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const redirectUri = "opengeni://auth/callback";
+  const authorize = await post(caller, "/v1/native-app/authorize", {
+    redirectUri,
+    codeChallenge: challenge,
+    codeChallengeMethod: "S256",
+    platform: "macos",
+    deviceName: "Test Mac",
+  });
+  expect(authorize.status).toBe(200);
+  const { redirectUrl } = (await authorize.json()) as { redirectUrl: string };
+  const code = new URL(redirectUrl).searchParams.get("code")!;
+  const token = await call(caller, "/v1/native-app/token", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, codeVerifier: verifier, redirectUri }),
+  });
+  expect(token.status).toBe(200);
+  const { accessToken } = (await token.json()) as { accessToken: string };
+  const windowSession = await call(caller, "/v1/native-app/web-session", {
+    method: "POST",
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  expect(windowSession.status).toBe(200);
+  const cookie = sessionCookie(windowSession);
+  return { cookie, sessionId: (await sessionRow(cookie)).id };
+}
+
+/** Make the person's sign-in a Google sign-in at `at`, and drop their password. */
+async function socialSignIn(person: { userId: string; sessionId: string }, at: Date) {
+  await shared.admin`
+    update auth_session_authentications set amr = '{oauth}', authenticated_at = ${at}
+    where auth_session_id = ${person.sessionId}
+  `;
+  await shared.admin`
+    update auth_identities set password = null
+    where user_id = ${person.userId} and provider_id = 'credential'
+  `;
+}
+
+const wholeSecondsAgo = (seconds: number) =>
+  new Date(Math.floor((Date.now() - seconds * 1000) / 1000) * 1000);
+
+describe("authentication events", () => {
+  for (const mode of ["dual", "broker"] as const) {
+    test(`a real sign-in records its authentication in ${mode} mode`, async () => {
+      const app = managedApp({
+        hostTokenAudience: audience,
+        managedAuthSessionSetMode: mode,
+      });
+      const person = await brokerMember(app, `${mode} Sign In Person`);
+      const [session] = await shared.admin<{ id: string; created_at: Date }[]>`
+        select id, created_at from auth_sessions where user_id = ${person.userId}
+      `;
+      expect(await authentications(session!.id)).toEqual([
+        { amr: ["pwd"], authenticated_at: session!.created_at },
+      ]);
+      expect((await hostTokenClaims(person)).auth_time).toBe(epochSeconds(session!.created_at));
+    }, 60_000);
+  }
+
+  test("a native app device session inherits the approving authentication and is never fresh on its own", async () => {
+    const app = stepUpApp();
+    const person = await member(app, "Device Approver");
+    // The approving browser signed in with Google an hour ago.
+    await socialSignIn(person, person.signedInAt);
+    const device = await nativeDevice(person);
+    const deviceCaller = { ...person, cookie: device.cookie, peer: freshPeer() };
+
+    expect(await authentications(device.sessionId)).toEqual([
+      { amr: ["oauth"], authenticated_at: person.signedInAt },
+    ]);
+    const claims = await hostTokenClaims(deviceCaller);
+    expect(claims.sid).toBe(device.sessionId);
+    expect(claims.auth_time).toBe(epochSeconds(person.signedInAt));
+    expect(claims.amr).toEqual(["oauth"]);
+
+    // A new session is not a fresh social sign-in or a fresh authentication.
+    await expectRefusal(
+      await post(deviceCaller, "/v1/auth/reauthenticate", {}),
+      401,
+      "REAUTH_FAILED",
+    );
+    await expectRefusal(
+      await post(deviceCaller, "/v1/auth/totp/enroll", {}),
+      401,
+      "TOTP_AUTHENTICATION_REQUIRED",
+    );
+    const methods = (await (
+      await call(deviceCaller, "/v1/auth/sign-in-methods", {
+        headers: { cookie: deviceCaller.cookie },
+      })
+    ).json()) as { freshAuthenticationRequired: boolean };
+    expect(methods.freshAuthenticationRequired).toBe(true);
+    expect(await authentications(device.sessionId)).toHaveLength(1);
+  }, 60_000);
+
+  test("a device approved right after a social sign-in keeps that sign-in's time", async () => {
+    const app = stepUpApp();
+    const person = await member(app, "Fresh Device Approver");
+    const signedInAt = wholeSecondsAgo(60);
+    await socialSignIn(person, signedInAt);
+    const device = await nativeDevice(person);
+    const deviceCaller = { ...person, cookie: device.cookie, peer: freshPeer() };
+    const response = await post(deviceCaller, "/v1/auth/reauthenticate", {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authTime: signedInAt.toISOString(),
+      amr: ["oauth"],
+    });
+    expect((await hostTokenClaims(deviceCaller)).auth_time).toBe(epochSeconds(signedInAt));
+  }, 60_000);
+
+  test("a code added to a social sign-in keeps the sign-in's time", async () => {
+    const app = stepUpApp();
+    const person = await member(app, "Social TOTP Person");
+    const signedInAt = wholeSecondsAgo(120);
+    await socialSignIn(person, signedInAt);
+    // Without a password, enrolling needs that fresh sign-in.
+    const enroll = await post(person, "/v1/auth/totp/enroll", {});
+    expect(enroll.status).toBe(200);
+    const secret = totpSecret(((await enroll.json()) as { totpURI: string }).totpURI);
+    expect(
+      (await post(person, "/v1/auth/totp/confirm", { code: await totpCode(secret) })).status,
+    ).toBe(200);
+
+    const response = await post(person, "/v1/auth/reauthenticate", {
+      totp: await totpCode(secret, 1),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      authTime: signedInAt.toISOString(),
+      amr: ["oauth", "otp"],
+    });
+    const claims = await hostTokenClaims(person);
+    expect(claims.auth_time).toBe(epochSeconds(signedInAt));
+    expect(claims.amr).toEqual(["oauth", "otp"]);
+  }, 60_000);
+});
+
+describe("TOTP lockout", () => {
+  test("ten wrong codes lock the factor, even for the right code, until it expires", async () => {
+    const app = stepUpApp();
+    const person = await member(app, "Lockout Person");
+    const secret = await enrollTotp(person);
+    await forgetUsedCodes(person.userId);
+    const attempt = (body: Record<string, unknown>, path = "/v1/auth/reauthenticate") =>
+      post({ ...person, peer: freshPeer() }, path, body);
+    const factor = async () =>
+      (
+        await shared.admin<
+          {
+            failed_verification_count: number;
+            locked_until: Date | null;
+            last_used_counter: string | null;
+          }[]
+        >`
+          select failed_verification_count, locked_until, last_used_counter
+          from auth_two_factors where user_id = ${person.userId}
+        `
+      )[0]!;
+
+    const wrong = await wrongTotpCode(secret);
+    for (let index = 0; index < 10; index++) {
+      await expectRefusal(await attempt({ password, totp: wrong }), 401, "REAUTH_FAILED");
+    }
+    expect((await factor()).failed_verification_count).toBe(10);
+    expect((await factor()).locked_until).not.toBeNull();
+
+    const right = await totpCode(secret);
+    const locked = await attempt({ password, totp: right });
+    await expectRefusal(locked, 429, "REAUTH_TOTP_LOCKED");
+    expect(Number(locked.headers.get("retry-after"))).toBeGreaterThan(14 * 60);
+    await expectRefusal(
+      await attempt({ password, code: right }, "/v1/auth/totp/disable"),
+      429,
+      "TOTP_LOCKED",
+    );
+    // No time step was spent while locked.
+    expect((await factor()).last_used_counter).toBeNull();
+
+    await shared.admin`
+      update auth_two_factors set locked_until = now() - interval '1 second'
+      where user_id = ${person.userId}
+    `;
+    const unlocked = await attempt({ password, totp: right });
+    expect(unlocked.status).toBe(200);
+    expect(((await unlocked.json()) as { amr: string[] }).amr).toEqual(["pwd", "otp"]);
+    expect(await factor()).toMatchObject({ failed_verification_count: 0, locked_until: null });
+  }, 120_000);
 });

@@ -37,6 +37,7 @@ import {
   type ManagedAuthNewSignupsGate,
 } from "./new-signups-gate";
 import { createSignupFunnelMetrics } from "./signup-funnel-metrics";
+import { recordSessionAuthentication, signInAuthenticationMethod } from "./session-authentication";
 import {
   currentManagedAuthProviderId,
   currentManagedAuthAttemptId,
@@ -605,11 +606,14 @@ export function createManagedAuth(
               },
             };
           },
-          after: async (session) => {
+          after: async (session, context) => {
             funnel?.recordSignIn();
             recordCurrentManagedAuthSession(session.id);
-            if (!shouldDiscardCurrentManagedAuthProviderSession()) return;
-            await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
+            if (shouldDiscardCurrentManagedAuthProviderSession()) {
+              await db.execute(sql`delete from auth_sessions where id = ${session.id}`);
+              return;
+            }
+            await recordSignInAuthentication(db, session, context);
           },
         },
       },
@@ -643,6 +647,29 @@ export function createManagedAuth(
   }) as ManagedAuth;
   configureManagedUserAdmission(auth, settings.allowedUserEmails);
   return auth;
+}
+
+/**
+ * Record the sign-in that created a session as its first authentication, at
+ * the session's creation time. Only a password or Google/GitHub sign-in
+ * endpoint counts; any other session creation (email verification links, a
+ * native app device session) records nothing here and is not an
+ * authentication.
+ */
+async function recordSignInAuthentication(
+  db: Database,
+  session: { id: string; createdAt: Date | string },
+  context: { path?: string; params?: Record<string, unknown> | undefined } | null | undefined,
+): Promise<void> {
+  const providerId =
+    typeof context?.params?.id === "string" ? context.params.id : currentManagedAuthProviderId();
+  const method = signInAuthenticationMethod(context?.path, providerId);
+  if (!method) return;
+  await recordSessionAuthentication(db, {
+    authSessionId: session.id,
+    amr: [method],
+    authenticatedAt: new Date(session.createdAt),
+  });
 }
 
 export const MANAGED_AUTH_PRODUCT_NAME = "Opengeni";

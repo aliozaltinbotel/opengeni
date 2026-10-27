@@ -158,7 +158,15 @@ export function registerManagedSignInMethodRoutes(app: Hono, deps: ApiRouteDeps)
     const [user] = await rows<{ email: string; emailVerified: boolean; fresh: boolean }>(
       deps,
       sql`
-      select u.email, u.email_verified as "emailVerified", s.created_at > clock_timestamp()-interval '5 minutes' as fresh
+      select u.email, u.email_verified as "emailVerified",
+        -- A fresh authentication of this session (sign-in or re-authentication),
+        -- never its creation time: the same rule managed_sign_in_method_authority applies.
+        exists (
+          select 1 from auth_session_authentications a
+          where a.auth_session_id = s.id
+            and a.authenticated_at > clock_timestamp() - interval '5 minutes'
+            and a.authenticated_at <= clock_timestamp()
+        ) as fresh
       from auth_users u join auth_sessions s on s.user_id=u.id where u.id=${actor.authUserId} and s.id=${actor.authSessionId}`,
     );
     if (!user) throw new HTTPException(401);

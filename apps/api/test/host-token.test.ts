@@ -308,6 +308,11 @@ describe("host session token with an audience", () => {
     await shared.admin`
       update auth_sessions set created_at = ${signedInAt}, updated_at = now() where id = ${sessionId}
     `;
+    // The sign-in is the session's recorded authentication, not its row.
+    await shared.admin`
+      update auth_session_authentications set authenticated_at = ${signedInAt}
+      where auth_session_id = ${sessionId}
+    `;
 
     const response = await mint(instance, { cookie: owner.cookie }, owner.workspaceId);
     expect(response.status).toBe(200);

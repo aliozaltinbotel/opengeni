@@ -489,6 +489,8 @@ function authenticatorAppError(error: unknown, hasPassword: boolean): string {
         : "Sign in again, then try within five minutes.";
     case "TOTP_INVALID_CODE":
       return "That code didn't match. Enter the current code from your authenticator app.";
+    case "TOTP_LOCKED":
+      return "Too many wrong codes. Wait 15 minutes, then try again.";
     case "TOTP_RATE_LIMITED":
       return "Too many attempts. Wait a minute and try again.";
     case "TOTP_ALREADY_ENROLLED":

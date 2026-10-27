@@ -95,6 +95,8 @@ async function session(userId: string, provider = "credential") {
     token = crypto.randomUUID();
   await admin`insert into auth_sessions(id,user_id,token,expires_at,identity_id,identity_revision,auth_revision,login_binding_id,login_binding_revision)
     values(${sessionId},${userId},${token},now()+interval '1 hour',${projection.activeIdentity.id},${projection.activeIdentity.identityRevision},${projection.activeIdentity.authRevision},${binding.id},${binding.revision})`;
+  // The fixture session has just signed in: freshness reads its recorded authentication.
+  await admin`insert into auth_session_authentications(auth_session_id,amr) values(${sessionId},${provider === "credential" ? "{pwd}" : "{oauth}"}::text[])`;
   return {
     sessionId,
     token,
@@ -234,6 +236,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       });
       if (condition === "stale")
         await admin`update auth_sessions set created_at=now()-interval '6 minutes' where id=${user.sessionId}`;
+      await admin`update auth_session_authentications set authenticated_at=now()-interval '6 minutes' where auth_session_id=${user.sessionId}`;
       if (condition === "revoked")
         await admin`delete from auth_sessions where id=${user.sessionId}`;
       const browserCookie =
@@ -273,6 +276,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       mutate(user, { kind: "disconnect", provider: "google", usableProviders: ["google"] }),
     ).rejects.toThrow("SIGN_IN_METHOD_LAST_USABLE_METHOD");
     await admin`update auth_sessions set created_at=now()-interval '6 minutes' where id=${user.sessionId}`;
+    await admin`update auth_session_authentications set authenticated_at=now()-interval '6 minutes' where auth_session_id=${user.sessionId}`;
     await rt.adapter.refreshSelectedSession({ token: user.token } as never);
     const result = await rt.app.request("/v1/auth/sign-in-methods", {
       headers: { cookie: await cookie(rt, user.token) },
@@ -334,6 +338,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
     const rt = runtime();
     const cookies = await cookie(rt, user.token);
     await admin`update auth_sessions set created_at=now()-interval '6 minutes' where id=${user.sessionId}`;
+    await admin`update auth_session_authentications set authenticated_at=now()-interval '6 minutes' where auth_session_id=${user.sessionId}`;
     const headers = {
       cookie: cookies,
       origin: "http://opengeni.test",
@@ -597,6 +602,7 @@ describe("managed sign-in methods restricted PostgreSQL and Better Auth", () => 
       "SIGN_IN_METHOD_LAST_USABLE_METHOD",
     );
     await admin`update auth_sessions set created_at=now()-interval '6 minutes' where id=${single.sessionId}`;
+    await admin`update auth_session_authentications set authenticated_at=now()-interval '6 minutes' where auth_session_id=${single.sessionId}`;
     await expect(mutate(single, { kind: "connect", provider: "github" })).rejects.toThrow(
       "SIGN_IN_METHOD_REAUTHENTICATION_REQUIRED",
     );

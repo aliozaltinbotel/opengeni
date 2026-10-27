@@ -82,6 +82,11 @@ export const TOTP_REFUSALS = {
     code: "TOTP_NOT_ENROLLED",
     message: "No authenticator app is set up",
   },
+  locked: {
+    status: 429,
+    code: "TOTP_LOCKED",
+    message: "Too many wrong codes. Your authenticator app is locked for a while.",
+  },
   rateLimited: {
     status: 429,
     code: "TOTP_RATE_LIMITED",
@@ -149,9 +154,7 @@ export function registerManagedAuthTotpRoutes(app: Hono, deps: ApiRouteDeps): vo
     if (!factor || factor.verified) {
       throw new StepUpRefusalError(TOTP_REFUSALS.enrollmentNotStarted);
     }
-    if (!(await consumeTotpCode(deps.db, auth, factor, body.code))) {
-      throw new StepUpRefusalError(TOTP_REFUSALS.invalidCode);
-    }
+    await requireTotpCode(deps, auth, factor, body.code);
     await setTotpEnrollment(deps, session.authUserId, factor, true);
     return context.json({ status: "enrolled" satisfies TotpStatus });
   });
@@ -161,9 +164,7 @@ export function registerManagedAuthTotpRoutes(app: Hono, deps: ApiRouteDeps): vo
     const factor = await readTotpFactor(deps.db, session.authUserId);
     if (!factor?.verified) throw new StepUpRefusalError(TOTP_REFUSALS.notEnrolled);
     await requireFirstFactor(deps, session, body.password);
-    if (!(await consumeTotpCode(deps.db, auth, factor, body.code))) {
-      throw new StepUpRefusalError(TOTP_REFUSALS.invalidCode);
-    }
+    await requireTotpCode(deps, auth, factor, body.code);
     await setTotpEnrollment(deps, session.authUserId, factor, false);
     return context.json({ status: "none" satisfies TotpStatus });
   });
@@ -188,7 +189,23 @@ async function admitTotpMutation<T extends z.ZodType>(
   return { session, body: parsed.data };
 }
 
-/** The password when the person has one; otherwise a sign-in in the last five minutes. */
+async function requireTotpCode(
+  deps: ApiRouteDeps,
+  auth: ManagedAuth,
+  factor: TotpFactor,
+  code: string,
+): Promise<void> {
+  const outcome = await consumeTotpCode(deps.db, auth, factor, code);
+  if (outcome.kind === "locked") {
+    throw new StepUpRefusalError(TOTP_REFUSALS.locked, outcome.retryAfterSeconds);
+  }
+  if (outcome.kind !== "accepted") throw new StepUpRefusalError(TOTP_REFUSALS.invalidCode);
+}
+
+/**
+ * The password when the person has one; otherwise an authentication of this
+ * session at most five minutes old.
+ */
 async function requireFirstFactor(
   deps: ApiRouteDeps,
   session: StepUpSession,
@@ -197,7 +214,7 @@ async function requireFirstFactor(
   const hash = await readCredentialPasswordHash(deps.db, session.authUserId);
   const proven = hash
     ? password !== undefined && (await verifyManagedAuthPassword(password, hash))
-    : session.authentication.signedInRecently;
+    : session.authentication.latest?.recent === true;
   if (!proven) throw new StepUpRefusalError(TOTP_REFUSALS.authenticationRequired);
 }
 

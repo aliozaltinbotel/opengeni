@@ -119,6 +119,8 @@ function failureMessage(error: unknown, status: ReauthenticationStatus): string 
         : "We couldn't confirm it's you. Sign in again, then continue within five minutes.";
     case "REAUTH_TOTP_REQUIRED":
       return "Enter the code from your authenticator app.";
+    case "REAUTH_TOTP_LOCKED":
+      return "Too many wrong codes. Wait 15 minutes, then try again.";
     case "REAUTH_RATE_LIMITED":
       return "Too many attempts. Wait a minute and try again.";
     case "REAUTH_SESSION_REQUIRED":

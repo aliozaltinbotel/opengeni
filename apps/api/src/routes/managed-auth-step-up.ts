@@ -130,8 +130,6 @@ export type StepUpSession = {
   authSessionId: string;
   email: string;
   authentication: SessionAuthenticationRecord;
-  /** The providers of the identity's active login bindings, by binding id. */
-  bindingProviders: ReadonlyMap<string, string>;
 };
 
 /**
@@ -186,9 +184,6 @@ export async function requireStepUpSession(
     ...human,
     email: user.email,
     authentication,
-    bindingProviders: new Map(
-      projection.loginBindings.map((binding) => [binding.id, binding.providerId]),
-    ),
   };
 }
 
