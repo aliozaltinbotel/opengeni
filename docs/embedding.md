@@ -1154,6 +1154,70 @@ governance port, the route does not exist.
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 
+#### Session policy: attachments and generic tool families
+
+Each governed organization has one session policy
+(`@opengeni/contracts/organization-session-policy`, table
+`organization_session_policies`, migration 1017) for every session in its
+workspaces, whatever started it (chat, API, schedules, automations):
+
+```ts
+type OrganizationSessionPolicy = {
+  attachments: "enabled" | "disabled";
+  toolFamilies: {
+    mode: "deny" | "allow";
+    families: ("shell" | "codemode" | "browser" | "computerUse")[];
+  };
+};
+```
+
+- **Families.** `shell` is the sandbox shell and file-editing tools
+  (`exec_command`, `write_stdin`, `apply_patch`, `view_image`, `code_search`,
+  `command_read`/`command_wait`) and the compute-routing tools
+  (`sandboxes_list`, `sandbox_attach`, `sandbox_swap`, `sandbox_provision`,
+  `run_on`, `connected_machine_enroll_token`, `connected_machine_remove`).
+  `codemode` is the in-sandbox Codemode bearer and the `/codemode/*` routes.
+  `browser` is the browser and interaction tools. `computerUse` is the
+  `computer_*` tools, the desktop tools, `excel_run` and
+  `connected_machine_enable_screen_control`. `deny` removes the named families;
+  `allow` keeps only the named ones. The policy only narrows: a kept family
+  still follows the session's own capabilities.
+- **Default.** The first time the fork sees an organization governed (native
+  creation, a host command, or any API read of its policy) it stores the
+  governed default, `{ attachments: "disabled", toolFamilies: { mode: "deny",
+  families: ["shell", "codemode", "browser", "computerUse"] } }`. Nothing is
+  stored for an ungoverned organization, and without a bound port the API reads
+  nothing, so stock deployments are unchanged.
+- **Host command.** `PUT /v1/host/organizations/:org/session-policy` with
+  `{ actingExternalUser, command: { policy, operationId } }` replaces the
+  policy (mutation `session_policy.update`, decided with `via: "host"`; the
+  same service-token rules as the other host commands). A replay of the
+  stored policy's operation id changes nothing. `GET` on the same path reads
+  it. The response is `{ organizationId, policy, source: "stock" |
+  "governed_default" | "host", revision, updatedAt }`. No native route writes
+  the policy, and native workspace settings or session capabilities cannot
+  widen it.
+- **Attachments off.** A person's `POST /v1/workspaces/:ws/files/uploads`
+  and its `/complete`, and a session create or message that attaches a file
+  (`resources[].kind === "file"`), answer `403` with `details.code
+  ATTACHMENTS_DISABLED`. An agent's own uploads are not attachments and pass.
+  The workspace-scoped `GET /v1/config/client?workspaceId=` reports
+  `fileUploads.enabled: false`, and the console hides its attach controls for
+  that workspace.
+- **Families off.** The worker removes the denied families from every turn's
+  tool catalog (first-party tools, function tools, the sandbox shell and
+  filesystem capabilities) and mints no Codemode bearer when `codemode` or
+  `shell` is denied. The API refuses them again at call admission: the
+  first-party MCP server never registers a denied tool whatever the token's
+  signed selection names, and the `/codemode/*`, `browser-sessions`,
+  `attached-browsers`, `computer-sessions` (mutations) and
+  `sessions/:id/terminal/*` routes answer `403` with `details.code
+  SESSION_TOOL_FAMILY_DENIED` and `details.family`, after authenticating the
+  caller.
+- **Worker reads.** The worker has no governance port; it reads the stored
+  policy once per turn and treats no row as stock. A host should set its
+  policy when it provisions an organization.
+
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.
