@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: every deployed database already holds this key under its earlier 0551/0666 name, so the add and its validation only run on a fresh install whose model_call_facts table is still empty
 -- PQA-0197: append-only, exact-call source receipts; historical facts remain unattributed.
 --
 -- Cendra fork migration, first shipped as 0551_model_call_source_receipts.sql and
@@ -88,7 +89,10 @@ DO $fact_receipt$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM pg_constraint WHERE conrelid='model_call_facts'::regclass AND conname='model_call_fact_source_receipt_fk') THEN
   ALTER TABLE model_call_facts ADD CONSTRAINT model_call_fact_source_receipt_fk
    FOREIGN KEY(source_receipt_id,account_id,workspace_id,session_id,turn_id,source_key)
-   REFERENCES model_call_source_receipts(id,account_id,workspace_id,session_id,turn_id,source_key);
+   REFERENCES model_call_source_receipts(id,account_id,workspace_id,session_id,turn_id,source_key)
+   -- Deferrable NO ACTION (2026-10-26 sync): both tables are removed by a workspace
+   -- deletion, which defers such keys to commit (upstream 0927). 1009 converts older installs.
+   DEFERRABLE INITIALLY IMMEDIATE;
  END IF;
 END $fact_receipt$;
 DO $grants$ BEGIN
