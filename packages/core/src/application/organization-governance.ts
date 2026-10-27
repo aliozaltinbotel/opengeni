@@ -37,8 +37,20 @@ export async function organizationGovernanceDecision(
 }
 
 /**
+ * Raised when a bound port breaks its contract, for example a `governs` that
+ * returns a Promise: treating that as "not governed" would open the gate.
+ */
+export class OrganizationGovernancePortContractError extends Error {
+  readonly name = "OrganizationGovernancePortContractError";
+  constructor(message: string) {
+    super(message);
+  }
+}
+
+/**
  * Whether a bound port governs this organization. Without a port nothing is
- * read; a port that throws, and a failed lookup, fail the caller (closed).
+ * read; a port that throws or answers anything but a boolean, and a failed
+ * lookup, fail the caller (closed).
  */
 export async function organizationGovernedByHost(
   deps: OrganizationGovernanceDeps,
@@ -47,7 +59,18 @@ export async function organizationGovernedByHost(
   const port = deps.organizationGovernance;
   if (!port) return false;
   const externalSource = await organizationExternalSource(deps.db, organizationId);
-  return port.governs({ organizationId, externalSource }) === true;
+  const governed: unknown = port.governs({ organizationId, externalSource });
+  if (typeof governed !== "boolean")
+    throw new OrganizationGovernancePortContractError(
+      `OrganizationGovernancePort.governs must return a boolean, not ${describeValue(governed)}`,
+    );
+  return governed;
+}
+
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (value instanceof Promise) return "a Promise";
+  return typeof value;
 }
 
 /**

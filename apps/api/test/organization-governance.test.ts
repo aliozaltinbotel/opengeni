@@ -13,6 +13,8 @@ import {
 } from "@opengeni/contracts/organization-governance";
 import {
   EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
+  organizationGovernanceDecision,
+  organizationGovernedByHost,
   type ApiRouteDeps,
   type AppDependencies,
   type ManagedEmailDeliveryResult,
@@ -1242,3 +1244,33 @@ async function exchangeCode(approved: Response, mcpClient: McpClient): Promise<v
   });
   expect(token.status).toBe(200);
 }
+
+describe("organization governance port, final review", () => {
+  test("governs must answer a boolean: a Promise-returning port fails the caller closed", async () => {
+    const asyncPort = {
+      governs: async () => false,
+      decide: () => "allow",
+    } as unknown as OrganizationGovernancePort;
+    const deps = { db: client.db, organizationGovernance: asyncPort };
+    const contractError = {
+      name: "OrganizationGovernancePortContractError",
+    };
+    await expect(
+      organizationGovernanceDecision(deps, {
+        organizationId: world.governedOrganizationId,
+        mutation: "invitation.create",
+        via: "native",
+      }),
+    ).rejects.toMatchObject(contractError);
+    await expect(
+      organizationGovernedByHost(deps, world.ungovernedOrganizationId),
+    ).rejects.toMatchObject(contractError);
+    // Through a native route the mutation is not performed.
+    const invite = await appFor(asyncPort).request(`${org()}/invitations`, {
+      method: "POST",
+      headers: browser(world.owner.cookie),
+      body: JSON.stringify(inviteBody(`async-port-${id()}@example.test`)),
+    });
+    expect(invite.status).toBe(500);
+  }, 60_000);
+});

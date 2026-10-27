@@ -62,7 +62,11 @@ export type GovernedMutationChannel = "native" | "host";
  * host has decided to allow it.
  */
 export type OrganizationGovernancePort = {
-  /** Organizations this host governs, keyed by the org's external identity source. */
+  /**
+   * Organizations this host governs, keyed by the org's external identity
+   * source. Synchronous: any answer but a boolean (a Promise included) fails
+   * the request closed with `OrganizationGovernancePortContractError`.
+   */
   governs(input: { organizationId: string; externalSource: string | null }): boolean;
   decide(input: {
     organizationId: string;

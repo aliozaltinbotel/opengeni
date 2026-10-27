@@ -903,7 +903,9 @@ type OrganizationGovernancePort = {
 };
 ```
 
-`governs` receives the organization's `managed_accounts.external_source`.
+`governs` receives the organization's `managed_accounts.external_source`
+and must answer synchronously with a boolean; any other answer (a Promise
+included) fails the request closed (`OrganizationGovernancePortContractError`).
 For a governed organization, every native route that invites, revokes or
 re-sends an invitation, changes a role, suspends, reactivates or offboards a
 member, adds, changes or removes workspace or external members, creates,
