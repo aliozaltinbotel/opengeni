@@ -2,15 +2,15 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { sql } from "drizzle-orm";
 import type { OrganizationSessionPolicy } from "@opengeni/contracts/organization-session-policy";
 import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
+  acquireRestrictedRuntimeTestDatabase,
+  type RestrictedRuntimeTestDatabase,
 } from "@opengeni/testing/shared-pg";
 import { createDb, rawRows, withAccountRls, type DbClient } from "../src/database";
 import {
   bootstrapWorkspace,
   ensureGovernedOrganizationSessionPolicy,
   getOrganizationSessionPolicy,
+  HOST_SESSION_POLICY_ROUTINE,
   hostSessionPolicyWriteGranted,
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
@@ -26,15 +26,21 @@ import {
  * goes through the withheld routine, only for a recorded host command.
  */
 
-let shared: SharedTestDatabase;
+// The documented posture: a NOSUPERUSER, NOBYPASSRLS migration owner (which
+// owns the routine), a dedicated data schema and the restricted runtime role,
+// all under FORCE RLS.
+let shared: RestrictedRuntimeTestDatabase;
 let client: DbClient;
 
 beforeAll(async () => {
-  const acquired = await acquireSharedTestDatabase("organization-session-policies");
+  const acquired = await acquireRestrictedRuntimeTestDatabase(
+    "organization-session-policies",
+    "policy_data",
+  );
   if (!acquired) throw new Error("PostgreSQL required");
   shared = acquired;
-  client = createDb(shared.appUrl, { max: 2 });
-}, 600_000);
+  client = createDb(shared.appUrl, { max: 2, searchPath: shared.schema });
+}, 900_000);
 
 afterAll(async () => {
   await client?.close();
@@ -134,6 +140,12 @@ describe("the runtime's direct access", () => {
 
 describe("the host's routine", () => {
   test("is withheld until a later release grants it", async () => {
+    // It runs as a migration owner that FORCE RLS binds.
+    const [owner] = await shared.admin<{ bypass: boolean }[]>`
+      select role.rolbypassrls as bypass from pg_proc proc
+      join pg_roles role on role.oid = proc.proowner
+      where proc.proname = 'put_host_organization_session_policy'`;
+    expect(owner?.bypass).toBe(false);
     expect(await hostSessionPolicyWriteGranted(client.db)).toBe(false);
     const id = await organization(true);
     expect(
@@ -145,7 +157,9 @@ describe("the host's routine", () => {
         expectedRevision: 0,
       }),
     ).toBeNull();
-    await grantDeferredRuntimeAccess(shared.admin);
+    await shared.admin.unsafe(
+      `GRANT EXECUTE ON FUNCTION ${HOST_SESSION_POLICY_ROUTINE} TO opengeni_app`,
+    );
     expect(await hostSessionPolicyWriteGranted(client.db)).toBe(true);
   });
 
