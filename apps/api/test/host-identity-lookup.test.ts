@@ -699,3 +699,38 @@ describe("a host command refused by the database names the actor", () => {
     expect(detailCode(body)).toBe("HOST_COMMAND_ACTOR_NOT_AUTHORIZED");
   }, 120_000);
 });
+
+describe("the member-list fallback's bound", () => {
+  test("an organization past the administration overview's bound answers 409, not 500", async () => {
+    const wasGranted = await lookupByIdentityGranted();
+    await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION
+      opengeni_private.lookup_organization_host_identity(uuid, text, uuid) FROM opengeni_app`);
+    try {
+      const organization = await hostOrganization();
+      const email = `${crypto.randomUUID()}@example.test`;
+      await hostInvite(organization, email);
+      const member = await acceptAll(email);
+      // 1001 grants in one shared workspace: the overview the fallback reads
+      // refuses more than 1000 (54000).
+      await shared.admin`
+        insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+        select ${organization.organizationId}, ${organization.businessWorkspaceId},
+          'test-host:bulk:' || n, 'member', '["sessions:read"]'::jsonb
+        from generate_series(1, 1001) as n`;
+      const response = await lookup(
+        governedApp,
+        organization.organizationId,
+        await hostToken(organization),
+        { identityId: (await identityOf(member)).id },
+      );
+      expect(response.status).toBe(409);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      const body = (await response.json()) as { error: { message: string } };
+      expect(body.error.message).toBe(
+        "organization access inventory exceeds the identity lookup's member-list bound",
+      );
+    } finally {
+      if (wasGranted) await grantDeferredRuntimeAccess(shared.admin);
+    }
+  }, 180_000);
+});

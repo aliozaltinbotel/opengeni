@@ -1110,7 +1110,8 @@ granted one release later. Until then the route gives the same answer through
 the organization's member list, at one identity projection per member, one
 invitation page per 100 invitations and one administration overview read.
 That fallback inherits the overview's bounds: more than 500 shared workspaces,
-or more than 1000 grants in one workspace, is refused.
+or more than 1000 grants in one workspace, answers `409` (the lookup by
+identity has no such bound).
 
 A host that retries an invitation revoke until it settles needs to know why a
 revoke was refused. The host's `invitations/:id/revoke` command answers `409`

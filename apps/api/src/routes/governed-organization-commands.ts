@@ -88,6 +88,9 @@ import {
 
 const Uuid = z.string().uuid();
 const SERVICE_TOKEN_PREFIX = "ogd2_";
+/** The 409 message when the identity lookup's member-list fallback is past its bound (54000). */
+const HOST_IDENTITY_LOOKUP_RESOURCE_LIMIT =
+  "organization access inventory exceeds the identity lookup's member-list bound";
 
 /** What a verified host command runs as. */
 type HostCommandAuthority = {
@@ -418,7 +421,9 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         identityId: identityId.toLowerCase(),
       });
     } catch (error) {
-      rethrowHostMembershipError(error);
+      // The member-list fallback reads the administration overview, which is
+      // bounded (500 shared workspaces, 1000 grants each).
+      rethrowHostMembershipError(error, HOST_IDENTITY_LOOKUP_RESOURCE_LIMIT);
     }
     // An identity elsewhere and an unknown one get this same answer.
     if (!identity)
@@ -720,7 +725,7 @@ function parsePathId(context: Context, name: string): string {
  * (not an active owner or admin, or a role rule). Status and message are the
  * native ones.
  */
-function rethrowHostMembershipError(error: unknown): never {
+function rethrowHostMembershipError(error: unknown, resourceLimitMessage?: string): never {
   if (!lastSharedWorkspaceRemovalHttpError(error) && nestedPostgresSqlState(error) === "42501")
     throw new ApiHttpError(403, {
       code: "forbidden",
@@ -729,7 +734,7 @@ function rethrowHostMembershipError(error: unknown): never {
       outcomeUnknown: false,
       details: { code: HOST_COMMAND_ACTOR_NOT_AUTHORIZED },
     });
-  rethrowMembershipError(error);
+  rethrowMembershipError(error, resourceLimitMessage);
 }
 
 function organizationNotHostGoverned(): ApiHttpError {
