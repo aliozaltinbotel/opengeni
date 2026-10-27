@@ -174,7 +174,7 @@ No other `*.gen.*` file differs from its generator on the merged tree (the fork 
 
 ## Verification
 
-Each gate ran once on the final tree (re-runs only for files a fit touched). "Inherited" means the same command and the
+Each gate ran once (re-runs only for files a fit touched). Typecheck, lint, format, web build and bundle budget ran at `94c7b2bb7`, before the renumber (`ba4430956`, which oxfmt-reflowed two db tests and renamed one companion test) and the test fits; the migration checks after the renumber; the fork-intent and package suites at `a484934a1`, with `3f1878689` (test-only) re-run alone. Nothing was re-run after `node_modules` was removed (one install, per the brief). "Inherited" means the same command and the
 same cases are red on fork25 `a9f495d8f` and/or upstream `01f15f453`, checked the same way on this host; the
 evidence is the comparison stated in each row.
 
