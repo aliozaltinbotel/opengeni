@@ -31,6 +31,8 @@ import {
   installVitePreloadRecovery,
 } from "./lib/vite-preload-recovery";
 import "./styles.css";
+// The host extension's stylesheet (empty for the stock console), after the base styles.
+import "@opengeni/web-host-extension/style.css";
 import { toast } from "sonner";
 
 retainIdentityLinkContinuation(window);

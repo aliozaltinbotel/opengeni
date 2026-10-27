@@ -375,13 +375,16 @@ ARG OPENGENI_SERVER_VERSION
 ARG OPENGENI_DEPLOYMENT_REVISION=dev
 ARG VITE_API_BASE_URL
 ARG VITE_CLERK_PUBLISHABLE_KEY
+# Absolute directory of a built host extension (index.js + style.css) for the
+# console build; empty builds the stock console.
+ARG OPENGENI_WEB_HOST_EXTENSION=""
 ENV NODE_ENV=production \
   VITE_API_BASE_URL=$VITE_API_BASE_URL \
   VITE_CLERK_PUBLISHABLE_KEY=$VITE_CLERK_PUBLISHABLE_KEY \
   OPENGENI_SERVER_VERSION=$OPENGENI_SERVER_VERSION \
   VITE_OPENGENI_DEPLOYMENT_REVISION=$OPENGENI_DEPLOYMENT_REVISION
 USER bun
-RUN bun run --cwd apps/web build \
+RUN OPENGENI_WEB_HOST_EXTENSION="$OPENGENI_WEB_HOST_EXTENSION" bun run --cwd apps/web build \
   && bun build apps/web/src/server.ts --target=bun --outfile=/app/web-server/server.ts
 
 # No target-architecture RUN steps or copied native build dependencies.

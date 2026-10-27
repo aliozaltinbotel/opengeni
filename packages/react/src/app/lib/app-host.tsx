@@ -15,6 +15,8 @@ import {
 } from "react";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
+import type { ToolRegistryEntry } from "../../timeline";
+import type { HostExtension, NativeDestination } from "../host-extension";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import type { MessageContextPill, MessageContextStore } from "./message-context";
@@ -52,6 +54,14 @@ export type AppHost = Readonly<{
    * page's own event stream (no second connection).
    */
   onSessionState?: ((state: SessionViewState) => void) | undefined;
+  /** The host extension's tool cards, ahead of the built-in renderers. */
+  toolRegistryEntries?: readonly ToolRegistryEntry[] | undefined;
+  /** Native destinations the host extension hides from every link source. */
+  hiddenNativeDestinations?: readonly NativeDestination[] | undefined;
+  /** The host extension's mark and wordmark, in place of the stock brand. */
+  brand?: HostExtension["brand"] | undefined;
+  /** The product name the console shows in place of the stock one. */
+  productName?: string | undefined;
 }>;
 
 const AppHostContext = createContext<AppHost | null>(null);

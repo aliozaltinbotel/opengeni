@@ -15,7 +15,9 @@
     "isolatedModules": true,
     "noEmit": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@opengeni/web-host-extension": ["./src/host-extension/none/index.ts"],
+      "@opengeni/web-host-extension/style.css": ["./src/host-extension/none/style.css"]
     },
     "types": ["vite/client", "node", "bun"]
   },

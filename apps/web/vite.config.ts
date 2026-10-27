@@ -9,6 +9,7 @@ import { defineConfig } from "vite";
 import { compactProtectedIndexHtml } from "./vite-index-html";
 import { chunkEvaluationOrderPlugin } from "./vite-chunk-evaluation-order";
 import { eagerGraphPlugin } from "./vite-eager-graph";
+import { hostExtensionAliases, resolveHostExtensionFiles } from "./vite-host-extension";
 import { safeReactHmrPlugin } from "./vite-safe-react-hmr";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -16,6 +17,11 @@ const canonicalIndexFilename = path.resolve(dirname, "index.html");
 const browserExtensionArchive = path.resolve(
   dirname,
   "../browser-extension/dist/opengeni-browser-extension.tar",
+);
+// Fails the build for a configured extension directory that is incomplete.
+const hostExtensionFiles = resolveHostExtensionFiles(
+  process.env.OPENGENI_WEB_HOST_EXTENSION,
+  path.resolve(dirname, "src/host-extension/none"),
 );
 const allowedHosts = process.env.OPENGENI_WEB_ALLOWED_HOSTS?.split(",")
   .map((host) => host.trim())
@@ -676,9 +682,10 @@ export default defineConfig({
     ...(allowedHosts?.length ? { allowedHosts } : {}),
   },
   resolve: {
-    alias: {
-      "@": path.resolve(dirname, "src"),
-    },
+    alias: [
+      { find: "@", replacement: path.resolve(dirname, "src") },
+      ...hostExtensionAliases(hostExtensionFiles),
+    ],
     dedupe: ["react", "react-dom", "radix-ui"],
   },
   plugins: [
