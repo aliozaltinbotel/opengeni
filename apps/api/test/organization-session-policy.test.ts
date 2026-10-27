@@ -374,9 +374,15 @@ describe("host session policy command", () => {
     try {
       const app = appFor(hostPort);
       const org = await organization(HOST_SOURCE);
-      const response = await putHostPolicy(app, org, OPEN_ALL);
+      const operationId = crypto.randomUUID();
+      const response = await putHostPolicy(app, org, OPEN_ALL, { operationId });
       expect(response.status).toBe(503);
       expect(detailCode(await response.json())).toBe("HOST_SESSION_POLICY_UNAVAILABLE");
+      // Refused before anything is recorded: the operation id stays unused.
+      const [attributions] = await shared.admin<{ count: number }[]>`
+        select count(*)::int as count from organization_host_command_attributions
+        where account_id = ${org.organizationId} and operation_id = ${operationId}`;
+      expect(attributions!.count).toBe(0);
       expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
         policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
         source: "governed_default",

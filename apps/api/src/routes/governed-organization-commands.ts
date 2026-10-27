@@ -56,6 +56,7 @@ import {
   getOrganizationInvitationForAdministration,
   getWorkspace,
   hostOrganizationOwnerGranted,
+  hostSessionPolicyWriteGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
@@ -459,6 +460,9 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       context,
       HostPutOrganizationSessionPolicyRequest,
     );
+    // Before anything is recorded, as the owner ensure does: an unavailable
+    // command leaves its operation id unused.
+    if (!(await hostSessionPolicyWriteGranted(deps.db))) throw hostSessionPolicyUnavailable();
     await recordAttribution(deps, authority, {
       mutation: "session_policy.update",
       operationId: command.operationId,
