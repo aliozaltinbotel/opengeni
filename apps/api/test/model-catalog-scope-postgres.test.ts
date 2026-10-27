@@ -45,6 +45,8 @@ beforeAll(async () => {
       sandboxBackend: "none",
       codexSubscriptionEnabled: false,
       claudeSubscriptionEnabled: false,
+      // Cendra fork: first-use external membership is a deployment opt-in (off by default).
+      externalMemberFirstUseEnabled: true,
     }),
     bus: new MemoryEventBus(),
     workflowClient: {} as never,
