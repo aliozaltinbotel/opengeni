@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
+import type { ApiRouteDeps } from "@opengeni/core";
 import {
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER,
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
@@ -26,6 +27,9 @@ import { testSettings } from "@opengeni/testing/settings";
 import { createLocalJWKSet, decodeProtectedHeader, jwtVerify, type JSONWebKeySet } from "jose";
 
 import { createApp } from "../src/app";
+import { MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT } from "../src/auth/managed-auth-rate-limits";
+import { HOST_TOKEN_JWKS_MAX_AGE_SECONDS, registerHostTokenRoutes } from "../src/routes/host-token";
+import { Hono } from "hono";
 
 /* End to end through the real app, Better Auth and PostgreSQL: a host that
    configures an audience gets a short-lived ES256 session token for one
@@ -579,3 +583,82 @@ describe("host session token with browser session sets", () => {
     }, 60_000);
   }
 });
+
+describe("host session token JWKS cache and mint limit", () => {
+  test("the JWKS is served from process memory for its max-age", async () => {
+    let reads = 0;
+    let failNext = false;
+    const managedAuth = {
+      options: { plugins: [{ id: "jwt" }] },
+      api: {
+        getJwks: async () => {
+          reads += 1;
+          if (failNext) {
+            failNext = false;
+            throw new Error("key store unavailable");
+          }
+          return { keys: [{ kid: `key-${reads}`, kty: "EC" }] };
+        },
+      },
+    };
+    const routes = new Hono();
+    registerHostTokenRoutes(routes, {
+      settings: { hostTokenAudience: audience, hostTokenTtlSeconds: 300, publicBaseUrl: origin },
+      managedAuth,
+    } as unknown as ApiRouteDeps);
+    const kids = async () => {
+      const response = await routes.request("/v1/auth/jwks");
+      if (response.status !== 200) return response.status;
+      expect(response.headers.get("cache-control")).toBe(
+        `public, max-age=${HOST_TOKEN_JWKS_MAX_AGE_SECONDS}`,
+      );
+      return ((await response.json()) as JSONWebKeySet).keys.map((key) => key.kid);
+    };
+    const start = Date.now();
+    try {
+      setSystemTime(start);
+      expect(await kids()).toEqual(["key-1"]);
+      setSystemTime(start + (HOST_TOKEN_JWKS_MAX_AGE_SECONDS * 1000 - 1));
+      expect(await kids()).toEqual(["key-1"]);
+      expect(reads).toBe(1);
+      // Expired: read again. A failed read is never cached.
+      setSystemTime(start + HOST_TOKEN_JWKS_MAX_AGE_SECONDS * 1000);
+      failNext = true;
+      expect(await kids()).toBe(500);
+      expect(await kids()).toEqual(["key-3"]);
+      expect(await kids()).toEqual(["key-3"]);
+      expect(reads).toBe(3);
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  test("a signing key the cached JWKS lacks refreshes it", async () => {
+    const instance = managedApp({ hostTokenAudience: audience });
+    const owner = await ownerWithOrganization(instance, "Rotated Key Owner");
+    const first = await mint(instance, { cookie: owner.cookie }, owner.workspaceId);
+    await verifiedClaims(instance, first);
+    // An operator clears the key store (for example after rotating the auth
+    // secret): the next mint creates a new key that the cache has not seen.
+    await shared.admin`delete from auth_jwks`;
+    const second = await mint(instance, { cookie: owner.cookie }, owner.workspaceId);
+    await verifiedClaims(instance, second);
+  }, 60_000);
+
+  test("one session mints at most the limit per window; another session is unaffected", async () => {
+    const instance = managedApp({ hostTokenAudience: audience });
+    const owner = await ownerWithOrganization(instance, "Busy Minter");
+    for (let attempt = 0; attempt < MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT.max; attempt += 1) {
+      const minted = await mint(instance, { cookie: owner.cookie }, owner.workspaceId);
+      expect({ attempt, status: minted.status }).toEqual({ attempt, status: 200 });
+    }
+    const limited = await mint(instance, { cookie: owner.cookie }, owner.workspaceId);
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(limited.headers.get("cache-control")).toContain("no-store");
+    expect(await refusalCode(limited)).toBe("HOST_TOKEN_RATE_LIMITED");
+    const otherSession = await signIn(instance, owner.email, owner.password);
+    expect((await mint(instance, { cookie: otherSession }, owner.workspaceId)).status).toBe(200);
+  }, 120_000);
+});
+

@@ -87,6 +87,21 @@ export function managedAuthProductCredentialThrottleKey(
   return `${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}product:${route}:${digest}`;
 }
 
+/**
+ * Host session tokens one browser session may mint per window
+ * (`/v1/auth/host-token`). A host mints one per workspace about once per token
+ * lifetime, so this only stops a session that mints in a loop.
+ */
+export const MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT = { window: 60, max: 30 } as const;
+
+/** Content-free per-session counter key for host session token minting. */
+export function managedAuthHostTokenThrottleKey(secret: string, authSessionId: string): string {
+  const digest = createHmac("sha256", secret)
+    .update(`opengeni:managed-auth:host-token-throttle:v1\n${authSessionId}`)
+    .digest("hex");
+  return `${MANAGED_AUTH_EMAIL_THROTTLE_KEY_PREFIX}host-token:${digest}`;
+}
+
 /** The rules handed to Better Auth: the limits above, plus `false` for each
  * path in {@link MANAGED_AUTH_UNLIMITED_PATHS}, which skips its limiter. */
 export const MANAGED_AUTH_BETTER_AUTH_RATE_LIMIT_RULES: Record<

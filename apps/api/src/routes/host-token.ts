@@ -14,7 +14,16 @@ import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
 
-import { hostSessionTokenJwks, signHostSessionToken } from "../auth/managed-auth";
+import {
+  hostSessionTokenJwks,
+  signHostSessionToken,
+  type HostSessionTokenJwks,
+} from "../auth/managed-auth";
+import {
+  consumeManagedAuthEmailThrottle,
+  managedAuthHostTokenThrottleKey,
+  MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT,
+} from "../auth/managed-auth-rate-limits";
 import {
   readSessionAuthentication,
   type AuthenticationMethod,
@@ -62,6 +71,11 @@ export const HOST_TOKEN_REFUSALS = {
     code: "HOST_TOKEN_AUTHENTICATION_UNKNOWN",
     message: "This session has no recorded sign-in. Confirm it's you, or sign in again.",
   },
+  rateLimited: {
+    status: 429,
+    code: "HOST_TOKEN_RATE_LIMITED",
+    message: "Too many host session tokens for this session. Try again shortly.",
+  },
 } as const satisfies Record<
   string,
   { status: ContentfulStatusCode; code: `HOST_TOKEN_${string}`; message: string }
@@ -70,11 +84,21 @@ export const HOST_TOKEN_REFUSALS = {
 type HostTokenRefusal = (typeof HOST_TOKEN_REFUSALS)[keyof typeof HOST_TOKEN_REFUSALS];
 
 class HostTokenRefusalError extends Error {
-  constructor(readonly refusal: HostTokenRefusal) {
+  constructor(
+    readonly refusal: HostTokenRefusal,
+    readonly retryAfterSeconds?: number,
+  ) {
     super(refusal.message);
     this.name = "HostTokenRefusalError";
   }
 }
+
+/** How long a verifier, and this process, may reuse a published JWKS. */
+export const HOST_TOKEN_JWKS_MAX_AGE_SECONDS = 300;
+
+// Only used when no Better Auth secret is configured (local development);
+// the counter key is a content-free digest either way.
+const THROTTLE_FALLBACK_KEY = "opengeni:managed-auth:host-token-throttle:local";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
@@ -83,6 +107,7 @@ type HostTokenConfiguration = {
   audience: string;
   issuer: string;
   ttlSeconds: number;
+  jwks: HostTokenJwksCache;
 };
 
 export function registerHostTokenRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -93,15 +118,19 @@ export function registerHostTokenRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       return context.json(await mintHostSessionToken(context, deps, configuration));
     } catch (error) {
-      if (error instanceof HostTokenRefusalError) return refuse(context, error.refusal);
+      if (error instanceof HostTokenRefusalError) {
+        if (error.retryAfterSeconds !== undefined)
+          context.header("retry-after", String(error.retryAfterSeconds));
+        return refuse(context, error.refusal);
+      }
       throw error;
     }
   });
   if (!configuration) return;
 
   app.get("/v1/auth/jwks", async (context) => {
-    context.header("cache-control", "public, max-age=300");
-    return context.json(await hostSessionTokenJwks(configuration.auth));
+    context.header("cache-control", `public, max-age=${HOST_TOKEN_JWKS_MAX_AGE_SECONDS}`);
+    return context.json(await configuration.jwks.read());
   });
   // The plugin's own token endpoint signs the whole user object for any
   // session holder. Only the host token route may sign.
@@ -119,7 +148,79 @@ function hostTokenConfiguration(deps: ApiRouteDeps): HostTokenConfiguration | nu
     audience,
     issuer,
     ttlSeconds: deps.settings.hostTokenTtlSeconds,
+    jwks: createHostTokenJwksCache(deps.managedAuth),
   };
+}
+
+type HostTokenJwksCache = {
+  /** The published JWKS, read from the key store at most once per max-age. */
+  read(): Promise<HostSessionTokenJwks>;
+  /** Called with each minted token's key id: a key not yet cached drops the cache. */
+  noteSigningKey(kid: string | undefined): void;
+};
+
+/**
+ * The JWKS kept in process memory for `HOST_TOKEN_JWKS_MAX_AGE_SECONDS`, the
+ * same time verifiers may cache it. A failed read is not cached, and a token
+ * signed with a key the cached set lacks (a cleared or newly created key)
+ * drops the cache, so this process never publishes a set missing its own
+ * signing key.
+ */
+function createHostTokenJwksCache(auth: ManagedAuth): HostTokenJwksCache {
+  let cached: { jwks: HostSessionTokenJwks; expiresAtMs: number } | null = null;
+  let pending: Promise<HostSessionTokenJwks> | null = null;
+  let generation = 0;
+  const load = (): Promise<HostSessionTokenJwks> => {
+    const startedGeneration = generation;
+    return hostSessionTokenJwks(auth).then((jwks) => {
+      if (startedGeneration === generation)
+        cached = { jwks, expiresAtMs: Date.now() + HOST_TOKEN_JWKS_MAX_AGE_SECONDS * 1000 };
+      return jwks;
+    });
+  };
+  return {
+    async read() {
+      if (cached && Date.now() < cached.expiresAtMs) return cached.jwks;
+      pending ??= load().finally(() => {
+        pending = null;
+      });
+      return await pending;
+    },
+    noteSigningKey(kid) {
+      if (cached?.jwks.keys.some((key) => key.kid === kid)) return;
+      cached = null;
+      pending = null;
+      generation += 1;
+    },
+  };
+}
+
+/** The `kid` of a compact JWS this process just signed. */
+function signingKeyId(token: string): string | undefined {
+  try {
+    const header: unknown = JSON.parse(
+      Buffer.from(token.split(".", 1)[0] ?? "", "base64url").toString("utf8"),
+    );
+    const kid = (header as { kid?: unknown } | null)?.kid;
+    return typeof kid === "string" ? kid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function throttleSecret(deps: ApiRouteDeps): string {
+  return deps.settings.betterAuthSecret ?? THROTTLE_FALLBACK_KEY;
+}
+
+/** Count one mint against the session's window. */
+async function throttleHostTokenSession(deps: ApiRouteDeps, authSessionId: string): Promise<void> {
+  const attempt = await consumeManagedAuthEmailThrottle(deps.db, {
+    key: managedAuthHostTokenThrottleKey(throttleSecret(deps), authSessionId),
+    windowSeconds: MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT.window,
+    max: MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT.max,
+  });
+  if (!attempt.allowed)
+    throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.rateLimited, attempt.retryAfterSeconds);
 }
 
 function refuse(context: Context, refusal: HostTokenRefusal): Response {
@@ -151,6 +252,7 @@ async function mintHostSessionToken(
     }),
     { 401: HOST_TOKEN_REFUSALS.sessionRequired },
   );
+  await throttleHostTokenSession(deps, human.authSessionId);
   const projection = await getCanonicalHumanIdentityProjection(deps.db, human.authUserId).catch(
     (error: unknown) => {
       if (error instanceof CanonicalHumanIdentityNotFoundError) {
@@ -195,6 +297,7 @@ async function mintHostSessionToken(
     exp: expiresAt,
     jti: crypto.randomUUID(),
   });
+  configuration.jwks.noteSigningKey(signingKeyId(token));
   return { token, expiresAt: new Date(expiresAt * 1000).toISOString() };
 }
 
