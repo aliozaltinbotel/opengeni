@@ -187,7 +187,9 @@ function createHostTokenJwksCache(auth: ManagedAuth): HostTokenJwksCache {
       return await pending;
     },
     noteSigningKey(kid) {
-      if (cached?.jwks.keys.some((key) => key.kid === kid)) return;
+      // Nothing cached yet: the next read loads the current set anyway, and a
+      // read in flight must not be restarted by every mint.
+      if (!cached || cached.jwks.keys.some((key) => key.kid === kid)) return;
       cached = null;
       pending = null;
       generation += 1;
