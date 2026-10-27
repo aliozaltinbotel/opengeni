@@ -6,6 +6,7 @@ import {
   OrganizationMembershipRole,
   PutOrganizationWorkspaceMemberRequest,
   RevokeOrganizationInvitationRequest,
+  RevokeOrganizationWorkspaceMemberRequest,
 } from "./organization-membership-lifecycle";
 
 /**
@@ -182,4 +183,16 @@ export const HostSetOrganizationWorkspaceMemberRequest = /* @__PURE__ */ defineS
 );
 export type HostSetOrganizationWorkspaceMemberRequest = z.infer<
   typeof HostSetOrganizationWorkspaceMemberRequest
+>;
+
+/**
+ * Removes one member's access to one shared workspace. A governed member's
+ * last shared workspace is never removed (`GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`):
+ * offboard the member instead.
+ */
+export const HostRevokeOrganizationWorkspaceMemberRequest = /* @__PURE__ */ defineSchema(() =>
+  hostCommand(RevokeOrganizationWorkspaceMemberRequest),
+);
+export type HostRevokeOrganizationWorkspaceMemberRequest = z.infer<
+  typeof HostRevokeOrganizationWorkspaceMemberRequest
 >;

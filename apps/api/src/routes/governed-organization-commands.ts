@@ -3,6 +3,7 @@ import {
   OrganizationInvitation,
   OrganizationMember,
   OrganizationWorkspaceAccessMember,
+  RevokeOrganizationWorkspaceMemberResponse,
   UpdateOrganizationMemberRequest,
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
@@ -15,6 +16,7 @@ import {
   HostOrganizationMemberLifecycleRequest,
   HostReactivateOrganizationMemberRequest,
   HostRevokeOrganizationInvitationRequest,
+  HostRevokeOrganizationWorkspaceMemberRequest,
   HostSetOrganizationWorkspaceMemberRequest,
   ORGANIZATION_NOT_HOST_GOVERNED,
   type ActingExternalUser,
@@ -28,6 +30,7 @@ import {
   putOrganizationWorkspaceMember,
   recordOrganizationHostCommandAttribution,
   revokeOrganizationInvitation,
+  revokeOrganizationWorkspaceMember,
   updateOrganizationMember,
 } from "@opengeni/db";
 import type { Context, Hono } from "hono";
@@ -236,6 +239,39 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
             actorSubjectId: authority.actorSubjectId,
             targetOrganizationMembershipId: membershipId,
             access: command,
+          }),
+        ),
+      );
+    } catch (error) {
+      rethrowMembershipError(error);
+    }
+  });
+
+  app.delete(`${base}/workspaces/:workspaceId/members/:membershipId`, async (context) => {
+    const authority = await requireHostCommand(context, deps, "workspace_member.remove");
+    const workspaceId = parsePathId(context, "workspaceId");
+    const membershipId = parsePathId(context, "membershipId");
+    const { actingExternalUser, command } = await parseCommand(
+      context,
+      HostRevokeOrganizationWorkspaceMemberRequest,
+    );
+    await recordAttribution(deps, authority, {
+      mutation: "workspace_member.remove",
+      operationId: command.operationId,
+      actingExternalUser,
+    });
+    try {
+      return context.json(
+        RevokeOrganizationWorkspaceMemberResponse.parse(
+          await revokeOrganizationWorkspaceMember(deps.db, {
+            organizationId: authority.organizationId,
+            workspaceId,
+            actorSubjectId: authority.actorSubjectId,
+            targetOrganizationMembershipId: membershipId,
+            expectedUpdatedAt: command.expectedUpdatedAt,
+            operationId: command.operationId,
+            // A host command's organization is governed: its members keep one.
+            requireRemainingSharedWorkspace: true,
           }),
         ),
       );

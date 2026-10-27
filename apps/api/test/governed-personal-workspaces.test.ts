@@ -384,6 +384,56 @@ describe("the privacy setting", () => {
   }, 60_000);
 });
 
+/** A governed organization with two shared workspaces and a member in both. */
+async function memberWithTwoWorkspaces(app: App) {
+  const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
+  const email = `member-${crypto.randomUUID()}@example.test`;
+  expect((await hostInvite(organizationId, businessWorkspaceId, email)).status).toBe(201);
+  const member = await acceptAsNewMember(app, email);
+  const second = await app.request(`/v1/organizations/${organizationId}/workspaces`, {
+    method: "POST",
+    headers: browser(owner.cookie),
+    body: JSON.stringify({ name: "Second workspace", operationId: crypto.randomUUID() }),
+  });
+  expect(second.status).toBe(201);
+  const secondWorkspaceId = ((await second.json()) as { id: string }).id;
+  const [membership] = await shared.admin<{ id: string }[]>`
+    select id from organization_memberships
+    where account_id = ${organizationId} and subject_id = ${member.subjectId}`;
+  const granted = await app.request(
+    `/v1/host/organizations/${organizationId}/workspaces/${secondWorkspaceId}/members/${membership!.id}`,
+    {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${await hostToken(organizationId, businessWorkspaceId)}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        actingExternalUser,
+        command: { role: "member", expectedUpdatedAt: null, operationId: crypto.randomUUID() },
+      }),
+    },
+  );
+  expect(granted.status).toBe(200);
+  return {
+    organizationId,
+    businessWorkspaceId,
+    secondWorkspaceId,
+    member,
+    organizationMembershipId: membership!.id,
+  };
+}
+
+/** Microsecond precision: a workspace-access revoke compares it exactly. */
+async function workspaceMembershipUpdatedAt(workspaceId: string, subjectId: string) {
+  const [row] = await shared.admin<{ updatedAt: string }[]>`
+    select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+    from workspace_memberships
+    where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
+  if (!row) throw new Error("workspace membership not found");
+  return row.updatedAt;
+}
+
 describe("a governed member always keeps a shared workspace", () => {
   async function invitationCount(organizationId: string): Promise<number> {
     const [row] = await shared.admin<{ count: number }[]>`
@@ -392,65 +442,18 @@ describe("a governed member always keeps a shared workspace", () => {
     return row!.count;
   }
 
-  /** A governed organization with two shared workspaces and a member in both. */
-  async function memberWithTwoWorkspaces(app: App) {
-    const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
-    const email = `member-${crypto.randomUUID()}@example.test`;
-    expect((await hostInvite(organizationId, businessWorkspaceId, email)).status).toBe(201);
-    const member = await acceptAsNewMember(app, email);
-    const second = await app.request(`/v1/organizations/${organizationId}/workspaces`, {
-      method: "POST",
-      headers: browser(owner.cookie),
-      body: JSON.stringify({ name: "Second workspace", operationId: crypto.randomUUID() }),
-    });
-    expect(second.status).toBe(201);
-    const secondWorkspaceId = ((await second.json()) as { id: string }).id;
-    const [membership] = await shared.admin<{ id: string }[]>`
-      select id from organization_memberships
-      where account_id = ${organizationId} and subject_id = ${member.subjectId}`;
-    const granted = await app.request(
-      `/v1/host/organizations/${organizationId}/workspaces/${secondWorkspaceId}/members/${membership!.id}`,
-      {
-        method: "PUT",
-        headers: {
-          authorization: `Bearer ${await hostToken(organizationId, businessWorkspaceId)}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          actingExternalUser,
-          command: { role: "member", expectedUpdatedAt: null, operationId: crypto.randomUUID() },
-        }),
-      },
-    );
-    expect(granted.status).toBe(200);
-    return {
-      organizationId,
-      businessWorkspaceId,
-      secondWorkspaceId,
-      member,
-      organizationMembershipId: membership!.id,
-    };
-  }
-
   async function revokeNatively(
     app: App,
     input: { organizationId: string; workspaceId: string; organizationMembershipId: string },
     subjectId: string,
   ) {
-    // Microsecond precision: the revoke compares it exactly.
-    const [row] = await shared.admin<{ updatedAt: string }[]>`
-      select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
-      from workspace_memberships
-      where workspace_id = ${input.workspaceId} and subject_id = ${subjectId}`;
+    const expectedUpdatedAt = await workspaceMembershipUpdatedAt(input.workspaceId, subjectId);
     return await app.request(
       `/v1/organizations/${input.organizationId}/workspaces/${input.workspaceId}/members/${input.organizationMembershipId}/revoke`,
       {
         method: "POST",
         headers: browser(owner.cookie),
-        body: JSON.stringify({
-          expectedUpdatedAt: row!.updatedAt,
-          operationId: crypto.randomUUID(),
-        }),
+        body: JSON.stringify({ expectedUpdatedAt, operationId: crypto.randomUUID() }),
       },
     );
   }
@@ -529,6 +532,102 @@ describe("a governed member always keeps a shared workspace", () => {
       member.subjectId,
     );
     expect(removed.status).toBe(200);
+  }, 120_000);
+});
+
+describe("the host revokes a member's workspace access", () => {
+  beforeAll(freshOwner, 60_000);
+
+  async function hostRevoke(
+    app: App,
+    input: {
+      organizationId: string;
+      workspaceId: string;
+      organizationMembershipId: string;
+      subjectId: string;
+      token: string;
+    },
+    operationId = crypto.randomUUID(),
+  ) {
+    const expectedUpdatedAt = await workspaceMembershipUpdatedAt(
+      input.workspaceId,
+      input.subjectId,
+    );
+    return await app.request(
+      `/v1/host/organizations/${input.organizationId}/workspaces/${input.workspaceId}/members/${input.organizationMembershipId}`,
+      {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${input.token}`, "content-type": "application/json" },
+        body: JSON.stringify({ actingExternalUser, command: { expectedUpdatedAt, operationId } }),
+      },
+    );
+  }
+
+  async function hasWorkspaceAccess(workspaceId: string, subjectId: string): Promise<boolean> {
+    const [row] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_memberships
+      where workspace_id = ${workspaceId} and subject_id = ${subjectId}`;
+    return row!.count === 1;
+  }
+
+  test("a host command revokes one workspace; the member's last shared workspace is refused", async () => {
+    const world = await memberWithTwoWorkspaces(governedApp);
+    const token = await hostToken(world.organizationId, world.businessWorkspaceId);
+    const target = { ...world, subjectId: world.member.subjectId, token };
+    const operationId = crypto.randomUUID();
+    const removed = await hostRevoke(
+      governedApp,
+      { ...target, workspaceId: world.secondWorkspaceId },
+      operationId,
+    );
+    expect(removed.status).toBe(200);
+    expect(await removed.json()).toEqual({ removed: true, replay: false });
+    expect(await hasWorkspaceAccess(world.secondWorkspaceId, world.member.subjectId)).toBe(false);
+    const [attribution] = await shared.admin<
+      { mutation: string; acting_external_id: string; service_subject_id: string }[]
+    >`
+      select mutation, acting_external_id, service_subject_id
+      from organization_host_command_attributions
+      where account_id = ${world.organizationId} and operation_id = ${operationId}`;
+    expect(attribution).toEqual({
+      mutation: "workspace_member.remove",
+      acting_external_id: actingExternalUser.externalId,
+      service_subject_id: owner.subjectId,
+    });
+
+    const last = await hostRevoke(governedApp, {
+      ...target,
+      workspaceId: world.businessWorkspaceId,
+    });
+    expect(last.status).toBe(409);
+    expect(detailCode(await last.json())).toBe("GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE");
+    expect(await hasWorkspaceAccess(world.businessWorkspaceId, world.member.subjectId)).toBe(true);
+  }, 120_000);
+
+  test("a service token for another organization is refused", async () => {
+    const world = await memberWithTwoWorkspaces(governedApp);
+    const other = await hostOrganization(HOST_SOURCE);
+    const refused = await hostRevoke(governedApp, {
+      ...world,
+      workspaceId: world.secondWorkspaceId,
+      subjectId: world.member.subjectId,
+      token: await hostToken(other.organizationId, other.businessWorkspaceId),
+    });
+    expect(refused.status).toBe(401);
+    expect(detailCode(await refused.json())).toBe("HOST_COMMAND_SERVICE_TOKEN_REQUIRED");
+    expect(await hasWorkspaceAccess(world.secondWorkspaceId, world.member.subjectId)).toBe(true);
+  }, 120_000);
+
+  test("stock: without a port there is no host revoke route", async () => {
+    const world = await memberWithTwoWorkspaces(governedApp);
+    const response = await hostRevoke(stockApp, {
+      ...world,
+      workspaceId: world.secondWorkspaceId,
+      subjectId: world.member.subjectId,
+      token: await hostToken(world.organizationId, world.businessWorkspaceId),
+    });
+    expect(response.status).toBe(404);
+    expect(await hasWorkspaceAccess(world.secondWorkspaceId, world.member.subjectId)).toBe(true);
   }, 120_000);
 });
 
