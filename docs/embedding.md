@@ -941,21 +941,29 @@ ORGANIZATION_NOT_HOST_GOVERNED`. The token's `subjectId` is the database
 actor, checked like any administrator: an active `owner` or `admin`
 membership of the organization, otherwise `403
 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. That is normally the subject the host
-passed to `bootstrapWorkspace`, which owns the organizations it creates (see
-the host owner below). The native receipt and lifecycle event are
+passed to `bootstrapWorkspace` with `governedOrganizationOwner: true`, which
+owns the organizations it creates that way (see the host owner below). The native receipt and lifecycle event are
 written as for the native route, and `organization_host_command_attributions`
 names the acting external user and service initiator under the same operation
 id. Reusing an operation id for another command or acting user is `409
 HOST_COMMAND_OPERATION_CONFLICT`.
 
-**The host owner.** When `bootstrapWorkspace` creates an organization, it also
-makes the subject it is given the organization's active `owner` (an
-`organization_memberships` row, with the hidden Personal workspace every
-active membership has and no access to it). It does so only for a new
-organization, and never for the `opengeni:local`, `opengeni:configured` and
-`better-auth:user` accounts, which have their own memberships. An
-organization bootstrapped before this has no such owner, so every host
-command and read for it is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. The host
+**The host owner.** The owner write is opt-in. A host that runs its commands
+as the subject it bootstraps with passes
+`bootstrapWorkspace({ ..., governedOrganizationOwner: true })`. When that call
+creates the organization, it also makes the subject the organization's active
+`owner`, which writes three rows: the `organization_memberships` row, the
+hidden Personal workspace every active membership has (with no access to
+it), and that workspace's `workspace_inference_controls` row. It does so only
+for a new organization (decided by the insert itself, so two concurrent first
+bootstraps write one owner), never for the `opengeni:local`,
+`opengeni:configured` and `better-auth:user` accounts, which have their own
+memberships, and never for identity-backed subjects (`user:`,
+`external_user:`), whose memberships come from invitations and external
+identities. Without the flag, `bootstrapWorkspace` writes no organization
+membership, as in stock. An organization bootstrapped without it, or before
+the owner routine was granted, has no such owner, so every host command and
+read for it is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`. The host
 fixes that once with `POST /v1/host/organizations/:id/host-owner/ensure`
 (`HostEnsureOrganizationOwnerRequest`):
 `{ actingExternalUser, command: { operationId } }`.
@@ -1277,7 +1285,7 @@ type OrganizationSessionPolicy = {
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.
 
-`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and membership rows, then returns an `AccessContext`. When it creates the account, it also makes the subject the organization's owner (see "The host owner" under Organization Governance), except for the local, configured and managed-human accounts.
+`bootstrapWorkspace(db, input)` receives external account/workspace identifiers, display names, a subject id/label, and optional permission arrays. It creates or updates the account, workspace, and workspace membership rows, then returns an `AccessContext`. Two opt-in flags are for a host that governs the organization: `governedSessionPolicy` stores the governed session policy, and `governedOrganizationOwner` makes the subject the owner of an organization the call creates (see "The host owner" under Organization Governance). Without them it writes neither.
 
 The workspace remains the operational boundary. Route and core code must use the workspace id from the grant/path, not a resource id, as the access boundary.
 

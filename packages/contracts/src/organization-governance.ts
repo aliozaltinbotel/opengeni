@@ -248,8 +248,10 @@ export type HostRevokeOrganizationWorkspaceMemberRequest = z.infer<
 /**
  * Host owner ensure (`POST /v1/host/organizations/:id/host-owner/ensure`):
  * makes the service token's own subject the active owner of the token's own
- * organization, for an organization bootstrapped before `bootstrapWorkspace`
- * wrote that owner. The command names no subject: the token's is the only one.
+ * organization, for an organization bootstrapped without that owner
+ * (`bootstrapWorkspace` without `governedOrganizationOwner`, or before its
+ * routine was granted). The command names no subject: the token's is the only
+ * one.
  */
 export const HostEnsureOrganizationOwnerRequest = /* @__PURE__ */ defineSchema(() =>
   hostCommand(z.object({ operationId: primitives.uuid }).strict()),

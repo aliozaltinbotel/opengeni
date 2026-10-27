@@ -13,7 +13,14 @@ import {
   recordOrganizationHostCommandAttribution,
   type DbClient,
 } from "../src";
-import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
+import {
+  rawRows,
+  setRlsContext,
+  setSubjectRlsContext,
+  withRlsContext,
+  type Database,
+} from "../src/database";
+import { ensureBootstrappedOrganizationOwner } from "../src/organization-host-owner";
 
 /*
  * Migration 1017's host owner routine under the deployed posture: a
@@ -63,8 +70,12 @@ async function setGrant(granted: boolean): Promise<void> {
   expect(await hostOrganizationOwnerGranted(client!.db)).toBe(granted);
 }
 
-async function bootstrap(subjectId = `test-host:provisioner:${crypto.randomUUID()}`) {
-  const tenant = crypto.randomUUID();
+/** What the host does: bootstrap an organization asking for its owner. */
+async function bootstrap(
+  subjectId = `test-host:provisioner:${crypto.randomUUID()}`,
+  options: { tenant?: string; owner?: boolean } = {},
+) {
+  const tenant = options.tenant ?? crypto.randomUUID();
   const context = await bootstrapWorkspace(client!.db, {
     accountExternalSource: SOURCE,
     accountExternalId: tenant,
@@ -73,6 +84,7 @@ async function bootstrap(subjectId = `test-host:provisioner:${crypto.randomUUID(
     workspaceExternalId: tenant,
     workspaceName: `Workspace ${tenant}`,
     subjectId,
+    ...(options.owner === false ? {} : { governedOrganizationOwner: true }),
   });
   return {
     organizationId: context.defaultAccountId!,
@@ -293,5 +305,102 @@ describe("1017 under a NOSUPERUSER migration owner", () => {
     ]);
     const [created] = await callAs(self, organization, await recordEnsure(organization));
     expect((created as { result: { created: boolean } }).result.created).toBe(true);
+  });
+});
+
+/** Backends of this database waiting on a lock. */
+async function lockWaiters(): Promise<number> {
+  const [row] = await fixture!.admin<{ waiting: number }[]>`
+    select count(*)::int as waiting from pg_stat_activity
+    where datname = current_database() and wait_event_type = 'Lock'`;
+  return row!.waiting;
+}
+
+async function untilLockWaiters(count: number): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if ((await lockWaiters()) >= count) return;
+    await Bun.sleep(25);
+  }
+  throw new Error(`fewer than ${count} backends ever waited on a lock`);
+}
+
+describe("bootstrapWorkspace's owner write", () => {
+  test("is opt-in: without governedOrganizationOwner a granted bootstrap writes no owner", async () => {
+    if (!fixture) return;
+    await setGrant(true);
+    const organization = await bootstrap(undefined, { owner: false });
+    expect(await memberships(organization.organizationId)).toEqual([]);
+    const [counts] = await fixture.admin<{ workspaces: number; controls: number }[]>`
+      select (select count(*)::int from workspaces
+          where account_id = ${organization.organizationId}) as workspaces,
+        (select count(*)::int from workspace_inference_controls
+          where account_id = ${organization.organizationId}) as controls`;
+    // Only the bootstrapped workspace: no hidden Personal workspace or its control row.
+    expect(counts).toEqual({ workspaces: 1, controls: 1 });
+  });
+
+  test("two concurrent first bootstraps of one organization both complete, with one owner", async () => {
+    if (!fixture) return;
+    await setGrant(true);
+    const tenant = crypto.randomUUID();
+    const subjects = [1, 2].map((n) => `test-host:provisioner-${n}:${crypto.randomUUID()}`);
+    // Hold the first bootstrap after its organization insert (its next
+    // statement reads workspaces), so the second reads no organization yet,
+    // inserts it too and waits on the first's row: both believe they created it.
+    const blocker = await fixture.admin.reserve();
+    let first: Promise<Organization> | undefined;
+    let second: Promise<Organization> | undefined;
+    try {
+      await blocker`begin`;
+      await blocker.unsafe(`lock table "${fixture.schema}".workspaces in access exclusive mode`);
+      first = bootstrap(subjects[0], { tenant });
+      await untilLockWaiters(1);
+      second = bootstrap(subjects[1], { tenant });
+      await untilLockWaiters(2);
+    } finally {
+      await blocker`commit`;
+      blocker.release();
+    }
+    const [one, two] = await Promise.all([first!, second!]);
+    expect(two.organizationId).toBe(one.organizationId);
+    const rows = await memberships(one.organizationId);
+    expect(rows.map(({ role, status }) => ({ role, status }))).toEqual([
+      { role: "owner", status: "active" },
+    ]);
+    expect(subjects).toContain(rows[0]!.subject_id);
+  });
+
+  test("identity-backed subjects are skipped, as the routine refuses them", async () => {
+    if (!fixture) return;
+    await setGrant(true);
+    for (const subjectId of [`user:${crypto.randomUUID()}`, `external_user:${crypto.randomUUID()}`]) {
+      const organization = await bootstrap(subjectId);
+      expect(await memberships(organization.organizationId)).toEqual([]);
+    }
+    // Only the exact prefixes: '_' is no wildcard.
+    const lookalike = await bootstrap(`externalXuser:${crypto.randomUUID()}`);
+    expect((await memberships(lookalike.organizationId)).map((row) => row.role)).toEqual(["owner"]);
+  });
+
+  test("while the routine is withheld it sets no subject context in the caller's transaction", async () => {
+    if (!fixture) return;
+    await setGrant(false);
+    const organization = await bootstrap(undefined, { owner: false });
+    const subject = await client!.db.transaction(async (tx) => {
+      const scoped = tx as unknown as Database;
+      await setRlsContext(scoped, { accountId: organization.organizationId, workspaceId: null });
+      await ensureBootstrappedOrganizationOwner(scoped, {
+        organizationId: organization.organizationId,
+        subjectId: organization.subjectId,
+        accountExternalSource: SOURCE,
+      });
+      const [row] = await rawRows<{ subject: string }>(
+        scoped,
+        sql`select coalesce(current_setting('opengeni.subject_id', true), '') as subject`,
+      );
+      return row!.subject;
+    });
+    expect(subject).toBe("");
+    expect(await memberships(organization.organizationId)).toEqual([]);
   });
 });

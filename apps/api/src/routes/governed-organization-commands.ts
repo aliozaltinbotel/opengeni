@@ -348,8 +348,8 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
   });
 
   // The token's own subject becomes the owner of the token's own organization,
-  // for an organization bootstrapped before bootstrapWorkspace wrote that
-  // owner. Not a governed mutation: no native route does it, and the host is
+  // for an organization bootstrapped without that owner (without
+  // governedOrganizationOwner, or before its routine was granted). Not a governed mutation: no native route does it, and the host is
   // the caller. Recorded like a host command, under its own attribution name.
   // Before the owner exists the subject is no administrator, so this runs on
   // requireHostService and applies the governed policy only afterwards.

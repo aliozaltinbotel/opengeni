@@ -2350,6 +2350,17 @@ export type BootstrapWorkspaceInput = {
    * policy is already stored, so its first session can never run without it.
    */
   governedSessionPolicy?: boolean;
+  /**
+   * The embedding host runs its host commands and reads as `subjectId`: when
+   * this call creates the organization, also make the subject its active
+   * owner (an organization membership, with the hidden Personal workspace and
+   * inference-control row every active membership has; migration 1017's
+   * routine, written only once that routine's runtime grant ships). Skipped
+   * for the local, configured and managed-human accounts and for
+   * identity-backed subjects (`user:`, `external_user:`). Off by default: a
+   * stock bootstrap writes no organization membership.
+   */
+  governedOrganizationOwner?: boolean;
 };
 
 function samePermissionSet(left: unknown, right: readonly Permission[]): boolean {
@@ -2377,10 +2388,12 @@ export async function bootstrapWorkspace(
       )
       .limit(1);
     // A new organization's host owner is written below, once the subject's
-    // workspace grant exists.
-    const organizationCreated = !account;
+    // workspace grant exists. "New" is what the upsert did, not the read
+    // above: a concurrent first bootstrap of the same organization reads no
+    // row either, then waits on the other's insert and updates it.
+    let organizationCreated = false;
     if (!account) {
-      [account] = await tx
+      const [upserted] = await tx
         .insert(schema.managedAccounts)
         .values({
           name: input.accountName,
@@ -2394,7 +2407,15 @@ export async function bootstrapWorkspace(
             updatedAt: new Date(),
           },
         })
-        .returning();
+        .returning({
+          ...getTableColumns(schema.managedAccounts),
+          inserted: sql<boolean>`(xmax = 0)`,
+        });
+      if (upserted) {
+        const { inserted, ...row } = upserted;
+        account = row;
+        organizationCreated = inserted === true;
+      }
     } else if (account.name !== input.accountName) {
       [account] = await tx
         .update(schema.managedAccounts)
@@ -2513,7 +2534,7 @@ export async function bootstrapWorkspace(
         })
         .where(eq(schema.workspaceMemberships.id, membership.id));
     }
-    if (organizationCreated) {
+    if (organizationCreated && input.governedOrganizationOwner) {
       // Host commands and reads run as this subject, checked like any
       // organization administrator: it owns the organization it provisioned.
       await setRlsContext(tx as unknown as Database, {

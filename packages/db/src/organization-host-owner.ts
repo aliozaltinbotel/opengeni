@@ -22,6 +22,13 @@ const OWN_MEMBERSHIP_SOURCES: ReadonlySet<string> = new Set([
   "better-auth:user",
 ]);
 
+/**
+ * Identity-backed subjects, whose memberships come from invitations and
+ * external identities. 1017's routine refuses them (42501), which would abort
+ * bootstrapWorkspace's transaction, so they are skipped before it is called.
+ */
+const IDENTITY_SUBJECT_PREFIXES = ["user:", "external_user:"] as const;
+
 const HostOrganizationOwnerRow = z
   .object({
     membershipId: z.string().uuid(),
@@ -65,35 +72,39 @@ export async function ensureOrganizationHostOwner(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
+      if (!(await hostOrganizationOwnerGranted(scopedDb))) return null;
       await setSubjectRlsContext(scopedDb, input.subjectId);
-      return await ensureOwnerInScope(scopedDb, input, input.operationId);
+      return await callOwnerRoutine(scopedDb, input, input.operationId);
     },
   );
 }
 
 /**
- * bootstrapWorkspace's half: inside its transaction, once it has created the
- * organization and the subject's workspace grant. Without an operation id the
- * routine writes an owner only into an organization with no membership yet.
- * The caller has set the organization's account context; this sets the
- * subject's.
+ * bootstrapWorkspace's half (with `governedOrganizationOwner`): inside its
+ * transaction, once it has created the organization and the subject's
+ * workspace grant. Without an operation id the routine writes an owner only
+ * into an organization with no membership yet. The caller has set the
+ * organization's account context; this sets the subject's only when it calls
+ * the routine, so a skipped or not-yet-granted owner leaves the caller's
+ * transaction as it was.
  */
 export async function ensureBootstrappedOrganizationOwner(
   tx: Database,
   input: HostOwnerInput & { accountExternalSource: string },
 ): Promise<void> {
   if (OWN_MEMBERSHIP_SOURCES.has(input.accountExternalSource)) return;
+  if (IDENTITY_SUBJECT_PREFIXES.some((prefix) => input.subjectId.startsWith(prefix))) return;
+  // Checked first: a permission error would abort the caller's transaction.
+  if (!(await hostOrganizationOwnerGranted(tx))) return;
   await setSubjectRlsContext(tx, input.subjectId);
-  await ensureOwnerInScope(tx, input, null);
+  await callOwnerRoutine(tx, input, null);
 }
 
-async function ensureOwnerInScope(
+async function callOwnerRoutine(
   db: Database,
   input: HostOwnerInput,
   operationId: string | null,
-): Promise<HostOrganizationOwnerResult | null> {
-  // Checked first: a permission error would abort the caller's transaction.
-  if (!(await hostOrganizationOwnerGranted(db))) return null;
+): Promise<HostOrganizationOwnerResult> {
   const [row] = await rawRows<{ result: unknown }>(
     db,
     sql`select opengeni_private.ensure_organization_host_owner(

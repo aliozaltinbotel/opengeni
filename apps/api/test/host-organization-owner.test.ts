@@ -108,6 +108,7 @@ async function bootstrapHostOrganization(source = HOST_SOURCE): Promise<HostOrga
     workspaceName: `Workspace ${tenant}`,
     subjectId,
     subjectLabel: "Host provisioner",
+    governedOrganizationOwner: true,
   });
   return {
     organizationId: context.defaultAccountId!,
@@ -275,7 +276,7 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-describe("bootstrapWorkspace makes the host's subject the owner of a new organization", () => {
+describe("bootstrapWorkspace({ governedOrganizationOwner }) makes the host's subject the owner of a new organization", () => {
   test("a freshly bootstrapped organization accepts the host's commands and lookup", async () => {
     await setEnsureGrant(true);
     const organization = await bootstrapHostOrganization();
@@ -309,6 +310,7 @@ describe("bootstrapWorkspace makes the host's subject the owner of a new organiz
       workspaceExternalId: crypto.randomUUID(),
       workspaceName: "Second workspace",
       subjectId: organization.subjectId,
+      governedOrganizationOwner: true,
     });
     expect(again.defaultAccountId).toBe(organization.organizationId);
     expect(await membershipsOf(organization.organizationId)).toEqual([]);
