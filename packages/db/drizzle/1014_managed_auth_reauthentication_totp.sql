@@ -2,6 +2,10 @@
 -- Re-authentication and TOTP for managed browser sessions
 -- (OPENGENI_MANAGED_AUTH_TOTP_ENABLED and the host session token).
 --
+-- Required by every managed deployment, whatever its settings: every password
+-- and Google/GitHub sign-in writes auth_session_authentications, and
+-- sign-in-method changes read their freshness from it (below).
+--
 -- auth_users.two_factor_enabled and auth_two_factors are the storage of Better
 -- Auth's twoFactor plugin, which runs only when TOTP is enabled. Secrets and
 -- backup codes are stored encrypted with OPENGENI_BETTER_AUTH_SECRET.
