@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: constraint-validation: every deployed database already holds both checks from 0668 and skips them as this file's post-image, so the add and validation only run on a fresh install whose usage_events table has no call rows yet
 -- Per-call AI usage facts on usage_events (Cendra fork, MAINT-P09-430).
 --
 -- usage_events.attributes carries the bounded per-call facts of a `model.call`
@@ -19,30 +20,82 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '10min';
 
+-- Fork rule (2026-10-26 sync): this file was first recorded as 0668. Every object below
+-- is created when absent, accepted when it is exactly this migration's post-image (the
+-- call check also as 1001's successor post-image), and refused otherwise.
 ALTER TABLE usage_events
   ADD COLUMN IF NOT EXISTS attributes jsonb;
 
--- The same byte bound the export applies to initiator context.
-ALTER TABLE usage_events
-  ADD CONSTRAINT usage_events_attributes_shape_check CHECK (
-    attributes IS NULL
-    OR (jsonb_typeof(attributes) = 'object' AND octet_length(attributes::text) <= 4096)
-  ) NOT VALID;
+DO $attributes_guard$
+DECLARE
+  shape_definition text;
+  shape_validated boolean;
+  call_definition text;
+  call_validated boolean;
+BEGIN
+  IF (
+    SELECT pg_catalog.format_type(attribute.atttypid, attribute.atttypmod)
+    FROM pg_catalog.pg_attribute attribute
+    WHERE attribute.attrelid = 'usage_events'::regclass
+      AND attribute.attname = 'attributes' AND NOT attribute.attisdropped
+  ) IS DISTINCT FROM 'jsonb' THEN
+    RAISE EXCEPTION 'USAGE_EVENT_ATTRIBUTES_COLUMN_DRIFT' USING ERRCODE = '55000';
+  END IF;
 
-ALTER TABLE usage_events
-  VALIDATE CONSTRAINT usage_events_attributes_shape_check;
+  SELECT pg_catalog.pg_get_constraintdef(c.oid), c.convalidated
+  INTO shape_definition, shape_validated
+  FROM pg_catalog.pg_constraint c
+  WHERE c.conrelid = 'usage_events'::regclass AND c.conname = 'usage_events_attributes_shape_check';
+  IF shape_definition IS NULL THEN
+    -- The same byte bound the export applies to initiator context.
+    ALTER TABLE usage_events
+      ADD CONSTRAINT usage_events_attributes_shape_check CHECK (
+        attributes IS NULL
+        OR (jsonb_typeof(attributes) = 'object' AND octet_length(attributes::text) <= 4096)
+      ) NOT VALID;
+    ALTER TABLE usage_events
+      VALIDATE CONSTRAINT usage_events_attributes_shape_check;
+  ELSIF shape_definition IS DISTINCT FROM
+      'CHECK (((attributes IS NULL) OR ((jsonb_typeof(attributes) = ''object''::text) AND (octet_length((attributes)::text) <= 4096))))'
+    OR NOT shape_validated
+  THEN
+    RAISE EXCEPTION 'USAGE_EVENT_ATTRIBUTES_SHAPE_DRIFT' USING ERRCODE = '55000';
+  END IF;
 
--- A per-call row is meaningless without its facts; every other type may omit them.
-ALTER TABLE usage_events
-  ADD CONSTRAINT usage_events_call_attributes_check CHECK (
-    event_type NOT IN ('model.call', 'embedding.call')
-    OR (attributes IS NOT NULL AND jsonb_typeof(attributes -> 'schema') = 'string')
-  ) NOT VALID;
+  SELECT pg_catalog.pg_get_constraintdef(c.oid), c.convalidated
+  INTO call_definition, call_validated
+  FROM pg_catalog.pg_constraint c
+  WHERE c.conrelid = 'usage_events'::regclass AND c.conname = 'usage_events_call_attributes_check';
+  IF call_definition IS NULL THEN
+    -- A per-call row is meaningless without its facts; every other type may omit them.
+    ALTER TABLE usage_events
+      ADD CONSTRAINT usage_events_call_attributes_check CHECK (
+        event_type NOT IN ('model.call', 'embedding.call')
+        OR (attributes IS NOT NULL AND jsonb_typeof(attributes -> 'schema') = 'string')
+      ) NOT VALID;
+    ALTER TABLE usage_events
+      VALIDATE CONSTRAINT usage_events_call_attributes_check;
+  ELSIF call_definition NOT IN (
+      'CHECK (((event_type <> ALL (ARRAY[''model.call''::text, ''embedding.call''::text])) OR ((attributes IS NOT NULL) AND (jsonb_typeof((attributes -> ''schema''::text)) = ''string''::text))))',
+      'CHECK (((event_type <> ALL (ARRAY[''model.call''::text, ''embedding.call''::text])) OR ((attributes IS NOT NULL) AND COALESCE((jsonb_typeof((attributes -> ''schema''::text)) = ''string''::text), false))))'
+    )
+    OR NOT call_validated
+  THEN
+    RAISE EXCEPTION 'USAGE_EVENT_CALL_ATTRIBUTES_DRIFT' USING ERRCODE = '55000';
+  END IF;
 
-ALTER TABLE usage_events
-  VALIDATE CONSTRAINT usage_events_call_attributes_check;
+  IF pg_catalog.to_regprocedure('opengeni_private.reject_usage_event_attributes_mutation()') IS NOT NULL
+    AND (
+      SELECT pg_catalog.md5(p.prosrc) FROM pg_catalog.pg_proc p
+      WHERE p.oid = pg_catalog.to_regprocedure('opengeni_private.reject_usage_event_attributes_mutation()')
+    ) IS DISTINCT FROM '3b8192aaf0f51998e850260dd3389f2a'
+  THEN
+    RAISE EXCEPTION 'USAGE_EVENT_ATTRIBUTES_GUARD_DRIFT' USING ERRCODE = '55000';
+  END IF;
+END
+$attributes_guard$;
 
-CREATE FUNCTION opengeni_private.reject_usage_event_attributes_mutation()
+CREATE OR REPLACE FUNCTION opengeni_private.reject_usage_event_attributes_mutation()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = pg_catalog
@@ -58,9 +111,30 @@ $$;
 
 REVOKE ALL ON FUNCTION opengeni_private.reject_usage_event_attributes_mutation() FROM PUBLIC;
 
-CREATE TRIGGER usage_events_attributes_immutable
-BEFORE UPDATE OF attributes ON usage_events
-FOR EACH ROW EXECUTE FUNCTION opengeni_private.reject_usage_event_attributes_mutation();
+DO $attributes_trigger$
+DECLARE trigger_row record;
+BEGIN
+  SELECT t.tgfoid, t.tgtype, t.tgattr::text AS tgattr, t.tgenabled
+  INTO trigger_row
+  FROM pg_catalog.pg_trigger t
+  WHERE t.tgrelid = 'usage_events'::regclass AND t.tgname = 'usage_events_attributes_immutable'
+    AND NOT t.tgisinternal;
+  IF NOT FOUND THEN
+    CREATE TRIGGER usage_events_attributes_immutable
+    BEFORE UPDATE OF attributes ON usage_events
+    FOR EACH ROW EXECUTE FUNCTION opengeni_private.reject_usage_event_attributes_mutation();
+  ELSIF trigger_row.tgfoid IS DISTINCT FROM
+      'opengeni_private.reject_usage_event_attributes_mutation()'::regprocedure::oid
+    OR trigger_row.tgtype <> 19 OR trigger_row.tgenabled <> 'O'
+    OR trigger_row.tgattr IS DISTINCT FROM (
+      SELECT a.attnum::text FROM pg_catalog.pg_attribute a
+      WHERE a.attrelid = 'usage_events'::regclass AND a.attname = 'attributes'
+    )
+  THEN
+    RAISE EXCEPTION 'USAGE_EVENT_ATTRIBUTES_TRIGGER_DRIFT' USING ERRCODE = '55000';
+  END IF;
+END
+$attributes_trigger$;
 
 DO $migration$
 DECLARE target_schema text := current_schema();

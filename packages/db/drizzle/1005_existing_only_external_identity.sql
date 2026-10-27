@@ -1,6 +1,18 @@
 -- deployment-mode: rolling
 -- Restrictive authentication resolves current authority without provisioning or healing.
-CREATE FUNCTION read_existing_external_identity(p_account_id uuid, p_source text, p_external_id text)
+-- Fork rule (2026-10-26 sync): first recorded as 0954. Each object is created when absent,
+-- accepted when it is exactly this migration's post-image, and refused otherwise.
+DO $function_preimage$
+BEGIN
+  IF pg_catalog.to_regprocedure('read_existing_external_identity(uuid,text,text)') IS NOT NULL
+    AND (SELECT pg_catalog.md5(p.prosrc) FROM pg_catalog.pg_proc p WHERE p.oid = pg_catalog.to_regprocedure('read_existing_external_identity(uuid,text,text)'))
+      IS DISTINCT FROM '64b9520714e4584f5361484f395baefd'
+  THEN
+    RAISE EXCEPTION 'EXISTING_EXTERNAL_IDENTITY_READER_DRIFT' USING ERRCODE = '55000';
+  END IF;
+END
+$function_preimage$;
+CREATE OR REPLACE FUNCTION read_existing_external_identity(p_account_id uuid, p_source text, p_external_id text)
 RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT
 AS $body$
 DECLARE

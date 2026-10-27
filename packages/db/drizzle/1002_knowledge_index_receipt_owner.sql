@@ -7,6 +7,9 @@ DECLARE fn regprocedure:='knowledge_index_work(uuid,uuid,uuid,jsonb)'::regproced
 BEGIN
   SELECT pg_get_functiondef(fn),prosrc,jsonb_build_object('owner',proowner,'acl',proacl,'definer',prosecdef,'config',proconfig,'language',prolang,'volatility',provolatile)
     INTO src,before_body,before_facts FROM pg_proc WHERE oid=fn;
+  -- Fork rule (2026-10-26 sync): this file was first recorded as 0670; its own exact
+  -- post-image is accepted as already applied, anything other than pre/post-image refuses.
+  IF md5(before_body)='99407756f5a465e4dedc40774862115c' THEN RETURN; END IF;
   IF md5(before_body)<>'7c635c9dbd7c69dc91a522f873dcfbc6' THEN RAISE EXCEPTION 'KNOWLEDGE_INDEX_RECEIPT_OWNER_PREIMAGE_MOVED'; END IF;
   anchor:=$a$  SELECT * INTO job FROM knowledge_index_jobs j WHERE j.account_id=p_account AND j.revision_id=p_revision
     AND j.lease_id=p_lease AND j.state='running' AND j.lease_until>clock_timestamp() FOR UPDATE;$a$;

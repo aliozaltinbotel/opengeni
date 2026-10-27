@@ -9,6 +9,9 @@ BEGIN
   SELECT p.proowner,p.proacl,p.prosecdef,p.proconfig,
     encode(sha256(convert_to(p.prosrc,'UTF8')),'hex') AS body_sha256
     INTO STRICT before_metadata FROM pg_proc p WHERE p.oid=target;
+  -- Fork rule (2026-10-26 sync): first recorded as 0955; the exact post-image is already applied.
+  IF before_metadata.prosecdef AND before_metadata.body_sha256='ae7ac054b0d3d75b83aa977e0d73826fa97f338b5e71b1292c60a26d940fbde5'
+    THEN RETURN; END IF;
   IF NOT before_metadata.prosecdef OR before_metadata.body_sha256<>'c77dcb40d9efc5c57fc6d2ffbe77b55bc73b82cfb54752921d5a113e90eaef45'
     THEN RAISE EXCEPTION 'knowledge_entry_apply HUMAN proposal predecessor drifted'; END IF;
   definition:=pg_get_functiondef(target);

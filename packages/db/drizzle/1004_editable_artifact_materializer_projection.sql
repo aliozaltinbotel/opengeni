@@ -36,6 +36,24 @@ BEGIN
     )
   INTO source, definition, before_facts
   FROM pg_catalog.pg_proc p WHERE p.oid = target;
+  -- Fork rule (2026-10-26 sync): first recorded as 0896. The exact post-image (function
+  -- body and both owner-only SELECT policies) is accepted as already applied.
+  IF pg_catalog.md5(source) = 'f602bb3be40595ef5254077d59093d2d'
+    AND (
+      SELECT count(*) FROM pg_catalog.pg_policy policy
+      JOIN pg_catalog.pg_class relation ON relation.oid = policy.polrelid
+      JOIN pg_catalog.pg_namespace namespace ON namespace.oid = relation.relnamespace
+      WHERE namespace.nspname = data_schema
+        AND relation.relname IN ('editable_artifacts', 'editable_artifact_snapshots')
+        AND policy.polname = 'editable_artifact_materializer_owner'
+        AND policy.polcmd = 'r' AND policy.polpermissive AND policy.polroles = ARRAY[0::oid]
+        AND pg_catalog.pg_get_expr(policy.polqual, policy.polrelid)
+          = pg_catalog.format('(CURRENT_USER = %L::name)', migration_owner)
+        AND policy.polwithcheck IS NULL
+    ) = 2
+  THEN
+    RETURN;
+  END IF;
   IF pg_catalog.md5(source) IS DISTINCT FROM 'f20eb83e91a1e0b3363fa928cee79d8a'
     OR before_facts->>'definer' IS DISTINCT FROM 'true'
     OR (before_facts->>'owner')::oid IS DISTINCT FROM
