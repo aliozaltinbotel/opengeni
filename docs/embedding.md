@@ -909,9 +909,12 @@ included) fails the request closed (`OrganizationGovernancePortContractError`).
 For a governed organization, every native route that invites, revokes or
 re-sends an invitation, changes a role, suspends, reactivates or offboards a
 member, adds, changes or removes workspace or external members, creates,
-changes or revokes API keys, personal API keys or service accounts, or
+changes or revokes API keys, personal API keys or service accounts,
 connects, changes or disconnects an MCP agent (the OAuth consent is refused
-before a code is issued) asks `decide` with `via: "native"` after
+before a code is issued), starts, approves, cancels or executes an
+organization recovery operation (`organization_recovery.*`), or deletes a
+workspace (`workspace.delete`, both `DELETE /v1/organizations/:id/workspaces/:ws`
+and `DELETE /v1/workspaces/:ws`) asks `decide` with `via: "native"` after
 authenticating the caller. First-use external provisioning through an
 organization key (`x-opengeni-external-actor`) asks for `external_member.add`:
 when refused, only identities and memberships that already exist resolve. A

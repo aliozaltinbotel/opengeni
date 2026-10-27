@@ -1610,6 +1610,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.delete("/v1/workspaces/:workspaceId", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    await requireNativeOrganizationMutation(deps, grant.accountId, "workspace.delete");
     await deleteWorkspaceForRequest(deps, {
       accountId: grant.accountId,
       workspaceId,

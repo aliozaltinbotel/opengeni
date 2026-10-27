@@ -566,11 +566,13 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       // quiescence rules. It confers no organization-administrator identity.
       const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
       await requireOrganizationKeyWorkspaceDeletion(context, deps, organizationId, workspaceId);
+      await requireNativeOrganizationMutation(deps, organizationId, "workspace.delete");
       await deleteWorkspaceForRequest(deps, { accountId: organizationId, workspaceId });
       return context.body(null, 204);
     }
     const { subjectId } = await requireOrganizationAdministrator(context, deps, organizationId);
     const workspaceId = parseId(WorkspaceId, context.req.param("workspaceId"), "workspace id");
+    await requireNativeOrganizationMutation(deps, organizationId, "workspace.delete");
     await deleteWorkspaceForRequest(deps, {
       accountId: organizationId,
       workspaceId,

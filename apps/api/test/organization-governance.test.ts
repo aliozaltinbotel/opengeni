@@ -457,7 +457,44 @@ const nativeRoutes: NativeRoute[] = [
     path: () => `${org()}/service-accounts/${id()}`,
     auth: "owner",
   },
+  // organization-recovery.ts: the recovery operations
+  ...recoveryRoutes(),
+  // workspace deletion: organization-memberships.ts and workspaces.ts
+  {
+    mutation: "workspace.delete",
+    method: "DELETE",
+    path: () => `${org()}/workspaces/${world.sharedWorkspaceId}`,
+    auth: "owner",
+  },
+  {
+    mutation: "workspace.delete",
+    method: "DELETE",
+    path: () => ws(),
+    auth: "owner",
+  },
 ];
+
+function recoveryRoutes(): NativeRoute[] {
+  const operation = () => ({ expectedOperationRevision: 1, operationId: id() });
+  return [
+    {
+      mutation: "organization_recovery.start",
+      method: "POST",
+      path: () => `${org()}/recovery/operations`,
+      auth: "owner",
+      body: () => ({ targetMembershipId: id(), expectedPolicyRevision: 1, operationId: id() }),
+    },
+    ...(["approve", "cancel", "execute"] as const).map(
+      (command): NativeRoute => ({
+        mutation: `organization_recovery.${command}`,
+        method: "POST",
+        path: () => `${org()}/recovery/operations/${id()}/${command}`,
+        auth: "owner",
+        body: operation,
+      }),
+    ),
+  ];
+}
 
 async function requestNative(app: App, route: NativeRoute): Promise<Response> {
   const headers =
@@ -1273,4 +1310,99 @@ describe("organization governance port, final review", () => {
     });
     expect(invite.status).toBe(500);
   }, 60_000);
+});
+
+describe("organization recovery and workspace deletion are governed", () => {
+  const allowingPort: OrganizationGovernancePort = {
+    governs: ({ externalSource }) => externalSource === HOST_SOURCE,
+    decide: ({ mutation, via }) => {
+      decisions.push({ mutation, via });
+      return "allow";
+    },
+  };
+
+  async function createSharedWorkspace(): Promise<string> {
+    const created = await stockApp.request(`${org()}/workspaces`, {
+      method: "POST",
+      headers: browser(world.owner.cookie),
+      body: JSON.stringify({ name: `Disposable ${id()}`, operationId: id() }),
+    });
+    expect(created.status).toBe(201);
+    return ((await created.json()) as { id: string }).id;
+  }
+
+  async function workspaceExists(workspaceId: string): Promise<boolean> {
+    const [row] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from workspaces where id = ${workspaceId}`;
+    return row?.count === 1;
+  }
+
+  const recovery = () => recoveryRoutes();
+
+  test("stock: recovery operations keep their own answer and no port is asked", async () => {
+    for (const route of recovery()) {
+      decisions.length = 0;
+      const response = await requestNative(stockApp, route);
+      // Legacy browser sessions have no actor fence: recovery's own 409.
+      expect({ route: route.mutation, status: response.status }).toEqual({
+        route: route.mutation,
+        status: 409,
+      });
+      expect(refusalCode(await json(response))).toBeUndefined();
+      expect(decisions).toEqual([]);
+    }
+  }, 60_000);
+
+  test("allowed natively: recovery operations reach their own checks", async () => {
+    const app = appFor(allowingPort);
+    for (const route of recovery()) {
+      decisions.length = 0;
+      const response = await requestNative(app, route);
+      expect({ route: route.mutation, status: response.status }).toEqual({
+        route: route.mutation,
+        status: 409,
+      });
+      expect(decisions).toEqual([{ mutation: route.mutation, via: "native" }]);
+    }
+  }, 60_000);
+
+  test("a refused workspace deletion keeps the workspace; stock and allowed delete it", async () => {
+    // The organization route also takes an organization key with workspace:admin.
+    const adminKey = await organizationKey(world.governedOrganizationId, [
+      "workspace:read",
+      "workspace:admin",
+    ]);
+    type DeletePath = "organization" | "organization_key" | "workspace";
+    const deleteVia = async (app: App, workspaceId: string, path: DeletePath) =>
+      await app.request(
+        path === "workspace" ? `/v1/workspaces/${workspaceId}` : `${org()}/workspaces/${workspaceId}`,
+        {
+          method: "DELETE",
+          headers: path === "organization_key" ? bearer(adminKey) : browser(world.owner.cookie),
+        },
+      );
+    for (const path of ["organization", "organization_key", "workspace"] as const) {
+      const workspaceId = await createSharedWorkspace();
+      decisions.length = 0;
+      const refused = await deleteVia(governedApp, workspaceId, path);
+      expect(refused.status).toBe(403);
+      const body = await json(refused);
+      expect(refusalCode(body)).toBe("ORGANIZATION_GOVERNED_BY_HOST");
+      expect(refusedMutation(body)).toBe("workspace.delete");
+      expect(decisions).toEqual([{ mutation: "workspace.delete", via: "native" }]);
+      expect(await workspaceExists(workspaceId)).toBe(true);
+
+      decisions.length = 0;
+      const allowed = await deleteVia(appFor(allowingPort), workspaceId, path);
+      expect(allowed.status).toBe(204);
+      expect(decisions).toEqual([{ mutation: "workspace.delete", via: "native" }]);
+      expect(await workspaceExists(workspaceId)).toBe(false);
+
+      const stockWorkspaceId = await createSharedWorkspace();
+      decisions.length = 0;
+      expect((await deleteVia(stockApp, stockWorkspaceId, path)).status).toBe(204);
+      expect(decisions).toEqual([]);
+      expect(await workspaceExists(stockWorkspaceId)).toBe(false);
+    }
+  }, 120_000);
 });

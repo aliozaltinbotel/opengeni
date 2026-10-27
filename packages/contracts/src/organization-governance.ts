@@ -10,8 +10,10 @@ import {
 
 /**
  * Every native route that changes who belongs to an organization, what they may
- * do there, or which credentials act in it (including connected MCP agents).
- * An embedding host that governs an organization decides each one
+ * do there, or which credentials act in it (including connected MCP agents),
+ * the organization recovery operations that hand ownership to a member, and
+ * workspace deletion, which removes every grant in that workspace. An
+ * embedding host that governs an organization decides each one
  * (`OrganizationGovernancePort.decide`). The list may grow in later releases.
  */
 export const GOVERNED_MUTATIONS = [
@@ -38,6 +40,11 @@ export const GOVERNED_MUTATIONS = [
   "mcp_connection.create",
   "mcp_connection.update",
   "mcp_connection.revoke",
+  "organization_recovery.start",
+  "organization_recovery.approve",
+  "organization_recovery.cancel",
+  "organization_recovery.execute",
+  "workspace.delete",
 ] as const;
 export type GovernedMutation = (typeof GOVERNED_MUTATIONS)[number];
 
