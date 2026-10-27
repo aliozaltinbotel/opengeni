@@ -35,6 +35,7 @@
 //   /workspaces/:id/settings                 → workspace settings (general, access, API keys; Models redirects to the organization)
 //   /workspaces/:id/organization             → organization settings (billing, usage, plan, members)
 //   /workspaces/:id/account                  → legacy redirect to /organization
+//   /workspaces/:id/<extension path>         → host extension pages (host-extension/routes.tsx)
 //   /billing?checkout=success|cancelled      → Stripe return → default organization
 //   /device?user_code=…                      → self-hosted enrollment approve page
 //   /account-auth?transaction=…              → isolated browser-slot authentication popup
@@ -131,6 +132,8 @@ import {
 import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
+import { hostExtension } from "@/host-extension/registry";
+import { buildHostExtensionWorkspaceRoutes } from "@/host-extension/routes";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -1012,7 +1015,13 @@ const workspaceAccountRoute = createRoute({
   },
   component: AccountRedirect,
 });
-const routeTree = rootRoute.addChildren([
+// The host extension's pages, after every native route. Registration refused
+// any path that collides with a native one; the stub adds none.
+export const hostExtensionWorkspaceRoutes = buildHostExtensionWorkspaceRoutes(
+  workspaceRoute,
+  hostExtension.routes,
+);
+export const routeTree = rootRoute.addChildren([
   indexRoute,
   sessionDeepLinkRoute,
   billingReturnRoute,
@@ -1089,6 +1098,9 @@ const routeTree = rootRoute.addChildren([
     workspaceSettingsRoute,
     workspaceOrganizationRoute,
     workspaceAccountRoute,
+    // Typed `never` so the dynamic paths stay out of the typed route tree: an
+    // `AnyRoute` child would make every `/workspaces/$workspaceId/…` link valid.
+    ...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),
   ]),
 ]);
 // Every match needs its own Suspense boundary. Without a default pending

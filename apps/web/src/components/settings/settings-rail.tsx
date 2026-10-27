@@ -46,6 +46,7 @@ import {
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
+import { hostExtension } from "@/host-extension/registry";
 import type {
   WorkspaceManagementLocation,
   WorkspaceSettingsSection,
@@ -157,8 +158,14 @@ export function runtimePages(insideDesktopApp: boolean) {
   return RUNTIME_PAGES.filter((page) => !("desktopOnly" in page) || insideDesktopApp);
 }
 
+/** The extension's nav item for a settings-mode extension route, if it lists one. */
+function extensionNavItem(path: string) {
+  return hostExtension.nav?.find((item) => item.path === path);
+}
+
 /** The name of a workspace settings page or dashboard. */
 export function workspacePageLabel(location: WorkspaceManagementLocation): string {
+  if (location.kind === "extension") return extensionNavItem(location.path)?.label ?? "Settings";
   if (location.kind === "settings")
     return WORKSPACE_SETTINGS_COPY[location.section ?? "general"].title;
   if (location.kind === "page") {
@@ -187,6 +194,11 @@ export function settingsRailItemId(location: SettingsLocation): string | null {
       return `workspace:${location.target}`;
     case "organization":
       return location.section ? `organization:${location.section}` : null;
+    case "extension": {
+      // The same id as the extension's settings rail item.
+      const item = extensionNavItem(location.path);
+      return item ? `extension:${item.id}` : null;
+    }
     case "account":
       return "account:security";
   }
@@ -284,6 +296,19 @@ export function useSettingsRail(input: {
       }
       case "page":
         void navigate({ to: location.target, params: { workspaceId: nextWorkspaceId } });
+        return;
+      case "extension":
+        // A page addressed by its own ids ($params) belongs to this workspace;
+        // the next one opens on its settings instead.
+        void navigate(
+          location.path.includes("$")
+            ? { to: "/workspaces/$workspaceId/settings", params: { workspaceId: nextWorkspaceId } }
+            : {
+                // Extension paths are registered at build time, outside the typed route tree.
+                to: `/workspaces/$workspaceId/${location.path}` as "/workspaces/$workspaceId",
+                params: { workspaceId: nextWorkspaceId },
+              },
+        );
         return;
       case "organization":
         void navigate({

@@ -87,6 +87,8 @@ export function WorkspaceManagementShell({
   const section: WorkspaceSettingsSection | null =
     location.kind === "settings" ? (location.section ?? "general") : null;
   // Organization pages draw their own header (its actions come from the page).
+  // A host extension page (`kind: "extension"`) is the routed child itself: it
+  // draws its own header and sits in the shell's standard settings scroller.
   const page: SettingsShellPage | null =
     section && !isSubPage(section, search)
       ? {

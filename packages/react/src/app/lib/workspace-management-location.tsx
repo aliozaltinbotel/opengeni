@@ -46,7 +46,9 @@ export type WorkspaceManagementLocation =
   | { kind: "settings"; section: WorkspaceSettingsSection | null }
   | { kind: "page"; target: WorkspacePageTarget }
   /** `section` is null when the URL names no (or an unknown) organization page. */
-  | { kind: "organization"; section: OrganizationAdminSection | null };
+  | { kind: "organization"; section: OrganizationAdminSection | null }
+  /** A host extension page registered with `mode: "settings"`; `path` is its registered pattern. */
+  | { kind: "extension"; path: string };
 
 /** Parses `?section=`, mapping older names to the page that holds them now. */
 export function workspaceSettingsSectionFromSearch(
@@ -61,14 +63,33 @@ export function workspaceSettingsSectionFromSearch(
 }
 
 /**
+ * Whether `pathname` is exactly the extension route `path` under the workspace
+ * `base`. A `$param` segment matches any one non-empty segment.
+ */
+function matchesExtensionPath(pathname: string, base: string, path: string): boolean {
+  if (!pathname.startsWith(`${base}/`)) return false;
+  const actual = pathname.slice(base.length + 1).split("/");
+  const expected = path.split("/");
+  return (
+    actual.length === expected.length &&
+    expected.every((segment, index) =>
+      segment.startsWith("$") ? actual[index] !== "" : actual[index] === segment,
+    )
+  );
+}
+
+/**
  * Resolve the workspace routes that open in settings mode: the settings rail
  * replaces the main rail. Matching is segment-aware: `/rigs/:rigId` belongs to
  * Sandbox environments, while a future `/rigs-archive` route is not captured.
+ * `extensionSettingsPaths` are the host extension's settings-mode route paths;
+ * each matches only its own URL, never a deeper one.
  */
 export function workspaceManagementLocation(
   pathname: string,
   workspaceId: string,
   settingsSection?: unknown,
+  extensionSettingsPaths: readonly string[] = [],
 ): WorkspaceManagementLocation | null {
   const base = `/workspaces/${encodeURIComponent(workspaceId)}`;
   if (pathname === `${base}/settings`) {
@@ -87,5 +108,8 @@ export function workspaceManagementLocation(
       return { kind: "page", target };
     }
   }
-  return null;
+  const extensionPath = extensionSettingsPaths.find((path) =>
+    matchesExtensionPath(pathname, base, path),
+  );
+  return extensionPath === undefined ? null : { kind: "extension", path: extensionPath };
 }
