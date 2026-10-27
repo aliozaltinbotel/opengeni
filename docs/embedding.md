@@ -906,11 +906,20 @@ type OrganizationGovernancePort = {
 `governs` receives the organization's `managed_accounts.external_source`.
 For a governed organization, every native route that invites, revokes or
 re-sends an invitation, changes a role, suspends, reactivates or offboards a
-member, adds, changes or removes workspace or external members, or creates,
-changes or revokes API keys, personal API keys or service accounts asks
-`decide` with `via: "native"` after authenticating the caller. A refusal is
-`403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`, for owners
-too. Unbound, nothing changes and the host routes below are not registered.
+member, adds, changes or removes workspace or external members, creates,
+changes or revokes API keys, personal API keys or service accounts, or
+connects, changes or disconnects an MCP agent (the OAuth consent is refused
+before a code is issued) asks `decide` with `via: "native"` after
+authenticating the caller. First-use external provisioning through an
+organization key (`x-opengeni-external-actor`) asks for `external_member.add`:
+when refused, only identities and memberships that already exist resolve. A
+refusal is `403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`,
+for owners too. Unbound, nothing changes and the host routes below are not
+registered.
+
+`decide` MUST answer `"refuse"` for any mutation it does not recognize:
+`GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
+stay closed until the host chooses to allow it.
 
 The host performs these mutations through `/v1/host/organizations/:id/...`
 (`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   organizationAccessPresetPermissions,
   signDelegatedAccessToken,
@@ -11,22 +11,31 @@ import {
   type GovernedMutation,
   type OrganizationGovernancePort,
 } from "@opengeni/contracts/organization-governance";
-import type {
-  AppDependencies,
-  ManagedEmailDeliveryResult,
-  ManagedEmailMessage,
+import {
+  EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS,
+  type ApiRouteDeps,
+  type AppDependencies,
+  type ManagedEmailDeliveryResult,
+  type ManagedEmailMessage,
 } from "@opengeni/core";
 import {
   createAdditionalManagedOrganization,
   createDb,
   createManagedOrganization,
   createOrganizationApiKey,
+  type Database,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { ZodError } from "zod";
 import { createApp } from "../src/app";
+import { registerOrganizationMembershipRoutes } from "../src/routes/organization-memberships";
+import { registerWorkspaceRoutes } from "../src/routes/workspaces";
+import { requireNativeWorkspaceMutation } from "../src/http/organization-governance";
 import { startApiOrganizationGovernanceOverride, type StartApiOptions } from "../src/index";
 
 /*
@@ -81,7 +90,10 @@ type World = {
 type Person = { cookie: string; email: string; subjectId: string };
 let world: World;
 
-function appFor(organizationGovernance?: OrganizationGovernancePort): App {
+function appFor(
+  organizationGovernance?: OrganizationGovernancePort,
+  options: { externalMemberFirstUse?: boolean } = {},
+): App {
   return createApp({
     settings: testSettings({
       databaseUrl: shared.adminUrl,
@@ -91,6 +103,8 @@ function appFor(organizationGovernance?: OrganizationGovernancePort): App {
       delegationSecret,
       organizationUserSetupEmailTokenTransport: "query",
       organizationUserSetupQueryEdgeSanitizationConfirmed: true,
+      mcpOauthEnabled: true,
+      externalMemberFirstUseEnabled: options.externalMemberFirstUse === true,
     }),
     db: client.db,
     bus: new MemoryEventBus(),
@@ -167,14 +181,22 @@ function inviteBody(email: string, operationId = crypto.randomUUID()) {
   };
 }
 
-async function organizationKey(accountId: string): Promise<string> {
+async function organizationKey(
+  accountId: string,
+  permissions: Permission[] = [
+    "workspace:read",
+    "members:manage",
+    "account:admin",
+    "api_keys:manage",
+  ],
+): Promise<string> {
   const token = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
   await createOrganizationApiKey(client.db, {
     accountId,
     name: "Host service key",
     prefix: token.slice(0, 14),
     keyHash: createHash("sha256").update(token).digest("hex"),
-    permissions: ["workspace:read", "members:manage", "account:admin", "api_keys:manage"],
+    permissions,
   });
   return token;
 }
@@ -444,7 +466,12 @@ describe("organization governance port", () => {
   test("the route table names every governed mutation the port can be asked about", () => {
     const routed = new Set([
       ...nativeRoutes.map((route) => route.mutation),
+      // Covered by their own tests below: they need an existing key or an
+      // OAuth sign-in in progress.
       "personal_api_key.revoke",
+      "mcp_connection.create",
+      "mcp_connection.update",
+      "mcp_connection.revoke",
     ]);
     expect([...routed].sort()).toEqual([...GOVERNED_MUTATIONS].sort());
   });
@@ -863,4 +890,335 @@ async function expectAttribution(operationId: string, mutation: GovernedMutation
       acting_external_id: actingExternalUser.externalId,
     },
   ]);
+}
+
+const allowAllNative: OrganizationGovernancePort = {
+  governs: ({ externalSource }) => externalSource === HOST_SOURCE,
+  decide: () => "allow",
+};
+
+function externalActor(externalId: string): Record<string, string> {
+  return {
+    "x-opengeni-external-actor": encodeURIComponent(
+      JSON.stringify({ mode: "external", identity: { source: "test-host:user", externalId } }),
+    ),
+  };
+}
+
+async function externalIdentityCount(externalId: string): Promise<number> {
+  const [row] = await shared.admin<{ count: number }[]>`
+    select count(*)::int as count from external_identities
+    where account_id = ${world.governedOrganizationId}
+      and source = 'test-host:user' and external_id = ${externalId}`;
+  return row?.count ?? -1;
+}
+
+describe("organization governance port, fix round 1", () => {
+  test("a failed workspace lookup fails the gate closed; without a port nothing is read", async () => {
+    const failing = {
+      select: () => {
+        throw new Error("connection terminated");
+      },
+    } as unknown as Database;
+    await expect(
+      requireNativeWorkspaceMutation(
+        { db: failing, organizationGovernance: hostPort },
+        id(),
+        "external_member.add",
+      ),
+    ).rejects.toThrow("connection terminated");
+    await expect(
+      requireNativeWorkspaceMutation({ db: failing }, id(), "external_member.add"),
+    ).resolves.toBeUndefined();
+  });
+
+  test("stock: body-first external handlers keep their status order without a port", async () => {
+    // Handler level, as an embedding host mounts them: unauthenticated requests
+    // whose bodies are invalid. Without a port the handlers that validate the
+    // body first still answer the validation error, not 401; with a port the
+    // caller is authenticated before the host is asked.
+    const handlers = (organizationGovernance?: OrganizationGovernancePort) => {
+      const app = new Hono();
+      app.onError((error, c) =>
+        error instanceof HTTPException
+          ? c.json({ message: error.message }, error.status)
+          : error instanceof ZodError
+            ? c.json({ message: "invalid request" }, 400)
+            : c.json({ message: "internal" }, 500),
+      );
+      const deps = {
+        db: client.db,
+        settings: testSettings({ productAccessMode: "managed" }),
+        managedAuth: null,
+        ...(organizationGovernance ? { organizationGovernance } : {}),
+      } as unknown as ApiRouteDeps;
+      registerWorkspaceRoutes(app, deps);
+      registerOrganizationMembershipRoutes(app, deps);
+      return app;
+    };
+    const stock = handlers();
+    const bound = handlers(hostPort);
+    const cases: Array<[string, string, string, number]> = [
+      ["PATCH", `${org()}/external-members/${id()}`, "{}", 401],
+      [
+        "PATCH",
+        `${org()}/workspaces/${world.sharedWorkspaceId}/external-members/${id()}`,
+        "{}",
+        401,
+      ],
+      [
+        "POST",
+        `${org()}/workspaces/${world.sharedWorkspaceId}/members/${id()}/revoke`,
+        JSON.stringify({ cancelGrantOperationId: "not-a-uuid" }),
+        401,
+      ],
+      ["POST", `${ws()}/external-members`, JSON.stringify({ identity: {} }), 400],
+      [
+        "PATCH",
+        `${ws()}/external-members/${encodeURIComponent(`external_user:${id()}`)}`,
+        JSON.stringify({ identity: {} }),
+        400,
+      ],
+    ];
+    for (const [method, path, body, status] of cases) {
+      const init = { method, headers: { "content-type": "application/json" }, body };
+      const response = await stock.request(path, init);
+      expect({ method, path, status: response.status }).toEqual({ method, path, status });
+    }
+    // The body-first PATCH authenticates before the host is asked once a port is bound.
+    const patch = cases[4]!;
+    const governed = await bound.request(patch[1], {
+      method: patch[0],
+      headers: { "content-type": "application/json" },
+      body: patch[2],
+    });
+    expect(governed.status).toBe(401);
+  }, 60_000);
+
+  test("first-use external provisioning through an organization key asks the host", async () => {
+    const key = bearer(world.organizationKeyToken);
+    const refusedId = `first-use-${id()}`;
+    const refused = await governedApp.request("/v1/access/me", {
+      headers: { ...key, ...externalActor(refusedId) },
+    });
+    expect(refused.status).toBe(403);
+    const body = await json(refused);
+    expect(refusalCode(body)).toBe("ORGANIZATION_GOVERNED_BY_HOST");
+    expect(refusedMutation(body)).toBe("external_member.add");
+    expect(await externalIdentityCount(refusedId)).toBe(0);
+
+    // Stock provisions as before; an identity that already exists still
+    // resolves when the host refuses provisioning.
+    const existingId = `first-use-${id()}`;
+    const stock = await stockApp.request("/v1/access/me", {
+      headers: { ...key, ...externalActor(existingId) },
+    });
+    expect(stock.status).toBe(200);
+    expect(await externalIdentityCount(existingId)).toBe(1);
+    const existing = await governedApp.request("/v1/access/me", {
+      headers: { ...key, ...externalActor(existingId) },
+    });
+    expect(existing.status).toBe(200);
+
+    const allowedId = `first-use-${id()}`;
+    const allowed = await appFor(allowAllNative).request("/v1/access/me", {
+      headers: { ...key, ...externalActor(allowedId) },
+    });
+    expect(allowed.status).toBe(200);
+    expect(await externalIdentityCount(allowedId)).toBe(1);
+  }, 60_000);
+
+  test("first-use workspace membership asks the host when it would be created", async () => {
+    const key = bearer(
+      await organizationKey(world.governedOrganizationId, [
+        "members:manage",
+        "account:admin",
+        ...(EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS as Permission[]),
+      ]),
+    );
+    const grantPath = `${ws()}/access/grant`;
+    const provision = async (externalId: string) => {
+      const response = await stockApp.request("/v1/access/me", {
+        headers: { ...key, ...externalActor(externalId) },
+      });
+      expect(response.status).toBe(200);
+    };
+    const refusedId = `member-${id()}`;
+    await provision(refusedId);
+    const refused = await appFor(hostPort, { externalMemberFirstUse: true }).request(grantPath, {
+      headers: { ...key, ...externalActor(refusedId) },
+    });
+    expect(refused.status).toBe(403);
+    expect(refusalCode(await json(refused))).toBe("ORGANIZATION_GOVERNED_BY_HOST");
+
+    const allowedId = `member-${id()}`;
+    await provision(allowedId);
+    const allowed = await appFor(allowAllNative, { externalMemberFirstUse: true }).request(
+      grantPath,
+      { headers: { ...key, ...externalActor(allowedId) } },
+    );
+    expect(allowed.status).toBe(200);
+
+    const stockId = `member-${id()}`;
+    await provision(stockId);
+    const stock = await appFor(undefined, { externalMemberFirstUse: true }).request(grantPath, {
+      headers: { ...key, ...externalActor(stockId) },
+    });
+    expect(stock.status).toBe(200);
+  }, 60_000);
+
+  test("connecting, changing and disconnecting an MCP agent is decided by the host", async () => {
+    const owner = browser(world.owner.cookie);
+    const readOnly = readPolicy();
+    const approve = (app: App, requestToken: string) =>
+      app.request(`/v1/mcp-connections/requests/${requestToken}`, {
+        method: "POST",
+        headers: owner,
+        body: JSON.stringify({
+          decision: "approve",
+          organizationId: world.governedOrganizationId,
+          access: readOnly,
+        }),
+      });
+
+    const pending = await startOrganizationSignIn();
+    const refused = await approve(governedApp, pending.requestToken);
+    expect(refused.status).toBe(403);
+    const refusedBody = await json(refused);
+    expect(refusalCode(refusedBody)).toBe("ORGANIZATION_GOVERNED_BY_HOST");
+    expect(refusedMutation(refusedBody)).toBe("mcp_connection.create");
+    // Refused before the request was bound or answered: it is still pending.
+    const stillPending = await approve(stockApp, pending.requestToken);
+    expect(stillPending.status).toBe(200);
+    await exchangeCode(stillPending, pending);
+
+    const allowedSignIn = await startOrganizationSignIn();
+    expect((await approve(appFor(allowAllNative), allowedSignIn.requestToken)).status).toBe(200);
+
+    const listed = (await (
+      await stockApp.request(`${org()}/mcp-connections`, { headers: owner })
+    ).json()) as { connections: Array<{ id: string }> };
+    const connectionId = listed.connections[0]!.id;
+    const connection = `${org()}/mcp-connections/${connectionId}`;
+    const patch = (app: App) =>
+      app.request(connection, {
+        method: "PATCH",
+        headers: owner,
+        body: JSON.stringify({ access: readOnly }),
+      });
+    const refusedPatch = await patch(governedApp);
+    expect(refusedPatch.status).toBe(403);
+    expect(refusedMutation(await json(refusedPatch))).toBe("mcp_connection.update");
+    const refusedDelete = await governedApp.request(connection, {
+      method: "DELETE",
+      headers: owner,
+    });
+    expect(refusedDelete.status).toBe(403);
+    expect(refusedMutation(await json(refusedDelete))).toBe("mcp_connection.revoke");
+    expect((await patch(stockApp)).status).toBe(200);
+    expect(
+      (await appFor(allowAllNative).request(connection, { method: "DELETE", headers: owner }))
+        .status,
+    ).toBe(204);
+  }, 60_000);
+
+  test("a workspace MCP sign-in is refused before a code is issued", async () => {
+    const mcpClient = await registerMcpClient();
+    const authorize = authorizeUrl(
+      mcpClient,
+      `${origin}/v1/workspaces/${world.sharedWorkspaceId}/mcp`,
+    );
+    const consent = await governedApp.request(authorize.pathname + authorize.search, {
+      headers: { cookie: world.owner.cookie },
+    });
+    expect(consent.status).toBe(200);
+    const requestToken = /ogmcp_req_[A-Za-z0-9_-]+/u.exec(await consent.text())?.[0];
+    expect(requestToken).toBeDefined();
+    const form = (app: App) =>
+      app.request("/oauth/authorize", {
+        method: "POST",
+        headers: {
+          cookie: world.owner.cookie,
+          origin,
+          "sec-fetch-site": "same-origin",
+          "content-type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({
+          request: requestToken!,
+          decision: "approve",
+          workspace_id: world.sharedWorkspaceId,
+        }).toString(),
+      });
+    const refused = await form(governedApp);
+    expect(refused.status).toBe(403);
+    expect(refusedMutation(await json(refused))).toBe("mcp_connection.create");
+    const stock = await form(stockApp);
+    expect(stock.status).toBe(200);
+    expect(stock.headers.get("refresh") ?? "").toContain("code=");
+  }, 60_000);
+});
+
+type McpClient = { clientId: string; verifier: string; challenge: string };
+const redirectUri = "http://127.0.0.1:4567/callback";
+
+async function registerMcpClient(): Promise<McpClient> {
+  const registered = await stockApp.request("/oauth/register", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_name: "Governance agent",
+      redirect_uris: [redirectUri],
+      grant_types: ["authorization_code", "refresh_token"],
+      token_endpoint_auth_method: "none",
+    }),
+  });
+  expect(registered.status).toBe(201);
+  const { client_id: clientId } = (await registered.json()) as { client_id: string };
+  const verifier = randomBytes(32).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { clientId, verifier, challenge };
+}
+
+function authorizeUrl(mcpClient: McpClient, resource: string): URL {
+  const authorize = new URL("/oauth/authorize", origin);
+  for (const [key, value] of Object.entries({
+    response_type: "code",
+    scope: "mcp:access",
+    client_id: mcpClient.clientId,
+    redirect_uri: redirectUri,
+    code_challenge: mcpClient.challenge,
+    code_challenge_method: "S256",
+    resource,
+    state: "governance-state",
+  }))
+    authorize.searchParams.set(key, value);
+  return authorize;
+}
+
+async function startOrganizationSignIn(): Promise<McpClient & { requestToken: string }> {
+  const mcpClient = await registerMcpClient();
+  const authorize = authorizeUrl(mcpClient, `${origin}/v1/mcp`);
+  const started = await stockApp.request(authorize.pathname + authorize.search, {
+    headers: { cookie: world.owner.cookie },
+  });
+  expect(started.status).toBe(302);
+  const requestToken = new URL(started.headers.get("location")!).searchParams.get("request")!;
+  return { ...mcpClient, requestToken };
+}
+
+async function exchangeCode(approved: Response, mcpClient: McpClient): Promise<void> {
+  const redirect = new URL(((await approved.json()) as { redirectTo: string }).redirectTo);
+  const token = await stockApp.request("/oauth/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: mcpClient.clientId,
+      code: redirect.searchParams.get("code")!,
+      code_verifier: mcpClient.verifier,
+      redirect_uri: redirectUri,
+      resource: `${origin}/v1/mcp`,
+    }),
+  });
+  expect(token.status).toBe(200);
 }

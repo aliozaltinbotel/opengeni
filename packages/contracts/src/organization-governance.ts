@@ -10,8 +10,9 @@ import {
 
 /**
  * Every native route that changes who belongs to an organization, what they may
- * do there, or which credentials act in it. An embedding host that governs an
- * organization decides each one (`OrganizationGovernancePort.decide`).
+ * do there, or which credentials act in it (including connected MCP agents).
+ * An embedding host that governs an organization decides each one
+ * (`OrganizationGovernancePort.decide`). The list may grow in later releases.
  */
 export const GOVERNED_MUTATIONS = [
   "invitation.create",
@@ -34,6 +35,9 @@ export const GOVERNED_MUTATIONS = [
   "service_account.create",
   "service_account.update",
   "service_account.delete",
+  "mcp_connection.create",
+  "mcp_connection.update",
+  "mcp_connection.revoke",
 ] as const;
 export type GovernedMutation = (typeof GOVERNED_MUTATIONS)[number];
 
@@ -45,6 +49,10 @@ export type GovernedMutationChannel = "native" | "host";
  * standalone Opengeni. Bound, an organization the host governs accepts each
  * listed mutation only when the host allows it for that channel; a host
  * typically refuses every native mutation and allows its own commands.
+ *
+ * `decide` MUST answer "refuse" for any mutation it does not recognize:
+ * `GOVERNED_MUTATIONS` may grow, and a new mutation must stay closed until the
+ * host has decided to allow it.
  */
 export type OrganizationGovernancePort = {
   /** Organizations this host governs, keyed by the org's external identity source. */

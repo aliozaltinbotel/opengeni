@@ -100,7 +100,10 @@ import {
   resolveOrganizationUserSetupDeliveryEmail,
 } from "../auth/organization-user-setup";
 import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
-import { requireNativeOrganizationMutation } from "../http/organization-governance";
+import {
+  requireNativeOrganizationMutation,
+  requireNativeOrganizationMutationForRequest,
+} from "../http/organization-governance";
 import type { GovernedMutation } from "@opengeni/contracts/organization-governance";
 
 const OrganizationId = z.string().uuid();
@@ -311,8 +314,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       "organization id",
     );
     const membershipId = parseId(MembershipId, context.req.param("membershipId"), "membership id");
-    await requireAccessContext(context, deps);
-    await requireNativeOrganizationMutation(deps, organizationId, "external_member.update");
+    await requireNativeOrganizationMutationForRequest(
+      context,
+      deps,
+      organizationId,
+      "external_member.update",
+    );
     try {
       return context.json(
         await updateExternalIdentityMembershipForRequest(
@@ -640,8 +647,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
         "membership id",
       );
       const input = await readRequestJson(context);
-      await requireAccessContext(context, deps);
-      await requireNativeOrganizationMutation(deps, organizationId, "external_member.update");
+      await requireNativeOrganizationMutationForRequest(
+        context,
+        deps,
+        organizationId,
+        "external_member.update",
+      );
       return context.json(
         await updateExternalWorkspaceMemberForRequest(
           context,
@@ -671,8 +682,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
           context.req.param("membershipId"),
           "membership id",
         );
-        await requireAccessContext(context, deps);
-        await requireNativeOrganizationMutation(deps, organizationId, "external_member.update");
+        await requireNativeOrganizationMutationForRequest(
+          context,
+          deps,
+          organizationId,
+          "external_member.update",
+        );
         return context.json(
           await cancelExternalWorkspaceMemberGrantForRequest(
             context,

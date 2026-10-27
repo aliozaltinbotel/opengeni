@@ -190,7 +190,7 @@ import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 import {
   requireNativeOrganizationMutation,
-  requireNativeWorkspaceMutation,
+  requireNativeWorkspaceMutationForRequest,
 } from "../http/organization-governance";
 import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
@@ -332,8 +332,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // schema error from the application layer.
     const body = await readRequestJson(c);
     parseRequestBody(AddExternalWorkspaceMemberRequest, body);
-    await requireAccessContext(c, deps);
-    await requireNativeWorkspaceMutation(deps, c.req.param("workspaceId"), "external_member.add");
+    await requireNativeWorkspaceMutationForRequest(
+      c,
+      deps,
+      c.req.param("workspaceId"),
+      "external_member.add",
+    );
     return c.json(
       await addExternalWorkspaceMemberForRequest(c, deps, c.req.param("workspaceId"), body),
     );
@@ -341,8 +345,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.patch("/v1/workspaces/:workspaceId/external-members/:subjectId", async (c) => {
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const body: unknown = await c.req.json();
-    await requireAccessContext(c, deps);
-    await requireNativeWorkspaceMutation(
+    await requireNativeWorkspaceMutationForRequest(
+      c,
       deps,
       c.req.param("workspaceId"),
       "external_member.update",
