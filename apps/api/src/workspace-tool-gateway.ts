@@ -950,7 +950,13 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         codexAppsDesignation,
       )
     : undefined;
-  const localMcpServers = [...firstPartyServers, ...apiIntegrationServers];
+  const hostServers = await workspaceHostToolServers(routeDeps, {
+    grant,
+    signal: options.signal,
+    reservedIds: [...FIRST_PARTY_GATEWAY_SERVER_IDS, ...apiIntegrationServers.map(({ id }) => id)],
+    configuredIds: gatewayServerIds,
+  });
+  const localMcpServers = [...firstPartyServers, ...apiIntegrationServers, ...hostServers];
   const policyTargets = new Map(
     gatewaySettings.mcpServers.map((config) => {
       const binding = accountBindings.find((candidate) => candidate.serverId === config.id);
@@ -1576,6 +1582,55 @@ function workspaceToolGatewayOutcome(error: unknown) {
   if (error instanceof ToolGatewayInputValidationError) return "invalid_input" as const;
   if (error instanceof ToolGatewayToolNotFoundError) return "not_found" as const;
   return "failed" as const;
+}
+
+export const HOST_TOOL_SERVER_ID_CONFLICT = "HOST_TOOL_SERVER_ID_CONFLICT";
+
+/** A host tool-server registration that would shadow another gateway server. */
+export class HostToolServerIdConflictError extends Error {
+  readonly code = HOST_TOOL_SERVER_ID_CONFLICT;
+  constructor(readonly serverId: string) {
+    super(`host tool server id conflicts with another gateway server: ${serverId}`);
+    this.name = "HostToolServerIdConflictError";
+  }
+}
+
+const FIRST_PARTY_GATEWAY_SERVER_IDS = ["opengeni", "files", "docs"] as const;
+
+/**
+ * The embedding host's in-process servers for this grant. Every registration is
+ * checked for an id conflict first, so a first-party id is refused even when the
+ * grant's settings omit that server; only ids configured for this gateway are
+ * then kept. Registrations the gateway will not own are closed here.
+ */
+async function workspaceHostToolServers(
+  routeDeps: Pick<ApiRouteDeps, "workspaceToolServers">,
+  input: {
+    grant: AccessGrant;
+    signal: AbortSignal | undefined;
+    reservedIds: readonly string[];
+    configuredIds: ReadonlySet<string>;
+  },
+): Promise<LocalMcpServerRegistration[]> {
+  const port = routeDeps.workspaceToolServers;
+  if (!port) return [];
+  const registrations = await port({
+    grant: input.grant,
+    ...(input.signal ? { signal: input.signal } : {}),
+  });
+  const close = async (items: readonly LocalMcpServerRegistration[]) => {
+    await Promise.allSettled(items.map(async ({ server }) => await server.close()));
+  };
+  const seen = new Set<string>(input.reservedIds);
+  for (const registration of registrations) {
+    if (seen.has(registration.id)) {
+      await close(registrations);
+      throw new HostToolServerIdConflictError(registration.id);
+    }
+    seen.add(registration.id);
+  }
+  await close(registrations.filter(({ id }) => !input.configuredIds.has(id)));
+  return registrations.filter(({ id }) => input.configuredIds.has(id));
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {

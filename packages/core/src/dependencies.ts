@@ -33,6 +33,7 @@ import type {
 } from "./editable-artifacts";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
 import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
+import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
 import type { NativeAccessContinuation } from "./access";
@@ -292,6 +293,25 @@ export type AppDependencies = {
    * host's own commands are served under `/v1/host/organizations/*`.
    */
   organizationGovernance?: OrganizationGovernancePort | null;
+  /**
+   * Optional embedding-host tool servers for the workspace tool gateway (the
+   * workspace MCP server, HTTP `/tools/*`, Sites and current-human calls).
+   * Called once per gateway preparation with the caller's grant; it returns
+   * fresh in-process MCP servers, which the gateway closes after the request.
+   * A registration is used only when its id names a configured
+   * `settings.mcpServers` entry, replacing that entry's remote transport; other
+   * ids are ignored. The entry's settings (allowed tools, approval policy) and
+   * the connector tool policy apply exactly as for any MCP server. An id equal
+   * to a first-party server (`opengeni`, `files`, `docs`), an API-integration
+   * server or another host registration is refused with
+   * `HOST_TOOL_SERVER_ID_CONFLICT`. Return the same servers for every grant and
+   * scope by grant inside each server's tools: a configured entry the port
+   * omits keeps its remote transport, like any other configured server.
+   */
+  workspaceToolServers?: (input: {
+    grant: AccessGrant;
+    signal?: AbortSignal;
+  }) => Promise<readonly LocalMcpServerRegistration[]>;
   managedAuth?: ManagedAuth | null;
   /** Provider-neutral browser login-slot adapter; required by dual/broker managed auth. */
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;

@@ -532,6 +532,11 @@ export type StartApiOptions = {
    * credential mutations the host does not allow, and serve the host's commands.
    */
   organizationGovernance?: OrganizationGovernancePort | null;
+  /**
+   * Embedding-host tool servers for the workspace tool gateway
+   * (`AppDependencies.workspaceToolServers`), executed in-process.
+   */
+  workspaceToolServers?: AppDependencies["workspaceToolServers"];
 };
 
 /**
@@ -559,6 +564,18 @@ export function startApiOrganizationGovernanceOverride(
   return options.organizationGovernance === undefined
     ? {}
     : { organizationGovernance: options.organizationGovernance };
+}
+
+/**
+ * The composition override an embedding host's `workspaceToolServers` option
+ * contributes: unset forwards nothing; a port is forwarded as given.
+ */
+export function startApiWorkspaceToolServersOverride(
+  options: Pick<StartApiOptions, "workspaceToolServers">,
+): Pick<AppDependencies, "workspaceToolServers"> | Record<string, never> {
+  return options.workspaceToolServers === undefined
+    ? {}
+    : { workspaceToolServers: options.workspaceToolServers };
 }
 
 export async function startApi(options: StartApiOptions = {}) {
@@ -677,6 +694,7 @@ export async function startApi(options: StartApiOptions = {}) {
   const { app, routeDeps } = createAppComposition({
     ...startApiSessionAuthorizationOverride(options),
     ...startApiOrganizationGovernanceOverride(options),
+    ...startApiWorkspaceToolServersOverride(options),
     settings,
     db: dbClient.db,
     bus,
