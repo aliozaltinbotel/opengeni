@@ -950,6 +950,15 @@ setting back on through `PATCH /v1/organizations/:id/privacy-settings` is
 `403 ORGANIZATION_GOVERNED_BY_HOST` with `details.setting =
 "personalWorkspaces"`; turning it off is always accepted.
 
+Because a governed member has no Personal workspace to fall back to, the host
+must keep every human member in at least one shared workspace. A host or
+native invitation to a governed organization with an empty
+`initialWorkspaceIds` is `422 GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`, and
+removing a member's last shared workspace (through a native removal route the
+host allows) is `409 GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`; offboard or
+suspend the member instead. The host's `PUT workspaces/:ws/members/:id`
+command only grants access, so it never removes one.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 

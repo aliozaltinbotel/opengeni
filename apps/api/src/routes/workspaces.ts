@@ -189,6 +189,7 @@ import {
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 import {
+  requireGovernedMemberKeepsWorkspace,
   requireNativeOrganizationMutation,
   requireNativeWorkspaceMutationForRequest,
 } from "../http/organization-governance";
@@ -1762,6 +1763,12 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     await requireNativeOrganizationMutation(deps, grant.accountId, "workspace_member.remove");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
+    await requireGovernedMemberKeepsWorkspace(deps, {
+      organizationId: grant.accountId,
+      actorSubjectId: grant.subjectId,
+      workspaceId,
+      member: { subjectId },
+    });
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
     // The fenced removal command re-enforces both guards fail-closed.

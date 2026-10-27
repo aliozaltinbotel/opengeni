@@ -37,6 +37,7 @@ import { ApiHttpError } from "../http/api-error";
 import {
   organizationGovernanceDecision,
   organizationGovernedByHostError,
+  requireGovernedInvitationWorkspace,
 } from "../http/organization-governance";
 import { readRequestJson } from "../http/request-body";
 import {
@@ -75,6 +76,11 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
     const { actingExternalUser, command } = await parseCommand(
       context,
       HostInviteOrganizationMemberRequest,
+    );
+    await requireGovernedInvitationWorkspace(
+      deps,
+      authority.organizationId,
+      command.initialWorkspaceIds,
     );
     try {
       assertOrganizationUserSetupDeliveryConfigured(deps.settings, deps.managedEmailTransport);

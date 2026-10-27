@@ -50,6 +50,12 @@ export type GovernedMutationChannel = "native" | "host";
  * listed mutation only when the host allows it for that channel; a host
  * typically refuses every native mutation and allows its own commands.
  *
+ * A governed organization has no Personal workspaces, so every human member
+ * must keep at least one shared workspace: the host invites each person with
+ * at least one `initialWorkspaceIds` entry, and never removes a member's last
+ * shared workspace (offboard or suspend the member instead). Both are refused
+ * with `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`.
+ *
  * `decide` MUST answer "refuse" for any mutation it does not recognize:
  * `GOVERNED_MUTATIONS` may grow, and a new mutation must stay closed until the
  * host has decided to allow it.
@@ -70,6 +76,8 @@ export const ORGANIZATION_NOT_HOST_GOVERNED = "ORGANIZATION_NOT_HOST_GOVERNED";
 export const HOST_COMMAND_SERVICE_TOKEN_REQUIRED = "HOST_COMMAND_SERVICE_TOKEN_REQUIRED";
 export const HOST_COMMAND_PERMISSION_REQUIRED = "HOST_COMMAND_PERMISSION_REQUIRED";
 export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT";
+export const GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE =
+  "GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE";
 
 const encoder = new TextEncoder();
 function boundedOpaqueText(maxBytes: number) {

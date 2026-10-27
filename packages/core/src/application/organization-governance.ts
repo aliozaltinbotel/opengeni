@@ -1,4 +1,5 @@
 import {
+  GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE,
   ORGANIZATION_GOVERNED_BY_HOST,
   type GovernedMutation,
   type GovernedMutationChannel,
@@ -6,6 +7,7 @@ import {
 } from "@opengeni/contracts/organization-governance";
 import {
   getManagedAccount,
+  getOrganizationAdministrationOverview,
   getOrganizationPrivacyPreferences,
   updateOrganizationPrivacyPreferences,
   withAccountRls,
@@ -115,6 +117,64 @@ export async function requireNativeOrganizationMutationAllowed(
     via: "native",
   });
   if (decision === "refuse") throw new OrganizationGovernedByHostError(mutation);
+}
+
+/**
+ * Raised when a governed organization would get a human member with no shared
+ * workspace: their default would be the Personal workspace, which is off there.
+ */
+export class GovernedMemberRequiresSharedWorkspaceError extends Error {
+  readonly name = "GovernedMemberRequiresSharedWorkspaceError";
+  readonly code = GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE;
+  constructor(readonly operation: "invitation" | "removal") {
+    super(
+      operation === "invitation"
+        ? "Invite people to this organization with at least one shared workspace."
+        : "This is the member's last shared workspace. Offboard or suspend the member instead.",
+    );
+  }
+}
+
+/** A governed organization's invitation names at least one shared workspace. */
+export async function requireGovernedInvitationSharedWorkspace(
+  deps: OrganizationGovernanceDeps,
+  input: { organizationId: string; initialWorkspaceIds: readonly string[] },
+): Promise<void> {
+  if (input.initialWorkspaceIds.length > 0) return;
+  if (await organizationGovernedByHost(deps, input.organizationId))
+    throw new GovernedMemberRequiresSharedWorkspaceError("invitation");
+}
+
+/**
+ * A governed organization's member keeps a shared workspace other than
+ * `workspaceId` after its removal. The member is named by organization
+ * membership id or subject id; anyone without another shared workspace in the
+ * organization's administration overview is refused. Ungoverned organizations
+ * read nothing.
+ */
+export async function requireGovernedMemberKeepsSharedWorkspace(
+  deps: OrganizationGovernanceDeps,
+  input: {
+    organizationId: string;
+    actorSubjectId: string;
+    workspaceId: string;
+    member: { organizationMembershipId: string } | { subjectId: string };
+  },
+): Promise<void> {
+  if (!(await organizationGovernedByHost(deps, input.organizationId))) return;
+  const overview = await getOrganizationAdministrationOverview(deps.db, {
+    organizationId: input.organizationId,
+    actorSubjectId: input.actorSubjectId,
+  });
+  const isMember = (candidate: { organizationMembershipId: string | null; subjectId: string }) =>
+    "organizationMembershipId" in input.member
+      ? candidate.organizationMembershipId === input.member.organizationMembershipId
+      : candidate.subjectId === input.member.subjectId;
+  const keepsAnother = overview.workspaces.some(
+    (workspace) =>
+      workspace.id !== input.workspaceId && workspace.members.some((member) => isMember(member)),
+  );
+  if (!keepsAnother) throw new GovernedMemberRequiresSharedWorkspaceError("removal");
 }
 
 async function organizationExternalSource(

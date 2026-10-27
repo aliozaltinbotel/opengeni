@@ -49,6 +49,12 @@ const hostPort: OrganizationGovernancePort = {
   governs: ({ externalSource }) => externalSource === HOST_SOURCE,
   decide: ({ via }) => (via === "host" ? "allow" : "refuse"),
 };
+/** A host that also lets owners remove workspace access natively. */
+const removalAllowedPort: OrganizationGovernancePort = {
+  governs: ({ externalSource }) => externalSource === HOST_SOURCE,
+  decide: ({ via, mutation }) =>
+    via === "host" || mutation === "workspace_member.remove" ? "allow" : "refuse",
+};
 const governsEveryOrganization: OrganizationGovernancePort = {
   governs: () => true,
   decide: ({ via }) => (via === "host" ? "allow" : "refuse"),
@@ -131,18 +137,18 @@ async function personalWorkspacesEnabled(organizationId: string): Promise<boolea
     .personalWorkspacesEnabled;
 }
 
-function inviteCommand(email: string, workspaceId: string) {
+function inviteCommand(email: string, workspaceId: string | null) {
   return {
     email,
     role: "member",
-    initialWorkspaceIds: [workspaceId],
+    initialWorkspaceIds: workspaceId ? [workspaceId] : [],
     expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
     operationId: crypto.randomUUID(),
   };
 }
 
-async function hostInvite(organizationId: string, workspaceId: string, email: string) {
-  const token = await signDelegatedAccessToken(delegationSecret, {
+async function hostToken(organizationId: string, workspaceId: string): Promise<string> {
+  return await signDelegatedAccessToken(delegationSecret, {
     accountId: organizationId,
     workspaceId,
     subjectId: owner.subjectId,
@@ -151,11 +157,27 @@ async function hostInvite(organizationId: string, workspaceId: string, email: st
     serviceInitiator: { kind: "service", subjectId: "test-host:governance" },
     exp: Math.floor(Date.now() / 1000) + 300,
   });
+}
+
+/** `workspaceId` authenticates the token; `invitedTo` is the invitation's workspace, if any. */
+async function hostInvite(
+  organizationId: string,
+  workspaceId: string,
+  email: string,
+  invitedTo: string | null = workspaceId,
+) {
   return await governedApp.request(`/v1/host/organizations/${organizationId}/invitations`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ actingExternalUser, command: inviteCommand(email, workspaceId) }),
+    headers: {
+      authorization: `Bearer ${await hostToken(organizationId, workspaceId)}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ actingExternalUser, command: inviteCommand(email, invitedTo) }),
   });
+}
+
+function detailCode(body: unknown): string | undefined {
+  return (body as { error?: { details?: { code?: string } } }).error?.details?.code;
 }
 
 /** The invitee signs up after the invitation, then accepts it. */
@@ -353,4 +375,152 @@ describe("the privacy setting", () => {
     expect((await setPersonalWorkspaces(governedApp, organizationId, true)).status).toBe(200);
     expect(await personalWorkspacesEnabled(organizationId)).toBe(true);
   }, 60_000);
+});
+
+describe("a governed member always keeps a shared workspace", () => {
+  async function invitationCount(organizationId: string): Promise<number> {
+    const [row] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from organization_membership_invitations
+      where account_id = ${organizationId}`;
+    return row!.count;
+  }
+
+  /** A governed organization with two shared workspaces and a member in both. */
+  async function memberWithTwoWorkspaces(app: App) {
+    const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
+    const email = `member-${crypto.randomUUID()}@example.test`;
+    expect((await hostInvite(organizationId, businessWorkspaceId, email)).status).toBe(201);
+    const member = await acceptAsNewMember(app, email);
+    const second = await app.request(`/v1/organizations/${organizationId}/workspaces`, {
+      method: "POST",
+      headers: browser(owner.cookie),
+      body: JSON.stringify({ name: "Second workspace", operationId: crypto.randomUUID() }),
+    });
+    expect(second.status).toBe(201);
+    const secondWorkspaceId = ((await second.json()) as { id: string }).id;
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${organizationId} and subject_id = ${member.subjectId}`;
+    const granted = await app.request(
+      `/v1/host/organizations/${organizationId}/workspaces/${secondWorkspaceId}/members/${membership!.id}`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${await hostToken(organizationId, businessWorkspaceId)}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          actingExternalUser,
+          command: { role: "member", expectedUpdatedAt: null, operationId: crypto.randomUUID() },
+        }),
+      },
+    );
+    expect(granted.status).toBe(200);
+    return {
+      organizationId,
+      businessWorkspaceId,
+      secondWorkspaceId,
+      member,
+      organizationMembershipId: membership!.id,
+    };
+  }
+
+  async function revokeNatively(
+    app: App,
+    input: { organizationId: string; workspaceId: string; organizationMembershipId: string },
+    subjectId: string,
+  ) {
+    // Microsecond precision: the revoke compares it exactly.
+    const [row] = await shared.admin<{ updatedAt: string }[]>`
+      select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+      from workspace_memberships
+      where workspace_id = ${input.workspaceId} and subject_id = ${subjectId}`;
+    return await app.request(
+      `/v1/organizations/${input.organizationId}/workspaces/${input.workspaceId}/members/${input.organizationMembershipId}/revoke`,
+      {
+        method: "POST",
+        headers: browser(owner.cookie),
+        body: JSON.stringify({
+          expectedUpdatedAt: row!.updatedAt,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+  }
+
+  test("a host invitation without a shared workspace is refused", async () => {
+    const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
+    const before = await invitationCount(organizationId);
+    const refused = await hostInvite(
+      organizationId,
+      businessWorkspaceId,
+      `x-${crypto.randomUUID()}@example.test`,
+      null,
+    );
+    expect(refused.status).toBe(422);
+    expect(detailCode(await refused.json())).toBe("GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE");
+    expect(await invitationCount(organizationId)).toBe(before);
+  }, 60_000);
+
+  test("removing a governed member's last shared workspace is refused; another one is not", async () => {
+    const app = appFor(removalAllowedPort);
+    const world = await memberWithTwoWorkspaces(app);
+    // The second workspace goes; the business one stays.
+    const removed = await revokeNatively(
+      app,
+      { ...world, workspaceId: world.secondWorkspaceId },
+      world.member.subjectId,
+    );
+    expect(removed.status).toBe(200);
+    // Now the business workspace is the member's last one.
+    const last = await revokeNatively(
+      app,
+      { ...world, workspaceId: world.businessWorkspaceId },
+      world.member.subjectId,
+    );
+    expect(last.status).toBe(409);
+    expect(detailCode(await last.json())).toBe("GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE");
+    const workspaceRoute = await app.request(
+      `/v1/workspaces/${world.businessWorkspaceId}/members/${encodeURIComponent(world.member.subjectId)}`,
+      { method: "DELETE", headers: browser(owner.cookie) },
+    );
+    expect(workspaceRoute.status).toBe(409);
+    expect(detailCode(await workspaceRoute.json())).toBe(
+      "GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE",
+    );
+    const { defaultWorkspaceId } = await memberAccess(app, world.member, world.organizationId);
+    expect(defaultWorkspaceId).toBe(world.businessWorkspaceId);
+  }, 120_000);
+
+  test("an ungoverned organization still invites without a workspace and removes the last one", async () => {
+    const { organizationId, businessWorkspaceId } = await hostOrganization(null);
+    const app = appFor(removalAllowedPort);
+    const withoutWorkspace = await app.request(`/v1/organizations/${organizationId}/invitations`, {
+      method: "POST",
+      headers: browser(owner.cookie),
+      body: JSON.stringify(inviteCommand(`x-${crypto.randomUUID()}@example.test`, null)),
+    });
+    expect(withoutWorkspace.status).toBe(201);
+    const email = `member-${crypto.randomUUID()}@example.test`;
+    const invited = await app.request(`/v1/organizations/${organizationId}/invitations`, {
+      method: "POST",
+      headers: browser(owner.cookie),
+      body: JSON.stringify(inviteCommand(email, businessWorkspaceId)),
+    });
+    expect(invited.status).toBe(201);
+    const member = await acceptAsNewMember(app, email);
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${organizationId} and subject_id = ${member.subjectId}`;
+    const removed = await revokeNatively(
+      app,
+      {
+        organizationId,
+        workspaceId: businessWorkspaceId,
+        organizationMembershipId: membership!.id,
+      },
+      member.subjectId,
+    );
+    expect(removed.status).toBe(200);
+  }, 120_000);
 });

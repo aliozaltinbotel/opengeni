@@ -102,6 +102,8 @@ import {
 } from "../auth/organization-user-setup";
 import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
 import {
+  requireGovernedInvitationWorkspace,
+  requireGovernedMemberKeepsWorkspace,
   requireNativeOrganizationMutation,
   requireNativeOrganizationMutationForRequest,
   requirePersonalWorkspacesSetting,
@@ -719,6 +721,12 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
       const payload = await parseBody(context, RevokeOrganizationWorkspaceMemberRequest);
       await requireNativeOrganizationMutation(deps, organizationId, "workspace_member.remove");
+      await requireGovernedMemberKeepsWorkspace(deps, {
+        organizationId,
+        actorSubjectId: subjectId,
+        workspaceId,
+        member: { organizationMembershipId: membershipId },
+      });
       try {
         return context.json(
           RevokeOrganizationWorkspaceMemberResponse.parse(
@@ -850,6 +858,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
     );
     const payload = await parseBody(context, CreateOrganizationInvitationRequest);
     await requireNativeOrganizationMutation(deps, organizationId, "invitation.create");
+    await requireGovernedInvitationWorkspace(deps, organizationId, payload.initialWorkspaceIds);
     // Bearer construction configuration must fail before the invitation
     // commits. Provider outcomes are journaled durably after this boundary.
     try {

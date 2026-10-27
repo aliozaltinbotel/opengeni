@@ -1,12 +1,16 @@
 import {
+  GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE,
   ORGANIZATION_GOVERNED_BY_HOST,
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
 import {
+  GovernedMemberRequiresSharedWorkspaceError,
   OrganizationGovernedByHostError,
   PersonalWorkspacesGovernedByHostError,
   requireAccessContext,
   requireNativeOrganizationMutationAllowed,
+  requireGovernedInvitationSharedWorkspace,
+  requireGovernedMemberKeepsSharedWorkspace,
   requirePersonalWorkspacesSettingAllowed,
   type ApiRouteDeps,
 } from "@opengeni/core";
@@ -97,6 +101,46 @@ export async function requirePersonalWorkspacesSetting(
       retryable: false,
       outcomeUnknown: false,
       details: { code: ORGANIZATION_GOVERNED_BY_HOST, setting: "personalWorkspaces" },
+    });
+  }
+}
+
+/**
+ * A governed organization's invitation names a shared workspace: `422
+ * GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE` otherwise.
+ */
+export async function requireGovernedInvitationWorkspace(
+  deps: GovernanceDeps,
+  organizationId: string,
+  initialWorkspaceIds: readonly string[],
+): Promise<void> {
+  await withSharedWorkspaceRefusal(() =>
+    requireGovernedInvitationSharedWorkspace(deps, { organizationId, initialWorkspaceIds }),
+  );
+}
+
+/**
+ * Removing a governed organization member's last shared workspace is `409
+ * GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`.
+ */
+export async function requireGovernedMemberKeepsWorkspace(
+  deps: GovernanceDeps,
+  input: Parameters<typeof requireGovernedMemberKeepsSharedWorkspace>[1],
+): Promise<void> {
+  await withSharedWorkspaceRefusal(() => requireGovernedMemberKeepsSharedWorkspace(deps, input));
+}
+
+async function withSharedWorkspaceRefusal(check: () => Promise<void>): Promise<void> {
+  try {
+    await check();
+  } catch (error) {
+    if (!(error instanceof GovernedMemberRequiresSharedWorkspaceError)) throw error;
+    throw new ApiHttpError(error.operation === "invitation" ? 422 : 409, {
+      code: error.operation === "invitation" ? "validation_failed" : "conflict",
+      message: error.message,
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE },
     });
   }
 }

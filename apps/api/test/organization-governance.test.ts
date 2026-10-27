@@ -181,6 +181,11 @@ function inviteBody(email: string, operationId = crypto.randomUUID()) {
   };
 }
 
+/** A governed organization's invitation names a shared workspace (Task 7). */
+function hostInviteBody(email: string, operationId = crypto.randomUUID()) {
+  return { ...inviteBody(email, operationId), initialWorkspaceIds: [world.sharedWorkspaceId] };
+}
+
 async function organizationKey(
   accountId: string,
   permissions: Permission[] = [
@@ -605,7 +610,7 @@ describe("organization governance port", () => {
     const target = await signUp(stockApp, "Invited Staff");
 
     const inviteOperationId = id();
-    const inviteCommand = inviteBody(target.email, inviteOperationId);
+    const inviteCommand = hostInviteBody(target.email, inviteOperationId);
     decisions.length = 0;
     const invite = await governedApp.request(`${host}/invitations`, {
       method: "POST",
@@ -671,6 +676,11 @@ describe("organization governance port", () => {
     expect(member.role).toBe("admin");
     await expectReceipt("change_role", roleOperationId, "membership.role.change");
 
+    // The invitation already granted the shared workspace; the host changes it.
+    const [invitedAccess] = await shared.admin<{ updatedAt: string }[]>`
+      select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+      from workspace_memberships
+      where workspace_id = ${world.sharedWorkspaceId} and subject_id = ${target.subjectId}`;
     const grantOperationId = id();
     const grant = await governedApp.request(
       `${host}/workspaces/${world.sharedWorkspaceId}/members/${member.id}`,
@@ -679,7 +689,11 @@ describe("organization governance port", () => {
         headers,
         body: JSON.stringify({
           actingExternalUser,
-          command: { role: "member", expectedUpdatedAt: null, operationId: grantOperationId },
+          command: {
+            role: "viewer",
+            expectedUpdatedAt: invitedAccess!.updatedAt,
+            operationId: grantOperationId,
+          },
         }),
       },
     );
@@ -719,7 +733,7 @@ describe("organization governance port", () => {
       headers,
       body: JSON.stringify({
         actingExternalUser,
-        command: inviteBody(`later-${id()}@example.test`),
+        command: hostInviteBody(`later-${id()}@example.test`),
       }),
     });
     expect(second.status).toBe(201);
@@ -741,7 +755,10 @@ describe("organization governance port", () => {
   test("host commands refuse anything but a service token for the governed organization", async () => {
     const path = `/v1/host/organizations/${world.governedOrganizationId}/invitations`;
     const command = () =>
-      JSON.stringify({ actingExternalUser, command: inviteBody(`refused-${id()}@example.test`) });
+      JSON.stringify({
+        actingExternalUser,
+        command: hostInviteBody(`refused-${id()}@example.test`),
+      });
     const ordinaryDelegated = await signDelegatedAccessToken(delegationSecret, {
       accountId: world.governedOrganizationId,
       workspaceId: world.sharedWorkspaceId,
@@ -803,7 +820,7 @@ describe("organization governance port", () => {
     const outsider = await governedApp.request(path, {
       method: "POST",
       headers: bearer(await serviceToken({ subjectId: `user:${id()}` })),
-      body: JSON.stringify({ actingExternalUser, command: inviteBody(outsiderEmail) }),
+      body: JSON.stringify({ actingExternalUser, command: hostInviteBody(outsiderEmail) }),
     });
     expect(outsider.status).toBe(403);
     const [{ count: outsiderInvitations } = { count: -1 }] = await shared.admin<
