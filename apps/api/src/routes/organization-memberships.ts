@@ -102,8 +102,10 @@ import {
 } from "../auth/organization-user-setup";
 import { parseRequestBody, parseRequestQuery, readRequestJson } from "../http/request-body";
 import {
+  lastSharedWorkspaceRemovalHttpError,
+  removalRequiresRemainingSharedWorkspace,
   requireGovernedInvitationWorkspace,
-  requireGovernedMemberKeepsWorkspace,
+  requireGovernedReactivationWorkspaces,
   requireNativeOrganizationMutation,
   requireNativeOrganizationMutationForRequest,
   requirePersonalWorkspacesSetting,
@@ -255,6 +257,8 @@ function parseId(schema: z.ZodString, value: string, label: string): string {
 }
 
 export function rethrowMembershipError(error: unknown, resourceLimitMessage?: string): never {
+  const lastSharedWorkspace = lastSharedWorkspaceRemovalHttpError(error);
+  if (lastSharedWorkspace) throw lastSharedWorkspace;
   const sqlState = nestedPostgresSqlState(error);
   if (sqlState === "P0S01") {
     throw new ApiHttpError(402, {
@@ -721,12 +725,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       );
       const payload = await parseBody(context, RevokeOrganizationWorkspaceMemberRequest);
       await requireNativeOrganizationMutation(deps, organizationId, "workspace_member.remove");
-      await requireGovernedMemberKeepsWorkspace(deps, {
+      const requireRemainingSharedWorkspace = await removalRequiresRemainingSharedWorkspace(
+        deps,
         organizationId,
-        actorSubjectId: subjectId,
-        workspaceId,
-        member: { organizationMembershipId: membershipId },
-      });
+      );
       try {
         return context.json(
           RevokeOrganizationWorkspaceMemberResponse.parse(
@@ -737,6 +739,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
               targetOrganizationMembershipId: membershipId,
               expectedUpdatedAt: payload.expectedUpdatedAt,
               operationId: payload.operationId,
+              ...(requireRemainingSharedWorkspace ? { requireRemainingSharedWorkspace } : {}),
             }),
           ),
         );
@@ -1073,6 +1076,10 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
       organizationId,
       memberTransitionMutation[payload.kind],
     );
+    // A native reactivation cannot re-grant: a governed organization's
+    // members are reactivated by the host command with workspaceIds.
+    if (payload.kind === "reactivate")
+      await requireGovernedReactivationWorkspaces(deps, organizationId, undefined);
     try {
       return context.json(
         OrganizationMember.parse(

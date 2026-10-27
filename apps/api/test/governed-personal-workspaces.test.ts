@@ -49,11 +49,13 @@ const hostPort: OrganizationGovernancePort = {
   governs: ({ externalSource }) => externalSource === HOST_SOURCE,
   decide: ({ via }) => (via === "host" ? "allow" : "refuse"),
 };
-/** A host that also lets owners remove workspace access natively. */
+/** A host that also lets owners remove workspace access and reactivate natively. */
 const removalAllowedPort: OrganizationGovernancePort = {
   governs: ({ externalSource }) => externalSource === HOST_SOURCE,
   decide: ({ via, mutation }) =>
-    via === "host" || mutation === "workspace_member.remove" ? "allow" : "refuse",
+    via === "host" || mutation === "workspace_member.remove" || mutation === "membership.reactivate"
+      ? "allow"
+      : "refuse",
 };
 const governsEveryOrganization: OrganizationGovernancePort = {
   governs: () => true,
@@ -235,6 +237,11 @@ beforeAll(async () => {
   client = createDb(shared.appUrl, { max: 8 });
   stockApp = appFor();
   governedApp = appFor(hostPort);
+  await freshOwner();
+}, 180_000);
+
+/** Each owner may create a bounded number of organizations; later suites take a new one. */
+async function freshOwner(): Promise<void> {
   owner = await signUp(stockApp, "Business owner");
   await createManagedOrganization(client.db, {
     subjectId: owner.subjectId,
@@ -242,7 +249,7 @@ beforeAll(async () => {
     name: "Owner's first organization",
     operationId: crypto.randomUUID(),
   });
-}, 180_000);
+}
 
 afterAll(async () => {
   await client?.close().catch(() => undefined);
@@ -522,5 +529,288 @@ describe("a governed member always keeps a shared workspace", () => {
       member.subjectId,
     );
     expect(removed.status).toBe(200);
+  }, 120_000);
+});
+
+describe("removal guard runs inside the removal command", () => {
+  beforeAll(freshOwner, 60_000);
+
+  async function grantHost(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    role: "member" | "admin",
+  ) {
+    return await governedApp.request(
+      `/v1/host/organizations/${organizationId}/workspaces/${workspaceId}/members/${membershipId}`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${await hostToken(organizationId, workspaceId)}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          actingExternalUser,
+          command: {
+            role,
+            expectedUpdatedAt: await accessUpdatedAt(workspaceId, membershipId),
+            operationId: crypto.randomUUID(),
+          },
+        }),
+      },
+    );
+  }
+
+  async function accessUpdatedAt(
+    workspaceId: string,
+    membershipId: string,
+  ): Promise<string | null> {
+    const [row] = await shared.admin<{ updatedAt: string }[]>`
+      select to_char(wm.updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+      from workspace_memberships wm
+      join organization_memberships om on om.subject_id = wm.subject_id and om.account_id = wm.account_id
+      where wm.workspace_id = ${workspaceId} and om.id = ${membershipId}`;
+    return row?.updatedAt ?? null;
+  }
+
+  /** A governed organization with a member and a workspace-only admin, both in the business workspace. */
+  async function governedPair(app: App) {
+    const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
+    const people: { person: Person; membershipId: string }[] = [];
+    for (const label of ["member", "workspace-admin"]) {
+      const email = `${label}-${crypto.randomUUID()}@example.test`;
+      expect((await hostInvite(organizationId, businessWorkspaceId, email)).status).toBe(201);
+      const person = await acceptAsNewMember(app, email);
+      const [membership] = await shared.admin<{ id: string }[]>`
+        select id from organization_memberships
+        where account_id = ${organizationId} and subject_id = ${person.subjectId}`;
+      people.push({ person, membershipId: membership!.id });
+    }
+    const [member, admin] = people as [(typeof people)[0], (typeof people)[0]];
+    expect(
+      (await grantHost(organizationId, businessWorkspaceId, admin.membershipId, "admin")).status,
+    ).toBe(200);
+    return { organizationId, businessWorkspaceId, member, admin };
+  }
+
+  test("a workspace-only admin gets the route's own answers, never a 500", async () => {
+    const app = appFor(removalAllowedPort);
+    const world = await governedPair(app);
+    // The organization route needs organization administration: its own 403.
+    const [row] = await shared.admin<{ updatedAt: string }[]>`
+      select to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as "updatedAt"
+      from workspace_memberships
+      where workspace_id = ${world.businessWorkspaceId} and subject_id = ${world.member.person.subjectId}`;
+    const organizationRoute = await app.request(
+      `/v1/organizations/${world.organizationId}/workspaces/${world.businessWorkspaceId}/members/${world.member.membershipId}/revoke`,
+      {
+        method: "POST",
+        headers: browser(world.admin.person.cookie),
+        body: JSON.stringify({
+          expectedUpdatedAt: row!.updatedAt,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(organizationRoute.status).toBe(403);
+    // The workspace route lets a workspace admin remove; the last grant is the guard's 409.
+    const workspaceRoute = await app.request(
+      `/v1/workspaces/${world.businessWorkspaceId}/members/${encodeURIComponent(world.member.person.subjectId)}`,
+      { method: "DELETE", headers: browser(world.admin.person.cookie) },
+    );
+    expect(workspaceRoute.status).toBe(409);
+    expect(detailCode(await workspaceRoute.json())).toBe(
+      "GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE",
+    );
+    // A subject without a grant keeps the route's own answer.
+    const missing = await app.request(
+      `/v1/workspaces/${world.businessWorkspaceId}/members/${encodeURIComponent(`user:${crypto.randomUUID()}`)}`,
+      { method: "DELETE", headers: browser(owner.cookie) },
+    );
+    expect(missing.status).not.toBe(409);
+    expect(missing.status).toBeLessThan(500);
+  }, 180_000);
+
+  test("a service principal's last grant is removed; only managed humans are checked", async () => {
+    const app = appFor(removalAllowedPort);
+    const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
+    const service = `service:test-host-${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${organizationId}, ${businessWorkspaceId}, ${service}, 'member', ${shared.admin.json(["workspace:read"])})`;
+    const removed = await app.request(
+      `/v1/workspaces/${businessWorkspaceId}/members/${encodeURIComponent(service)}`,
+      { method: "DELETE", headers: browser(owner.cookie) },
+    );
+    expect(removed.status).toBe(204);
+  }, 60_000);
+});
+
+describe("reactivating a governed member re-grants a shared workspace", () => {
+  beforeAll(freshOwner, 60_000);
+
+  async function lifecycle(
+    organizationId: string,
+    workspaceId: string,
+    membershipId: string,
+    kind: "suspend" | "reactivate",
+    extra: Record<string, unknown> = {},
+  ) {
+    const [row] = await shared.admin<{ revision: number }[]>`
+      select authorization_revision::int as revision from organization_memberships where id = ${membershipId}`;
+    return await governedApp.request(
+      `/v1/host/organizations/${organizationId}/members/${membershipId}/${kind}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${await hostToken(organizationId, workspaceId)}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          actingExternalUser,
+          command: {
+            expectedAuthorizationRevision: row!.revision,
+            operationId: crypto.randomUUID(),
+            ...extra,
+          },
+        }),
+      },
+    );
+  }
+
+  async function suspendedMember() {
+    const { organizationId, businessWorkspaceId } = await hostOrganization(HOST_SOURCE);
+    const email = `member-${crypto.randomUUID()}@example.test`;
+    expect((await hostInvite(organizationId, businessWorkspaceId, email)).status).toBe(201);
+    const member = await acceptAsNewMember(governedApp, email);
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${organizationId} and subject_id = ${member.subjectId}`;
+    const membershipId = membership!.id;
+    expect(
+      (await lifecycle(organizationId, businessWorkspaceId, membershipId, "suspend")).status,
+    ).toBe(200);
+    // Suspension removes every workspace grant.
+    expect(await sharedGrants(organizationId, member.subjectId, businessWorkspaceId)).toBe(0);
+    return { organizationId, businessWorkspaceId, member, membershipId };
+  }
+
+  async function sharedGrants(organizationId: string, subjectId: string, workspaceId: string) {
+    const [row] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from workspace_memberships
+      where account_id = ${organizationId} and subject_id = ${subjectId} and workspace_id = ${workspaceId}`;
+    return row!.count;
+  }
+
+  async function status(membershipId: string): Promise<string> {
+    const [row] = await shared.admin<{ status: string }[]>`
+      select status from organization_memberships where id = ${membershipId}`;
+    return row!.status;
+  }
+
+  test("a host reactivation without workspaceIds is refused", async () => {
+    const world = await suspendedMember();
+    for (const extra of [{}, { workspaceIds: [] }]) {
+      const refused = await lifecycle(
+        world.organizationId,
+        world.businessWorkspaceId,
+        world.membershipId,
+        "reactivate",
+        extra,
+      );
+      expect(refused.status).toBe(422);
+      expect(detailCode(await refused.json())).toBe("GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE");
+    }
+    expect(await status(world.membershipId)).toBe("suspended");
+  }, 120_000);
+
+  test("a host reactivation with workspaceIds grants them in the same command", async () => {
+    const world = await suspendedMember();
+    const reactivated = await lifecycle(
+      world.organizationId,
+      world.businessWorkspaceId,
+      world.membershipId,
+      "reactivate",
+      { workspaceIds: [world.businessWorkspaceId] },
+    );
+    expect(reactivated.status).toBe(200);
+    expect(((await reactivated.json()) as { status: string }).status).toBe("active");
+    expect(
+      await sharedGrants(world.organizationId, world.member.subjectId, world.businessWorkspaceId),
+    ).toBe(1);
+    const { defaultWorkspaceId } = await memberAccess(
+      governedApp,
+      world.member,
+      world.organizationId,
+    );
+    expect(defaultWorkspaceId).toBe(world.businessWorkspaceId);
+  }, 120_000);
+
+  test("a grant that fails rolls the reactivation back", async () => {
+    const world = await suspendedMember();
+    const failed = await lifecycle(
+      world.organizationId,
+      world.businessWorkspaceId,
+      world.membershipId,
+      "reactivate",
+      { workspaceIds: [crypto.randomUUID()] },
+    );
+    expect(failed.status).toBeGreaterThanOrEqual(400);
+    expect(failed.status).toBeLessThan(500);
+    expect(await status(world.membershipId)).toBe("suspended");
+  }, 120_000);
+
+  test("a native reactivation in a governed organization is refused", async () => {
+    const world = await suspendedMember();
+    const [row] = await shared.admin<{ revision: number }[]>`
+      select authorization_revision::int as revision from organization_memberships where id = ${world.membershipId}`;
+    const refused = await appFor(removalAllowedPort).request(
+      `/v1/organizations/${world.organizationId}/members/${world.membershipId}`,
+      {
+        method: "PATCH",
+        headers: browser(owner.cookie),
+        body: JSON.stringify({
+          kind: "reactivate",
+          expectedAuthorizationRevision: row!.revision,
+          operationId: crypto.randomUUID(),
+        }),
+      },
+    );
+    expect(refused.status).toBe(422);
+    expect(detailCode(await refused.json())).toBe("GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE");
+    expect(await status(world.membershipId)).toBe("suspended");
+  }, 120_000);
+
+  test("an ungoverned organization still suspends and reactivates natively", async () => {
+    const { organizationId, businessWorkspaceId } = await hostOrganization(null);
+    const email = `member-${crypto.randomUUID()}@example.test`;
+    const invited = await governedApp.request(`/v1/organizations/${organizationId}/invitations`, {
+      method: "POST",
+      headers: browser(owner.cookie),
+      body: JSON.stringify(inviteCommand(email, businessWorkspaceId)),
+    });
+    expect(invited.status).toBe(201);
+    const member = await acceptAsNewMember(governedApp, email);
+    const [membership] = await shared.admin<{ id: string }[]>`
+      select id from organization_memberships
+      where account_id = ${organizationId} and subject_id = ${member.subjectId}`;
+    for (const kind of ["suspend", "reactivate"] as const) {
+      const [row] = await shared.admin<{ revision: number }[]>`
+        select authorization_revision::int as revision from organization_memberships where id = ${membership!.id}`;
+      const response = await governedApp.request(
+        `/v1/organizations/${organizationId}/members/${membership!.id}`,
+        {
+          method: "PATCH",
+          headers: browser(owner.cookie),
+          body: JSON.stringify({
+            kind,
+            expectedAuthorizationRevision: row!.revision,
+            operationId: crypto.randomUUID(),
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+    }
+    expect(await status(membership!.id)).toBe("active");
   }, 120_000);
 });

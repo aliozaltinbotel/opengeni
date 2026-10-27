@@ -9,12 +9,13 @@ import {
   PersonalWorkspacesGovernedByHostError,
   requireAccessContext,
   requireNativeOrganizationMutationAllowed,
+  organizationGovernedByHost,
   requireGovernedInvitationSharedWorkspace,
-  requireGovernedMemberKeepsSharedWorkspace,
+  requireGovernedReactivationSharedWorkspace,
   requirePersonalWorkspacesSettingAllowed,
   type ApiRouteDeps,
 } from "@opengeni/core";
-import { getWorkspace } from "@opengeni/db";
+import { getWorkspace, LastSharedWorkspaceRemovalError } from "@opengeni/db";
 import type { Context } from "hono";
 import { ApiHttpError } from "./api-error";
 
@@ -120,14 +121,34 @@ export async function requireGovernedInvitationWorkspace(
 }
 
 /**
- * Removing a governed organization member's last shared workspace is `409
- * GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`.
+ * Reactivating a governed organization's member re-grants a shared workspace:
+ * `422 GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE` otherwise.
  */
-export async function requireGovernedMemberKeepsWorkspace(
+export async function requireGovernedReactivationWorkspaces(
   deps: GovernanceDeps,
-  input: Parameters<typeof requireGovernedMemberKeepsSharedWorkspace>[1],
+  organizationId: string,
+  workspaceIds: readonly string[] | undefined,
 ): Promise<void> {
-  await withSharedWorkspaceRefusal(() => requireGovernedMemberKeepsSharedWorkspace(deps, input));
+  await withSharedWorkspaceRefusal(() =>
+    requireGovernedReactivationSharedWorkspace(deps, { organizationId, workspaceIds }),
+  );
+}
+
+/**
+ * Whether a removal must leave the member a shared workspace: true in a
+ * governed organization. The removal command checks it under its own lock.
+ */
+export async function removalRequiresRemainingSharedWorkspace(
+  deps: GovernanceDeps,
+  organizationId: string,
+): Promise<boolean> {
+  return await organizationGovernedByHost(deps, organizationId);
+}
+
+/** The `409 GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE` for a refused removal, else null. */
+export function lastSharedWorkspaceRemovalHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof LastSharedWorkspaceRemovalError)) return null;
+  return sharedWorkspaceRefusal(new GovernedMemberRequiresSharedWorkspaceError("removal"));
 }
 
 async function withSharedWorkspaceRefusal(check: () => Promise<void>): Promise<void> {
@@ -135,14 +156,20 @@ async function withSharedWorkspaceRefusal(check: () => Promise<void>): Promise<v
     await check();
   } catch (error) {
     if (!(error instanceof GovernedMemberRequiresSharedWorkspaceError)) throw error;
-    throw new ApiHttpError(error.operation === "invitation" ? 422 : 409, {
-      code: error.operation === "invitation" ? "validation_failed" : "conflict",
-      message: error.message,
-      retryable: false,
-      outcomeUnknown: false,
-      details: { code: GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE },
-    });
+    throw sharedWorkspaceRefusal(error);
   }
+}
+
+/** A request that would leave no shared workspace is 422; a removal that would is 409. */
+function sharedWorkspaceRefusal(error: GovernedMemberRequiresSharedWorkspaceError): ApiHttpError {
+  const removal = error.operation === "removal";
+  return new ApiHttpError(removal ? 409 : 422, {
+    code: removal ? "conflict" : "validation_failed",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE },
+  });
 }
 
 export function organizationGovernedByHostError(mutation: GovernedMutation): ApiHttpError {

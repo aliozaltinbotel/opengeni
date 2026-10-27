@@ -13,6 +13,7 @@ import {
   HostChangeOrganizationMemberRoleRequest,
   HostInviteOrganizationMemberRequest,
   HostOrganizationMemberLifecycleRequest,
+  HostReactivateOrganizationMemberRequest,
   HostRevokeOrganizationInvitationRequest,
   HostSetOrganizationWorkspaceMemberRequest,
   ORGANIZATION_NOT_HOST_GOVERNED,
@@ -38,6 +39,7 @@ import {
   organizationGovernanceDecision,
   organizationGovernedByHostError,
   requireGovernedInvitationWorkspace,
+  requireGovernedReactivationWorkspaces,
 } from "../http/organization-governance";
 import { readRequestJson } from "../http/request-body";
 import {
@@ -175,7 +177,27 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
     );
   });
 
-  for (const kind of ["suspend", "reactivate", "offboard"] as const) {
+  app.post(`${base}/members/:membershipId/reactivate`, async (context) => {
+    const authority = await requireHostCommand(context, deps, "membership.reactivate");
+    const membershipId = parsePathId(context, "membershipId");
+    const {
+      actingExternalUser,
+      command: { workspaceIds, ...command },
+    } = await parseCommand(context, HostReactivateOrganizationMemberRequest);
+    await requireGovernedReactivationWorkspaces(deps, authority.organizationId, workspaceIds);
+    return context.json(
+      await transitionMember(
+        deps,
+        authority,
+        membershipId,
+        actingExternalUser,
+        { kind: "reactivate", ...command },
+        workspaceIds,
+      ),
+    );
+  });
+
+  for (const kind of ["suspend", "offboard"] as const) {
     app.post(`${base}/members/:membershipId/${kind}`, async (context) => {
       const authority = await requireHostCommand(context, deps, memberTransitionMutation[kind]);
       const membershipId = parsePathId(context, "membershipId");
@@ -229,6 +251,7 @@ async function transitionMember(
   membershipId: string,
   actingExternalUser: ActingExternalUser,
   input: unknown,
+  reactivationWorkspaceIds?: readonly string[],
 ) {
   const parsed = UpdateOrganizationMemberRequest.safeParse(input);
   if (!parsed.success)
@@ -247,6 +270,7 @@ async function transitionMember(
         operationId: transition.operationId,
         membershipId,
         transition,
+        ...(reactivationWorkspaceIds ? { reactivationWorkspaceIds } : {}),
       }),
     );
   } catch (error) {

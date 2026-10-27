@@ -7,7 +7,6 @@ import {
 } from "@opengeni/contracts/organization-governance";
 import {
   getManagedAccount,
-  getOrganizationAdministrationOverview,
   getOrganizationPrivacyPreferences,
   updateOrganizationPrivacyPreferences,
   withAccountRls,
@@ -119,6 +118,16 @@ export async function requireNativeOrganizationMutationAllowed(
   if (decision === "refuse") throw new OrganizationGovernedByHostError(mutation);
 }
 
+export type GovernedSharedWorkspaceOperation = "invitation" | "removal" | "reactivation";
+
+const GOVERNED_SHARED_WORKSPACE_MESSAGES: Record<GovernedSharedWorkspaceOperation, string> = {
+  invitation: "Invite people to this organization with at least one shared workspace.",
+  removal:
+    "This is the member's last shared workspace. Offboard the member, or suspend them and reactivate with the shared workspaces to restore.",
+  reactivation:
+    "Reactivate members of this organization through the host command with the shared workspaces to grant (workspaceIds).",
+};
+
 /**
  * Raised when a governed organization would get a human member with no shared
  * workspace: their default would be the Personal workspace, which is off there.
@@ -126,12 +135,8 @@ export async function requireNativeOrganizationMutationAllowed(
 export class GovernedMemberRequiresSharedWorkspaceError extends Error {
   readonly name = "GovernedMemberRequiresSharedWorkspaceError";
   readonly code = GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE;
-  constructor(readonly operation: "invitation" | "removal") {
-    super(
-      operation === "invitation"
-        ? "Invite people to this organization with at least one shared workspace."
-        : "This is the member's last shared workspace. Offboard or suspend the member instead.",
-    );
+  constructor(readonly operation: GovernedSharedWorkspaceOperation) {
+    super(GOVERNED_SHARED_WORKSPACE_MESSAGES[operation]);
   }
 }
 
@@ -146,35 +151,17 @@ export async function requireGovernedInvitationSharedWorkspace(
 }
 
 /**
- * A governed organization's member keeps a shared workspace other than
- * `workspaceId` after its removal. The member is named by organization
- * membership id or subject id; anyone without another shared workspace in the
- * organization's administration overview is refused. Ungoverned organizations
- * read nothing.
+ * Reactivating a governed organization's member re-grants at least one shared
+ * workspace: suspension removed every grant. A native reactivation, which
+ * cannot carry grants, passes `undefined` and is refused there.
  */
-export async function requireGovernedMemberKeepsSharedWorkspace(
+export async function requireGovernedReactivationSharedWorkspace(
   deps: OrganizationGovernanceDeps,
-  input: {
-    organizationId: string;
-    actorSubjectId: string;
-    workspaceId: string;
-    member: { organizationMembershipId: string } | { subjectId: string };
-  },
+  input: { organizationId: string; workspaceIds: readonly string[] | undefined },
 ): Promise<void> {
-  if (!(await organizationGovernedByHost(deps, input.organizationId))) return;
-  const overview = await getOrganizationAdministrationOverview(deps.db, {
-    organizationId: input.organizationId,
-    actorSubjectId: input.actorSubjectId,
-  });
-  const isMember = (candidate: { organizationMembershipId: string | null; subjectId: string }) =>
-    "organizationMembershipId" in input.member
-      ? candidate.organizationMembershipId === input.member.organizationMembershipId
-      : candidate.subjectId === input.member.subjectId;
-  const keepsAnother = overview.workspaces.some(
-    (workspace) =>
-      workspace.id !== input.workspaceId && workspace.members.some((member) => isMember(member)),
-  );
-  if (!keepsAnother) throw new GovernedMemberRequiresSharedWorkspaceError("removal");
+  if (input.workspaceIds !== undefined && input.workspaceIds.length > 0) return;
+  if (await organizationGovernedByHost(deps, input.organizationId))
+    throw new GovernedMemberRequiresSharedWorkspaceError("reactivation");
 }
 
 async function organizationExternalSource(

@@ -189,7 +189,8 @@ import {
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
 import {
-  requireGovernedMemberKeepsWorkspace,
+  lastSharedWorkspaceRemovalHttpError,
+  removalRequiresRemainingSharedWorkspace,
   requireNativeOrganizationMutation,
   requireNativeWorkspaceMutationForRequest,
 } from "../http/organization-governance";
@@ -1763,12 +1764,6 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     await requireNativeOrganizationMutation(deps, grant.accountId, "workspace_member.remove");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
-    await requireGovernedMemberKeepsWorkspace(deps, {
-      organizationId: grant.accountId,
-      actorSubjectId: grant.subjectId,
-      workspaceId,
-      member: { subjectId },
-    });
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.
     // The fenced removal command re-enforces both guards fail-closed.
@@ -1777,17 +1772,26 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       subjectId,
       callerSubjectId: grant.subjectId,
     });
-    await removeWorkspaceMember(deps.db, {
-      accountId: grant.accountId,
-      workspaceId,
-      actorSubjectId: grant.subjectId,
-      targetSubjectId: subjectId,
-      // An organization owner/admin acting without their own workspace grant
-      // proves that authority through the organization capability instead.
-      ...(organizationAdministrator
-        ? { requireOrganizationSharedWorkspaceAdministration: true }
-        : {}),
-    });
+    const requireRemainingSharedWorkspace = await removalRequiresRemainingSharedWorkspace(
+      deps,
+      grant.accountId,
+    );
+    try {
+      await removeWorkspaceMember(deps.db, {
+        accountId: grant.accountId,
+        workspaceId,
+        actorSubjectId: grant.subjectId,
+        targetSubjectId: subjectId,
+        // An organization owner/admin acting without their own workspace grant
+        // proves that authority through the organization capability instead.
+        ...(organizationAdministrator
+          ? { requireOrganizationSharedWorkspaceAdministration: true }
+          : {}),
+        ...(requireRemainingSharedWorkspace ? { requireRemainingSharedWorkspace } : {}),
+      });
+    } catch (error) {
+      throw lastSharedWorkspaceRemovalHttpError(error) ?? error;
+    }
     return c.body(null, 204);
   });
 }

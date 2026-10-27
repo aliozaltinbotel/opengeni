@@ -52,9 +52,10 @@ export type GovernedMutationChannel = "native" | "host";
  *
  * A governed organization has no Personal workspaces, so every human member
  * must keep at least one shared workspace: the host invites each person with
- * at least one `initialWorkspaceIds` entry, and never removes a member's last
- * shared workspace (offboard or suspend the member instead). Both are refused
- * with `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`.
+ * at least one `initialWorkspaceIds` entry, never removes a member's last
+ * shared workspace (offboard the member instead), and reactivates a suspended
+ * member with `workspaceIds` to re-grant, because suspension removes every
+ * grant. Each is refused with `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`.
  *
  * `decide` MUST answer "refuse" for any mutation it does not recognize:
  * `GOVERNED_MUTATIONS` may grow, and a new mutation must stay closed until the
@@ -137,7 +138,27 @@ export type HostChangeOrganizationMemberRoleRequest = z.infer<
   typeof HostChangeOrganizationMemberRoleRequest
 >;
 
-/** Suspend, reactivate and offboard take the same command. */
+/**
+ * Reactivation re-grants shared workspaces in the same transaction: suspension
+ * removed every grant, and a governed member must keep one. `workspaceIds` is
+ * required (else `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`); each is granted
+ * with the workspace role `member`.
+ */
+export const HostReactivateOrganizationMemberRequest = /* @__PURE__ */ defineSchema(() =>
+  hostCommand(
+    z
+      .object({
+        ...MemberTransitionFields,
+        workspaceIds: z.array(primitives.uuid).max(100).optional(),
+      })
+      .strict(),
+  ),
+);
+export type HostReactivateOrganizationMemberRequest = z.infer<
+  typeof HostReactivateOrganizationMemberRequest
+>;
+
+/** Suspend and offboard take the same command. */
 export const HostOrganizationMemberLifecycleRequest = /* @__PURE__ */ defineSchema(() =>
   hostCommand(z.object(MemberTransitionFields).strict()),
 );

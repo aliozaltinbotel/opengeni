@@ -718,7 +718,10 @@ describe("organization governance port", () => {
           command: {
             expectedAuthorizationRevision: member.authorizationRevision,
             operationId,
-            ...(kind === "reactivate" ? {} : { reason: "host decision" }),
+            // Suspension removed every grant; a governed reactivation re-grants.
+            ...(kind === "reactivate"
+              ? { workspaceIds: [world.sharedWorkspaceId] }
+              : { reason: "host decision" }),
           },
         }),
       });

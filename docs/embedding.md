@@ -923,7 +923,8 @@ stay closed until the host chooses to allow it.
 
 The host performs these mutations through `/v1/host/organizations/:id/...`
 (`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,
-`members/:id/{suspend,reactivate,offboard}` and
+`members/:id/{suspend,reactivate,offboard}` (reactivate also takes
+`workspaceIds`, below) and
 `PUT workspaces/:ws/members/:id`). Each takes
 `{ actingExternalUser: { source, externalId }, command }`, where `command` is
 the native request body. Authentication is a service delegated token
@@ -951,13 +952,22 @@ setting back on through `PATCH /v1/organizations/:id/privacy-settings` is
 "personalWorkspaces"`; turning it off is always accepted.
 
 Because a governed member has no Personal workspace to fall back to, the host
-must keep every human member in at least one shared workspace. A host or
-native invitation to a governed organization with an empty
-`initialWorkspaceIds` is `422 GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`, and
-removing a member's last shared workspace (through a native removal route the
-host allows) is `409 GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`; offboard or
-suspend the member instead. The host's `PUT workspaces/:ws/members/:id`
-command only grants access, so it never removes one.
+must keep every human member in at least one shared workspace, and each break
+of that is `GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE`:
+
+- A host or native invitation with an empty `initialWorkspaceIds` is `422`.
+- Removing a managed human member's last shared workspace through a native
+  removal route the host allows is `409`. The removal command checks it under
+  its organization lock; service principals and external identities are not
+  checked. To take someone out, offboard them.
+- Suspension removes every workspace grant, so reactivation must re-grant:
+  the host's `members/:id/reactivate` command takes `workspaceIds` (required,
+  shared workspaces of the organization) and grants each with the workspace
+  role `member` in the same transaction as the reactivation; without them it
+  is `422`. A native reactivation cannot carry grants and is `422` too.
+
+The host's `PUT workspaces/:ws/members/:id` command only grants access, so it
+never removes one.
 
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
