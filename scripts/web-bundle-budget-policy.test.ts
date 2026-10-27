@@ -537,6 +537,13 @@ describe("web bundle budget with a host extension", () => {
   test.skipIf(!fixtureBuildRequested)(
     "OPENGENI_WEB_BUNDLE_FIXTURE_BUILD=1: the fixture extension build stays within 2 KiB of the stub's initial load",
     () => {
+      // The staged copy must stay outside Tailwind's own scan, or the CSS
+      // assertions below would pass without the extension source.
+      const ignored = spawnSync("git", ["check-ignore", "-q", stagedFixture], { cwd: repoRoot });
+      expect({ stagedFixture, ignored: ignored.status === 0 }).toEqual({
+        stagedFixture,
+        ignored: true,
+      });
       const stub = buildAndMeasure("");
       let fixture: BuildMeasure;
       try {
