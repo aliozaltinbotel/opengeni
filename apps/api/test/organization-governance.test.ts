@@ -1375,7 +1375,9 @@ describe("organization recovery and workspace deletion are governed", () => {
     type DeletePath = "organization" | "organization_key" | "workspace";
     const deleteVia = async (app: App, workspaceId: string, path: DeletePath) =>
       await app.request(
-        path === "workspace" ? `/v1/workspaces/${workspaceId}` : `${org()}/workspaces/${workspaceId}`,
+        path === "workspace"
+          ? `/v1/workspaces/${workspaceId}`
+          : `${org()}/workspaces/${workspaceId}`,
         {
           method: "DELETE",
           headers: path === "organization_key" ? bearer(adminKey) : browser(world.owner.cookie),

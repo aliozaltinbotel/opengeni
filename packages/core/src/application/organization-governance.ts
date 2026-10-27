@@ -42,9 +42,6 @@ export async function organizationGovernanceDecision(
  */
 export class OrganizationGovernancePortContractError extends Error {
   readonly name = "OrganizationGovernancePortContractError";
-  constructor(message: string) {
-    super(message);
-  }
 }
 
 /**

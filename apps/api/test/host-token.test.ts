@@ -661,4 +661,3 @@ describe("host session token JWKS cache and mint limit", () => {
     expect((await mint(instance, { cookie: otherSession }, owner.workspaceId)).status).toBe(200);
   }, 120_000);
 });
-

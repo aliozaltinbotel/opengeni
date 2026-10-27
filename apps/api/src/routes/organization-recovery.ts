@@ -281,12 +281,7 @@ export function registerOrganizationRecoveryRoutes(
   });
 
   app.post(`${base}/operations`, async (context) => {
-    const authority = await mutationContext(
-      context,
-      deps,
-      services,
-      "organization_recovery.start",
-    );
+    const authority = await mutationContext(context, deps, services, "organization_recovery.start");
     const payload = await parseBody(context, StartOrganizationRecoveryOperationRequest);
     try {
       return mutationResponse(

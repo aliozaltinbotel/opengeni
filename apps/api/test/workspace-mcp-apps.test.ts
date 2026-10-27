@@ -428,4 +428,3 @@ describe("MCP Apps resources after the caller's authority is revoked", () => {
     }
   });
 });
-
