@@ -18,6 +18,7 @@ import {
   OwnershipSelector,
   SocialConnectorControls,
 } from "@opengeni/react/app/components/capabilities/capability-detail-sheet";
+import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 
 beforeAll(() => {
   GlobalRegistrator.register();
@@ -152,6 +153,41 @@ describe("connection ownership UI", () => {
       expect(view.container.querySelector('input[type="password"]')).toBeNull();
     } finally {
       await view.unmount();
+    }
+  });
+  test("with Secrets hidden by the host extension, 1Password setup says whether it is connected, without a link", async () => {
+    configurePageAppHost({ hiddenNativeDestinations: ["secrets"] });
+    const view = await render(
+      <DetailBody
+        workspaceId="ws"
+        setupOnly
+        inline
+        showIdentity={false}
+        item={CapabilityCatalogItemSchema.parse({
+          id: "api:1password",
+          kind: "api",
+          source: "built_in",
+          name: "1Password",
+          surfaceType: "first_party_onepassword",
+          runtime: { available: true },
+        })}
+        health={{ state: "none" }}
+        logoSrc={null}
+        busy={false}
+        errorMessage={null}
+        canManageSocial={false}
+        onAction={() => {
+          throw new Error("Must not use generic setup");
+        }}
+      />,
+    );
+    try {
+      expect(view.container.querySelector('a[href*="/secrets"]')).toBeNull();
+      expect(view.container.textContent).not.toContain("Opens Secrets");
+      expect(view.container.textContent).toContain("1Password isn't connected to this workspace.");
+    } finally {
+      await view.unmount();
+      configurePageAppHost({ hiddenNativeDestinations: undefined });
     }
   });
   test("a personal connector enabled by another member waits for this viewer's account before reading permissions", async () => {

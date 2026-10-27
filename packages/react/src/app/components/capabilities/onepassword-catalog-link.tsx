@@ -1,6 +1,11 @@
 import { Button } from "../../../ui/button";
+import { useNativeDestinationVisible } from "../../lib/app-host";
 
-/** Keep token entry, ownership and vault selection in the protected Secrets flow. */
+/**
+ * Keep token entry, ownership and vault selection in the protected Secrets
+ * flow. When the host extension hides Secrets there is no flow to open here,
+ * so it only says whether 1Password is connected.
+ */
 export function OnePasswordCatalogLink({
   workspaceId,
   connected,
@@ -10,6 +15,16 @@ export function OnePasswordCatalogLink({
   connected: boolean;
   preserveChat?: boolean | undefined;
 }) {
+  const secretsVisible = useNativeDestinationVisible("secrets");
+  if (!secretsVisible) {
+    return (
+      <p className="text-sm text-fg-muted">
+        {connected
+          ? "1Password is connected to this workspace."
+          : "1Password isn't connected to this workspace."}
+      </p>
+    );
+  }
   const href = `/workspaces/${encodeURIComponent(workspaceId)}/secrets${
     connected ? "" : "?view=connect-1password"
   }`;

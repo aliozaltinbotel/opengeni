@@ -60,6 +60,7 @@ import {
 import { focusCapabilitySuccessor } from "../../lib/capability-focus";
 import { analyticsAction, type AnalyticsAction } from "../../../ui/analytics-actions";
 import { cn } from "../../lib/utils";
+import { useNativeDestinationVisible } from "../../lib/app-host";
 import type {
   CapabilityCatalogItem,
   ConnectionMetadata,
@@ -290,6 +291,7 @@ export function DetailBody({
   onRetryAuthInspection?: (() => void) | undefined;
 }) {
   const plan = useMemo(() => capabilityConnectPlan(item), [item]);
+  const secretsVisible = useNativeDestinationVisible("secrets");
   const defaultOwnership = defaultCapabilityConnectionOwnership(item);
   // API-key reconnect reveals the credential form in place of the button.
   const [reconnecting, setReconnecting] = useState(false);
@@ -461,10 +463,12 @@ export function DetailBody({
             <ExcelAddinSetupSteps item={item} preserveChat={setupOnly} />
           ) : item.surfaceType === "first_party_onepassword" && workspaceId ? (
             <div className="space-y-3">
-              <p className="text-sm text-fg-muted">
-                {setupOnly ? "Opens Secrets in a new tab. " : ""}
-                Connect a service account and choose which vaults agents can use.
-              </p>
+              {secretsVisible ? (
+                <p className="text-sm text-fg-muted">
+                  {setupOnly ? "Opens Secrets in a new tab. " : ""}
+                  Connect a service account and choose which vaults agents can use.
+                </p>
+              ) : null}
               <OnePasswordCatalogLink
                 workspaceId={workspaceId}
                 connected={item.enabled}
