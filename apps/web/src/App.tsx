@@ -132,7 +132,9 @@ import {
 import { navigableWorkspaces } from "@opengeni/react/app/lib/managed-self-context";
 import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/desktop";
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
-import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
+// Installs the build's host extension before this module's routes read it.
+import { hostExtension } from "@/host-extension/startup";
+import { hiddenNativeDestinations } from "@/host-extension/registry";
 import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
 import { hostFilteredWorkspaces } from "@opengeni/react/app/host-extension";
 import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
@@ -1109,7 +1111,7 @@ export const routeTree = rootRoute.addChildren([
         // `AnyRoute` child would make every `/workspaces/$workspaceId/…` link valid.
         ...(hostExtensionWorkspaceRoutes as readonly unknown[] as readonly never[]),
       ],
-      HIDDEN_NATIVE_DESTINATIONS,
+      hiddenNativeDestinations(),
     ),
   ),
 ]);
@@ -1137,7 +1139,7 @@ warmDesktopPages(
       { to: "/workspaces/$workspaceId/automations", page: LazyAutomationsRoute },
       { to: "/workspaces/$workspaceId/artifacts", page: LazyArtifactsRoute },
     ],
-    HIDDEN_NATIVE_DESTINATIONS,
+    hiddenNativeDestinations(),
   ).map((entry) => entry.page),
 );
 

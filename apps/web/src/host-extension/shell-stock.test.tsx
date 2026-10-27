@@ -32,7 +32,7 @@ const { TooltipProvider } = await import("@opengeni/react/ui/tooltip");
 const { WorkspaceShells } = await import("@/routes/workspace");
 const { afterHostSignOut } = await import("./lifecycle");
 const { HostWorkspaceSwitchBoundary } = await import("./workspace-switch-boundary");
-const { hostExtension } = await import("./registry");
+const { currentHostExtension } = await import("./registry");
 
 afterAll(() => {
   mock.restore();
@@ -80,7 +80,7 @@ async function render(
 
 describe("stock shell (no host extension)", () => {
   test("the stub declares no providers, brand, filter or hooks", () => {
-    expect(hostExtension).toEqual({ id: "none" });
+    expect(currentHostExtension()).toEqual({ id: "none" });
   });
 
   test("the rail shows the Opengeni brand", async () => {

@@ -19,27 +19,25 @@ import {
   type WorkspaceConfigItem,
   type WorkspaceConfigTarget,
 } from "@/components/rail/workspace-nav-data";
-import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
+import { currentHostExtension, hiddenNativeDestinations } from "@/host-extension/registry";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
 
-/** The native shortcuts the host extension does not hide. */
-const PRIMARY_ITEMS = visibleNativeItems(PRIMARY_WORKSPACE_ITEMS, HIDDEN_NATIVE_DESTINATIONS);
+/** The native shortcuts the host extension does not hide (read at render, after startup). */
+function primaryItems() {
+  return visibleNativeItems(PRIMARY_WORKSPACE_ITEMS, hiddenNativeDestinations());
+}
 
 /** A native shortcut, or undefined when the host extension hides it. */
 function primaryItem(to: WorkspaceConfigTarget): WorkspaceConfigItem | undefined {
-  return PRIMARY_ITEMS.find((item) => item.to === to);
+  return primaryItems().find((item) => item.to === to);
 }
-
-const KNOWLEDGE_ITEM = primaryItem("/workspaces/$workspaceId/state");
-const AUTOMATIONS_ITEM = primaryItem("/workspaces/$workspaceId/automations");
-const MEETINGS_ITEM = primaryItem("/workspaces/$workspaceId/meetings");
 
 /** The extension's primary-nav items that show here, after the native shortcuts. */
 function extensionPrimaryItems(workspaceId: string, pathname: string) {
-  return (hostExtension.nav ?? []).filter(
+  return (currentHostExtension().nav ?? []).filter(
     (item) => item.placement === "primary" && (item.visible?.({ workspaceId, pathname }) ?? true),
   );
 }
@@ -78,7 +76,7 @@ export function WorkspaceShortcutLinks({
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      {PRIMARY_ITEMS.map((item) => (
+      {primaryItems().map((item) => (
         <WorkspaceConfigLink
           key={item.to}
           item={item}
@@ -121,8 +119,11 @@ export function PrimaryNavExtras() {
   const recordingMeeting = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const extensionItems = extensionPrimaryItems(rail.workspaceId, pathname);
+  const knowledgeItem = primaryItem("/workspaces/$workspaceId/state");
+  const automationsItem = primaryItem("/workspaces/$workspaceId/automations");
+  const meetingsItem = primaryItem("/workspaces/$workspaceId/meetings");
   const activeWorkspaceSection =
-    PRIMARY_ITEMS.find((item) => isConfigItemActive(pathname, rail.workspaceId, item.to))?.label ??
+    primaryItems().find((item) => isConfigItemActive(pathname, rail.workspaceId, item.to))?.label ??
     extensionItems.find((item) => isHostExtensionNavItemActive(pathname, rail.workspaceId, item))
       ?.label;
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
@@ -181,9 +182,9 @@ export function PrimaryNavExtras() {
             </>
           ) : (
             <>
-              {pendingKnowledge && KNOWLEDGE_ITEM ? (
+              {pendingKnowledge && knowledgeItem ? (
                 <WorkspaceConfigLink
-                  item={KNOWLEDGE_ITEM}
+                  item={knowledgeItem}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   needsReview
@@ -195,9 +196,9 @@ export function PrimaryNavExtras() {
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
               ) : null}
-              {schedulesNeedAttention && AUTOMATIONS_ITEM ? (
+              {schedulesNeedAttention && automationsItem ? (
                 <WorkspaceConfigLink
-                  item={AUTOMATIONS_ITEM}
+                  item={automationsItem}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   needsAttention
@@ -209,9 +210,9 @@ export function PrimaryNavExtras() {
                   onNavigate={() => rail.setDrawerOpen(false)}
                 />
               ) : null}
-              {recordingMeeting && MEETINGS_ITEM ? (
+              {recordingMeeting && meetingsItem ? (
                 <WorkspaceConfigLink
-                  item={MEETINGS_ITEM}
+                  item={meetingsItem}
                   workspaceId={rail.workspaceId}
                   variant="rail"
                   recording

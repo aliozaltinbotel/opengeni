@@ -2216,6 +2216,11 @@ export function rendersToolOutputPreview(renderer: ToolRenderer, item: ToolCallI
   );
 }
 
+/** The built-in entries, for checks that must agree with {@link defaultToolRegistry}. */
+export function builtInToolRegistryEntries(): readonly ToolRegistryEntry[] {
+  return BASE_ENTRIES;
+}
+
 /** The built-in tool renderer registry: every first-party tool plus a fallback. */
 export const defaultToolRegistry: ToolRegistry = createToolRegistry(BASE_ENTRIES, GenericRenderer);
 

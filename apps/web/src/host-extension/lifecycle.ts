@@ -5,14 +5,14 @@ import {
   signOutAfterHostHook,
   switchWorkspaceAfterHostHook,
 } from "@opengeni/react/app/lib/host-lifecycle";
-import { hostExtension } from "./registry";
+import { currentHostExtension } from "./registry";
 
 /** Runs a native sign-out after the host extension's `onSignOut` (bounded); at once for the stub. */
 export function afterHostSignOut<Result>(signOut: () => Promise<Result>): Promise<Result> {
-  return signOutAfterHostHook(hostExtension.lifecycle, signOut);
+  return signOutAfterHostHook(currentHostExtension().lifecycle, signOut);
 }
 
 /** Navigates into `to` after the host extension's `onWorkspaceSwitch(from, to)` (bounded). */
 export function afterHostWorkspaceSwitch(from: string, to: string, proceed: () => void): void {
-  switchWorkspaceAfterHostHook(hostExtension.lifecycle, from, to, proceed);
+  switchWorkspaceAfterHostHook(currentHostExtension().lifecycle, from, to, proceed);
 }

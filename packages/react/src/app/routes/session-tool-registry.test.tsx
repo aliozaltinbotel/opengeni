@@ -52,6 +52,35 @@ function toolCall(name: string): ToolCallItem {
   };
 }
 
+/**
+ * Each `<name …>` opening tag in a TSX source, up to the `>` that closes it:
+ * a `>` inside a `{…}` prop expression (an arrow, a comparison) or inside a
+ * quoted attribute value does not end the tag.
+ */
+function openingTags(source: string, name: string): string[] {
+  const tags: string[] = [];
+  for (const match of source.matchAll(new RegExp(`<${name}(?=[\\s/>])`, "g"))) {
+    let depth = 0;
+    let quote: string | null = null;
+    for (let index = match.index + match[0].length; index < source.length; index += 1) {
+      const char = source[index];
+      if (quote) {
+        if (char === quote) quote = null;
+      } else if (char === "{") {
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+      } else if (depth === 0 && (char === '"' || char === "'")) {
+        quote = char;
+      } else if (depth === 0 && char === ">") {
+        tags.push(source.slice(match.index, index + 1));
+        break;
+      }
+    }
+  }
+  return tags;
+}
+
 function SessionTimeline({ items }: { items: ToolCallItem[] }) {
   return <MessageTimeline items={items} toolRegistry={useHostToolRegistry()} />;
 }
@@ -123,6 +152,21 @@ describe("session tool registry", () => {
   test("the session page passes the host tool registry to its timeline", async () => {
     const source = await readFile(new URL("./session.tsx", import.meta.url), "utf8");
     expect(source).toContain("const toolRegistry = useHostToolRegistry();");
-    expect(source).toMatch(/<MessageTimeline\s+toolRegistry=\{toolRegistry\}/);
+    const tags = openingTags(source, "MessageTimeline");
+    expect(tags.length).toBeGreaterThan(0);
+    for (const tag of tags) expect(tag).toMatch(/\stoolRegistry=\{toolRegistry\}/);
+  });
+
+  test("the opening-tag scan reads past arrow props and stops before the children", () => {
+    const [afterArrow] = openingTags(
+      "<MessageTimeline\n  onOpen={() => open(a > b)}\n  toolRegistry={toolRegistry}\n/>",
+      "MessageTimeline",
+    );
+    expect(afterArrow).toMatch(/\stoolRegistry=\{toolRegistry\}/);
+    const [withChild] = openingTags(
+      '<MessageTimeline items={items} label="a > b">\n  <Inner toolRegistry={toolRegistry} />\n</MessageTimeline>',
+      "MessageTimeline",
+    );
+    expect(withChild).toBe('<MessageTimeline items={items} label="a > b">');
   });
 });

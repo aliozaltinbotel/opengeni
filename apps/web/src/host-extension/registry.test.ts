@@ -7,7 +7,16 @@ import {
   type HostExtensionRoute,
 } from "@opengeni/react/app/host-extension";
 
-import { hostExtension, validateHostExtension } from "./registry";
+import {
+  createHostExtensionSlot,
+  currentHostExtension,
+  extensionSettingsPaths,
+  hiddenNativeDestinations,
+  validateHostExtension,
+} from "./registry";
+
+// The console installs its extension once, from its startup module.
+const startup = await import("./startup");
 
 const Page = () => null;
 const Icon = () => null;
@@ -36,8 +45,62 @@ describe("host extension registry", () => {
     expect(validateHostExtension(EMPTY_HOST_EXTENSION)).toBe(EMPTY_HOST_EXTENSION);
   });
 
-  test("resolves the stock stub when no extension is configured", () => {
-    expect(hostExtension).toEqual({ id: "none" });
+  test("installs the stock stub at startup when no extension is configured", () => {
+    expect(startup.hostExtension).toEqual({ id: "none" });
+    expect(currentHostExtension()).toBe(startup.hostExtension);
+    expect(hiddenNativeDestinations()).toEqual([]);
+    expect(extensionSettingsPaths()).toEqual([]);
+  });
+
+  describe("installation", () => {
+    test("installs a validated extension once and serves it to every reader", () => {
+      const slot = createHostExtensionSlot();
+      const extension = extensionWith({
+        routes: [route("operations"), { ...route("prefs"), mode: "settings" }],
+        hiddenNativeDestinations: ["automations"],
+      });
+      expect(slot.install(extension)).toBe(extension);
+      expect(slot.current()).toBe(extension);
+      expect(() => slot.install(extension)).toThrow(/^HOST_EXTENSION_INSTALLED: /);
+    });
+
+    test("refuses an extension that does not validate, and installs nothing", () => {
+      const slot = createHostExtensionSlot();
+      expect(() => slot.install({ id: "" })).toThrow(/^HOST_EXTENSION_INVALID: id /);
+      expect(() => slot.install(EMPTY_HOST_EXTENSION)).not.toThrow();
+    });
+
+    test("refuses to install after a reader already saw the stock extension", () => {
+      // A reader before installation would keep stock values, so a late
+      // install fails loudly instead of leaving the console half-extended.
+      const slot = createHostExtensionSlot();
+      expect(slot.current()).toBe(EMPTY_HOST_EXTENSION);
+      expect(() => slot.install(EMPTY_HOST_EXTENSION)).toThrow(
+        /^HOST_EXTENSION_READ_BEFORE_INSTALL: /,
+      );
+    });
+  });
+
+  test("only the startup module imports the build's extension", async () => {
+    // A lazy route that statically reaches a module with import() reshuffles
+    // the startup chunks, so the descriptor (whose pages load through
+    // import()) is imported from the main entry's startup module alone.
+    const sources = new Bun.Glob("**/*.{ts,tsx}").scan({
+      cwd: new URL("..", import.meta.url).pathname,
+    });
+    const importers: string[] = [];
+    for await (const file of sources) {
+      if (/\.test\.tsx?$/.test(file)) continue;
+      const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
+      if (/["']@opengeni\/web-host-extension["']/.test(source)) importers.push(file);
+    }
+    expect(importers.sort()).toEqual(["host-extension/startup.ts"]);
+    const main = await readFile(new URL("../main.tsx", import.meta.url), "utf8");
+    expect(main).toMatch(/^import "\.\/app-host";$/m);
+    for (const file of ["../app-host.ts", "../App.tsx"]) {
+      const source = await readFile(new URL(file, import.meta.url), "utf8");
+      expect(source).toContain('from "@/host-extension/startup"');
+    }
   });
 
   test("accepts a complete extension", () => {
@@ -194,6 +257,16 @@ describe("host extension registry", () => {
       );
     });
 
+    test.each(["artifacts_create", "host-app__exec_command"])(
+      "refuses an entry for %p, which a built-in card already renders",
+      (name) => {
+        expectInvalid(
+          extensionWith({ toolRegistryEntries: [{ ...entry, name }] }),
+          "toolRegistryEntries[0].name",
+        );
+      },
+    );
+
     test("refuses two entries for one tool name", () => {
       expectInvalid(
         extensionWith({ toolRegistryEntries: [entry, { ...entry, render: Page }] }),
@@ -208,8 +281,8 @@ describe("host extension registry", () => {
     const extension = validateHostExtension(loaded.default);
     expect(extension.toolRegistryEntries).toHaveLength(1);
     const [fixtureRoute] = extension.routes ?? [];
-    expect(fixtureRoute).toBeDefined();
-    const page = await fixtureRoute!.load();
+    if (!fixtureRoute) throw new Error("the fixture dist registers no route");
+    const page = await fixtureRoute.load();
     expect(typeof page.default).toBe("function");
     const style = await readFile(new URL("style.css", fixture), "utf8");
     expect(style.match(/--og-color-[a-z-]+:/g)).toHaveLength(2);

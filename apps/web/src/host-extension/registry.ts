@@ -1,12 +1,16 @@
-// The console's host extension, resolved at build time for the fixed
-// `@opengeni/web-host-extension` specifier (vite-host-extension.ts) and checked
-// once here. The bundle comes from outside this build, so its shape is checked
-// at runtime: a malformed or colliding route is refused with the field it
-// names, never left to shadow a native page.
-import extension from "@opengeni/web-host-extension";
+// The console's host extension: its check, and the slot every console module
+// reads it from. The bundle comes from outside this build, so its shape is
+// checked at runtime: a malformed or colliding route is refused with the field
+// it names, never left to shadow a native page.
+//
+// This module does not import the extension itself. startup.ts, which only the
+// main entry reaches, imports the build's `@opengeni/web-host-extension` and
+// installs it here; lazy routes import this module, and a descriptor with
+// import() that lazy routes reach statically reshuffles the startup chunks.
 import {
+  EMPTY_HOST_EXTENSION,
+  isBuiltInToolCardName,
   isNativeDestination,
-  NATIVE_DESTINATIONS,
   type HostExtension,
   type NativeDestination,
 } from "@opengeni/react/app/host-extension";
@@ -15,12 +19,13 @@ import {
 const ROUTE_PATH = /^[a-z][a-z0-9-]*(\/(\$?[a-zA-Z][a-zA-Z0-9]*|[a-z0-9-]+))*$/;
 
 /**
- * First path segments the native console owns under workspaces/$workspaceId/,
- * including redirect-only ones. Kept static (App.tsx's routes are built after
- * this module runs); registry.test.ts fails when App.tsx adds one not listed.
+ * First path segments the native console owns under workspaces/$workspaceId/
+ * besides its native destinations, including redirect-only ones. Kept static
+ * (App.tsx's routes are built after this module runs); registry.test.ts fails
+ * when App.tsx adds one not listed. Plain strings: a load-time read of the
+ * contract module's bindings could run before that module in a chunk cycle.
  */
-const NATIVE_SEGMENTS: ReadonlySet<string> = new Set([
-  ...NATIVE_DESTINATIONS,
+const OTHER_NATIVE_SEGMENTS: ReadonlySet<string> = new Set([
   "sessions",
   "settings",
   "organization",
@@ -96,7 +101,7 @@ function checkRoutePath(path: string, field: string): void {
   if (!ROUTE_PATH.test(path)) fail(field, `"${path}" is not a lowercase relative route path`);
   const segments = path.split("/");
   const first = segments[0] ?? "";
-  if (NATIVE_SEGMENTS.has(first))
+  if (isNativeDestination(first) || OTHER_NATIVE_SEGMENTS.has(first))
     fail(field, `"${path}" collides with the native "${first}" route`);
   const params = new Set<string>();
   for (const param of segments.filter((segment) => segment.startsWith("$"))) {
@@ -175,6 +180,7 @@ function checkToolRegistryEntries(value: unknown): void {
     if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
     const name = text(entry.name, `${field}.name`);
     if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
+    if (isBuiltInToolCardName(name)) fail(`${field}.name`, `"${name}" has a built-in card`);
     names.add(name);
     component(entry.render, `${field}.render`);
     // An omitted flag means prefixed leaf matching in the timeline registry, so
@@ -219,14 +225,71 @@ export function validateHostExtension(value: unknown): HostExtension {
   return value as HostExtension;
 }
 
-/** This build's host extension: the configured bundle, or the stock stub. */
-export const hostExtension: HostExtension = validateHostExtension(extension);
+export type HostExtensionSlot = Readonly<{
+  /** Validates and installs the extension; once, before anything reads it. */
+  install: (value: unknown) => HostExtension;
+  /** The installed extension; the stock one until something is installed. */
+  current: () => HostExtension;
+}>;
 
-/** Paths of this build's extension routes that open in the settings-mode shell. */
-export const EXTENSION_SETTINGS_PATHS: readonly string[] = (hostExtension.routes ?? [])
-  .filter((route) => route.mode === "settings")
-  .map((route) => route.path);
+/**
+ * A slot that holds one host extension. Reading it before installation gives
+ * the stock extension, which tests and stock pages rely on; installing after
+ * such a read throws HOST_EXTENSION_READ_BEFORE_INSTALL, because that reader
+ * would keep stock values while the rest of the console is extended.
+ */
+export function createHostExtensionSlot(): HostExtensionSlot {
+  let installed: HostExtension | undefined;
+  let readBeforeInstall = false;
+  return {
+    install(value) {
+      if (installed) {
+        throw new Error("HOST_EXTENSION_INSTALLED: the host extension is installed once");
+      }
+      if (readBeforeInstall) {
+        throw new Error(
+          "HOST_EXTENSION_READ_BEFORE_INSTALL: read the host extension at call time, after startup",
+        );
+      }
+      installed = validateHostExtension(value);
+      return installed;
+    },
+    current() {
+      if (installed) return installed;
+      readBeforeInstall = true;
+      return EMPTY_HOST_EXTENSION;
+    },
+  };
+}
+
+const slot = createHostExtensionSlot();
+
+/** Installs this build's extension; called by startup.ts only. */
+export const installHostExtension: HostExtensionSlot["install"] = slot.install;
+
+/** This build's host extension (the configured bundle, or the stock stub). Read it at call time. */
+export const currentHostExtension: HostExtensionSlot["current"] = slot.current;
+
+const NONE: readonly never[] = Object.freeze([]);
+let settingsPathsOf: HostExtension | undefined;
+let settingsPaths: readonly string[] = NONE;
+
+/**
+ * Paths of this build's extension routes that open in the settings-mode shell.
+ * The same array on every call for one extension, so it can be a memo input.
+ */
+export function extensionSettingsPaths(): readonly string[] {
+  const extension = currentHostExtension();
+  if (extension !== settingsPathsOf) {
+    settingsPathsOf = extension;
+    settingsPaths = (extension.routes ?? [])
+      .filter((route) => route.mode === "settings")
+      .map((route) => route.path);
+  }
+  return settingsPaths;
+}
 
 /** Native destinations this build's extension hides from every link source; none for the stub. */
-export const HIDDEN_NATIVE_DESTINATIONS: readonly NativeDestination[] =
-  hostExtension.hiddenNativeDestinations ?? [];
+export function hiddenNativeDestinations(): readonly NativeDestination[] {
+  return currentHostExtension().hiddenNativeDestinations ?? NONE;
+}

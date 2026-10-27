@@ -99,6 +99,8 @@ mock.module("@opengeni/web-host-extension", () => ({
 
 GlobalRegistrator.register({ url: "http://homeserver/workspaces/ws-design/sessions" });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+// The console's startup module installs the (mocked) extension for every reader.
+await import("@/host-extension/startup");
 const { WorkspaceSwitcherMenu } = await import("./workspace-switcher");
 
 afterAll(() => {

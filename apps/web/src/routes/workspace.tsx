@@ -26,7 +26,7 @@ import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-s
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
-import { EXTENSION_SETTINGS_PATHS, hostExtension } from "@/host-extension/registry";
+import { currentHostExtension, extensionSettingsPaths } from "@/host-extension/registry";
 import { HostExtensionProviders } from "@/host-extension/providers";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
@@ -502,7 +502,7 @@ function AuthorizedWorkspaceShell({
     location.pathname,
     workspaceId,
     location.search.section,
-    EXTENSION_SETTINGS_PATHS,
+    extensionSettingsPaths(),
   );
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
@@ -516,7 +516,7 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
-      productName={hostExtension.productName}
+      productName={currentHostExtension().productName}
       // The console's API adapter owns update notices and guarded page reloads.
       onWorkspaceControlEvent={(event) => {
         if (workspaceControlEventInvalidatesWorkspace(event)) {
@@ -540,7 +540,7 @@ function AuthorizedWorkspaceShell({
           <ConsoleMeetingRecorderProvider workspaceId={workspaceId}>
             <RailProvider
               workspaceId={workspaceId}
-              extensionSettingsPaths={EXTENSION_SETTINGS_PATHS}
+              extensionSettingsPaths={extensionSettingsPaths()}
             >
               <ActionsProvider>
                 <WorkspaceShells
@@ -615,7 +615,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
         location.pathname,
         workspaceId,
         location.search.section,
-        EXTENSION_SETTINGS_PATHS,
+        extensionSettingsPaths(),
       )}
     />
   );

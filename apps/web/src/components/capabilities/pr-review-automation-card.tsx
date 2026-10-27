@@ -2,7 +2,7 @@ import { useNavigate } from "@tanstack/react-router";
 import { GitPullRequestIcon } from "lucide-react";
 
 import { Button } from "@opengeni/react/ui/button";
-import { HIDDEN_NATIVE_DESTINATIONS } from "@/host-extension/registry";
+import { hiddenNativeDestinations } from "@/host-extension/registry";
 
 /**
  * Pull-request review is an automation: a GitHub pull-request trigger plus
@@ -11,7 +11,7 @@ import { HIDDEN_NATIVE_DESTINATIONS } from "@/host-extension/registry";
  */
 export function PrReviewAutomationCard(props: { workspaceId: string }) {
   const navigate = useNavigate();
-  if (HIDDEN_NATIVE_DESTINATIONS.includes("automations")) return null;
+  if (hiddenNativeDestinations().includes("automations")) return null;
   return (
     <section className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-4">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border text-fg-muted">

@@ -2,9 +2,7 @@
 // around both the rail shell and the settings shell, so its pages and nav read
 // them in either mode. Without providers (the stub) the children render bare.
 import type { ReactNode } from "react";
-import { hostExtension } from "./registry";
-
-const SHELL_PROVIDERS = hostExtension.shellProviders ?? [];
+import { currentHostExtension } from "./registry";
 
 /** Nests the extension's `shellProviders` in order, the first outermost. */
 export function HostExtensionProviders({
@@ -14,7 +12,7 @@ export function HostExtensionProviders({
   workspaceId: string;
   children: ReactNode;
 }) {
-  return SHELL_PROVIDERS.reduceRight<ReactNode>(
+  return (currentHostExtension().shellProviders ?? []).reduceRight<ReactNode>(
     (inner, Provider) => <Provider workspaceId={workspaceId}>{inner}</Provider>,
     children,
   );

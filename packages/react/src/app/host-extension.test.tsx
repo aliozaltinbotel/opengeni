@@ -3,7 +3,13 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 
-import { isWorkspaceSegmentHidden, nativeDestinationsOfSegment } from "./host-extension";
+import type { ToolCallItem } from "../timeline";
+import { builtInToolRegistryEntries, defaultToolRegistry } from "../timeline/tool-renderers";
+import {
+  isBuiltInToolCardName,
+  isWorkspaceSegmentHidden,
+  nativeDestinationsOfSegment,
+} from "./host-extension";
 import { AppHostProvider, useNativeDestinationVisible, type AppHost } from "./lib/app-host";
 
 beforeAll(() => {
@@ -63,5 +69,47 @@ describe("hidden native destinations", () => {
     );
     expect(seen).toEqual({ automations: true, secrets: false });
     act(() => root.unmount());
+  });
+});
+
+describe("built-in tool card names", () => {
+  function toolCall(name: string): ToolCallItem {
+    return {
+      kind: "tool-call",
+      id: `tc-${name}`,
+      turnId: "turn-1",
+      callId: `call-${name}`,
+      name,
+      arguments: {},
+      output: { status: "ready" },
+      truncation: null,
+      raw: undefined,
+      status: "complete",
+      occurredAt: new Date(0).toISOString(),
+    };
+  }
+  const rendersBuiltIn = (name: string) =>
+    defaultToolRegistry.resolve(toolCall(name)) !== defaultToolRegistry.fallback;
+
+  // The startup-safe name list must agree with the timeline's own registry for
+  // every built-in name, behind another server's prefix, and for unknown names.
+  const names = builtInToolRegistryEntries().flatMap((entry) =>
+    entry.match === "name" ? [entry.name, `evil__${entry.name}`, `host-app__${entry.name}`] : [],
+  );
+
+  test("covers every name the default tool registry gives a built-in card", () => {
+    expect(names.length).toBeGreaterThan(0);
+    for (const name of [...names, "host-app__get_onboarding_status", "get_onboarding_status"]) {
+      expect({ name, builtIn: isBuiltInToolCardName(name) }).toEqual({
+        name,
+        builtIn: rendersBuiltIn(name),
+      });
+    }
+  });
+
+  test("an exact-only built-in name is not claimed behind another prefix", () => {
+    expect(isBuiltInToolCardName("artifacts_create")).toBe(true);
+    expect(isBuiltInToolCardName("evil__artifacts_create")).toBe(false);
+    expect(isBuiltInToolCardName("evil__exec_command")).toBe(true);
   });
 });

@@ -48,7 +48,7 @@ import {
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
-import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
+import { currentHostExtension, hiddenNativeDestinations } from "@/host-extension/registry";
 import { afterHostWorkspaceSwitch } from "@/host-extension/lifecycle";
 import {
   workspaceSwitchTarget,
@@ -162,7 +162,7 @@ export const RUNTIME_PAGES = [
  * has it, and none the host extension hides.
  */
 export function runtimePages(insideDesktopApp: boolean) {
-  return visibleNativeItems(RUNTIME_PAGES, HIDDEN_NATIVE_DESTINATIONS).filter(
+  return visibleNativeItems(RUNTIME_PAGES, hiddenNativeDestinations()).filter(
     (page) => !("desktopOnly" in page) || insideDesktopApp,
   );
 }
@@ -173,8 +173,8 @@ export function runtimePages(insideDesktopApp: boolean) {
  * is left out.
  */
 function extensionSettingsSections(workspaceId: string, pathname: string): SettingsRailSection[] {
-  const nav = hostExtension.nav ?? [];
-  return (hostExtension.settingsGroups ?? []).flatMap((group) => {
+  const { nav = [], settingsGroups = [] } = currentHostExtension();
+  return settingsGroups.flatMap((group) => {
     const items = nav.filter(
       (item) =>
         item.placement !== "primary" &&
@@ -208,7 +208,7 @@ function extensionSettingsSections(workspaceId: string, pathname: string): Setti
 
 /** The extension's nav item for a settings-mode extension route, if it lists one. */
 function extensionNavItem(path: string) {
-  return hostExtension.nav?.find((item) => item.path === path);
+  return currentHostExtension().nav?.find((item) => item.path === path);
 }
 
 /** The name of a workspace settings page or dashboard. */
@@ -416,7 +416,7 @@ export function useSettingsRail(input: {
       workspaceId,
       "workspace:admin",
     );
-    const activityPages = visibleNativeItems(ACTIVITY_PAGES, HIDDEN_NATIVE_DESTINATIONS).filter(
+    const activityPages = visibleNativeItems(ACTIVITY_PAGES, hiddenNativeDestinations()).filter(
       (page) => !page.requiresAdmin || canReadInsights,
     );
     sections.push({

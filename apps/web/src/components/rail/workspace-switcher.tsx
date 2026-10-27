@@ -40,7 +40,7 @@ import { cn } from "@opengeni/react/app/lib/utils";
 import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
 import type { Workspace } from "@opengeni/react/app/types";
 import { hostFilteredWorkspaces } from "@opengeni/react/app/host-extension";
-import { hostExtension } from "@/host-extension/registry";
+import { currentHostExtension } from "@/host-extension/registry";
 
 /** The switcher menu's width; surface and rows are the one menu spec (menu-styles.ts). */
 export const SWITCHER_MENU_CLASS = "w-72 max-w-[calc(100vw-2rem)]";
@@ -209,7 +209,7 @@ export function WorkspaceSwitcherMenu(props: {
     () =>
       hostFilteredWorkspaces(
         navigableWorkspaces(context.workspaces, context.managedSelfContext, props.workspaceId),
-        hostExtension.workspaceFilter,
+        currentHostExtension().workspaceFilter,
         props.workspaceId,
       ),
     [context.workspaces, context.managedSelfContext, props.workspaceId],

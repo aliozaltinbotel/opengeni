@@ -14,7 +14,7 @@ import {
   recordHostWorkspaceEntered,
   type HostLifecycle,
 } from "@opengeni/react/app/lib/host-lifecycle";
-import { hostExtension } from "./registry";
+import { currentHostExtension } from "./registry";
 
 /**
  * The tenant boundary, held on "Switching workspace" while the host's
@@ -24,7 +24,7 @@ export function HostWorkspaceSwitchBoundary({
   workspaceId,
   stateOwnerWorkspaceId,
   prepareTransition,
-  lifecycle = hostExtension.lifecycle,
+  lifecycle = currentHostExtension().lifecycle,
 }: {
   workspaceId: string;
   stateOwnerWorkspaceId: string | null;
@@ -59,7 +59,7 @@ export function HostWorkspaceSwitchBoundary({
 export function useHostWorkspaceEntered(
   workspaceId: string,
   ready: boolean,
-  lifecycle: HostLifecycle | undefined = hostExtension.lifecycle,
+  lifecycle: HostLifecycle | undefined = currentHostExtension().lifecycle,
 ): void {
   useEffect(() => {
     if (ready) recordHostWorkspaceEntered(lifecycle, workspaceId);

@@ -7,7 +7,7 @@ import "@/navigation-host";
 import type { AppApiHost } from "@opengeni/react/app/lib/app-api";
 import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { lazySurface } from "@opengeni/react/app/lib/app-surfaces";
-import { hostExtension } from "@/host-extension/registry";
+import { hostExtension } from "@/host-extension/startup";
 
 export const webAppApiHost: AppApiHost = {
   apiBaseUrl,

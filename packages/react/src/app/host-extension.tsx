@@ -3,8 +3,18 @@
 // the native destinations it hides. The console resolves one extension at build
 // time through the `@opengeni/web-host-extension` specifier; without one it
 // uses EMPTY_HOST_EXTENSION and behaves as stock.
+//
+// The descriptor (the specifier's default export) is startup code: keep it to
+// plain data, small eager components and `import()` thunks. Page bodies
+// (`routes[].load`) and tool-card bodies (a `lazy(() => import(…))` behind
+// the card's own Suspense) load on demand. The console imports the descriptor
+// from its main entry's startup module only, and every other console module
+// reads the installed extension at call time: a module with `import()` that
+// lazy routes also reach statically would reshuffle the startup chunks.
 import type { ComponentType, ReactNode } from "react";
 import type { ToolRenderer } from "../timeline";
+
+export { isBuiltInToolCardName } from "./built-in-tool-names";
 
 export type NativeDestination =
   | "plugins"

@@ -45,7 +45,7 @@ import {
   userErrorTextWithoutReference,
 } from "@opengeni/react/ui/api-error";
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
-import { HIDDEN_NATIVE_DESTINATIONS } from "@/host-extension/registry";
+import { hiddenNativeDestinations } from "@/host-extension/registry";
 import type { MachineView } from "@opengeni/react/machines";
 
 /** While the connect dialog waits for the new machine, look for it sooner. */
@@ -483,7 +483,7 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
 
 /** Inside the desktop app: where screen control, App-shots and the rest moved. */
 function ThisComputerPointer({ workspaceId }: { workspaceId: string }) {
-  if (!thisComputerSettingsAvailable() || HIDDEN_NATIVE_DESTINATIONS.includes("computer-use")) {
+  if (!thisComputerSettingsAvailable() || hiddenNativeDestinations().includes("computer-use")) {
     return null;
   }
   return (

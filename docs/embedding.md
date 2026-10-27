@@ -1699,6 +1699,29 @@ root dotfiles while preserving nested project dotfiles:
 />
 ```
 
+### Web console host extension
+
+A host can also extend the stock web console itself at build time.
+`OPENGENI_WEB_HOST_EXTENSION` names an absolute directory with a built
+`index.js` and `style.css`; the console resolves the fixed
+`@opengeni/web-host-extension` specifier to it. The contract is `HostExtension`
+in `@opengeni/react/app/host-extension`.
+
+`index.js` is the descriptor, and the console loads it at startup. Keep it to
+plain data, small eager components (nav icons, brand marks, shell providers)
+and `import()` thunks. Load page bodies through `routes[].load`, and load
+tool-card bodies with `lazy(() => import(…))` behind the card's own
+`Suspense`. Pages and cards then download only when someone opens them, and the
+descriptor adds about one small module to the console's startup load.
+
+The console imports the descriptor from one startup module that only its main
+entry reaches (`apps/web/src/host-extension/startup.ts`). Every other console
+module reads the installed extension at call time. Do not import the
+specifier anywhere else. A module that lazy routes also reach statically and
+that holds `import()` reshuffles the bundler's route-aware startup chunks,
+which can pull whole lazy surfaces into the first load. A host tool card may
+not use a tool name that a built-in card already renders.
+
 ## Trust model
 
 The embed boundary has a deliberate split of authority. Getting this wrong in
