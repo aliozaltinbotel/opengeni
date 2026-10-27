@@ -881,6 +881,58 @@ have that user connect it from a canonical signed-in Opengeni session, which
 freezes an ordinary personal-connection delegation onto the causal turn. See
 `docs/organization-tenancy.md` for the authority model.
 
+### Organization Governance
+
+Canonical sources: `OrganizationGovernancePort` and `GOVERNED_MUTATIONS` in
+`packages/contracts/src/organization-governance.ts`, the route gate in
+`apps/api/src/http/organization-governance.ts` and the host commands in
+`apps/api/src/routes/governed-organization-commands.ts`.
+
+A host that owns business authorization can govern the organizations it
+provisions by binding `AppDependencies.organizationGovernance` (or the
+`startApi` option of the same name):
+
+```ts
+type OrganizationGovernancePort = {
+  governs(input: { organizationId: string; externalSource: string | null }): boolean;
+  decide(input: {
+    organizationId: string;
+    mutation: GovernedMutation;
+    via: "native" | "host";
+  }): "allow" | "refuse";
+};
+```
+
+`governs` receives the organization's `managed_accounts.external_source`.
+For a governed organization, every native route that invites, revokes or
+re-sends an invitation, changes a role, suspends, reactivates or offboards a
+member, adds, changes or removes workspace or external members, or creates,
+changes or revokes API keys, personal API keys or service accounts asks
+`decide` with `via: "native"` after authenticating the caller. A refusal is
+`403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`, for owners
+too. Unbound, nothing changes and the host routes below are not registered.
+
+The host performs these mutations through `/v1/host/organizations/:id/...`
+(`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,
+`members/:id/{suspend,reactivate,offboard}` and
+`PUT workspaces/:ws/members/:id`). Each takes
+`{ actingExternalUser: { source, externalId }, command }`, where `command` is
+the native request body. Authentication is a service delegated token
+(`ogd2_`, `principalKind: "service"`) for that organization and one of its
+workspaces, holding `members:manage`; anything else is `401
+HOST_COMMAND_SERVICE_TOKEN_REQUIRED`. The command must be allowed by
+`decide` with `via: "host"`, and an ungoverned organization answers `403
+ORGANIZATION_NOT_HOST_GOVERNED`. The token's `subjectId` is the database
+actor, checked like any administrator (for example the owner subject the host
+passed to `bootstrapWorkspace`); the native receipt and lifecycle event are
+written as for the native route, and `organization_host_command_attributions`
+names the acting external user and service initiator under the same operation
+id. Reusing an operation id for another command or acting user is `409
+HOST_COMMAND_OPERATION_CONFLICT`.
+
+The gate is on HTTP routes. In-process callers of the `@opengeni/db`
+membership functions are not routed through it.
+
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.

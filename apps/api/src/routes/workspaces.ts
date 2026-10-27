@@ -188,6 +188,10 @@ import {
 } from "@opengeni/config";
 import { AddExternalWorkspaceMemberRequest } from "@opengeni/contracts/external-identities";
 import { parseRequestBody, parseRequestJson, readRequestJson } from "../http/request-body";
+import {
+  requireNativeOrganizationMutation,
+  requireNativeWorkspaceMutation,
+} from "../http/organization-governance";
 import { workspaceXaiOperationAvailable } from "../xai-subscription-core";
 
 export function canonicalWorkspacePolicyModelIds(
@@ -328,18 +332,28 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // schema error from the application layer.
     const body = await readRequestJson(c);
     parseRequestBody(AddExternalWorkspaceMemberRequest, body);
+    await requireAccessContext(c, deps);
+    await requireNativeWorkspaceMutation(deps, c.req.param("workspaceId"), "external_member.add");
     return c.json(
       await addExternalWorkspaceMemberForRequest(c, deps, c.req.param("workspaceId"), body),
     );
   });
   app.patch("/v1/workspaces/:workspaceId/external-members/:subjectId", async (c) => {
+    const subjectId = decodeURIComponent(c.req.param("subjectId"));
+    const body: unknown = await c.req.json();
+    await requireAccessContext(c, deps);
+    await requireNativeWorkspaceMutation(
+      deps,
+      c.req.param("workspaceId"),
+      "external_member.update",
+    );
     return c.json(
       await updateExternalWorkspaceMemberPermissionsForRequest(
         c,
         deps,
         c.req.param("workspaceId"),
-        decodeURIComponent(c.req.param("subjectId")),
-        await c.req.json(),
+        subjectId,
+        body,
       ),
     );
   });
@@ -1640,6 +1654,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = await parseRequestJson(c, AddWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     requireExplicitPermissionDelegation(grant, payload.permissions);
+    await requireNativeOrganizationMutation(deps, grant.accountId, "workspace_member.add");
     let candidates: WorkspaceMemberCandidate[];
     try {
       candidates = await listWorkspaceMemberManagementCandidates(deps.db, {
@@ -1699,6 +1714,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = await parseRequestJson(c, UpdateWorkspaceMemberRequest);
     requireApiKeyDelegationContext(await requireAccessContext(c, deps), payload.permissions);
     requireExplicitPermissionDelegation(grant, payload.permissions);
+    await requireNativeOrganizationMutation(deps, grant.accountId, "workspace_member.update");
     const existing = await listWorkspacePeople(deps, workspaceId);
     const current = existing.find((member) => member.subjectId === subjectId);
     if (!current) {
@@ -1740,6 +1756,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       workspaceId,
       "members:manage",
     );
+    await requireNativeOrganizationMutation(deps, grant.accountId, "workspace_member.remove");
     const subjectId = decodeURIComponent(c.req.param("subjectId"));
     const members = await listWorkspaceMembers(deps.db, workspaceId);
     // Never remove yourself, and never remove the last administering member.

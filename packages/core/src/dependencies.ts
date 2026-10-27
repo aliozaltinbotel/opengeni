@@ -32,6 +32,7 @@ import type {
   EditableArtifactOfficeImportPort,
 } from "./editable-artifacts";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
+import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
 import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
 import type { NativeAccessContinuation } from "./access";
@@ -284,6 +285,13 @@ export type AppDependencies = {
    * an unavailable or invalid host decision.
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
+  /**
+   * Optional embedding-host membership governance. Unset (or null) preserves
+   * standalone administration; once bound, a governed organization refuses each
+   * membership, role and credential mutation the host does not allow, and the
+   * host's own commands are served under `/v1/host/organizations/*`.
+   */
+  organizationGovernance?: OrganizationGovernancePort | null;
   managedAuth?: ManagedAuth | null;
   /** Provider-neutral browser login-slot adapter; required by dual/broker managed auth. */
   managedAuthSessionAdapter?: ManagedAuthSessionAdapter | null;

@@ -389,6 +389,7 @@ import { registerSessionArtifactAssociationRoutes } from "./routes/session-artif
 import { registerVideoGenerationRoutes } from "./routes/video-generation";
 import { registerCanonicalHumanIdentityRoutes } from "./routes/canonical-human-identities";
 import { registerOrganizationMembershipRoutes } from "./routes/organization-memberships";
+import { registerGovernedOrganizationCommandRoutes } from "./routes/governed-organization-commands";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -2443,6 +2444,7 @@ export function createAppComposition(deps: AppDependencies): {
   registerVideoGenerationRoutes(app, routeDeps);
   registerCanonicalHumanIdentityRoutes(app, routeDeps);
   registerOrganizationMembershipRoutes(app, routeDeps);
+  registerGovernedOrganizationCommandRoutes(app, routeDeps);
   registerOrganizationSessionRoutes(app, routeDeps);
   registerOrganizationRecoveryRoutes(app, routeDeps);
   registerUserResourceAuthorityRoutes(app, routeDeps);

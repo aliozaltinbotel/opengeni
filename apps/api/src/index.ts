@@ -16,6 +16,7 @@ import type {
   ScheduledTaskScheduleSpec,
   SessionAuthorizationPort,
 } from "@opengeni/contracts";
+import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
 import {
   assertRuntimeDatabasePosture,
   isRetryableRuntimeDatabaseStartupError,
@@ -525,6 +526,12 @@ export type StartApiOptions = {
    * unavailable or invalid host decision, exactly as through `createApp`.
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
+  /**
+   * Embedding-host membership governance (`AppDependencies.organizationGovernance`).
+   * Once bound, governed organizations refuse native membership, role and
+   * credential mutations the host does not allow, and serve the host's commands.
+   */
+  organizationGovernance?: OrganizationGovernancePort | null;
 };
 
 /**
@@ -539,6 +546,19 @@ export function startApiSessionAuthorizationOverride(
   return options.sessionAuthorization === undefined
     ? {}
     : { sessionAuthorization: options.sessionAuthorization };
+}
+
+/**
+ * The composition override an embedding host's `organizationGovernance` option
+ * contributes, with the same three shapes as `sessionAuthorization`: unset
+ * forwards nothing; `null` and a port are forwarded as given.
+ */
+export function startApiOrganizationGovernanceOverride(
+  options: Pick<StartApiOptions, "organizationGovernance">,
+): Pick<AppDependencies, "organizationGovernance"> | Record<string, never> {
+  return options.organizationGovernance === undefined
+    ? {}
+    : { organizationGovernance: options.organizationGovernance };
 }
 
 export async function startApi(options: StartApiOptions = {}) {
@@ -656,6 +676,7 @@ export async function startApi(options: StartApiOptions = {}) {
   }
   const { app, routeDeps } = createAppComposition({
     ...startApiSessionAuthorizationOverride(options),
+    ...startApiOrganizationGovernanceOverride(options),
     settings,
     db: dbClient.db,
     bus,
