@@ -9,7 +9,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolApproval } from "@opengeni/observability";
 import {
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
@@ -25,6 +28,8 @@ import {
   ToolGatewayDeclarationsResponse,
   toolPolicyActionName,
   isSecretReferenceError,
+  MCP_APP_RESOURCE_MIME_TYPE,
+  McpAppResourceUri,
   type AccessGrant,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -74,6 +79,7 @@ import {
 } from "@opengeni/db";
 import {
   type LocalMcpServerRegistration,
+  type McpResource,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,
@@ -128,6 +134,15 @@ export type PreparedWorkspaceToolGateway = Pick<
   toolGateway: NonNullable<PreparedWorkspaceToolGatewayTools["toolGateway"]>;
   toolGatewayCatalog: NonNullable<PreparedWorkspaceToolGatewayTools["toolGatewayCatalog"]>;
   reauthorize?: () => Promise<void>;
+  /** Host servers serving MCP Apps views; absent unless a host registration lists resources. */
+  hostViewServers?: readonly HostViewServer[];
+};
+
+/** One host tool server's MCP Apps view resources. */
+type HostViewServer = {
+  serverId: string;
+  listResources: NonNullable<LocalMcpServerRegistration["listResources"]>;
+  readResource?: LocalMcpServerRegistration["readResource"];
 };
 
 type WorkspaceSiteToolContext = {
@@ -1032,6 +1047,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
             }),
         }),
         mapDefinition: (definition) => {
+          // Only a host tool server's own listing can attach an MCP Apps view.
+          const resourceUri = hostServers.views.get(
+            workspaceToolGatewayIdentityKey(definition.identity),
+          );
+          if (resourceUri) definition = { ...definition, meta: { ui: { resourceUri } } };
           // Raw/local providers have no native credential revision. The legacy
           // gateway fallback binds the whole public catalog, including Ask/Allow
           // presentation. Targeted approvals instead use the runtime's existing
@@ -1134,10 +1154,17 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     await prepared.close().catch(() => undefined);
     options.signal.throwIfAborted();
   }
+  const hostViewServers = hostServers.registrations.flatMap(
+    ({ id, listResources, readResource }): HostViewServer[] =>
+      listResources
+        ? [{ serverId: id, listResources, ...(readResource ? { readResource } : {}) }]
+        : [],
+  );
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
+    ...(hostViewServers.length > 0 ? { hostViewServers } : {}),
   };
 }
 
@@ -1230,9 +1257,15 @@ export function buildWorkspaceToolGatewayMcpServer(
   const callableEntries = prepared.toolGatewayCatalog.entries.filter(
     (entry) => entry.approval !== "human",
   );
+  const hostViewServers = prepared.hostViewServers ?? [];
   const server = new Server(
     { name: "opengeni-tool-gateway", version: "1.0.0" },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: {
+        tools: {},
+        ...(hostViewServers.length > 0 ? { resources: { listChanged: false } } : {}),
+      },
+    },
   );
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     await prepared.reauthorize?.();
@@ -1251,10 +1284,13 @@ export function buildWorkspaceToolGatewayMcpServer(
           "opengeni/source": entry.source,
           "opengeni/approval": entry.approval,
           "opengeni/catalogDigest": prepared.toolGatewayCatalog.digest,
+          ...(entry.meta?.ui ? { ui: entry.meta.ui } : {}),
         },
       })),
     };
   });
+  if (hostViewServers.length > 0)
+    registerHostViewResources(server, prepared, callableEntries, hostViewServers);
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
     if (!entry) throw new ToolGatewayToolNotFoundError();
@@ -1285,6 +1321,56 @@ export function buildWorkspaceToolGatewayMcpServer(
     }
   });
   return server;
+}
+
+/** MCP error for a resource that does not exist for this caller. */
+const MCP_RESOURCE_NOT_FOUND = -32002;
+
+/**
+ * Serves host MCP Apps views. A view is reachable only through a tool this
+ * caller's MCP catalog lists, and only from that tool's own host server; every
+ * other URI answers "resource not found", without revealing whether it exists.
+ */
+function registerHostViewResources(
+  server: Server,
+  prepared: PreparedWorkspaceToolGateway,
+  callableEntries: readonly PreparedWorkspaceToolGateway["toolGatewayCatalog"]["entries"][number][],
+  hostViewServers: readonly HostViewServer[],
+): void {
+  const hosts = new Map(hostViewServers.map((host) => [host.serverId, host]));
+  const viewServers = new Map<string, HostViewServer>();
+  for (const entry of callableEntries) {
+    const uri = entry.meta?.ui?.resourceUri;
+    const host = hosts.get(entry.identity.serverId);
+    if (uri && host && !viewServers.has(uri)) viewServers.set(uri, host);
+  }
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
+    await prepared.reauthorize?.();
+    const listed = await Promise.all(
+      [...new Set(viewServers.values())].map(async (host) =>
+        (await host.listResources()).filter(({ uri }) => viewServers.get(uri) === host),
+      ),
+    );
+    const seen = new Set<string>();
+    const resources: McpResource[] = [];
+    for (const resource of listed.flat()) {
+      if (seen.has(resource.uri)) continue;
+      seen.add(resource.uri);
+      resources.push(resource);
+    }
+    return { resources };
+  });
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+    const { uri } = request.params;
+    const notFound = () => new McpError(MCP_RESOURCE_NOT_FOUND, "Resource not found", { uri });
+    const host = viewServers.get(uri);
+    if (!host?.readResource) throw notFound();
+    await prepared.reauthorize?.();
+    const view = await host.readResource(uri);
+    if (view?.mimeType !== MCP_APP_RESOURCE_MIME_TYPE || typeof view.text !== "string")
+      throw notFound();
+    return { contents: [{ uri, mimeType: MCP_APP_RESOURCE_MIME_TYPE, text: view.text }] };
+  });
 }
 
 export async function callWorkspaceToolGateway(
@@ -1631,9 +1717,14 @@ async function workspaceHostToolServers(
     staticIds: ReadonlySet<string>;
     configuredIds: ReadonlySet<string>;
   },
-): Promise<{ registrations: LocalMcpServerRegistration[]; staticIds: ReadonlySet<string> }> {
+): Promise<{
+  registrations: LocalMcpServerRegistration[];
+  staticIds: ReadonlySet<string>;
+  views: ReadonlyMap<string, string>;
+}> {
   const port = routeDeps.workspaceToolServers;
-  if (!port) return { registrations: [], staticIds: new Set() };
+  const views = new Map<string, string>();
+  if (!port) return { registrations: [], staticIds: new Set(), views };
   const registrations = await port({
     grant: input.grant,
     ...(input.signal ? { signal: input.signal } : {}),
@@ -1652,9 +1743,50 @@ async function workspaceHostToolServers(
   const owned = (id: string) => input.staticIds.has(id) && input.configuredIds.has(id);
   await close(registrations.filter(({ id }) => !owned(id)));
   return {
-    registrations: registrations.filter(({ id }) => owned(id)),
+    registrations: registrations
+      .filter(({ id }) => owned(id))
+      .map((registration) => recordingHostViews(registration, views)),
     staticIds: new Set(registrations.map(({ id }) => id).filter((id) => input.staticIds.has(id))),
+    views,
   };
+}
+
+/**
+ * The registration with its server's `tools/list` observed: each listed tool's
+ * well-formed `_meta.ui.resourceUri` is recorded under its gateway identity
+ * key, and a malformed one is dropped. The listing itself passes unchanged.
+ */
+function recordingHostViews(
+  registration: LocalMcpServerRegistration,
+  views: Map<string, string>,
+): LocalMcpServerRegistration {
+  const listTools: LocalMcpServerRegistration["server"]["listTools"] = async () => {
+    const tools = await registration.server.listTools();
+    for (const tool of tools) {
+      const key = workspaceToolGatewayIdentityKey({
+        serverId: registration.id,
+        toolName: tool.name,
+      });
+      const uri = McpAppResourceUri.safeParse(hostToolViewUri(tool));
+      if (uri.success) views.set(key, uri.data);
+      else views.delete(key);
+    }
+    return tools;
+  };
+  const server = new Proxy(registration.server, {
+    get(target, property) {
+      if (property === "listTools") return listTools;
+      const value: unknown = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return { ...registration, server };
+}
+
+function hostToolViewUri(tool: object): unknown {
+  const meta = "_meta" in tool ? tool._meta : undefined;
+  const ui = typeof meta === "object" && meta !== null && "ui" in meta ? meta.ui : undefined;
+  return typeof ui === "object" && ui !== null && "resourceUri" in ui ? ui.resourceUri : undefined;
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {

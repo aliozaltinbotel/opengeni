@@ -11471,6 +11471,16 @@
         "$.theme": "enum?=[\"\\\"dark\\\"\",\"\\\"light\\\"\"]"
       }
     },
+    "AttemptToolCatalogMeta": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.ui": "object?",
+        "$.ui.resourceUri": "string!"
+      }
+    },
     "AttemptToolIdentity": {
       "io": [
         "input",
@@ -29075,6 +29085,7 @@
         "$.entries[].inputSchema{}|3[]": "ref(__schema0)",
         "$.entries[].inputSchema{}|4": "object",
         "$.entries[].inputSchema{}|4{}": "ref(__schema0)",
+        "$.entries[].meta": "ref(AttemptToolCatalogMeta)?",
         "$.entries[].modelName": "string!",
         "$.entries[].outputSchema": "object?",
         "$.entries[].outputSchema{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
@@ -29300,6 +29311,7 @@
         "$.tool.entry.inputSchema{}|3[]": "ref(__schema0)",
         "$.tool.entry.inputSchema{}|4": "object",
         "$.tool.entry.inputSchema{}|4{}": "ref(__schema0)",
+        "$.tool.entry.meta": "ref(AttemptToolCatalogMeta)?",
         "$.tool.entry.modelName": "string!",
         "$.tool.entry.outputSchema": "object?",
         "$.tool.entry.outputSchema{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
@@ -29343,6 +29355,7 @@
         "$.tools[].entry.inputSchema{}|3[]": "ref(__schema0)",
         "$.tools[].entry.inputSchema{}|4": "object",
         "$.tools[].entry.inputSchema{}|4{}": "ref(__schema0)",
+        "$.tools[].entry.meta": "ref(AttemptToolCatalogMeta)?",
         "$.tools[].entry.modelName": "string!",
         "$.tools[].entry.outputSchema": "object?",
         "$.tools[].entry.outputSchema{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
@@ -29384,6 +29397,7 @@
         "$.entry.inputSchema{}|3[]": "ref(__schema0)",
         "$.entry.inputSchema{}|4": "object",
         "$.entry.inputSchema{}|4{}": "ref(__schema0)",
+        "$.entry.meta": "ref(AttemptToolCatalogMeta)?",
         "$.entry.modelName": "string!",
         "$.entry.outputSchema": "object?",
         "$.entry.outputSchema{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",
@@ -29429,6 +29443,7 @@
         "$.tool.entry.inputSchema{}|3[]": "ref(__schema0)",
         "$.tool.entry.inputSchema{}|4": "object",
         "$.tool.entry.inputSchema{}|4{}": "ref(__schema0)",
+        "$.tool.entry.meta": "ref(AttemptToolCatalogMeta)?",
         "$.tool.entry.modelName": "string!",
         "$.tool.entry.outputSchema": "object?",
         "$.tool.entry.outputSchema{}": "union null=[\"0\",\"1\",\"2\",\"3\",\"4\"]",

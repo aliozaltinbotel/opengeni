@@ -6,6 +6,7 @@
 export {
   prepareAgentTools as prepareWorkspaceToolGatewayTools,
   type LocalMcpServerRegistration,
+  type McpResource,
   type PreparedAgentTools as PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
   type ResolveConnectionCredentialResult,

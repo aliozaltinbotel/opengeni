@@ -5255,7 +5255,20 @@ export type LocalMcpServerRegistration = {
     args: Record<string, unknown>,
     options?: { signal?: AbortSignal },
   ) => Promise<void> | void;
+  /**
+   * MCP Apps views this server serves. Only the workspace MCP uses these, and
+   * only for an embedding host's registration; model execution ignores them.
+   */
+  listResources?(): Promise<readonly McpResource[]>;
+  /** The HTML of one listed view, read through `resources/read`. */
+  readResource?(uri: string): Promise<{
+    mimeType: typeof import("@opengeni/contracts").MCP_APP_RESOURCE_MIME_TYPE;
+    text: string;
+  }>;
 };
+
+/** One MCP resource a local server lists. */
+export type McpResource = import("@modelcontextprotocol/sdk/types.js").Resource;
 
 export type ToolPreparationPhase =
   | "server_construction"
