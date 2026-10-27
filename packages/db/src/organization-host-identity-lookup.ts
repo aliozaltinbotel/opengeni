@@ -9,6 +9,68 @@ import { z } from "zod";
 import type { Database } from "./database";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 
+/**
+ * Migration 1016's lookup by identity. Its runtime EXECUTE is withheld for one
+ * release (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES); until it is
+ * granted the lookup resolves the identity through the member list instead.
+ */
+export const HOST_IDENTITY_LOOKUP_ROUTINE =
+  "opengeni_private.lookup_organization_host_identity(uuid, text, uuid)";
+
+type LookupInput = { organizationId: string; actorSubjectId: string; identityId: string };
+
+/**
+ * What one organization knows about a native identity, for its embedding host.
+ * Null when no membership of this organization (in any status) belongs to the
+ * identity, whether or not the identity exists: callers must not tell the two
+ * apart. The actor is checked like any administrator (active owner or admin).
+ */
+export async function lookupOrganizationHostIdentity(
+  db: Database,
+  input: LookupInput,
+): Promise<HostOrganizationIdentityType | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      return (await hostIdentityLookupGranted(scopedDb))
+        ? await lookupByIdentity(scopedDb, input)
+        : await lookupThroughMemberList(scopedDb, input);
+    },
+  );
+}
+
+/** Whether 1016's routine exists and the runtime may call it. */
+export async function hostIdentityLookupGranted(db: Pick<Database, "execute">): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${HOST_IDENTITY_LOOKUP_ROUTINE})::oid, 'EXECUTE'
+    ) as granted`,
+  );
+  return row?.granted === true;
+}
+
+async function lookupByIdentity(
+  db: Database,
+  input: LookupInput,
+): Promise<HostOrganizationIdentityType | null> {
+  const [row] = await rawRows<{ result: unknown }>(
+    db,
+    sql`select opengeni_private.lookup_organization_host_identity(
+      ${input.organizationId}::uuid, ${input.actorSubjectId}, ${input.identityId}::uuid
+    ) as result`,
+  );
+  return row?.result ? HostOrganizationIdentity.parse(row.result) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Until 1016's routine is granted: resolve the identity among the
+// organization's own members, through routines the runtime already holds.
+// Remove together with the grant.
+// ---------------------------------------------------------------------------
+
 const MANAGED_HUMAN_SUBJECT_PREFIX = "user:";
 const INVITATION_PAGE_SIZE = 100;
 
@@ -18,58 +80,49 @@ const MatchedMember = z.object({
 });
 type MatchedMember = z.infer<typeof MatchedMember>;
 
-/**
- * What one organization knows about a native identity, for its embedding host.
- * Null when no membership of this organization (in any status) belongs to the
- * identity, whether or not the identity exists: callers must not tell the two
- * apart.
- *
- * The actor is checked like any administrator (active owner or admin); the
- * organization's member list is the only way in, so an identity is resolved
- * only among this organization's own members. That costs one identity
- * projection per managed-human member and one invitation page per 100
- * invitations, in one read transaction.
- */
-export async function lookupOrganizationHostIdentity(
+async function lookupThroughMemberList(
   db: Database,
-  input: { organizationId: string; actorSubjectId: string; identityId: string },
+  input: LookupInput,
 ): Promise<HostOrganizationIdentityType | null> {
-  return await withRlsContext(
-    db,
-    { accountId: input.organizationId, workspaceId: null },
-    async (scopedDb) => {
-      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
-      const matched = await membersOfIdentity(scopedDb, input);
-      const [first] = matched;
-      if (!first) return null;
-      const identity = first.projection.activeIdentity;
-      const binding = first.projection.loginBindings.find(
-        (candidate) => candidate.id === identity.activeLoginBindingId,
-      );
-      const membershipIds = new Set(matched.map(({ member }) => member.id));
-      return HostOrganizationIdentity.parse({
-        identityStatus: identity.status,
-        verifiedEmail: await verifiedEmailOf(scopedDb, authUserIdOf(first.member.subjectId)),
-        activeLoginBinding:
-          binding?.status === "active" ? { id: binding.id, revision: binding.revision } : null,
-        acceptedInvitations: (await listAllInvitations(scopedDb, input)).flatMap(
-          ({ id, status, acceptedMembershipId, updatedAt }) =>
-            status === "accepted" &&
-            acceptedMembershipId !== null &&
-            membershipIds.has(acceptedMembershipId)
-              ? [{ id, acceptedMembershipId, acceptedAt: new Date(updatedAt).toISOString() }]
-              : [],
-        ),
-      });
-    },
+  const matched = await membersOfIdentity(db, input);
+  const [first] = matched;
+  if (!first) return null;
+  const { activeIdentity, loginBindings } = first.projection;
+  const binding = loginBindings.find(
+    (candidate) =>
+      candidate.id === activeIdentity.activeLoginBindingId && candidate.status === "active",
   );
+  const membershipIds = new Set(matched.map(({ member }) => member.id));
+  const oldestActive = matched.find(({ member }) => member.status === "active");
+  let verifiedEmail: string | null = null;
+  if (binding) {
+    const authUserIds = matched.map(({ member }) => authUserIdOf(member.subjectId));
+    verifiedEmail = await bindingVerifiedEmail(db, binding, authUserIds);
+  } else if (oldestActive) {
+    verifiedEmail = await verifiedEmailOf(db, authUserIdOf(oldestActive.member.subjectId));
+  }
+  return HostOrganizationIdentity.parse({
+    identityStatus: activeIdentity.status,
+    verifiedEmail,
+    activeLoginBinding: binding ? { id: binding.id, revision: binding.revision } : null,
+    memberships: matched.map(({ member }) => ({
+      id: member.id,
+      status: member.status,
+      role: member.role,
+    })),
+    acceptedInvitations: (await listAllInvitations(db, input)).flatMap(
+      ({ id, status, acceptedMembershipId, updatedAt }) =>
+        status === "accepted" &&
+        acceptedMembershipId !== null &&
+        membershipIds.has(acceptedMembershipId)
+          ? [{ id, acceptedMembershipId, acceptedAt: new Date(updatedAt).toISOString() }]
+          : [],
+    ),
+  });
 }
 
 /** This organization's managed-human members whose account belongs to the identity, oldest first. */
-async function membersOfIdentity(
-  db: Database,
-  input: { organizationId: string; actorSubjectId: string; identityId: string },
-): Promise<MatchedMember[]> {
+async function membersOfIdentity(db: Database, input: LookupInput): Promise<MatchedMember[]> {
   const rows = await rawRows<{ member: unknown; projection: unknown }>(
     db,
     sql`
@@ -85,7 +138,7 @@ async function membersOfIdentity(
         ) member
         where starts_with(member.value ->> 'subjectId', ${MANAGED_HUMAN_SUBJECT_PREFIX})
       ) candidate
-      where candidate.projection -> 'activeIdentity' ->> 'id' = ${input.identityId.toLowerCase()}
+      where candidate.projection -> 'activeIdentity' ->> 'id' = ${input.identityId}
     `,
   );
   return rows
@@ -99,6 +152,29 @@ async function membersOfIdentity(
 
 function authUserIdOf(subjectId: string): string {
   return subjectId.slice(MANAGED_HUMAN_SUBJECT_PREFIX.length);
+}
+
+/** The verified email of the matched account the login binding signs in to. */
+async function bindingVerifiedEmail(
+  db: Database,
+  binding: { providerId: string; providerAccountId: string },
+  authUserIds: readonly string[],
+): Promise<string | null> {
+  const [row] = await rawRows<{ email: string }>(
+    db,
+    sql`select account_user.email
+      from auth_identities account
+      join auth_users account_user on account_user.id = account.user_id
+      where lower(account.provider_id) = ${binding.providerId}
+        and account.account_id = ${binding.providerAccountId}
+        and account.user_id = any(array[${sql.join(
+          authUserIds.map((id) => sql`${id}`),
+          sql`, `,
+        )}]::text[])
+        and account_user.email_verified
+      limit 1`,
+  );
+  return row?.email ?? null;
 }
 
 async function verifiedEmailOf(db: Database, authUserId: string): Promise<string | null> {

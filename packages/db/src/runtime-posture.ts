@@ -49,8 +49,9 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * (0929), the recording recovery sweep's stalled-work inventory (0930), the
  * MCP Events subscription pump's due inventory (0932), the source feed pump's
  * due inventory (0935), the recording retention sweep's due inventory (0946),
- * the lookup of whose personal machine a chat runs on (0978) and the re-arm of
- * the running commands a returning runner did not answer for (0984). Each is
+ * the lookup of whose personal machine a chat runs on (0978), the re-arm of
+ * the running commands a returning runner did not answer for (0984) and the
+ * host's lookup of a native identity in its organization (1016). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -64,6 +65,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "list_due_recording_retention_v1(integer)",
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "lookup_organization_host_identity(uuid, text, uuid)",
 ] as const;
 
 /**
@@ -76,11 +78,14 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup; until a later migration grants it, the
  * runtime treats the lookup as unavailable and keeps the earlier behaviour.
  * 0984 withholds the connected-command re-arm the same way; until it is
- * granted, a runner's inventory report skips it.
+ * granted, a runner's inventory report skips it. 1016 withholds the host
+ * identity lookup; until it is granted, the lookup resolves the identity
+ * through the organization's member list.
  */
 export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
   "session_machine_owner_subject_v1(uuid, uuid, uuid)",
   "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "lookup_organization_host_identity(uuid, text, uuid)",
 ] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
@@ -107,6 +112,15 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_memberships",
   ],
   "rearm_unanswered_connected_commands(uuid, uuid, text)": ["session_background_commands"],
+  "lookup_organization_host_identity(uuid, text, uuid)": [
+    "canonical_human_identities",
+    "canonical_human_identity_subjects",
+    "canonical_human_login_bindings",
+    "organization_memberships",
+    "organization_membership_invitations",
+    "auth_identities",
+    "auth_users",
+  ],
 };
 
 export const SUBSCRIPTION_PLAN_MAINTENANCE_INVENTORY_ROUTINE =

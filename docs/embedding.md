@@ -982,30 +982,46 @@ with `{ identityId }`, the `sub` of a host session token
 (`HostLookupOrganizationIdentityRequest`). It authenticates like the host
 commands (the same service token, `members:manage`, an administrator subject
 and `403 ORGANIZATION_NOT_HOST_GOVERNED`), but it is a read: no `decide`, no
-`actingExternalUser` and no attribution row. The answer
-(`HostOrganizationIdentity`, sent with `cache-control: no-store`) is:
+`actingExternalUser` and no attribution row. Every answer, refusals included,
+is sent with `cache-control: no-store`. The answer (`HostOrganizationIdentity`)
+is:
 
 ```ts
 {
   identityStatus: "active" | "recovery_required" | "disputed" | "disabled";
   verifiedEmail: string | null; // null while the account's email is unverified
   activeLoginBinding: { id: string; revision: number } | null;
+  memberships: { id: string; status: "provisioning" | "active" | "suspended" | "revoked"; role: "owner" | "admin" | "member" }[];
   acceptedInvitations: { id: string; acceptedMembershipId: string; acceptedAt: string }[];
 }
 ```
 
+`memberships` lists the identity's memberships in this organization, oldest
+first; it is a list because one identity can sign in through more than one
+account. A suspended or offboarded (`revoked`) member still answers `200`:
+**the host must refuse to link any membership that is not `active`.**
+
+`verifiedEmail` is the email of the account the active login binding signs
+in to; without an active binding, the oldest active membership's account. It
+is `null` while that email is unverified, or when there is no such account.
 `activeLoginBinding` is the identity's active canonical login binding, or
 `null` when it has none in the `active` state. Its `id` changes when another
 sign-in method becomes the active binding, and its `revision` increases
 whenever that binding's state changes. `acceptedInvitations` lists only this
-organization's invitations, newest first; `acceptedAt` is the acceptance time,
-since an accepted invitation never changes again. An identity with a
-membership in the organization, in any status (an offboarded member included),
-answers `200`. An identity with no membership there answers `404` with
+organization's invitations, newest first; `acceptedAt` is the invitation's
+`accepted_at` (migration 1016), set when it is accepted. An identity with no
+membership in the organization answers `404` with
 `error.details.code = "HOST_IDENTITY_NOT_IN_ORGANIZATION"`, the same answer as
-an identity that does not exist. The identity is resolved among the
-organization's own members, so the read costs one identity projection per
-member and one invitation page per 100 invitations.
+an identity that does not exist. A token whose subject is not an active owner
+or admin of the organization is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`, the
+code every host command now gives when the database refuses its actor.
+
+The read is one query by identity
+(`opengeni_private.lookup_organization_host_identity`, migration 1016). Like
+every new runtime definer, its runtime `EXECUTE` is granted one release
+later; until then the route answers the same through the organization's
+member list, at one identity projection per member and one invitation page
+per 100 invitations.
 
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.

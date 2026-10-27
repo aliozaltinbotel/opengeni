@@ -4,6 +4,7 @@ import { defineSchema } from "./define-schema";
 import { CanonicalHumanIdentityStatus } from "./canonical-human-identities";
 import {
   CreateOrganizationInvitationRequest,
+  OrganizationMember,
   OrganizationMembershipRole,
   PutOrganizationWorkspaceMemberRequest,
   RevokeOrganizationInvitationRequest,
@@ -93,6 +94,8 @@ export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT"
 export const GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE =
   "GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE";
 export const HOST_IDENTITY_NOT_IN_ORGANIZATION = "HOST_IDENTITY_NOT_IN_ORGANIZATION";
+/** The service token's subject may not do this here: not an active owner or admin, or a role rule. */
+export const HOST_COMMAND_ACTOR_NOT_AUTHORIZED = "HOST_COMMAND_ACTOR_NOT_AUTHORIZED";
 
 const encoder = new TextEncoder();
 function boundedOpaqueText(maxBytes: number) {
@@ -216,8 +219,12 @@ export type HostLookupOrganizationIdentityRequest = z.infer<
  * member (any membership status). An identity with no membership here answers
  * 404 `HOST_IDENTITY_NOT_IN_ORGANIZATION`, the same as an unknown one.
  *
- * - `verifiedEmail`: the sign-in email of the identity's account, or null
- *   while that email is unverified.
+ * - `memberships`: the identity's memberships in this organization, oldest
+ *   first (a list: an identity can have more than one account). Every status
+ *   answers 200; a host MUST refuse to link a membership that is not `active`.
+ * - `verifiedEmail`: the email of the account the active login binding signs
+ *   in to or, without an active binding, of the oldest active membership's
+ *   account; null when that email is unverified or there is no such account.
  * - `activeLoginBinding`: the identity's active login binding, or null when it
  *   has none in the `active` state (see `identityStatus`). `id` changes when
  *   another sign-in method becomes the active binding; `revision` increases
@@ -230,11 +237,22 @@ export const HostOrganizationIdentity = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
       identityStatus: CanonicalHumanIdentityStatus,
-      verifiedEmail: z.string().email().max(320).nullable(),
+      verifiedEmail: z.string().min(1).max(320).nullable(),
       activeLoginBinding: z
         .object({ id: primitives.uuid, revision: primitives.positiveInteger })
         .strict()
         .nullable(),
+      memberships: z
+        .array(
+          z
+            .object({
+              id: primitives.uuid,
+              status: OrganizationMember.shape.status,
+              role: OrganizationMembershipRole,
+            })
+            .strict(),
+        )
+        .min(1),
       acceptedInvitations: z.array(
         z
           .object({

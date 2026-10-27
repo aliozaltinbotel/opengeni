@@ -3906,7 +3906,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's and 0984's stay deferred", () => {
+describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 0978's, 0984's and 1016's stay deferred", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -3946,6 +3946,9 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
     "sandboxes",
     "enrollments",
     "session_background_commands",
+    // 1016's host identity lookup also reads the account tables.
+    "auth_identities",
+    "auth_users",
   ];
   function eventPosture(execute: boolean): RuntimeDatabasePosture {
     const posture = safePosture();
@@ -3991,10 +3994,12 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "lookup_organization_host_identity(uuid, text, uuid)",
     ]);
     expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "lookup_organization_host_identity(uuid, text, uuid)",
     ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
@@ -4045,6 +4050,7 @@ describe("runtime definers: 0947 and 0950 grant what 0937 and 0946 withheld, 097
       "list_due_recording_retention_v1(integer)",
       "session_machine_owner_subject_v1(uuid, uuid, uuid)",
       "rearm_unanswered_connected_commands(uuid, uuid, text)",
+      "lookup_organization_host_identity(uuid, text, uuid)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

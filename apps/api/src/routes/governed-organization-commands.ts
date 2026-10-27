@@ -8,6 +8,7 @@ import {
   verifyDelegatedAccessToken,
 } from "@opengeni/contracts";
 import {
+  HOST_COMMAND_ACTOR_NOT_AUTHORIZED,
   HOST_COMMAND_OPERATION_CONFLICT,
   HOST_COMMAND_PERMISSION_REQUIRED,
   HOST_COMMAND_SERVICE_TOKEN_REQUIRED,
@@ -36,6 +37,7 @@ import {
   getOrganizationInvitationForAdministration,
   getWorkspace,
   lookupOrganizationHostIdentity,
+  nestedPostgresSqlState,
   putOrganizationWorkspaceMember,
   recordOrganizationHostCommandAttribution,
   revokeOrganizationInvitation,
@@ -48,6 +50,7 @@ import { z } from "zod";
 import { assertOrganizationUserSetupDeliveryConfigured } from "../auth/organization-user-setup";
 import { ApiHttpError } from "../http/api-error";
 import {
+  lastSharedWorkspaceRemovalHttpError,
   organizationGovernanceDecision,
   organizationGovernedByHostError,
   requireGovernedInvitationWorkspace,
@@ -142,7 +145,7 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       );
     } catch (error) {
       if (error instanceof HTTPException) throw error;
-      rethrowMembershipError(error);
+      rethrowHostMembershipError(error);
     }
   });
 
@@ -171,7 +174,7 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         ),
       );
     } catch (error) {
-      rethrowMembershipError(error);
+      rethrowHostMembershipError(error);
     }
   });
 
@@ -253,7 +256,7 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         ),
       );
     } catch (error) {
-      rethrowMembershipError(error);
+      rethrowHostMembershipError(error);
     }
   });
 
@@ -286,12 +289,14 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         ),
       );
     } catch (error) {
-      rethrowMembershipError(error);
+      rethrowHostMembershipError(error);
     }
   });
 
   // A read: no governed mutation to decide and no attribution to record.
   app.post(`${base}/identities/lookup`, async (context) => {
+    // Every answer, refusals included, is about one person: never cached.
+    context.header("cache-control", "no-store");
     const authority = await requireHostService(context, deps);
     if (!(await organizationGovernedByHost(deps, authority.organizationId)))
       throw organizationNotHostGoverned();
@@ -308,7 +313,7 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         identityId: identityId.toLowerCase(),
       });
     } catch (error) {
-      rethrowMembershipError(error);
+      rethrowHostMembershipError(error);
     }
     // An identity elsewhere and an unknown one get this same answer.
     if (!identity)
@@ -319,7 +324,6 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         outcomeUnknown: false,
         details: { code: HOST_IDENTITY_NOT_IN_ORGANIZATION },
       });
-    context.header("cache-control", "no-store");
     return context.json(HostOrganizationIdentity.parse(identity));
   });
 }
@@ -353,7 +357,7 @@ async function transitionMember(
       }),
     );
   } catch (error) {
-    rethrowMembershipError(error);
+    rethrowHostMembershipError(error);
   }
 }
 
@@ -384,7 +388,7 @@ async function requireHostCommand(
       actorSubjectId: authority.actorSubjectId,
     });
   } catch (error) {
-    rethrowMembershipError(error);
+    rethrowHostMembershipError(error);
   }
   return authority;
 }
@@ -474,6 +478,24 @@ function parsePathId(context: Context, name: string): string {
   const parsed = Uuid.safeParse(context.req.param(name));
   if (!parsed.success) throw new HTTPException(422, { message: `invalid ${name}` });
   return parsed.data.toLowerCase();
+}
+
+/**
+ * `rethrowMembershipError`, with a refusal code on the 403 a database fence
+ * gives when the service token's subject may not do this in the organization
+ * (not an active owner or admin, or a role rule). Status and message are the
+ * native ones.
+ */
+function rethrowHostMembershipError(error: unknown): never {
+  if (!lastSharedWorkspaceRemovalHttpError(error) && nestedPostgresSqlState(error) === "42501")
+    throw new ApiHttpError(403, {
+      code: "forbidden",
+      message: "organization administration is not authorized",
+      retryable: false,
+      outcomeUnknown: false,
+      details: { code: HOST_COMMAND_ACTOR_NOT_AUTHORIZED },
+    });
+  rethrowMembershipError(error);
 }
 
 function organizationNotHostGoverned(): ApiHttpError {
