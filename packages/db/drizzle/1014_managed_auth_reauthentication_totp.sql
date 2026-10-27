@@ -26,7 +26,7 @@ CREATE TABLE auth_two_factors (
   user_id text NOT NULL UNIQUE REFERENCES auth_users (id) ON DELETE CASCADE,
   secret text NOT NULL,
   backup_codes text NOT NULL,
-  verified boolean NOT NULL DEFAULT true,
+  verified boolean NOT NULL DEFAULT false,
   failed_verification_count integer NOT NULL DEFAULT 0,
   locked_until timestamptz,
   -- Product column, not the plugin's: the TOTP time step of the last accepted
@@ -41,8 +41,12 @@ REVOKE ALL ON auth_two_factors FROM PUBLIC;
 CREATE TABLE auth_session_authentications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   auth_session_id text NOT NULL REFERENCES auth_sessions (id) ON DELETE CASCADE,
+  -- Exactly one primary method (pwd or oauth), an optional otp, no repeats.
   amr text[] NOT NULL CHECK (
-    cardinality(amr) BETWEEN 1 AND 3 AND amr <@ ARRAY['pwd', 'oauth', 'otp']::text[]
+    array_ndims(amr) = 1
+    AND amr <@ ARRAY['pwd', 'oauth', 'otp']::text[]
+    AND ('pwd' = ANY (amr))::int + ('oauth' = ANY (amr))::int = 1
+    AND cardinality(amr) = 1 + ('otp' = ANY (amr))::int
   ),
   authenticated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   -- Orders events that share an authentication time (a second factor added to

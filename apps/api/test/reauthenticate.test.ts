@@ -1010,3 +1010,42 @@ describe("TOTP lockout", () => {
     expect(await factor()).toMatchObject({ failed_verification_count: 0, locked_until: null });
   }, 120_000);
 });
+
+describe("authentication storage constraints", () => {
+  test("amr is one primary method with an optional otp, never duplicated", async () => {
+    const person = await member(stepUpApp(), "Amr Constraint Person");
+    const insert = async (amr: string) =>
+      await shared.admin`
+        insert into auth_session_authentications (auth_session_id, amr)
+        values (${person.sessionId}, ${amr}::text[])
+      `.then(
+        () => "accepted",
+        () => "refused",
+      );
+    for (const amr of ["{pwd}", "{oauth}", "{pwd,otp}", "{otp,oauth}"])
+      expect({ amr, outcome: await insert(amr) }).toEqual({ amr, outcome: "accepted" });
+    for (const amr of [
+      "{}",
+      "{otp}",
+      "{pwd,oauth}",
+      "{pwd,pwd}",
+      "{otp,otp}",
+      "{pwd,otp,otp}",
+      "{pwd,oauth,otp}",
+      "{pwd,NULL}",
+      "{{pwd},{otp}}",
+      "{sms}",
+    ])
+      expect({ amr, outcome: await insert(amr) }).toEqual({ amr, outcome: "refused" });
+  }, 60_000);
+
+  test("a factor row written without verified is not verified", async () => {
+    const person = await member(stepUpApp(), "Unverified Factor Person");
+    const [row] = await shared.admin<{ verified: boolean }[]>`
+      insert into auth_two_factors (id, user_id, secret, backup_codes)
+      values (${crypto.randomUUID()}, ${person.userId}, 'secret', 'codes')
+      returning verified
+    `;
+    expect(row!.verified).toBe(false);
+  }, 60_000);
+});
