@@ -109,16 +109,25 @@ describe("host extension registry", () => {
       return sources.sort((left, right) => (left.file < right.file ? -1 : 1));
     }
 
-    /** Each module specifier a source imports (static, side-effect, re-export or import()), resolved under src. */
+    /**
+     * Each module specifier a source imports (static, side-effect, re-export or
+     * import()). `@/…` and relative ones resolve under src; a `.js`, `.ts` or
+     * `.tsx` extension and a trailing `/index` are dropped.
+     */
     function importedModules(file: string, source: string): string[] {
       const specifiers = source.matchAll(
         /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["']([^"']+)["']/gm,
       );
-      return Array.from(specifiers, ([, specifier = ""]) => {
-        if (specifier.startsWith("@/")) return specifier.slice(2);
-        if (specifier.startsWith(".")) return join(dirname(file), specifier);
-        return specifier;
-      });
+      return Array.from(specifiers, ([, specifier = ""]) => moduleOf(file, specifier));
+    }
+
+    function moduleOf(file: string, specifier: string): string {
+      const resolved = specifier.startsWith("@/")
+        ? specifier.slice(2)
+        : specifier.startsWith(".")
+          ? join(dirname(file), specifier)
+          : specifier;
+      return resolved.replace(/\.(?:js|ts|tsx)$/, "").replace(/\/index$/, "");
     }
 
     test("only the startup module imports the build's extension", async () => {
@@ -147,7 +156,21 @@ describe("host extension registry", () => {
       "extensionSettingsPaths",
     ]);
 
-    type AstNode = Readonly<{ type: string; start: number; callee?: AstNode; name?: string }>;
+    type AstNode = Readonly<{
+      type: string;
+      start: number;
+      callee?: AstNode;
+      object?: AstNode;
+      property?: AstNode;
+      computed?: boolean;
+      expression?: AstNode;
+      imported?: AstNode;
+      local?: AstNode;
+      name?: string;
+      value?: unknown;
+      source?: AstNode | null;
+      specifiers?: readonly AstNode[];
+    }>;
     const FUNCTION_NODES: ReadonlySet<string> = new Set([
       "FunctionDeclaration",
       "FunctionExpression",
@@ -162,29 +185,109 @@ describe("host extension registry", () => {
       );
     }
 
-    /** `file:line` of each call to an extension reader outside every function body. */
+    /** An identifier's name, or a string literal's value (`import { "x" as y }`, `r["x"]`). */
+    function nameOf(node: AstNode | undefined): string | undefined {
+      if (node?.type === "Identifier") return node.name;
+      return typeof node?.value === "string" ? node.value : undefined;
+    }
+
+    function unwrapParentheses(node: AstNode | undefined): AstNode | undefined {
+      return node?.type === "ParenthesizedExpression" ? unwrapParentheses(node.expression) : node;
+    }
+
+    /** The function a call runs at once: `(() => …)()`, `(function () {…})()` or `.call`/`.apply` of one. */
+    function immediatelyInvoked(callee: AstNode | undefined): AstNode | undefined {
+      const target = unwrapParentheses(callee);
+      if (target && FUNCTION_NODES.has(target.type)) return target;
+      if (target?.type !== "MemberExpression" || target.computed) return undefined;
+      const invoked = unwrapParentheses(target.object);
+      const method = nameOf(target.property);
+      return invoked &&
+        FUNCTION_NODES.has(invoked.type) &&
+        (method === "call" || method === "apply")
+        ? invoked
+        : undefined;
+    }
+
+    /** The local names a module binds to readers: aliased named imports and namespace imports. */
+    function readerBindings(program: AstNode): { readers: Set<string>; namespaces: Set<string> } {
+      const readers = new Set(EXTENSION_READERS);
+      const namespaces = new Set<string>();
+      const body: unknown = Reflect.get(program, "body");
+      for (const statement of Array.isArray(body) ? body : []) {
+        if (!isAstNode(statement) || statement.type !== "ImportDeclaration") continue;
+        for (const specifier of statement.specifiers ?? []) {
+          const local = nameOf(specifier.local);
+          if (!local) continue;
+          if (specifier.type === "ImportNamespaceSpecifier") namespaces.add(local);
+          if (
+            specifier.type === "ImportSpecifier" &&
+            EXTENSION_READERS.has(nameOf(specifier.imported) ?? "")
+          ) {
+            readers.add(local);
+          }
+        }
+      }
+      return { readers, namespaces };
+    }
+
+    /**
+     * `file:line` of each load-time read of the extension: a call to a reader
+     * (under any import alias or through a namespace import) outside every
+     * function body, where an IIFE's body counts as load time. Outside
+     * registry.ts, a re-export of a reader counts too, because its importers
+     * would escape this scan's names.
+     */
     function moduleScopeReads(file: string, source: string): string[] {
       const { program, errors } = parseSync(file, source);
       expect(errors).toEqual([]);
-      const reads: string[] = [];
-      const visit = (node: AstNode, inFunction: boolean): void => {
-        const callee = node.type === "CallExpression" ? node.callee : undefined;
-        if (
-          !inFunction &&
-          callee?.type === "Identifier" &&
-          EXTENSION_READERS.has(callee.name ?? "")
-        ) {
-          reads.push(`${file}:${source.slice(0, node.start).split("\n").length}`);
+      const root = program as unknown as AstNode;
+      const { readers, namespaces } = readerBindings(root);
+      const reads = new Set<number>();
+      const lineOf = (node: AstNode): number => source.slice(0, node.start).split("\n").length;
+      const isReader = (callee: AstNode | undefined): boolean => {
+        const target = unwrapParentheses(callee);
+        if (target?.type === "Identifier") return readers.has(target.name ?? "");
+        const object = unwrapParentheses(target?.object);
+        return (
+          target?.type === "MemberExpression" &&
+          object?.type === "Identifier" &&
+          namespaces.has(object.name ?? "") &&
+          EXTENSION_READERS.has(nameOf(target.property) ?? "")
+        );
+      };
+      const reExportsReader = (node: AstNode): boolean => {
+        if (node.type === "ExportAllDeclaration") {
+          const from = nameOf(node.source ?? undefined) ?? "";
+          return moduleOf(file, from) === "host-extension/registry";
         }
-        const nested = inFunction || FUNCTION_NODES.has(node.type);
+        if (node.type !== "ExportNamedDeclaration") return false;
+        const exported = (node.specifiers ?? []).map((specifier) => nameOf(specifier.local) ?? "");
+        return exported.some((local) =>
+          node.source ? EXTENSION_READERS.has(local) : readers.has(local),
+        );
+      };
+      // An IIFE's own body runs while the module loads.
+      const loadTimeFunctions = new Set<AstNode>();
+      const visit = (node: AstNode, inFunction: boolean): void => {
+        if (node.type === "CallExpression" && !inFunction) {
+          if (isReader(node.callee)) reads.add(lineOf(node));
+          const invoked = immediatelyInvoked(node.callee);
+          if (invoked) loadTimeFunctions.add(invoked);
+        }
+        if (file !== "host-extension/registry.ts" && reExportsReader(node)) {
+          reads.add(lineOf(node));
+        }
+        const nested =
+          inFunction || (FUNCTION_NODES.has(node.type) && !loadTimeFunctions.has(node));
         for (const value of Object.values(node)) {
           for (const child of Array.isArray(value) ? value : [value]) {
             if (isAstNode(child)) visit(child, nested);
           }
         }
       };
-      visit(program as unknown as AstNode, false);
-      return reads;
+      visit(root, false);
+      return Array.from(reads, (line) => `${file}:${line}`);
     }
 
     test("no module reads the extension while it loads, except main-entry App.tsx", async () => {
@@ -205,6 +308,75 @@ describe("host extension registry", () => {
         "export function Shell({ lifecycle = currentHostExtension().lifecycle }) { return lifecycle; }",
       ].join("\n");
       expect(moduleScopeReads("probe.ts", source)).toEqual(["probe.ts:1"]);
+    });
+
+    test("the module-scope scan follows aliased and namespace imports of a reader", () => {
+      const source = [
+        'import { currentHostExtension as extension } from "./registry";',
+        'import * as registry from "@/host-extension/registry";',
+        "const product = extension().productName;",
+        "const hidden = registry.hiddenNativeDestinations();",
+        'const paths = registry["extensionSettingsPaths"]();',
+        "export function Page() { return [extension(), registry.extensionSettingsPaths()]; }",
+      ].join("\n");
+      expect(moduleScopeReads("probe.ts", source)).toEqual([
+        "probe.ts:3",
+        "probe.ts:4",
+        "probe.ts:5",
+      ]);
+    });
+
+    test("the module-scope scan treats an IIFE body as load time", () => {
+      const source = [
+        "const hidden = (() => hiddenNativeDestinations())();",
+        "const product = (function () { return currentHostExtension().productName; })();",
+        "void (async () => { await Promise.resolve(); extensionSettingsPaths(); })();",
+        "const later = (() => () => currentHostExtension())();",
+        "(function () { currentHostExtension(); }).call(null);",
+      ].join("\n");
+      expect(moduleScopeReads("probe.ts", source)).toEqual([
+        "probe.ts:1",
+        "probe.ts:2",
+        "probe.ts:3",
+        "probe.ts:5",
+      ]);
+    });
+
+    test("the module-scope scan finds a reader re-exported outside registry.ts", () => {
+      const source = [
+        'export { currentHostExtension } from "./registry";',
+        'export { hiddenNativeDestinations as hidden } from "@/host-extension/registry";',
+        'import { extensionSettingsPaths as paths } from "./registry";',
+        "export { paths };",
+        'export * from "./registry.ts";',
+        'export * as registry from "../host-extension/registry";',
+        'export { productName } from "./brand";',
+      ].join("\n");
+      expect(moduleScopeReads("host-extension/probe.ts", source)).toEqual([
+        "host-extension/probe.ts:1",
+        "host-extension/probe.ts:2",
+        "host-extension/probe.ts:4",
+        "host-extension/probe.ts:5",
+        "host-extension/probe.ts:6",
+      ]);
+      expect(moduleScopeReads("host-extension/registry.ts", source)).toEqual([]);
+    });
+
+    test("the importer scan resolves extensions and index modules", () => {
+      const source = [
+        'import { a } from "./startup.js";',
+        'import "@/host-extension/startup/index";',
+        'export { b } from "./startup/index.ts";',
+        'const c = import("../host-extension/startup.tsx");',
+        'import "@opengeni/web-host-extension/style.css";',
+      ].join("\n");
+      expect(importedModules("host-extension/probe.ts", source)).toEqual([
+        "host-extension/startup",
+        "host-extension/startup",
+        "host-extension/startup",
+        "host-extension/startup",
+        "@opengeni/web-host-extension/style.css",
+      ]);
     });
   });
 

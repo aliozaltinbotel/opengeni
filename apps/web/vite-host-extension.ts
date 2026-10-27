@@ -6,7 +6,7 @@
 import { statSync } from "node:fs";
 import path from "node:path";
 
-import type { Alias } from "vite";
+import type { Alias, Plugin } from "vite";
 
 export type HostExtensionFiles = Readonly<{ entry: string; style: string }>;
 
@@ -76,4 +76,29 @@ export const HOST_EXTENSION_STOCK_DEFINE = "import.meta.env.OPENGENI_WEB_HOST_EX
 /** Vite `define` entries for this build's host extension setting. */
 export function hostExtensionDefine(configured: string | undefined): Record<string, string> {
   return { [HOST_EXTENSION_STOCK_DEFINE]: JSON.stringify(String(!configured?.trim())) };
+}
+
+/**
+ * Tailwind generates only the utilities it finds in its sources, and the
+ * console's stylesheet lists the console's own. A Vite plugin that appends the
+ * configured extension directory as one more `@source` of `stylesheet`, so the
+ * utilities only the extension's built JS uses are generated too. Register it
+ * before `tailwindcss()`: both transform CSS in the `pre` stage, in plugin
+ * order. Undefined when no extension is configured, so a stock build is
+ * unchanged.
+ */
+export function hostExtensionTailwindSource(
+  configured: string | undefined,
+  stylesheet: string,
+): Plugin | undefined {
+  const directory = configured?.trim();
+  if (!directory) return undefined;
+  const source = `\n@source ${JSON.stringify(directory)};\n`;
+  return {
+    name: "opengeni-host-extension-tailwind-source",
+    enforce: "pre",
+    transform(code, id) {
+      return id.split("?")[0] === stylesheet ? code + source : null;
+    },
+  };
 }

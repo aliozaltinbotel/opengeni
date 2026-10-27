@@ -2106,6 +2106,10 @@ tool-card bodies with `lazy(() => import(…))` behind the card's own
 `Suspense`. Pages and cards then download only when someone opens them, and the
 descriptor adds about one small module to the console's startup load.
 
+The console's Tailwind build also scans that directory, so a utility class
+that only the extension's built JS uses is still generated, even when the
+directory is listed in the host's `.gitignore`.
+
 The console imports the descriptor from one startup module that only its main
 entry reaches (`apps/web/src/host-extension/startup.ts`). Every other console
 module reads the installed extension at call time. Do not import the
@@ -2113,6 +2117,14 @@ specifier anywhere else. A module that lazy routes also reach statically and
 that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
+
+Bundle the extension's own icon set (for example `lucide-react`) into its
+build rather than leaving it external to share the console's modules. The
+console's startup and direct chat route load some of the same icon modules.
+When a lazy extension chunk imports many of them as well, the bundler can merge
+the shared modules into a lazy chunk that startup then has to load, and the
+build's eager-graph check refuses it. Bundled icons cost a few duplicate
+drawings and share no state, since the console mounts no icon provider.
 
 ## Trust model
 
