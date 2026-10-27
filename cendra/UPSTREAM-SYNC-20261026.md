@@ -12,7 +12,7 @@ it is for review and a repin by Native.
 | Merge base | `0355223eeb6ebda5ad4d8d37290cdb5106737045` |
 | Fork side / upstream side | 185 commits (160 non-merge) / 1063 commits |
 | Merge commit | `1c6f1fedde7d47004afaadade2b2892ab7a45279` (parents `a9f495d8f`, `01f15f453`) |
-| Follow-ups | `ee9825191` regenerated `bun.lock`; `94c7b2bb7` fork call sites fitted to upstream signatures; `ba4430956` fork migrations renumbered to 0997-1008; `414d55809` four newer fork host routes exempted from the organization MCP catalog (catalog regenerated); `b6fe4e67f` regenerated surface and Site browser runtime; `5aee0983d`, `a484934a1`, `3f1878689` test fits; this report |
+| Follow-ups | `ee9825191` regenerated `bun.lock`; `94c7b2bb7` fork call sites fitted to upstream signatures; `ba4430956` fork migrations renumbered to 0997-1008; `414d55809` four newer fork host routes exempted from the organization MCP catalog (catalog regenerated); `b6fe4e67f` regenerated surface and Site browser runtime; `5aee0983d`, `a484934a1`, `3f1878689` test fits; this report; fix round 1: `8c07a6fe1` every renamed migration accepts its own exact post-image, `2d2c8b5d6` deferrable model-call-fact receipt key (0998, 1009, 1010), `9a82a150e` existing-only identity fence `FOR NO KEY UPDATE` (1011 and a PostgreSQL test), `a91525eb5` title usage keeps the subscription connection, `f54969111` test fits |
 | Toolchain | Bun 1.4.3 (the fork's `packageManager`, from `CendraAgenticPMS/.local/toolchains/bun-1.4.3`; the host default is 1.3.14) |
 
 History. The shared clone is shallow at `662b922f3` and partial (`blob:none`); the merge base resolved without
@@ -62,7 +62,7 @@ upstream's bytes at merge time and were then regenerated (`b6fe4e67f`, `414d5580
 | `apps/worker/src/index.ts` | Union: fork `StartRealtimeUsageWorkflow` + upstream `StartRecordingWorkflow` in imports and both signaler checks. |
 | `apps/worker/src/activities/agent-turn/compaction-prep.ts` | Upstream's prompt-cache fingerprint observer (`observeCompactionRequests`, `promptCacheRequest`) and remote `withheldWireHistory` kept; the fork's exact-call compaction source keys (`beforeModelCallSourceReceipt(request, "COMPACTION")`, `onUnreportedUsage`, `successfulSourceKey`/`successfulRemoteSourceKey`) re-applied inside both portable summarizer branches and the remote v2 requester. |
 | `apps/worker/src/activities/context-compaction.ts` | Union of the requester type (`withheldWireHistory` + fork `successfulModelSourceKey`) and upstream's `CompactionInputRecoveryPayload`. Upstream's new exact withheld-wire-history path (remote v2 and portable) is **gated for the fork**: it is used only when every withheld item is attributable to a durable history row (retained `session_history_items` binding or projection identity, new helper `compactionSourceId`); otherwise the durable items are re-projected as before, so the summary keeps exact `summarySourceIds`. The withheld request is still always consumed. `successfulInput` (remote) and `sourceItems` (portable) follow the input actually sent. Adapted; see concern on prompt-cache reuse. |
-| `apps/worker/src/activities/agent-turn/stream-attempt.ts` | Union of imports (upstream `PromptCacheRequestFingerprint`, fork turn-budget). The fork's `settleCapturedModelTerminal` (exact-call `nativeSourceKey` by response) kept as the single terminal-settlement owner; it now also passes upstream's `promptCacheRequest` and `subscriptionConnectionId` (the latter was in the merge base and in upstream; the fork's helper, b465f1817, had dropped it when it was replayed onto the base; restored). Upstream's `eagerOwnedSandboxSetup` added after it. The F-2 `turnRouteWatch.responseSettled` budget count kept. Tool-output events: upstream's accepted-wait verbatim reply is pushed first, then the fork's SDK execution timing (b1ebb50b8) and parallel-batch deferral (0592c01e4). |
+| `apps/worker/src/activities/agent-turn/stream-attempt.ts` | Union of imports (upstream `PromptCacheRequestFingerprint`, fork turn-budget). The fork's `settleCapturedModelTerminal` (exact-call `nativeSourceKey` by response) kept as the single terminal-settlement owner; it now also passes upstream's `promptCacheRequest` and `subscriptionConnectionId` (the latter was in the merge base and in upstream; the fork's helper, b465f1817, had dropped it when it was replayed onto the base; restored). Fix round 1 (`a91525eb5`) restores it on the session-title usage call too, which the fork had dropped the same way. Upstream's `eagerOwnedSandboxSetup` added after it. The F-2 `turnRouteWatch.responseSettled` budget count kept. Tool-output events: upstream's accepted-wait verbatim reply is pushed first, then the fork's SDK execution timing (b1ebb50b8) and parallel-batch deferral (0592c01e4). |
 | `packages/runtime/src/lazy-tool-transport.ts` | Union of imports. The fork moved `tool_list` into the private `listAuthorizedTools` method (to record list sources); upstream's only change inside it, `...(cursor === undefined ? this.unavailableSources() : {})` on both group and tool pages, re-applied in the method. Disclosure flush: upstream's notice items (`noticeAfter`/`cachedNoticeItem`) and the fork's `bindModelGenericToolDisclosure(item, readySelections)` both kept. |
 | `packages/core/src/access/index.ts` | Union of imports (fork `validateCanonicalHumanSession`, upstream `externalPersonPersonalWorkspaceId`). Upstream routed the four explicit-key delegation ceilings through a new `ceilingCovers` (exact or personal-setup coverage). The fork's 5b32e0b7c rule (explicit-mode `hasPermission`, so Q-16 secret aliases delegate as they authorize, never the admin wildcard) is re-applied inside `ceilingCovers`; since the merged `hasPermission` already includes upstream's personal-setup rule, both intents hold at every call site. |
 | `packages/core/src/domain/sessions.ts` | Union of imports (fork creation-receipt recovery, upstream Teams admission and message time zone). Session create: the fork's isolated image-only scope check (evidence assessor, 4d8551444) runs first, then upstream's Teams proof composition into `externalBeforeCreateCommit`. Fork `importedHistoryOrigins` beside upstream `timeZone`; fork F-2 `fallback`/`turnBudget` options beside upstream `teamsConversation`. Send: upstream's app-action grant and `waitsForMachineOwner` result, with the fork's `messageModelSourceRefs` and F-2 `turnMetadata` route declaration re-added. |
@@ -127,39 +127,44 @@ already carries the fork's replacements) 0998 re-runs successfully (both verifie
 Non-superuser owner (`NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB`), extensions created by the superuser,
 `OPENGENI_MIGRATIONS_PREINSTALLED_VECTOR=true`, no live application role.
 
+**Rule (since fix round 1): every fork migration accepts its own exact post-image.** A renamed file re-runs on every
+database that recorded its earlier name (staging runs the pin `13a55d8b7`, which carries all twelve fork25 names), so
+each fork migration applies its pre-image, accepts its exact post-image as already applied, and refuses anything else.
+No ledger alias is used (`migrate.ts` has none).
+
+First pass (`ba4430956`): the merged migrator on a fork25-migrated database stopped at
+`1000_usage_event_call_attributes.sql` (`constraint "usage_events_attributes_shape_check" ... already exists`); 1000,
+1002, 1004, 1005, 1006, 1007 and 1008 all failed a re-run there (1002/1004/1006 on their pre-image pins, 1005 on
+`CREATE FUNCTION`, 1007/1008 on `ADD COLUMN`). Fix round 1 (`8c07a6fe1`) gave them the 2026-10-08 shape:
+
+| Files | Shape |
+| --- | --- |
+| 1000, 1005, 1007, 1008 (DDL) | Columns `ADD COLUMN IF NOT EXISTS` with a type assertion; checks and triggers created when absent, else compared with the exact post-image (constraint definition and validation; trigger function, type, enabled state and column list); guard and reader functions created or replaced only when absent or byte-identical (md5 of `prosrc`). 1000 also accepts 1001's successor check. |
+| 1002, 1004, 1006 (function patches) | Early return on the exact post-image (md5 / sha-256 of the body; 1004 also its two owner-only SELECT policies), before the existing pre-image pins. No upstream migration in 0895-0996 touches `knowledge_index_work`, `validate_editable_artifact_projection` or `knowledge_entry_apply`; the post-image digests were read from a fork25-migrated database and equal the merged fresh install's. |
+| 0997, 0998, 0999, 1001, 1003 | Already re-runnable (2026-10-08 bodies; 1001 rewrites its own check; 1003 accepts its post-image). |
+
+Three forward fork migrations follow (fix round 1): 1009 and 1010 make the model-call-fact receipt key a deferrable
+NO ACTION check (re-added `NOT VALID`, then validated, as 0927/0928; 0998 now creates it deferrable on a fresh
+install), and 1011 moves the existing-only identity resolver's membership fence to `FOR NO KEY UPDATE`.
+
+Proof at `9a82a150e` (final migration bytes):
+
 | Path | Result |
 | --- | --- |
-| (a) empty PG17 -> merged migrator | rc 0; 985 ledger rows, head `1008_session_creation_receipt.sql`; no fork25 names; both spool overloads of `fork_session_content` carry the fork's `source_basis` copy and upstream's `FOR NO KEY UPDATE` fence |
+| (a) empty PG17 -> merged migrator | rc 0; 988 ledger rows, head `1011_existing_external_identity_membership_key_share.sql`; both spool overloads of `fork_session_content` carry the fork's `source_basis` copy and upstream's `FOR NO KEY UPDATE` fence |
+| (a) merged migrator again | rc 0, applied 0 |
 | (b) empty PG17 -> fork25 migrator (`a9f495d8f`'s `packages/` and exactly its 894 migration files) | rc 0; 894 rows, head `0958_session_creation_receipt.sql` |
-| (b) then the merged migrator | **rc 1.** It applied upstream's 91 migrations and 0997, 0998, 0999 (the bodies made re-runnable on 2026-10-08), then stopped at `1000_usage_event_call_attributes.sql`: `constraint "usage_events_attributes_shape_check" for relation "usage_events" already exists` |
-| (b) each remaining renamed file run once in a rolled-back transaction on that database | 1001 and 1003 succeed; 1000, 1002, 1004, 1005, 1006, 1007 and 1008 fail (table below) |
+| (b) then the merged migrator | rc 0; applied 106 (upstream's 91, the 12 renamed fork files, 1009-1011); 1000 rows |
+| (b) merged migrator again | rc 0, applied 0 |
+| (a) vs (b) normalized schema dumps (`pg_dump --schema-only`, owner name and column order normalized) | equal except the install timestamp upstream's 0515 bakes into a function |
+| Both end states | receipt key deferrable, not deferred, validated; `read_existing_external_identity` md5 `fa17db36...` (`FOR NO KEY UPDATE`) |
+| Drift refusals (rolled-back transactions on (b)) | a changed shape check -> `USAGE_EVENT_ATTRIBUTES_SHAPE_DRIFT`; a changed `knowledge_entry_apply` body -> `knowledge_entry_apply HUMAN proposal predecessor drifted`; a changed resolver fence -> `EXISTING_EXTERNAL_IDENTITY_FENCE_PREIMAGE_DRIFT`; a missing receipt key -> `MODEL_CALL_FACT_SOURCE_RECEIPT_FK_MISSING` |
 
-**Repin blocker (for Native): any database that recorded the fork25 names (staging runs the pin `13a55d8b7`, which
-carries all twelve) re-runs the renamed files, and seven of them are not re-runnable.** The staging ledger itself was
-not read: the read-only tunnel (127.0.0.1:19422) was down and its helper is not on this host. Path (b) is the local
-evidence.
-
-| Renamed file | Re-run on a fork25-migrated database |
-| --- | --- |
-| 0997, 0998, 0999 | succeed (2026-10-08 idempotent bodies) |
-| 1000_usage_event_call_attributes | `constraint "usage_events_attributes_shape_check" ... already exists` |
-| 1001_usage_event_call_attributes_schema_required | succeeds |
-| 1002_knowledge_index_receipt_owner | `KNOWLEDGE_INDEX_RECEIPT_OWNER_PREIMAGE_MOVED` |
-| 1003_private_child_membership_authority | succeeds |
-| 1004_editable_artifact_materializer_projection | `1004 materializer projection preimage changed` |
-| 1005_existing_only_external_identity | `function "read_existing_external_identity" already exists with same argument types` |
-| 1006_human_knowledge_review_first_proposals | `knowledge_entry_apply HUMAN proposal predecessor drifted` |
-| 1007_pending_tool_model_output_sources | `column "model_output_sources" of relation "session_pending_tool_calls" already exists` |
-| 1008_session_creation_receipt | `column "creation_receipt" of relation "sessions" already exists` |
-
-The brief kept the bodies as they are. Two ways to unblock, for Native to choose: give the seven files the
-accept-the-post-image idempotent shape the 2026-10-08 sync used (pre-image or exact post-image, refuse otherwise), or
-record the new names for the old ones in `schema_migrations` in the repin's migration Job before the migrator runs
-(`migrate.ts` has no alias mechanism). The first also covers a database whose earlier fork run preceded upstream's
-later changes.
+The staging ledger itself was not read (the read-only tunnel was down); path (b) reproduces it from fork25's own
+migrator and migration set.
 
 Drain set for the repin: of upstream's 91 new migrations, one is `-- deployment-mode: maintenance`
-(`0907_subscription_connection_one_owner.sql`); the other 90 and all twelve fork files are rolling.
+(`0907_subscription_connection_one_owner.sql`); the other 90 and all fifteen fork files (0997-1011) are rolling.
 
 ## Regenerated files
 
@@ -226,13 +231,29 @@ beyond the 137 above: 3,237 files, 29,451 cases passed, 95 failed, 98 skipped; 5
 | Class | Files |
 | --- | --- |
 | Load/collateral, green alone | 3: `session-list-mine-filter`, `billing-usage-recent-postgres` (both `CONNECTION_ENDED` while a cluster-role file reset roles), `session-attach-scoped-sandbox-environment` |
-| Red on upstream `01f15f453` too | 8: `native-report-delivery`, `native-spreadsheet-transaction-order` (both need `OPENGENI_ARTIFACT_RUNTIME_MANIFEST`), `migration-0264-...`, `session-control-mega-migration`, `browser-client-surface` (also red on fork25), and `image-generation-credits`, `session-app-actions`, `workspace-deletion-cascade-postgres` (hit the 20-minute kill here; red on upstream as well) |
-| Red on fork25 with the same cases, green on upstream (fork divergence that predates this sync) | 39: `agent-widening-fences`, `connections-routes`, `external-workspace-routing-postgres`, `knowledge-preparation-postgres` (api), `personal-workspace-access`, `published-sites-postgres`, `session-agent-access`, `transcription-routes`, `voice-input-credit-billing`, `cache-notice-replay`, `codex-core-usage-attribution`, `final-reply-postgres`, `parallel-session-title-finalization`, `scheduled-task-personal-authority`, `session-usage-limit-postgres`, `steer-at-model-step-postgres`, `assistant-message-events` (plus two upstream-new cases of the same kind, below), `agent-session-commands`, `company-brain-context-selection-postgres`, `database-boundary`, `pre-knowledge-memory`, `runtime-posture-compatibility-postgres`, `session-event-writer-audit`, `session-fork-agent-parity-postgres`, `slack-bot-migration-compatibility`, `subscription-personal-acceptance-reads-postgres`, `host-messages`, and the intermediate-ledger migration tests `migration-0152`, `-0199`, `-0345`, `-0393`, `-0461`, `-0552`, `-0716`, `-0717`, `-0733`, `-0737`, `-0763`, `-0764` |
-| Merge interaction, fixed | 1: `model-catalog-scope-postgres` (upstream-new; opted into first-use membership, `3f1878689`; 3/3) |
+| Red on upstream `01f15f453` too | 7: `native-report-delivery`, `native-spreadsheet-transaction-order` (both need `OPENGENI_ARTIFACT_RUNTIME_MANIFEST`), `migration-0264-...`, `session-control-mega-migration`, `browser-client-surface` (also red on fork25), and `image-generation-credits`, `session-app-actions` (hit the 20-minute kill here; red on upstream as well) |
+| Red on fork25 with the same cases, green on upstream (fork divergence that predates this sync) | 38 (39 before fix round 1, which turned `codex-core-usage-attribution` green): `agent-widening-fences`, `connections-routes`, `external-workspace-routing-postgres`, `knowledge-preparation-postgres` (api), `personal-workspace-access`, `published-sites-postgres`, `session-agent-access`, `transcription-routes`, `voice-input-credit-billing`, `cache-notice-replay`, `final-reply-postgres`, `parallel-session-title-finalization`, `scheduled-task-personal-authority`, `session-usage-limit-postgres`, `steer-at-model-step-postgres`, `assistant-message-events` (plus two upstream-new cases of the same kind, below), `agent-session-commands`, `company-brain-context-selection-postgres`, `database-boundary`, `pre-knowledge-memory`, `runtime-posture-compatibility-postgres`, `session-event-writer-audit`, `session-fork-agent-parity-postgres`, `slack-bot-migration-compatibility`, `subscription-personal-acceptance-reads-postgres`, `host-messages`, and the intermediate-ledger migration tests `migration-0152`, `-0199`, `-0345`, `-0393`, `-0461`, `-0552`, `-0716`, `-0717`, `-0733`, `-0737`, `-0763`, `-0764` |
+| Merge interaction / fork schema, fixed | 3: `workspace-deletion-cascade-postgres` (its `workspace deletion schema` block failed on the fork's immediate receipt key, "every reference between two removed tables is a deferrable no-action check"; the whole file also hit the 20-minute kill; fixed by 1009/1010, block 2/2 alone), `codex-core-usage-attribution` (title path, 5/5), `model-catalog-scope-postgres` (upstream-new; opted into first-use membership, `3f1878689`; 3/3) |
 | Upstream-new tests that meet an existing fork divergence (no fork25 counterpart; same failure mode as fork25's red files) | 3, plus two new cases in `assistant-message-events`: `automation-steer-postgres` (5), `history-footprint-compaction` (2) and those two cases all end in `MODEL_OUTPUT_PRODUCER_INEXACT` at history append, the fork's refusal of model output over history its tests seed without source basis (2026-10-08 finding 4; `final-reply-postgres`, `steer-at-model-step-postgres` and `session-usage-limit-postgres` fail the same way on fork25); `speech-to-text-deployment` (2) reaches the fork's MAINT-P09-430 `recordTranscriptionModelCall` receipt with a stubbed db, the cause of fork25's red `voice-input-credit-billing` and `transcription-routes` |
 | Deliberate divergence from this merge | 1: `claude-size-compaction` (1): upstream expects compaction to send its exact withheld wire request; the fork gate re-projects the durable history because the test's withheld items carry no source binding (concern 2) |
 
 No file is red because the merge dropped a fork or upstream behaviour without a recorded decision.
+
+### Fix round 1 re-runs
+
+At `f54969111`, own PG17 and Temporal as above:
+
+| Command | Result |
+| --- | --- |
+| `bun run typecheck` | PASS, all projects clean |
+| `bun scripts/check-migration-schema-contract.ts --base 01f15f453` | PASS (988 migrations, 686 forward additions; 1009-1011 registered) |
+| `bun scripts/check-migration-ordinals.ts --base 01f15f453` | no fork collision (only upstream's own 0730/0871/0872 groups, as before) |
+| `check-migration-deployment-mode`, `-lock-order`, `-online-safety`, `-rls-backfills` | PASS (online-safety: constraint-validation exceptions declared for 0998, 1000, 1001 and 1007, whose adds only run on a fresh install) |
+| `release-schema-contract`, `embedding-migration-order`, `migration-ordinals`, `check-migration-deployment-mode`, `check-migration-online-safety` tests | PASS 111/111 |
+| PostgreSQL proof (a)/(b), reruns, dump comparison | PASS (Migrations) |
+| `workspace-deletion-cascade-postgres -t "workspace deletion schema"` | PASS 2/2 |
+| `existing-external-identity-key-checks` (new) | PASS 2/2; with 1011 removed: 0/2 (`40P01 deadlock detected`, fence still `FOR UPDATE`) |
+| 32 test files that touch the changed migrations, functions or usage paths (incl. `usage-event-call-attributes`, `migration-1000-...`, `model-call-source-receipts`, `session-creation-receipt`, `editable-artifact-materialization-postgres`, `external-identity-request-lock-order-postgres`, `membership-fence-foreign-key-checks`, `runtime-posture`, `unified-knowledge-postgres`, `skills-postgres`, `codex-core-usage-attribution`) | 29 green (`usage-event-call-attributes` after `f54969111` reads 1000's check from its new branch); 3 red with exactly the cases they had before (`runtime-posture-compatibility-postgres`, `session-authorization-routes`, `personal-workspace-session-tenancy`, all inherited from fork25) |
 
 ## New upstream defaults touching auth, tenancy or MCP
 
@@ -243,7 +264,7 @@ Settings are named by their environment variable; "default" is the merged `packa
 | External users (tenancy) | 0923: `external_user:` subjects (Cendra's `asUser` actors) now count as people for the inbox: session owner, else starter, else schedule owner. | On, no setting. Cendra users' questions, approvals and paused goals are recorded as inbox items instead of undelivered; pushes still find no device. |
 | External users (auth) | `stampWorkspacePersonAuthorization`: a server-verified external person (a Site's signed viewer, the sender of an accepted chat turn) reloads live access to exactly one workspace, intersected with the caller's cap; a person without a workspace grant reaches only the Personal workspace their active membership names (`externalPersonPersonalWorkspaceId`). No identity is provisioned. | Only reached from those server paths, never from headers or token claims. The fork's existing-only identity resolution and `OPENGENI_EXTERNAL_MEMBER_FIRST_USE_ENABLED=false` are unchanged. |
 | Personal workspaces | 0918: per-organization `personal_workspaces_enabled`. | Default true (a missing row means on), the pre-change behaviour. |
-| Membership fences | 0925: membership row locks in `ensure_external_identity`, `transition_session_visibility` and both `fork_session_content` overloads become `FOR NO KEY UPDATE`, so foreign-key checks are not blocked. | The fork's 1005 `read_existing_external_identity` (written before 0925) still locks the membership row `FOR UPDATE`; upstream's postflight checks only its own four routines (1003 uses `FOR KEY SHARE`). Fork owner to decide. |
+| Membership fences | 0925: membership row locks in `ensure_external_identity`, `transition_session_visibility` and both `fork_session_content` overloads become `FOR NO KEY UPDATE`, so foreign-key checks are not blocked. | Fix round 1: the fork's 1005 `read_existing_external_identity` (written before 0925, and with first-use membership off the external identity path on every `asUser` request) is moved to `FOR NO KEY UPDATE` by 1011; `packages/db/test/existing-external-identity-key-checks.test.ts` reproduces upstream's deadlock fixture through it (40P01 without 1011, both commit with it). 1003 already used `FOR KEY SHARE`. |
 | App actions | Per-message app-action grants frozen with each turn (0956/0971, `turnAppActionGrant`): only for a human session with context integrity; changes need confirmation for signed-in people. | `OPENGENI_DELEGATED_SIGN_IN_APP_ACTION_CHANGES` default false: a person not signed in through Opengeni's own managed or local session (for example an embedded or delegated human) gets `changes: "none"` app actions. |
 | Organization MCP catalog | Many new catalogued app actions (upstream's own routes). | The fork's eight host routes stay exempt (four since 2026-10-08, four added here). |
 | OAuth / connections | `exactMcpBinding`/`connectionSelection` removed: reconnect matches the stored MCP URL exactly for every profile; plain connect/add resolve the returned identity atomically. New built-in Google Drive and Google Calendar OAuth profiles. | Drive (`OPENGENI_GOOGLE_DRIVE_MCP_ENABLED`) and Calendar (`OPENGENI_GOOGLE_CALENDAR_ENABLED`) default false; `OPENGENI_GOOGLE_CONNECTOR_SETUP_ENABLED` is new and defaults **true** (Google connector setup offered in the console). |
@@ -256,16 +277,21 @@ Settings are named by their environment variable; "default" is the merged `packa
 
 ## Open risks and decisions for Native
 
-1. **Repin blocker:** seven renamed fork migrations (1000, 1002, 1004, 1005, 1006, 1007, 1008) fail when re-run on a
-   database that recorded the fork25 names (staging). Idempotent bodies or ledger aliasing in the repin Job; see
-   Migrations. The staging ledger was not read.
-2. **Compaction exact-request reuse gated.** Upstream's withheld-wire-history compaction input is used only when every
-   item is bound to a durable history row; otherwise the fork re-projects durable items so summaries keep exact
-   `summarySourceIds`. Prompt-cache reuse on compaction is lost whenever the withheld request is not attributable
-   (`claude-size-compaction` shows it). Native to confirm, or to bind the withheld items.
-3. **`subscriptionConnectionId` restored** on terminal model-call settlement: the fork's `settleCapturedModelTerminal`
-   (b465f1817, replayed onto the base) had dropped it, so subscription turns at fork25 recorded model usage without
-   the connection. The merged tree records it again (upstream's behaviour).
+1. **Renamed migrations (resolved in fix round 1):** all fifteen fork migrations follow the post-image rule; a
+   fork25-migrated database upgrades with rc 0 and converges to the fresh schema. The staging ledger was not read.
+2. **Compaction exact-request reuse is effectively off for Cendra.** Upstream's withheld-wire-history compaction
+   input is used only when every item is bound to a durable history row; otherwise the fork re-projects durable items
+   so summaries keep exact `summarySourceIds`. Per `packages/runtime/src/prepared-compaction-request.ts` (55-62) the
+   withheld request contains request-local items (tool disclosures, restored tool-search results) that never bind to
+   `session_history_items`, so the gate fails whenever lazy tools are present, which is Cendra's normal path. The cost
+   is not only the lost prompt-cache read on the compaction request: re-deriving the history diverges from the
+   ordinary request, and Claude then drops every later signed thinking block (upstream's own comment).
+   `claude-size-compaction` shows the fallback. Native to decide: bind request-local items to their producing call so
+   the exact request is attributable, or accept upstream's exact request with a weaker summary provenance.
+3. **`subscriptionConnectionId` restored** on terminal model-call settlement and (fix round 1) on session-title usage:
+   the fork's replayed helpers (b465f1817) had dropped it on both, so subscription turns at fork25 recorded model and
+   title usage without the connection. Upstream's `codex-core-usage-attribution` (red on fork25) is 5/5; an unknown
+   connection still falls back through the existing foreign-key path in `model-usage.ts`.
 4. **Tool results with a model projection** (upstream's Gmail cards): the fork's source receipt digests the exact tool
    result, while the model sees upstream's projection.
 5. **Model calls without fork receipts:** upstream's new meeting-recording transcription and image-generation credit
@@ -273,9 +299,10 @@ Settings are named by their environment variable; "default" is the merged `packa
    calls).
 6. **Organization MCP exemptions:** four more fork host routes exempted (`414d55809`); Native to confirm they should
    stay agent-unreachable.
-7. **Fork 1005 lock mode:** `read_existing_external_identity` keeps `FOR UPDATE` on the membership row where upstream's
-   0925 moved its own routines to `FOR NO KEY UPDATE`.
-8. **Inherited reds:** lint (42 findings) and format (177 files) debt from fork25; web bundle budget red on upstream
-   itself; 39 upstream test files already red on fork25 (fork divergence), unchanged here.
-9. **Host notes:** dangling `~/.bun/install/cache` symlink (Bun hangs without `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`);
+7. **Fork 1005 lock mode (resolved in fix round 1):** 1011 moves it to `FOR NO KEY UPDATE`.
+8. **Workspace deletion (resolved in fix round 1):** the receipt key is deferrable (1009/1010); upstream's
+   `workspace deletion schema` block passes 2/2.
+9. **Inherited reds:** lint (42 findings) and format (177 files) debt from fork25; web bundle budget red on upstream
+   itself; 38 upstream test files already red on fork25 (fork divergence), unchanged here.
+10. **Host notes:** dangling `~/.bun/install/cache` symlink (Bun hangs without `BUN_RUNTIME_TRANSPILER_CACHE_PATH=0`);
    the shared clone's default credential helper cannot push this fork (pushed with `gh auth git-credential`).
