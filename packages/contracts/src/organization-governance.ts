@@ -4,6 +4,7 @@ import { defineSchema } from "./define-schema";
 import { CanonicalHumanIdentityStatus } from "./canonical-human-identities";
 import {
   CreateOrganizationInvitationRequest,
+  OrganizationInvitationStatus,
   OrganizationMember,
   OrganizationMembershipRole,
   PutOrganizationWorkspaceMemberRequest,
@@ -99,6 +100,20 @@ export const HOST_IDENTITY_NOT_IN_ORGANIZATION = "HOST_IDENTITY_NOT_IN_ORGANIZAT
  * token's subject): for example not an active owner or admin, or a role rule.
  */
 export const HOST_COMMAND_ACTOR_NOT_AUTHORIZED = "HOST_COMMAND_ACTOR_NOT_AUTHORIZED";
+/** The host invitation read: the invitation is unknown or another organization's. */
+export const HOST_INVITATION_NOT_IN_ORGANIZATION = "HOST_INVITATION_NOT_IN_ORGANIZATION";
+/**
+ * A host invitation revoke refused because the invitation is still pending at
+ * another revision (`details.status` is `"pending"`): read it back and retry at
+ * its current revision.
+ */
+export const HOST_INVITATION_REVISION_CONFLICT = "HOST_INVITATION_REVISION_CONFLICT";
+/**
+ * A host invitation revoke refused because the invitation is no longer
+ * pending: `details.status` is `"accepted"`, `"revoked"` or `"expired"`. Final:
+ * no retry can revoke it.
+ */
+export const HOST_INVITATION_NOT_PENDING = "HOST_INVITATION_NOT_PENDING";
 
 const encoder = new TextEncoder();
 function boundedOpaqueText(maxBytes: number) {
@@ -271,3 +286,35 @@ export const HostOrganizationIdentity = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type HostOrganizationIdentity = z.infer<typeof HostOrganizationIdentity>;
+
+/**
+ * Host invitation read (`GET /v1/host/organizations/:id/invitations/:invitationId`):
+ * where one of the organization's invitations stands, so a host can settle a
+ * revoke it retries. A read: no `actingExternalUser`, no attribution. An
+ * invitation that is unknown or another organization's answers 404
+ * `HOST_INVITATION_NOT_IN_ORGANIZATION`, the same for both.
+ *
+ * - `status`: `expired` is a pending invitation past `expiresAt`. `accepted`,
+ *   `revoked` and `expired` are final.
+ * - `revision`: what a revoke's `expectedRevision` must equal while pending.
+ * - `acceptedMembershipId`, `acceptedAt`: the membership the acceptance made
+ *   and when, for an accepted invitation; otherwise null. An accepted
+ *   invitation never changes again.
+ *
+ * Instants are ISO-8601 UTC with millisecond precision. The invitee's email,
+ * name and workspaces are not part of it.
+ */
+export const HostOrganizationInvitation = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      id: primitives.uuid,
+      organizationId: primitives.uuid,
+      status: OrganizationInvitationStatus,
+      revision: primitives.positiveInteger,
+      acceptedMembershipId: primitives.nullableUuid,
+      acceptedAt: primitives.dateTime.nullable(),
+      expiresAt: primitives.dateTime,
+    })
+    .strict(),
+);
+export type HostOrganizationInvitation = z.infer<typeof HostOrganizationInvitation>;

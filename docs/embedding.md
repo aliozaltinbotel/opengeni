@@ -1025,6 +1025,51 @@ later; until then the route answers the same through the organization's
 member list, at one identity projection per member and one invitation page
 per 100 invitations.
 
+A host that retries an invitation revoke until it settles needs to know why a
+revoke was refused. The host's `invitations/:id/revoke` command answers `409`
+with `error.code = "conflict"` and one of two refusal codes:
+
+- `error.details.code = "HOST_INVITATION_REVISION_CONFLICT"` with
+  `details.status = "pending"`: the invitation is still pending, but at a
+  revision other than `expectedRevision`. Read it back and retry at its current
+  revision.
+- `error.details.code = "HOST_INVITATION_NOT_PENDING"` with `details.status`
+  `"accepted"`, `"revoked"` or `"expired"`: no revoke can succeed, at any
+  revision. An `accepted` invitation made a membership; offboard that member if
+  the person must go.
+
+Every other answer is the native one. An unknown invitation is `404`. An
+expired invitation revoked at its current revision is revoked (`200`), because
+its stored row is still pending. The revoke is idempotent on its
+`operationId`: replaying the same command after success returns the original
+receipt and changes nothing. The same `operationId` with another input is
+`409`.
+
+To read an invitation back, the host calls
+`GET /v1/host/organizations/:id/invitations/:invitationId`. It authenticates
+like the identity lookup (the same service token, `members:manage`, an
+administrator subject, `403 ORGANIZATION_NOT_HOST_GOVERNED`) and is a read, with
+no `decide` and no attribution row. Every answer, refusals included, is sent
+with `cache-control: no-store`. The answer (`HostOrganizationInvitation`) is:
+
+```ts
+{
+  id: string;
+  organizationId: string;
+  status: "pending" | "accepted" | "revoked" | "expired"; // expired: pending past expiresAt
+  revision: number; // a revoke's expectedRevision while pending
+  acceptedMembershipId: string | null; // set when accepted
+  acceptedAt: string | null; // set when accepted
+  expiresAt: string;
+}
+```
+
+Instants are ISO-8601 UTC with millisecond precision. The invitee's email,
+name and workspaces are left out. An invitation that does not exist and one
+that belongs to another organization both answer `404` with
+`error.details.code = "HOST_INVITATION_NOT_IN_ORGANIZATION"`. Without the
+governance port, the route does not exist.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 

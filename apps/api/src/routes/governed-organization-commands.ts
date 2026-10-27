@@ -13,10 +13,14 @@ import {
   HOST_COMMAND_PERMISSION_REQUIRED,
   HOST_COMMAND_SERVICE_TOKEN_REQUIRED,
   HOST_IDENTITY_NOT_IN_ORGANIZATION,
+  HOST_INVITATION_NOT_IN_ORGANIZATION,
+  HOST_INVITATION_NOT_PENDING,
+  HOST_INVITATION_REVISION_CONFLICT,
   HostChangeOrganizationMemberRoleRequest,
   HostInviteOrganizationMemberRequest,
   HostLookupOrganizationIdentityRequest,
   HostOrganizationIdentity,
+  HostOrganizationInvitation,
   HostOrganizationMemberLifecycleRequest,
   HostReactivateOrganizationMemberRequest,
   HostRevokeOrganizationInvitationRequest,
@@ -76,7 +80,7 @@ type HostCommandAuthority = {
 
 /**
  * Host commands for organizations an embedding host governs, and the host's
- * identity lookup. Each command runs the
+ * identity lookup and invitation read. Each command runs the
  * same membership, invitation or workspace-access operation as the native
  * route, so its receipt and lifecycle event are the native ones; the acting
  * external user is recorded next to them under the same operation id.
@@ -174,8 +178,38 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         ),
       );
     } catch (error) {
+      const refusal = await invitationRevokeRefusal(
+        deps,
+        authority,
+        { invitationId, expectedRevision: command.expectedRevision },
+        error,
+      );
+      if (refusal) throw refusal;
       rethrowHostMembershipError(error);
     }
+  });
+
+  // A read: no governed mutation to decide and no attribution to record.
+  app.get(`${base}/invitations/:invitationId`, async (context) => {
+    context.header("cache-control", "no-store");
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
+    const invitation = await readHostInvitation(
+      deps,
+      authority,
+      parsePathId(context, "invitationId"),
+    );
+    // An invitation elsewhere and an unknown one get this same answer.
+    if (!invitation)
+      throw new ApiHttpError(404, {
+        code: "not_found",
+        message: "This invitation is not in this organization.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: HOST_INVITATION_NOT_IN_ORGANIZATION },
+      });
+    return context.json(invitation);
   });
 
   app.post(`${base}/members/:membershipId/change-role`, async (context) => {
@@ -326,6 +360,78 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       });
     return context.json(HostOrganizationIdentity.parse(identity));
   });
+}
+
+/**
+ * One of the organization's invitations as the host sees it, or null when it
+ * is unknown or another organization's (the same database answer for both).
+ */
+async function readHostInvitation(
+  deps: ApiRouteDeps,
+  authority: HostCommandAuthority,
+  invitationId: string,
+): Promise<HostOrganizationInvitation | null> {
+  let invitation: OrganizationInvitation;
+  try {
+    invitation = await getOrganizationInvitationForAdministration(deps.db, {
+      organizationId: authority.organizationId,
+      actorSubjectId: authority.actorSubjectId,
+      invitationId,
+    });
+  } catch (error) {
+    if (nestedPostgresSqlState(error) === "P0002") return null;
+    rethrowHostMembershipError(error);
+  }
+  return HostOrganizationInvitation.parse({
+    id: invitation.id,
+    organizationId: invitation.organizationId,
+    status: invitation.status,
+    revision: invitation.revision,
+    acceptedMembershipId: invitation.acceptedMembershipId,
+    // The accepting write is an invitation's last: only pending ones are
+    // revoked or rebound. So an accepted invitation's update time is when it
+    // was accepted.
+    acceptedAt: invitation.status === "accepted" ? isoInstant(invitation.updatedAt) : null,
+    expiresAt: isoInstant(invitation.expiresAt),
+  });
+}
+
+/**
+ * Why the database refused a host revoke, when it was the invitation's state:
+ * the native refusal is the same 409 for a stale revision and for an
+ * invitation no longer pending (the revision check runs first, and accepting
+ * or revoking bumps the revision), so the invitation is read back. Null keeps
+ * the native refusal: any other error, a failed read-back, or a pending
+ * invitation still at the expected revision.
+ */
+async function invitationRevokeRefusal(
+  deps: ApiRouteDeps,
+  authority: HostCommandAuthority,
+  revoke: { invitationId: string; expectedRevision: number },
+  error: unknown,
+): Promise<ApiHttpError | null> {
+  const sqlState = nestedPostgresSqlState(error);
+  if (sqlState !== "40001" && sqlState !== "55000") return null;
+  const current = await readHostInvitation(deps, authority, revoke.invitationId).catch(() => null);
+  if (!current) return null;
+  if (current.status === "pending" && current.revision === revoke.expectedRevision) return null;
+  const pending = current.status === "pending";
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message: pending
+      ? "This invitation changed; read it back and retry at its current revision."
+      : "This invitation is no longer pending.",
+    retryable: false,
+    outcomeUnknown: false,
+    details: {
+      code: pending ? HOST_INVITATION_REVISION_CONFLICT : HOST_INVITATION_NOT_PENDING,
+      status: current.status,
+    },
+  });
+}
+
+function isoInstant(value: string): string {
+  return new Date(value).toISOString();
 }
 
 async function transitionMember(
