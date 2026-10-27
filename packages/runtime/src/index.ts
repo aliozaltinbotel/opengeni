@@ -1,4 +1,5 @@
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
+import type { SessionToolFamily } from "@opengeni/contracts/organization-session-policy";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
 import { sharedKnowledgeGuidance } from "./agent-instructions/modules/knowledge";
 import { measureMcpPhase } from "@opengeni/observability";
@@ -2570,6 +2571,13 @@ export type BuildAgentOptions = {
    */
   codemodeAvailable?: boolean;
   /**
+   * Generic tool families the organization's session policy removes. `shell`
+   * drops the sandbox shell and file-editing capabilities; `codemode` refuses
+   * a Codemode bearer (callers mint none). First-party and function tools of
+   * every denied family are removed by the caller before they reach here.
+   */
+  deniedSessionToolFamilies?: readonly SessionToolFamily[];
+  /**
    * Whether this attempt offers the Jev-backed `code_search` tool. Adds one
    * short directive so the agent starts code investigation with it.
    */
@@ -2961,7 +2969,15 @@ export function appendCodemodeInstructions(composed: string, codemodeAvailable: 
 }
 
 function codemodeIsAvailable(options: BuildAgentOptions): boolean {
+  if (sessionToolFamilyDenied(options, "codemode")) return false;
   return options.codemodeAvailable ?? Boolean(options.codemodeTokenSeed);
+}
+
+function sessionToolFamilyDenied(
+  options: Pick<BuildAgentOptions, "deniedSessionToolFamilies">,
+  family: SessionToolFamily,
+): boolean {
+  return options.deniedSessionToolFamilies?.includes(family) === true;
 }
 
 const GIT_BINDING_DISCOVERY_DIRECTIVE =
@@ -3279,6 +3295,12 @@ export function buildOpenGeniAgent(
   }
   if (options.codemodeAvailable === false && options.codemodeTokenSeed) {
     throw new Error("codemodeAvailable cannot be false when a Codemode token seed is supplied");
+  }
+  if (
+    (sessionToolFamilyDenied(options, "codemode") || sessionToolFamilyDenied(options, "shell")) &&
+    (options.codemodeTokenSeed || options.codemodeAvailable === true)
+  ) {
+    throw new Error("A Codemode bearer cannot be supplied when the session policy denies Codemode");
   }
   const artifactRuntimeAvailable = artifactRuntimeIsAvailable(options);
   const editableArtifactToolsAvailable = hasCanonicalEditableArtifactToolSurface(
@@ -3632,6 +3654,9 @@ export function buildOpenGeniAgent(
         ? { onToolCancellationFence: options.onToolCancellationFence }
         : {}),
       ...(options.secretResolver ? { secretResolver: options.secretResolver } : {}),
+      ...(options.deniedSessionToolFamilies?.length
+        ? { deniedSessionToolFamilies: options.deniedSessionToolFamilies }
+        : {}),
     }),
   });
   agentSkillSelections.set(agent, skillComposition.selections);
@@ -4974,6 +4999,8 @@ export function buildAgentCapabilities(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    /** The session policy's removed families; `shell` drops the shell and filesystem capabilities. */
+    deniedSessionToolFamilies?: readonly SessionToolFamily[];
   } = {},
 ): ReturnType<typeof Capabilities.default> {
   return buildAgentCapabilitiesFromComposition(
@@ -5003,6 +5030,7 @@ function buildAgentCapabilitiesFromComposition(
     turnCancellationSignal?: AbortSignal;
     onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
     secretResolver?: SecretResolver | null;
+    deniedSessionToolFamilies?: readonly SessionToolFamily[];
   },
 ): ReturnType<typeof Capabilities.default> {
   // A secret resolver needs the controller's wrappers even without a turn
@@ -5043,7 +5071,10 @@ function buildAgentCapabilitiesFromComposition(
   if (options.structuredToolTransport === false || options.authorizeAttemptExecution) {
     neutralizeStructuredToolTransport(filesystemCapability);
   }
-  const caps: ReturnType<typeof Capabilities.default> = [
+  // A session policy without the shell family keeps no sandbox shell or file
+  // editing: neither capability is attached, so none of their tools exist.
+  const shellDenied = sessionToolFamilyDenied(options, "shell");
+  const sandboxCapabilities: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
     shell({
       // The SDK normally renders every shell error into model-facing text.
@@ -5076,6 +5107,7 @@ function buildAgentCapabilitiesFromComposition(
       ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }),
     }),
   ];
+  const caps: ReturnType<typeof Capabilities.default> = shellDenied ? [] : sandboxCapabilities;
   if (options.workspaceSkillPaths?.length) {
     caps.push(
       workspaceSkills(

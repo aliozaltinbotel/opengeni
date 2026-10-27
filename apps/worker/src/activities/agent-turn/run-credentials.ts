@@ -1,3 +1,8 @@
+import {
+  sessionToolFamilyGate,
+  type SessionToolFamilyGate,
+} from "@opengeni/contracts/organization-session-policy";
+import { codemodeDeliveryForTurn } from "./session-tool-families";
 import { getSessionRootId, resolvePrReviewGitCredential } from "@opengeni/db";
 import { prReviewRegistrationIdFromCredentialBinding } from "@opengeni/core";
 import {
@@ -81,6 +86,8 @@ import type {
 } from "./turn-context";
 
 export type PrepareRunCredentialsDeps = {
+  /** The organization's session policy; absent means nothing is denied. */
+  sessionToolFamilies?: SessionToolFamilyGate;
   localMcpServerIds?: readonly string[];
   turnTools: ReturnType<typeof withFirstPartyTools>;
   input: RunAgentTurnInput;
@@ -396,7 +403,10 @@ async function prepareRunCredentialsObserved(
     waitForTurnOperation(
       sandboxEnvironmentForRun(sandboxEnvironmentSettings, platformGitResources, {
         skipGitHubToken: activeSandboxBackend === "selfhosted",
-        codemodeDelivery: activeSandboxBackend === "selfhosted" ? "transient_exec" : "managed_file",
+        codemodeDelivery: codemodeDeliveryForTurn(
+          activeSandboxBackend,
+          deps.sessionToolFamilies ?? sessionToolFamilyGate(null),
+        ),
         deferGitHubToken: activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
         scope: connectionScope,
         ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),

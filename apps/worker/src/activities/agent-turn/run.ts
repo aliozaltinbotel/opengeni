@@ -151,6 +151,7 @@ import {
 } from "./xai-core";
 import type { CoreSubscriptionRequests } from "./subscription-core-requests";
 import { prepareRunCredentials } from "./run-credentials";
+import { readTurnSessionToolFamilyGate } from "./session-tool-families";
 import { prepareTurnToolPolicy, prepareTurnToolRuntime } from "./tool-environment";
 import { applyTurnGitHubRepositoryBindings } from "./github-repository-bindings";
 import { dropUnavailableOptionalRepositories } from "./optional-repositories";
@@ -1631,7 +1632,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             undefined,
           );
 
+          // The organization's session policy, read once for this attempt: its
+          // denied tool families never reach the catalog or a Codemode bearer.
+          const sessionToolFamilies = await readTurnSessionToolFamilyGate(db, input.accountId);
           const runCredentials = await prepareRunCredentials({
+            sessionToolFamilies,
             turnTools,
             localMcpServerIds: installedApiIntegrations.map((integration) => integration.serverId),
             input,
@@ -1801,6 +1806,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             },
           });
           const toolRuntime = await prepareTurnToolRuntime({
+            sessionToolFamilies,
             independentSessionTitles: !!startSessionTitleWorkflow,
             vaultAccess,
             fetchKnowledgeSource: sourceActivities.runKnowledgeSourceSyncBatch,
@@ -1856,6 +1862,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           } = toolRuntime;
 
           const agentBuildInput = {
+            sessionToolFamilies,
             vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
             nativeSkillArtifactSources: toolRuntime.nativeSkillArtifactSources,

@@ -1,3 +1,4 @@
+import type { SessionToolFamilyGate } from "@opengeni/contracts/organization-session-policy";
 import {
   getWorkspaceVideoGenerationPolicy,
   ImageGenerationCreditError,
@@ -97,6 +98,8 @@ import {
 } from "./secret-resolver";
 
 export type BuildTurnAgentDeps = {
+  /** The organization's session policy; absent means nothing is denied. */
+  sessionToolFamilies?: SessionToolFamilyGate;
   /** NPD-013: the in-attempt fallback's build does not ask for the session title a second time (fallbackRunInputs). */
   suppressMissingSessionTitleHint?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
@@ -853,6 +856,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
         ...(sandboxCodemodeToken ? { codemodeAvailable: true } : {}),
+        ...(deps.sessionToolFamilies?.deniedFamilies.size
+          ? { deniedSessionToolFamilies: [...deps.sessionToolFamilies.deniedFamilies] }
+          : {}),
         ...(codeSearchAvailable ? { codeSearchAvailable: true } : {}),
         // Managed boxes receive the bearer through their protected per-session
         // token file. Connected Machines use transient per-exec delivery above,
