@@ -119,6 +119,26 @@ export async function ensureGovernedOrganizationSessionPolicy(
   });
 }
 
+/**
+ * One page of organizations that carry an external identity source, in id
+ * order (managed_accounts is a deployment-wide runtime table). For a pass
+ * that asks a host port which of them it governs.
+ */
+export async function listManagedAccountExternalSources(
+  db: Database,
+  input: { after: string | null; limit: number },
+): Promise<{ id: string; externalSource: string }[]> {
+  const rows = await rawRows<{ id: string; external_source: string }>(
+    db,
+    sql`select id, external_source from managed_accounts
+      where external_source is not null
+        and (${input.after}::uuid is null or id > ${input.after}::uuid)
+      order by id
+      limit ${input.limit}`,
+  );
+  return rows.map((row) => ({ id: row.id, externalSource: row.external_source }));
+}
+
 /** Whether 1018's routine exists and the runtime may call it. */
 export async function hostSessionPolicyWriteGranted(
   db: Pick<Database, "execute">,

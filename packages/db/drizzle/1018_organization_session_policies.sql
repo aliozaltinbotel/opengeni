@@ -1,4 +1,5 @@
 -- deployment-mode: rolling
+-- online-safety-exception: unbatched-data: one governed-default row per organization that already ran a host command; attributions are a few rows per organization
 -- One session policy per organization: whether people may attach files in its
 -- workspaces' sessions, and which generic tool families (shell, codemode,
 -- browser, computerUse) its sessions never receive. No row means no
@@ -33,6 +34,7 @@
 -- rolling gap. Ordinals 1016 and 1017 belong to the host identity lookup and
 -- host owner (sibling change of the same bundle).
 SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '5min';
 
 CREATE TABLE organization_session_policies (
   account_id uuid PRIMARY KEY REFERENCES managed_accounts (id) ON DELETE CASCADE,
@@ -53,6 +55,26 @@ CREATE TABLE organization_session_policies (
   updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
   CHECK ((source = 'host') = (last_operation_id IS NOT NULL))
 );
+-- Backfill. Whether a host governs an organization is the host's answer at
+-- run time (OrganizationGovernancePort.governs), not a fact in this database,
+-- so the migration stores the governed default only for organizations the
+-- database itself shows governed: those that already ran a host command,
+-- which the API accepts only for a governed organization. The API stores it
+-- for every other governed organization when it starts with its port bound
+-- (storeGovernedOrganizationSessionPolicyDefaults). The row is the exact
+-- governed default and only narrows; the copy is idempotent, and runs before
+-- this table enables RLS.
+-- backfill:begin
+ALTER TABLE organization_host_command_attributions NO FORCE ROW LEVEL SECURITY;
+INSERT INTO organization_session_policies (
+  account_id, attachments, tool_family_mode, tool_families, source
+)
+SELECT DISTINCT attribution.account_id, 'disabled', 'deny',
+  ARRAY['shell', 'codemode', 'browser', 'computerUse']::text[], 'governed_default'
+FROM organization_host_command_attributions attribution
+ON CONFLICT (account_id) DO NOTHING;
+ALTER TABLE organization_host_command_attributions FORCE ROW LEVEL SECURITY;
+-- backfill:end
 ALTER TABLE organization_session_policies ENABLE ROW LEVEL SECURITY;
 ALTER TABLE organization_session_policies FORCE ROW LEVEL SECURITY;
 CREATE POLICY account_read ON organization_session_policies
@@ -159,22 +181,29 @@ BEGIN
   FROM organization_session_policies p
   WHERE p.account_id = p_account_id
   FOR UPDATE;
-  -- 0 means "no host policy yet": nothing stored, or only the governed
-  -- default, which the fork stores on its own whenever it sees the
-  -- organization governed (including just before this command).
-  IF coalesce(current_revision, 0) <> p_expected_revision
-    AND NOT (p_expected_revision = 0 AND current_source = 'governed_default')
-  THEN
-    RAISE EXCEPTION 'organization session policy revision is not the expected one'
-      USING ERRCODE = 'OGSP2';
-  END IF;
   IF current_revision IS NULL THEN
+    -- The runtime may store the governed default at the same moment (it holds
+    -- no advisory lock): whoever inserts first wins, and the row is re-read.
     INSERT INTO organization_session_policies (
       account_id, attachments, tool_family_mode, tool_families, source
     ) VALUES (
       p_account_id, 'disabled', 'deny',
       ARRAY['shell', 'codemode', 'browser', 'computerUse']::text[], 'governed_default'
-    );
+    )
+    ON CONFLICT (account_id) DO NOTHING;
+    SELECT p.revision, p.source INTO current_revision, current_source
+    FROM organization_session_policies p
+    WHERE p.account_id = p_account_id
+    FOR UPDATE;
+  END IF;
+  -- 0 means "no host policy yet": nothing stored, or only the governed
+  -- default, which the fork stores on its own whenever it sees the
+  -- organization governed (including just before this command).
+  IF current_revision <> p_expected_revision
+    AND NOT (p_expected_revision = 0 AND current_source = 'governed_default')
+  THEN
+    RAISE EXCEPTION 'organization session policy revision is not the expected one'
+      USING ERRCODE = 'OGSP2';
   END IF;
   UPDATE organization_session_policies p SET
     attachments = p_attachments,

@@ -144,6 +144,8 @@ export function deniedSessionToolFamilies(policy: OrganizationSessionPolicy): Se
   );
 }
 
+const INTERACTION_MODEL_PREFIX = "interaction__";
+
 /** First-party tools that move the session's compute or add a machine. */
 const COMPUTE_ROUTING_TOOLS: ReadonlySet<string> = new Set([
   "sandboxes_list",
@@ -167,6 +169,9 @@ const COMPUTER_USE_TOOLS: ReadonlySet<string> = new Set([
  */
 export function sessionToolFamilyOf(toolName: string): SessionToolFamily | null {
   if (isCuaDesktopModelTool(toolName)) return "computerUse";
+  // In-process interaction tools reach the model as `interaction__<tool>`.
+  if (toolName.startsWith(INTERACTION_MODEL_PREFIX))
+    return sessionToolFamilyOf(toolName.slice(INTERACTION_MODEL_PREFIX.length));
   if (COMPUTER_USE_TOOLS.has(toolName)) return "computerUse";
   if (COMPUTE_ROUTING_TOOLS.has(toolName)) return "shell";
   const firstParty = (FIRST_PARTY_MCP_TOOL_CAPABILITIES as Record<string, string | undefined>)[

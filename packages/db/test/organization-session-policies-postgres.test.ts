@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { sql } from "drizzle-orm";
 import type { OrganizationSessionPolicy } from "@opengeni/contracts/organization-session-policy";
 import {
@@ -218,5 +219,70 @@ describe("the host's routine", () => {
       }),
     ).rejects.toBeInstanceOf(SessionPolicyRevisionConflictError);
     expect((await getOrganizationSessionPolicy(client.db, id))?.revision).toBe(2);
+  });
+});
+
+describe("the host routine racing the runtime's default", () => {
+  test("a default stored at the same moment never makes the host write fail", async () => {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const id = await organization();
+      const operationId = crypto.randomUUID();
+      await recordOrganizationHostCommandAttribution(client.db, {
+        organizationId: id,
+        operationId,
+        mutation: "session_policy.update",
+        serviceSubjectId: SERVICE_SUBJECT,
+        serviceInitiatorSubjectId: "test-host:governance",
+        actingExternalUser: { source: "test-host:user", externalId: "staff-1" },
+      });
+      const [, written] = await Promise.all([
+        ensureGovernedOrganizationSessionPolicy(client.db, id).catch(() => null),
+        putHostOrganizationSessionPolicy(client.db, {
+          organizationId: id,
+          subjectId: SERVICE_SUBJECT,
+          operationId,
+          policy: OPEN,
+          expectedRevision: 0,
+        }),
+      ]);
+      expect(written).toMatchObject({ replay: false, stored: { source: "host", revision: 2 } });
+    }
+  });
+});
+
+describe("1018's backfill", () => {
+  test("stores the default, once, for organizations that already ran a host command", async () => {
+    const commanded = await organization();
+    const untouched = await organization();
+    await recordOrganizationHostCommandAttribution(client.db, {
+      organizationId: commanded,
+      operationId: crypto.randomUUID(),
+      mutation: "invitation.create",
+      serviceSubjectId: SERVICE_SUBJECT,
+      serviceInitiatorSubjectId: "test-host:governance",
+      actingExternalUser: { source: "test-host:user", externalId: "staff-1" },
+    });
+    const migration = readFileSync(
+      new URL("../drizzle/1018_organization_session_policies.sql", import.meta.url),
+      "utf8",
+    );
+    const backfill = migration.split("-- backfill:begin")[1]!.split("-- backfill:end")[0]!;
+    for (let run = 0; run < 2; run += 1) {
+      await shared.admin.begin(async (tx) => {
+        await tx.unsafe(`SET LOCAL search_path TO "${shared.schema}", public`);
+        await tx.unsafe(backfill);
+      });
+    }
+    expect(await getOrganizationSessionPolicy(client.db, commanded)).toMatchObject({
+      source: "governed_default",
+      revision: 1,
+      policy: { attachments: "disabled" },
+    });
+    expect(await getOrganizationSessionPolicy(client.db, untouched)).toBeNull();
+    // FORCE RLS is back on the attributions table.
+    const [attributions] = await shared.admin<{ forced: boolean }[]>`
+      select relforcerowsecurity as forced from pg_class
+      where oid = ${`"${shared.schema}".organization_host_command_attributions`}::regclass`;
+    expect(attributions?.forced).toBe(true);
   });
 });

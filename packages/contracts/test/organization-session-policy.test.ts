@@ -88,6 +88,10 @@ describe("organization session policy", () => {
     expect(sessionToolFamilyOf("browser_open")).toBe("browser");
     expect(sessionToolFamilyOf("interaction_discover")).toBe("browser");
     expect(sessionToolFamilyOf("computer_act")).toBe("computerUse");
+    // The in-process interaction tools' model names.
+    expect(sessionToolFamilyOf("interaction__browser_open")).toBe("browser");
+    expect(sessionToolFamilyOf("interaction__computer_act")).toBe("computerUse");
+    expect(sessionToolFamilyOf("interaction__knowledge_search")).toBeNull();
     expect(sessionToolFamilyOf("excel_run")).toBe("computerUse");
     expect(sessionToolFamilyOf("connected_machine_enable_screen_control")).toBe("computerUse");
     for (const tool of CUA_DESKTOP_TOOLS)
