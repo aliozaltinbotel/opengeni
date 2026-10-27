@@ -13,7 +13,7 @@ import {
   type ReactNode,
 } from "react";
 
-import { BrandMark, Wordmark } from "@opengeni/react/app/components/brand-mark";
+import { BrandMark, Wordmark, useProductName } from "@opengeni/react/app/components/brand-mark";
 import { Button } from "@opengeni/react/ui/button";
 import { ContentPage } from "@opengeni/react/ui/content-layout";
 import { PageHeader, PageHeaderStyleProvider } from "@opengeni/react/ui/page-header";
@@ -230,6 +230,7 @@ function SettingsRail({
   onNavigate?: () => void;
 }) {
   const ref = useRef<HTMLElement>(null);
+  const productName = useProductName();
   const [query, setQuery] = useState("");
   const entries = useMemo(() => settingsSearchEntries(sections), [sections]);
   const results = useMemo(() => searchSettings(entries, query), [entries, query]);
@@ -304,7 +305,7 @@ function SettingsRail({
           ) : (
             <LinkShell
               link={home}
-              aria-label="Opengeni home"
+              aria-label={`${productName} home`}
               className="flex h-8 w-fit shrink-0 items-center gap-2 rounded-md px-1.5 text-fg outline-none focus-visible:ring-2 focus-visible:ring-brand/55"
             >
               <BrandMark className="w-5" />

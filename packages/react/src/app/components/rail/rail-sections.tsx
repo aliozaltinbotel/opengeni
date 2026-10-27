@@ -4,7 +4,7 @@
 import { ChevronsLeftIcon, ChevronsRightIcon, SquarePenIcon, XIcon } from "lucide-react";
 import { createContext, useContext, type ReactNode } from "react";
 
-import { BrandMark, Wordmark } from "../brand-mark";
+import { BrandMark, Wordmark, useProductName } from "../brand-mark";
 import { useRail } from "./rail-context";
 import { NewSessionLink } from "./session-list";
 import { Button } from "../../../ui/button";
@@ -65,6 +65,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
   const rail = useRail();
   const { switcher } = useContext(SessionShellSlotsContext);
   const sidebarKeys = useActionShortcut("view.sidebar");
+  const productName = useProductName();
   // Without the brand (an embed, or the macOS app whose window controls sit
   // in the row), the row holds just the collapse toggle, at its end.
   const brand = useSessionUiFeature("brand");
@@ -111,7 +112,7 @@ export function RailHeader({ showSwitcher = true }: { showSwitcher?: boolean }) 
             to="/workspaces/$workspaceId/sessions"
             params={{ workspaceId: rail.workspaceId }}
             className="flex h-8 shrink-0 items-center gap-2 rounded-md px-1.5 text-fg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-            aria-label="Opengeni home"
+            aria-label={`${productName} home`}
           >
             <BrandMark className="w-5" />
             {!rail.collapsed ? <Wordmark className="text-[18px]" /> : null}

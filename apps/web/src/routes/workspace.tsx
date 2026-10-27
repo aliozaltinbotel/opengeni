@@ -26,7 +26,8 @@ import { AppShotCoordinator } from "@opengeni/react/app/components/desktop/app-s
 import { RailShell } from "@/components/rail/rail-shell";
 import { webSecretsUi } from "@opengeni/react/app/lib/secrets-ui";
 import { workspaceManagementLocation } from "@opengeni/react/app/lib/workspace-management-location";
-import { EXTENSION_SETTINGS_PATHS } from "@/host-extension/registry";
+import { EXTENSION_SETTINGS_PATHS, hostExtension } from "@/host-extension/registry";
+import { HostExtensionProviders } from "@/host-extension/providers";
 import { OrganizationWorkspaceAdministrationBoundary } from "@/components/settings/organization-workspace-administration";
 import { Button } from "@opengeni/react/ui/button";
 import { WorkspaceTenantBoundary } from "@opengeni/react/app/components/workspace-tenant-boundary";
@@ -512,6 +513,7 @@ function AuthorizedWorkspaceShell({
     <OpenGeniProvider
       client={context.client}
       workspaceId={workspaceId}
+      productName={hostExtension.productName}
       // The console's API adapter owns update notices and guarded page reloads.
       onWorkspaceControlEvent={(event) => {
         if (workspaceControlEventInvalidatesWorkspace(event)) {
@@ -538,24 +540,55 @@ function AuthorizedWorkspaceShell({
               extensionSettingsPaths={EXTENSION_SETTINGS_PATHS}
             >
               <ActionsProvider>
-                {managementLocation ? (
-                  <WorkspaceManagementShell
-                    workspaceId={workspaceId}
-                    workspaceName={activeWorkspace?.name}
-                    organizationName={organizationName}
-                    location={managementLocation}
-                  >
-                    {children}
-                  </WorkspaceManagementShell>
-                ) : (
-                  <RailShell>{children}</RailShell>
-                )}
+                <WorkspaceShells
+                  workspaceId={workspaceId}
+                  workspaceName={activeWorkspace?.name}
+                  organizationName={organizationName}
+                  managementLocation={managementLocation}
+                >
+                  {children}
+                </WorkspaceShells>
               </ActionsProvider>
             </RailProvider>
           </ConsoleMeetingRecorderProvider>
         </DesktopThisComputerProvider>
       </SecretsUiProvider>
     </OpenGeniProvider>
+  );
+}
+
+/**
+ * The settings shell on a settings page, else the rail shell, inside the host
+ * extension's providers so its pages and nav can read them in either mode.
+ */
+export function WorkspaceShells({
+  workspaceId,
+  workspaceName,
+  organizationName,
+  managementLocation,
+  children,
+}: {
+  workspaceId: string;
+  workspaceName: string | undefined;
+  organizationName: string;
+  managementLocation: ReturnType<typeof workspaceManagementLocation>;
+  children: ReactNode;
+}) {
+  return (
+    <HostExtensionProviders workspaceId={workspaceId}>
+      {managementLocation ? (
+        <WorkspaceManagementShell
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          organizationName={organizationName}
+          location={managementLocation}
+        >
+          {children}
+        </WorkspaceManagementShell>
+      ) : (
+        <RailShell>{children}</RailShell>
+      )}
+    </HostExtensionProviders>
   );
 }
 

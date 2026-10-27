@@ -61,6 +61,20 @@ export type HostExtension = Readonly<{
   }>;
 }>;
 
+/**
+ * The workspaces a host's `workspaceFilter` keeps, in order. `currentWorkspaceId`
+ * (the workspace the person is in) is kept regardless, so a picker still
+ * shows where they are. Without a filter the list is returned as it is.
+ */
+export function hostFilteredWorkspaces<T extends Readonly<{ id: string; accountId: string }>>(
+  workspaces: T[],
+  filter: HostExtension["workspaceFilter"],
+  currentWorkspaceId?: string | null,
+): T[] {
+  if (!filter) return workspaces;
+  return workspaces.filter((workspace) => workspace.id === currentWorkspaceId || filter(workspace));
+}
+
 /** The stock console's extension: no pages, no nav, nothing hidden. */
 export const EMPTY_HOST_EXTENSION: HostExtension = { id: "none" };
 

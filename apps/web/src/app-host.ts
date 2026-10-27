@@ -22,6 +22,8 @@ configurePageAppHost({
   hiddenNativeDestinations: hostExtension.hiddenNativeDestinations,
   brand: hostExtension.brand,
   productName: hostExtension.productName,
+  workspaceFilter: hostExtension.workspaceFilter,
+  lifecycle: hostExtension.lifecycle,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({

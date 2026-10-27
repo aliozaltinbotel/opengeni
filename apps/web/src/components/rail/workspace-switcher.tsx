@@ -39,6 +39,8 @@ import {
 import { cn } from "@opengeni/react/app/lib/utils";
 import { administersOrganization } from "@opengeni/react/app/lib/workspaces";
 import type { Workspace } from "@opengeni/react/app/types";
+import { hostFilteredWorkspaces } from "@opengeni/react/app/host-extension";
+import { hostExtension } from "@/host-extension/registry";
 
 /** The switcher menu's width; surface and rows are the one menu spec (menu-styles.ts). */
 export const SWITCHER_MENU_CLASS = "w-72 max-w-[calc(100vw-2rem)]";
@@ -201,10 +203,15 @@ export function WorkspaceSwitcherMenu(props: {
     context.workspaces.find((workspace) => workspace.id === props.workspaceId) ?? null;
   const activeAccountId =
     activeWorkspace?.accountId ?? context.accessContext.defaultAccountId ?? null;
-  // A Personal workspace the organization turned off is not offered, unless
-  // a link brought the person into it.
+  // A Personal workspace the organization turned off is not offered, nor one
+  // the host extension's filter leaves out, unless the person is in it.
   const workspaces = useMemo(
-    () => navigableWorkspaces(context.workspaces, context.managedSelfContext, props.workspaceId),
+    () =>
+      hostFilteredWorkspaces(
+        navigableWorkspaces(context.workspaces, context.managedSelfContext, props.workspaceId),
+        hostExtension.workspaceFilter,
+        props.workspaceId,
+      ),
     [context.workspaces, context.managedSelfContext, props.workspaceId],
   );
   const orgs = organizationsForSubject(t, context.accessContext, workspaces);

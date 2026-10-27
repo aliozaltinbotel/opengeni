@@ -49,6 +49,7 @@ import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
 import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
+import { afterHostWorkspaceSwitch } from "@/host-extension/lifecycle";
 import {
   workspaceSwitchTarget,
   type WorkspaceManagementLocation,
@@ -342,18 +343,21 @@ export function useSettingsRail(input: {
     return current;
   }
 
+  /** Waits for the host extension's onWorkspaceSwitch hook (bounded), as the main rail does. */
   function openWorkspace(nextWorkspaceId: string) {
-    context.resetSessionView();
-    if (location.kind === "account") {
-      void navigate({
-        to: "/workspaces/$workspaceId/settings",
-        params: { workspaceId: nextWorkspaceId },
-      });
-      return;
-    }
-    void navigate(
-      workspaceSwitchTarget(switchLocation(location, nextWorkspaceId), nextWorkspaceId),
-    );
+    afterHostWorkspaceSwitch(input.workspaceId ?? nextWorkspaceId, nextWorkspaceId, () => {
+      context.resetSessionView();
+      if (location.kind === "account") {
+        void navigate({
+          to: "/workspaces/$workspaceId/settings",
+          params: { workspaceId: nextWorkspaceId },
+        });
+        return;
+      }
+      void navigate(
+        workspaceSwitchTarget(switchLocation(location, nextWorkspaceId), nextWorkspaceId),
+      );
+    });
   }
 
   const workspaceName = managedWorkspace?.name ?? workspace?.name ?? null;

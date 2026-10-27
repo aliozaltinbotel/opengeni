@@ -27,6 +27,8 @@ import { useSessionUiFeature } from "../session-ui-features";
 import { useUiEventTarget } from "../ui-events";
 import { t } from "../console-text";
 import { isPersonalWorkspace, navigableWorkspaces } from "../managed-self-context";
+import { hostFilteredWorkspaces } from "../../host-extension";
+import { useAppHost } from "../app-host";
 import { workspacesByOrganization } from "../org";
 import { hasWorkspacePermission } from "../permissions";
 import { readChatDirectory, recordChatVisit } from "./chat-directory";
@@ -165,6 +167,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
   const platform = useMemo(() => currentPlatform(), []);
   const workspaceId = rail.workspaceId;
   const subjectId = app.accessContext.subjectId;
+  const workspaceFilter = useAppHost().workspaceFilter;
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const routeChatId = /\/sessions\/([^/]+)/.exec(pathname)?.[1] ?? null;
   const routeSiteId = /\/sites\/([^/]+)/.exec(pathname)?.[1] ?? null;
@@ -174,13 +177,18 @@ export function ActionsProvider(props: { children: ReactNode }) {
       : null;
 
   // Every workspace open to the person, in the workspace picker's order (so
-  // not a Personal one the organization turned off, unless the person is in it).
+  // not a Personal one the organization turned off, nor one the host
+  // extension's filter leaves out, unless the person is in it).
   const workspaces = useMemo<WorkspaceChoice[]>(
     () =>
       workspacesByOrganization(
         t,
         app.accessContext,
-        navigableWorkspaces(app.workspaces, app.managedSelfContext, workspaceId),
+        hostFilteredWorkspaces(
+          navigableWorkspaces(app.workspaces, app.managedSelfContext, workspaceId),
+          workspaceFilter,
+          workspaceId,
+        ),
       ).flatMap((group) =>
         group.workspaces.map((workspace) => ({
           id: workspace.id,
@@ -189,7 +197,7 @@ export function ActionsProvider(props: { children: ReactNode }) {
           personal: isPersonalWorkspace(workspace, app.managedSelfContext),
         })),
       ),
-    [app.accessContext, app.workspaces, app.managedSelfContext, workspaceId],
+    [app.accessContext, app.workspaces, app.managedSelfContext, workspaceId, workspaceFilter],
   );
   // The same rule as the fork button under a message.
   const canForkCurrentChat =

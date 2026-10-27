@@ -88,6 +88,15 @@ mock.module("@opengeni/react/app/app-context", () => ({
   }),
 }));
 
+// A host extension's workspace filter, changed by a test; it keeps every workspace by default.
+let keepWorkspace: (candidate: { id: string; accountId: string }) => boolean = () => true;
+mock.module("@opengeni/web-host-extension", () => ({
+  default: {
+    id: "fixture",
+    workspaceFilter: (candidate: { id: string; accountId: string }) => keepWorkspace(candidate),
+  },
+}));
+
 GlobalRegistrator.register({ url: "http://homeserver/workspaces/ws-design/sessions" });
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 const { WorkspaceSwitcherMenu } = await import("./workspace-switcher");
@@ -99,6 +108,7 @@ afterAll(() => {
 beforeEach(() => {
   authMode = "managedSession";
   singleOrganization = false;
+  keepWorkspace = () => true;
   createRequests.length = 0;
   localStorage.clear();
   document.body.replaceChildren();
@@ -262,6 +272,27 @@ describe("workspace picker", () => {
       expect(picker.selected).toEqual(["ws-created"]);
     } finally {
       await picker.unmount();
+    }
+  });
+
+  test("leaves out the workspaces a host extension filters out, except the one the person is in", async () => {
+    keepWorkspace = (candidate) => candidate.accountId === acme && candidate.id !== "ws-production";
+    const picker = await renderPicker("ws-design");
+    try {
+      const names = items().map((row) => row.textContent ?? "");
+      expect(names.some((name) => name.includes("Design preview"))).toBe(true);
+      expect(names.some((name) => name.includes("Personal workspace"))).toBe(true);
+      expect(menuText()).not.toContain("Production");
+      expect(menuText()).not.toContain("Launch room");
+      expect(menuText()).not.toContain("Northwind Labs");
+    } finally {
+      await picker.unmount();
+    }
+    const inFiltered = await renderPicker("ws-production");
+    try {
+      expect(item("Production")).toBeDefined();
+    } finally {
+      await inFiltered.unmount();
     }
   });
 });

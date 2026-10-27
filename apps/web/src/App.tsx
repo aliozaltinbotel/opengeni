@@ -134,6 +134,7 @@ import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/d
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 import { HIDDEN_NATIVE_DESTINATIONS, hostExtension } from "@/host-extension/registry";
 import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
+import { hostFilteredWorkspaces } from "@opengeni/react/app/host-extension";
 import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
 import { buildHostExtensionWorkspaceRoutes } from "@/host-extension/routes";
 
@@ -1180,11 +1181,11 @@ function RootIndexRoute() {
     rememberedWorkspaceId: readLastWorkspaceId(
       workspaceNavigationPreferenceStorageId(context.accessContext.subjectId),
     ),
-    // Never land in a Personal workspace the organization turned off.
-    workspaces: navigableWorkspaces(
-      context.workspaces,
-      context.managedSelfContext,
-      requestedWorkspaceId,
+    // Never land in a Personal workspace the organization turned off, nor in
+    // one the host extension's filter leaves out (even when requested by link).
+    workspaces: hostFilteredWorkspaces(
+      navigableWorkspaces(context.workspaces, context.managedSelfContext, requestedWorkspaceId),
+      hostExtension.workspaceFilter,
     ),
     accessContext: context.accessContext,
   });
