@@ -5265,7 +5265,23 @@ export type LocalMcpServerRegistration = {
     mimeType: typeof import("@opengeni/contracts").MCP_APP_RESOURCE_MIME_TYPE;
     text: string;
   }>;
+  /**
+   * MCP protocol-extension request handlers keyed by method name, for example
+   * `events/list`. Only the workspace MCP serves these, and only for an
+   * embedding host's registration; model execution ignores them. A name must
+   * match `^[a-z]+/[a-z_]+$` and must not be a core MCP method, a notification
+   * or a method another registration declares. A handler must resolve to a JSON
+   * object. An `McpError` it throws reaches the client as raised; any other
+   * error is answered with a generic internal error.
+   */
+  extensionMethods?: Readonly<Record<string, McpExtensionMethodHandler>>;
 };
+
+/** One host MCP protocol-extension method, called with the request's grant. */
+export type McpExtensionMethodHandler = (
+  params: unknown,
+  ctx: { grant: import("@opengeni/contracts").AccessGrant; signal: AbortSignal },
+) => Promise<unknown>;
 
 /** One MCP resource a local server lists. */
 export type McpResource = import("@modelcontextprotocol/sdk/types.js").Resource;

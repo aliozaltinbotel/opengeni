@@ -313,6 +313,13 @@ export type AppDependencies = {
    * `HOST_TOOL_SERVER_ID_CONFLICT`. Return the same servers for every grant and
    * scope by grant inside each server's tools: a configured entry the port
    * omits keeps its remote transport, like any other configured server.
+   *
+   * A used registration's `extensionMethods` are served on the workspace MCP
+   * server only and advertised under `capabilities.experimental[<id>]`. Each
+   * call runs the same reauthorize step as `tools/list`, then the handler with
+   * the request's grant. A malformed name, a core MCP method or notification,
+   * or a method two registrations declare is refused with
+   * `HOST_MCP_METHOD_CONFLICT`.
    */
   workspaceToolServers?: (input: {
     grant: AccessGrant;

@@ -9,12 +9,18 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { recordToolApproval } from "@opengeni/observability";
 import {
   CallToolRequestSchema,
+  ClientNotificationSchema,
+  ClientRequestSchema,
+  ErrorCode,
   ListResourcesRequestSchema,
   ListToolsRequestSchema,
   McpError,
   ReadResourceRequestSchema,
+  ServerNotificationSchema,
+  ServerRequestSchema,
   type CallToolResult,
 } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { IntegrationInvocationError } from "@opengeni/capabilities";
 import { CODEX_APPS_MCP_SERVER_ID } from "@opengeni/codex";
 import type { Settings } from "@opengeni/config";
@@ -79,6 +85,7 @@ import {
 } from "@opengeni/db";
 import {
   type LocalMcpServerRegistration,
+  type McpExtensionMethodHandler,
   type McpResource,
   type PreparedWorkspaceToolGatewayTools,
   type ResolveConnectionCredentialInput,
@@ -136,6 +143,15 @@ export type PreparedWorkspaceToolGateway = Pick<
   reauthorize?: () => Promise<void>;
   /** Host servers serving MCP Apps views; absent unless a host registration lists resources. */
   hostViewServers?: readonly HostViewServer[];
+  /** Host MCP extension methods; absent unless a host registration declares one. */
+  hostExtensionMethods?: readonly HostExtensionMethod[];
+};
+
+/** One MCP protocol-extension method a host tool server declares. */
+export type HostExtensionMethod = {
+  serverId: string;
+  method: string;
+  handler: McpExtensionMethodHandler;
 };
 
 /** One host tool server's MCP Apps view resources. */
@@ -1160,11 +1176,20 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         ? [{ serverId: id, listResources, ...(readResource ? { readResource } : {}) }]
         : [],
   );
+  const hostExtensionMethods = hostServers.registrations.flatMap(
+    ({ id, extensionMethods }): HostExtensionMethod[] =>
+      Object.entries(extensionMethods ?? {}).map(([method, handler]) => ({
+        serverId: id,
+        method,
+        handler,
+      })),
+  );
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
     ...(hostViewServers.length > 0 ? { hostViewServers } : {}),
+    ...(hostExtensionMethods.length > 0 ? { hostExtensionMethods } : {}),
   };
 }
 
@@ -1258,12 +1283,16 @@ export function buildWorkspaceToolGatewayMcpServer(
     (entry) => entry.approval !== "human",
   );
   const hostViewServers = prepared.hostViewServers ?? [];
+  const hostExtensionMethods = prepared.hostExtensionMethods ?? [];
   const server = new Server(
     { name: "opengeni-tool-gateway", version: "1.0.0" },
     {
       capabilities: {
         tools: {},
         ...(hostViewServers.length > 0 ? { resources: { listChanged: false } } : {}),
+        ...(hostExtensionMethods.length > 0
+          ? { experimental: hostExtensionCapabilities(hostExtensionMethods) }
+          : {}),
       },
     },
   );
@@ -1291,6 +1320,8 @@ export function buildWorkspaceToolGatewayMcpServer(
   });
   if (hostViewServers.length > 0)
     registerHostViewResources(server, prepared, callableEntries, hostViewServers);
+  for (const extension of hostExtensionMethods)
+    registerHostExtensionMethod(server, prepared, grant, extension);
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
     if (!entry) throw new ToolGatewayToolNotFoundError();
@@ -1325,6 +1356,46 @@ export function buildWorkspaceToolGatewayMcpServer(
 
 /** MCP error for a resource that does not exist for this caller. */
 const MCP_RESOURCE_NOT_FOUND = -32002;
+
+/** `capabilities.experimental`: each host server's extension methods, under its id. */
+function hostExtensionCapabilities(
+  methods: readonly HostExtensionMethod[],
+): Record<string, { methods: string[] }> {
+  const capabilities: Record<string, { methods: string[] }> = {};
+  for (const { serverId, method } of methods)
+    (capabilities[serverId] ??= { methods: [] }).methods.push(method);
+  for (const capability of Object.values(capabilities)) capability.methods.sort();
+  return capabilities;
+}
+
+/**
+ * Serves one host extension method. Every call first runs the same live
+ * reauthorize step `tools/list` does, so revoked authority is refused before
+ * the host handler runs. The handler gets the request's grant and abort
+ * signal. An `McpError` it raises reaches the client as raised; any other
+ * failure, or a result that is not a JSON object, is a generic internal error.
+ */
+function registerHostExtensionMethod(
+  server: Server,
+  prepared: PreparedWorkspaceToolGateway,
+  grant: AccessGrant,
+  { method, handler }: HostExtensionMethod,
+): void {
+  const request = z.object({ method: z.literal(method), params: z.unknown().optional() });
+  server.setRequestHandler(request, async ({ params }, extra) => {
+    await prepared.reauthorize?.();
+    let result: unknown;
+    try {
+      result = await handler(params, { grant, signal: extra.signal });
+    } catch (error) {
+      if (error instanceof McpError) throw error;
+      throw new McpError(ErrorCode.InternalError, "Extension method failed");
+    }
+    if (typeof result !== "object" || result === null || Array.isArray(result))
+      throw new McpError(ErrorCode.InternalError, "Extension method failed");
+    return result as Record<string, unknown>;
+  });
+}
 
 /**
  * Serves host MCP Apps views. A view is reachable only through a tool this
@@ -1688,6 +1759,61 @@ function workspaceToolGatewayOutcome(error: unknown) {
 }
 
 export const HOST_TOOL_SERVER_ID_CONFLICT = "HOST_TOOL_SERVER_ID_CONFLICT";
+export const HOST_MCP_METHOD_CONFLICT = "HOST_MCP_METHOD_CONFLICT";
+
+/** Why a host extension method was refused. */
+export type HostMcpMethodConflictReason = "invalid_name" | "core_method" | "duplicate";
+
+/** A host extension method that is malformed or would shadow another handler. */
+export class HostMcpMethodConflictError extends Error {
+  readonly code = HOST_MCP_METHOD_CONFLICT;
+  constructor(
+    readonly serverId: string,
+    readonly method: string,
+    readonly reason: HostMcpMethodConflictReason,
+  ) {
+    super(`host MCP extension method ${method} from ${serverId} is refused: ${reason}`);
+    this.name = "HostMcpMethodConflictError";
+  }
+}
+
+const HOST_MCP_METHOD_NAME = /^[a-z]+\/[a-z_]+$/u;
+
+/** A protocol message union of the MCP SDK, read for its method literals. */
+type McpProtocolUnion = { options: readonly { shape: { method: { value: string } } }[] };
+const MCP_PROTOCOL_UNIONS: readonly McpProtocolUnion[] = [
+  ClientRequestSchema,
+  ServerRequestSchema,
+  ClientNotificationSchema,
+  ServerNotificationSchema,
+];
+
+/** Every request and notification method of the MCP SDK's protocol schemas. */
+const CORE_MCP_METHODS: ReadonlySet<string> = new Set(
+  MCP_PROTOCOL_UNIONS.flatMap(({ options }) => options.map(({ shape }) => shape.method.value)),
+);
+
+/**
+ * The first refused extension method across all registrations: a name outside
+ * `^[a-z]+/[a-z_]+$`, a core MCP method or any `notifications/` name (never a
+ * request), or a method two registrations declare.
+ */
+function hostExtensionMethodConflict(
+  registrations: readonly LocalMcpServerRegistration[],
+): HostMcpMethodConflictError | null {
+  const declared = new Set<string>();
+  for (const { id, extensionMethods } of registrations) {
+    for (const method of Object.keys(extensionMethods ?? {})) {
+      if (!HOST_MCP_METHOD_NAME.test(method))
+        return new HostMcpMethodConflictError(id, method, "invalid_name");
+      if (CORE_MCP_METHODS.has(method) || method.startsWith("notifications/"))
+        return new HostMcpMethodConflictError(id, method, "core_method");
+      if (declared.has(method)) return new HostMcpMethodConflictError(id, method, "duplicate");
+      declared.add(method);
+    }
+  }
+  return null;
+}
 
 /** A host tool-server registration that would shadow another gateway server. */
 export class HostToolServerIdConflictError extends Error {
@@ -1739,6 +1865,11 @@ async function workspaceHostToolServers(
       throw new HostToolServerIdConflictError(registration.id);
     }
     seen.add(registration.id);
+  }
+  const methodConflict = hostExtensionMethodConflict(registrations);
+  if (methodConflict) {
+    await close(registrations);
+    throw methodConflict;
   }
   const owned = (id: string) => input.staticIds.has(id) && input.configuredIds.has(id);
   await close(registrations.filter(({ id }) => !owned(id)));
