@@ -203,8 +203,12 @@ const LazyPersonalSecurityRoute = lazyRouteComponent(
   () => import("@/routes/personal-security"),
   "PersonalSecurityRoute",
 );
+// Served from the Personal security entry, which already loads the same
+// managed-human modules. A lazy entry of its own that imports `@/api`
+// regroups the entry-aware startup chunks (about 3 MB of session code in the
+// first load, refused by the eager-graph check).
 const LazyReauthenticateRoute = lazyRouteComponent(
-  () => import("@/routes/reauthenticate"),
+  () => import("@/routes/personal-security"),
   "ReauthenticateRoute",
 );
 const LazyNativeSignInRoute = lazyRouteComponent(

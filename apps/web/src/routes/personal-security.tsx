@@ -737,3 +737,6 @@ export function AuthenticatorAppSection({
     </Section>
   );
 }
+
+// /reauthenticate loads through this lazy entry (see LazyReauthenticateRoute in App.tsx).
+export { ReauthenticateRoute } from "./reauthenticate";
