@@ -28,31 +28,49 @@ export function startGovernedSessionPolicyBackfill(
 ): Promise<GovernedSessionPolicyDefaultsResult | undefined> {
   const startedAt = Date.now();
   return storeGovernedOrganizationSessionPolicyDefaults(deps, {
-    onOrganization: ({ organizationId, outcome, error }) => {
-      observability.incrementCounter({ ...OUTCOME_METRIC, labels: { outcome } });
-      if (outcome === "failed")
-        observability.warn("governed session policy default could not be stored", {
-          organizationId,
-          errorClass: error instanceof Error ? error.name : "unknown",
-          errorCode: "governed_session_policy_default_failed",
-          origin: "api",
-        });
-    },
+    onOrganization: ({ organizationId, outcome, error }) =>
+      observe(() => {
+        observability.incrementCounter({ ...OUTCOME_METRIC, labels: { outcome } });
+        if (outcome === "failed")
+          observability.warn("governed session policy default could not be stored", {
+            organizationId,
+            errorClass: errorClassOf(error),
+            errorCode: "governed_session_policy_default_failed",
+            origin: "api",
+          });
+      }),
   }).then(
     (result) => {
-      observability.info("governed session policy defaults stored", {
-        ...result,
-        durationMs: Date.now() - startedAt,
-      });
+      observe(() =>
+        observability.info("governed session policy defaults stored", {
+          ...result,
+          durationMs: Date.now() - startedAt,
+        }),
+      );
       return result;
     },
     (error: unknown) => {
-      observability.error("governed session policy defaults could not be stored", {
-        errorClass: error instanceof Error ? error.name : "unknown",
-        errorCode: "governed_session_policy_backfill_failed",
-        origin: "api",
-      });
+      observe(() =>
+        observability.error("governed session policy defaults could not be stored", {
+          errorClass: errorClassOf(error),
+          errorCode: "governed_session_policy_backfill_failed",
+          origin: "api",
+        }),
+      );
       return undefined;
     },
   );
+}
+
+function errorClassOf(error: unknown): string {
+  return error instanceof Error ? error.name : "unknown";
+}
+
+/** Observer failures never reach the pass or its promise. */
+function observe(report: () => void): void {
+  try {
+    report();
+  } catch {
+    // The metrics or logging sink is unhealthy; the pass stays authoritative.
+  }
 }
