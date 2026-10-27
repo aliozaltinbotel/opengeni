@@ -36,14 +36,18 @@ import {
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
 import {
+  HOST_SESSION_POLICY_UNAVAILABLE,
   HostPutOrganizationSessionPolicyRequest,
+  HostPutOrganizationSessionPolicyResponse,
   OrganizationSessionPolicyView,
+  SESSION_POLICY_OPERATION_CONFLICT,
+  SESSION_POLICY_REVISION_CONFLICT,
 } from "@opengeni/contracts/organization-session-policy";
 import {
   applyGovernedOrganizationPolicy,
   hasPermission,
   organizationGovernedByHost,
-  resolveOrganizationSessionPolicy,
+  readOrganizationSessionPolicy,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
@@ -56,6 +60,8 @@ import {
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
   putOrganizationWorkspaceMember,
+  SessionPolicyOperationConflictError,
+  SessionPolicyRevisionConflictError,
   recordOrganizationHostCommandAttribution,
   revokeOrganizationInvitation,
   revokeOrganizationWorkspaceMember,
@@ -428,17 +434,21 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
 
   // The organization's session policy: attachments and generic tool families
   // for every session in its workspaces. No native route writes it.
+  // A read: no governed mutation to decide, no attribution, no stored default.
   app.get(`${base}/session-policy`, async (context) => {
-    const authority = await requireHostCommand(context, deps, "session_policy.update");
     context.header("cache-control", "no-store");
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
     return context.json(
       OrganizationSessionPolicyView.parse(
-        await resolveOrganizationSessionPolicy(deps, authority.organizationId),
+        await readOrganizationSessionPolicy(deps, authority.organizationId),
       ),
     );
   });
 
   app.put(`${base}/session-policy`, async (context) => {
+    context.header("cache-control", "no-store");
     const authority = await requireHostCommand(context, deps, "session_policy.update");
     const { actingExternalUser, command } = await parseCommand(
       context,
@@ -449,20 +459,32 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       operationId: command.operationId,
       actingExternalUser,
     });
-    const { stored } = await putHostOrganizationSessionPolicy(deps.db, {
-      organizationId: authority.organizationId,
-      policy: command.policy,
-      operationId: command.operationId,
-      actorSubjectId: authority.actorSubjectId,
-    });
-    context.header("cache-control", "no-store");
+    let written: Awaited<ReturnType<typeof putHostOrganizationSessionPolicy>>;
+    try {
+      written = await putHostOrganizationSessionPolicy(deps.db, {
+        organizationId: authority.organizationId,
+        subjectId: authority.actorSubjectId,
+        operationId: command.operationId,
+        policy: command.policy,
+        expectedRevision: command.expectedRevision,
+      });
+    } catch (error) {
+      if (error instanceof SessionPolicyOperationConflictError)
+        throw sessionPolicyConflict(SESSION_POLICY_OPERATION_CONFLICT, error.message);
+      if (error instanceof SessionPolicyRevisionConflictError)
+        throw sessionPolicyConflict(SESSION_POLICY_REVISION_CONFLICT, error.message);
+      rethrowHostMembershipError(error);
+    }
+    if (!written) throw hostSessionPolicyUnavailable();
+    const { stored, replay } = written;
     return context.json(
-      OrganizationSessionPolicyView.parse({
+      HostPutOrganizationSessionPolicyResponse.parse({
         organizationId: stored.organizationId,
         policy: stored.policy,
         source: stored.source,
         revision: stored.revision,
         updatedAt: stored.updatedAt.toISOString(),
+        replay,
       }),
     );
   });
@@ -737,5 +759,25 @@ function serviceTokenRequired(): ApiHttpError {
     retryable: false,
     outcomeUnknown: false,
     details: { code: HOST_COMMAND_SERVICE_TOKEN_REQUIRED },
+  });
+}
+
+function sessionPolicyConflict(code: string, message: string): ApiHttpError {
+  return new ApiHttpError(409, {
+    code: "conflict",
+    message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code },
+  });
+}
+
+function hostSessionPolicyUnavailable(): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "Setting a host session policy is not available on this deployment yet.",
+    retryable: true,
+    outcomeUnknown: false,
+    details: { code: HOST_SESSION_POLICY_UNAVAILABLE },
   });
 }

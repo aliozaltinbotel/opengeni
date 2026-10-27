@@ -4,6 +4,7 @@ import {
   WORKSPACE_OPENROUTER_MODEL_ID_PREFIX,
   WORKSPACE_OPPER_MODEL_ID_PREFIX,
 } from "@opengeni/config";
+import { turnAttachmentsAllowed } from "./agent-turn/session-tool-families";
 import {
   applySessionAgentConfigWriteThrough,
   newSessionKnowledgeSearchTools,
@@ -122,6 +123,20 @@ export function createAutomationActivities(
             errorCode: "credential_restriction_violation",
           });
           return { action: "failed", reason: "credential_restriction_violation" };
+        }
+        // The organization's session policy may turn attachments off after the
+        // trigger was saved: its template's files never reach a session.
+        if (
+          template.resources.some((resource) => resource.kind === "file") &&
+          !(await turnAttachmentsAllowed(service.db, input.accountId))
+        ) {
+          await settle(service.db, {
+            workspaceId: input.workspaceId,
+            runId: run.id,
+            status: "failed",
+            errorCode: "attachments_disabled",
+          });
+          return { action: "failed", reason: "attachments_disabled" };
         }
         const requestedModel = template.model ?? deploymentCatalogSettings.openaiModel;
         const catalogSettings =

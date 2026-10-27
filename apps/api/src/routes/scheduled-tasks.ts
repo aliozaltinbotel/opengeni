@@ -80,6 +80,7 @@ import {
   verifyScheduledTaskSlackChannel,
 } from "../integrations/slack-bot";
 import { deleteScheduledTaskWithDurableCleanup } from "../scheduled-task-deletion";
+import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
 import { parseRequestBody, readRequestJson } from "../http/request-body";
 
 export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -256,6 +257,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       action: "schedule:create",
       quantity: 1,
     });
+    await requireScheduledWorkAdmissible(deps, grant.accountId, payload.agentConfig.resources);
     const task = await createValidatedScheduledTask({
       settings: catalogSettings,
       db,
@@ -451,6 +453,11 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       verifySlackChannel: slackChannelVerifier(grant),
       eventSourceFetch: deps.eventSourceFetch,
     });
+    await requireScheduledWorkAdmissible(
+      deps,
+      grant.accountId,
+      update.agentConfig?.resources ?? existing.agentConfig.resources,
+    );
     const task = await updateScheduledTaskForApi(
       db,
       grant,
@@ -509,6 +516,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
       sessionAuthorization: deps.sessionAuthorization,
       authorizationSurface: "http",
     });
+    await requireScheduledWorkAdmissible(deps, grant.accountId, existing.agentConfig.resources);
     const task = await updateScheduledTaskForApi(db, grant, existing.id, update);
     await syncUpdatedScheduledTask({ db, workflowClient, previous, task });
     const [resumed] = await withEventsAndBlockers([task]);
@@ -521,6 +529,7 @@ export function registerScheduledTaskRoutes(app: Hono, deps: ApiRouteDeps): void
     // Load the task before the gate so a codex-model scheduled task can be
     // recognised as codex-billed and skip the credit/cost gates at the edge.
     const task = await requireVisibleScheduledTask(db, grant, c.req.param("taskId"));
+    await requireScheduledWorkAdmissible(deps, grant.accountId, task.agentConfig.resources);
     if (task.action.kind === "agent_turn") {
       const catalogSettings = (
         await resolveWorkspaceCatalogSettings(db, deps.settings, {

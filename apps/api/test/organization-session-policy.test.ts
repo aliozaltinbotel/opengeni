@@ -17,7 +17,11 @@ import {
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
+import {
+  acquireSharedTestDatabase,
+  grantDeferredRuntimeAccess,
+  type SharedTestDatabase,
+} from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
@@ -160,6 +164,10 @@ const PERSON_PERMISSIONS: Permission[] = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
+  "files:write",
+  "documents:manage",
+  "scheduled_tasks:manage",
+  "enrollments:manage",
 ];
 
 async function personBearer(org: Organization): Promise<string> {
@@ -215,18 +223,43 @@ async function putHostPolicy(
   app: App,
   org: Organization,
   policy: unknown,
-  operationId: string = crypto.randomUUID(),
-  authorization?: string,
+  options: { operationId?: string; expectedRevision?: number; authorization?: string } = {},
 ): Promise<Response> {
   return await app.request(`/v1/host/organizations/${org.organizationId}/session-policy`, {
     method: "PUT",
     headers: {
-      authorization: authorization ?? (await hostBearer(org)),
+      authorization: options.authorization ?? (await hostBearer(org)),
       "content-type": "application/json",
     },
-    body: JSON.stringify({ actingExternalUser, command: { policy, operationId } }),
+    body: JSON.stringify({
+      actingExternalUser,
+      command: {
+        policy,
+        operationId: options.operationId ?? crypto.randomUUID(),
+        expectedRevision: options.expectedRevision ?? 0,
+      },
+    }),
   });
 }
+
+async function getHostPolicy(app: App, org: Organization): Promise<Response> {
+  return await app.request(`/v1/host/organizations/${org.organizationId}/session-policy`, {
+    headers: { authorization: await hostBearer(org) },
+  });
+}
+
+async function post(app: App, org: Organization, path: string, body: unknown = {}) {
+  return await app.request(`/v1/workspaces/${org.workspaceId}${path}`, {
+    method: "POST",
+    headers: { authorization: await personBearer(org), "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+const OPEN_ALL = {
+  attachments: "enabled",
+  toolFamilies: { mode: "deny", families: [] },
+} as const;
 
 async function readyFile(org: Organization): Promise<string> {
   const fileId = crypto.randomUUID();
@@ -306,6 +339,21 @@ describe("attachment kill switch", () => {
 });
 
 describe("host session policy command", () => {
+  test("until 1018's routine is granted, the command is unavailable and the default holds", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const response = await putHostPolicy(app, org, OPEN_ALL);
+    expect(response.status).toBe(503);
+    expect(detailCode(await response.json())).toBe("HOST_SESSION_POLICY_UNAVAILABLE");
+    expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
+      policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
+      source: "governed_default",
+    });
+    expect((await requestUpload(app, org)).status).toBe(403);
+    // Every later test runs as a deployment that has granted it.
+    await grantDeferredRuntimeAccess(shared.admin);
+  });
+
   test("the host turns attachments on; uploads then succeed and the client config follows", async () => {
     const app = appFor(hostPort);
     const org = await organization(HOST_SOURCE);
@@ -313,29 +361,75 @@ describe("host session policy command", () => {
       attachments: "enabled",
       toolFamilies: { mode: "deny", families: ["shell", "codemode", "browser", "computerUse"] },
     };
-    const operationId = crypto.randomUUID();
-    const response = await putHostPolicy(app, org, policy, operationId);
+    const response = await putHostPolicy(app, org, policy);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { policy: unknown; source: string; revision: number };
-    expect(body).toMatchObject({ policy, source: "host" });
+    const body = (await response.json()) as { revision: number };
+    expect(body).toMatchObject({ policy, source: "host", replay: false });
     expect((await requestUpload(app, org)).status).toBe(201);
     expect((await workspaceClientConfig(app, org)).fileUploads.enabled).toBe(true);
-    // The same operation replays without a new revision.
-    const replay = await putHostPolicy(app, org, policy, operationId);
-    expect(replay.status).toBe(200);
-    expect(((await replay.json()) as { revision: number }).revision).toBe(body.revision);
-    const read = await app.request(`/v1/host/organizations/${org.organizationId}/session-policy`, {
-      headers: { authorization: await hostBearer(org) },
-    });
+    const read = await getHostPolicy(app, org);
     expect(read.status).toBe(200);
     expect(await read.json()).toMatchObject({ policy, source: "host", revision: body.revision });
+  });
+
+  test("an operation id replays its own body, refuses another, and a stale revision never overwrites", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const operationId = crypto.randomUUID();
+    const first = await putHostPolicy(app, org, OPEN_ALL, { operationId });
+    expect(first.status).toBe(200);
+    const { revision } = (await first.json()) as { revision: number };
+    const replay = await putHostPolicy(app, org, OPEN_ALL, { operationId });
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ revision, replay: true });
+    const otherBody = await putHostPolicy(
+      app,
+      org,
+      { ...OPEN_ALL, attachments: "disabled" },
+      { operationId, expectedRevision: revision },
+    );
+    expect(otherBody.status).toBe(409);
+    expect(detailCode(await otherBody.json())).toBe("SESSION_POLICY_OPERATION_CONFLICT");
+    // A delayed command that still expects "no host policy" is refused.
+    const delayed = await putHostPolicy(app, org, GOVERNED_ORGANIZATION_SESSION_POLICY, {
+      expectedRevision: 0,
+    });
+    expect(delayed.status).toBe(409);
+    expect(detailCode(await delayed.json())).toBe("SESSION_POLICY_REVISION_CONFLICT");
+    expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
+      policy: OPEN_ALL,
+      revision,
+    });
+    const next = await putHostPolicy(app, org, GOVERNED_ORGANIZATION_SESSION_POLICY, {
+      expectedRevision: revision,
+    });
+    expect(next.status).toBe(200);
+    expect(await next.json()).toMatchObject({ revision: revision + 1, replay: false });
+  });
+
+  test("the host's read has no side effect", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const read = await getHostPolicy(app, org);
+    expect(read.status).toBe(200);
+    expect(await read.json()).toMatchObject({
+      policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
+      source: "governed_default",
+      revision: 0,
+    });
+    expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toBeNull();
+    const [privacy] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count from organization_host_command_attributions
+      where account_id = ${org.organizationId}`;
+    expect(privacy!.count).toBe(0);
   });
 
   test("native credentials cannot set the policy, and native settings cannot widen it", async () => {
     const app = appFor(hostPort);
     const org = await organization(HOST_SOURCE);
-    const widened = { attachments: "enabled", toolFamilies: { mode: "deny", families: [] } };
-    const native = await putHostPolicy(app, org, widened, undefined, await personBearer(org));
+    const native = await putHostPolicy(app, org, OPEN_ALL, {
+      authorization: await personBearer(org),
+    });
     expect(native.status).toBe(401);
     expect(detailCode(await native.json())).toBe("HOST_COMMAND_SERVICE_TOKEN_REQUIRED");
     // A workspace admin turning every capability on for new sessions does not
@@ -364,6 +458,42 @@ describe("host session policy command", () => {
   });
 });
 
+describe("attachments on every person-facing entry", () => {
+  test("knowledge drops, session file writes and schedule templates are refused", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    // Shell open, so the session file routes reach their attachment check.
+    expect(
+      (
+        await putHostPolicy(app, org, {
+          attachments: "disabled",
+          toolFamilies: { mode: "allow", families: ["shell"] },
+        })
+      ).status,
+    ).toBe(200);
+    const drop = await post(app, org, "/knowledge/drops", { kind: "text", text: "Door code 1234" });
+    expect(drop.status).toBe(403);
+    expect(detailCode(await drop.json())).toBe("ATTACHMENTS_DISABLED");
+    const sessionId = crypto.randomUUID();
+    for (const operation of ["write", "move", "mkdir"]) {
+      const response = await post(app, org, `/sessions/${sessionId}/fs/${operation}`, {});
+      expect(response.status).toBe(403);
+      expect(detailCode(await response.json())).toBe("ATTACHMENTS_DISABLED");
+    }
+    const schedule = await post(app, org, "/scheduled-tasks", {
+      name: "Read notes",
+      schedule: { type: "manual" },
+      agentConfig: {
+        prompt: "Read the notes.",
+        resources: [{ kind: "file", fileId: await readyFile(org) }],
+        tools: [],
+      },
+    });
+    expect(schedule.status).toBe(403);
+    expect(detailCode(await schedule.json())).toBe("ATTACHMENTS_DISABLED");
+  });
+});
+
 describe("generic tool families", () => {
   test("Codemode refuses a governed organization with SESSION_TOOL_FAMILY_DENIED", async () => {
     const governed = await organization(HOST_SOURCE);
@@ -389,17 +519,25 @@ describe("generic tool families", () => {
     const app = appFor(hostPort);
     const org = await organization(HOST_SOURCE);
     const sessionId = crypto.randomUUID();
+    const enrollmentId = crypto.randomUUID();
     for (const [path, family] of [
       [`/v1/workspaces/${org.workspaceId}/browser-sessions`, "browser"],
       [`/v1/workspaces/${org.workspaceId}/computer-sessions`, "computerUse"],
+      [`/v1/workspaces/${org.workspaceId}/machines/${enrollmentId}/screen-control`, "computerUse"],
+      [`/v1/workspaces/${org.workspaceId}/enrollments/token`, "shell"],
+      [`/v1/workspaces/${org.workspaceId}/enrollments/device/approve`, "shell"],
       [`/v1/workspaces/${org.workspaceId}/sessions/${sessionId}/terminal/exec`, "shell"],
+      [`/v1/workspaces/${org.workspaceId}/sessions/${sessionId}/fs/list`, "shell"],
+      [`/v1/workspaces/${org.workspaceId}/sessions/${sessionId}/fs/write`, "shell"],
+      [`/v1/workspaces/${org.workspaceId}/sessions/${sessionId}/git/status`, "shell"],
+      [`/v1/workspaces/${org.workspaceId}/codemode/calls`, "codemode"],
     ] as const) {
       const response = await app.request(path, {
         method: "POST",
         headers: { authorization: await personBearer(org), "content-type": "application/json" },
         body: JSON.stringify({}),
       });
-      expect(response.status).toBe(403);
+      expect([path, response.status]).toEqual([path, 403]);
       expect(await response.json()).toMatchObject({
         error: { details: { code: "SESSION_TOOL_FAMILY_DENIED", family } },
       });

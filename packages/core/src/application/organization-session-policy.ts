@@ -24,9 +24,10 @@ import {
  *
  * The policy is durable state because both processes enforce it: the API at
  * upload, message admission and call admission, the worker when it assembles
- * every turn's tool catalog. The worker has no governance port, so the
- * governed default is stored the first time the API sees an organization
- * governed; from then on both read the same row.
+ * every turn's tool catalog. The worker has no governance port, so the API
+ * stores the governed default at every governed entry point that can start
+ * work (and bootstrapWorkspace can store it at creation); from then on both
+ * read the same row.
  *
  * - API (`resolveOrganizationSessionPolicy`): without a bound port nothing is
  *   read and the policy is stock. With one, a stored policy wins; a governed
@@ -62,11 +63,44 @@ export async function ensureGovernedOrganizationSessionPolicyStored(
   organizationId: string,
 ): Promise<StoredOrganizationSessionPolicy | null> {
   if (!(await organizationGovernedByHost(deps, organizationId))) return null;
-  return await ensureGovernedOrganizationSessionPolicy(
-    deps.db,
+  return await ensureGovernedOrganizationSessionPolicy(deps.db, organizationId);
+}
+
+/**
+ * Called at every governed entry point that can start work (session create,
+ * message admission, schedule and automation create or update), before that
+ * work is stored: a governed organization never reaches the worker without its
+ * policy row, whose absence the worker reads as stock. Without a port nothing
+ * is read.
+ */
+export async function ensureOrganizationSessionPolicyAtEntry(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<void> {
+  if (!deps.organizationGovernance) return;
+  await resolveOrganizationSessionPolicy(deps, organizationId);
+}
+
+/**
+ * A read with no side effect (the host's GET): what is stored, else the
+ * governed default a governed organization would get (unstored, revision 0),
+ * else stock.
+ */
+export async function readOrganizationSessionPolicy(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<OrganizationSessionPolicyView> {
+  if (!deps.organizationGovernance) return view(organizationId, null);
+  const stored = await getOrganizationSessionPolicy(deps.db, organizationId);
+  if (stored) return view(organizationId, stored);
+  if (!(await organizationGovernedByHost(deps, organizationId))) return view(organizationId, null);
+  return {
     organizationId,
-    GOVERNED_ORGANIZATION_SESSION_POLICY,
-  );
+    policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
+    source: "governed_default",
+    revision: 0,
+    updatedAt: null,
+  };
 }
 
 /** The API's answer for one organization. A failed read or port fails the caller (closed). */

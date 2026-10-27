@@ -5,7 +5,6 @@ import {
   type GovernedMutationChannel,
   type OrganizationGovernancePort,
 } from "@opengeni/contracts/organization-governance";
-import { GOVERNED_ORGANIZATION_SESSION_POLICY } from "@opengeni/contracts/organization-session-policy";
 import {
   ensureGovernedOrganizationSessionPolicy,
   getManagedAccount,
@@ -92,11 +91,7 @@ export async function applyGovernedOrganizationPolicy(
   if (!(await organizationGovernedByHost(deps, input.organizationId))) return;
   // Its sessions get no attachments and no generic tool families until the
   // host sets a policy; stored, so the worker reads the same answer.
-  await ensureGovernedOrganizationSessionPolicy(
-    deps.db,
-    input.organizationId,
-    GOVERNED_ORGANIZATION_SESSION_POLICY,
-  );
+  await ensureGovernedOrganizationSessionPolicy(deps.db, input.organizationId);
   const preferences = await getOrganizationPrivacyPreferences(deps.db, input.organizationId);
   if (!preferences.personalWorkspacesEnabled) return;
   await updateOrganizationPrivacyPreferences(deps.db, {

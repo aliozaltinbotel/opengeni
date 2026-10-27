@@ -1,13 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  GOVERNED_ORGANIZATION_SESSION_POLICY,
-  sessionToolFamilyGate,
-} from "@opengeni/contracts/organization-session-policy";
+import { sessionToolFamilyGate } from "@opengeni/contracts/organization-session-policy";
 import {
   bootstrapWorkspace,
   createDb,
   ensureGovernedOrganizationSessionPolicy,
-  putHostOrganizationSessionPolicy,
   type DbClient,
 } from "@opengeni/db";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
@@ -74,11 +70,7 @@ describe("turn tool families", () => {
 
   test("the governed default removes every generic family and Codemode delivery", async () => {
     const id = await organizationId();
-    await ensureGovernedOrganizationSessionPolicy(
-      client.db,
-      id,
-      GOVERNED_ORGANIZATION_SESSION_POLICY,
-    );
+    await ensureGovernedOrganizationSessionPolicy(client.db, id);
     const gate = await readTurnSessionToolFamilyGate(client.db, id);
     expect(withoutDeniedFamilyTools(CATALOG, (name) => name, gate)).toEqual([
       "knowledge_search",
@@ -90,12 +82,12 @@ describe("turn tool families", () => {
 
   test("a host allowlist keeps only the families it names", async () => {
     const id = await organizationId();
-    await putHostOrganizationSessionPolicy(client.db, {
-      organizationId: id,
-      policy: { attachments: "enabled", toolFamilies: { mode: "allow", families: ["browser"] } },
-      operationId: crypto.randomUUID(),
-      actorSubjectId: "api_key:host",
-    });
+    // A host's stored policy (written by 1018's host routine; set directly here).
+    await shared.admin`insert into organization_session_policies
+        (account_id, attachments, tool_family_mode, tool_families, source, revision,
+         last_operation_id, updated_by_subject_id)
+      values (${id}, 'enabled', 'allow', ARRAY['browser']::text[], 'host', 2,
+        ${crypto.randomUUID()}, 'api_key:host')`;
     const gate = await readTurnSessionToolFamilyGate(client.db, id);
     expect(withoutDeniedFamilyTools(CATALOG, (name) => name, gate)).toEqual([
       "browser_open",

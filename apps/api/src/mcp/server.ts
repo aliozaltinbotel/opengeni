@@ -429,6 +429,7 @@ import {
   type OtherWorkspaceSessionTool,
 } from "./session-other-workspace";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { requireScheduledWorkAdmissible } from "../http/organization-session-policy";
 import {
   sessionToolFamilyGate,
   type SessionToolFamily,
@@ -2091,6 +2092,7 @@ export function buildOpenGeniMcpServer(
           action: "schedule:create",
           quantity: 1,
         });
+        await requireScheduledWorkAdmissible(deps, grant.accountId, payload.agentConfig.resources);
         const task = await createValidatedScheduledTask({
           settings: deps.settings,
           db: deps.db,
@@ -2195,6 +2197,11 @@ export function buildOpenGeniMcpServer(
             }),
           );
         }
+        await requireScheduledWorkAdmissible(
+          deps,
+          grant.accountId,
+          update.agentConfig?.resources ?? existing.agentConfig.resources,
+        );
         const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,
@@ -2277,6 +2284,11 @@ export function buildOpenGeniMcpServer(
           sessionAuthorization: deps.sessionAuthorization,
           authorizationSurface: "first_party_mcp",
         });
+        await requireScheduledWorkAdmissible(
+          deps,
+          grant.accountId,
+          update.agentConfig?.resources ?? existing.agentConfig.resources,
+        );
         const task = await updateScheduledTaskForApi(deps.db, grant, id, update);
         await syncUpdatedScheduledTask({
           db: deps.db,

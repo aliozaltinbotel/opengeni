@@ -1,4 +1,5 @@
 import { fileOwnerContextForAccess } from "@opengeni/core";
+import { requireWorkspaceAttachmentsAllowed } from "../http/organization-session-policy";
 import { withSessionRlsActorContext } from "@opengeni/db";
 import {
   AddDocumentRequest,
@@ -593,6 +594,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const access = await requireAccessGrantAuthorization(c, deps, workspaceId, "documents:manage");
     const { grant } = access;
+    // A person's dropped text or file is an attachment for the workspace's
+    // sessions (Knowledge reaches the model); the organization may turn them off.
+    if (grant.principalKind !== "agent_attempt")
+      await requireWorkspaceAttachmentsAllowed(deps, grant.accountId);
     if (!objectStorage) {
       throw new HTTPException(503, { message: "object storage is not configured" });
     }

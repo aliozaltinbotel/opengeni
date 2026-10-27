@@ -2,6 +2,7 @@ import {
   GOOGLE_DRIVE_NATIVE_RETIRED_REASON,
   isRetiredNativeGoogleDriveTask,
 } from "@opengeni/contracts/google-drive-native-retirement";
+import { turnAttachmentsAllowed } from "./agent-turn/session-tool-families";
 import { getScheduledTaskClaudeProviderAccountAuthoritySnapshot } from "@opengeni/db";
 import { retryScheduledTaskAdmission } from "./scheduled-task-admission";
 import { scheduledTaskSessionTitle } from "./scheduled-task-title";
@@ -524,6 +525,14 @@ export function createScheduledTaskActivities(services: () => Promise<ControlAct
       }
       if (task.status !== "active") {
         return { action: "blocked", reason: "scheduled_task_paused" };
+      }
+      // The organization's session policy may turn attachments off after the
+      // schedule was saved: its files never reach a session.
+      if (
+        task.agentConfig.resources.some((resource) => resource.kind === "file") &&
+        !(await turnAttachmentsAllowed(db, task.accountId))
+      ) {
+        return { action: "blocked", reason: "attachments_disabled" };
       }
       if (task.agentConfig.knowledgeSource && knowledgeSourceSyncEffectivelyPaused(task)) {
         return { action: "blocked", reason: "knowledge_source_paused" };

@@ -20,6 +20,15 @@ export async function readTurnSessionToolFamilyGate(
   return sessionToolFamilyGate((await getOrganizationSessionPolicy(db, organizationId))?.policy);
 }
 
+/** Whether stored work may still attach files: no stored policy, or attachments enabled. */
+export async function turnAttachmentsAllowed(
+  db: Database,
+  organizationId: string,
+): Promise<boolean> {
+  const stored = await getOrganizationSessionPolicy(db, organizationId);
+  return !stored || stored.policy.attachments === "enabled";
+}
+
 /** Every tool whose family the policy denies is removed; order is kept. */
 export function withoutDeniedFamilyTools<T>(
   tools: readonly T[],

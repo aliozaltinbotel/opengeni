@@ -571,6 +571,7 @@ export type DispatchScheduledTaskRunResult =
         | "scheduled_model_unavailable"
         | "knowledge_source_paused"
         | "legacy_source_schedule_requires_migration"
+        | "attachments_disabled"
         | "atlassian_native_retired"
         | "google_drive_native_retired"
         | "incident_preflight_metadata_missing"

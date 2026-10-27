@@ -301,7 +301,10 @@ import {
 } from "./personal-connection-delegations";
 import { hasReservedOpenGeniSlackBotSessionMetadata } from "./slack-bot";
 import { requirePersonalWorkspaceOpenToNewWork } from "../application/organization-privacy";
-import { requireOrganizationAttachmentsAllowed } from "../application/organization-session-policy";
+import {
+  ensureOrganizationSessionPolicyAtEntry,
+  requireOrganizationAttachmentsAllowed,
+} from "../application/organization-session-policy";
 import {
   requireVerifiedOwningUser,
   requireManagedHumanPrivateSessionCreate,
@@ -3489,6 +3492,8 @@ async function createSessionForRequestInFileScope(
           message: "object storage is not configured",
         });
       }
+      // A governed organization's policy row exists before its first session.
+      await ensureOrganizationSessionPolicyAtEntry(unresolvedDeps, grant.accountId);
       // A person's attached file is refused where the organization turns
       // attachments off; an agent passes on files it produced.
       if (
@@ -4875,6 +4880,8 @@ async function acceptSessionUserMessageInFileScope(
         message: "object storage is not configured",
       });
     }
+    // A governed organization's policy row exists before work is admitted.
+    await ensureOrganizationSessionPolicyAtEntry(deps, grant.accountId);
     if (
       requestedResources.some((resource) => resource.kind === "file") &&
       grant.principalKind !== "agent_attempt"

@@ -79,7 +79,7 @@ test("a workspace whose organization turns attachments off hides the attach affo
   expect(workspaceScopedClientConfig(deployment, {}).voiceInput?.available).toBe(false);
   const governed = workspaceScopedClientConfig(deployment, {
     fileUploads: { enabled: false, maxSizeBytes: 10_000 },
-    voiceInput: { available: true, providers: ["a"] } as ClientConfig["voiceInput"],
+    voiceInput: { available: true, providers: ["a"] } as unknown as ClientConfig["voiceInput"],
   });
   // Every composer reads `clientConfig.fileUploads.enabled` to show attach.
   expect(governed.fileUploads.enabled).toBe(false);
