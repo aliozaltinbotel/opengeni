@@ -1158,7 +1158,7 @@ membership functions are not routed through it.
 
 Each governed organization has one session policy
 (`@opengeni/contracts/organization-session-policy`, table
-`organization_session_policies`, migration 1017) for every session in its
+`organization_session_policies`, migration 1018) for every session in its
 workspaces, whatever started it (chat, API, schedules, automations):
 
 ```ts
@@ -1182,41 +1182,80 @@ type OrganizationSessionPolicy = {
   `connected_machine_enable_screen_control`. `deny` removes the named families;
   `allow` keeps only the named ones. The policy only narrows: a kept family
   still follows the session's own capabilities.
-- **Default.** The first time the fork sees an organization governed (native
-  creation, a host command, or any API read of its policy) it stores the
-  governed default, `{ attachments: "disabled", toolFamilies: { mode: "deny",
-  families: ["shell", "codemode", "browser", "computerUse"] } }`. Nothing is
-  stored for an ungoverned organization, and without a bound port the API reads
+- **Default, from the first piece of work.** The governed default is
+  `{ attachments: "disabled", toolFamilies: { mode: "deny", families:
+  ["shell", "codemode", "browser", "computerUse"] } }`. With the port bound,
+  the API stores it unless a policy is stored at every governed entry point
+  that can start work: native organization creation, every host command,
+  session creation, message admission, and the create, update, resume and run
+  of a schedule or an automation trigger (REST and first-party MCP alike).
+  `bootstrapWorkspace({ ..., governedSessionPolicy: true })` stores it in the
+  bootstrap transaction. The worker, which has no port, treats a missing row as
+  stock; because every governed entry stores the row first, a governed
+  organization's work never reaches the worker without one. Nothing is stored
+  for an ungoverned organization, and without a bound port the API reads
   nothing, so stock deployments are unchanged.
+- **Who may write the row.** The runtime may read it and insert only the
+  governed default (the table's INSERT policy admits nothing else); it has no
+  UPDATE or DELETE. A host's policy is written only by
+  `opengeni_private.put_host_organization_session_policy`, a SECURITY DEFINER
+  routine that requires the host command's `session_policy.update`
+  attribution for the same service subject and operation id, keeps a receipt
+  per operation id with the body's digest, and checks the expected revision.
+  The routine's runtime EXECUTE is withheld for one release (expand-contract);
+  until it is granted the host command answers `503
+  HOST_SESSION_POLICY_UNAVAILABLE` and every governed organization keeps the
+  governed default.
 - **Host command.** `PUT /v1/host/organizations/:org/session-policy` with
-  `{ actingExternalUser, command: { policy, operationId } }` replaces the
-  policy (mutation `session_policy.update`, decided with `via: "host"`; the
-  same service-token rules as the other host commands). A replay of the
-  stored policy's operation id changes nothing. `GET` on the same path reads
-  it. The response is `{ organizationId, policy, source: "stock" |
-  "governed_default" | "host", revision, updatedAt }`. No native route writes
-  the policy, and native workspace settings or session capabilities cannot
-  widen it.
-- **Attachments off.** A person's `POST /v1/workspaces/:ws/files/uploads`
-  and its `/complete`, and a session create or message that attaches a file
-  (`resources[].kind === "file"`), answer `403` with `details.code
-  ATTACHMENTS_DISABLED`. An agent's own uploads are not attachments and pass.
+  `{ actingExternalUser, command: { policy, operationId, expectedRevision } }`
+  replaces the policy (mutation `session_policy.update`, decided with
+  `via: "host"`; the same service-token rules as the other host commands).
+  `expectedRevision` is the `revision` the host last read; `0` means no host
+  policy yet (nothing stored, or only the governed default). The same
+  operation id with the same body replays (`replay: true`); with another body
+  it is `409 SESSION_POLICY_OPERATION_CONFLICT`; a stale revision is `409
+  SESSION_POLICY_REVISION_CONFLICT`, so a delayed old command never overwrites
+  a newer revision. `GET` on the same path is a read with no side effect: it
+  stores nothing, decides nothing and records nothing, and answers the
+  governed default with revision `0` while nothing is stored. Answers are
+  `{ organizationId, policy, source: "stock" | "governed_default" | "host",
+  revision, updatedAt }` (and `replay` on PUT). No native route writes the
+  policy, and native workspace settings or session capabilities cannot widen
+  it.
+- **Attachments off.** These answer `403` with `details.code
+  ATTACHMENTS_DISABLED`:
+  - a person's `POST /v1/workspaces/:ws/files/uploads` and its `/complete`;
+  - a session create or message that attaches a file (`resources[].kind ===
+    "file"`);
+  - `POST /v1/workspaces/:ws/knowledge/drops` (text or file);
+  - a person's `sessions/:id/fs/write`, `fs/move` and `fs/mkdir`;
+  - a schedule or automation trigger whose template attaches a file, at create,
+    update, resume and run. When the worker fires one saved before attachments
+    were turned off, it refuses it (`attachments_disabled`).
+
   The workspace-scoped `GET /v1/config/client?workspaceId=` reports
   `fileUploads.enabled: false`, and the console hides its attach controls for
-  that workspace.
+  that workspace. **Accepted exemptions:** an agent principal's own uploads
+  and file writes are its outputs, not attachments, and pass; a session fork
+  or history import reuses files that were already admitted, and is not
+  re-checked.
 - **Families off.** The worker removes the denied families from every turn's
   tool catalog (first-party tools, function tools, the sandbox shell and
   filesystem capabilities) and mints no Codemode bearer when `codemode` or
   `shell` is denied. The API refuses them again at call admission: the
   first-party MCP server never registers a denied tool whatever the token's
-  signed selection names, and the `/codemode/*`, `browser-sessions`,
-  `attached-browsers`, `computer-sessions` (mutations) and
-  `sessions/:id/terminal/*` routes answer `403` with `details.code
+  signed selection names, and these routes answer `403` with `details.code
   SESSION_TOOL_FAMILY_DENIED` and `details.family`, after authenticating the
-  caller.
-- **Worker reads.** The worker has no governance port; it reads the stored
-  policy once per turn and treats no row as stock. A host should set its
-  policy when it provisions an organization.
+  caller: `/codemode/*`; `browser-sessions` and `computer-sessions`
+  (mutations); `machines/:id/screen-control`; `enrollments/token` and
+  `enrollments/device/approve` (a Connected Machine is both `shell` and
+  `computerUse`); `sessions/:id/terminal/*`, `sessions/:id/fs/*` and
+  `sessions/:id/git/*`.
+- **A stored row outlives governance.** Nothing deletes a policy row. If a
+  host stops governing an organization, its stored policy still applies, at
+  the API and in the worker. If the port is unbound, the worker keeps
+  honouring the row while the API, which reads nothing without a port, stops
+  refusing at its own entry points. An operator deletes the row to lift it.
 
 ### Tenancy / Bootstrap Workspace
 
