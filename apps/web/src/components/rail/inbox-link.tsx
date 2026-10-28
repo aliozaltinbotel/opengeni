@@ -6,13 +6,16 @@ import { useAppContext } from "@opengeni/react/app/app-context";
 import { hasInbox, inboxAttentionCount, useInbox } from "@opengeni/react/app/lib/inbox";
 import { cn } from "@opengeni/react/app/lib/utils";
 
-/** The Inbox entry: always visible to a signed-in person, with how many things wait on them. */
-export function InboxLink() {
+/**
+ * The Inbox entry: always visible to a signed-in person, with how many things
+ * wait on them. `label` is the host extension's name for it (default "Inbox").
+ */
+export function InboxLink({ label = "Inbox" }: { label?: string } = {}) {
   const { accessContext } = useAppContext();
-  return hasInbox(accessContext) ? <PersonInboxLink /> : null;
+  return hasInbox(accessContext) ? <PersonInboxLink label={label} /> : null;
 }
 
-function PersonInboxLink() {
+function PersonInboxLink({ label }: { label: string }) {
   const rail = useRail();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
   const active = pathname === `/workspaces/${rail.workspaceId}/inbox`;
@@ -24,8 +27,8 @@ function PersonInboxLink() {
       to="/workspaces/$workspaceId/inbox"
       params={{ workspaceId: rail.workspaceId }}
       data-active={active ? "true" : undefined}
-      aria-label={count > 0 ? `Inbox, ${count} waiting` : "Inbox"}
-      title={rail.collapsed ? (count > 0 ? `Inbox · ${count} waiting` : "Inbox") : undefined}
+      aria-label={count > 0 ? `${label}, ${count} waiting` : label}
+      title={rail.collapsed ? (count > 0 ? `${label} · ${count} waiting` : label) : undefined}
       onClick={() => rail.setDrawerOpen(false)}
       className={cn(
         "group relative flex h-8 items-center rounded-md text-sm font-normal text-fg-label outline-none transition-colors pointer-coarse:h-10",
@@ -39,7 +42,7 @@ function PersonInboxLink() {
         className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-brand opacity-0 transition-opacity group-data-[active=true]:opacity-100"
       />
       <InboxIcon className="size-4 shrink-0" />
-      {rail.collapsed ? null : <span className="min-w-0 truncate">Inbox</span>}
+      {rail.collapsed ? null : <span className="min-w-0 truncate">{label}</span>}
       {count > 0 ? (
         rail.collapsed ? (
           <span

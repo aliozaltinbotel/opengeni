@@ -15,31 +15,76 @@ import {
 import {
   isConfigItemActive,
   PRIMARY_WORKSPACE_ITEMS,
-  visibleNativeItems,
   type WorkspaceConfigItem,
   type WorkspaceConfigTarget,
 } from "@/components/rail/workspace-nav-data";
-import { currentHostExtension, hiddenNativeDestinations } from "@/host-extension/registry";
+import { currentHostExtension } from "@/host-extension/registry";
+import {
+  composePrimaryNav,
+  type HostExtensionNavItem,
+  type NativeNavId,
+} from "@opengeni/react/app/host-extension";
 import { Button } from "@opengeni/react/ui/button";
 import { cn } from "@opengeni/react/app/lib/utils";
 
 const WORKSPACE_SHORTCUTS_EXPANDED_KEY = "opengeni.rail.nav";
 
-/** The native shortcuts the host extension does not hide (read at render, after startup). */
-function primaryItems() {
-  return visibleNativeItems(PRIMARY_WORKSPACE_ITEMS, hiddenNativeDestinations());
+/** A native rail entry: the inbox, or a workspace shortcut with its destination item. */
+type NativeRailEntry =
+  | Readonly<{ id: "inbox"; label: string }>
+  | Readonly<{ id: Exclude<NativeNavId, "inbox">; label: string; item: WorkspaceConfigItem }>;
+type ShortcutEntry = Extract<NativeRailEntry, { item: WorkspaceConfigItem }>;
+type RailEntry = NativeRailEntry | HostExtensionNavItem;
+
+/** The native rail entries in rail order: the inbox, then the shortcuts. */
+const NATIVE_RAIL_ENTRIES: readonly NativeRailEntry[] = [
+  { id: "inbox", label: "Inbox" },
+  ...PRIMARY_WORKSPACE_ITEMS.map(
+    (item): NativeRailEntry => ({
+      id: item.to.split("/").at(-1) as Exclude<NativeNavId, "inbox">,
+      label: item.label,
+      item,
+    }),
+  ),
+];
+
+function isHostEntry(entry: RailEntry): entry is HostExtensionNavItem {
+  return "placement" in entry;
 }
 
-/** A native shortcut, or undefined when the host extension hides it. */
-function primaryItem(to: WorkspaceConfigTarget): WorkspaceConfigItem | undefined {
-  return primaryItems().find((item) => item.to === to);
+function isShortcut(entry: RailEntry): entry is ShortcutEntry {
+  return !isHostEntry(entry) && entry.id !== "inbox";
 }
 
-/** The extension's primary-nav items that show here, after the native shortcuts. */
-function extensionPrimaryItems(workspaceId: string, pathname: string) {
-  return (currentHostExtension().nav ?? []).filter(
-    (item) => item.placement === "primary" && (item.visible?.({ workspaceId, pathname }) ?? true),
-  );
+/** A shortcut's destination item under its (possibly overridden) label. */
+function shortcutItem(entry: ShortcutEntry): WorkspaceConfigItem {
+  return entry.label === entry.item.label ? entry.item : { ...entry.item, label: entry.label };
+}
+
+/**
+ * The rail the host extension composes (read at render, after startup):
+ * hidden destinations left out, overrides applied, then its primary items.
+ */
+function composedRail(workspaceId: string, pathname: string) {
+  const { chat, peers } = composePrimaryNav(currentHostExtension(), NATIVE_RAIL_ENTRIES, {
+    workspaceId,
+    pathname,
+  });
+  const inbox = peers.find((entry) => !isHostEntry(entry) && entry.id === "inbox");
+  return {
+    chat,
+    inbox: inbox && !isHostEntry(inbox) ? inbox : undefined,
+    shortcuts: peers.filter((entry) => isHostEntry(entry) || entry.id !== "inbox"),
+  };
+}
+
+/** A peer shortcut, or undefined when the extension hides it or moves it off the peers. */
+function peerShortcut(
+  shortcuts: readonly RailEntry[],
+  to: WorkspaceConfigTarget,
+): WorkspaceConfigItem | undefined {
+  const entry = shortcuts.find((candidate) => isShortcut(candidate) && candidate.item.to === to);
+  return entry && isShortcut(entry) ? shortcutItem(entry) : undefined;
 }
 
 function initialWorkspaceShortcutsExpanded(): boolean {
@@ -72,38 +117,94 @@ export function WorkspaceShortcutLinks({
   const recorderState = useMeetingRecorderState();
   const recording = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const extensionItems = extensionPrimaryItems(rail.workspaceId, pathname);
+  const { shortcuts } = composedRail(rail.workspaceId, pathname);
 
   return (
     <div className={cn("grid gap-0.5", className)}>
-      {primaryItems().map((item) => (
-        <WorkspaceConfigLink
-          key={item.to}
-          item={item}
-          needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
-          needsAttention={
-            item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention
-          }
-          recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
-          workspaceId={rail.workspaceId}
-          variant="rail"
-          collapsed={rail.collapsed}
-          active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
-          onNavigate={() => rail.setDrawerOpen(false)}
-        />
-      ))}
-      {extensionItems.map((item) => (
-        <HostExtensionNavLink
-          key={item.id}
-          item={item}
-          workspaceId={rail.workspaceId}
-          variant="rail"
-          collapsed={rail.collapsed}
-          active={isHostExtensionNavItemActive(pathname, rail.workspaceId, item)}
-          onNavigate={() => rail.setDrawerOpen(false)}
+      {shortcuts.map((entry) => (
+        <RailEntryLink
+          key={isHostEntry(entry) ? `host:${entry.id}` : entry.id}
+          entry={entry}
+          pathname={pathname}
+          pendingKnowledge={pendingKnowledge}
+          schedulesNeedAttention={schedulesNeedAttention}
+          recording={recording}
         />
       ))}
     </div>
+  );
+}
+
+/** One rail row: the inbox, a native shortcut (with its indicator) or a host entry. */
+function RailEntryLink({
+  entry,
+  pathname,
+  pendingKnowledge = false,
+  schedulesNeedAttention = false,
+  recording = false,
+}: {
+  entry: RailEntry;
+  pathname: string;
+  pendingKnowledge?: boolean;
+  schedulesNeedAttention?: boolean;
+  recording?: boolean;
+}) {
+  const rail = useRail();
+  if (isHostEntry(entry))
+    return (
+      <HostExtensionNavLink
+        item={entry}
+        workspaceId={rail.workspaceId}
+        variant="rail"
+        collapsed={rail.collapsed}
+        active={isHostExtensionNavItemActive(pathname, rail.workspaceId, entry)}
+        onNavigate={() => rail.setDrawerOpen(false)}
+      />
+    );
+  if (!isShortcut(entry)) return <InboxLink label={entry.label} />;
+  const item = shortcutItem(entry);
+  return (
+    <WorkspaceConfigLink
+      item={item}
+      needsReview={item.to === "/workspaces/$workspaceId/state" && pendingKnowledge}
+      needsAttention={item.to === "/workspaces/$workspaceId/automations" && schedulesNeedAttention}
+      recording={item.to === "/workspaces/$workspaceId/meetings" && recording}
+      workspaceId={rail.workspaceId}
+      variant="rail"
+      collapsed={rail.collapsed}
+      active={isConfigItemActive(pathname, rail.workspaceId, item.to)}
+      onNavigate={() => rail.setDrawerOpen(false)}
+    />
+  );
+}
+
+/**
+ * The chat utility group: the native entries the host extension moved next
+ * to "New session", drawn as their own group with a rule under it.
+ */
+function ChatUtilityGroup({
+  entries,
+  ...indicators
+}: {
+  entries: readonly NativeRailEntry[];
+  pathname: string;
+  pendingKnowledge: boolean;
+  schedulesNeedAttention: boolean;
+  recording: boolean;
+}) {
+  return (
+    <>
+      <div role="group" aria-label="Chat" data-rail-group="chat" className="grid gap-0.5">
+        {entries.map((entry) => (
+          <RailEntryLink key={entry.id} entry={entry} {...indicators} />
+        ))}
+      </div>
+      <div
+        role="separator"
+        data-rail-group-separator=""
+        className="mx-2.5 my-1.5 border-t border-border"
+      />
+    </>
   );
 }
 
@@ -118,14 +219,15 @@ export function PrimaryNavExtras() {
   const recorderState = useMeetingRecorderState();
   const recordingMeeting = recorderState === "recording" || recorderState === "paused";
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const extensionItems = extensionPrimaryItems(rail.workspaceId, pathname);
-  const knowledgeItem = primaryItem("/workspaces/$workspaceId/state");
-  const automationsItem = primaryItem("/workspaces/$workspaceId/automations");
-  const meetingsItem = primaryItem("/workspaces/$workspaceId/meetings");
-  const activeWorkspaceSection =
-    primaryItems().find((item) => isConfigItemActive(pathname, rail.workspaceId, item.to))?.label ??
-    extensionItems.find((item) => isHostExtensionNavItemActive(pathname, rail.workspaceId, item))
-      ?.label;
+  const { chat, inbox, shortcuts } = composedRail(rail.workspaceId, pathname);
+  const knowledgeItem = peerShortcut(shortcuts, "/workspaces/$workspaceId/state");
+  const automationsItem = peerShortcut(shortcuts, "/workspaces/$workspaceId/automations");
+  const meetingsItem = peerShortcut(shortcuts, "/workspaces/$workspaceId/meetings");
+  const activeWorkspaceSection = shortcuts.find((entry) =>
+    isHostEntry(entry)
+      ? isHostExtensionNavItemActive(pathname, rail.workspaceId, entry)
+      : isShortcut(entry) && isConfigItemActive(pathname, rail.workspaceId, entry.item.to),
+  )?.label;
   const [shortcutsExpanded, setShortcutsExpandedState] = useState(
     initialWorkspaceShortcutsExpanded,
   );
@@ -151,7 +253,16 @@ export function PrimaryNavExtras() {
 
   return (
     <>
-      <InboxLink />
+      {chat.length > 0 ? (
+        <ChatUtilityGroup
+          entries={chat}
+          pathname={pathname}
+          pendingKnowledge={pendingKnowledge}
+          schedulesNeedAttention={schedulesNeedAttention}
+          recording={recordingMeeting}
+        />
+      ) : null}
+      {inbox ? <InboxLink label={inbox.label} /> : null}
 
       {rail.isMobile ? null : rail.collapsed ? (
         <WorkspaceShortcutLinks

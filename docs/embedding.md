@@ -2302,6 +2302,17 @@ that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
 
+`navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
+`plugins`, `state`, `automations`, `meetings`, `artifacts`): `label` renames
+one wherever the rail draws it (expanded, collapsed, folded under More),
+`group: "chat"` moves it into the chat group right after "New session" (its own
+`role="group"` with a rule before the other entries), and `group: "hidden"`
+leaves it off the rail while its page stays. Each id appears once, and an
+override of a destination the extension hides is refused.
+`composePrimaryNav(extension, nativeItems, context?)` is the pure resolver the
+rail uses; it imports no React or DOM code, so a host can run it in a test or
+a child process.
+
 `hiddenNativeDestinations` hides a native destination wherever the console
 offers it: its nav entries, its settings-rail and settings-search entries, its
 links, and its URL, which renders the not-found page. `insights` also hides the

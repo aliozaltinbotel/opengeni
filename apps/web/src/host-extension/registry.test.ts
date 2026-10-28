@@ -609,6 +609,41 @@ describe("host extension registry", () => {
     });
   });
 
+  describe("native rail overrides", () => {
+    test("accepts a relabel, a move to chat and an entry left off the rail", () => {
+      const extension = extensionWith({
+        navOverrides: [
+          { id: "inbox", label: "Agent requests", group: "chat" },
+          { id: "artifacts", group: "chat" },
+          { id: "meetings", group: "hidden" },
+          { id: "plugins", label: "Agent skills", group: "peer" },
+        ],
+      });
+      expect(validateHostExtension(extension)).toBe(extension);
+    });
+
+    test.each([
+      [[{ id: "secrets" }], "navOverrides[0].id"],
+      [[{ id: "pms" }], "navOverrides[0].id"],
+      [[{ id: "inbox" }, { id: "state" }, { id: "inbox", label: "Again" }], "navOverrides[2].id"],
+      [[{ id: "inbox", label: "" }], "navOverrides[0].label"],
+      [[{ id: "inbox", group: "settings" }], "navOverrides[0].group"],
+      [[{ id: "inbox", icon: Icon }], "navOverrides[0].icon"],
+    ])("refuses the overrides %p at %s", (navOverrides, field) => {
+      expectInvalid({ id: "fixture", navOverrides }, field);
+    });
+
+    test("refuses an override of a destination the extension hides", () => {
+      expectInvalid(
+        extensionWith({
+          hiddenNativeDestinations: ["meetings"],
+          navOverrides: [{ id: "meetings", label: "Calls" }],
+        }),
+        "navOverrides[0].id",
+      );
+    });
+  });
+
   test("the prebuilt extension dist fixture is a valid extension with lazy pages", async () => {
     const fixture = new URL("../../test/fixtures/host-extension-dist/", import.meta.url);
     const loaded: { default: unknown } = await import(new URL("index.js", fixture).href);

@@ -61,6 +61,20 @@ export type HostToolRegistryEntry = Readonly<{
   render: ToolRenderer;
   matchPrefixedLeaf: false;
 }>;
+/** Native rail entries a host extension can relabel, move or leave off the rail. */
+export type NativeNavId = "inbox" | "plugins" | "state" | "automations" | "meetings" | "artifacts";
+/**
+ * Where a native rail entry shows: `peer` (default) with the workspace
+ * shortcuts, `chat` in the chat utility group right after "New session"
+ * (drawn as a separate group), `hidden` nowhere on the rail (its page and
+ * links elsewhere stay; `hiddenNativeDestinations` removes a page).
+ */
+export type HostExtensionNavGroup = "peer" | "chat" | "hidden";
+export type HostExtensionNavOverride = Readonly<{
+  id: NativeNavId;
+  label?: string;
+  group?: HostExtensionNavGroup;
+}>;
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
@@ -70,6 +84,11 @@ export type HostExtension = Readonly<{
   }>;
   routes?: readonly HostExtensionRoute[];
   nav?: readonly HostExtensionNavItem[];
+  /**
+   * Native rail entries relabelled, moved into the chat group or left off the
+   * rail (`composePrimaryNav`); each id at most once.
+   */
+  navOverrides?: readonly HostExtensionNavOverride[];
   settingsGroups?: readonly Readonly<{ id: string; label: string }>[];
   hiddenNativeDestinations?: readonly NativeDestination[];
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
@@ -112,6 +131,70 @@ export function hostFilteredWorkspaces<T extends Readonly<{ id: string; accountI
 ): T[] {
   if (!filter) return workspaces;
   return workspaces.filter((workspace) => workspace.id === currentWorkspaceId || filter(workspace));
+}
+
+const NO_ITEMS: readonly never[] = Object.freeze([]);
+
+/** Every native rail entry an override may name, in rail order. */
+export const NATIVE_NAV_IDS: readonly NativeNavId[] = Object.freeze([
+  "inbox",
+  "plugins",
+  "state",
+  "automations",
+  "meetings",
+  "artifacts",
+]);
+
+export function isNativeNavId(value: unknown): value is NativeNavId {
+  return typeof value === "string" && (NATIVE_NAV_IDS as readonly string[]).includes(value);
+}
+
+/** The native destination a rail entry opens, if hiding a destination can remove it. */
+export function nativeNavDestination(id: NativeNavId): NativeDestination | null {
+  return id === "inbox" ? null : id;
+}
+
+/** A native rail entry as the console lists it: its id and stock label (plus its own fields). */
+export type NativeNavEntry = Readonly<{ id: NativeNavId; label: string }>;
+export type ComposedPrimaryNav<T extends NativeNavEntry> = Readonly<{
+  /** Native entries in the chat group, after "New session", relabelled. */
+  chat: readonly T[];
+  /** The rail's peers in order: native entries (relabelled), then the host's primary entries. */
+  peers: readonly (T | HostExtensionNavItem)[];
+}>;
+
+/**
+ * The primary rail a host extension composes from the console's native entries
+ * (`nativeItems`, in rail order): entries whose destination the extension
+ * hides are left out, overrides relabel entries and move them into the chat
+ * group or off the rail, and the host's `placement: "primary"` items follow
+ * the native peers (each kept unless its `visible` answers false for
+ * `context`; with no context every item is kept). Pure: no React, no DOM.
+ */
+export function composePrimaryNav<T extends NativeNavEntry>(
+  extension: Pick<HostExtension, "nav" | "navOverrides" | "hiddenNativeDestinations">,
+  nativeItems: readonly T[],
+  context?: HostExtensionContext,
+): ComposedPrimaryNav<T> {
+  const hidden = extension.hiddenNativeDestinations ?? NO_ITEMS;
+  const overrides = new Map((extension.navOverrides ?? NO_ITEMS).map((entry) => [entry.id, entry]));
+  const chat: T[] = [];
+  const peers: (T | HostExtensionNavItem)[] = [];
+  for (const item of nativeItems) {
+    const destination = nativeNavDestination(item.id);
+    if (destination !== null && hidden.includes(destination)) continue;
+    const override = overrides.get(item.id);
+    const entry = override?.label === undefined ? item : { ...item, label: override.label };
+    const group = override?.group ?? "peer";
+    if (group === "chat") chat.push(entry);
+    else if (group === "peer") peers.push(entry);
+  }
+  for (const item of extension.nav ?? NO_ITEMS) {
+    if (item.placement !== "primary") continue;
+    if (context && item.visible && !item.visible(context)) continue;
+    peers.push(item);
+  }
+  return { chat, peers };
 }
 
 /** The stock console's extension: no pages, no nav, nothing hidden. */

@@ -11,6 +11,8 @@ import {
   EMPTY_HOST_EXTENSION,
   isBuiltInToolCardName,
   isNativeDestination,
+  isNativeNavId,
+  nativeNavDestination,
   type HostExtension,
   type NativeDestination,
 } from "@opengeni/react/app/host-extension";
@@ -111,6 +113,12 @@ function checkRoutePath(path: string, field: string): void {
   }
 }
 
+/** Only these keys, or the field names the first one it does not know. */
+function knownKeys(value: Fields, field: string, keys: readonly string[]): void {
+  const unknown = Object.keys(value).find((key) => !keys.includes(key));
+  if (unknown !== undefined) fail(`${field}.${unknown}`, "is not a known field");
+}
+
 function routePaths(value: unknown): ReadonlySet<string> {
   const paths = new Set<string>();
   list(value, "routes").forEach((entry, index) => {
@@ -140,6 +148,31 @@ function settingsGroupIds(value: unknown): ReadonlySet<string> {
     ids.add(id);
   });
   return ids;
+}
+
+/** Native rail overrides: known ids, once each, never a destination the extension hides. */
+function checkNavOverrides(value: unknown, hidden: readonly unknown[]): void {
+  const ids = new Set<string>();
+  list(value, "navOverrides").forEach((entry, index) => {
+    const field = `navOverrides[${index}]`;
+    const override = record(entry, field);
+    knownKeys(override, field, ["id", "label", "group"]);
+    const id = override.id;
+    if (!isNativeNavId(id)) fail(`${field}.id`, `"${String(id)}" is not a native rail entry`);
+    if (ids.has(id)) fail(`${field}.id`, `"${id}" is overridden twice`);
+    const destination = nativeNavDestination(id);
+    if (destination !== null && hidden.includes(destination))
+      fail(`${field}.id`, `"${id}" is a hidden native destination`);
+    ids.add(id);
+    optionalText(override.label, `${field}.label`);
+    if (
+      override.group !== undefined &&
+      override.group !== "peer" &&
+      override.group !== "chat" &&
+      override.group !== "hidden"
+    )
+      fail(`${field}.group`, 'must be "peer", "chat" or "hidden"');
+  });
 }
 
 function checkNav(value: unknown, paths: ReadonlySet<string>, groups: ReadonlySet<string>): void {
@@ -211,17 +244,18 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
-  checkNav(fields.nav, routePaths(fields.routes), settingsGroupIds(fields.settingsGroups));
-  list(fields.hiddenNativeDestinations, "hiddenNativeDestinations").forEach(
-    (destination, index) => {
-      if (!isNativeDestination(destination)) {
-        fail(
-          `hiddenNativeDestinations[${index}]`,
-          `"${String(destination)}" is not a native destination`,
-        );
-      }
-    },
-  );
+  const paths = routePaths(fields.routes);
+  const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
+  checkNav(fields.nav, paths, settingsGroupIds(fields.settingsGroups));
+  checkNavOverrides(fields.navOverrides, hidden);
+  hidden.forEach((destination, index) => {
+    if (!isNativeDestination(destination)) {
+      fail(
+        `hiddenNativeDestinations[${index}]`,
+        `"${String(destination)}" is not a native destination`,
+      );
+    }
+  });
   list(fields.shellProviders, "shellProviders").forEach((provider, index) =>
     component(provider, `shellProviders[${index}]`),
   );
