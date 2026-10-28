@@ -25,8 +25,9 @@ const OUTCOME_METRIC = {
  * returned promise, which settles when the pass ends and never rejects. Each
  * governed organization counts once under its outcome (stored, present,
  * failed); each failure also records a protected failure diagnostic naming
- * its organization and logs its id publicly, and one summary line closes the
- * pass. Undefined when the pass itself could not run (its
+ * its organization and logs one public warning with its error code and the
+ * diagnostic's id as `correlationId` (never the organization id), and one
+ * summary line closes the pass. Undefined when the pass itself could not run (its
  * organization listing failed).
  */
 export function startGovernedSessionPolicyBackfill(
