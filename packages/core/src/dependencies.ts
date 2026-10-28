@@ -299,7 +299,12 @@ export type AppDependencies = {
    * Called once per gateway preparation with the caller's grant; it returns
    * fresh in-process MCP servers, which the gateway closes after the request.
    * It must honour `signal` (the caller's request lifetime). A throw or
-   * rejection fails the whole catalog closed for that request.
+   * rejection fails the whole catalog closed for that request. A returned
+   * server whose connect or `tools/list` fails is only left out: its tools are
+   * absent from the catalog and the preparation records it in
+   * `unavailableMcpServers`, as for a failed connector. A call to a tool of a
+   * server left out is refused like any tool not in the catalog, and a listed
+   * tool's failing call still fails loud.
    *
    * A registration is used only when its id names a deployment-static
    * `settings.mcpServers` entry configured for the request, replacing that

@@ -220,4 +220,126 @@ describe("workspace tool gateway filtering", () => {
       await Promise.all([first.close(), second.close()]);
     }
   });
+
+  describe("a registration that is best-effort for listing", () => {
+    const scope = {
+      accountId: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+    };
+    const settings = testSettings({
+      mcpServers: [
+        { id: "inventory", url: "https://inventory.example.test/mcp", cacheToolsList: true },
+        { id: "host", url: "https://host.example.test/mcp", cacheToolsList: true },
+      ],
+    });
+    const refs = [
+      { kind: "mcp" as const, id: "inventory" },
+      { kind: "mcp" as const, id: "host" },
+    ];
+    const tool = (name: string) => ({
+      name,
+      inputSchema: { type: "object" as const, properties: {}, additionalProperties: false },
+    });
+    const listing = (
+      name: string,
+      tools: () => Promise<ReturnType<typeof tool>[]>,
+      call: () => Promise<{ type: "text"; text: string }[]>,
+    ): MCPServer => ({
+      name,
+      cacheToolsList: true,
+      async connect() {},
+      async close() {},
+      listTools: tools,
+      callTool: call,
+      async invalidateToolsCache() {},
+    });
+    const ok = async () => [{ type: "text" as const, text: "ok" }];
+    const inventory = () => listing("inventory", async () => [tool("read_item")], ok);
+    const unlistable = () =>
+      listing(
+        "host",
+        async () => {
+          throw new Error("host listing unavailable");
+        },
+        ok,
+      );
+    const call = (catalogDigest: string, serverId: string, toolName: string) => ({
+      operationId: crypto.randomUUID(),
+      catalogDigest,
+      identity: { serverId, toolName },
+      arguments: {},
+      caller: { kind: "http" as const, subjectId: "human:test" },
+    });
+
+    test("a failed listing leaves its tools out and records the server, and a call fails closed", async () => {
+      const prepared = await prepareAgentTools(settings, refs, {
+        ...scope,
+        localMcpServers: [
+          { id: "inventory", server: inventory() },
+          { id: "host", server: unlistable(), listingBestEffort: true },
+        ],
+        workspaceToolGateway: {},
+      });
+      try {
+        const catalog = prepared.toolGatewayCatalog!;
+        expect(catalog.entries.map((entry) => entry.identity)).toEqual([
+          { serverId: "inventory", toolName: "read_item" },
+        ]);
+        expect([...prepared.unavailableMcpServers.keys()]).toEqual(["host"]);
+        await expect(
+          prepared.toolGateway!.prepareCall(call(catalog.digest, "host", "write_item")),
+        ).rejects.toMatchObject({ code: "tool_not_found" });
+        const listed = await prepared.toolGateway!.prepareCall(
+          call(catalog.digest, "inventory", "read_item"),
+        );
+        await listed.execute();
+      } finally {
+        await prepared.close();
+      }
+    });
+
+    test("without the mark the same listing failure fails the catalog", async () => {
+      await expect(
+        prepareAgentTools(settings, refs, {
+          ...scope,
+          localMcpServers: [
+            { id: "inventory", server: inventory() },
+            { id: "host", server: unlistable() },
+          ],
+          workspaceToolGateway: {},
+        }),
+      ).rejects.toThrow();
+    });
+
+    test("a listed tool whose call throws still fails loud", async () => {
+      const prepared = await prepareAgentTools(settings, refs, {
+        ...scope,
+        localMcpServers: [
+          { id: "inventory", server: inventory() },
+          {
+            id: "host",
+            server: listing(
+              "host",
+              async () => [tool("write_item")],
+              async () => {
+                throw new Error("host call failed");
+              },
+            ),
+            listingBestEffort: true,
+          },
+        ],
+        workspaceToolGateway: {},
+      });
+      try {
+        const catalog = prepared.toolGatewayCatalog!;
+        const hostCall = await prepared.toolGateway!.prepareCall(
+          call(catalog.digest, "host", "write_item"),
+        );
+        await expect(hostCall.execute()).rejects.toThrow("host call failed");
+        expect(prepared.unavailableMcpServers.size).toBe(0);
+      } finally {
+        await prepared.close();
+      }
+    });
+  });
 });
