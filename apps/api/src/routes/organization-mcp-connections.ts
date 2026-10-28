@@ -72,6 +72,7 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
         organizationId,
         connectionId: connection.id,
         change: "consent_downgraded",
+        previousConsentScope: connection.organizationAccess,
         consentScope: access,
       });
     await updateOrganizationMcpConnectionAccess(deps.db, {

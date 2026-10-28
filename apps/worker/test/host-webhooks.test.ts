@@ -222,6 +222,23 @@ describe("the mcp_connection.revoked host webhook", () => {
     ).rejects.toMatchObject({ type: "HOST_WEBHOOK_REFUSED", nonRetryable: true });
   }, 60_000);
 
+  function downgradeRequest(
+    connectionId: string,
+    consentScope: OrganizationAccessPolicy,
+  ): HostWebhookDeliveryRequest {
+    return {
+      deliveryId: crypto.randomUUID(),
+      event: {
+        type: "mcp_connection.revoked",
+        organizationId: accountId,
+        connectionId,
+        change: "consent_downgraded",
+        previousConsentScope: readOnly,
+        consentScope,
+      },
+    };
+  }
+
   test("a consent downgrade is delivered with the new scope; a later revoke supersedes it", async () => {
     received.length = 0;
     const connectionId = await connect();
@@ -229,16 +246,7 @@ describe("the mcp_connection.revoked host webhook", () => {
       ...readOnly,
       workspaceScope: { kind: "selected", workspaceIds: [crypto.randomUUID()] },
     };
-    const request: HostWebhookDeliveryRequest = {
-      deliveryId: crypto.randomUUID(),
-      event: {
-        type: "mcp_connection.revoked",
-        organizationId: accountId,
-        connectionId,
-        change: "consent_downgraded",
-        consentScope: narrowed,
-      },
-    };
+    const request = downgradeRequest(connectionId, narrowed);
     expect(await activities.confirmHostWebhookChange(request)).toEqual({ status: "pending" });
     await updateOrganizationMcpConnectionAccess(client.db, {
       accountId,
@@ -253,6 +261,56 @@ describe("the mcp_connection.revoked host webhook", () => {
     });
     await revokeOrganizationMcpConnection(client.db, { accountId, connectionId });
     expect(await activities.confirmHostWebhookChange(request)).toEqual({ status: "superseded" });
+  }, 60_000);
+
+  test("a downgrade still confirms after a widening-only change lands, and reports what was lost", async () => {
+    received.length = 0;
+    const connectionId = await connect();
+    const lost = readOnly.permissions[0]!;
+    // PATCH A takes one permission away and starts its delivery.
+    const downgraded: OrganizationAccessPolicy = {
+      preset: "custom",
+      permissions: readOnly.permissions.filter((permission) => permission !== lost),
+      workspaceScope: { kind: "all" },
+    };
+    const request = downgradeRequest(connectionId, downgraded);
+    await updateOrganizationMcpConnectionAccess(client.db, {
+      accountId,
+      connectionId,
+      organizationAccess: downgraded,
+    });
+    // PATCH W, which only adds, commits before A's delivery confirms.
+    const widened: OrganizationAccessPolicy = {
+      ...downgraded,
+      permissions: [...downgraded.permissions, "sessions:create"],
+    };
+    await updateOrganizationMcpConnectionAccess(client.db, {
+      accountId,
+      connectionId,
+      organizationAccess: widened,
+    });
+    expect(await runHostWebhookDelivery(request, activities, noWait)).toBe("delivered");
+    const body = JSON.parse(received[0]!.body) as { consentScope: OrganizationAccessPolicy };
+    expect(body.consentScope.permissions).not.toContain(lost);
+    expect(body.consentScope.permissions).toContain("sessions:create");
+  }, 60_000);
+
+  test("outside local/test a plain http target is refused for good", async () => {
+    const production = createHostWebhookActivities(
+      async () =>
+        ({
+          db: client.db,
+          settings: testSettings({
+            environment: "production",
+            hostWebhooks: {
+              mcpConnectionRevoked: { url: `http://127.0.0.1:${receiver.port}/hooks`, secret },
+            },
+          }),
+        }) as unknown as ControlActivityServices,
+    );
+    await expect(
+      production.deliverHostWebhook({ deliveryId: crypto.randomUUID(), body: "{}" }),
+    ).rejects.toMatchObject({ type: "HOST_WEBHOOK_TARGET_REFUSED", nonRetryable: true });
   }, 60_000);
 
   test("a change that never commits sends nothing", async () => {

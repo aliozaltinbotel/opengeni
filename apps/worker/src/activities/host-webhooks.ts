@@ -4,10 +4,11 @@ import {
   HOST_WEBHOOK_DELIVERY_HEADER,
   HOST_WEBHOOK_SIGNATURE_HEADER,
   HostMcpConnectionRevokedWebhook,
-  type HostMcpConnectionConsentScope,
+  isConsentScopeDowngrade,
   type HostWebhookDeliveryRequest,
 } from "@opengeni/contracts/organization-governance";
 import { getMcpOAuthConnectionRecord, mcpOAuthConnectionConsentScope } from "@opengeni/db";
+import { DestinationPolicyError, pinnedFetch } from "@opengeni/network";
 import type { ControlActivityServices } from "./types";
 
 /** Where a requested change stands, as the database shows it now. */
@@ -32,7 +33,7 @@ export function hostWebhookSignature(secret: string, body: string): string {
  */
 export function createHostWebhookActivities(
   services: () => Promise<ControlActivityServices>,
-  options: { fetch?: typeof fetch } = {},
+  options: { fetch?: typeof pinnedFetch } = {},
 ) {
   async function confirmHostWebhookChange(
     request: HostWebhookDeliveryRequest,
@@ -49,7 +50,11 @@ export function createHostWebhookActivities(
       if (!record.revokedAt) return { status: "pending" };
     } else {
       if (record.revokedAt) return { status: "superseded" };
-      if (!sameConsentScope(consentScope, event.consentScope)) return { status: "pending" };
+      // Committed once the stored setting has lost something against the one
+      // the change started from, even when a later change that only widened
+      // landed first; the body names the setting as it stands now.
+      if (!isConsentScopeDowngrade(event.previousConsentScope, consentScope))
+        return { status: "pending" };
     }
     const body = HostMcpConnectionRevokedWebhook.parse({
       type: event.type,
@@ -74,18 +79,33 @@ export function createHostWebhookActivities(
       );
     let response: Response;
     try {
-      response = await (options.fetch ?? fetch)(target.url, {
-        method: "POST",
-        redirect: "error",
-        signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
-        headers: {
-          "content-type": "application/json",
-          [HOST_WEBHOOK_SIGNATURE_HEADER]: hostWebhookSignature(target.secret, input.body),
-          [HOST_WEBHOOK_DELIVERY_HEADER]: input.deliveryId,
+      response = await (options.fetch ?? pinnedFetch)(
+        target.url,
+        {
+          method: "POST",
+          signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
+          headers: {
+            "content-type": "application/json",
+            [HOST_WEBHOOK_SIGNATURE_HEADER]: hostWebhookSignature(target.secret, input.body),
+            [HOST_WEBHOOK_DELIVERY_HEADER]: input.deliveryId,
+          },
+          body: input.body,
         },
-        body: input.body,
-      });
+        // The deployment's operator configured this target, so a host inside
+        // the cluster is reachable; it must still be https outside local/test.
+        { ...settings, integrationsAllowPrivateNetworkTargets: true },
+        { label: "Host webhook", requireHttpsOutsideLocalTest: true },
+      );
     } catch (error) {
+      // A target the policy refuses is refused on every attempt; a DNS failure may pass.
+      if (
+        error instanceof DestinationPolicyError &&
+        !["dns_failed", "dns_empty"].includes(error.reason)
+      )
+        throw ApplicationFailure.nonRetryable(
+          `host webhook target refused: ${error.message}`,
+          "HOST_WEBHOOK_TARGET_REFUSED",
+        );
       throw ApplicationFailure.retryable(
         `host webhook delivery failed: ${error instanceof Error ? error.name : "error"}`,
         "HOST_WEBHOOK_UNREACHABLE",
@@ -94,26 +114,12 @@ export function createHostWebhookActivities(
     await response.body?.cancel().catch(() => undefined);
     if (response.ok) return;
     const message = `host webhook answered ${response.status}`;
-    // A refusal the host will repeat ends the delivery; anything else is retried.
-    if (response.status >= 400 && response.status < 500 && ![408, 429].includes(response.status))
+    // A refusal or redirect the host will repeat ends the delivery (redirects
+    // are never followed); anything else is retried.
+    if (response.status < 500 && ![408, 429].includes(response.status))
       throw ApplicationFailure.nonRetryable(message, "HOST_WEBHOOK_REFUSED");
     throw ApplicationFailure.retryable(message, "HOST_WEBHOOK_REJECTED");
   }
 
   return { confirmHostWebhookChange, deliverHostWebhook };
-}
-
-function sameConsentScope(
-  left: HostMcpConnectionConsentScope,
-  right: HostMcpConnectionConsentScope,
-): boolean {
-  const sorted = (values: readonly string[]) => [...values].sort().join("\n");
-  const ids = (scope: HostMcpConnectionConsentScope["workspaceScope"]) =>
-    scope.kind === "all" ? "*" : sorted(scope.workspaceIds);
-  return (
-    left.preset === right.preset &&
-    sorted(left.permissions) === sorted(right.permissions) &&
-    left.workspaceScope.kind === right.workspaceScope.kind &&
-    ids(left.workspaceScope) === ids(right.workspaceScope)
-  );
 }

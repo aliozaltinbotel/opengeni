@@ -2158,7 +2158,11 @@ const SettingsSchema = z.object({
   // Webhooks the embedding host receives, each off unless configured.
   // `mcpConnectionRevoked`: POSTed once per revoked or downgraded MCP
   // connection, signed `X-Host-Signature: sha256=<hex HMAC-SHA256(secret, body)>`
-  // and retried by the worker until the host answers 2xx. The API and the
+  // and retried by the worker until the host answers 2xx. The worker waits up
+  // to about two minutes (24 checks, 5 seconds apart) to see the change
+  // committed and sends nothing after that. The URL must be https outside
+  // local/test; a target inside the cluster is allowed. The API (which refuses
+  // to start without a workflow client that can start deliveries) and the
   // worker both read it.
   hostWebhooks: z
     .object({

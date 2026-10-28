@@ -1,12 +1,39 @@
 import { createHash } from "node:crypto";
 import type { OrganizationAccessPolicy } from "@opengeni/contracts";
-import type { HostWebhookDeliveryRequest } from "@opengeni/contracts/organization-governance";
+import {
+  isConsentScopeDowngrade,
+  type HostWebhookDeliveryRequest,
+} from "@opengeni/contracts/organization-governance";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { ApiHttpError } from "./api-error";
 
 type McpConnectionChange =
   | { change: "revoked" }
-  | { change: "consent_downgraded"; consentScope: OrganizationAccessPolicy };
+  | {
+      change: "consent_downgraded";
+      /** The setting before the change, which the worker compares the committed one to. */
+      previousConsentScope: OrganizationAccessPolicy;
+      consentScope: OrganizationAccessPolicy;
+    };
+
+/** The startup refusal when the webhook is configured but deliveries can't be started. */
+export const HOST_WEBHOOK_DELIVERY_UNAVAILABLE = "HOST_WEBHOOK_DELIVERY_UNAVAILABLE";
+
+/**
+ * Refuse to start an API that has the host webhook configured but a workflow
+ * client that cannot start deliveries: the misconfiguration surfaces at boot,
+ * not as a warning on every disconnect.
+ */
+export function assertHostWebhookDeliveryConfigured(
+  deps: Pick<ApiRouteDeps, "settings" | "workflowClient">,
+): void {
+  if (
+    deps.settings.hostWebhooks?.mcpConnectionRevoked &&
+    !deps.workflowClient.startHostWebhookDelivery
+  )
+    throw new Error(
+      `${HOST_WEBHOOK_DELIVERY_UNAVAILABLE}: hostWebhooks.mcpConnectionRevoked is configured but the workflow client cannot start host webhook deliveries`,
+    );
+}
 
 /**
  * Start the host's `mcp_connection.revoked` delivery for a change about to be
@@ -15,17 +42,16 @@ type McpConnectionChange =
  * a process that dies before writing, sends nothing. Nothing is started while
  * `settings.hostWebhooks.mcpConnectionRevoked` is unset. A revoke has one
  * delivery id per connection, so concurrent revokes share one delivery.
+ *
+ * A notification never blocks the change: when the delivery can't be started
+ * (Temporal unreachable), one structured warning is logged and the caller
+ * writes the change anyway. The host MCP connection read stays authoritative.
  */
 export async function startMcpConnectionRevokedDelivery(
   deps: Pick<ApiRouteDeps, "settings" | "workflowClient">,
   input: { organizationId: string; connectionId: string } & McpConnectionChange,
 ): Promise<void> {
   if (!deps.settings.hostWebhooks?.mcpConnectionRevoked) return;
-  const start = deps.workflowClient.startHostWebhookDelivery;
-  if (!start)
-    throw new Error(
-      "HOST_WEBHOOK_DELIVERY_UNAVAILABLE: the workflow client cannot start deliveries",
-    );
   const { organizationId, connectionId } = input;
   const request: HostWebhookDeliveryRequest =
     input.change === "revoked"
@@ -45,41 +71,32 @@ export async function startMcpConnectionRevokedDelivery(
             organizationId,
             connectionId,
             change: "consent_downgraded",
+            previousConsentScope: input.previousConsentScope,
             consentScope: input.consentScope,
           },
         };
   try {
+    const start = deps.workflowClient.startHostWebhookDelivery;
+    if (!start) throw new Error(HOST_WEBHOOK_DELIVERY_UNAVAILABLE);
     await start(request);
-  } catch {
-    // Nothing was written: the change waits until its delivery can start.
-    throw new ApiHttpError(503, {
-      code: "upstream_unavailable",
-      message: "This change can't be recorded right now. Try again shortly.",
-      retryable: true,
-      outcomeUnknown: false,
-      details: { code: HOST_WEBHOOK_DELIVERY_UNAVAILABLE },
+  } catch (error) {
+    console.warn("host_webhook.delivery_start_failed", {
+      event: request.event.type,
+      change: request.event.change,
+      organizationId,
+      connectionId,
+      deliveryId: request.deliveryId,
+      errorClass: error instanceof Error ? error.name : typeof error,
     });
   }
 }
 
-/** The 503 `details.code` when a configured host webhook's delivery can't be started. */
-export const HOST_WEBHOOK_DELIVERY_UNAVAILABLE = "HOST_WEBHOOK_DELIVERY_UNAVAILABLE";
-
-/**
- * Whether a new access setting takes something away: a permission the old one
- * had, or a workspace it covered (every workspace narrowed to selected ones,
- * or a selected workspace dropped). A change that only adds is not one.
- */
+/** Whether a new access setting takes a permission or a workspace away (see `isConsentScopeDowngrade`). */
 export function isConsentDowngrade(
   before: OrganizationAccessPolicy,
   after: OrganizationAccessPolicy,
 ): boolean {
-  const kept = new Set(after.permissions);
-  if (before.permissions.some((permission) => !kept.has(permission))) return true;
-  if (after.workspaceScope.kind === "all") return false;
-  if (before.workspaceScope.kind === "all") return true;
-  const selected = new Set(after.workspaceScope.workspaceIds);
-  return before.workspaceScope.workspaceIds.some((workspaceId) => !selected.has(workspaceId));
+  return isConsentScopeDowngrade(before, after);
 }
 
 /** A name-based (version 5 layout) UUID: the same name always gives the same id. */

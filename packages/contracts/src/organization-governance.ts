@@ -420,7 +420,9 @@ export type HostOrganizationMember = z.infer<typeof HostOrganizationMember>;
  * - `permissions_lost`: the person no longer holds any permission the
  *   connection was consented in its workspace scope (an organization
  *   connection), or no longer has the workspace authority the connection's
- *   live grant needs (a workspace connection).
+ *   live grant needs (a workspace connection). An organization connection
+ *   that consented `account:read` (every preset does) practically never
+ *   reaches it: every active membership holds `account:read`.
  *
  * The list may grow; a host must treat an unknown reason as not live.
  */
@@ -502,8 +504,12 @@ export const HOST_WEBHOOK_DELIVERY_HEADER = "X-Host-Delivery";
  * body under the configured secret; verify it over the exact bytes received.
  * `X-Host-Delivery` is the delivery's id: every retry of one delivery sends
  * the same id and body, so a host deduplicates on it. A delivery is retried
- * with backoff until the host answers 2xx; a 4xx other than 408 and 429 ends
- * it. Membership changes and other reasons a connection stops being live (see
+ * with backoff until the host answers 2xx; a 3xx (never followed) or a 4xx
+ * other than 408 and 429 ends it. The worker looks for the committed change
+ * for about two minutes (24 checks, 5 seconds apart) and sends nothing after
+ * that. A delivery that can't be started never blocks the change: the API logs
+ * `host_webhook.delivery_start_failed` and writes it anyway, and the host MCP
+ * connection read stays authoritative. Membership changes and other reasons a connection stops being live (see
  * the host MCP connection read) send nothing.
  */
 export const HostMcpConnectionRevokedWebhook = /* @__PURE__ */ defineSchema(() =>
@@ -535,9 +541,33 @@ export type HostWebhookDeliveryRequest = {
     connectionId: string;
   } & (
     | { change: "revoked" }
-    | { change: "consent_downgraded"; consentScope: HostMcpConnectionConsentScope }
+    | {
+        change: "consent_downgraded";
+        /** The setting the change starts from. */
+        previousConsentScope: HostMcpConnectionConsentScope;
+        /** The setting the change writes. */
+        consentScope: HostMcpConnectionConsentScope;
+      }
   );
 };
+
+/**
+ * Whether a new consent takes something away from an old one: a permission
+ * the old one had, or a workspace it covered (every workspace narrowed to
+ * selected ones, or a selected workspace dropped). A change that only adds is
+ * not one.
+ */
+export function isConsentScopeDowngrade(
+  before: Pick<HostMcpConnectionConsentScope, "permissions" | "workspaceScope">,
+  after: Pick<HostMcpConnectionConsentScope, "permissions" | "workspaceScope">,
+): boolean {
+  const kept = new Set(after.permissions);
+  if (before.permissions.some((permission) => !kept.has(permission))) return true;
+  if (after.workspaceScope.kind === "all") return false;
+  if (before.workspaceScope.kind === "all") return true;
+  const selected = new Set(after.workspaceScope.workspaceIds);
+  return before.workspaceScope.workspaceIds.some((workspaceId) => !selected.has(workspaceId));
+}
 
 /**
  * Host invitation read (`GET /v1/host/organizations/:id/invitations/:invitationId`):

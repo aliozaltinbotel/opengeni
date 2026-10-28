@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   organizationAccessPresetPermissions,
   type OrganizationAccessPolicy,
@@ -21,7 +21,8 @@ import { createApp } from "../src/app";
 /*
  * With `hostWebhooks.mcpConnectionRevoked` configured, disconnecting an MCP
  * connection, or taking access away from one, starts exactly one durable
- * delivery before the change is written. Without it nothing is started.
+ * delivery before the change is written; a delivery that can't start is
+ * logged and never blocks the change. Without it nothing is started.
  */
 
 const origin = "http://opengeni.test";
@@ -225,6 +226,7 @@ describe("the mcp_connection.revoked delivery is started", () => {
     expect(started[0]!.event).toMatchObject({
       change: "consent_downgraded",
       connectionId,
+      previousConsentScope: readOnlyEverywhere,
       consentScope: narrowed,
     });
     // Widening back to every workspace takes nothing away.
@@ -232,7 +234,7 @@ describe("the mcp_connection.revoked delivery is started", () => {
     expect(started).toHaveLength(1);
   }, 60_000);
 
-  test("a delivery that can't be started leaves the connection as it was", async () => {
+  test("a delivery that can't be started never blocks the disconnect", async () => {
     started.length = 0;
     const connectionId = await connect();
     const failing = createApp({
@@ -247,22 +249,52 @@ describe("the mcp_connection.revoked delivery is started", () => {
       bus: new MemoryEventBus(),
       workflowClient: {
         startHostWebhookDelivery: async () => {
-          throw new Error("temporal unavailable");
+          throw new TypeError("temporal unavailable");
         },
       } as unknown as SessionWorkflowClient,
     } as AppDependencies);
-    const response = await failing.request(connectionPath(connectionId), {
-      method: "DELETE",
-      headers: browser(person.cookie),
-    });
-    expect(response.status).toBe(503);
-    const body = (await response.json()) as { error: { details?: { code?: string } } };
-    expect(body.error.details?.code).toBe("HOST_WEBHOOK_DELIVERY_UNAVAILABLE");
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await disconnect(failing, connectionId);
+      const warnings = warn.mock.calls.filter(
+        ([event]) => event === "host_webhook.delivery_start_failed",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]![1]).toEqual({
+        event: "mcp_connection.revoked",
+        change: "revoked",
+        organizationId: person.organizationId,
+        connectionId,
+        deliveryId: expect.any(String),
+        errorClass: "TypeError",
+      });
+      expect(JSON.stringify(warnings[0])).not.toContain(hook.secret);
+    } finally {
+      warn.mockRestore();
+    }
+    expect(started).toHaveLength(0);
     const [row] = await shared.admin<{ revoked_at: Date | null }[]>`
       select revoked_at from mcp_oauth_refresh_tokens
       where family_id = ${connectionId} order by generation desc limit 1`;
-    expect(row!.revoked_at).toBeNull();
+    expect(row!.revoked_at).not.toBeNull();
   }, 60_000);
+
+  test("an API configured with the webhook refuses to start without a way to deliver it", () => {
+    expect(() =>
+      createApp({
+        settings: testSettings({
+          databaseUrl: shared.adminUrl,
+          productAccessMode: "managed",
+          betterAuthSecret: "host-mcp-connection-webhook-secret-32-bytes",
+          publicBaseUrl: origin,
+          hostWebhooks: { mcpConnectionRevoked: hook },
+        }),
+        db: client.db,
+        bus: new MemoryEventBus(),
+        workflowClient: {} as never,
+      } as AppDependencies),
+    ).toThrow("HOST_WEBHOOK_DELIVERY_UNAVAILABLE");
+  });
 
   test("never without the configured webhook", async () => {
     started.length = 0;

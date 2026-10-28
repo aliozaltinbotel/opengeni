@@ -1228,10 +1228,12 @@ Unset, nothing is sent. When a person or an administrator disconnects an MCP
 connection, or its person changes its access setting so that it loses a
 permission or a workspace, the API starts one durable delivery (a Temporal
 workflow) just before it writes the change, and the worker POSTs it once it
-sees the change committed; a change that never commits sends nothing. While
-the delivery cannot be started (Temporal unreachable), the disconnect or access
-change is refused with `503` (`details.code =
-"HOST_WEBHOOK_DELIVERY_UNAVAILABLE"`, retryable) and nothing is written. The body
+sees the change committed. It looks for about two minutes (24 checks, 5
+seconds apart); a change that never commits sends nothing. A notification
+never blocks the change: when the delivery cannot be started (Temporal
+unreachable), the API logs one `host_webhook.delivery_start_failed` warning and
+writes the change anyway, so the connection read stays authoritative. The URL
+must be https outside local/test; a target inside the cluster is allowed. The body
 (`HostMcpConnectionRevokedWebhook`) is:
 
 ```ts
@@ -1251,7 +1253,8 @@ change is refused with `503` (`details.code =
 secret; verify it over the exact bytes received. `X-Host-Delivery` is the
 delivery's id. A delivery is retried with backoff (for about a day) until the
 host answers `2xx`, each retry with the same id and body, so deduplicate on
-the id; a `4xx` other than `408` and `429` ends it. A membership that ends, a
+the id; a `3xx` (redirects are never followed) or a `4xx` other than `408`
+and `429` ends it. A membership that ends, a
 refresh-token reuse that revokes a connection, and an expiry send nothing:
 settle those with the connection read.
 
