@@ -1161,6 +1161,31 @@ that belongs to another organization both answer `404` with
 `error.details.code = "HOST_INVITATION_NOT_IN_ORGANIZATION"`. Without the
 governance port, the route does not exist.
 
+To read one membership back before acting on it, the host calls
+`GET /v1/host/organizations/:id/members/:membershipId`. It authenticates like
+the invitation read and is a read, with no `decide`, no attribution row and
+`cache-control: no-store` on every answer. Every status answers `200`; a
+membership that does not exist and one that belongs to another organization
+both answer `404` with `error.details.code = "HOST_MEMBER_NOT_IN_ORGANIZATION"`.
+The answer (`HostOrganizationMember`) is:
+
+```ts
+{
+  membershipId: string;
+  organizationId: string;
+  userId: string | null; // the native account (subject `user:<userId>`)
+  identityId: string | null; // that account's native identity: a host session token's `sub`
+  status: "provisioning" | "active" | "suspended" | "revoked"; // revoked: offboarded
+  role: "owner" | "admin" | "member";
+  authorizationRevision: number; // a member command's expectedAuthorizationRevision
+  sharedWorkspaceAccess: { workspaceId; membershipId; role; permissions; updatedAt }[];
+  updatedAt: string; // the membership's last change
+}
+```
+
+`status`, `authorizationRevision` and `sharedWorkspaceAccess` are the identity
+lookup's: a suspended or offboarded membership has no shared-workspace access.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 

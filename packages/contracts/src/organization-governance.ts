@@ -105,6 +105,8 @@ export const HOST_IDENTITY_NOT_IN_ORGANIZATION = "HOST_IDENTITY_NOT_IN_ORGANIZAT
  * token's subject): for example not an active owner or admin, or a role rule.
  */
 export const HOST_COMMAND_ACTOR_NOT_AUTHORIZED = "HOST_COMMAND_ACTOR_NOT_AUTHORIZED";
+/** The host member read: the membership is unknown or another organization's. */
+export const HOST_MEMBER_NOT_IN_ORGANIZATION = "HOST_MEMBER_NOT_IN_ORGANIZATION";
 /** The host invitation read: the invitation is unknown or another organization's. */
 export const HOST_INVITATION_NOT_IN_ORGANIZATION = "HOST_INVITATION_NOT_IN_ORGANIZATION";
 /**
@@ -285,6 +287,21 @@ export type HostLookupOrganizationIdentityRequest = z.infer<
   typeof HostLookupOrganizationIdentityRequest
 >;
 
+/** A membership's grants in the organization's shared workspaces (see the identity lookup). */
+function hostSharedWorkspaceAccess() {
+  return z.array(
+    z
+      .object({
+        workspaceId: primitives.uuid,
+        membershipId: primitives.uuid,
+        role: WorkspaceMemberRole,
+        permissions: z.array(z.string().min(1).max(128)),
+        updatedAt: primitives.string.datetime({ offset: true }),
+      })
+      .strict(),
+  );
+}
+
 /**
  * What the organization knows about one native identity that is, or was, its
  * member (any membership status). An identity with no membership here answers
@@ -332,17 +349,7 @@ export const HostOrganizationIdentity = /* @__PURE__ */ defineSchema(() =>
               status: OrganizationMember.shape.status,
               role: OrganizationMembershipRole,
               authorizationRevision: primitives.positiveInteger,
-              sharedWorkspaceAccess: z.array(
-                z
-                  .object({
-                    workspaceId: primitives.uuid,
-                    membershipId: primitives.uuid,
-                    role: WorkspaceMemberRole,
-                    permissions: z.array(z.string().min(1).max(128)),
-                    updatedAt: primitives.string.datetime({ offset: true }),
-                  })
-                  .strict(),
-              ),
+              sharedWorkspaceAccess: hostSharedWorkspaceAccess(),
             })
             .strict(),
         )
@@ -360,6 +367,42 @@ export const HostOrganizationIdentity = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type HostOrganizationIdentity = z.infer<typeof HostOrganizationIdentity>;
+
+/**
+ * Host member read (`GET /v1/host/organizations/:id/members/:membershipId`):
+ * where one of the organization's memberships stands, in any status, so a host
+ * can check a membership it linked before acting on it. A read: no
+ * `actingExternalUser`, no attribution. A membership that is unknown or
+ * another organization's answers 404 `HOST_MEMBER_NOT_IN_ORGANIZATION`, the
+ * same for both.
+ *
+ * - `status`, `role`, `authorizationRevision` and `sharedWorkspaceAccess`
+ *   mean exactly what they mean in the identity lookup's `memberships`: a
+ *   `revoked` (offboarded) or `suspended` membership answers 200 with that
+ *   status and no shared-workspace access.
+ * - `userId`: the native account the membership belongs to (the subject
+ *   `user:<userId>`), and `identityId` that account's native identity (the
+ *   `sub` of its host session tokens). Both are null for a membership whose
+ *   subject is not a native account; `identityId` is also null when the
+ *   account has no identity.
+ * - `updatedAt`: the membership's last change.
+ */
+export const HostOrganizationMember = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      membershipId: primitives.uuid,
+      organizationId: primitives.uuid,
+      userId: z.string().min(1).max(1024).nullable(),
+      identityId: primitives.nullableUuid,
+      status: OrganizationMember.shape.status,
+      role: OrganizationMembershipRole,
+      authorizationRevision: primitives.positiveInteger,
+      sharedWorkspaceAccess: hostSharedWorkspaceAccess(),
+      updatedAt: primitives.string.datetime({ offset: true }),
+    })
+    .strict(),
+);
+export type HostOrganizationMember = z.infer<typeof HostOrganizationMember>;
 
 /**
  * Host invitation read (`GET /v1/host/organizations/:id/invitations/:invitationId`):
