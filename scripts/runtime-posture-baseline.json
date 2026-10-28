@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
   "status": "production",
-  "sourceCommit": "3ad4699829c0ec9cd042745975b083ebaee2791d",
-  "release": "ghcr.io/cloudgeni-ai/opengeni-api@sha256:12325d4a26931cef0fb2c182769e5f2c457c4b73f69534e83504972e6296a879"
+  "sourceCommit": "b2cf70e9ee012d2b96dfba6768e6a196eb7057fa",
+  "release": "fork pin A b2cf70e9e (cendra/native-successor2-20261028), the release pin B follows; its image digest is recorded at the repin"
 }
