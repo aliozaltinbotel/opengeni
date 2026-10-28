@@ -4,6 +4,7 @@ import {
   isConsentScopeDowngrade,
   type HostWebhookDeliveryRequest,
 } from "@opengeni/contracts/organization-governance";
+import { assertHostWebhookSettings } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
 
 type McpConnectionChange =
@@ -26,6 +27,8 @@ export const HOST_WEBHOOK_DELIVERY_UNAVAILABLE = "HOST_WEBHOOK_DELIVERY_UNAVAILA
 export function assertHostWebhookDeliveryConfigured(
   deps: Pick<ApiRouteDeps, "settings" | "workflowClient">,
 ): void {
+  // Settings an embedding host built without the environment loader are checked too.
+  assertHostWebhookSettings(deps.settings);
   if (
     deps.settings.hostWebhooks?.mcpConnectionRevoked &&
     !deps.workflowClient.startHostWebhookDelivery
@@ -75,10 +78,21 @@ export async function startMcpConnectionRevokedDelivery(
             consentScope: input.consentScope,
           },
         };
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const start = deps.workflowClient.startHostWebhookDelivery;
     if (!start) throw new Error(HOST_WEBHOOK_DELIVERY_UNAVAILABLE);
-    await start(request);
+    // A hung start counts as a failed one. A start that succeeds late is
+    // harmless: the worker still waits to see the change committed.
+    await Promise.race([
+      start(request),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new HostWebhookDeliveryStartTimeoutError()),
+          HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS,
+        );
+      }),
+    ]);
   } catch (error) {
     console.warn("host_webhook.delivery_start_failed", {
       event: request.event.type,
@@ -88,6 +102,18 @@ export async function startMcpConnectionRevokedDelivery(
       deliveryId: request.deliveryId,
       errorClass: error instanceof Error ? error.name : typeof error,
     });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** How long a disconnect or access change waits for its delivery to start. */
+export const HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS = 3_000;
+
+class HostWebhookDeliveryStartTimeoutError extends Error {
+  constructor() {
+    super("the host webhook delivery did not start in time");
+    this.name = "HostWebhookDeliveryStartTimeoutError";
   }
 }
 

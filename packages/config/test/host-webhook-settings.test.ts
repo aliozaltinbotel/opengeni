@@ -26,3 +26,22 @@ test("its URL and secret configure it together", () => {
     getSettings({ [url]: "ftp://host.example.test/hooks", [secret]: "x".repeat(32) }),
   ).toThrow();
 });
+
+test("a plain http URL is refused at startup outside local/test, and allowed in local and test", () => {
+  const http = {
+    [url]: "http://host.internal/hooks",
+    [secret]: "host-webhook-secret-of-at-least-32-chars",
+  };
+  expect(() => getSettings({ ...http, OPENGENI_ENVIRONMENT: "production" })).toThrow(
+    "HOST_WEBHOOK_URL_HTTPS_REQUIRED",
+  );
+  for (const environment of ["local", "test"])
+    expect(getSettings({ ...http, OPENGENI_ENVIRONMENT: environment }).hostWebhooks).toBeDefined();
+  expect(
+    getSettings({
+      ...http,
+      [url]: "https://host.example.test/hooks",
+      OPENGENI_ENVIRONMENT: "production",
+    }).hostWebhooks,
+  ).toBeDefined();
+});

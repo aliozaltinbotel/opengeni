@@ -17,6 +17,7 @@ import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
+import { HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS } from "../src/http/host-webhooks";
 
 /*
  * With `hostWebhooks.mcpConnectionRevoked` configured, disconnecting an MCP
@@ -278,6 +279,74 @@ describe("the mcp_connection.revoked delivery is started", () => {
       where family_id = ${connectionId} order by generation desc limit 1`;
     expect(row!.revoked_at).not.toBeNull();
   }, 60_000);
+
+  test("a delivery start that never answers holds the disconnect no longer than its deadline", async () => {
+    const connectionId = await connect();
+    let calls = 0;
+    const hung = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        betterAuthSecret: "host-mcp-connection-webhook-secret-32-bytes",
+        publicBaseUrl: origin,
+        hostWebhooks: { mcpConnectionRevoked: hook },
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        startHostWebhookDelivery: () => {
+          calls += 1;
+          return new Promise<void>(() => undefined);
+        },
+      } as unknown as SessionWorkflowClient,
+    } as AppDependencies);
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+    const startedAt = Date.now();
+    try {
+      await disconnect(hung, connectionId);
+      const elapsed = Date.now() - startedAt;
+      expect(elapsed).toBeGreaterThanOrEqual(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS - 50);
+      expect(elapsed).toBeLessThan(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS + 2_000);
+      const warnings = warn.mock.calls.filter(
+        ([event]) => event === "host_webhook.delivery_start_failed",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]![1]).toMatchObject({
+        connectionId,
+        errorClass: "HostWebhookDeliveryStartTimeoutError",
+      });
+    } finally {
+      warn.mockRestore();
+    }
+    // The start was attempted once and never completed: no delivery is recorded as started.
+    expect(calls).toBe(1);
+    expect(started.filter(({ event }) => event.connectionId === connectionId)).toEqual([]);
+    const [row] = await shared.admin<{ revoked_at: Date | null }[]>`
+      select revoked_at from mcp_oauth_refresh_tokens
+      where family_id = ${connectionId} order by generation desc limit 1`;
+    expect(row!.revoked_at).not.toBeNull();
+  }, 60_000);
+
+  test("an API refuses a plain http webhook outside local/test, and accepts it in test", () => {
+    const appIn = (environment: string, url: string) =>
+      createApp({
+        settings: testSettings({
+          environment,
+          databaseUrl: shared.adminUrl,
+          productAccessMode: "managed",
+          betterAuthSecret: "host-mcp-connection-webhook-secret-32-bytes",
+          publicBaseUrl: origin,
+          hostWebhooks: { mcpConnectionRevoked: { ...hook, url } },
+        } as never),
+        db: client.db,
+        bus: new MemoryEventBus(),
+        workflowClient,
+      } as AppDependencies);
+    expect(() => appIn("production", "http://host.internal/hooks")).toThrow(
+      "HOST_WEBHOOK_URL_HTTPS_REQUIRED",
+    );
+    expect(() => appIn("test", "http://host.internal/hooks")).not.toThrow();
+  });
 
   test("an API configured with the webhook refuses to start without a way to deliver it", () => {
     expect(() =>

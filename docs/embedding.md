@@ -1230,10 +1230,11 @@ permission or a workspace, the API starts one durable delivery (a Temporal
 workflow) just before it writes the change, and the worker POSTs it once it
 sees the change committed. It looks for about two minutes (24 checks, 5
 seconds apart); a change that never commits sends nothing. A notification
-never blocks the change: when the delivery cannot be started (Temporal
-unreachable), the API logs one `host_webhook.delivery_start_failed` warning and
+never blocks the change: the start has a 3-second deadline, and when the
+delivery cannot be started in time (Temporal unreachable or hung), the API logs one `host_webhook.delivery_start_failed` warning and
 writes the change anyway, so the connection read stays authoritative. The URL
-must be https outside local/test; a target inside the cluster is allowed. The body
+must be https outside local/test (a plain http URL there refuses startup with
+`HOST_WEBHOOK_URL_HTTPS_REQUIRED`); a target inside the cluster is allowed. The body
 (`HostMcpConnectionRevokedWebhook`) is:
 
 ```ts

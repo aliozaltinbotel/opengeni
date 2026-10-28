@@ -66,6 +66,7 @@ import {
   type DocumentIndexClient,
   type SessionWorkflowClient,
 } from "./app";
+import { HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS } from "./http/host-webhooks";
 import { observabilityEventBusOptions } from "./observability";
 import { startGovernedSessionPolicyBackfill } from "./governed-session-policy-backfill";
 import { startAuthCalloutResponder } from "./sandbox/auth-callout";
@@ -250,14 +251,19 @@ export async function createTemporalWorkflowClient(
     startHostWebhookDelivery: async (input) => {
       // A run still waiting is joined; one that delivered is never repeated;
       // one that failed (its change never committed) may run again.
+      // The call's own deadline, so a hung connection never holds the change.
       try {
-        await temporal.workflow.start("hostWebhookDeliveryWorkflow", {
-          taskQueue: settings.temporalTaskQueue,
-          workflowId: `host-webhook:${input.deliveryId}`,
-          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
-          workflowIdConflictPolicy: "USE_EXISTING",
-          args: [input],
-        });
+        await temporal.withDeadline(
+          Date.now() + HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS,
+          async () =>
+            await temporal.workflow.start("hostWebhookDeliveryWorkflow", {
+              taskQueue: settings.temporalTaskQueue,
+              workflowId: `host-webhook:${input.deliveryId}`,
+              workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+              workflowIdConflictPolicy: "USE_EXISTING",
+              args: [input],
+            }),
+        );
       } catch (error) {
         if (!isWorkflowAlreadyStarted(error)) throw error;
       }
