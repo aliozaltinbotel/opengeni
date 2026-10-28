@@ -457,7 +457,7 @@ export async function resolveMcpOAuthAccessToken(
 
 export async function resolveLiveMcpOAuthGrant(
   db: Database,
-  access: McpOAuthAccess,
+  access: McpOAuthGrantSnapshot & Pick<McpOAuthAccess, "refreshFamilyId">,
 ): Promise<AccessGrant | null> {
   // Organization connections resolve per request through the person proof.
   const workspaceId = access.workspaceId;
@@ -585,6 +585,65 @@ export async function listOrganizationMcpConnections(
     lastUsedAt: row.last_used_at === null ? null : new Date(row.last_used_at),
     expiresAt: new Date(row.expires_at),
   }));
+}
+
+/**
+ * One MCP OAuth connection (a refresh-token family, organization or
+ * workspace) of an account as its latest token generation stands, live or not.
+ * `grant` is that generation's grant, so `resolveLiveMcpOAuthGrant` can be run on it.
+ */
+export type McpOAuthConnectionRecord = {
+  id: string;
+  accountId: string;
+  clientId: string;
+  grant: McpOAuthGrantSnapshot & { refreshFamilyId: string; expiresAt: Date };
+  connectedAt: Date;
+  revokedAt: Date | null;
+  /** The latest of the generation's creation (its token rotation) and its revocation. */
+  updatedAt: Date;
+};
+
+/** An account's connection by id in any state, or null when unknown or another account's. */
+export async function getMcpOAuthConnectionRecord(
+  db: Database,
+  input: { accountId: string; connectionId: string },
+): Promise<McpOAuthConnectionRecord | null> {
+  const [row] = await rawRows<
+    GrantRow & {
+      family_id: string;
+      client_id: string;
+      connected_at: Date | string | null;
+      created_at: Date | string;
+      expires_at: Date | string;
+      revoked_at: Date | string | null;
+    }
+  >(
+    db,
+    sql`select family_id, client_id, account_id, workspace_id, subject_id, resource,
+        permissions, tool_identities, organization_access,
+        connected_at, created_at, expires_at, revoked_at
+      from mcp_oauth_refresh_tokens
+      where family_id = ${input.connectionId}::uuid
+        and account_id = ${input.accountId}
+      order by generation desc
+      limit 1`,
+  );
+  if (!row) return null;
+  const createdAt = new Date(row.created_at);
+  const revokedAt = row.revoked_at === null ? null : new Date(row.revoked_at);
+  return {
+    id: row.family_id,
+    accountId: row.account_id,
+    clientId: row.client_id,
+    grant: {
+      ...mapGrant(row),
+      refreshFamilyId: row.family_id,
+      expiresAt: new Date(row.expires_at),
+    },
+    connectedAt: new Date(row.connected_at ?? row.created_at),
+    revokedAt,
+    updatedAt: revokedAt && revokedAt > createdAt ? revokedAt : createdAt,
+  };
 }
 
 /** Change what a connection can do; its next request uses the new setting. */

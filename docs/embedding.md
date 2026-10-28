@@ -1186,6 +1186,39 @@ The answer (`HostOrganizationMember`) is:
 `status`, `authorizationRevision` and `sharedWorkspaceAccess` are the identity
 lookup's: a suspended or offboarded membership has no shared-workspace access.
 
+To settle what it projected from an outside MCP client a member signed in
+with, the host reads the connection:
+`GET /v1/host/organizations/:id/mcp-connections/:connectionId`, where
+`connectionId` is the connection's id in the native connected-agents list. It
+authenticates like the member read, writes nothing and is sent with
+`cache-control: no-store`. A connection that does not exist and one that
+belongs to another organization both answer `404` with
+`error.details.code = "HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION"`. The answer
+(`HostOrganizationMcpConnection`) is:
+
+```ts
+{
+  connectionId: string;
+  organizationId: string;
+  workspaceId: string | null; // a workspace connection's one workspace; null for an organization connection
+  clientId: string;
+  status: "active" | "revoked";
+  reason: null | "revoked" | "expired" | "membership_not_live" | "permissions_lost";
+  consentScope: { preset: string | null; permissions: string[]; workspaceScope };
+  revokedAt: string | null; // when it was disconnected or expired
+  updatedAt: string; // its latest token rotation or its revocation
+}
+```
+
+`status` is `active` only while the connection's next request would resolve a
+live grant. Otherwise it is `revoked`, and `reason` is the first of these that
+holds: it was disconnected (`revoked`), its refresh token expired (`expired`),
+its person's membership is no longer active (`membership_not_live`), or the
+person no longer holds any consented permission at the organization or in a
+workspace in the consented scope (`permissions_lost`; for a workspace
+connection, the live-grant resolution its requests use refuses). Only the last
+two can become `active` again. Treat any other `reason` as not live.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 

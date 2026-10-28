@@ -2,6 +2,7 @@ import { z } from "zod";
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
 import { CanonicalHumanIdentityStatus } from "./canonical-human-identities";
+import { OrganizationAccessPreset, OrganizationWorkspaceScope } from "./organization-access";
 import {
   CreateOrganizationInvitationRequest,
   OrganizationInvitationStatus,
@@ -107,6 +108,8 @@ export const HOST_IDENTITY_NOT_IN_ORGANIZATION = "HOST_IDENTITY_NOT_IN_ORGANIZAT
 export const HOST_COMMAND_ACTOR_NOT_AUTHORIZED = "HOST_COMMAND_ACTOR_NOT_AUTHORIZED";
 /** The host member read: the membership is unknown or another organization's. */
 export const HOST_MEMBER_NOT_IN_ORGANIZATION = "HOST_MEMBER_NOT_IN_ORGANIZATION";
+/** The host MCP connection read: the connection is unknown or another organization's. */
+export const HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION = "HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION";
 /** The host invitation read: the invitation is unknown or another organization's. */
 export const HOST_INVITATION_NOT_IN_ORGANIZATION = "HOST_INVITATION_NOT_IN_ORGANIZATION";
 /**
@@ -403,6 +406,86 @@ export const HostOrganizationMember = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type HostOrganizationMember = z.infer<typeof HostOrganizationMember>;
+
+/**
+ * Why a host MCP connection read answers `status: "revoked"`: the connection's
+ * next request would be refused. Checked in this order, and the first that
+ * holds is the answer:
+ *
+ * - `revoked`: the connection was disconnected (by its person, an
+ *   administrator, or a refresh-token reuse that revoked its whole family).
+ * - `expired`: its refresh token's lifetime ended.
+ * - `membership_not_live`: its person's membership in the organization is no
+ *   longer active (suspended, offboarded, or gone).
+ * - `permissions_lost`: the person no longer holds any permission the
+ *   connection was consented in its workspace scope (an organization
+ *   connection), or no longer has the workspace authority the connection's
+ *   live grant needs (a workspace connection).
+ *
+ * The list may grow; a host must treat an unknown reason as not live.
+ */
+export const HOST_MCP_CONNECTION_NOT_LIVE_REASONS = [
+  "revoked",
+  "expired",
+  "membership_not_live",
+  "permissions_lost",
+] as const;
+export type HostMcpConnectionNotLiveReason = (typeof HOST_MCP_CONNECTION_NOT_LIVE_REASONS)[number];
+
+/**
+ * What an MCP connection was consented to do. An organization connection
+ * (`workspaceId` null) has its access setting's `preset`; a workspace
+ * connection has `preset: null` and a `selected` scope of its one workspace.
+ */
+export const HostMcpConnectionConsentScope = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      preset: OrganizationAccessPreset.nullable(),
+      permissions: z.array(z.string().min(1).max(128)),
+      workspaceScope: OrganizationWorkspaceScope,
+    })
+    .strict(),
+);
+export type HostMcpConnectionConsentScope = z.infer<typeof HostMcpConnectionConsentScope>;
+
+/**
+ * Host read of one MCP connection
+ * (`GET /v1/host/organizations/:id/mcp-connections/:connectionId`): whether
+ * an outside MCP client a member signed in with can still act, so a host can
+ * settle what it projected from the connection. `connectionId` is the
+ * connection's id in the native connected-agents list (its refresh-token
+ * family). A read: no `actingExternalUser`, no attribution. A connection that
+ * is unknown or another organization's answers 404
+ * `HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION`, the same for both.
+ *
+ * - `status`: `active` when the connection's live grant still resolves now,
+ *   otherwise `revoked` with `reason` (see `HOST_MCP_CONNECTION_NOT_LIVE_REASONS`);
+ *   `reason` is null while active. A `revoked` answer can become `active`
+ *   again only for `membership_not_live` and `permissions_lost` (the member is
+ *   reactivated or regains access); `revoked` and `expired` are final.
+ * - `workspaceId`: the one workspace of a workspace connection, null for an
+ *   organization connection.
+ * - `revokedAt`: when it was disconnected (`revoked`) or expired (`expired`);
+ *   null otherwise.
+ * - `updatedAt`: the connection's last recorded change: its latest token
+ *   rotation or its revocation. A change of its access setting is not dated.
+ */
+export const HostOrganizationMcpConnection = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      connectionId: primitives.uuid,
+      organizationId: primitives.uuid,
+      workspaceId: primitives.nullableUuid,
+      clientId: z.string().min(1).max(1024),
+      status: z.enum(["active", "revoked"]),
+      reason: z.enum(HOST_MCP_CONNECTION_NOT_LIVE_REASONS).nullable(),
+      consentScope: HostMcpConnectionConsentScope,
+      revokedAt: primitives.dateTime.nullable(),
+      updatedAt: primitives.dateTime,
+    })
+    .strict(),
+);
+export type HostOrganizationMcpConnection = z.infer<typeof HostOrganizationMcpConnection>;
 
 /**
  * Host invitation read (`GET /v1/host/organizations/:id/invitations/:invitationId`):

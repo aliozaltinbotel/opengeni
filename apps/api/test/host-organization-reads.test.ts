@@ -7,9 +7,17 @@ import type {
   ManagedEmailMessage,
 } from "@opengeni/core";
 import {
+  organizationAccessPresetPermissions,
+  type OrganizationAccessPolicy,
+} from "@opengeni/contracts";
+import {
+  consumeMcpOAuthAuthorizationRequest,
   createAdditionalManagedOrganization,
   createDb,
   createManagedOrganization,
+  createMcpOAuthAuthorizationRequest,
+  exchangeMcpOAuthAuthorizationCode,
+  revokeOrganizationMcpConnection,
   type DbClient,
 } from "@opengeni/db";
 import { getCanonicalHumanIdentityProjection } from "@opengeni/db/canonical-human-identities";
@@ -318,6 +326,204 @@ describe("the host reads back one of its organization's memberships", () => {
     const membership = await membershipOf(first.organizationId, member.subjectId);
     for (const token of [null, "not-a-service-token"]) {
       const response = await hostRead(first, `/members/${membership.id}`, token);
+      expect(response.status).toBe(401);
+      expect(detailCode(await response.json())).toBe("HOST_COMMAND_SERVICE_TOKEN_REQUIRED");
+    }
+  }, 60_000);
+});
+
+const mcpClientId = `ogmcp_client_${crypto.randomUUID()}`;
+const mcpRedirectUri = "http://127.0.0.1:4567/callback";
+const tokenHash = () => crypto.randomUUID().replaceAll("-", "").padEnd(64, "0");
+const inDays = (days: number) => new Date(Date.now() + days * 86_400_000);
+const readOnlyEverywhere: OrganizationAccessPolicy = {
+  preset: "read_only",
+  permissions: organizationAccessPresetPermissions("read_only"),
+  workspaceScope: { kind: "all" },
+};
+
+/**
+ * A person's MCP sign-in, as the OAuth flow stores it: an organization
+ * connection with an access setting, or a workspace connection with
+ * permissions. Its id is the refresh-token family.
+ */
+async function connect(
+  organization: HostOrganization,
+  person: Person,
+  bound: { organizationAccess: OrganizationAccessPolicy } | { workspaceId: string },
+): Promise<string> {
+  const requestHash = tokenHash();
+  const resource =
+    "workspaceId" in bound
+      ? `${origin}/v1/workspaces/${bound.workspaceId}/mcp`
+      : `${origin}/v1/mcp`;
+  await createMcpOAuthAuthorizationRequest(client.db, {
+    requestHash,
+    clientId: mcpClientId,
+    accountId: organization.organizationId,
+    workspaceId: "workspaceId" in bound ? bound.workspaceId : null,
+    subjectId: person.subjectId,
+    resource,
+    redirectUri: mcpRedirectUri,
+    codeChallenge: "c".repeat(43),
+    state: null,
+    permissions: "workspaceId" in bound ? ["workspace:read", "sessions:read"] : [],
+    toolIdentities: [],
+    organizationAccess: "organizationAccess" in bound ? bound.organizationAccess : null,
+    expiresAt: inDays(1),
+  });
+  const codeHash = tokenHash();
+  expect(
+    await consumeMcpOAuthAuthorizationRequest(client.db, {
+      requestHash,
+      subjectId: person.subjectId,
+      codeHash,
+      codeExpiresAt: inDays(1),
+    }),
+  ).not.toBeNull();
+  const exchanged = await exchangeMcpOAuthAuthorizationCode(client.db, {
+    codeHash,
+    clientId: mcpClientId,
+    redirectUri: mcpRedirectUri,
+    resource,
+    codeChallenge: "c".repeat(43),
+    accessTokenHash: tokenHash(),
+    refreshTokenHash: tokenHash(),
+    accessExpiresAt: inDays(1),
+    refreshExpiresAt: inDays(30),
+  });
+  return exchanged!.refreshFamilyId;
+}
+
+type ConnectionBody = {
+  connectionId: string;
+  organizationId: string;
+  workspaceId: string | null;
+  clientId: string;
+  status: string;
+  reason: string | null;
+  consentScope: unknown;
+  revokedAt: string | null;
+  updatedAt: string;
+};
+
+async function readConnection(
+  organization: HostOrganization,
+  connectionId: string,
+): Promise<{ status: number; body: ConnectionBody }> {
+  const response = await hostRead(
+    organization,
+    `/mcp-connections/${connectionId}`,
+    await hostToken(organization),
+  );
+  expect(response.headers.get("cache-control")).toBe("no-store");
+  return { status: response.status, body: (await response.json()) as ConnectionBody };
+}
+
+describe("the host reads back one of its organization's MCP connections", () => {
+  let first: HostOrganization;
+  let second: HostOrganization;
+  let member: Person;
+  let leaver: Person;
+
+  beforeAll(async () => {
+    await shared.admin`insert into mcp_oauth_clients (
+      client_id, redirect_uris, client_name, grant_types, response_types, registration_scope_hash,
+      expires_at
+    ) values (
+      ${mcpClientId}, ${shared.admin.json([mcpRedirectUri])}, 'Outside agent',
+      ${shared.admin.json(["authorization_code", "refresh_token"])},
+      ${shared.admin.json(["code"])}, ${"5".repeat(64)}, ${inDays(30)}
+    )`;
+    first = await hostOrganization();
+    second = await hostOrganization();
+    member = await invitedMember(first);
+    leaver = await invitedMember(first);
+  }, 180_000);
+
+  test("an active organization connection answers its consent and no reason", async () => {
+    const connectionId = await connect(first, member, { organizationAccess: readOnlyEverywhere });
+    const { status, body } = await readConnection(first, connectionId);
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      connectionId,
+      organizationId: first.organizationId,
+      workspaceId: null,
+      clientId: mcpClientId,
+      status: "active",
+      reason: null,
+      consentScope: readOnlyEverywhere,
+      revokedAt: null,
+      updatedAt: body.updatedAt,
+    });
+  }, 60_000);
+
+  test("an active workspace connection answers its one workspace", async () => {
+    const connectionId = await connect(first, member, { workspaceId: first.businessWorkspaceId });
+    const { status, body } = await readConnection(first, connectionId);
+    expect(status).toBe(200);
+    expect(body.status).toBe("active");
+    expect(body.workspaceId).toBe(first.businessWorkspaceId);
+    expect(body.consentScope).toEqual({
+      preset: null,
+      permissions: ["workspace:read", "sessions:read"],
+      workspaceScope: { kind: "selected", workspaceIds: [first.businessWorkspaceId] },
+    });
+  }, 60_000);
+
+  test("a disconnected connection answers revoked, with when", async () => {
+    const connectionId = await connect(first, member, { organizationAccess: readOnlyEverywhere });
+    expect(
+      await revokeOrganizationMcpConnection(client.db, {
+        accountId: first.organizationId,
+        connectionId,
+      }),
+    ).toBe(true);
+    const { status, body } = await readConnection(first, connectionId);
+    expect(status).toBe(200);
+    expect(body.status).toBe("revoked");
+    expect(body.reason).toBe("revoked");
+    const [row] = await shared.admin<{ revoked_at: Date }[]>`
+      select revoked_at from mcp_oauth_refresh_tokens
+      where family_id = ${connectionId} order by generation desc limit 1`;
+    expect(body.revokedAt).toBe(row!.revoked_at.toISOString());
+    expect(body.updatedAt).toBe(row!.revoked_at.toISOString());
+  }, 60_000);
+
+  test("a connection whose member was offboarded is not live", async () => {
+    const organizationConnection = await connect(first, leaver, {
+      organizationAccess: readOnlyEverywhere,
+    });
+    const workspaceConnection = await connect(first, leaver, {
+      workspaceId: first.businessWorkspaceId,
+    });
+    for (const connectionId of [organizationConnection, workspaceConnection])
+      expect((await readConnection(first, connectionId)).body.status).toBe("active");
+    await offboard(first, leaver);
+    for (const connectionId of [organizationConnection, workspaceConnection]) {
+      const { status, body } = await readConnection(first, connectionId);
+      expect(status).toBe(200);
+      expect({ status: body.status, reason: body.reason, revokedAt: body.revokedAt }).toEqual({
+        status: "revoked",
+        reason: "membership_not_live",
+        revokedAt: null,
+      });
+    }
+  }, 60_000);
+
+  test("another organization's connection and an unknown one get the same 404", async () => {
+    const connectionId = await connect(first, member, { organizationAccess: readOnlyEverywhere });
+    for (const id of [connectionId, crypto.randomUUID()]) {
+      const { status, body } = await readConnection(second, id);
+      expect(status).toBe(404);
+      expect(detailCode(body)).toBe("HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION");
+    }
+  }, 60_000);
+
+  test("without a service token the read is refused", async () => {
+    const connectionId = await connect(first, member, { organizationAccess: readOnlyEverywhere });
+    for (const token of [null, "not-a-service-token"]) {
+      const response = await hostRead(first, `/mcp-connections/${connectionId}`, token);
       expect(response.status).toBe(401);
       expect(detailCode(await response.json())).toBe("HOST_COMMAND_SERVICE_TOKEN_REQUIRED");
     }
