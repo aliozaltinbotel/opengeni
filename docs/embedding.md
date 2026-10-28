@@ -2319,6 +2319,18 @@ both from the root (`/`) and from `workspaces/$workspaceId/`: `"sessions"`
 other value is refused at registration. `workspaceLanding(extension)` resolves
 it without React or a DOM.
 
+`outsideWorkspaceRoutes` mounts host pages at the console's top level,
+outside any workspace (for example `register`, `not-admitted`), for people
+who have no workspace yet. Each is `{ path, load, access? }`: `path` is
+lowercase static segments whose first segment is not one of the console's own
+top-level routes (or `v1`, `api`, `assets`, `auth`, `oauth`, `mcp`), which
+registration refuses; `access: "public"` renders the page before configuration
+and sign-in, like the reset-password page, and `"signedIn"` (the default)
+renders it once the person is signed in, before the workspace access and
+onboarding gates. These pages render inside `outsideWorkspaceProviders`
+(components taking only `children`), not inside `shellProviders`, which take a
+workspace.
+
 `hiddenNativeDestinations` hides a native destination wherever the console
 offers it: its nav entries, its settings-rail and settings-search entries, its
 links, and its URL, which renders the not-found page. `insights` also hides the

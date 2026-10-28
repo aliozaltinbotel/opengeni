@@ -14,6 +14,7 @@ import {
   isNativeNavId,
   nativeNavDestination,
   type HostExtension,
+  type HostExtensionOutsideWorkspaceRoute,
   type NativeDestination,
 } from "@opengeni/react/app/host-extension";
 
@@ -43,6 +44,42 @@ const OTHER_NATIVE_SEGMENTS: ReadonlySet<string> = new Set([
   "memory",
   "sites",
 ]);
+
+/**
+ * First path segments the native console owns at its top level (App.tsx's
+ * root routes, and the API and asset paths served beside it). A host page
+ * outside any workspace must start with another segment; registry.test.ts
+ * fails when App.tsx adds a root route not listed.
+ */
+const NATIVE_TOP_LEVEL_SEGMENTS: ReadonlySet<string> = new Set([
+  "sessions",
+  "identity-links",
+  "billing",
+  "integrations",
+  "teams",
+  "connect-agent",
+  "device",
+  "reset-password",
+  "excel",
+  "desktop-return",
+  "setup-account",
+  "account-auth",
+  "settings",
+  "reauthenticate",
+  "native-sign-in",
+  "site-auth",
+  "dev",
+  "workspaces",
+  "v1",
+  "api",
+  "assets",
+  "auth",
+  "oauth",
+  "mcp",
+]);
+
+/** Lowercase static segments: an outside-workspace page path (no params). */
+const OUTSIDE_ROUTE_PATH = /^[a-z][a-z0-9-]*(\/[a-z0-9-]+)*$/;
 
 /** The workspace route's own param, which an extension path must not redeclare. */
 const WORKSPACE_PARAM = "$workspaceId";
@@ -117,6 +154,26 @@ function checkRoutePath(path: string, field: string): void {
 function knownKeys(value: Fields, field: string, keys: readonly string[]): void {
   const unknown = Object.keys(value).find((key) => !keys.includes(key));
   if (unknown !== undefined) fail(`${field}.${unknown}`, "is not a known field");
+}
+
+function checkOutsideWorkspaceRoutes(value: unknown): void {
+  const paths = new Set<string>();
+  list(value, "outsideWorkspaceRoutes").forEach((entry, index) => {
+    const field = `outsideWorkspaceRoutes[${index}]`;
+    const route = record(entry, field);
+    const path =
+      typeof route.path === "string" ? route.path : fail(`${field}.path`, "must be a string");
+    if (!OUTSIDE_ROUTE_PATH.test(path))
+      fail(`${field}.path`, `"${path}" is not a lowercase static route path`);
+    const first = path.split("/")[0] ?? "";
+    if (NATIVE_TOP_LEVEL_SEGMENTS.has(first))
+      fail(`${field}.path`, `"${path}" collides with the native "${first}" route`);
+    if (paths.has(path)) fail(`${field}.path`, `"${path}" is registered twice`);
+    if (typeof route.load !== "function") fail(`${field}.load`, "must be a function");
+    if (route.access !== undefined && route.access !== "public" && route.access !== "signedIn")
+      fail(`${field}.access`, 'must be "public" or "signedIn"');
+    paths.add(path);
+  });
 }
 
 function routePaths(value: unknown): ReadonlySet<string> {
@@ -258,6 +315,10 @@ export function validateHostExtension(value: unknown): HostExtension {
   checkNav(fields.nav, paths, settingsGroupIds(fields.settingsGroups));
   checkNavOverrides(fields.navOverrides, hidden);
   checkLanding(fields.landing, paths);
+  checkOutsideWorkspaceRoutes(fields.outsideWorkspaceRoutes);
+  list(fields.outsideWorkspaceProviders, "outsideWorkspaceProviders").forEach((provider, index) =>
+    component(provider, `outsideWorkspaceProviders[${index}]`),
+  );
   hidden.forEach((destination, index) => {
     if (!isNativeDestination(destination)) {
       fail(
@@ -338,6 +399,19 @@ export const currentHostExtension: HostExtensionSlot["current"] = slot.current;
  * The same array on every call, so it can be a memo input.
  */
 export const extensionSettingsPaths: HostExtensionSlot["settingsPaths"] = slot.settingsPaths;
+
+/** This build's extension pages outside any workspace (read at call time). */
+export function outsideWorkspaceRoutes(): readonly HostExtensionOutsideWorkspaceRoute[] {
+  return currentHostExtension().outsideWorkspaceRoutes ?? NONE;
+}
+
+/** The outside-workspace page at `pathname` (exact, trailing slash allowed), if any. */
+export function outsideWorkspaceRouteAt(
+  pathname: string,
+): HostExtensionOutsideWorkspaceRoute | undefined {
+  const path = pathname.replace(/^\/+|\/+$/g, "");
+  return outsideWorkspaceRoutes().find((route) => route.path === path);
+}
 
 /** Native destinations this build's extension hides from every link source; none for the stub. */
 export function hiddenNativeDestinations(): readonly NativeDestination[] {

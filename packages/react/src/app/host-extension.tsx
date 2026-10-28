@@ -41,6 +41,23 @@ export type HostExtensionRoute = Readonly<{
   /** "settings" renders inside the settings-mode shell. Default "rail". */
   mode?: "rail" | "settings";
 }>;
+/**
+ * A host page mounted outside any workspace, at the console's top level (for
+ * example "register" or "not-admitted"). It renders inside the extension's
+ * `outsideWorkspaceProviders` (never its `shellProviders`, which take a
+ * workspace), before any workspace exists.
+ *
+ * - `access: "public"` renders it before configuration and sign-in, like the
+ *   console's reset-password page (a signed-out visitor reaches it).
+ * - `access: "signedIn"` (default) renders it once the person is signed in,
+ *   before the workspace access and onboarding gates.
+ */
+export type HostExtensionOutsideWorkspaceRoute = Readonly<{
+  /** Lowercase static segments, no params; its first segment is not a native top-level one. */
+  path: string;
+  load: () => Promise<{ default: ComponentType }>;
+  access?: "public" | "signedIn";
+}>;
 export type HostExtensionNavItem = Readonly<{
   id: string;
   label: string;
@@ -89,12 +106,16 @@ export type HostExtension = Readonly<{
    * rail (`composePrimaryNav`); each id at most once.
    */
   navOverrides?: readonly HostExtensionNavOverride[];
+  /** Host pages at the console's top level, outside any workspace. */
+  outsideWorkspaceRoutes?: readonly HostExtensionOutsideWorkspaceRoute[];
   /**
    * The workspace-relative path the console opens for a workspace (the root
    * redirect and `workspaces/$workspaceId/`): "sessions" or one of the
    * extension's own static routes. Default "sessions".
    */
   landing?: string;
+  /** Wrap the `outsideWorkspace` pages, the first outermost (they take no workspace). */
+  outsideWorkspaceProviders?: readonly ComponentType<{ children: ReactNode }>[];
   settingsGroups?: readonly Readonly<{ id: string; label: string }>[];
   hiddenNativeDestinations?: readonly NativeDestination[];
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
