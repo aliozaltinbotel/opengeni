@@ -228,6 +228,15 @@ function checkToolRegistryEntries(value: unknown): void {
   });
 }
 
+/** "sessions" or one of the extension's own workspace pages without params. */
+function checkLanding(value: unknown, paths: ReadonlySet<string>): void {
+  if (value === undefined) return;
+  const landing = text(value, "landing");
+  if (landing === "sessions") return;
+  if (landing.includes("$")) fail("landing", `"${landing}" has a param no redirect can fill`);
+  if (!paths.has(landing)) fail("landing", `"${landing}" is not a registered route`);
+}
+
 function checkLifecycle(value: unknown): void {
   if (value === undefined) return;
   const lifecycle = record(value, "lifecycle");
@@ -248,6 +257,7 @@ export function validateHostExtension(value: unknown): HostExtension {
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   checkNav(fields.nav, paths, settingsGroupIds(fields.settingsGroups));
   checkNavOverrides(fields.navOverrides, hidden);
+  checkLanding(fields.landing, paths);
   hidden.forEach((destination, index) => {
     if (!isNativeDestination(destination)) {
       fail(

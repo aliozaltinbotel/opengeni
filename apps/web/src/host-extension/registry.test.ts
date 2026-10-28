@@ -644,6 +644,24 @@ describe("host extension registry", () => {
     });
   });
 
+  describe("landing", () => {
+    test("accepts sessions and one of the extension's own static routes", () => {
+      for (const landing of ["sessions", "operations/today"]) {
+        const extension = extensionWith({ routes: [route("operations/today")], landing });
+        expect(validateHostExtension(extension)).toBe(extension);
+      }
+    });
+
+    test.each([
+      ["reports", [route("operations")]],
+      ["inbox", [route("operations")]],
+      ["operations/$itemId", [route("operations/$itemId")]],
+      ["", [route("operations")]],
+    ])("refuses the landing %p", (landing, routes) => {
+      expectInvalid(extensionWith({ routes, landing }), "landing");
+    });
+  });
+
   test("the prebuilt extension dist fixture is a valid extension with lazy pages", async () => {
     const fixture = new URL("../../test/fixtures/host-extension-dist/", import.meta.url);
     const loaded: { default: unknown } = await import(new URL("index.js", fixture).href);

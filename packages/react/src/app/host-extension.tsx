@@ -89,6 +89,12 @@ export type HostExtension = Readonly<{
    * rail (`composePrimaryNav`); each id at most once.
    */
   navOverrides?: readonly HostExtensionNavOverride[];
+  /**
+   * The workspace-relative path the console opens for a workspace (the root
+   * redirect and `workspaces/$workspaceId/`): "sessions" or one of the
+   * extension's own static routes. Default "sessions".
+   */
+  landing?: string;
   settingsGroups?: readonly Readonly<{ id: string; label: string }>[];
   hiddenNativeDestinations?: readonly NativeDestination[];
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
@@ -195,6 +201,11 @@ export function composePrimaryNav<T extends NativeNavEntry>(
     peers.push(item);
   }
   return { chat, peers };
+}
+
+/** The workspace-relative path the console opens for a workspace: the extension's `landing`, else "sessions". */
+export function workspaceLanding(extension: Pick<HostExtension, "landing">): string {
+  return extension.landing ?? "sessions";
 }
 
 /** The stock console's extension: no pages, no nav, nothing hidden. */

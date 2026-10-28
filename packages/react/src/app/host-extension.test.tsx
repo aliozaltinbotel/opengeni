@@ -11,6 +11,7 @@ import {
   isBuiltInToolCardName,
   isWorkspaceSegmentHidden,
   nativeDestinationsOfSegment,
+  workspaceLanding,
 } from "./host-extension";
 import { AppHostProvider, useNativeDestinationVisible, type AppHost } from "./lib/app-host";
 
@@ -198,19 +199,24 @@ describe("composePrimaryNav", () => {
       "Operations",
     ]);
   });
+
+  test("workspaceLanding is the extension's landing, else sessions", () => {
+    expect(workspaceLanding({})).toBe("sessions");
+    expect(workspaceLanding({ landing: "operations/today" })).toBe("operations/today");
+  });
 });
 
 describe("the resolvers outside a DOM", () => {
-  test("a child process with no DOM composes the rail from the contract module", () => {
+  test("a child process with no DOM composes the rail and the landing from the contract module", () => {
     const script = `
-      const { composePrimaryNav } = await import(${JSON.stringify(
+      const { composePrimaryNav, workspaceLanding } = await import(${JSON.stringify(
         new URL("./host-extension.tsx", import.meta.url).pathname,
       )});
       const composed = composePrimaryNav(
         { navOverrides: [{ id: "inbox", label: "Agent requests", group: "chat" }] },
         [{ id: "inbox", label: "Inbox" }, { id: "state", label: "Knowledge" }],
       );
-      console.log(JSON.stringify({ composed }));
+      console.log(JSON.stringify({ composed, landing: workspaceLanding({ landing: "operations/today" }) }));
     `;
     const child = Bun.spawnSync([process.execPath, "-e", script], { stderr: "pipe" });
     expect(child.stderr.toString()).toBe("");
@@ -219,6 +225,7 @@ describe("the resolvers outside a DOM", () => {
         chat: [{ id: "inbox", label: "Agent requests" }],
         peers: [{ id: "state", label: "Knowledge" }],
       },
+      landing: "operations/today",
     });
   });
 });

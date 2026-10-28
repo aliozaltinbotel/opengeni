@@ -136,6 +136,7 @@ import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/d
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 // Installs the build's host extension before this module's routes read it.
 import { hostExtension } from "@/host-extension/startup";
+import { WorkspaceLandingRedirect } from "@/host-extension/landing";
 import { hiddenNativeDestinations } from "@/host-extension/registry";
 import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
 import {
@@ -1228,12 +1229,12 @@ function RootIndexRoute() {
       />
     );
   }
-  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
+  return <WorkspaceLandingRedirect workspaceId={workspaceId} />;
 }
 
 function WorkspaceIndexRedirect() {
   const { workspaceId } = workspaceRoute.useParams();
-  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
+  return <WorkspaceLandingRedirect workspaceId={workspaceId} />;
 }
 
 function WorkspaceShell() {

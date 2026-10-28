@@ -2313,6 +2313,12 @@ override of a destination the extension hides is refused.
 rail uses; it imports no React or DOM code, so a host can run it in a test or
 a child process.
 
+`landing` is the workspace-relative page the console opens for a workspace,
+both from the root (`/`) and from `workspaces/$workspaceId/`: `"sessions"`
+(the default) or one of the extension's own `routes` without a `$param`; any
+other value is refused at registration. `workspaceLanding(extension)` resolves
+it without React or a DOM.
+
 `hiddenNativeDestinations` hides a native destination wherever the console
 offers it: its nav entries, its settings-rail and settings-search entries, its
 links, and its URL, which renders the not-found page. `insights` also hides the
