@@ -232,6 +232,38 @@ describe("the mcp_connection.revoked delivery is started", () => {
     expect(started).toHaveLength(1);
   }, 60_000);
 
+  test("a delivery that can't be started leaves the connection as it was", async () => {
+    started.length = 0;
+    const connectionId = await connect();
+    const failing = createApp({
+      settings: testSettings({
+        databaseUrl: shared.adminUrl,
+        productAccessMode: "managed",
+        betterAuthSecret: "host-mcp-connection-webhook-secret-32-bytes",
+        publicBaseUrl: origin,
+        hostWebhooks: { mcpConnectionRevoked: hook },
+      }),
+      db: client.db,
+      bus: new MemoryEventBus(),
+      workflowClient: {
+        startHostWebhookDelivery: async () => {
+          throw new Error("temporal unavailable");
+        },
+      } as unknown as SessionWorkflowClient,
+    } as AppDependencies);
+    const response = await failing.request(connectionPath(connectionId), {
+      method: "DELETE",
+      headers: browser(person.cookie),
+    });
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { error: { details?: { code?: string } } };
+    expect(body.error.details?.code).toBe("HOST_WEBHOOK_DELIVERY_UNAVAILABLE");
+    const [row] = await shared.admin<{ revoked_at: Date | null }[]>`
+      select revoked_at from mcp_oauth_refresh_tokens
+      where family_id = ${connectionId} order by generation desc limit 1`;
+    expect(row!.revoked_at).toBeNull();
+  }, 60_000);
+
   test("never without the configured webhook", async () => {
     started.length = 0;
     const connectionId = await connect();

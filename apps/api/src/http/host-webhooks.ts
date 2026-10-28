@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { OrganizationAccessPolicy } from "@opengeni/contracts";
 import type { HostWebhookDeliveryRequest } from "@opengeni/contracts/organization-governance";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { ApiHttpError } from "./api-error";
 
 type McpConnectionChange =
   | { change: "revoked" }
@@ -47,8 +48,22 @@ export async function startMcpConnectionRevokedDelivery(
             consentScope: input.consentScope,
           },
         };
-  await start(request);
+  try {
+    await start(request);
+  } catch {
+    // Nothing was written: the change waits until its delivery can start.
+    throw new ApiHttpError(503, {
+      code: "upstream_unavailable",
+      message: "This change can't be recorded right now. Try again shortly.",
+      retryable: true,
+      outcomeUnknown: false,
+      details: { code: HOST_WEBHOOK_DELIVERY_UNAVAILABLE },
+    });
+  }
 }
+
+/** The 503 `details.code` when a configured host webhook's delivery can't be started. */
+export const HOST_WEBHOOK_DELIVERY_UNAVAILABLE = "HOST_WEBHOOK_DELIVERY_UNAVAILABLE";
 
 /**
  * Whether a new access setting takes something away: a permission the old one

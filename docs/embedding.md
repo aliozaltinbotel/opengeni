@@ -1228,7 +1228,10 @@ Unset, nothing is sent. When a person or an administrator disconnects an MCP
 connection, or its person changes its access setting so that it loses a
 permission or a workspace, the API starts one durable delivery (a Temporal
 workflow) just before it writes the change, and the worker POSTs it once it
-sees the change committed; a change that never commits sends nothing. The body
+sees the change committed; a change that never commits sends nothing. While
+the delivery cannot be started (Temporal unreachable), the disconnect or access
+change is refused with `503` (`details.code =
+"HOST_WEBHOOK_DELIVERY_UNAVAILABLE"`, retryable) and nothing is written. The body
 (`HostMcpConnectionRevokedWebhook`) is:
 
 ```ts
