@@ -15,6 +15,12 @@ import type { ComponentType, ReactNode } from "react";
 import type { ToolRenderer } from "../timeline";
 
 export { isBuiltInToolCardName } from "./built-in-tool-names";
+/**
+ * The page's CSP nonce (`<meta property="csp-nonce">`), or undefined: for an
+ * extension that injects its own <style> or passes `nonce` to a library. The
+ * console already stamps it on every <style> the document creates.
+ */
+export { cspNonce as nonce } from "./lib/csp-nonce";
 
 export type NativeDestination =
   | "plugins"

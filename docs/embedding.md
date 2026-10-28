@@ -2339,6 +2339,17 @@ organization settings page Organization > Insights:
 replaces "Opengeni" in the document title and in the panel that asks to reload
 after a new version.
 
+**Content-Security-Policy nonce.** A host that serves the console under a
+nonce CSP (never `'unsafe-inline'`) puts the response's nonce in
+`<meta property="csp-nonce" nonce="…">` first in `<head>`, ahead of the
+console's scripts, which carry the same nonce. An inline bootstrap in
+`index.html` (`opengeni-csp-nonce-bootstrap`) then stamps it on every `<style>`
+element the document creates (sonner's stylesheet, xterm's renderer styles)
+and sets `__webpack_nonce__` for get-nonce (radix's scroll lock), before any
+module runs; the main entry installs it again for the dev server. Only
+`<style>` is stamped: a script the page creates stays under `script-src`.
+Extensions read it with `nonce()` from `@opengeni/react/app/host-extension`.
+
 Bundle the extension's own icon set (for example `lucide-react`) into its
 build rather than leaving it external to share the console's modules. The
 console's startup and direct chat route load some of the same icon modules.
