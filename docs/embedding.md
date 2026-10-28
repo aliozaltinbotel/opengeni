@@ -2204,6 +2204,12 @@ that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
 
+`hiddenNativeDestinations` hides a native destination wherever the console
+offers it: its nav entries, its settings-rail and settings-search entries, its
+links, and its URL, which renders the not-found page. `insights` also hides the
+organization settings page Organization > Insights:
+`organization?section=insights` renders the not-found page.
+
 Bundle the extension's own icon set (for example `lucide-react`) into its
 build rather than leaving it external to share the console's modules. The
 console's startup and direct chat route load some of the same icon modules.

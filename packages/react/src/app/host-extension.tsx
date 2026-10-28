@@ -163,6 +163,27 @@ export function nativeDestinationsOfSegment(segment: string): readonly NativeDes
   return isNativeDestination(segment) ? [segment] : [];
 }
 
+/**
+ * Organization settings sections that show a native destination at
+ * organization scope. Hiding the destination hides the section too: the
+ * settings rail and settings search leave it out, and its URL renders the
+ * not-found page.
+ */
+const ORGANIZATION_SECTION_DESTINATIONS: Readonly<Record<string, NativeDestination>> = {
+  insights: "insights",
+};
+
+/** Whether an organization settings section shows a destination the host extension hides. */
+export function isOrganizationSectionHidden(
+  section: string,
+  hidden: readonly NativeDestination[],
+): boolean {
+  const destination = Object.hasOwn(ORGANIZATION_SECTION_DESTINATIONS, section)
+    ? ORGANIZATION_SECTION_DESTINATIONS[section]
+    : undefined;
+  return destination !== undefined && hidden.includes(destination);
+}
+
 /** Whether a first workspace segment opens a destination the host extension hides. */
 export function isWorkspaceSegmentHidden(
   segment: string,

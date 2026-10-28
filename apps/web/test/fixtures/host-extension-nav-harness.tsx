@@ -93,13 +93,45 @@ const appContext = {
   resetSessionView: () => undefined,
 } as unknown as AppContextValue;
 
+export const ORGANIZATION_ID = "o1";
+
+/**
+ * The same person as the owner of the workspace's organization, so the rail
+ * also lists the organization's settings pages.
+ */
+export const organizationOwnerContext = {
+  ...appContext,
+  workspaces: [{ ...appContext.workspaces[0]!, accountId: ORGANIZATION_ID }],
+  accessContext: {
+    ...appContext.accessContext,
+    accountGrants: [
+      {
+        accountId: ORGANIZATION_ID,
+        subjectId: "user:ada",
+        role: "owner",
+        permissions: ["account:admin", "billing:manage", "members:manage", "api_keys:manage"],
+        metadata: { accountName: "Operations Group" },
+      },
+    ],
+    workspaceGrants: [
+      {
+        workspaceId: WORKSPACE_ID,
+        accountId: ORGANIZATION_ID,
+        subjectId: "user:ada",
+        permissions: ["workspace:admin"],
+      },
+    ],
+  },
+} as unknown as AppContextValue;
+
 /** Renders `node` in a memory router at `url` and returns its HTML; unmounts after. */
 export async function renderInRouter(
   node: () => ReactNode,
   url = `/workspaces/${WORKSPACE_ID}/sessions`,
+  context: AppContextValue = appContext,
 ): Promise<{ container: HTMLElement; done: () => Promise<void> }> {
   const rootRoute = createRootRoute({
-    component: () => <AppContext.Provider value={appContext}>{node()}</AppContext.Provider>,
+    component: () => <AppContext.Provider value={context}>{node()}</AppContext.Provider>,
     notFoundComponent: () => null,
   });
   const router = createRouter({
@@ -127,6 +159,7 @@ type SettingsRailHook = typeof useSettingsRail;
 /** The settings rail's sections for workspace w1's General page. */
 export async function settingsRailSections(
   useRail: SettingsRailHook,
+  context: AppContextValue = appContext,
 ): Promise<SettingsRailSection[]> {
   let sections: SettingsRailSection[] = [];
   function Capture() {
@@ -136,7 +169,7 @@ export async function settingsRailSections(
     }).sections;
     return null;
   }
-  const view = await renderInRouter(() => <Capture />);
+  const view = await renderInRouter(() => <Capture />, undefined, context);
   await view.done();
   return sections;
 }
