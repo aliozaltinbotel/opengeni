@@ -415,6 +415,10 @@ const PUBLIC_TELEMETRY_ATTRIBUTE_KEYS = new Set([
   "examined",
   "registered",
   "failed",
+  // Counts of the API's startup session-policy pass (governed organizations
+  // visited and defaults stored); never identifiers.
+  "governed",
+  "stored",
   "delayMs",
   "provider",
   "providerApi",
@@ -649,6 +653,8 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "control_wake_dispatch_failed",
   "fenced_event_live_publish_failed",
   "forbidden",
+  "governed_session_policy_backfill_failed",
+  "governed_session_policy_default_failed",
   "host_export_batch_delivery_failed",
   "host_export_failure_settlement_stale",
   "host_export_pump_iteration_failed",

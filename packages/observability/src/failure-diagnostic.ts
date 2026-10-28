@@ -14,6 +14,8 @@ const CODES = [
   "retained_process_proof_failed",
   "retained_process_observation_failed",
   "mcp_orchestration_failed",
+  "governed_session_policy_default_failed",
+  "governed_session_policy_backfill_failed",
 ] as const;
 const STAGES = [
   "observability.error",
@@ -30,6 +32,7 @@ const STAGES = [
   "mcp.session_create",
   "mcp.session_send_message",
   "mcp.session_steer",
+  "governed_session_policy.startup_pass",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;
 // Reviewed schema names, never a syntactic allowlist for arbitrary driver strings.
@@ -63,6 +66,8 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/api/src/fatal-process-boundary.ts",
   "apps/api/src/mcp/server.ts",
   "apps/api/src/mcp/orchestration-failure-diagnostic.ts",
+  "apps/api/src/governed-session-policy-backfill.ts",
+  "packages/core/src/application/organization-session-policy.ts",
   "apps/api/dist/process/index.js",
   "apps/worker/src/activities/agent-turn/run.ts",
   "apps/worker/src/activities/agent-turn/claim.ts",
@@ -145,6 +150,8 @@ export type FailureDiagnosticInput = {
   parentSessionId?: string;
   processId?: string;
   turnId?: string;
+  /** The organization (managed account) a tenant-wide operation failed for. */
+  organizationId?: string;
   executionGeneration?: number;
   attempts?: number;
   sqlState?: string | null;
@@ -265,6 +272,7 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     parentSessionId: uuid(input.parentSessionId),
     processId: uuid(input.processId),
     turnId: uuid(input.turnId),
+    organizationId: uuid(input.organizationId),
     executionGeneration:
       Number.isSafeInteger(input.executionGeneration) &&
       input.executionGeneration! >= 1 &&

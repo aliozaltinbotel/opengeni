@@ -20,6 +20,7 @@ import {
   getOrganizationSessionPolicy,
   type DbClient,
 } from "@opengeni/db";
+import { createObservability } from "@opengeni/observability";
 import type { ObjectStorage } from "@opengeni/storage";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import {
@@ -722,7 +723,16 @@ describe("automations, MCP and the startup pass", () => {
     };
     const counters: { outcome: string; amount: number }[] = [];
     const logs: { level: string; message: string; attributes: Record<string, unknown> }[] = [];
+    const diagnostics: { code: string; stage: string; organizationId?: string }[] = [];
     const observability = {
+      recordFailureDiagnostic: (input: {
+        code: string;
+        stage: string;
+        organizationId?: string;
+      }) => {
+        diagnostics.push(input);
+        return "00000000-0000-4000-8000-000000000001";
+      },
       incrementCounter: (input: { labels?: Record<string, string>; amount?: number }) =>
         counters.push({ outcome: input.labels?.outcome ?? "", amount: input.amount ?? 1 }),
       info: (message: string, attributes: Record<string, unknown> = {}) =>
@@ -743,12 +753,19 @@ describe("automations, MCP and the startup pass", () => {
     expect(await getOrganizationSessionPolicy(client.db, fresh.organizationId)).toMatchObject({
       source: "governed_default",
     });
-    const failure = logs.find(
-      (log) => log.level === "warn" && log.attributes.organizationId === broken.organizationId,
-    );
-    expect(failure?.attributes).toMatchObject({
-      errorClass: "TypeError",
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        code: "governed_session_policy_default_failed",
+        stage: "governed_session_policy.startup_pass",
+        organizationId: broken.organizationId,
+      }),
+    ]);
+    const failure = logs.find((log) => log.level === "warn");
+    expect(failure?.attributes).toEqual({
+      errorClass: "OperationError",
       errorCode: "governed_session_policy_default_failed",
+      origin: "api",
+      correlationId: "00000000-0000-4000-8000-000000000001",
     });
     const total = (outcome: string) =>
       counters.filter((counter) => counter.outcome === outcome).reduce((n, c) => n + c.amount, 0);
@@ -758,6 +775,98 @@ describe("automations, MCP and the startup pass", () => {
       level: "info",
       message: "governed session policy defaults stored",
       attributes: { failed: 1 },
+    });
+  });
+});
+
+describe("the startup pass in production telemetry", () => {
+  test("public logs keep the pass's fields; the organization id stays in the protected diagnostic", async () => {
+    const broken = await organization(HOST_SOURCE);
+    await organization(HOST_SOURCE);
+    const port: OrganizationGovernancePort = {
+      ...hostPort,
+      governs: (input) => {
+        if (input.organizationId === broken.organizationId) throw new TypeError("port failure");
+        return hostPort.governs(input);
+      },
+    };
+    const exported: { url: string; body: unknown }[] = [];
+    const observability = createObservability(
+      {
+        observabilityStructuredLogs: true,
+        serviceName: "opengeni",
+        environment: "test",
+        observabilityDiagnosticsEndpoint: "https://diagnostics.example.test",
+      } as never,
+      {
+        component: "api",
+        exporter: async (url, body) => {
+          exported.push({ url, body });
+        },
+      },
+    );
+    const lines: string[] = [];
+    const original = { log: console.log, warn: console.warn, error: console.error };
+    console.log = (line: string) => lines.push(line);
+    console.warn = (line: string) => lines.push(line);
+    console.error = (line: string) => lines.push(line);
+    try {
+      await startGovernedSessionPolicyBackfill(
+        { db: client.db, organizationGovernance: port },
+        observability,
+      );
+      await observability.flush();
+    } finally {
+      Object.assign(console, original);
+    }
+    const records = lines.flatMap((line) => {
+      try {
+        return [JSON.parse(line) as Record<string, unknown>];
+      } catch {
+        return [];
+      }
+    });
+    const warning = records.find(
+      (record) => record.message === "governed session policy default could not be stored",
+    );
+    // Read before matching: an asymmetric matcher may stand in for it afterwards.
+    const correlationId = warning?.correlationId;
+    expect(warning).toMatchObject({
+      level: "warn",
+      errorCode: "governed_session_policy_default_failed",
+      origin: "api",
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+    // An organization id is an identifier: never public telemetry.
+    expect(JSON.stringify(records)).not.toContain(broken.organizationId);
+    const summary = records.find(
+      (record) => record.message === "governed session policy defaults stored",
+    );
+    expect(summary).toMatchObject({
+      level: "info",
+      governed: expect.any(Number),
+      stored: expect.any(Number),
+      failed: 1,
+      durationMs: expect.any(Number),
+    });
+    const diagnostics = exported
+      .filter(({ url }) => url === "https://diagnostics.example.test/v1/logs")
+      .map(({ body }) => {
+        const logs = body as {
+          resourceLogs: { scopeLogs: { logRecords: { body: { stringValue: string } }[] }[] }[];
+        };
+        return JSON.parse(logs.resourceLogs[0]!.scopeLogs[0]!.logRecords[0]!.body.stringValue) as {
+          diagnosticId: string;
+          code: string;
+          stage: string;
+          organizationId?: string;
+        };
+      });
+    expect(typeof correlationId).toBe("string");
+    expect(diagnostics.find((record) => record.diagnosticId === correlationId)).toMatchObject({
+      code: "governed_session_policy_default_failed",
+      stage: "governed_session_policy.startup_pass",
+      organizationId: broken.organizationId,
     });
   });
 });

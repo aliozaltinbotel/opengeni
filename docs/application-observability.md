@@ -428,8 +428,11 @@ Ordinary public logs are not a substitute for this protected receiver.
 The OTLP scope is `@opengeni/observability/diagnostics`, version `1`. Log bodies
 contain JSON with schema `opengeni.failure-diagnostic.v1`: a generated diagnostic
 UUID, closed code/stage/retry decision, reviewed constraint names, SQLSTATE,
-bounded contract event types, exact UUID attempt/session/turn/process correlation and
-the 40-hex deployment revision when configured. IDs belong in restricted log
+bounded contract event types, exact UUID attempt/session/turn/process correlation, the
+exact UUID organization of a tenant-wide operation (the API's startup session-policy
+pass, stage `governed_session_policy.startup_pass`, whose public warning carries only
+the diagnostic UUID as `correlationId`) and the 40-hex deployment revision when
+configured. IDs belong in restricted log
 bodies, never indexed metric labels. Unknown constraints and invalid IDs are
 omitted. Source failure classification and retries remain owned by the DB layer.
 

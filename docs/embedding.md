@@ -1215,19 +1215,25 @@ type OrganizationSessionPolicy = {
   (`storeGovernedOrganizationSessionPolicyDefaults`; idempotent, paged, one
   statement per governed organization). The pass runs in the background, so
   the API serves without waiting for it. Each organization is isolated: one
-  whose port answer or write fails is logged with its id and skipped, and the
-  pass goes on. Every governed organization counts once in
-  `opengeni_governed_session_policy_defaults_total{outcome="stored"|"present"|"failed"}`,
-  and a summary line (`governed session policy defaults stored`, with
-  `governed`, `stored`, `failed`, `durationMs`) closes the pass; a failed
+  whose port answer or write fails is skipped, and the pass goes on. Every
+  governed organization counts once in
+  `opengeni_governed_session_policy_defaults_total{outcome="stored"|"present"|"failed"}`.
+  A failed organization logs `errorCode=governed_session_policy_default_failed`
+  with a `correlationId`; its organization id is only in the protected failure
+  diagnostic with that id (exported when
+  `OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT` is set), never in public logs.
+  A summary line (`governed session policy defaults stored`, with `governed`,
+  `stored`, `failed`, `durationMs`) closes a finished pass; a pass whose
+  organization listing fails logs only
+  `errorCode=governed_session_policy_backfill_failed`, with no summary. A failed
   organization gets the default at its next governed entry point or the next
-  start. **So schedules and triggers a governed organization saved before 1018
+  start, and runs stock until then. **So schedules and triggers a governed organization saved before 1018
   start running under the governed default after the migration and that
   startup pass**: no attachments (a saved file reference makes the run
   `attachments_disabled`) and no generic tool families. A worker that fires one
   between the migration and the moment the pass reaches its organization still
-  runs it as stock; a drained cutover that waits for the summary line before
-  undraining has no such window. Nothing is stored
+  runs it as stock; a drained cutover that waits for the summary line, with
+  `failed` 0, before undraining has no such window. Nothing is stored
   for an ungoverned organization, and without a bound port the API reads
   nothing, so stock deployments are unchanged.
 - **Who may write the row.** The runtime may read it and insert only the
