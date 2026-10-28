@@ -171,6 +171,8 @@ describe("host extension registry", () => {
       source?: AstNode | null;
       specifiers?: readonly AstNode[];
       declaration?: AstNode | null;
+      declarations?: readonly AstNode[];
+      init?: AstNode | null;
     }>;
     const FUNCTION_NODES: ReadonlySet<string> = new Set([
       "FunctionDeclaration",
@@ -273,16 +275,29 @@ describe("host extension registry", () => {
       // namespace import of the registry.
       const bindsReader = (local: string): boolean =>
         readers.has(local) || registryNamespaces.has(local);
+      // An expression that is a reader itself (not a call of one): a bound
+      // name, or a reader read off a registry namespace (`ns.reader`, `ns["reader"]`).
+      const isReaderReference = (expression: AstNode | null | undefined): boolean => {
+        const target = unwrapParentheses(expression ?? undefined);
+        if (target?.type === "Identifier") return bindsReader(target.name ?? "");
+        const object = unwrapParentheses(target?.object);
+        return (
+          target?.type === "MemberExpression" &&
+          object?.type === "Identifier" &&
+          registryNamespaces.has(object.name ?? "") &&
+          EXTENSION_READERS.has(nameOf(target.property) ?? "")
+        );
+      };
       const reExportsReader = (node: AstNode): boolean => {
         if (node.type === "ExportAllDeclaration") {
           const from = nameOf(node.source ?? undefined) ?? "";
           return moduleOf(file, from) === "host-extension/registry";
         }
-        if (node.type === "ExportDefaultDeclaration") {
-          const declaration = unwrapParentheses(node.declaration ?? undefined);
-          return declaration?.type === "Identifier" && bindsReader(declaration.name ?? "");
-        }
+        if (node.type === "ExportDefaultDeclaration") return isReaderReference(node.declaration);
         if (node.type !== "ExportNamedDeclaration") return false;
+        // `export const r = reader;` binds a reader under a new exported name.
+        if ((node.declaration?.declarations ?? []).some(({ init }) => isReaderReference(init)))
+          return true;
         const exported = (node.specifiers ?? []).map((specifier) => nameOf(specifier.local) ?? "");
         return exported.some((local) =>
           node.source ? EXTENSION_READERS.has(local) : bindsReader(local),
@@ -383,6 +398,10 @@ describe("host extension registry", () => {
         "export default productName;",
         'import * as brand from "./brand";',
         "export { brand };",
+        "export const r = currentHostExtension;",
+        "export default extensionRegistry.currentHostExtension;",
+        'export const s = extensionRegistry["hiddenNativeDestinations"], t = productName;',
+        "export const u = brand.currentHostExtension;",
       ].join("\n");
       expect(moduleScopeReads("host-extension/probe.ts", source)).toEqual([
         "host-extension/probe.ts:1",
@@ -393,6 +412,9 @@ describe("host extension registry", () => {
         "host-extension/probe.ts:8",
         "host-extension/probe.ts:10",
         "host-extension/probe.ts:11",
+        "host-extension/probe.ts:16",
+        "host-extension/probe.ts:17",
+        "host-extension/probe.ts:18",
       ]);
       expect(moduleScopeReads("host-extension/registry.ts", source)).toEqual([]);
     });
