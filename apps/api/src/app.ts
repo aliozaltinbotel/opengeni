@@ -398,6 +398,7 @@ import {
   registerSessionToolFamilyRouteGuards,
 } from "./http/organization-session-policy";
 import { organizationGovernedByHostError } from "./http/organization-governance";
+import { assertHostWebhookDeliveryConfigured } from "./http/host-webhooks";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
 import { registerManagedOnboardingRoutes } from "./routes/managed-onboarding";
@@ -510,6 +511,7 @@ export function createAppComposition(deps: AppDependencies): {
   routeDeps: ApiRouteDeps;
 } {
   assertOrganizationUserSetupQueryTransportConfigured(deps.settings);
+  assertHostWebhookDeliveryConfigured(deps);
   // The request-scoped workspace control-prefix budget is validated once by
   // @opengeni/config at boot; install it for every request-scoped db command
   // (Send/Steer/control/queue/settings/delete) built by this app.

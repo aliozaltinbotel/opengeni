@@ -6,7 +6,9 @@ import {
 import { CanonicalHumanIdentityProjection } from "@opengeni/contracts/canonical-human-identities";
 import {
   HostOrganizationIdentity,
+  HostOrganizationMember,
   type HostOrganizationIdentity as HostOrganizationIdentityType,
+  type HostOrganizationMember as HostOrganizationMemberType,
 } from "@opengeni/contracts/organization-governance";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
@@ -109,7 +111,11 @@ async function lookupThroughMemberList(
     identityStatus: activeIdentity.status,
     verifiedEmail,
     activeLoginBinding: binding ? { id: binding.id, revision: binding.revision } : null,
-    memberships: await membershipsWithAccess(db, input, matched),
+    memberships: await membershipsWithAccess(
+      db,
+      input,
+      matched.map(({ member }) => member),
+    ),
     // The member list cannot see 1016's accepted_at, so acceptedAt is the
     // invitation's updatedAt. They are equal for every accepted invitation:
     // 0263's accept branch is the only writer of status 'accepted' and sets
@@ -137,8 +143,8 @@ type HostMembership = HostOrganizationIdentityType["memberships"][number];
  */
 async function membershipsWithAccess(
   db: Database,
-  input: LookupInput,
-  matched: readonly MatchedMember[],
+  input: { organizationId: string; actorSubjectId: string },
+  members: readonly OrganizationMember[],
 ): Promise<HostMembership[]> {
   const [row] = await rawRows<{ result: unknown }>(
     db,
@@ -147,7 +153,7 @@ async function membershipsWithAccess(
     ) as result`,
   );
   const { workspaces } = OrganizationAdministrationOverview.parse(row?.result);
-  return matched.map(({ member }) => ({
+  return members.map((member) => ({
     id: member.id,
     status: member.status,
     role: member.role,
@@ -164,6 +170,59 @@ async function membershipsWithAccess(
         })),
     ),
   }));
+}
+
+/**
+ * One of the organization's memberships in any status, for its embedding
+ * host, or null when it is unknown or another organization's (the same answer
+ * for both). Read through the member list and the administration overview, so
+ * the actor is checked like any administrator (active owner or admin).
+ */
+export async function readOrganizationHostMember(
+  db: Database,
+  input: { organizationId: string; actorSubjectId: string; membershipId: string },
+): Promise<HostOrganizationMemberType | null> {
+  return await withRlsContext(
+    db,
+    { accountId: input.organizationId, workspaceId: null },
+    async (scopedDb) => {
+      await setSubjectRlsContext(scopedDb, input.actorSubjectId);
+      const [row] = await rawRows<{ result: unknown }>(
+        scopedDb,
+        sql`select list_organization_members(
+          ${input.organizationId}::uuid, ${input.actorSubjectId}
+        ) as result`,
+      );
+      const member = OrganizationMember.array()
+        .parse(row?.result ?? [])
+        .find(({ id }) => id === input.membershipId);
+      if (!member) return null;
+      const [access] = await membershipsWithAccess(scopedDb, input, [member]);
+      const userId = member.subjectId.startsWith(MANAGED_HUMAN_SUBJECT_PREFIX)
+        ? authUserIdOf(member.subjectId)
+        : null;
+      return HostOrganizationMember.parse({
+        membershipId: member.id,
+        organizationId: member.organizationId,
+        userId,
+        identityId: userId ? await identityIdOf(scopedDb, userId) : null,
+        status: member.status,
+        role: member.role,
+        authorizationRevision: member.authorizationRevision,
+        sharedWorkspaceAccess: access?.sharedWorkspaceAccess ?? [],
+        updatedAt: member.updatedAt,
+      });
+    },
+  );
+}
+
+async function identityIdOf(db: Database, authUserId: string): Promise<string | null> {
+  const [row] = await rawRows<{ projection: unknown }>(
+    db,
+    sql`select get_canonical_human_identity_projection(${authUserId}) as projection`,
+  );
+  if (row?.projection === null || row?.projection === undefined) return null;
+  return CanonicalHumanIdentityProjection.parse(row.projection).activeIdentity.id;
 }
 
 /**

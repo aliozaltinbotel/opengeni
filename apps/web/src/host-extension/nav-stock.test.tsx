@@ -21,6 +21,7 @@ await installNavMocks();
 const { PrimaryNavExtras, WorkspaceShortcutLinks } = await import("@/components/rail/primary-nav");
 const { useSettingsRail } = await import("@/components/settings/settings-rail");
 const { settingsSearchEntries } = await import("@/components/settings/settings-search");
+const { BillingInsightsSection } = await import("@/components/organization/billing-page");
 
 let restoreMatchMedia: () => void = () => undefined;
 beforeAll(() => {
@@ -48,6 +49,13 @@ async function html(node: () => React.ReactNode): Promise<string> {
 }
 
 describe("stock primary nav and settings rail", () => {
+  test("Organization > Billing links to Insights", async () => {
+    const markup = await html(() => (
+      <BillingInsightsSection canReadBilling accountId="o1" workspaceId="w1" />
+    ));
+    expect(markup).toContain("Open Insights");
+  });
+
   test("the expanded primary nav is the stock one", async () => {
     expect(await html(() => <PrimaryNavExtras />)).toMatchSnapshot();
   });

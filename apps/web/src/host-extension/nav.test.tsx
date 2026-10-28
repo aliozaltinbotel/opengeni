@@ -1,7 +1,7 @@
 // A configured host extension adds its nav items to the primary nav and the
 // settings rail, and a native destination it hides is unreachable through
 // every link source and by direct URL. The fixture extension stands in for a
-// host product; it also hides Automations and Secrets.
+// host product; it also hides Automations, Secrets and Insights.
 import { afterAll, beforeAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import {
@@ -11,6 +11,7 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  isNotFound,
   type AnyRoute,
 } from "@tanstack/react-router";
 import { act } from "react";
@@ -24,6 +25,7 @@ import {
   indicators,
   installNavMocks,
   installViewportMatchMedia,
+  organizationOwnerContext,
   rail,
   renderInRouter,
   setViewportHeight,
@@ -32,7 +34,7 @@ import {
 
 const extension: HostExtension = {
   ...hostExtensionFixture,
-  hiddenNativeDestinations: ["automations", "secrets"],
+  hiddenNativeDestinations: ["automations", "secrets", "insights"],
 };
 void mock.module("@opengeni/web-host-extension", () => ({ default: extension }));
 
@@ -53,6 +55,7 @@ const { useSettingsRail } = await import("@/components/settings/settings-rail");
 const { searchSettings, settingsSearchEntries } =
   await import("@/components/settings/settings-search");
 const { NotFoundPanel } = await import("@/components/route-error");
+const { BillingInsightsSection } = await import("@/components/organization/billing-page");
 const { visibleNativeRoutes } = await import("./hidden-destinations");
 const app = await import("../App");
 await import("@/app-host");
@@ -195,6 +198,51 @@ describe("host extension settings rail and search", () => {
   });
 });
 
+describe("a hidden Insights also hides Organization > Insights", () => {
+  test("the organization's rail pages and settings search leave Insights out", async () => {
+    const sections = await settingsRailSections(useSettingsRail, organizationOwnerContext);
+    const organization = describeSections(sections).find(
+      (section) => section.id === "organization",
+    );
+    const labels = organization!.groups.flat().map((item) => item.label);
+    expect(labels).toContain("Billing");
+    expect(labels).not.toContain("Insights");
+    const entries = settingsSearchEntries(sections);
+    expect(entries.filter((entry) => entry.id.includes("insights"))).toEqual([]);
+    expect(searchSettings(entries, "insights")).toEqual([]);
+    expect(searchSettings(entries, "billing").map((entry) => entry.id)).toContain(
+      "organization:billing",
+    );
+  });
+
+  test("Organization > Billing offers no Insights link", async () => {
+    const view = await renderInRouter(() => (
+      <BillingInsightsSection canReadBilling accountId="o1" workspaceId="w1" />
+    ));
+    try {
+      expect(view.container.textContent).not.toContain("Insights");
+    } finally {
+      await view.done();
+    }
+  });
+
+  test("organization?section=insights renders the not-found page; another section does not", async () => {
+    const rendered = async (search: string) => {
+      const router = createRouter({
+        routeTree: app.routeTree,
+        history: createMemoryHistory({
+          initialEntries: [`/workspaces/w1/organization?section=${search}`],
+        }),
+      });
+      await router.load();
+      // The not-found is caught where its page renders: the root's not-found page.
+      return router.state.matches.some((match) => isNotFound(match.error));
+    };
+    expect(await rendered("insights")).toBe(true);
+    expect(await rendered("billing")).toBe(false);
+  });
+});
+
 describe("hidden native destinations by direct URL", () => {
   function workspaceChildren(): readonly AnyRoute[] {
     const workspace = (app.routeTree.children as readonly AnyRoute[]).find(
@@ -291,6 +339,6 @@ describe("other link sources", () => {
     const root = createRoot(container);
     act(() => root.render(<Capture />));
     act(() => root.unmount());
-    expect(hidden).toEqual(["automations", "secrets"]);
+    expect(hidden).toEqual(["automations", "secrets", "insights"]);
   });
 });

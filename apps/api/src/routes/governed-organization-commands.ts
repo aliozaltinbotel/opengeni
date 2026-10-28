@@ -16,6 +16,8 @@ import {
   HOST_INVITATION_NOT_IN_ORGANIZATION,
   HOST_INVITATION_NOT_PENDING,
   HOST_INVITATION_REVISION_CONFLICT,
+  HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION,
+  HOST_MEMBER_NOT_IN_ORGANIZATION,
   HOST_ORGANIZATION_OWNER_CONFLICT,
   HOST_ORGANIZATION_OWNER_ENSURE,
   HOST_ORGANIZATION_OWNER_UNAVAILABLE,
@@ -25,6 +27,8 @@ import {
   HostLookupOrganizationIdentityRequest,
   HostOrganizationIdentity,
   HostOrganizationInvitation,
+  HostOrganizationMcpConnection,
+  HostOrganizationMember,
   HostOrganizationMemberLifecycleRequest,
   HostOrganizationOwner,
   HostReactivateOrganizationMemberRequest,
@@ -61,6 +65,7 @@ import {
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
   putOrganizationWorkspaceMember,
+  readOrganizationHostMember,
   SessionPolicyOperationConflictError,
   SessionPolicyRevisionConflictError,
   recordOrganizationHostCommandAttribution,
@@ -73,6 +78,7 @@ import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { assertOrganizationUserSetupDeliveryConfigured } from "../auth/organization-user-setup";
 import { ApiHttpError } from "../http/api-error";
+import { readHostMcpConnection } from "../http/host-mcp-connection";
 import {
   lastSharedWorkspaceRemovalHttpError,
   organizationGovernanceDecision,
@@ -92,6 +98,12 @@ const SERVICE_TOKEN_PREFIX = "ogd2_";
 /** The 409 message when the identity lookup's member-list fallback is past its bound (54000). */
 const HOST_IDENTITY_LOOKUP_RESOURCE_LIMIT =
   "organization access inventory exceeds the identity lookup's member-list bound";
+/** The 409 message when the member read's administration overview is past its bound (54000). */
+const HOST_MEMBER_READ_RESOURCE_LIMIT =
+  "organization access inventory exceeds the member read's overview bound";
+/** The 409 message when the connection read's administration overview is past its bound (54000). */
+const HOST_MCP_CONNECTION_READ_RESOURCE_LIMIT =
+  "organization access inventory exceeds the MCP connection read's overview bound";
 
 /** What a verified host command runs as. */
 type HostCommandAuthority = {
@@ -103,7 +115,7 @@ type HostCommandAuthority = {
 
 /**
  * Host commands for organizations an embedding host governs, the host's
- * identity lookup and invitation read, and the ensure of the host's own owner
+ * identity lookup, its invitation, member and MCP connection reads, and the ensure of the host's own owner
  * membership. Each membership command runs the
  * same membership, invitation or workspace-access operation as the native
  * route, so its receipt and lifecycle event are the native ones; the acting
@@ -234,6 +246,70 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         details: { code: HOST_INVITATION_NOT_IN_ORGANIZATION },
       });
     return context.json(invitation);
+  });
+
+  // A read: no governed mutation to decide and no attribution to record.
+  app.get(`${base}/members/:membershipId`, async (context) => {
+    context.header("cache-control", "no-store");
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
+    const membershipId = parsePathId(context, "membershipId");
+    let member: HostOrganizationMember | null;
+    try {
+      member = await readOrganizationHostMember(deps.db, {
+        organizationId: authority.organizationId,
+        actorSubjectId: authority.actorSubjectId,
+        membershipId,
+      });
+    } catch (error) {
+      // The shared-workspace access reads the bounded administration overview.
+      rethrowHostMembershipError(error, HOST_MEMBER_READ_RESOURCE_LIMIT);
+    }
+    // A membership elsewhere and an unknown one get this same answer.
+    if (!member)
+      throw new ApiHttpError(404, {
+        code: "not_found",
+        message: "This membership is not in this organization.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: HOST_MEMBER_NOT_IN_ORGANIZATION },
+      });
+    return context.json(HostOrganizationMember.parse(member));
+  });
+
+  // A read: no governed mutation to decide and no attribution to record.
+  // An organization connection that consented `account:read` (every preset
+  // does) stays live for as long as its person is an active member, since
+  // every active membership holds `account:read`: it practically never
+  // reaches `permissions_lost`; only a custom setting without it can.
+  app.get(`${base}/mcp-connections/:connectionId`, async (context) => {
+    context.header("cache-control", "no-store");
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
+    const connectionId = parsePathId(context, "connectionId");
+    let connection: HostOrganizationMcpConnection | null;
+    try {
+      connection = await readHostMcpConnection(deps, {
+        organizationId: authority.organizationId,
+        actorSubjectId: authority.actorSubjectId,
+        connectionId,
+      });
+    } catch (error) {
+      // An organization connection's access reads the bounded overview.
+      rethrowHostMembershipError(error, HOST_MCP_CONNECTION_READ_RESOURCE_LIMIT);
+    }
+    // A connection elsewhere and an unknown one get this same answer.
+    if (!connection)
+      throw new ApiHttpError(404, {
+        code: "not_found",
+        message: "This MCP connection is not in this organization.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION },
+      });
+    return context.json(HostOrganizationMcpConnection.parse(connection));
   });
 
   app.post(`${base}/members/:membershipId/change-role`, async (context) => {

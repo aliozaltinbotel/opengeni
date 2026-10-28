@@ -2324,7 +2324,10 @@ export const allAccountPermissions: Permission[] = [
   "api_keys:manage",
 ];
 
-function accountPermissionsForOrganizationRole(role: "owner" | "admin" | "member"): Permission[] {
+/** The organization-level permissions an active membership of this role holds. */
+export function accountPermissionsForOrganizationRole(
+  role: "owner" | "admin" | "member",
+): Permission[] {
   if (role === "owner") return allAccountPermissions;
   if (role === "admin") {
     return ["account:read", "members:manage", "workspace:create", "billing:read"];

@@ -2155,6 +2155,28 @@ const SettingsSchema = z.object({
   // verifies the ES256 token locally against `GET /v1/auth/jwks`.
   hostTokenAudience: z.string().trim().min(1).max(512).optional(),
   hostTokenTtlSeconds: z.coerce.number().int().min(60).max(900).default(300),
+  // Webhooks the embedding host receives, each off unless configured.
+  // `mcpConnectionRevoked`: POSTed once per revoked or downgraded MCP
+  // connection, signed `X-Host-Signature: sha256=<hex HMAC-SHA256(secret, body)>`
+  // and retried by the worker until the host answers 2xx. The worker waits up
+  // to about two minutes (24 checks, 5 seconds apart) to see the change
+  // committed and sends nothing after that. The URL must be https outside
+  // local/test (`HOST_WEBHOOK_URL_HTTPS_REQUIRED` at startup); a target inside
+  // the cluster is allowed. The API gives a delivery's start 3 seconds. The API (which refuses
+  // to start without a workflow client that can start deliveries) and the
+  // worker both read it.
+  hostWebhooks: z
+    .object({
+      mcpConnectionRevoked: z
+        .object({
+          url: PublicHttpUrl,
+          secret: z.string().min(32, "must be at least 32 characters").max(1_024),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict()
+    .optional(),
   // TOTP as a re-authentication second factor (Better Auth's twoFactor plugin).
   // Off by default; when on, people can enroll an authenticator app and
   // `POST /v1/auth/reauthenticate` requires its code from enrolled people.
@@ -5975,6 +5997,16 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     hostTokenAudience: optional("OPENGENI_HOST_TOKEN_AUDIENCE"),
     hostTokenTtlSeconds: optional("OPENGENI_HOST_TOKEN_TTL_SECONDS"),
+    hostWebhooks:
+      source.OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL === undefined &&
+      source.OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET === undefined
+        ? undefined
+        : {
+            mcpConnectionRevoked: {
+              url: optional("OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL"),
+              secret: optional("OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET"),
+            },
+          },
     managedAuthTotpEnabled: optional("OPENGENI_MANAGED_AUTH_TOTP_ENABLED"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined
@@ -11224,6 +11256,28 @@ function validateRecordingTranscriptionSettings(settings: Settings): void {
   }
 }
 
+/** The startup refusal for a plain http host webhook outside local/test. */
+export const HOST_WEBHOOK_URL_HTTPS_REQUIRED = "HOST_WEBHOOK_URL_HTTPS_REQUIRED";
+
+/**
+ * Refuse a host webhook the worker could never deliver: outside local/test
+ * its URL must be https (deliveries require it), so a plain http URL fails
+ * at startup instead of on every delivery.
+ */
+export function assertHostWebhookSettings(
+  settings: Pick<Settings, "environment" | "hostWebhooks">,
+): void {
+  const url = settings.hostWebhooks?.mcpConnectionRevoked?.url;
+  if (
+    url !== undefined &&
+    !["local", "test"].includes(settings.environment) &&
+    !/^https:\/\//iu.test(url)
+  )
+    throw new Error(
+      `${HOST_WEBHOOK_URL_HTTPS_REQUIRED}: OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL must use https outside local/test`,
+    );
+}
+
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
@@ -11334,6 +11388,7 @@ function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = proces
       "OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_ID and OPENGENI_MANAGED_AUTH_GITHUB_CLIENT_SECRET must be configured together",
     );
   }
+  assertHostWebhookSettings(settings);
   if (settings.hostTokenAudience !== undefined) {
     if (settings.productAccessMode !== "managed") {
       throw new Error("OPENGENI_HOST_TOKEN_AUDIENCE requires OPENGENI_PRODUCT_ACCESS_MODE=managed");

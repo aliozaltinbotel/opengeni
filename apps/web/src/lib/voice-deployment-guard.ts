@@ -18,7 +18,12 @@ export type VoiceDeploymentDecision = "current" | "reload" | "prompt";
 
 const VOICE_RELOAD_STORAGE_PREFIX = "opengeni.voiceReloadForRevision:";
 
-export const VOICE_RELOADING_MESSAGE = "Opengeni was updated. Reloading to start voice…";
+/** What voice shows while it reloads onto a new build, naming the product (default "Opengeni"). */
+export function voiceReloadingMessage(productName = "Opengeni"): string {
+  return `${productName} was updated. Reloading to start voice…`;
+}
+
+export const VOICE_RELOADING_MESSAGE = voiceReloadingMessage();
 
 export function voiceBundleIsStale(facts: VoiceDeploymentFacts): boolean {
   const revisionChanged =
@@ -73,6 +78,8 @@ export function withVoiceDeploymentGuard<C extends RealtimeBeginClient>(
     decide: () => Promise<VoiceDeploymentDecision>;
     relaunch: (model: string | undefined) => void;
     prompt: () => void;
+    /** The product the reload message names; "Opengeni" when it returns nothing. */
+    productName?: () => string | undefined;
   },
 ): C {
   // Only a call's first begin is checked. Later begins for the same operation
@@ -94,7 +101,7 @@ export function withVoiceDeploymentGuard<C extends RealtimeBeginClient>(
         const decision = await deps.decide().catch((): VoiceDeploymentDecision => "current");
         if (decision === "reload") {
           deps.relaunch(request?.model);
-          throw new Error(VOICE_RELOADING_MESSAGE);
+          throw new Error(voiceReloadingMessage(deps.productName?.()));
         }
         if (decision === "prompt") deps.prompt();
         const response = await (value as C["beginSessionRealtime"]).apply(target, args);

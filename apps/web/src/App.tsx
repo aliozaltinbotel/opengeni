@@ -54,6 +54,7 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  notFound,
   useParams,
   useSearch,
 } from "@tanstack/react-router";
@@ -137,7 +138,10 @@ import type { DocumentAuthorityKind } from "@opengeni/sdk";
 import { hostExtension } from "@/host-extension/startup";
 import { hiddenNativeDestinations } from "@/host-extension/registry";
 import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
-import { hostFilteredWorkspaces } from "@opengeni/react/app/host-extension";
+import {
+  hostFilteredWorkspaces,
+  isOrganizationSectionHidden,
+} from "@opengeni/react/app/host-extension";
 import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
 import { buildHostExtensionWorkspaceRoutes } from "@/host-extension/routes";
 
@@ -1025,6 +1029,11 @@ const workspaceOrganizationRoute = createRoute({
         : {}),
       ...parseReturnTo(search),
     };
+  },
+  // A section showing a destination the host extension hides has no page.
+  beforeLoad: ({ search }) => {
+    if (search.section && isOrganizationSectionHidden(search.section, hiddenNativeDestinations()))
+      throw notFound();
   },
   component: Organization,
 });

@@ -28,6 +28,7 @@ import {
   withVoiceDeploymentGuard,
   type VoiceDeploymentDecision,
 } from "./lib/voice-deployment-guard";
+import { currentHostExtension } from "./host-extension/registry";
 
 export function resolveApiBaseUrl(value: string | undefined): string {
   return (value ?? "").replace(/\/+$/, "");
@@ -1453,6 +1454,7 @@ export function voiceRealtimeClient<
     decide: checkVoiceDeployment,
     relaunch: (model) => window.location.assign(voiceRelaunchUrl(sessionHref(), model)),
     prompt: showVoiceUpdatePrompt,
+    productName: () => currentHostExtension().productName,
   });
 }
 

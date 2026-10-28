@@ -1921,9 +1921,14 @@ async function workspaceHostToolServers(
   const owned = (id: string) => input.staticIds.has(id) && input.configuredIds.has(id);
   await close(registrations.filter(({ id }) => !owned(id)));
   return {
+    // Best-effort for listing: a host server that cannot list is left out of
+    // the catalog like a failed connector; calls to its tools still fail loud.
     registrations: registrations
       .filter(({ id }) => owned(id))
-      .map((registration) => recordingHostViews(registration, views)),
+      .map((registration) => ({
+        ...recordingHostViews(registration, views),
+        listingBestEffort: true,
+      })),
     staticIds: new Set(registrations.map(({ id }) => id).filter((id) => input.staticIds.has(id))),
     views,
   };

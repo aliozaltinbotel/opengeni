@@ -15,6 +15,7 @@ import { z } from "zod";
 
 import { requireSameOriginBrowserMutation } from "../http/browser-mutation-origin";
 import { parseRequestBody } from "../http/request-body";
+import { isConsentDowngrade, startMcpConnectionRevokedDelivery } from "../http/host-webhooks";
 import { requireNativeOrganizationMutation } from "../http/organization-governance";
 
 /* ----------------------------------------------------------------------------
@@ -66,6 +67,14 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
       }
     }
     await requireNativeOrganizationMutation(deps, organizationId, "mcp_connection.update");
+    if (isConsentDowngrade(connection.organizationAccess, access))
+      await startMcpConnectionRevokedDelivery(deps, {
+        organizationId,
+        connectionId: connection.id,
+        change: "consent_downgraded",
+        previousConsentScope: connection.organizationAccess,
+        consentScope: access,
+      });
     await updateOrganizationMcpConnectionAccess(deps.db, {
       accountId: organizationId,
       connectionId: connection.id,
@@ -92,6 +101,11 @@ export function registerOrganizationMcpConnectionRoutes(app: Hono, deps: ApiRout
       });
     }
     await requireNativeOrganizationMutation(deps, organizationId, "mcp_connection.revoke");
+    await startMcpConnectionRevokedDelivery(deps, {
+      organizationId,
+      connectionId: connection.id,
+      change: "revoked",
+    });
     await revokeOrganizationMcpConnection(deps.db, {
       accountId: organizationId,
       connectionId: connection.id,

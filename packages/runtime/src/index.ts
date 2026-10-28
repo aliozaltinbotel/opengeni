@@ -5266,6 +5266,16 @@ export type PreparedAgentTools = {
 export type LocalMcpServerRegistration = {
   id: string;
   server: MCPServer;
+  /**
+   * Best-effort for listing only: a failed connect or `tools/list` leaves this
+   * server's tools out of the preparation and records the server in
+   * `unavailableMcpServers`, the same as a failed connector, instead of
+   * failing the whole catalog. A call to one of its listed tools still fails
+   * loud. The workspace tool gateway sets it on an embedding host's
+   * `workspaceToolServers` registrations; every other registration stays
+   * strict unless its tool ref is optional or connection-backed.
+   */
+  listingBestEffort?: boolean;
   /** Host-derived references from the exact raw result before projection or spill.
    * This trusted registration is independent of result/model/transport metadata. */
   modelSourceRefs?: (
@@ -5920,40 +5930,45 @@ export async function prepareAgentTools(
             );
           }
           const optional = tool.optional === true;
-          return {
-            server: configureMcpOperationRecovery(
-              new PrefixedMcpServer(
-                local.server,
-                config.id,
-                config.allowedTools,
-                optional || Boolean(config.connectionRef),
-                aggregateToolBudget,
-                `${config.id}:${index}`,
-                false,
-                buildConnectorAttachmentAuthority(
-                  config,
-                  options,
-                  resolvedMcpToolConnectionIds,
-                  config.url,
-                  local.resolvedConnectionId,
-                ),
-                tool.eager !== true,
-                local.preflightCall,
-                local.approvalAuthority,
-                undefined,
-                undefined,
-                options.mcpAccountLabels?.get(config.id),
-                undefined,
-                local.effectAuthority,
-                false,
-                eagerToolNames,
-              ),
-              config,
-              options,
-              config.url,
+          const invocationBestEffort = optional || Boolean(config.connectionRef);
+          const prefixed = configureMcpOperationRecovery(
+            new PrefixedMcpServer(
+              local.server,
+              config.id,
+              config.allowedTools,
+              invocationBestEffort,
+              aggregateToolBudget,
+              `${config.id}:${index}`,
               false,
+              buildConnectorAttachmentAuthority(
+                config,
+                options,
+                resolvedMcpToolConnectionIds,
+                config.url,
+                local.resolvedConnectionId,
+              ),
+              tool.eager !== true,
+              local.preflightCall,
+              local.approvalAuthority,
+              undefined,
+              undefined,
+              options.mcpAccountLabels?.get(config.id),
+              undefined,
+              local.effectAuthority,
+              false,
+              eagerToolNames,
             ),
-            bestEffort: optional || Boolean(config.connectionRef),
+            config,
+            options,
+            config.url,
+            false,
+          );
+          prefixed.listingBestEffort = local.listingBestEffort === true;
+          return {
+            server: prefixed,
+            // Connects with the best-effort group and stays off the first-request
+            // barrier; only listing degrades, calls keep `invocationBestEffort`.
+            bestEffort: invocationBestEffort || prefixed.listingBestEffort,
             optional,
             eager: firstRequestTools,
             joinsFirstRequestBarrier: firstRequestTools,
@@ -9342,6 +9357,12 @@ export class PrefixedMcpServer implements MCPServer {
   // tools instead of propagating. Deduplicate the warn so one degraded server
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
+  /**
+   * A `tools/list` failure degrades to zero tools (as for `bestEffort`) while
+   * tool calls keep the server's own failure mode. Set from a local
+   * registration's `listingBestEffort`.
+   */
+  listingBestEffort = false;
   private loggedListToolsFailure = false;
   /** Where a best-effort server records that its tools are unavailable this attempt. */
   unavailableSink: Map<string, string> | undefined;
@@ -9686,7 +9707,7 @@ export class PrefixedMcpServer implements MCPServer {
     } catch (error) {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
-      if (!this.bestEffort) {
+      if (!this.bestEffort && !this.listingBestEffort) {
         throw mcpTransportErrorWithRetryMetadata(error, {
           recoverySafeSetup: this.recoverySafeSetup,
         });

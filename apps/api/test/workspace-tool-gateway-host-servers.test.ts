@@ -373,6 +373,36 @@ describe("workspace tool-server host port", () => {
     }
   });
 
+  test("a host server whose listing fails is left out; its tool's call is refused", async () => {
+    const w = await world([remoteServer, acmeEntry], async ({ grant }) => {
+      const registration = await hostRegistration("acme", acmeServer("acme", grant, []));
+      return [
+        {
+          ...registration,
+          server: {
+            ...registration.server,
+            listTools: async () => {
+              throw new Error("acme listing unavailable");
+            },
+          },
+        },
+      ];
+    });
+    try {
+      const listed = await w.post(listTools);
+      expect(listed.status).toBe(200);
+      expect(toolNames(listed.body)).toEqual([
+        "remote__fetch_document",
+        "remote__search_documents",
+      ]);
+      const called = await w.post(callTool("acme__lookup", { sku: "A-1" }));
+      expect(JSON.stringify(called.body)).not.toContain("acme:lookup:A-1");
+      expect(called.body.result?.isError === true || called.body.error !== undefined).toBe(true);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
   test("a host tool its settings entry requires approval for is omitted from MCP listing", async () => {
     const w = await world(
       [remoteServer, { ...acmeEntry, requireApproval: ["reserve"] }],

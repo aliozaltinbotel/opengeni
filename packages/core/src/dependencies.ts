@@ -32,7 +32,10 @@ import type {
   EditableArtifactOfficeImportPort,
 } from "./editable-artifacts";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
+import type {
+  HostWebhookDeliveryRequest,
+  OrganizationGovernancePort,
+} from "@opengeni/contracts/organization-governance";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
@@ -56,6 +59,12 @@ export type SessionWorkflowClient = {
   queryKnowledge?: (input: KnowledgeQueryWorkflowRequest) => Promise<KnowledgeEntryListResponse>;
   prepareKnowledge?: (input: KnowledgePreparationWorkflowRequest) => Promise<KnowledgeSavePreparationResponse>;
   startRealtimeUsageObservation?: (input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string }) => Promise<void>;
+  /**
+   * Start one durable host webhook delivery (`settings.hostWebhooks`), before
+   * the change it reports is written; the worker sends it once it sees the
+   * change committed. Idempotent on `deliveryId`.
+   */
+  startHostWebhookDelivery?: (input: HostWebhookDeliveryRequest) => Promise<void>;
   triggerAutomationRun?: (input: {
     accountId: string;
     workspaceId: string;
@@ -299,7 +308,12 @@ export type AppDependencies = {
    * Called once per gateway preparation with the caller's grant; it returns
    * fresh in-process MCP servers, which the gateway closes after the request.
    * It must honour `signal` (the caller's request lifetime). A throw or
-   * rejection fails the whole catalog closed for that request.
+   * rejection fails the whole catalog closed for that request. A returned
+   * server whose connect or `tools/list` fails is only left out: its tools are
+   * absent from the catalog and the preparation records it in
+   * `unavailableMcpServers`, as for a failed connector. A call to a tool of a
+   * server left out is refused like any tool not in the catalog, and a listed
+   * tool's failing call still fails loud.
    *
    * A registration is used only when its id names a deployment-static
    * `settings.mcpServers` entry configured for the request, replacing that

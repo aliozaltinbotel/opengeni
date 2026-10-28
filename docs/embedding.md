@@ -1161,6 +1161,104 @@ that belongs to another organization both answer `404` with
 `error.details.code = "HOST_INVITATION_NOT_IN_ORGANIZATION"`. Without the
 governance port, the route does not exist.
 
+To read one membership back before acting on it, the host calls
+`GET /v1/host/organizations/:id/members/:membershipId`. It authenticates like
+the invitation read and is a read, with no `decide`, no attribution row and
+`cache-control: no-store` on every answer. Every status answers `200`; a
+membership that does not exist and one that belongs to another organization
+both answer `404` with `error.details.code = "HOST_MEMBER_NOT_IN_ORGANIZATION"`.
+The answer (`HostOrganizationMember`) is:
+
+```ts
+{
+  membershipId: string;
+  organizationId: string;
+  userId: string | null; // the native account (subject `user:<userId>`)
+  identityId: string | null; // that account's native identity: a host session token's `sub`
+  status: "provisioning" | "active" | "suspended" | "revoked"; // revoked: offboarded
+  role: "owner" | "admin" | "member";
+  authorizationRevision: number; // a member command's expectedAuthorizationRevision
+  sharedWorkspaceAccess: { workspaceId; membershipId; role; permissions; updatedAt }[];
+  updatedAt: string; // the membership's last change
+}
+```
+
+`status`, `authorizationRevision` and `sharedWorkspaceAccess` are the identity
+lookup's: a suspended or offboarded membership has no shared-workspace access.
+
+To settle what it projected from an outside MCP client a member signed in
+with, the host reads the connection:
+`GET /v1/host/organizations/:id/mcp-connections/:connectionId`, where
+`connectionId` is the connection's id in the native connected-agents list. It
+authenticates like the member read, writes nothing and is sent with
+`cache-control: no-store`. A connection that does not exist and one that
+belongs to another organization both answer `404` with
+`error.details.code = "HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION"`. The answer
+(`HostOrganizationMcpConnection`) is:
+
+```ts
+{
+  connectionId: string;
+  organizationId: string;
+  workspaceId: string | null; // a workspace connection's one workspace; null for an organization connection
+  clientId: string;
+  status: "active" | "revoked";
+  reason: null | "revoked" | "expired" | "membership_not_live" | "permissions_lost";
+  consentScope: { preset: string | null; permissions: string[]; workspaceScope };
+  revokedAt: string | null; // when it was disconnected or expired
+  updatedAt: string; // its latest token rotation or its revocation
+}
+```
+
+`status` is `active` only while the connection's next request would resolve a
+live grant. Otherwise it is `revoked`, and `reason` is the first of these that
+holds: it was disconnected (`revoked`), its refresh token expired (`expired`),
+its person's membership is no longer active (`membership_not_live`), or the
+person no longer holds any consented permission at the organization or in a
+workspace in the consented scope (`permissions_lost`; for a workspace
+connection, the live-grant resolution its requests use refuses). Only the last
+two can become `active` again. Treat any other `reason` as not live.
+
+To hear about a disconnect without polling, configure the
+`mcp_connection.revoked` host webhook on both the API and the worker:
+`OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL` (http(s)) and
+`OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET` (at least 32
+characters), set together (`settings.hostWebhooks.mcpConnectionRevoked`).
+Unset, nothing is sent. When a person or an administrator disconnects an MCP
+connection, or its person changes its access setting so that it loses a
+permission or a workspace, the API starts one durable delivery (a Temporal
+workflow) just before it writes the change, and the worker POSTs it once it
+sees the change committed. It looks for about two minutes (24 checks, 5
+seconds apart); a change that never commits sends nothing. A notification
+never blocks the change: the start has a 3-second deadline, and when the
+delivery cannot be started in time (Temporal unreachable or hung), the API logs one `host_webhook.delivery_start_failed` warning and
+writes the change anyway, so the connection read stays authoritative. The URL
+must be https outside local/test (a plain http URL there refuses startup with
+`HOST_WEBHOOK_URL_HTTPS_REQUIRED`); a target inside the cluster is allowed. The body
+(`HostMcpConnectionRevokedWebhook`) is:
+
+```ts
+{
+  type: "mcp_connection.revoked";
+  change: "revoked" | "consent_downgraded";
+  connectionId: string;
+  organizationId: string;
+  workspaceId: string | null;
+  clientId: string;
+  revokedAt: string | null; // null for consent_downgraded
+  consentScope: { preset: string | null; permissions: string[]; workspaceScope }; // the new setting
+}
+```
+
+`X-Host-Signature: sha256=<hex>` is the HMAC-SHA256 of the raw body under the
+secret; verify it over the exact bytes received. `X-Host-Delivery` is the
+delivery's id. A delivery is retried with backoff (for about a day) until the
+host answers `2xx`, each retry with the same id and body, so deduplicate on
+the id; a `3xx` (redirects are never followed) or a `4xx` other than `408`
+and `429` ends it. A membership that ends, a
+refresh-token reuse that revokes a connection, and an expiry send nothing:
+settle those with the connection read.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 
@@ -2145,6 +2243,14 @@ specifier anywhere else. A module that lazy routes also reach statically and
 that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
+
+`hiddenNativeDestinations` hides a native destination wherever the console
+offers it: its nav entries, its settings-rail and settings-search entries, its
+links, and its URL, which renders the not-found page. `insights` also hides the
+organization settings page Organization > Insights:
+`organization?section=insights` renders the not-found page. `productName`
+replaces "Opengeni" in the document title and in the panel that asks to reload
+after a new version.
 
 Bundle the extension's own icon set (for example `lucide-react`) into its
 build rather than leaving it external to share the console's modules. The
