@@ -398,6 +398,7 @@ import {
   registerSessionToolFamilyRouteGuards,
 } from "./http/organization-session-policy";
 import { organizationGovernedByHostError } from "./http/organization-governance";
+import { registerGovernedWorkspaceRouteGuards } from "./http/governed-workspace-routes";
 import { assertHostWebhookDeliveryConfigured } from "./http/host-webhooks";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
@@ -428,6 +429,15 @@ import { registerSlackInteractionRoutes } from "./integrations/slack-interaction
 import { resolveSignedStateSecret } from "./signed-state-secret";
 
 export { allowedCorsOrigin } from "./http/cors";
+export {
+  GOVERNED_MEMBER_ORGANIZATION_ROUTES,
+  GOVERNED_MEMBER_SESSION_OPERATIONS,
+  GOVERNED_MEMBER_WORKSPACE_ROUTES,
+  governedMemberRouteAllowed,
+  governedRouteTable,
+  type GovernedRouteEntry,
+  type GovernedRouteTableRow,
+} from "./http/governed-workspace-routes";
 
 export type {
   ApiRouteDeps,
@@ -1498,6 +1508,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
   registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
+  // Before every workspace and organization route: a governed organization's
+  // people reach only its allowlist (and are refused by that name first).
+  registerGovernedWorkspaceRouteGuards(app, routeDeps);
   // Before every route a generic tool family's refusal guards.
   registerSessionToolFamilyRouteGuards(app, routeDeps);
 

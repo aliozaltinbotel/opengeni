@@ -900,6 +900,7 @@ type OrganizationGovernancePort = {
     mutation: GovernedMutation;
     via: "native" | "host";
   }): "allow" | "refuse";
+  memberRouteAccess?: "allowlist";
 };
 ```
 
@@ -925,6 +926,29 @@ registered.
 `decide` MUST answer `"refuse"` for any mutation it does not recognize:
 `GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
 stay closed until the host chooses to allow it.
+
+**Member route allowlist (opt-in).** With `memberRouteAccess: "allowlist"` on
+the port, a person of a governed organization (a `user:` or `external_user:`
+subject with their own credential: browser session, native app credential,
+personal API key) reaches `/v1/workspaces/:workspaceId/*` and
+`/v1/organizations/:organizationId/*` only through the governed allowlist;
+every other route answers `403` with `error.details.code =
+"WORKSPACE_ROUTE_NOT_ALLOWED"` and a body that names no resource, ahead of the
+route's own checks and of `decide`. The allowlist (exported from
+`@opengeni/api-router/app`) is the workspace itself, the session list and
+create, the composer's reads (`session-tenancy/capabilities`,
+`new-session-draft`, `session-message-search`, `models`, `model-catalog`,
+`usage/me`, `allowance/state`), the workspace live streams, the
+session-bound first-party MCP endpoint, the inbox and its notifications,
+documents, Knowledge and Skills (each under its own permission), session
+feedback and artifact reads, plus every session route whose
+`sessionAuthorizationOperationForHttp` operation is in
+`GOVERNED_MEMBER_SESSION_OPERATIONS`. No organization route is on it.
+`governedRouteTable(app.routes)` gives the decision for every mounted route,
+so a host can generate its refusal tests from it. Tokens signed with the
+delegation secret (host service and person tokens, agent attempts) and
+machine credentials keep each route's own checks, and a caller with no grant
+in the workspace gets the route's own answer (`401` stays `401`).
 
 The host performs these mutations through `/v1/host/organizations/:id/...`
 (`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,

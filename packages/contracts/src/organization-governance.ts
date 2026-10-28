@@ -90,11 +90,26 @@ export type OrganizationGovernancePort = {
     mutation: GovernedMutation;
     via: GovernedMutationChannel;
   }): "allow" | "refuse";
+  /**
+   * `"allowlist"`: a person of an organization this host governs reaches its
+   * workspace and organization routes (`/v1/workspaces/:workspaceId/*`,
+   * `/v1/organizations/:organizationId/*`) only when the route is on the
+   * governed allowlist the API exports (`governedRouteTable`); every other
+   * route answers 403 `WORKSPACE_ROUTE_NOT_ALLOWED`, ahead of `decide`. Tokens
+   * signed with the deployment's delegation secret (the host's own and the
+   * runtime's) are not affected. Unset, every route keeps its own checks.
+   */
+  memberRouteAccess?: "allowlist";
 };
 
 /** Refusal detail codes (`error.details.code`). */
 export const ORGANIZATION_GOVERNED_BY_HOST = "ORGANIZATION_GOVERNED_BY_HOST";
 export const ORGANIZATION_NOT_HOST_GOVERNED = "ORGANIZATION_NOT_HOST_GOVERNED";
+/**
+ * 403: a person of a governed organization called a workspace or organization
+ * route outside the governed allowlist (the API's default-deny).
+ */
+export const WORKSPACE_ROUTE_NOT_ALLOWED = "WORKSPACE_ROUTE_NOT_ALLOWED";
 export const HOST_COMMAND_SERVICE_TOKEN_REQUIRED = "HOST_COMMAND_SERVICE_TOKEN_REQUIRED";
 export const HOST_COMMAND_PERMISSION_REQUIRED = "HOST_COMMAND_PERMISSION_REQUIRED";
 export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT";
