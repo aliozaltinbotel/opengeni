@@ -12,6 +12,7 @@ import {
 import { getWorkspace } from "@opengeni/db";
 import type { Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
+import { requireWorkspaceRecordingsAllowed } from "../http/organization-session-policy";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
 import { registerResumableTranscriptionRoutes } from "./transcription-recordings";
 
@@ -22,6 +23,7 @@ export function registerTranscriptionRoutes(app: Hono, deps: ApiRouteDeps): void
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
     const workspace = await getWorkspace(deps.db, workspaceId);
     if (!workspace) return c.json({ code: "not_found" }, 404);
+    await requireWorkspaceRecordingsAllowed(deps, workspace.accountId);
     if (resolveWorkspaceVoiceInputEnabled(workspace.settings) === false) {
       return c.json({ code: "policy_blocked" }, 403);
     }

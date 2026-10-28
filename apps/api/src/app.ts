@@ -399,6 +399,7 @@ import {
 } from "./http/organization-session-policy";
 import { organizationGovernedByHostError } from "./http/organization-governance";
 import { registerGovernedWorkspaceRouteGuards } from "./http/governed-workspace-routes";
+import { sessionRecordingsAllowed } from "@opengeni/contracts/organization-session-policy";
 import { assertHostWebhookDeliveryConfigured } from "./http/host-webhooks";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
@@ -1587,10 +1588,14 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
-          if (routeDeps.organizationGovernance && workspace)
-            workspaceAttachmentsAllowed =
-              (await resolveOrganizationSessionPolicy(routeDeps, workspace.accountId)).policy
-                .attachments === "enabled";
+          // Voice input records audio, which the organization's policy may deny.
+          let workspaceRecordingsAllowed = true;
+          if (routeDeps.organizationGovernance && workspace) {
+            const view = await resolveOrganizationSessionPolicy(routeDeps, workspace.accountId);
+            workspaceAttachmentsAllowed = view.policy.attachments === "enabled";
+            workspaceRecordingsAllowed =
+              sessionRecordingsAllowed(view) && workspaceAttachmentsAllowed;
+          }
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
             workspace?.settings.voiceInput,
           ).data;
@@ -1601,7 +1606,11 @@ export function createAppComposition(deps: AppDependencies): {
             preferredProvider: voicePreferences?.preferredProvider,
             fallbackEnabled: voicePreferences?.fallbackEnabled,
           };
-          if (hasPermission(grant.permissions, "sessions:create") && transcription) {
+          if (
+            hasPermission(grant.permissions, "sessions:create") &&
+            transcription &&
+            workspaceRecordingsAllowed
+          ) {
             // `providers` lists every ready provider (the workspace picker);
             // `available` honours the workspace preference and fallback, so
             // the composer never offers a mic every request would refuse.

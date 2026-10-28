@@ -1,8 +1,10 @@
 import {
   ATTACHMENTS_DISABLED,
   GOVERNED_ORGANIZATION_SESSION_POLICY,
+  SESSION_RECORDINGS_DENIED,
   SESSION_TOOL_FAMILY_DENIED,
   STOCK_ORGANIZATION_SESSION_POLICY,
+  sessionRecordingsAllowed,
   sessionToolFamilyGate,
   type OrganizationSessionPolicyView,
   type SessionToolFamily,
@@ -240,6 +242,31 @@ export async function requireOrganizationAttachmentsAllowed(
   if (!deps.organizationGovernance) return;
   const { policy } = await resolveOrganizationSessionPolicy(deps, organizationId);
   if (policy.attachments !== "enabled") throw new AttachmentsDisabledError();
+}
+
+/** Raised where an organization's session policy turns recordings and transcription off. */
+export class SessionRecordingsDeniedError extends Error {
+  readonly name = "SessionRecordingsDeniedError";
+  readonly code = SESSION_RECORDINGS_DENIED;
+  constructor() {
+    super("Recording and transcription are turned off for this organization's sessions.");
+  }
+}
+
+/**
+ * Refuses a recording, its audio uploads and transcription when the
+ * organization's policy denies recordings (the default for a governed
+ * organization), then when it turns attachments off: recorded audio reaches
+ * the model as text, like an attachment. Without a port nothing is read.
+ */
+export async function requireOrganizationRecordingsAllowed(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<void> {
+  if (!deps.organizationGovernance) return;
+  const resolved = await resolveOrganizationSessionPolicy(deps, organizationId);
+  if (!sessionRecordingsAllowed(resolved)) throw new SessionRecordingsDeniedError();
+  if (resolved.policy.attachments !== "enabled") throw new AttachmentsDisabledError();
 }
 
 /** Refuses a tool family the organization's policy removes. */

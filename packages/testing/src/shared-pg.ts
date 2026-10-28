@@ -854,7 +854,7 @@ export async function acquireSharedTestDatabase(
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
  * on the personal-machine owner lookup (0978), the connected-command re-arm
  * (0984), the host identity lookup (1016), the host owner ensure (1017) and
- * the host session policy write (1018).
+ * the host session policy write (1018) and the host recordings write (1019).
  * Tests that exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(
@@ -872,6 +872,9 @@ export async function grantDeferredRuntimeAccess(
       TO "${role.replaceAll('"', '""')}";
     GRANT EXECUTE ON FUNCTION opengeni_private.put_host_organization_session_policy(
       uuid, text, uuid, text, text, text[], text, bigint
+    ) TO "${role.replaceAll('"', '""')}";
+    GRANT EXECUTE ON FUNCTION opengeni_private.set_host_organization_session_recordings(
+      uuid, text, uuid, text
     ) TO "${role.replaceAll('"', '""')}";
   `);
 }

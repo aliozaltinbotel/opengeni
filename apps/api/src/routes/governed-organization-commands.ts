@@ -538,7 +538,8 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
     );
     // Before anything is recorded, as the owner ensure does: an unavailable
     // command leaves its operation id unused.
-    if (!(await hostSessionPolicyWriteGranted(deps.db))) throw hostSessionPolicyUnavailable();
+    if (!(await hostSessionPolicyWriteGranted(deps.db, command.policy)))
+      throw hostSessionPolicyUnavailable();
     await recordAttribution(deps, authority, {
       mutation: "session_policy.update",
       operationId: command.operationId,

@@ -988,3 +988,128 @@ describe("generic tool families", () => {
     }
   });
 });
+
+const RECORDINGS_ROUTINE =
+  "opengeni_private.set_host_organization_session_recordings(uuid, text, uuid, text)";
+const RECORDING_INPUTS = [
+  "/recordings",
+  `/recordings/${crypto.randomUUID()}/uploads`,
+  `/recordings/${crypto.randomUUID()}/chunks/complete`,
+  `/recordings/${crypto.randomUUID()}/finalize`,
+  `/recordings/${crypto.randomUUID()}/transcripts`,
+  `/recordings/${crypto.randomUUID()}/live-session`,
+  `/recordings/${crypto.randomUUID()}/live-segments`,
+  "/transcription-recordings",
+  `/transcription-recordings/${crypto.randomUUID()}/finalize`,
+  "/transcriptions",
+];
+
+async function recordingCodes(app: App, org: Organization): Promise<(string | undefined)[]> {
+  return await Promise.all(
+    RECORDING_INPUTS.map(async (path) => {
+      const response = await post(app, org, path);
+      const code = detailCode(await response.json().catch(() => ({})));
+      return response.status === 403 ? code : undefined;
+    }),
+  );
+}
+
+describe("recordings follow the session policy", () => {
+  test("a governed organization refuses every recording input with SESSION_RECORDINGS_DENIED; reads stay open", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    expect(await recordingCodes(app, org)).toEqual(
+      RECORDING_INPUTS.map(() => "SESSION_RECORDINGS_DENIED"),
+    );
+    const list = await app.request(`/v1/workspaces/${org.workspaceId}/recordings`, {
+      headers: { authorization: await personBearer(org) },
+    });
+    expect(list.status).toBe(200);
+    // The governed default read back names no recordings field (the host's
+    // strict parsers keep working); the default for its source applies.
+    const read = (await (await getHostPolicy(app, org)).json()) as { policy: object };
+    expect(read.policy).toEqual(GOVERNED_ORGANIZATION_SESSION_POLICY);
+  });
+
+  test("stock and ungoverned organizations keep their recording routes", async () => {
+    for (const [app, source] of [
+      [appFor(), HOST_SOURCE],
+      [appFor(hostPort), "someone-else"],
+    ] as const) {
+      const org = await organization(source);
+      expect(await recordingCodes(app, org)).toEqual(RECORDING_INPUTS.map(() => undefined));
+    }
+  });
+
+  test("the host allows recordings; attachments off still refuse them, attachments on admit them", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const closed = await putHostPolicy(app, org, {
+      ...GOVERNED_ORGANIZATION_SESSION_POLICY,
+      recordings: "allowed",
+    });
+    expect(closed.status).toBe(200);
+    const closedBody = (await closed.json()) as {
+      policy: { recordings?: string };
+      revision: number;
+    };
+    expect(closedBody.policy.recordings).toBe("allowed");
+    expect(await recordingCodes(app, org)).toEqual(
+      RECORDING_INPUTS.map(() => "ATTACHMENTS_DISABLED"),
+    );
+    // A later command that does not name recordings keeps the stored setting.
+    const open = await putHostPolicy(app, org, OPEN_ALL, {
+      expectedRevision: closedBody.revision,
+    });
+    expect(open.status).toBe(200);
+    expect(((await open.json()) as { policy: { recordings?: string } }).policy.recordings).toBe(
+      "allowed",
+    );
+    expect(await recordingCodes(app, org)).toEqual(RECORDING_INPUTS.map(() => undefined));
+  });
+
+  test("a host that denies recordings explicitly is refused with SESSION_RECORDINGS_DENIED", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    const operationId = crypto.randomUUID();
+    const policy = { ...OPEN_ALL, recordings: "denied" };
+    expect((await putHostPolicy(app, org, policy, { operationId })).status).toBe(200);
+    // The same operation and body replays.
+    const replay = await putHostPolicy(app, org, policy, { operationId });
+    expect(((await replay.json()) as { replay: boolean }).replay).toBe(true);
+    expect(await recordingCodes(app, org)).toEqual(
+      RECORDING_INPUTS.map(() => "SESSION_RECORDINGS_DENIED"),
+    );
+    // Uploads follow attachments alone.
+    expect((await requestUpload(app, org)).status).toBe(201);
+  });
+
+  test("until 1019's routine is granted, a command naming recordings is unavailable; one without it is not", async () => {
+    await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${RECORDINGS_ROUTINE} FROM opengeni_app`);
+    try {
+      const app = appFor(hostPort);
+      const org = await organization(HOST_SOURCE);
+      const operationId = crypto.randomUUID();
+      const named = await putHostPolicy(
+        app,
+        org,
+        { ...OPEN_ALL, recordings: "allowed" },
+        {
+          operationId,
+        },
+      );
+      expect(named.status).toBe(503);
+      expect(detailCode(await named.json())).toBe("HOST_SESSION_POLICY_UNAVAILABLE");
+      const [attributions] = await shared.admin<{ count: number }[]>`
+        select count(*)::int as count from organization_host_command_attributions
+        where account_id = ${org.organizationId} and operation_id = ${operationId}`;
+      expect(attributions!.count).toBe(0);
+      expect((await putHostPolicy(app, org, OPEN_ALL)).status).toBe(200);
+      expect(await recordingCodes(app, org)).toEqual(
+        RECORDING_INPUTS.map(() => "SESSION_RECORDINGS_DENIED"),
+      );
+    } finally {
+      await shared.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${RECORDINGS_ROUTINE} TO opengeni_app`);
+    }
+  });
+});

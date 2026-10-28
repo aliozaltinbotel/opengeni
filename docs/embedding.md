@@ -1300,6 +1300,7 @@ type OrganizationSessionPolicy = {
     mode: "deny" | "allow";
     families: ("shell" | "codemode" | "browser" | "computerUse")[];
   };
+  recordings?: "allowed" | "denied";
 };
 ```
 
@@ -1385,6 +1386,31 @@ type OrganizationSessionPolicy = {
   revision, updatedAt }` (and `replay` on PUT). No native route writes the
   policy, and native workspace settings or session capabilities cannot widen
   it.
+- **Recordings (migration 1019).** `recordings` decides whether people may
+  record meetings and send recorded or dictated audio to a transcription
+  provider. When the policy leaves it out it takes the default for its source
+  (`sessionRecordingsAllowed`): `denied` for a stored policy (the governed
+  default or a host policy), `allowed` for stock. Answers name it only once a
+  host has set it, so a stored governed default reads back exactly as before.
+  A host command that names it sets it through
+  `opengeni_private.set_host_organization_session_recordings`, called right
+  after the policy routine for the row this operation id wrote; one that leaves
+  it out keeps the stored setting, and the body digest includes it only when
+  named. That routine's runtime EXECUTE is withheld for one release too: until
+  it is granted, a command naming `recordings` answers `503
+  HOST_SESSION_POLICY_UNAVAILABLE` and records nothing, and other commands are
+  unchanged. Denied, these answer `403` with `details.code
+  SESSION_RECORDINGS_DENIED`; allowed, they still answer `403
+  ATTACHMENTS_DISABLED` while attachments are off:
+  - `POST /v1/workspaces/:ws/recordings` (meetings and dictation) and a
+    recording's `uploads`, `chunks/complete`, `finalize`, `transcripts`,
+    `live-session` and `live-segments`;
+  - `POST /v1/workspaces/:ws/transcription-recordings`, its chunk `PUT`,
+    `finalize` and `process-next`;
+  - `POST /v1/workspaces/:ws/transcriptions`.
+
+  Reading, editing and deleting existing recordings stay open, and the
+  workspace-scoped client config reports voice input unavailable.
 - **Attachments off.** These answer `403` with `details.code
   ATTACHMENTS_DISABLED`:
   - a person's `POST /v1/workspaces/:ws/files/uploads` and its `/complete`;
