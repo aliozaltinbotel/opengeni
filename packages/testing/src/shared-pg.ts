@@ -850,12 +850,9 @@ export async function acquireSharedTestDatabase(
 }
 
 /**
- * Grant the runtime role what a migration withholds until the previous
- * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
- * on the personal-machine owner lookup (0978) and the connected-command
- * re-arm (0984). Tests that exercise them run as they will once they are
- * granted. 1019 grants the host governance definers 1016, 1017 and 1018
- * withheld, so the migrations themselves grant those.
+ * Restore the runtime role's EXECUTE on the personal-machine owner lookup
+ * (0978) and the connected-command re-arm (0984), which 1019 grants, after a
+ * test revoked it to exercise its callers' "not granted" path.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,

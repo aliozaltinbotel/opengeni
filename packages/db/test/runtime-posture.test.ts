@@ -3922,7 +3922,7 @@ test("Teams wake is non-callable and uses invoker rights with a fixed search pat
   }
 });
 
-describe("runtime definers: 0947, 0950 and 1019 grant what 0937, 0946, 1016, 1017 and 1018 withheld, 0978's and 0984's stay deferred", () => {
+describe("runtime definers: 0947, 0950 and 1019 grant what 0937, 0946, 0978, 0984, 1016, 1017 and 1018 withheld", () => {
   const eventTable = (name: string, granted: boolean, rls = true): RuntimeTablePosture => ({
     name,
     hasInheritance: false,
@@ -4019,11 +4019,8 @@ describe("runtime definers: 0947, 0950 and 1019 grant what 0937, 0946, 1016, 101
       "ensure_organization_host_owner(uuid, text, uuid)",
       "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
     ]);
-    // 1019 granted the host governance definers 1016, 1017 and 1018 withheld.
-    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
-      "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-      "rearm_unanswered_connected_commands(uuid, uuid, text)",
-    ]);
+    // 1019 granted what 0978, 0984, 1016, 1017 and 1018 withheld.
+    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(

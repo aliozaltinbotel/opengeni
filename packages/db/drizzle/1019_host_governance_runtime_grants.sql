@@ -8,6 +8,12 @@
 -- withheld are gone. CREATE OR REPLACE in 1017 kept 1016's routine ungranted,
 -- so all three are granted here.
 --
+-- It also grants the personal-machine owner lookup (0978) and the
+-- connected-command re-arm (0984), which the previous release knows as well
+-- (it withholds them too, and accepts them either way). Their callers keep
+-- checking the grant first, as they run inside transactions a permission
+-- error would abort.
+--
 -- Every configured application role gets them, as provisioning does.
 DO $host_governance_runtime_grants$
 DECLARE
@@ -26,7 +32,9 @@ BEGIN
       'GRANT EXECUTE ON FUNCTION opengeni_private.lookup_organization_host_identity(uuid, text, uuid), '
         || 'opengeni_private.ensure_organization_host_owner(uuid, text, uuid), '
         || 'opengeni_private.put_host_organization_session_policy('
-        || 'uuid, text, uuid, text, text, text[], text, bigint) TO %I',
+        || 'uuid, text, uuid, text, text, text[], text, bigint), '
+        || 'opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid), '
+        || 'opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text) TO %I',
       application_role
     );
   END LOOP;
