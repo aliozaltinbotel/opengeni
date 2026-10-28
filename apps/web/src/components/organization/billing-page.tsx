@@ -3,7 +3,9 @@ import { ArrowUpRightIcon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { isOrganizationSectionHidden } from "@opengeni/react/app/host-extension";
 import { RowButton } from "@opengeni/react/ui/page-actions";
+import { hiddenNativeDestinations } from "@/host-extension/registry";
 import { OrganizationCreditBalance } from "@/components/organization-credit-balance";
 import { ErrorMessage } from "@opengeni/react/ui/error-message";
 import { Section, SectionStack } from "@opengeni/react/ui/section";
@@ -108,7 +110,6 @@ function BillingOverview({
   onOpenBudget: (workspaceId: string) => void;
 }) {
   const { client, clientConfig } = useAppContext();
-  const navigate = useNavigate();
   const accountId = identity.organizationId;
   const workspaceId = identity.workspaceId;
   const identityKey = organizationAdminIdentityKey(identity);
@@ -409,30 +410,11 @@ function BillingOverview({
         <WorkspaceBudgetsSection onOpenWorkspace={onOpenBudget} />
       </Suspense>
 
-      {canReadBilling && accountId ? (
-        <Section title="Usage">
-          <SettingRowGroup>
-            <SettingRow
-              label="Insights"
-              description="Spend, tokens and model calls across every workspace, by model, workspace, person and more."
-              controlWidth="auto"
-              control={
-                <RowButton
-                  onClick={() =>
-                    void navigate({
-                      to: "/workspaces/$workspaceId/organization",
-                      params: { workspaceId },
-                      search: { section: "insights" },
-                    })
-                  }
-                >
-                  Open Insights
-                </RowButton>
-              }
-            />
-          </SettingRowGroup>
-        </Section>
-      ) : null}
+      <BillingInsightsSection
+        canReadBilling={canReadBilling}
+        accountId={accountId}
+        workspaceId={workspaceId}
+      />
     </SectionStack>
   );
 }
@@ -514,6 +496,52 @@ function EntitlementsSection(props: {
             }
           />
         ))}
+      </SettingRowGroup>
+    </Section>
+  );
+}
+
+/**
+ * The link to Organization > Insights, for someone who can read billing. Left
+ * out when the host extension hides the Insights destination.
+ */
+export function BillingInsightsSection({
+  canReadBilling,
+  accountId,
+  workspaceId,
+}: {
+  canReadBilling: boolean;
+  accountId: string;
+  workspaceId: string;
+}) {
+  const navigate = useNavigate();
+  if (
+    !canReadBilling ||
+    !accountId ||
+    isOrganizationSectionHidden("insights", hiddenNativeDestinations())
+  )
+    return null;
+  return (
+    <Section title="Usage">
+      <SettingRowGroup>
+        <SettingRow
+          label="Insights"
+          description="Spend, tokens and model calls across every workspace, by model, workspace, person and more."
+          controlWidth="auto"
+          control={
+            <RowButton
+              onClick={() =>
+                void navigate({
+                  to: "/workspaces/$workspaceId/organization",
+                  params: { workspaceId },
+                  search: { section: "insights" },
+                })
+              }
+            >
+              Open Insights
+            </RowButton>
+          }
+        />
       </SettingRowGroup>
     </Section>
   );

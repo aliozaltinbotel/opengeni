@@ -55,6 +55,7 @@ const { useSettingsRail } = await import("@/components/settings/settings-rail");
 const { searchSettings, settingsSearchEntries } =
   await import("@/components/settings/settings-search");
 const { NotFoundPanel } = await import("@/components/route-error");
+const { BillingInsightsSection } = await import("@/components/organization/billing-page");
 const { visibleNativeRoutes } = await import("./hidden-destinations");
 const app = await import("../App");
 await import("@/app-host");
@@ -212,6 +213,17 @@ describe("a hidden Insights also hides Organization > Insights", () => {
     expect(searchSettings(entries, "billing").map((entry) => entry.id)).toContain(
       "organization:billing",
     );
+  });
+
+  test("Organization > Billing offers no Insights link", async () => {
+    const view = await renderInRouter(() => (
+      <BillingInsightsSection canReadBilling accountId="o1" workspaceId="w1" />
+    ));
+    try {
+      expect(view.container.textContent).not.toContain("Insights");
+    } finally {
+      await view.done();
+    }
   });
 
   test("organization?section=insights renders the not-found page; another section does not", async () => {

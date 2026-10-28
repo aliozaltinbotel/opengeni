@@ -37,7 +37,13 @@ configurePageAppHost({
   },
 });
 
-// index.html names the stock product; a host extension's product names the tab.
+// index.html names the stock product; a host extension's product names the
+// tab and the page's link-preview title and site name.
 if (hostExtension.productName && typeof document !== "undefined") {
-  document.title = hostExtension.productName;
+  const productName = hostExtension.productName;
+  document.title = productName;
+  for (const property of ["og:title", "og:site_name"])
+    document.head
+      .querySelector(`meta[property="${property}"]`)
+      ?.setAttribute("content", productName);
 }
