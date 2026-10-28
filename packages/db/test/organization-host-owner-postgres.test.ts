@@ -308,20 +308,35 @@ describe("1017 under a NOSUPERUSER migration owner", () => {
   });
 });
 
-/** Backends of this database waiting on a lock. */
-async function lockWaiters(): Promise<number> {
+/** Backends waiting for the blocker's lock on this schema's workspaces table. */
+async function workspacesLockWaiters(): Promise<number[]> {
+  const rows = await fixture!.admin<{ pid: number }[]>`
+    select pid from pg_locks
+    where not granted and locktype = 'relation'
+      and relation = to_regclass(${`"${fixture!.schema}".workspaces`})`;
+  return rows.map((row) => row.pid);
+}
+
+/** Backends waiting for the transaction of `pid` (here: on its organization insert). */
+async function transactionWaiters(pid: number): Promise<number> {
   const [row] = await fixture!.admin<{ waiting: number }[]>`
-    select count(*)::int as waiting from pg_stat_activity
-    where datname = current_database() and wait_event_type = 'Lock'`;
+    select count(*)::int as waiting from pg_locks waiter
+    where not waiter.granted and waiter.locktype = 'transactionid'
+      and waiter.transactionid = (
+        select holder.transactionid from pg_locks holder
+        where holder.pid = ${pid} and holder.locktype = 'transactionid' and holder.granted
+        limit 1
+      )`;
   return row!.waiting;
 }
 
-async function untilLockWaiters(count: number): Promise<void> {
+async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, what: string) {
   for (let attempt = 0; attempt < 400; attempt += 1) {
-    if ((await lockWaiters()) >= count) return;
+    const value = await read();
+    if (done(value)) return value;
     await Bun.sleep(25);
   }
-  throw new Error(`fewer than ${count} backends ever waited on a lock`);
+  throw new Error(`never observed: ${what}`);
 }
 
 describe("bootstrapWorkspace's owner write", () => {
@@ -354,9 +369,20 @@ describe("bootstrapWorkspace's owner write", () => {
       await blocker`begin`;
       await blocker.unsafe(`lock table "${fixture.schema}".workspaces in access exclusive mode`);
       first = bootstrap(subjects[0], { tenant });
-      await untilLockWaiters(1);
+      // Exactly the first bootstrap, held on workspaces after its insert.
+      const [firstPid] = await until(
+        workspacesLockWaiters,
+        (pids) => pids.length === 1,
+        "the first bootstrap waiting on workspaces",
+      );
       second = bootstrap(subjects[1], { tenant });
-      await untilLockWaiters(2);
+      // The second waits on the first's transaction: it inserted the same
+      // organization after reading none, so the two really raced.
+      await until(
+        () => transactionWaiters(firstPid!),
+        (waiting) => waiting === 1,
+        "the second bootstrap waiting on the first's organization insert",
+      );
     } finally {
       await blocker`commit`;
       blocker.release();
