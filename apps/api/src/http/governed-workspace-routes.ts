@@ -200,18 +200,18 @@ export function isGovernedRoutePrefix(path: string): boolean {
 
 /**
  * The default-deny's decision for every route `app.routes` lists under the
- * governed prefixes, once per method and path, sorted. Middleware entries
- * (`ALL` on a wildcard) are left out; an `ALL` handler stays as `ALL`. A host
+ * governed prefixes, once per method and path, sorted. Middleware entries are
+ * left out; an `ALL` handler (wildcard ones included) stays as `ALL`. A host
  * generates its refusal tests from this table: every row with `allowed: false`
  * answers 403 `WORKSPACE_ROUTE_NOT_ALLOWED` to a person of a governed
  * organization.
  */
 export function governedRouteTable(
-  routes: readonly Readonly<{ method: string; path: string }>[],
+  routes: readonly Readonly<{ method: string; path: string; handler?: unknown }>[],
 ): GovernedRouteTableRow[] {
   const rows = new Map<string, GovernedRouteTableRow>();
   for (const route of routes) {
-    if (!isGovernedRoutePrefix(route.path) || route.path.endsWith("/*")) continue;
+    if (!isGovernedRoutePrefix(route.path) || isMiddleware(route)) continue;
     const key = `${route.method} ${route.path}`;
     if (rows.has(key)) continue;
     rows.set(key, {
@@ -223,6 +223,16 @@ export function governedRouteTable(
   return [...rows.values()].sort((a, b) =>
     a.path === b.path ? a.method.localeCompare(b.method) : a.path.localeCompare(b.path),
   );
+}
+
+/**
+ * A middleware entry of `app.routes` (arity two: `(context, next)`), the rule
+ * `registeredHandlerRoutePath` uses; without a handler, a `/*` template.
+ */
+function isMiddleware(route: Readonly<{ path: string; handler?: unknown }>): boolean {
+  return typeof route.handler === "function"
+    ? route.handler.length >= 2
+    : route.path.endsWith("/*");
 }
 
 export function workspaceRouteNotAllowedHttpError(): ApiHttpError {

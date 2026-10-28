@@ -168,6 +168,20 @@ describe("default-deny in a governed organization", () => {
     expect(result).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
   });
 
+  test("a denied route at the bare workspace and organization paths answers the refusal", async () => {
+    const workspace = await call(governedApp, `/v1/workspaces/${governed.workspaceId}`, {
+      method: "DELETE",
+      headers: browser(owner.cookie),
+    });
+    expect(workspace).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
+    const organization = await call(governedApp, `/v1/organizations/${governed.organizationId}`, {
+      method: "PATCH",
+      headers: browser(owner.cookie),
+      body: JSON.stringify({ name: "Renamed" }),
+    });
+    expect(organization).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
+  });
+
   test("an organization route answers 403 WORKSPACE_ROUTE_NOT_ALLOWED", async () => {
     const result = await call(governedApp, `/v1/organizations/${governed.organizationId}/members`, {
       headers: browser(owner.cookie),
@@ -268,6 +282,10 @@ describe("the exported route table", () => {
     expect(allowed("GET", `${ws}/automations/sources`)).toBe(false);
     expect(allowed("GET", `${ws}/codex/status`)).toBe(false);
     expect(allowed("GET", `${ws}/subscription-usage-pools`)).toBe(false);
+    expect(allowed("ALL", `${ws}/mcp`)).toBe(true);
+    // A real wildcard handler is listed; the guards' own middleware is not.
+    expect(allowed("ALL", `${ws}/codemode/sdk/*`)).toBe(false);
+    expect(table.some((row) => row.path === `${ws}/*`)).toBe(false);
     expect(
       table.filter((row) => row.path.startsWith("/v1/organizations/")).every((row) => !row.allowed),
     ).toBe(true);
