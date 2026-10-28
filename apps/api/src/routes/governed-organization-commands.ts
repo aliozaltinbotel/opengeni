@@ -279,6 +279,10 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
   });
 
   // A read: no governed mutation to decide and no attribution to record.
+  // An organization connection that consented `account:read` (every preset
+  // does) stays live for as long as its person is an active member, since
+  // every active membership holds `account:read`: it practically never
+  // reaches `permissions_lost`; only a custom setting without it can.
   app.get(`${base}/mcp-connections/:connectionId`, async (context) => {
     context.header("cache-control", "no-store");
     const authority = await requireHostService(context, deps);

@@ -511,6 +511,49 @@ describe("the host reads back one of its organization's MCP connections", () => 
     }
   }, 60_000);
 
+  test("a connection past its refresh lifetime is expired, with when", async () => {
+    const connectionId = await connect(first, member, { organizationAccess: readOnlyEverywhere });
+    const expiredAt = new Date(Date.now() - 60_000);
+    await shared.admin`
+      update mcp_oauth_refresh_tokens set expires_at = ${expiredAt} where family_id = ${connectionId}`;
+    const { status, body } = await readConnection(first, connectionId);
+    expect(status).toBe(200);
+    expect({ status: body.status, reason: body.reason, revokedAt: body.revokedAt }).toEqual({
+      status: "revoked",
+      reason: "expired",
+      revokedAt: expiredAt.toISOString(),
+    });
+  }, 60_000);
+
+  test("a connection whose person lost the workspace grant it needs has lost its permissions", async () => {
+    const holder = await invitedMember(first);
+    const workspaceConnection = await connect(first, holder, {
+      workspaceId: first.businessWorkspaceId,
+    });
+    // An organization connection consented only workspace permissions, in that workspace.
+    const organizationConnection = await connect(first, holder, {
+      organizationAccess: {
+        preset: "custom",
+        permissions: ["workspace:read", "sessions:read"],
+        workspaceScope: { kind: "selected", workspaceIds: [first.businessWorkspaceId] },
+      },
+    });
+    for (const connectionId of [workspaceConnection, organizationConnection])
+      expect((await readConnection(first, connectionId)).body.status).toBe("active");
+    await shared.admin`
+      delete from workspace_memberships
+      where workspace_id = ${first.businessWorkspaceId} and subject_id = ${holder.subjectId}`;
+    for (const connectionId of [workspaceConnection, organizationConnection]) {
+      const { status, body } = await readConnection(first, connectionId);
+      expect(status).toBe(200);
+      expect({ status: body.status, reason: body.reason, revokedAt: body.revokedAt }).toEqual({
+        status: "revoked",
+        reason: "permissions_lost",
+        revokedAt: null,
+      });
+    }
+  }, 60_000);
+
   test("another organization's connection and an unknown one get the same 404", async () => {
     const connectionId = await connect(first, member, { organizationAccess: readOnlyEverywhere });
     for (const id of [connectionId, crypto.randomUUID()]) {
