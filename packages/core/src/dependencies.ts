@@ -62,7 +62,10 @@ export type SessionWorkflowClient = {
   /**
    * Start one durable host webhook delivery (`settings.hostWebhooks`), before
    * the change it reports is written; the worker sends it once it sees the
-   * change committed. Idempotent on `deliveryId`.
+   * change committed. Idempotent on `deliveryId`. The implementation bounds
+   * the start with its own deadline (the API's Temporal client: 3 seconds):
+   * the change waits for it, and a start that fails or times out is only
+   * reported.
    */
   startHostWebhookDelivery?: (input: HostWebhookDeliveryRequest) => Promise<void>;
   triggerAutomationRun?: (input: {

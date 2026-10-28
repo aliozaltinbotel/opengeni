@@ -351,9 +351,14 @@ describe("the mcp_connection.revoked delivery is started", () => {
     expect(row!.revoked_at).not.toBeNull();
   }, 60_000);
 
-  test("a delivery start that never answers holds the disconnect no longer than its deadline", async () => {
+  test("a start its workflow client's deadline ends is reported, and the disconnect is written", async () => {
     const connectionId = await connect();
     let calls = 0;
+    const { observability, diagnostics } = capturingObservability();
+    // The workflow client bounds the start (the API's Temporal client gives it
+    // HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS); this one ends it early, as that
+    // deadline would.
+    const deadline = 200;
     const hung = createApp({
       settings: testSettings({
         databaseUrl: shared.adminUrl,
@@ -364,20 +369,29 @@ describe("the mcp_connection.revoked delivery is started", () => {
       }),
       db: client.db,
       bus: new MemoryEventBus(),
+      observability,
       workflowClient: {
         startHostWebhookDelivery: () => {
           calls += 1;
-          return new Promise<void>(() => undefined);
+          return new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error("Deadline exceeded")), deadline),
+          );
         },
       } as unknown as SessionWorkflowClient,
     } as AppDependencies);
     const startedAt = Date.now();
-    await disconnect(hung, connectionId);
+    await capturingConsole(async () => {
+      await disconnect(hung, connectionId);
+      await observability.flush();
+    });
     const elapsed = Date.now() - startedAt;
-    expect(elapsed).toBeGreaterThanOrEqual(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS - 50);
-    expect(elapsed).toBeLessThan(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS + 2_000);
+    expect(elapsed).toBeGreaterThanOrEqual(deadline - 50);
+    expect(elapsed).toBeLessThan(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS);
     // The start was attempted once and never completed: no delivery is recorded as started.
     expect(calls).toBe(1);
+    expect(diagnostics()).toEqual([
+      expect.objectContaining({ code: "host_webhook_delivery_start_failed", connectionId }),
+    ]);
     expect(started.filter(({ event }) => event.connectionId === connectionId)).toEqual([]);
     const [row] = await shared.admin<{ revoked_at: Date | null }[]>`
       select revoked_at from mcp_oauth_refresh_tokens

@@ -79,25 +79,15 @@ export async function startMcpConnectionRevokedDelivery(
             consentScope: input.consentScope,
           },
         };
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const start = deps.workflowClient.startHostWebhookDelivery;
     if (!start) throw new Error(HOST_WEBHOOK_DELIVERY_UNAVAILABLE);
-    // A hung start counts as a failed one. A start that succeeds late is
-    // harmless: the worker still waits to see the change committed.
-    await Promise.race([
-      start(request),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new HostWebhookDeliveryStartTimeoutError()),
-          HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS,
-        );
-      }),
-    ]);
+    // The workflow client bounds the start itself (the API's Temporal client:
+    // HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS through withDeadline), so a hung
+    // connection fails here like any other start.
+    await start(request);
   } catch (error) {
     reportDeliveryStartFailure(deps.observability, request, error);
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -158,15 +148,11 @@ function observe(report: () => void): void {
   }
 }
 
-/** How long a disconnect or access change waits for its delivery to start. */
+/**
+ * How long a disconnect or access change waits for its delivery to start: the
+ * deadline the API's Temporal workflow client gives the start.
+ */
 export const HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS = 3_000;
-
-class HostWebhookDeliveryStartTimeoutError extends Error {
-  constructor() {
-    super("the host webhook delivery did not start in time");
-    this.name = "HostWebhookDeliveryStartTimeoutError";
-  }
-}
 
 /** Whether a new access setting takes a permission or a workspace away (see `isConsentScopeDowngrade`). */
 export function isConsentDowngrade(
