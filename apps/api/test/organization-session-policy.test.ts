@@ -385,6 +385,10 @@ describe("host session policy command", () => {
         select count(*)::int as count from organization_host_command_attributions
         where account_id = ${org.organizationId} and operation_id = ${operationId}`;
       expect(attributions!.count).toBe(0);
+      const [receipts] = await shared.admin<{ count: number }[]>`
+        select count(*)::int as count from organization_session_policy_receipts
+        where account_id = ${org.organizationId}`;
+      expect(receipts!.count).toBe(0);
       expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
         policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
         source: "governed_default",
