@@ -174,12 +174,12 @@ describe("default-deny in a governed organization", () => {
       headers: browser(owner.cookie),
     });
     expect(workspace).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
-    const organization = await call(governedApp, `/v1/organizations/${governed.organizationId}`, {
+    const settings = await call(governedApp, `/v1/organizations/${governed.organizationId}`, {
       method: "PATCH",
       headers: browser(owner.cookie),
       body: JSON.stringify({ name: "Renamed" }),
     });
-    expect(organization).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
+    expect(settings).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
   });
 
   test("an organization route answers 403 WORKSPACE_ROUTE_NOT_ALLOWED", async () => {
