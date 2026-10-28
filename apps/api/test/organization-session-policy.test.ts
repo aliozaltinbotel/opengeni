@@ -23,11 +23,7 @@ import {
 import { createObservability } from "@opengeni/observability";
 import type { ObjectStorage } from "@opengeni/storage";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp, createAppComposition } from "../src/app";
 import { startGovernedSessionPolicyBackfill } from "../src/governed-session-policy-backfill";
@@ -59,9 +55,6 @@ beforeAll(async () => {
   if (!acquired) throw new Error("PostgreSQL test database unavailable");
   shared = acquired;
   client = createDb(shared.appUrl, { max: 4 });
-  // Tests run as a deployment that has granted 1018's host routine; the one
-  // that needs it withheld revokes it and restores the grant.
-  await grantDeferredRuntimeAccess(shared.admin);
 }, 180_000);
 
 const HOST_ROUTINE =
@@ -371,32 +364,11 @@ describe("attachment kill switch", () => {
 });
 
 describe("host session policy command", () => {
-  test("until 1018's routine is granted, the command is unavailable and the default holds", async () => {
-    await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${HOST_ROUTINE} FROM opengeni_app`);
-    try {
-      const app = appFor(hostPort);
-      const org = await organization(HOST_SOURCE);
-      const operationId = crypto.randomUUID();
-      const response = await putHostPolicy(app, org, OPEN_ALL, { operationId });
-      expect(response.status).toBe(503);
-      expect(detailCode(await response.json())).toBe("HOST_SESSION_POLICY_UNAVAILABLE");
-      // Refused before anything is recorded: the operation id stays unused.
-      const [attributions] = await shared.admin<{ count: number }[]>`
-        select count(*)::int as count from organization_host_command_attributions
-        where account_id = ${org.organizationId} and operation_id = ${operationId}`;
-      expect(attributions!.count).toBe(0);
-      const [receipts] = await shared.admin<{ count: number }[]>`
-        select count(*)::int as count from organization_session_policy_receipts
-        where account_id = ${org.organizationId}`;
-      expect(receipts!.count).toBe(0);
-      expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toMatchObject({
-        policy: GOVERNED_ORGANIZATION_SESSION_POLICY,
-        source: "governed_default",
-      });
-      expect((await requestUpload(app, org)).status).toBe(403);
-    } finally {
-      await shared.admin.unsafe(`GRANT EXECUTE ON FUNCTION ${HOST_ROUTINE} TO opengeni_app`);
-    }
+  test("1019 grants 1018's routine to the runtime", async () => {
+    const [row] = await shared.admin<{ granted: boolean | null }[]>`
+      select has_function_privilege('opengeni_app', to_regprocedure(${HOST_ROUTINE})::oid,
+        'EXECUTE') as granted`;
+    expect(row?.granted).toBe(true);
   });
 
   test("the host turns attachments on; uploads then succeed and the client config follows", async () => {

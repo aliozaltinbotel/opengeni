@@ -20,9 +20,8 @@ export type StoredOrganizationSessionPolicy = {
 };
 
 /**
- * Migration 1018's host write. Its runtime EXECUTE is withheld for one release
- * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES); until it is granted, a
- * host cannot replace the governed default.
+ * Migration 1018's host write (runtime EXECUTE granted by 1019; readiness
+ * requires it).
  */
 export const HOST_SESSION_POLICY_ROUTINE =
   "opengeni_private.put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)";
@@ -163,19 +162,6 @@ export async function listManagedAccountExternalSources(
   return rows.map((row) => ({ id: row.id, externalSource: row.external_source }));
 }
 
-/** Whether 1018's routine exists and the runtime may call it. */
-export async function hostSessionPolicyWriteGranted(
-  db: Pick<Database, "execute">,
-): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(
-      to_regprocedure(${HOST_SESSION_POLICY_ROUTINE})::oid, 'EXECUTE'
-    ) as granted`,
-  );
-  return row?.granted === true;
-}
-
 /** This operation id already wrote a policy with another body. */
 export class SessionPolicyOperationConflictError extends Error {
   readonly name = "SessionPolicyOperationConflictError";
@@ -199,7 +185,7 @@ export function organizationSessionPolicyDigest(policy: OrganizationSessionPolic
  * (recordOrganizationHostCommandAttribution, mutation `session_policy.update`,
  * this subject). A replay of the same operation and body changes nothing; the
  * same operation with another body, and a stale `expectedRevision`, are
- * refused. Null while 1018's routine is not granted ("not yet").
+ * refused.
  */
 export async function putHostOrganizationSessionPolicy(
   db: Database,
@@ -210,14 +196,13 @@ export async function putHostOrganizationSessionPolicy(
     policy: OrganizationSessionPolicy;
     expectedRevision: number;
   },
-): Promise<{ stored: StoredOrganizationSessionPolicy; replay: boolean } | null> {
+): Promise<{ stored: StoredOrganizationSessionPolicy; replay: boolean }> {
   const policy = OrganizationSessionPolicy.parse(input.policy);
   const digest = organizationSessionPolicyDigest(policy);
   return await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
-      if (!(await hostSessionPolicyWriteGranted(scopedDb))) return null;
       await setSubjectRlsContext(scopedDb, input.subjectId);
       let replay: boolean;
       try {

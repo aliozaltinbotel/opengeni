@@ -1379,7 +1379,6 @@ export * from "./organization-host-identity-lookup";
 export {
   HOST_ORGANIZATION_OWNER_ROUTINE,
   ensureOrganizationHostOwner,
-  hostOrganizationOwnerGranted,
   type HostOrganizationOwnerResult,
 } from "./organization-host-owner";
 export * from "./organization-session-policies";

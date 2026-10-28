@@ -85,18 +85,23 @@ function browser(cookie: string): Record<string, string> {
   return { cookie, origin, "sec-fetch-site": "same-origin", "content-type": "application/json" };
 }
 
-async function setEnsureGrant(granted: boolean): Promise<void> {
-  await shared.admin.unsafe(
-    `${granted ? "GRANT" : "REVOKE"} EXECUTE ON FUNCTION ${ENSURE_ROUTINE} ${granted ? "TO" : "FROM"} opengeni_app`,
-  );
+/** Whether the runtime may call 1017's routine (1019 grants it). */
+async function ensureGranted(): Promise<boolean> {
   const [row] = await shared.admin<{ granted: boolean | null }[]>`
     select has_function_privilege('opengeni_app', to_regprocedure(${ENSURE_ROUTINE})::oid,
       'EXECUTE') as granted`;
-  expect(row?.granted === true).toBe(granted);
+  return row?.granted === true;
 }
 
-/** An organization the host provisions with bootstrapWorkspace for its own subject. */
-async function bootstrapHostOrganization(source = HOST_SOURCE): Promise<HostOrganization> {
+/**
+ * An organization the host provisions with bootstrapWorkspace for its own
+ * subject; with `owner: false`, one bootstrapped without its owner, as before
+ * governedOrganizationOwner existed.
+ */
+async function bootstrapHostOrganization(
+  source = HOST_SOURCE,
+  { owner = true }: { owner?: boolean } = {},
+): Promise<HostOrganization> {
   const tenant = crypto.randomUUID();
   const subjectId = `test-host:provisioner:${tenant}`;
   const context = await bootstrapWorkspace(client.db, {
@@ -108,7 +113,7 @@ async function bootstrapHostOrganization(source = HOST_SOURCE): Promise<HostOrga
     workspaceName: `Workspace ${tenant}`,
     subjectId,
     subjectLabel: "Host provisioner",
-    governedOrganizationOwner: true,
+    governedOrganizationOwner: owner,
   });
   return {
     organizationId: context.defaultAccountId!,
@@ -278,7 +283,7 @@ afterAll(async () => {
 
 describe("bootstrapWorkspace({ governedOrganizationOwner }) makes the host's subject the owner of a new organization", () => {
   test("a freshly bootstrapped organization accepts the host's commands and lookup", async () => {
-    await setEnsureGrant(true);
+    expect(await ensureGranted()).toBe(true);
     const organization = await bootstrapHostOrganization();
     const [owner, ...others] = await membershipsOf(organization.organizationId);
     expect(others).toEqual([]);
@@ -299,9 +304,7 @@ describe("bootstrapWorkspace({ governedOrganizationOwner }) makes the host's sub
   }, 180_000);
 
   test("bootstrapping an existing organization again adds no owner", async () => {
-    await setEnsureGrant(false);
-    const organization = await bootstrapHostOrganization();
-    await setEnsureGrant(true);
+    const organization = await bootstrapHostOrganization(HOST_SOURCE, { owner: false });
     const again = await bootstrapWorkspace(client.db, {
       accountExternalSource: HOST_SOURCE,
       accountExternalId: organization.subjectId.slice("test-host:provisioner:".length),
@@ -317,17 +320,10 @@ describe("bootstrapWorkspace({ governedOrganizationOwner }) makes the host's sub
   }, 60_000);
 
   test("the stock local, configured and managed sources keep their own membership story", async () => {
-    await setEnsureGrant(true);
     for (const source of ["opengeni:configured", "better-auth:user"]) {
       const organization = await bootstrapHostOrganization(source);
       expect(await membershipsOf(organization.organizationId)).toEqual([]);
     }
-  }, 60_000);
-
-  test("until the routine is granted, a new organization gets no owner", async () => {
-    await setEnsureGrant(false);
-    const organization = await bootstrapHostOrganization();
-    expect(await membershipsOf(organization.organizationId)).toEqual([]);
   }, 60_000);
 });
 
@@ -338,9 +334,7 @@ describe("the host ensures its owner in an organization bootstrapped earlier", (
   let ownerMembershipId: string;
 
   beforeAll(async () => {
-    await setEnsureGrant(false);
-    legacy = await bootstrapHostOrganization();
-    await setEnsureGrant(true);
+    legacy = await bootstrapHostOrganization(HOST_SOURCE, { owner: false });
   }, 60_000);
 
   test("its host lookup and commands are refused before ensure, and answer after", async () => {
@@ -421,9 +415,7 @@ describe("the host ensures its owner in an organization bootstrapped earlier", (
   }, 120_000);
 
   test("ensure cannot target another organization or another subject", async () => {
-    await setEnsureGrant(false);
-    const other = await bootstrapHostOrganization();
-    await setEnsureGrant(true);
+    const other = await bootstrapHostOrganization(HOST_SOURCE, { owner: false });
     const before = await membershipsOf(legacy.organizationId);
 
     // The other organization's token, at this organization's path.
@@ -481,26 +473,8 @@ describe("the host ensures its owner in an organization bootstrapped earlier", (
 });
 
 describe("ensure refusals", () => {
-  test("until the routine is granted, ensure answers not yet and writes nothing", async () => {
-    await setEnsureGrant(false);
-    const organization = await bootstrapHostOrganization();
-    const response = await ensureOwner(governedApp, organization);
-    expect(response.status).toBe(503);
-    const body = (await response.json()) as { error: { retryable: boolean } };
-    expect(detailCode(body)).toBe("HOST_ORGANIZATION_OWNER_UNAVAILABLE");
-    expect(body.error.retryable).toBe(true);
-    expect(await membershipsOf(organization.organizationId)).toEqual([]);
-    const [attributions] = await shared.admin<{ count: string }[]>`
-      select count(*) from organization_host_command_attributions
-      where account_id = ${organization.organizationId}`;
-    expect(Number(attributions!.count)).toBe(0);
-    await setEnsureGrant(true);
-  }, 60_000);
-
   test("an organization the host does not govern is refused", async () => {
-    await setEnsureGrant(false);
-    const organization = await bootstrapHostOrganization("test-host:ungoverned");
-    await setEnsureGrant(true);
+    const organization = await bootstrapHostOrganization("test-host:ungoverned", { owner: false });
     const refused = await ensureOwner(governedApp, organization);
     expect(refused.status).toBe(403);
     expect(detailCode(await refused.json())).toBe("ORGANIZATION_NOT_HOST_GOVERNED");
@@ -508,9 +482,7 @@ describe("ensure refusals", () => {
   }, 60_000);
 
   test("stock: without a port there is no ensure route", async () => {
-    await setEnsureGrant(false);
-    const organization = await bootstrapHostOrganization();
-    await setEnsureGrant(true);
+    const organization = await bootstrapHostOrganization(HOST_SOURCE, { owner: false });
     expect((await ensureOwner(stockApp, organization)).status).toBe(404);
     expect(await membershipsOf(organization.organizationId)).toEqual([]);
   }, 60_000);

@@ -14,11 +14,7 @@ import {
 } from "@opengeni/db";
 import { getCanonicalHumanIdentityProjection } from "@opengeni/db/canonical-human-identities";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
-import {
-  acquireSharedTestDatabase,
-  grantDeferredRuntimeAccess,
-  type SharedTestDatabase,
-} from "@opengeni/testing/shared-pg";
+import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
 import { createApp } from "../src/app";
 
@@ -335,336 +331,320 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-/*
- * 1016 creates the lookup by identity without runtime EXECUTE (granted one
- * release later); until then the route resolves the identity through the
- * member list. Both paths answer every case the same way.
- */
-for (const path of ["member list (1016 not granted)", "lookup by identity (1016 granted)"]) {
-  const granted = path.startsWith("lookup by identity");
+/* 1016 creates the lookup by identity; 1019 grants it to the runtime. */
+describe("the host looks up a native identity in its organization", () => {
+  let first: HostOrganization;
+  let second: HostOrganization;
+  let member: Person;
+  let firstInvitationId: string;
+  let secondInvitationId: string;
 
-  describe(`the host looks up a native identity in its organization: ${path}`, () => {
-    let first: HostOrganization;
-    let second: HostOrganization;
-    let member: Person;
-    let firstInvitationId: string;
-    let secondInvitationId: string;
+  beforeAll(async () => {
+    expect(await lookupByIdentityGranted()).toBe(true);
+    first = await hostOrganization();
+    second = await hostOrganization();
+    const email = `${crypto.randomUUID()}@example.test`;
+    firstInvitationId = await hostInvite(first, email);
+    secondInvitationId = await hostInvite(second, email);
+    member = await acceptAll(email);
+  }, 180_000);
 
-    beforeAll(async () => {
-      if (granted) await grantDeferredRuntimeAccess(shared.admin);
-      else
-        await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION
-          opengeni_private.lookup_organization_host_identity(uuid, text, uuid) FROM opengeni_app`);
-      expect(await lookupByIdentityGranted()).toBe(granted);
-      first = await hostOrganization();
-      second = await hostOrganization();
+  test("answers the membership, accepted invitation, verified email and login binding", async () => {
+    const identity = await identityOf(member);
+    const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
+      identityId: identity.id,
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    const body = (await response.json()) as LookupBody;
+    const projection = await getCanonicalHumanIdentityProjection(client.db, member.userId);
+    const binding = projection.loginBindings.find(
+      (candidate) => candidate.id === identity.activeLoginBindingId,
+    );
+    expect(binding?.status).toBe("active");
+    const [invitation] = await shared.admin<
+      { accepted_membership_id: string; accepted_at: Date | null; updated_at: Date }[]
+    >`
+      select accepted_membership_id, accepted_at, updated_at
+      from organization_membership_invitations where id = ${firstInvitationId}`;
+    // 1016's trigger records the acceptance time from the accepting write.
+    expect(invitation!.accepted_at).toEqual(invitation!.updated_at);
+    const membership = await membershipOf(first.organizationId, member.subjectId);
+    const membershipId = membership.id;
+    expect(invitation!.accepted_membership_id).toBe(membershipId);
+    const sharedWorkspaceAccess = await sharedAccessOf(first.organizationId, member.subjectId);
+    // The invitation's initial workspace, granted with the member role.
+    expect(sharedWorkspaceAccess.map(({ workspaceId, role }) => ({ workspaceId, role }))).toEqual([
+      { workspaceId: first.businessWorkspaceId, role: "member" },
+    ]);
+    expect(body).toEqual({
+      identityStatus: "active",
+      verifiedEmail: member.email,
+      activeLoginBinding: { id: binding!.id, revision: binding!.revision },
+      memberships: [
+        {
+          id: membershipId,
+          status: "active",
+          role: "member",
+          authorizationRevision: membership.authorizationRevision,
+          sharedWorkspaceAccess,
+        },
+      ],
+      acceptedInvitations: [
+        {
+          id: firstInvitationId,
+          acceptedMembershipId: membershipId,
+          acceptedAt: invitation!.accepted_at!.toISOString(),
+        },
+      ],
+    });
+  }, 60_000);
+
+  test("lists only this organization's membership and invitations", async () => {
+    const identity = await identityOf(member);
+    for (const [organization, invitationId] of [
+      [first, firstInvitationId],
+      [second, secondInvitationId],
+    ] as const) {
+      const response = await lookup(
+        governedApp,
+        organization.organizationId,
+        await hostToken(organization),
+        { identityId: identity.id },
+      );
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as LookupBody;
+      const membershipId = await membershipIdOf(organization.organizationId, member.subjectId);
+      expect(body.memberships.map((membership) => membership.id)).toEqual([membershipId]);
+      expect(body.acceptedInvitations.map((accepted) => accepted.id)).toEqual([invitationId]);
+      expect(body.acceptedInvitations[0]!.acceptedMembershipId).toBe(membershipId);
+    }
+  }, 60_000);
+
+  test("a suspended and an offboarded member still answer, with their status", async () => {
+    for (const [kind, status] of [
+      ["suspend", "suspended"],
+      ["offboard", "revoked"],
+    ] as const) {
       const email = `${crypto.randomUUID()}@example.test`;
-      firstInvitationId = await hostInvite(first, email);
-      secondInvitationId = await hostInvite(second, email);
-      member = await acceptAll(email);
-    }, 180_000);
-
-    test("answers the membership, accepted invitation, verified email and login binding", async () => {
-      const identity = await identityOf(member);
+      const invitationId = await hostInvite(first, email);
+      const person = await acceptAll(email);
+      await hostTransition(first, person, kind);
       const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
-        identityId: identity.id,
+        identityId: (await identityOf(person)).id,
       });
       expect(response.status).toBe(200);
-      expect(response.headers.get("cache-control")).toBe("no-store");
       const body = (await response.json()) as LookupBody;
-      const projection = await getCanonicalHumanIdentityProjection(client.db, member.userId);
-      const binding = projection.loginBindings.find(
-        (candidate) => candidate.id === identity.activeLoginBindingId,
-      );
-      expect(binding?.status).toBe("active");
-      const [invitation] = await shared.admin<
-        { accepted_membership_id: string; accepted_at: Date | null; updated_at: Date }[]
-      >`
-        select accepted_membership_id, accepted_at, updated_at
-        from organization_membership_invitations where id = ${firstInvitationId}`;
-      // 1016's trigger records the acceptance time from the accepting write.
-      expect(invitation!.accepted_at).toEqual(invitation!.updated_at);
-      const membership = await membershipOf(first.organizationId, member.subjectId);
-      const membershipId = membership.id;
-      expect(invitation!.accepted_membership_id).toBe(membershipId);
-      const sharedWorkspaceAccess = await sharedAccessOf(first.organizationId, member.subjectId);
-      // The invitation's initial workspace, granted with the member role.
-      expect(sharedWorkspaceAccess.map(({ workspaceId, role }) => ({ workspaceId, role }))).toEqual(
-        [{ workspaceId: first.businessWorkspaceId, role: "member" }],
-      );
-      expect(body).toEqual({
-        identityStatus: "active",
-        verifiedEmail: member.email,
-        activeLoginBinding: { id: binding!.id, revision: binding!.revision },
-        memberships: [
-          {
-            id: membershipId,
-            status: "active",
-            role: "member",
-            authorizationRevision: membership.authorizationRevision,
-            sharedWorkspaceAccess,
-          },
-        ],
-        acceptedInvitations: [
-          {
-            id: firstInvitationId,
-            acceptedMembershipId: membershipId,
-            acceptedAt: invitation!.accepted_at!.toISOString(),
-          },
-        ],
-      });
-    }, 60_000);
-
-    test("lists only this organization's membership and invitations", async () => {
-      const identity = await identityOf(member);
-      for (const [organization, invitationId] of [
-        [first, firstInvitationId],
-        [second, secondInvitationId],
-      ] as const) {
-        const response = await lookup(
-          governedApp,
-          organization.organizationId,
-          await hostToken(organization),
-          { identityId: identity.id },
-        );
-        expect(response.status).toBe(200);
-        const body = (await response.json()) as LookupBody;
-        const membershipId = await membershipIdOf(organization.organizationId, member.subjectId);
-        expect(body.memberships.map((membership) => membership.id)).toEqual([membershipId]);
-        expect(body.acceptedInvitations.map((accepted) => accepted.id)).toEqual([invitationId]);
-        expect(body.acceptedInvitations[0]!.acceptedMembershipId).toBe(membershipId);
-      }
-    }, 60_000);
-
-    test("a suspended and an offboarded member still answer, with their status", async () => {
-      for (const [kind, status] of [
-        ["suspend", "suspended"],
-        ["offboard", "revoked"],
-      ] as const) {
-        const email = `${crypto.randomUUID()}@example.test`;
-        const invitationId = await hostInvite(first, email);
-        const person = await acceptAll(email);
-        await hostTransition(first, person, kind);
-        const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
-          identityId: (await identityOf(person)).id,
-        });
-        expect(response.status).toBe(200);
-        const body = (await response.json()) as LookupBody;
-        const membership = await membershipOf(first.organizationId, person.subjectId);
-        // Suspension and offboarding remove every shared-workspace grant.
-        expect(body.memberships).toEqual([
-          {
-            id: membership.id,
-            status,
-            role: "member",
-            authorizationRevision: membership.authorizationRevision,
-            sharedWorkspaceAccess: [],
-          },
-        ]);
-        expect(body.acceptedInvitations.map((accepted) => accepted.id)).toEqual([invitationId]);
-      }
-    }, 180_000);
-
-    test("authorizationRevision is exactly change-role's fence", async () => {
-      const email = `${crypto.randomUUID()}@example.test`;
-      await hostInvite(first, email);
-      const person = await acceptAll(email);
-      const identityId = (await identityOf(person)).id;
-      const read = async () => {
-        const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
-          identityId,
-        });
-        expect(response.status).toBe(200);
-        return ((await response.json()) as LookupBody).memberships[0]!;
-      };
-      const before = await read();
-      const changeRole = async (role: string, expectedAuthorizationRevision: number) =>
-        await governedApp.request(
-          `/v1/host/organizations/${first.organizationId}/members/${before.id}/change-role`,
-          {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${await hostToken(first)}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              actingExternalUser,
-              command: { role, expectedAuthorizationRevision, operationId: crypto.randomUUID() },
-            }),
-          },
-        );
-      const changed = await changeRole("admin", before.authorizationRevision);
-      expect(changed.status).toBe(200);
-      const after = await read();
-      expect(after.role).toBe("admin");
-      expect(after.authorizationRevision).toBe(
-        (await membershipOf(first.organizationId, person.subjectId)).authorizationRevision,
-      );
-      expect(after.authorizationRevision).toBeGreaterThan(before.authorizationRevision);
-      // The value read before the change is stale now.
-      expect((await changeRole("member", before.authorizationRevision)).status).toBe(409);
-      expect((await changeRole("member", after.authorizationRevision)).status).toBe(200);
-    }, 120_000);
-
-    test("sharedWorkspaceAccess updatedAt is exactly the custom-permission PUT's fence", async () => {
-      const email = `${crypto.randomUUID()}@example.test`;
-      await hostInvite(first, email);
-      const person = await acceptAll(email);
-      const identityId = (await identityOf(person)).id;
-      const read = async () => {
-        const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
-          identityId,
-        });
-        expect(response.status).toBe(200);
-        return ((await response.json()) as LookupBody).memberships[0]!;
-      };
-      const before = await read();
-      const [grant] = before.sharedWorkspaceAccess;
-      expect(grant?.workspaceId).toBe(first.businessWorkspaceId);
-      const put = async (permissions: string[], expectedUpdatedAt: string) =>
-        await governedApp.request(
-          `/v1/host/organizations/${first.organizationId}/workspaces/${first.businessWorkspaceId}/members/${before.id}`,
-          {
-            method: "PUT",
-            headers: {
-              authorization: `Bearer ${await hostToken(first)}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              actingExternalUser,
-              command: {
-                role: "custom",
-                permissions,
-                expectedUpdatedAt,
-                operationId: crypto.randomUUID(),
-              },
-            }),
-          },
-        );
-      const custom = ["workspace:read", "sessions:read"];
-      expect((await put(custom, grant!.updatedAt)).status).toBe(200);
-      const after = await read();
-      expect(after.sharedWorkspaceAccess).toEqual(
-        await sharedAccessOf(first.organizationId, person.subjectId),
-      );
-      expect(after.sharedWorkspaceAccess).toEqual([
+      const membership = await membershipOf(first.organizationId, person.subjectId);
+      // Suspension and offboarding remove every shared-workspace grant.
+      expect(body.memberships).toEqual([
         {
-          workspaceId: first.businessWorkspaceId,
-          membershipId: grant!.membershipId,
-          role: "custom",
-          permissions: custom,
-          updatedAt: expect.any(String),
+          id: membership.id,
+          status,
+          role: "member",
+          authorizationRevision: membership.authorizationRevision,
+          sharedWorkspaceAccess: [],
         },
       ]);
-      expect(after.sharedWorkspaceAccess[0]!.updatedAt).not.toBe(grant!.updatedAt);
-      // The value read before the PUT is stale now.
-      expect((await put(["workspace:read"], grant!.updatedAt)).status).toBe(409);
-      expect(
-        (await put(["workspace:read"], after.sharedWorkspaceAccess[0]!.updatedAt)).status,
-      ).toBe(200);
-    }, 120_000);
+      expect(body.acceptedInvitations.map((accepted) => accepted.id)).toEqual([invitationId]);
+    }
+  }, 180_000);
 
-    test("an unverified email answers verifiedEmail null", async () => {
-      const email = `${crypto.randomUUID()}@example.test`;
-      await hostInvite(first, email);
-      const unverified = await acceptAll(email);
-      await shared.admin`
-        update auth_users set email_verified = false where id = ${unverified.userId}`;
+  test("authorizationRevision is exactly change-role's fence", async () => {
+    const email = `${crypto.randomUUID()}@example.test`;
+    await hostInvite(first, email);
+    const person = await acceptAll(email);
+    const identityId = (await identityOf(person)).id;
+    const read = async () => {
       const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
-        identityId: (await identityOf(unverified)).id,
+        identityId,
       });
       expect(response.status).toBe(200);
-      const body = (await response.json()) as LookupBody;
-      expect(body.verifiedEmail).toBeNull();
-      expect(body.acceptedInvitations).toHaveLength(1);
-    }, 120_000);
-
-    test("an unknown identity and one from another organization get the same 404", async () => {
-      const elsewhere = await hostOrganization();
-      const email = `${crypto.randomUUID()}@example.test`;
-      await hostInvite(elsewhere, email);
-      const foreigner = await acceptAll(email);
-      const token = await hostToken(first);
-      const foreign = await lookup(governedApp, first.organizationId, token, {
-        identityId: (await identityOf(foreigner)).id,
-      });
-      const unknown = await lookup(governedApp, first.organizationId, token, {
-        identityId: crypto.randomUUID(),
-      });
-      for (const response of [foreign, unknown]) {
-        expect(response.status).toBe(404);
-        expect(response.headers.get("cache-control")).toBe("no-store");
-      }
-      const foreignBody = withoutRequestId(await foreign.json());
-      expect(detailCode(foreignBody)).toBe("HOST_IDENTITY_NOT_IN_ORGANIZATION");
-      expect(withoutRequestId(await unknown.json())).toEqual(foreignBody);
-    }, 120_000);
-
-    test("a service token for another organization is refused", async () => {
-      const identity = await identityOf(member);
-      const refused = await lookup(governedApp, first.organizationId, await hostToken(second), {
-        identityId: identity.id,
-      });
-      expect(refused.status).toBe(401);
-      expect(refused.headers.get("cache-control")).toBe("no-store");
-      expect(detailCode(await refused.json())).toBe("HOST_COMMAND_SERVICE_TOKEN_REQUIRED");
-    }, 60_000);
-
-    test("a token without members:manage is refused", async () => {
-      const identity = await identityOf(member);
-      const refused = await lookup(
-        governedApp,
-        first.organizationId,
-        await hostToken(first, ["account:read"]),
-        { identityId: identity.id },
+      return ((await response.json()) as LookupBody).memberships[0]!;
+    };
+    const before = await read();
+    const changeRole = async (role: string, expectedAuthorizationRevision: number) =>
+      await governedApp.request(
+        `/v1/host/organizations/${first.organizationId}/members/${before.id}/change-role`,
+        {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${await hostToken(first)}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            actingExternalUser,
+            command: { role, expectedAuthorizationRevision, operationId: crypto.randomUUID() },
+          }),
+        },
       );
-      expect(refused.status).toBe(403);
-      expect(detailCode(await refused.json())).toBe("HOST_COMMAND_PERMISSION_REQUIRED");
-    }, 60_000);
+    const changed = await changeRole("admin", before.authorizationRevision);
+    expect(changed.status).toBe(200);
+    const after = await read();
+    expect(after.role).toBe("admin");
+    expect(after.authorizationRevision).toBe(
+      (await membershipOf(first.organizationId, person.subjectId)).authorizationRevision,
+    );
+    expect(after.authorizationRevision).toBeGreaterThan(before.authorizationRevision);
+    // The value read before the change is stale now.
+    expect((await changeRole("member", before.authorizationRevision)).status).toBe(409);
+    expect((await changeRole("member", after.authorizationRevision)).status).toBe(200);
+  }, 120_000);
 
-    test("a token whose subject is not an organization administrator is refused", async () => {
-      const identity = await identityOf(member);
-      const refused = await lookup(
-        governedApp,
-        first.organizationId,
-        await hostToken(first, ["members:manage"], member.subjectId),
-        { identityId: identity.id },
-      );
-      expect(refused.status).toBe(403);
-      expect(refused.headers.get("cache-control")).toBe("no-store");
-      expect(detailCode(await refused.json())).toBe("HOST_COMMAND_ACTOR_NOT_AUTHORIZED");
-    }, 60_000);
-
-    test("an organization the host does not govern is refused", async () => {
-      const ungoverned = await hostOrganization(null);
-      const refused = await lookup(
-        governedApp,
-        ungoverned.organizationId,
-        await hostToken(ungoverned),
-        { identityId: (await identityOf(member)).id },
-      );
-      expect(refused.status).toBe(403);
-      expect(detailCode(await refused.json())).toBe("ORGANIZATION_NOT_HOST_GOVERNED");
-    }, 60_000);
-
-    test("a body without a UUID identityId is refused", async () => {
-      const token = await hostToken(first);
-      for (const body of [
-        {},
-        { identityId: "user:abc" },
-        { identityId: crypto.randomUUID(), x: 1 },
-      ])
-        expect((await lookup(governedApp, first.organizationId, token, body)).status).toBe(422);
-    }, 60_000);
-
-    test("stock: without a port there is no lookup route", async () => {
-      const response = await lookup(stockApp, first.organizationId, await hostToken(first), {
-        identityId: (await identityOf(member)).id,
+  test("sharedWorkspaceAccess updatedAt is exactly the custom-permission PUT's fence", async () => {
+    const email = `${crypto.randomUUID()}@example.test`;
+    await hostInvite(first, email);
+    const person = await acceptAll(email);
+    const identityId = (await identityOf(person)).id;
+    const read = async () => {
+      const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
+        identityId,
       });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as LookupBody).memberships[0]!;
+    };
+    const before = await read();
+    const [grant] = before.sharedWorkspaceAccess;
+    expect(grant?.workspaceId).toBe(first.businessWorkspaceId);
+    const put = async (permissions: string[], expectedUpdatedAt: string) =>
+      await governedApp.request(
+        `/v1/host/organizations/${first.organizationId}/workspaces/${first.businessWorkspaceId}/members/${before.id}`,
+        {
+          method: "PUT",
+          headers: {
+            authorization: `Bearer ${await hostToken(first)}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            actingExternalUser,
+            command: {
+              role: "custom",
+              permissions,
+              expectedUpdatedAt,
+              operationId: crypto.randomUUID(),
+            },
+          }),
+        },
+      );
+    const custom = ["workspace:read", "sessions:read"];
+    expect((await put(custom, grant!.updatedAt)).status).toBe(200);
+    const after = await read();
+    expect(after.sharedWorkspaceAccess).toEqual(
+      await sharedAccessOf(first.organizationId, person.subjectId),
+    );
+    expect(after.sharedWorkspaceAccess).toEqual([
+      {
+        workspaceId: first.businessWorkspaceId,
+        membershipId: grant!.membershipId,
+        role: "custom",
+        permissions: custom,
+        updatedAt: expect.any(String),
+      },
+    ]);
+    expect(after.sharedWorkspaceAccess[0]!.updatedAt).not.toBe(grant!.updatedAt);
+    // The value read before the PUT is stale now.
+    expect((await put(["workspace:read"], grant!.updatedAt)).status).toBe(409);
+    expect((await put(["workspace:read"], after.sharedWorkspaceAccess[0]!.updatedAt)).status).toBe(
+      200,
+    );
+  }, 120_000);
+
+  test("an unverified email answers verifiedEmail null", async () => {
+    const email = `${crypto.randomUUID()}@example.test`;
+    await hostInvite(first, email);
+    const unverified = await acceptAll(email);
+    await shared.admin`
+      update auth_users set email_verified = false where id = ${unverified.userId}`;
+    const response = await lookup(governedApp, first.organizationId, await hostToken(first), {
+      identityId: (await identityOf(unverified)).id,
+    });
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as LookupBody;
+    expect(body.verifiedEmail).toBeNull();
+    expect(body.acceptedInvitations).toHaveLength(1);
+  }, 120_000);
+
+  test("an unknown identity and one from another organization get the same 404", async () => {
+    const elsewhere = await hostOrganization();
+    const email = `${crypto.randomUUID()}@example.test`;
+    await hostInvite(elsewhere, email);
+    const foreigner = await acceptAll(email);
+    const token = await hostToken(first);
+    const foreign = await lookup(governedApp, first.organizationId, token, {
+      identityId: (await identityOf(foreigner)).id,
+    });
+    const unknown = await lookup(governedApp, first.organizationId, token, {
+      identityId: crypto.randomUUID(),
+    });
+    for (const response of [foreign, unknown]) {
       expect(response.status).toBe(404);
-    }, 60_000);
-  });
-}
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+    const foreignBody = withoutRequestId(await foreign.json());
+    expect(detailCode(foreignBody)).toBe("HOST_IDENTITY_NOT_IN_ORGANIZATION");
+    expect(withoutRequestId(await unknown.json())).toEqual(foreignBody);
+  }, 120_000);
+
+  test("a service token for another organization is refused", async () => {
+    const identity = await identityOf(member);
+    const refused = await lookup(governedApp, first.organizationId, await hostToken(second), {
+      identityId: identity.id,
+    });
+    expect(refused.status).toBe(401);
+    expect(refused.headers.get("cache-control")).toBe("no-store");
+    expect(detailCode(await refused.json())).toBe("HOST_COMMAND_SERVICE_TOKEN_REQUIRED");
+  }, 60_000);
+
+  test("a token without members:manage is refused", async () => {
+    const identity = await identityOf(member);
+    const refused = await lookup(
+      governedApp,
+      first.organizationId,
+      await hostToken(first, ["account:read"]),
+      { identityId: identity.id },
+    );
+    expect(refused.status).toBe(403);
+    expect(detailCode(await refused.json())).toBe("HOST_COMMAND_PERMISSION_REQUIRED");
+  }, 60_000);
+
+  test("a token whose subject is not an organization administrator is refused", async () => {
+    const identity = await identityOf(member);
+    const refused = await lookup(
+      governedApp,
+      first.organizationId,
+      await hostToken(first, ["members:manage"], member.subjectId),
+      { identityId: identity.id },
+    );
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("cache-control")).toBe("no-store");
+    expect(detailCode(await refused.json())).toBe("HOST_COMMAND_ACTOR_NOT_AUTHORIZED");
+  }, 60_000);
+
+  test("an organization the host does not govern is refused", async () => {
+    const ungoverned = await hostOrganization(null);
+    const refused = await lookup(
+      governedApp,
+      ungoverned.organizationId,
+      await hostToken(ungoverned),
+      { identityId: (await identityOf(member)).id },
+    );
+    expect(refused.status).toBe(403);
+    expect(detailCode(await refused.json())).toBe("ORGANIZATION_NOT_HOST_GOVERNED");
+  }, 60_000);
+
+  test("a body without a UUID identityId is refused", async () => {
+    const token = await hostToken(first);
+    for (const body of [{}, { identityId: "user:abc" }, { identityId: crypto.randomUUID(), x: 1 }])
+      expect((await lookup(governedApp, first.organizationId, token, body)).status).toBe(422);
+  }, 60_000);
+
+  test("stock: without a port there is no lookup route", async () => {
+    const response = await lookup(stockApp, first.organizationId, await hostToken(first), {
+      identityId: (await identityOf(member)).id,
+    });
+    expect(response.status).toBe(404);
+  }, 60_000);
+});
 
 describe("a host command refused by the database names the actor", () => {
   test("a non-administrator subject gets HOST_COMMAND_ACTOR_NOT_AUTHORIZED", async () => {
@@ -700,37 +680,26 @@ describe("a host command refused by the database names the actor", () => {
   }, 120_000);
 });
 
-describe("the member-list fallback's bound", () => {
-  test("an organization past the administration overview's bound answers 409, not 500", async () => {
-    const wasGranted = await lookupByIdentityGranted();
-    await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION
-      opengeni_private.lookup_organization_host_identity(uuid, text, uuid) FROM opengeni_app`);
-    try {
-      const organization = await hostOrganization();
-      const email = `${crypto.randomUUID()}@example.test`;
-      await hostInvite(organization, email);
-      const member = await acceptAll(email);
-      // 1001 grants in one shared workspace: the overview the fallback reads
-      // refuses more than 1000 (54000).
-      await shared.admin`
-        insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
-        select ${organization.organizationId}, ${organization.businessWorkspaceId},
-          'test-host:bulk:' || n, 'member', '["sessions:read"]'::jsonb
-        from generate_series(1, 1001) as n`;
-      const response = await lookup(
-        governedApp,
-        organization.organizationId,
-        await hostToken(organization),
-        { identityId: (await identityOf(member)).id },
-      );
-      expect(response.status).toBe(409);
-      expect(response.headers.get("cache-control")).toBe("no-store");
-      const body = (await response.json()) as { error: { message: string } };
-      expect(body.error.message).toBe(
-        "organization access inventory exceeds the identity lookup's member-list bound",
-      );
-    } finally {
-      if (wasGranted) await grantDeferredRuntimeAccess(shared.admin);
-    }
+describe("the lookup by identity has no member-list bound", () => {
+  test("an organization past the administration overview's bound still answers", async () => {
+    const organization = await hostOrganization();
+    const email = `${crypto.randomUUID()}@example.test`;
+    await hostInvite(organization, email);
+    const member = await acceptAll(email);
+    // 1001 grants in one shared workspace: more than the administration
+    // overview admits (1000, 54000 beyond), which the lookup does not read.
+    await shared.admin`
+      insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      select ${organization.organizationId}, ${organization.businessWorkspaceId},
+        'test-host:bulk:' || n, 'member', '["sessions:read"]'::jsonb
+      from generate_series(1, 1001) as n`;
+    const response = await lookup(
+      governedApp,
+      organization.organizationId,
+      await hostToken(organization),
+      { identityId: (await identityOf(member)).id },
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
   }, 180_000);
 });

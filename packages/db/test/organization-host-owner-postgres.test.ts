@@ -8,7 +8,6 @@ import {
   bootstrapWorkspace,
   createDb,
   ensureOrganizationHostOwner,
-  hostOrganizationOwnerGranted,
   nestedPostgresSqlState,
   recordOrganizationHostCommandAttribution,
   type DbClient,
@@ -63,11 +62,13 @@ afterAll(async () => {
   await fixture?.release();
 }, 180_000);
 
-async function setGrant(granted: boolean): Promise<void> {
-  await fixture!.admin.unsafe(
-    `${granted ? "GRANT" : "REVOKE"} EXECUTE ON FUNCTION ${ROUTINE} ${granted ? "TO" : "FROM"} opengeni_app`,
+/** Whether the runtime may call 1017's routine (1019 grants it). */
+async function routineGranted(): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    client!.db,
+    sql`select has_function_privilege(to_regprocedure(${ROUTINE})::oid, 'EXECUTE') as granted`,
   );
-  expect(await hostOrganizationOwnerGranted(client!.db)).toBe(granted);
+  return row?.granted === true;
 }
 
 /** What the host does: bootstrap an organization asking for its owner. */
@@ -151,18 +152,9 @@ async function sqlState(promise: Promise<unknown>): Promise<string | null> {
 }
 
 describe("1017 under a NOSUPERUSER migration owner", () => {
-  test("the routine is withheld from the runtime, and bootstrap then writes no owner", async () => {
+  test("1019 grants the routine, and bootstrap makes the subject the owner of the new organization", async () => {
     if (!fixture) return;
-    expect(await hostOrganizationOwnerGranted(client!.db)).toBe(false);
-    const organization = await bootstrap();
-    expect(await memberships(organization.organizationId)).toEqual([]);
-    expect(await hostEnsure(organization)).toBeNull();
-    expect(await memberships(organization.organizationId)).toEqual([]);
-  });
-
-  test("granted, bootstrap makes the subject the owner of the new organization", async () => {
-    if (!fixture) return;
-    await setGrant(true);
+    expect(await routineGranted()).toBe(true);
     const organization = await bootstrap();
     const rows = await memberships(organization.organizationId);
     expect(rows).toHaveLength(1);
@@ -193,9 +185,7 @@ describe("1017 under a NOSUPERUSER migration owner", () => {
 
   test("ensure is idempotent and leaves every other membership alone", async () => {
     if (!fixture) return;
-    await setGrant(false);
-    const organization = await bootstrap();
-    await setGrant(true);
+    const organization = await bootstrap(undefined, { owner: false });
     // Another membership of the organization (an external member).
     const [other] = await fixture.admin<{ id: string }[]>`
       with personal as (
@@ -227,10 +217,8 @@ describe("1017 under a NOSUPERUSER migration owner", () => {
 
   test("only the calling subject in the calling organization", async () => {
     if (!fixture) return;
-    await setGrant(false);
-    const target = await bootstrap();
-    const elsewhere = await bootstrap();
-    await setGrant(true);
+    const target = await bootstrap(undefined, { owner: false });
+    const elsewhere = await bootstrap(undefined, { owner: false });
     // Another subject's context, and another organization's context.
     const operationId = await recordEnsure(target);
     for (const context of [
@@ -254,7 +242,6 @@ describe("1017 under a NOSUPERUSER migration owner", () => {
 
   test("a membership of the subject that is not an active owner is never changed", async () => {
     if (!fixture) return;
-    await setGrant(true);
     const organization = await bootstrap();
     const [owner] = await memberships(organization.organizationId);
     for (const change of ["role = 'member'", "status = 'revoked', revoked_at = now()"]) {
@@ -273,10 +260,8 @@ describe("1017 under a NOSUPERUSER migration owner", () => {
 
   test("an owner is added to an existing organization only for a recorded host command", async () => {
     if (!fixture) return;
-    await setGrant(false);
-    const organization = await bootstrap();
-    const other = await bootstrap();
-    await setGrant(true);
+    const organization = await bootstrap(undefined, { owner: false });
+    const other = await bootstrap(undefined, { owner: false });
     const self = { accountId: organization.organizationId, subjectId: organization.subjectId };
     // No attribution, another command's, another subject's, another
     // organization's: each is refused.
@@ -342,7 +327,6 @@ async function until<T>(read: () => Promise<T>, done: (value: T) => boolean, wha
 describe("bootstrapWorkspace's owner write", () => {
   test("is opt-in: without governedOrganizationOwner a granted bootstrap writes no owner", async () => {
     if (!fixture) return;
-    await setGrant(true);
     const organization = await bootstrap(undefined, { owner: false });
     expect(await memberships(organization.organizationId)).toEqual([]);
     const [counts] = await fixture.admin<{ workspaces: number; controls: number }[]>`
@@ -356,7 +340,6 @@ describe("bootstrapWorkspace's owner write", () => {
 
   test("two concurrent first bootstraps of one organization both complete, with one owner", async () => {
     if (!fixture) return;
-    await setGrant(true);
     const tenant = crypto.randomUUID();
     const subjects = [1, 2].map((n) => `test-host:provisioner-${n}:${crypto.randomUUID()}`);
     // Hold the first bootstrap after its organization insert (its next
@@ -398,7 +381,6 @@ describe("bootstrapWorkspace's owner write", () => {
 
   test("identity-backed subjects are skipped, as the routine refuses them", async () => {
     if (!fixture) return;
-    await setGrant(true);
     for (const subjectId of [
       `user:${crypto.randomUUID()}`,
       `external_user:${crypto.randomUUID()}`,
@@ -411,10 +393,9 @@ describe("bootstrapWorkspace's owner write", () => {
     expect((await memberships(lookalike.organizationId)).map((row) => row.role)).toEqual(["owner"]);
   });
 
-  test("while the routine is withheld it sets no subject context in the caller's transaction", async () => {
+  test("a skipped owner sets no subject context in the caller's transaction", async () => {
     if (!fixture) return;
-    await setGrant(false);
-    const organization = await bootstrap(undefined, { owner: false });
+    const organization = await bootstrap(`user:${crypto.randomUUID()}`, { owner: false });
     const subject = await client!.db.transaction(async (tx) => {
       const scoped = tx as unknown as Database;
       await setRlsContext(scoped, { accountId: organization.organizationId, workspaceId: null });

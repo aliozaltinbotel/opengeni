@@ -263,17 +263,14 @@ personal-machine owner lookup withheld; its callers check
 `has_function_privilege` first, because they run inside transactions that a
 permission error would abort. 0984 created the connected-command re-arm
 withheld the same way, with the same caller check. 1016 created the host
-identity lookup withheld; until it is granted, the route answers through the
-organization's member list. 1017 replaced that lookup's body (it stays
-withheld) and created the host owner ensure withheld; until it is granted,
-`bootstrapWorkspace` writes no owner and the host's ensure command answers
-`HOST_ORGANIZATION_OWNER_UNAVAILABLE`. Nothing granted today can write an
-owner membership for a host subject, so that write has no fallback. 1018
-created the host session policy write
-(`opengeni_private.put_host_organization_session_policy`) withheld; until it
-is granted, the host's session-policy command answers
-`HOST_SESSION_POLICY_UNAVAILABLE` before it records anything, and every
-governed organization keeps the governed default the runtime may insert.
+identity lookup withheld, 1017 replaced its body (keeping it withheld) and
+created the host owner ensure withheld, and 1018 created the host session
+policy write (`opengeni_private.put_host_organization_session_policy`)
+withheld; while withheld, the lookup answered through the organization's
+member list and the ensure and session-policy commands answered 503 "not
+yet". 1019 granted all three, readiness requires them, and those "not yet"
+paths are gone: a runtime without the grant is unready and names the routine
+it lacks.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

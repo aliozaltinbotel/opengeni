@@ -995,13 +995,13 @@ fixes that once with `POST /v1/host/organizations/:id/host-owner/ensure`
   default (unless a policy is stored) and turns Personal workspaces off.
 - Answers carry `cache-control: no-store`.
 
-The owner write is a new runtime definer
-(`opengeni_private.ensure_organization_host_owner`, migration 1017), so its
-runtime `EXECUTE` is granted one release later. Until then
-`bootstrapWorkspace` writes no owner, and the ensure command answers `503`
-with `error.details.code = "HOST_ORGANIZATION_OWNER_UNAVAILABLE"`
-(`retryable: true`) and writes nothing. After the grant, call the ensure once
-for each organization bootstrapped before it.
+The owner write is a runtime definer
+(`opengeni_private.ensure_organization_host_owner`, migration 1017) whose
+runtime `EXECUTE` migration 1019 grants, one release later. Before 1019,
+`bootstrapWorkspace` wrote no owner and the ensure command answered `503`
+"not yet"; from 1019 on, readiness requires the grant (a runtime without it is
+unready and names the routine). Once 1019 is applied, call the ensure once for
+each organization bootstrapped before it.
 
 A governed organization's people have no Personal workspace to see or start
 work in. The fork turns the organization's Personal workspaces setting off
@@ -1106,13 +1106,10 @@ code every host command now gives when the database refuses its actor.
 
 The read is one query by identity
 (`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
-adds the fences). Like every new runtime definer, its runtime `EXECUTE` is
-granted one release later. Until then the route gives the same answer through
-the organization's member list, at one identity projection per member, one
-invitation page per 100 invitations and one administration overview read.
-That fallback inherits the overview's bounds: more than 500 shared workspaces,
-or more than 1000 grants in one workspace, answers `409` (the lookup by
-identity has no such bound).
+adds the fences), with no member-list bound. Like every new runtime definer,
+its runtime `EXECUTE` was granted one release later (migration 1019); before
+that the route answered through the organization's member list, which
+inherited the administration overview's bounds.
 
 A host that retries an invitation revoke until it settles needs to know why a
 revoke was refused. The host's `invitations/:id/revoke` command answers `409`
@@ -1341,10 +1338,9 @@ type OrganizationSessionPolicy = {
   routine that requires the host command's `session_policy.update`
   attribution for the same service subject and operation id, keeps a receipt
   per operation id with the body's digest, and checks the expected revision.
-  The routine's runtime EXECUTE is withheld for one release (expand-contract);
-  until it is granted the host command answers `503
-  HOST_SESSION_POLICY_UNAVAILABLE` and every governed organization keeps the
-  governed default.
+  The routine's runtime EXECUTE was withheld for one release
+  (expand-contract) and migration 1019 grants it; readiness requires it from
+  then on.
 - **Host command.** `PUT /v1/host/organizations/:org/session-policy` with
   `{ actingExternalUser, command: { policy, operationId, expectedRevision } }`
   replaces the policy (mutation `session_policy.update`, decided with
