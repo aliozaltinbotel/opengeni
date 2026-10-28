@@ -36,3 +36,8 @@ configurePageAppHost({
     ),
   },
 });
+
+// index.html names the stock product; a host extension's product names the tab.
+if (hostExtension.productName && typeof document !== "undefined") {
+  document.title = hostExtension.productName;
+}

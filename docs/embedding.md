@@ -2208,7 +2208,9 @@ not use a tool name that a built-in card already renders.
 offers it: its nav entries, its settings-rail and settings-search entries, its
 links, and its URL, which renders the not-found page. `insights` also hides the
 organization settings page Organization > Insights:
-`organization?section=insights` renders the not-found page.
+`organization?section=insights` renders the not-found page. `productName`
+replaces "Opengeni" in the document title and in the panel that asks to reload
+after a new version.
 
 Bundle the extension's own icon set (for example `lucide-react`) into its
 build rather than leaving it external to share the console's modules. The

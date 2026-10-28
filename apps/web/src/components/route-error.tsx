@@ -1,6 +1,7 @@
 import { Link, type ErrorComponentProps } from "@tanstack/react-router";
 import type { ErrorInfo } from "react";
 
+import { useProductName } from "@opengeni/react/app/components/brand-mark";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { Button } from "@opengeni/react/ui/button";
 import {
@@ -27,13 +28,14 @@ type RouteErrorPanelProps = Pick<ErrorComponentProps, "error"> & {
  */
 export function RouteErrorPanel({ error, reload = reloadDocument }: RouteErrorPanelProps) {
   const updated = hasObservedChunkLoadFailure() || isChunkLoadError(error);
+  const productName = useProductName();
   return (
     <ProblemPanel
-      title={updated ? "Opengeni has been updated" : "Something went wrong"}
+      title={updated ? `${productName} has been updated` : "Something went wrong"}
       description={
         <>
           {updated
-            ? "This tab is running an older version of Opengeni. Reload to continue with the latest version."
+            ? `This tab is running an older version of ${productName}. Reload to continue with the latest version.`
             : "This page hit an unexpected error. Reloading usually fixes it. If it keeps happening, go back to your workspace and try again."}
           {import.meta.env.DEV && error instanceof Error ? (
             <span className="mt-3 block rounded-md bg-muted p-2 text-left font-mono text-xs break-words text-fg-muted">
