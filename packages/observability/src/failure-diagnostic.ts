@@ -16,6 +16,7 @@ const CODES = [
   "mcp_orchestration_failed",
   "governed_session_policy_default_failed",
   "governed_session_policy_backfill_failed",
+  "host_webhook_delivery_start_failed",
 ] as const;
 const STAGES = [
   "observability.error",
@@ -33,6 +34,7 @@ const STAGES = [
   "mcp.session_send_message",
   "mcp.session_steer",
   "governed_session_policy.startup_pass",
+  "host_webhook.delivery_start",
 ] as const;
 const RETRIES = ["not_retryable", "exhausted", "unknown"] as const;
 // Reviewed schema names, never a syntactic allowlist for arbitrary driver strings.
@@ -67,6 +69,7 @@ export const DIAGNOSTIC_SOURCE_FILES = [
   "apps/api/src/mcp/server.ts",
   "apps/api/src/mcp/orchestration-failure-diagnostic.ts",
   "apps/api/src/governed-session-policy-backfill.ts",
+  "apps/api/src/http/host-webhooks.ts",
   "packages/core/src/application/organization-session-policy.ts",
   "apps/api/dist/process/index.js",
   "apps/worker/src/activities/agent-turn/run.ts",
@@ -152,6 +155,10 @@ export type FailureDiagnosticInput = {
   turnId?: string;
   /** The organization (managed account) a tenant-wide operation failed for. */
   organizationId?: string;
+  /** The MCP connection a host webhook delivery is about. */
+  connectionId?: string;
+  /** The host webhook delivery that could not be started. */
+  deliveryId?: string;
   executionGeneration?: number;
   attempts?: number;
   sqlState?: string | null;
@@ -273,6 +280,8 @@ export function failureDiagnostic(input: FailureDiagnosticInput, revision?: stri
     processId: uuid(input.processId),
     turnId: uuid(input.turnId),
     organizationId: uuid(input.organizationId),
+    connectionId: uuid(input.connectionId),
+    deliveryId: uuid(input.deliveryId),
     executionGeneration:
       Number.isSafeInteger(input.executionGeneration) &&
       input.executionGeneration! >= 1 &&

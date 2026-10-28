@@ -659,6 +659,7 @@ const PUBLIC_TELEMETRY_ERROR_CODES = new Set([
   "host_export_failure_settlement_stale",
   "host_export_pump_iteration_failed",
   "host_export_retention_prune_failed",
+  "host_webhook_delivery_start_failed",
   "idempotency_conflict",
   "incompatible_exposed_ports",
   "internal_error",

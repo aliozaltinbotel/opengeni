@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   organizationAccessPresetPermissions,
   type OrganizationAccessPolicy,
@@ -13,6 +13,7 @@ import {
   exchangeMcpOAuthAuthorizationCode,
   type DbClient,
 } from "@opengeni/db";
+import { createObservability } from "@opengeni/observability";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { testSettings } from "@opengeni/testing/settings";
@@ -23,7 +24,8 @@ import { HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS } from "../src/http/host-webhook
  * With `hostWebhooks.mcpConnectionRevoked` configured, disconnecting an MCP
  * connection, or taking access away from one, starts exactly one durable
  * delivery before the change is written; a delivery that can't start is
- * logged and never blocks the change. Without it nothing is started.
+ * counted and warned about (ids only in the protected diagnostic) and never
+ * blocks the change. Without it nothing is started.
  */
 
 const origin = "http://opengeni.test";
@@ -64,6 +66,59 @@ function appFor(hostWebhooks: boolean): App {
     // Without the webhook the stock workflow client has no delivery method.
     workflowClient: hostWebhooks ? workflowClient : ({} as never),
   } as AppDependencies);
+}
+
+const DIAGNOSTICS = "https://diagnostics.example.test";
+
+/** A real observability whose public lines and protected diagnostics the test reads. */
+function capturingObservability() {
+  const exported: unknown[] = [];
+  const observability = createObservability(
+    {
+      observabilityStructuredLogs: true,
+      observabilityMetricsEnabled: true,
+      serviceName: "opengeni",
+      environment: "test",
+      observabilityDiagnosticsEndpoint: DIAGNOSTICS,
+    } as never,
+    {
+      component: "api",
+      exporter: async (url, body) => {
+        if (url === `${DIAGNOSTICS}/v1/logs`) exported.push(body);
+      },
+    },
+  );
+  const diagnostics = () =>
+    exported.map((body) => {
+      const logs = body as {
+        resourceLogs: { scopeLogs: { logRecords: { body: { stringValue: string } }[] }[] }[];
+      };
+      return JSON.parse(
+        logs.resourceLogs[0]!.scopeLogs[0]!.logRecords[0]!.body.stringValue,
+      ) as Record<string, unknown>;
+    });
+  return { observability, diagnostics };
+}
+
+/** Runs `work` with console output captured as parsed structured records. */
+async function capturingConsole(work: () => Promise<void>): Promise<Record<string, unknown>[]> {
+  const lines: string[] = [];
+  const original = { log: console.log, warn: console.warn, error: console.error };
+  console.log = (line: string) => lines.push(String(line));
+  console.warn = (line: string) => lines.push(String(line));
+  console.error = (line: string) => lines.push(String(line));
+  try {
+    await work();
+  } finally {
+    Object.assign(console, original);
+  }
+  return lines.flatMap((line) => {
+    try {
+      return [JSON.parse(line) as Record<string, unknown>];
+    } catch {
+      return [];
+    }
+  });
 }
 
 let configured: App;
@@ -238,6 +293,7 @@ describe("the mcp_connection.revoked delivery is started", () => {
   test("a delivery that can't be started never blocks the disconnect", async () => {
     started.length = 0;
     const connectionId = await connect();
+    const { observability, diagnostics } = capturingObservability();
     const failing = createApp({
       settings: testSettings({
         databaseUrl: shared.adminUrl,
@@ -248,31 +304,46 @@ describe("the mcp_connection.revoked delivery is started", () => {
       }),
       db: client.db,
       bus: new MemoryEventBus(),
+      observability,
       workflowClient: {
         startHostWebhookDelivery: async () => {
           throw new TypeError("temporal unavailable");
         },
       } as unknown as SessionWorkflowClient,
     } as AppDependencies);
-    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
-    try {
+    const records = await capturingConsole(async () => {
       await disconnect(failing, connectionId);
-      const warnings = warn.mock.calls.filter(
-        ([event]) => event === "host_webhook.delivery_start_failed",
-      );
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]![1]).toEqual({
-        event: "mcp_connection.revoked",
-        change: "revoked",
-        organizationId: person.organizationId,
-        connectionId,
-        deliveryId: expect.any(String),
-        errorClass: "TypeError",
-      });
-      expect(JSON.stringify(warnings[0])).not.toContain(hook.secret);
-    } finally {
-      warn.mockRestore();
-    }
+      await observability.flush();
+    });
+    const warnings = records.filter(
+      (record) => record.message === "host webhook delivery could not be started",
+    );
+    expect(warnings).toHaveLength(1);
+    // Read before matching: an asymmetric matcher may stand in for it afterwards.
+    const correlationId = warnings[0]!.correlationId;
+    expect(warnings[0]).toMatchObject({
+      level: "warn",
+      errorCode: "host_webhook_delivery_start_failed",
+      origin: "api",
+      correlationId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+    // Organization, connection and delivery ids are identifiers: never public.
+    const publicText = JSON.stringify(records);
+    expect(publicText).not.toContain(person.organizationId);
+    expect(publicText).not.toContain(connectionId);
+    expect(publicText).not.toContain(hook.secret);
+    const diagnostic = diagnostics().find((record) => record.diagnosticId === correlationId);
+    expect(diagnostic).toMatchObject({
+      code: "host_webhook_delivery_start_failed",
+      stage: "host_webhook.delivery_start",
+      organizationId: person.organizationId,
+      connectionId,
+      deliveryId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain(hook.secret);
+    expect(await observability.prometheusMetrics()).toMatch(
+      /^opengeni_host_webhook_delivery_start_failures_total\{change="revoked",event="mcp_connection\.revoked",[^}]*\} 1$/m,
+    );
     expect(started).toHaveLength(0);
     const [row] = await shared.admin<{ revoked_at: Date | null }[]>`
       select revoked_at from mcp_oauth_refresh_tokens
@@ -300,24 +371,11 @@ describe("the mcp_connection.revoked delivery is started", () => {
         },
       } as unknown as SessionWorkflowClient,
     } as AppDependencies);
-    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
     const startedAt = Date.now();
-    try {
-      await disconnect(hung, connectionId);
-      const elapsed = Date.now() - startedAt;
-      expect(elapsed).toBeGreaterThanOrEqual(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS - 50);
-      expect(elapsed).toBeLessThan(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS + 2_000);
-      const warnings = warn.mock.calls.filter(
-        ([event]) => event === "host_webhook.delivery_start_failed",
-      );
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]![1]).toMatchObject({
-        connectionId,
-        errorClass: "HostWebhookDeliveryStartTimeoutError",
-      });
-    } finally {
-      warn.mockRestore();
-    }
+    await disconnect(hung, connectionId);
+    const elapsed = Date.now() - startedAt;
+    expect(elapsed).toBeGreaterThanOrEqual(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS - 50);
+    expect(elapsed).toBeLessThan(HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS + 2_000);
     // The start was attempted once and never completed: no delivery is recorded as started.
     expect(calls).toBe(1);
     expect(started.filter(({ event }) => event.connectionId === connectionId)).toEqual([]);
