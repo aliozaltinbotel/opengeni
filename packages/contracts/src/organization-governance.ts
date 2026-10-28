@@ -487,6 +487,58 @@ export const HostOrganizationMcpConnection = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostOrganizationMcpConnection = z.infer<typeof HostOrganizationMcpConnection>;
 
+/** Headers of every host webhook delivery. */
+export const HOST_WEBHOOK_SIGNATURE_HEADER = "X-Host-Signature";
+export const HOST_WEBHOOK_DELIVERY_HEADER = "X-Host-Delivery";
+
+/**
+ * The `mcp_connection.revoked` host webhook (`settings.hostWebhooks.mcpConnectionRevoked`):
+ * POSTed once for each MCP connection of an organization that is disconnected
+ * (`change: "revoked"`, `revokedAt` set) or whose access setting loses a
+ * permission or a workspace (`change: "consent_downgraded"`, `revokedAt` null,
+ * `consentScope` the new setting). Sent only after the change committed.
+ *
+ * `X-Host-Signature` is `sha256=` and the lowercase hex HMAC-SHA256 of the raw
+ * body under the configured secret; verify it over the exact bytes received.
+ * `X-Host-Delivery` is the delivery's id: every retry of one delivery sends
+ * the same id and body, so a host deduplicates on it. A delivery is retried
+ * with backoff until the host answers 2xx; a 4xx other than 408 and 429 ends
+ * it. Membership changes and other reasons a connection stops being live (see
+ * the host MCP connection read) send nothing.
+ */
+export const HostMcpConnectionRevokedWebhook = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      type: z.literal("mcp_connection.revoked"),
+      change: z.enum(["revoked", "consent_downgraded"]),
+      connectionId: primitives.uuid,
+      organizationId: primitives.uuid,
+      workspaceId: primitives.nullableUuid,
+      clientId: z.string().min(1).max(1024),
+      revokedAt: primitives.dateTime.nullable(),
+      consentScope: HostMcpConnectionConsentScope,
+    })
+    .strict(),
+);
+export type HostMcpConnectionRevokedWebhook = z.infer<typeof HostMcpConnectionRevokedWebhook>;
+
+/**
+ * One durable host webhook delivery the API asks the worker to make, before
+ * it writes the change: the worker sends it only once the change is seen
+ * committed, so a change that never commits sends nothing.
+ */
+export type HostWebhookDeliveryRequest = {
+  deliveryId: string;
+  event: {
+    type: "mcp_connection.revoked";
+    organizationId: string;
+    connectionId: string;
+  } & (
+    | { change: "revoked" }
+    | { change: "consent_downgraded"; consentScope: HostMcpConnectionConsentScope }
+  );
+};
+
 /**
  * Host invitation read (`GET /v1/host/organizations/:id/invitations/:invitationId`):
  * where one of the organization's invitations stands, so a host can settle a

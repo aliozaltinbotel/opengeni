@@ -1219,6 +1219,39 @@ workspace in the consented scope (`permissions_lost`; for a workspace
 connection, the live-grant resolution its requests use refuses). Only the last
 two can become `active` again. Treat any other `reason` as not live.
 
+To hear about a disconnect without polling, configure the
+`mcp_connection.revoked` host webhook on both the API and the worker:
+`OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL` (http(s)) and
+`OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET` (at least 32
+characters), set together (`settings.hostWebhooks.mcpConnectionRevoked`).
+Unset, nothing is sent. When a person or an administrator disconnects an MCP
+connection, or its person changes its access setting so that it loses a
+permission or a workspace, the API starts one durable delivery (a Temporal
+workflow) just before it writes the change, and the worker POSTs it once it
+sees the change committed; a change that never commits sends nothing. The body
+(`HostMcpConnectionRevokedWebhook`) is:
+
+```ts
+{
+  type: "mcp_connection.revoked";
+  change: "revoked" | "consent_downgraded";
+  connectionId: string;
+  organizationId: string;
+  workspaceId: string | null;
+  clientId: string;
+  revokedAt: string | null; // null for consent_downgraded
+  consentScope: { preset: string | null; permissions: string[]; workspaceScope }; // the new setting
+}
+```
+
+`X-Host-Signature: sha256=<hex>` is the HMAC-SHA256 of the raw body under the
+secret; verify it over the exact bytes received. `X-Host-Delivery` is the
+delivery's id. A delivery is retried with backoff (for about a day) until the
+host answers `2xx`, each retry with the same id and body, so deduplicate on
+the id; a `4xx` other than `408` and `429` ends it. A membership that ends, a
+refresh-token reuse that revokes a connection, and an expiry send nothing:
+settle those with the connection read.
+
 The gate is on HTTP routes. In-process callers of the `@opengeni/db`
 membership functions are not routed through it.
 

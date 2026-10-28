@@ -247,6 +247,21 @@ export async function createTemporalWorkflowClient(
         });
       } catch (error) { if (!isWorkflowAlreadyStarted(error)) throw error; }
     },
+    startHostWebhookDelivery: async (input) => {
+      // A run still waiting is joined; one that delivered is never repeated;
+      // one that failed (its change never committed) may run again.
+      try {
+        await temporal.workflow.start("hostWebhookDeliveryWorkflow", {
+          taskQueue: settings.temporalTaskQueue,
+          workflowId: `host-webhook:${input.deliveryId}`,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE_FAILED_ONLY",
+          workflowIdConflictPolicy: "USE_EXISTING",
+          args: [input],
+        });
+      } catch (error) {
+        if (!isWorkflowAlreadyStarted(error)) throw error;
+      }
+    },
     triggerAutomationRun: async ({ accountId, workspaceId, runId }) => {
       try {
         await temporal.workflow.start("automationRunWorkflow", {

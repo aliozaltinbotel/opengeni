@@ -1,7 +1,6 @@
 import { Permission } from "@opengeni/contracts";
 import {
   HostOrganizationMcpConnection,
-  type HostMcpConnectionConsentScope,
   type HostMcpConnectionNotLiveReason,
 } from "@opengeni/contracts/organization-governance";
 import { hasPermission, organizationWorkspaceInScope, type ApiRouteDeps } from "@opengeni/core";
@@ -11,6 +10,7 @@ import {
   getOrganizationAdministrationOverview,
   listOrganizationMembers,
   managedPersonalWorkspacePermissions,
+  mcpOAuthConnectionConsentScope,
   resolveLiveMcpOAuthGrant,
   type McpOAuthConnectionRecord,
 } from "@opengeni/db";
@@ -48,7 +48,7 @@ export async function readHostMcpConnection(
     clientId: record.clientId,
     status: liveness.status,
     reason: liveness.reason,
-    consentScope: connectionConsentScope(record),
+    consentScope: mcpOAuthConnectionConsentScope(record),
     revokedAt:
       liveness.reason === "revoked"
         ? record.revokedAt!.toISOString()
@@ -57,19 +57,6 @@ export async function readHostMcpConnection(
           : null,
     updatedAt: record.updatedAt.toISOString(),
   });
-}
-
-/** What the connection was consented to do (see `HostMcpConnectionConsentScope`). */
-export function connectionConsentScope(
-  record: Pick<McpOAuthConnectionRecord, "grant">,
-): HostMcpConnectionConsentScope {
-  const { organizationAccess, workspaceId, permissions } = record.grant;
-  if (organizationAccess) return organizationAccess;
-  return {
-    preset: null,
-    permissions,
-    workspaceScope: { kind: "selected", workspaceIds: workspaceId ? [workspaceId] : [] },
-  };
 }
 
 /**

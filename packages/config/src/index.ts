@@ -2155,6 +2155,23 @@ const SettingsSchema = z.object({
   // verifies the ES256 token locally against `GET /v1/auth/jwks`.
   hostTokenAudience: z.string().trim().min(1).max(512).optional(),
   hostTokenTtlSeconds: z.coerce.number().int().min(60).max(900).default(300),
+  // Webhooks the embedding host receives, each off unless configured.
+  // `mcpConnectionRevoked`: POSTed once per revoked or downgraded MCP
+  // connection, signed `X-Host-Signature: sha256=<hex HMAC-SHA256(secret, body)>`
+  // and retried by the worker until the host answers 2xx. The API and the
+  // worker both read it.
+  hostWebhooks: z
+    .object({
+      mcpConnectionRevoked: z
+        .object({
+          url: PublicHttpUrl,
+          secret: z.string().min(32, "must be at least 32 characters").max(1_024),
+        })
+        .strict()
+        .optional(),
+    })
+    .strict()
+    .optional(),
   // TOTP as a re-authentication second factor (Better Auth's twoFactor plugin).
   // Off by default; when on, people can enroll an authenticator app and
   // `POST /v1/auth/reauthenticate` requires its code from enrolled people.
@@ -5975,6 +5992,16 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     managedAuthSessionSetMode: optional("OPENGENI_MANAGED_AUTH_SESSION_SET_MODE"),
     hostTokenAudience: optional("OPENGENI_HOST_TOKEN_AUDIENCE"),
     hostTokenTtlSeconds: optional("OPENGENI_HOST_TOKEN_TTL_SECONDS"),
+    hostWebhooks:
+      source.OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL === undefined &&
+      source.OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET === undefined
+        ? undefined
+        : {
+            mcpConnectionRevoked: {
+              url: optional("OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL"),
+              secret: optional("OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_SECRET"),
+            },
+          },
     managedAuthTotpEnabled: optional("OPENGENI_MANAGED_AUTH_TOTP_ENABLED"),
     nativeAppSchemes:
       source.OPENGENI_NATIVE_APP_SCHEMES === undefined

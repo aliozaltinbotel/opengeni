@@ -4,6 +4,7 @@ import {
   ToolGatewayIdentity,
   type AccessGrant,
 } from "@opengeni/contracts";
+import type { HostMcpConnectionConsentScope } from "@opengeni/contracts/organization-governance";
 import { sql } from "drizzle-orm";
 import { rawRows, type Database, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
@@ -602,6 +603,22 @@ export type McpOAuthConnectionRecord = {
   /** The latest of the generation's creation (its token rotation) and its revocation. */
   updatedAt: Date;
 };
+
+/**
+ * What a connection was consented to do: an organization connection's access
+ * setting, or a workspace connection's permissions in its one workspace.
+ */
+export function mcpOAuthConnectionConsentScope(
+  record: Pick<McpOAuthConnectionRecord, "grant">,
+): HostMcpConnectionConsentScope {
+  const { organizationAccess, workspaceId, permissions } = record.grant;
+  if (organizationAccess) return organizationAccess;
+  return {
+    preset: null,
+    permissions,
+    workspaceScope: { kind: "selected", workspaceIds: workspaceId ? [workspaceId] : [] },
+  };
+}
 
 /** An account's connection by id in any state, or null when unknown or another account's. */
 export async function getMcpOAuthConnectionRecord(

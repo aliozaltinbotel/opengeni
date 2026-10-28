@@ -98,6 +98,8 @@ export const runAgentTurn = defaultTurnActivities.runAgentTurn;
 export const reconcileVideoGenerationOperation =
   defaultTurnActivities.reconcileVideoGenerationOperation;
 export const observeRealtimeSessionUsage = defaultControlActivities.observeRealtimeSessionUsage;
+export const confirmHostWebhookChange = defaultControlActivities.confirmHostWebhookChange;
+export const deliverHostWebhook = defaultControlActivities.deliverHostWebhook;
 export const reconcileSessionTitleOperation = defaultTurnActivities.reconcileSessionTitleOperation;
 export const indexDocument = defaultControlActivities.indexDocument;
 export const indexKnowledge = defaultControlActivities.indexKnowledge;

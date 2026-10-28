@@ -32,7 +32,10 @@ import type {
   EditableArtifactOfficeImportPort,
 } from "./editable-artifacts";
 import type { ExternalActorContinuation } from "@opengeni/contracts/external-identities";
-import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
+import type {
+  HostWebhookDeliveryRequest,
+  OrganizationGovernancePort,
+} from "@opengeni/contracts/organization-governance";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
 import type { KnowledgeContext } from "@opengeni/db";
@@ -56,6 +59,12 @@ export type SessionWorkflowClient = {
   queryKnowledge?: (input: KnowledgeQueryWorkflowRequest) => Promise<KnowledgeEntryListResponse>;
   prepareKnowledge?: (input: KnowledgePreparationWorkflowRequest) => Promise<KnowledgeSavePreparationResponse>;
   startRealtimeUsageObservation?: (input: { accountId: string; workspaceId: string; sessionId: string; connectionId: string }) => Promise<void>;
+  /**
+   * Start one durable host webhook delivery (`settings.hostWebhooks`), before
+   * the change it reports is written; the worker sends it once it sees the
+   * change committed. Idempotent on `deliveryId`.
+   */
+  startHostWebhookDelivery?: (input: HostWebhookDeliveryRequest) => Promise<void>;
   triggerAutomationRun?: (input: {
     accountId: string;
     workspaceId: string;
