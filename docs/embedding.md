@@ -791,11 +791,22 @@ revocation by binding `AppDependencies.sessionAuthorization`:
 type SessionAuthorizationPort = {
   capabilities?: { modelAccountOperation?: boolean };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  authorizeSessionCreate?(input: AuthorizeSessionCreateInput): Promise<SessionAuthorizationDecision>;
   resolveListScope(
     input: ResolveSessionAuthorizationListScopeInput,
   ): Promise<SessionAuthorizationListScope>;
 };
 ```
+
+`authorizeSessionCreate` is optional and target-free (`{ accountId,
+workspaceId, actor, surface }`, no session yet). When the host provides it,
+`POST /v1/workspaces/:workspaceId/sessions` whose body carries an
+`initialMessage` (a first turn the default start mode admits without any other
+check) asks it before anything is created: a refusal answers `403` with
+`error.details.code = "SESSION_CREATE_NOT_AUTHORIZED"`, and a throw or an
+unreadable answer `503 SESSION_AUTHORIZATION_UNAVAILABLE`. A create without a
+first message, and a port without the method, check only `sessions:create`,
+as before.
 
 `authorizeSession` receives the account/workspace, requested operation and
 surface, the immediate target plus its server-resolved lineage root, and either
