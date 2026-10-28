@@ -90,7 +90,8 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * application role, as 0947 and 1019 do), drop it from this list, and remove
  * its "not yet" path.
  */
-export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES =
+  [] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
