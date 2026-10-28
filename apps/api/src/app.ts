@@ -178,7 +178,7 @@ import {
   eventTriggersEnabled,
   OrganizationGovernedByHostError,
   PersonalWorkspacesOffError,
-  resolveOrganizationSessionPolicy,
+  readOrganizationSessionPolicy,
   sessionUsageLimitsProducerEnabled,
 } from "@opengeni/core";
 import {
@@ -1574,9 +1574,11 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
+          // A read: the side-effect-free answer, as the route guards use; it
+          // never stores the governed default.
           if (routeDeps.organizationGovernance && workspace)
             workspaceAttachmentsAllowed =
-              (await resolveOrganizationSessionPolicy(routeDeps, workspace.accountId)).policy
+              (await readOrganizationSessionPolicy(routeDeps, workspace.accountId)).policy
                 .attachments === "enabled";
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
             workspace?.settings.voiceInput,

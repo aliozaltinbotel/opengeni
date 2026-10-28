@@ -319,6 +319,13 @@ describe("attachment kill switch", () => {
     expect(host.status).toBe(404);
   });
 
+  test("the workspace client config reports a governed organization's uploads off without storing anything", async () => {
+    const app = appFor(hostPort);
+    const org = await organization(HOST_SOURCE);
+    expect((await workspaceClientConfig(app, org)).fileUploads.enabled).toBe(false);
+    expect(await getOrganizationSessionPolicy(client.db, org.organizationId)).toBeNull();
+  });
+
   test("a governed organization refuses uploads with ATTACHMENTS_DISABLED and reports uploads off", async () => {
     const app = appFor(hostPort);
     const org = await organization(HOST_SOURCE);
