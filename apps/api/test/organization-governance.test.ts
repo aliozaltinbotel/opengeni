@@ -518,6 +518,9 @@ describe("organization governance port", () => {
       "mcp_connection.revoke",
       // Host command only (organization-session-policy.test.ts): no native route.
       "session_policy.update",
+      // Decided against the person's governed memberships, not the route's
+      // organization (organization-create-governance.test.ts).
+      "organization.create",
     ]);
     expect([...routed].sort()).toEqual([...GOVERNED_MUTATIONS].sort());
   });

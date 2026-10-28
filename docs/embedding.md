@@ -923,6 +923,14 @@ refusal is `403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`,
 for owners too. Unbound, nothing changes and the host routes below are not
 registered.
 
+**Organization creation.** A person who belongs (any membership but a revoked
+one) to a governed organization creates no organization of their own:
+`POST /v1/organizations` and `POST /v1/organizations/additional` ask `decide`
+for `organization.create` with `via: "native"` for each governed organization
+they belong to, and any refusal answers `403` with `error.details.code =
+"ORGANIZATION_CREATE_GOVERNED"` before anything is written. A person without a
+governed membership, and a deployment without a port, are unchanged.
+
 `decide` MUST answer `"refuse"` for any mutation it does not recognize:
 `GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
 stay closed until the host chooses to allow it.

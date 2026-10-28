@@ -1,10 +1,13 @@
 import {
   GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE,
+  ORGANIZATION_CREATE_GOVERNED,
   ORGANIZATION_GOVERNED_BY_HOST,
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
 import {
   GovernedMemberRequiresSharedWorkspaceError,
+  OrganizationCreateGovernedError,
+  requireOrganizationCreateAllowed,
   OrganizationGovernedByHostError,
   PersonalWorkspacesGovernedByHostError,
   requireAccessContext,
@@ -170,6 +173,30 @@ function sharedWorkspaceRefusal(error: GovernedMemberRequiresSharedWorkspaceErro
     outcomeUnknown: false,
     details: { code: GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE },
   });
+}
+
+/**
+ * Refuses `POST /v1/organizations` and `/v1/organizations/additional` for a
+ * person who belongs to a governed organization whose host does not allow
+ * `organization.create`: 403 ORGANIZATION_CREATE_GOVERNED.
+ */
+export async function requireOrganizationCreate(
+  deps: GovernanceDeps,
+  subjectId: string,
+): Promise<void> {
+  try {
+    await requireOrganizationCreateAllowed(deps, subjectId);
+  } catch (error) {
+    if (error instanceof OrganizationCreateGovernedError)
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: error.message,
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: ORGANIZATION_CREATE_GOVERNED },
+      });
+    throw error;
+  }
 }
 
 export function organizationGovernedByHostError(mutation: GovernedMutation): ApiHttpError {

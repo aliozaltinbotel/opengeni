@@ -55,6 +55,9 @@ export const GOVERNED_MUTATIONS = [
   "workspace.delete",
   // Host command only: no native route writes an organization's session policy.
   "session_policy.update",
+  // A person creating another organization (`POST /v1/organizations` and
+  // `/v1/organizations/additional`) while they belong to this governed one.
+  "organization.create",
 ] as const;
 export type GovernedMutation = (typeof GOVERNED_MUTATIONS)[number];
 
@@ -110,6 +113,12 @@ export const ORGANIZATION_NOT_HOST_GOVERNED = "ORGANIZATION_NOT_HOST_GOVERNED";
  * route outside the governed allowlist (the API's default-deny).
  */
 export const WORKSPACE_ROUTE_NOT_ALLOWED = "WORKSPACE_ROUTE_NOT_ALLOWED";
+/**
+ * 403: a person who belongs to a governed organization tried to create an
+ * organization, and that organization's host does not allow
+ * `organization.create` natively.
+ */
+export const ORGANIZATION_CREATE_GOVERNED = "ORGANIZATION_CREATE_GOVERNED";
 export const HOST_COMMAND_SERVICE_TOKEN_REQUIRED = "HOST_COMMAND_SERVICE_TOKEN_REQUIRED";
 export const HOST_COMMAND_PERMISSION_REQUIRED = "HOST_COMMAND_PERMISSION_REQUIRED";
 export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT";
