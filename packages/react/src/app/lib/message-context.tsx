@@ -131,3 +131,28 @@ export function createMessageContextStore(initial?: MessageContextInput): Messag
     },
   };
 }
+
+/** Resolves visible host context at send time, retaining exclusions only within one workspace. */
+export function createHostMessageContextStore(
+  resolve: (
+    context: Readonly<{ workspaceId: string; pathname: string }>,
+  ) => MessageContextInput,
+  readContext: () => Readonly<{ workspaceId: string; pathname: string }>,
+): MessageContextStore {
+  const store = createMessageContextStore();
+  let workspaceId: string | undefined;
+  function update(input: MessageContextInput): void {
+    const context = readContext();
+    if (workspaceId !== context.workspaceId) store.set(undefined);
+    workspaceId = context.workspaceId;
+    store.set(input);
+  }
+  return {
+    ...store,
+    set: update,
+    forSend() {
+      update(resolve(readContext()));
+      return store.forSend();
+    },
+  };
+}

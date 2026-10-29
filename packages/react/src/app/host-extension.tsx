@@ -12,6 +12,7 @@
 // reads the installed extension at call time: a module with `import()` that
 // lazy routes also reach statically would reshuffle the startup chunks.
 import type { ComponentType, ReactNode } from "react";
+import type { MessageContextInput } from "./lib/message-context";
 import type { ToolRenderer } from "../timeline";
 
 export { isBuiltInToolCardName } from "./built-in-tool-names";
@@ -120,6 +121,8 @@ export type HostExtensionNavOverride = Readonly<{
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
+  /** Labelled, dismissible context resolved for each message and realtime start. */
+  messageContext?: (context: HostExtensionContext) => MessageContextInput;
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;

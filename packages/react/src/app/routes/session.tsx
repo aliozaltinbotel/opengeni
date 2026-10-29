@@ -4072,6 +4072,7 @@ function SessionChatPane(props: {
                   !terminal ? (
                     <Suspense fallback={null}>
                       <LazyCodexRealtimeControl
+                        getModelContext={hostMessageContext}
                         client={realtimeClient}
                         workspaceId={props.session.workspaceId}
                         sessionId={props.session.id}
