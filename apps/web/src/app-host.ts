@@ -28,6 +28,7 @@ configurePageAppHost({
   api: webAppApiHost,
   toolRegistryEntries: hostExtension.toolRegistryEntries,
   hiddenNativeDestinations: hostExtension.hiddenNativeDestinations,
+  hiddenNativeSections: hostExtension.hiddenNativeSections,
   brand: hostExtension.brand,
   productName: hostExtension.productName,
   workspaceFilter: hostExtension.workspaceFilter,

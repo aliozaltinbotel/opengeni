@@ -12,12 +12,14 @@ import {
   isBuiltInToolCardName,
   isNativeDestination,
   isNativeNavId,
+  isNativeSectionId,
   nativeNavDestination,
   type HostExtension,
   type HostExtensionContext,
   type HostExtensionStarter,
   type HostExtensionOutsideWorkspaceRoute,
   type NativeDestination,
+  type NativeSectionId,
 } from "@opengeni/react/app/host-extension";
 
 /** Lowercase segments with optional `$param` segments, relative to the workspace. */
@@ -417,6 +419,9 @@ export function validateHostExtension(value: unknown): HostExtension {
   optionalFunction(fields.messageContext, "messageContext");
   optionalFunction(fields.starters, "starters");
   checkSessionIndicator(fields.sessionIndicator);
+  list(fields.hiddenNativeSections, "hiddenNativeSections").forEach((section, index) => {
+    if (!isNativeSectionId(section)) fail(`hiddenNativeSections[${index}]`, "is not a native section");
+  });
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   const groups = settingsGroupIds(fields.settingsGroups);
@@ -524,4 +529,9 @@ export function outsideWorkspaceRouteAt(
 /** Native destinations this build's extension hides from every link source; none for the stub. */
 export function hiddenNativeDestinations(): readonly NativeDestination[] {
   return currentHostExtension().hiddenNativeDestinations ?? NONE;
+}
+
+/** Native settings sections and capability parts hidden by this build. */
+export function hiddenNativeSections(): readonly NativeSectionId[] {
+  return currentHostExtension().hiddenNativeSections ?? NONE;
 }

@@ -1,3 +1,4 @@
+import { hiddenNativeSections } from "@/host-extension/registry";
 // Renders a workspace-config destination (icon + label + link). Used by the
 // rail Workspace menu and the settings Browse strip.
 import { Link } from "@tanstack/react-router";
@@ -56,6 +57,8 @@ export function WorkspaceConfigLink(props: {
   onNavigate?: () => void;
 }) {
   const { item, workspaceId, variant, active, collapsed, onNavigate } = props;
+  const skillsOnlyTarget = item.to === "/workspaces/$workspaceId/plugins" && hiddenNativeSections().includes("capabilities.plugins");
+  const sectionSearch = skillsOnlyTarget ? { search: { section: "skills" as const } } : {};
   const attentionTitle = props.needsReview
     ? "Knowledge needs review"
     : props.needsAttention
@@ -67,7 +70,7 @@ export function WorkspaceConfigLink(props: {
       <Link
         to={item.to}
         params={{ workspaceId }}
-        search={props.needsReview ? { review: true } : {}}
+        search={props.needsReview ? { review: true } : skillsOnlyTarget ? { section: "skills" } : {}}
         {...(active === undefined
           ? { activeProps: { "data-active": "true" as const } }
           : { "data-active": active ? ("true" as const) : undefined })}
@@ -136,6 +139,7 @@ export function WorkspaceConfigLink(props: {
       <Link
         to={item.to}
         params={{ workspaceId }}
+        {...sectionSearch}
         data-active={active ? "true" : undefined}
         title={item.description}
         className={cn(
@@ -155,6 +159,7 @@ export function WorkspaceConfigLink(props: {
     <Link
       to={item.to}
       params={{ workspaceId }}
+      {...sectionSearch}
       title={item.description}
       className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-fg-muted transition-colors hover:bg-hover hover:text-fg"
       onClick={onNavigate}

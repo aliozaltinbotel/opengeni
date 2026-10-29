@@ -41,6 +41,7 @@ import { PRIMARY_WORKSPACE_ITEMS, visibleNativeItems } from "@/components/rail/w
 import {
   nativeEntriesInSettingsGroup,
   nativeNavOverride,
+  isNativeSectionHidden,
   type NativeNavId,
 } from "@opengeni/react/app/host-extension";
 import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
@@ -58,7 +59,7 @@ import {
 import { hasWorkspacePermission } from "@opengeni/react/app/lib/permissions";
 import { currentPageReturnTo, returnToSearch } from "@opengeni/react/app/lib/return-to";
 import { useOrganizationName } from "@/lib/use-organization-name";
-import { currentHostExtension, hiddenNativeDestinations } from "@/host-extension/registry";
+import { currentHostExtension, hiddenNativeDestinations, hiddenNativeSections } from "@/host-extension/registry";
 import { afterHostWorkspaceSwitch } from "@/host-extension/lifecycle";
 import {
   workspaceSwitchTarget,
@@ -476,7 +477,7 @@ export function useSettingsRail(input: {
       meta: `${managedWorkspace.name} · Organization management`,
       groups: [
         {
-          items: (["general", "access"] as const).map((section) => ({
+          items: (["general", "access"] as const).filter((section) => !isNativeSectionHidden("workspace", section, [], hiddenNativeSections())).map((section) => ({
             id: `workspace:${section}`,
             label: WORKSPACE_SETTINGS_COPY[section].title,
             icon: SECTION_ICONS[section],
@@ -516,8 +517,8 @@ export function useSettingsRail(input: {
             // has no Usage page either.
             ...SECTION_ORDER.filter(
               (section) =>
-                !personal ||
-                (section !== "api-keys" && section !== "developer" && section !== "usage"),
+                !isNativeSectionHidden("workspace", section, [], hiddenNativeSections()) &&
+                (!personal || (section !== "api-keys" && section !== "developer" && section !== "usage")),
             ).map((section) => ({
               id: `workspace:${section}`,
               label: WORKSPACE_SETTINGS_COPY[section].title,

@@ -1,3 +1,4 @@
+import { capabilitiesSectionFromSearch, type NativeCapabilitiesSection } from "@opengeni/react/app/host-extension";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { slackSettingsSearch } from "@/lib/slack-settings-search";
@@ -45,13 +46,12 @@ const MAX_CALLBACK_VALUE_LENGTH = 512;
 export function workspaceIntegrationsCallbackHref(
   workspaceId: string,
   search: string,
-  section?: "skills",
+  section?: NativeCapabilitiesSection,
 ): string {
   const incoming = new URLSearchParams(search);
   const outgoing = new URLSearchParams();
-  if (section === "skills" || incoming.get("section") === "skills") {
-    outgoing.set("section", "skills");
-  }
+  const requestedSection = section ?? capabilitiesSectionFromSearch(incoming.get("section"));
+  if (requestedSection) outgoing.set("section", requestedSection);
   const slack = slackSettingsSearch(Object.fromEntries(incoming));
   for (const key of CALLBACK_KEYS) {
     // A Slack outcome owns `reason`/`connectionId`, already sanitized above.
