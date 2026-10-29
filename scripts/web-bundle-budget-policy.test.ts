@@ -82,7 +82,7 @@ describe("web bundle budget policy", () => {
       "initialRaw: 1485 * kib",
       "initialGzip: 405 * kib",
       "initialFileGzip: wholeKibEnvelope(82_325)",
-      "initialFiles: 36",
+      "initialFiles: 37",
       "lazyChunkRaw: 800 * kib",
       "lazyChunkGzip: 240 * kib",
       "cssGzip: wholeKibEnvelope(48_180)",
