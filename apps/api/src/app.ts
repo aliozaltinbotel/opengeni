@@ -289,7 +289,7 @@ import {
   publicListenerServesMetrics,
   registerPrometheusMetricsRoute,
 } from "./http/metrics-listener";
-import { allowedCorsOrigin } from "./http/cors";
+import { allowedCredentialedCorsOrigin } from "./http/cors";
 import {
   createLocalBrowserBoundary,
   localBrowserRequestHost,
@@ -903,8 +903,7 @@ export function createAppComposition(deps: AppDependencies): {
   const credentialedCors = cors({
     ...corsHeaders,
     credentials: true,
-    origin: (origin) =>
-      allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin) ? origin : null,
+    origin: (origin) => (allowedCredentialedCorsOrigin(deps.settings, origin) ? origin : null),
   });
 
   const localCors = localBrowserBoundary
@@ -927,7 +926,7 @@ export function createAppComposition(deps: AppDependencies): {
       return origin ? localCors(c, next) : next();
     }
     const middleware =
-      origin && allowedCorsOrigin(deps.settings.corsAllowOriginRegex, origin)
+      origin && allowedCredentialedCorsOrigin(deps.settings, origin)
         ? credentialedCors
         : publicApiCors;
     return middleware(c, next);

@@ -1,5 +1,10 @@
 import { requireSignupChallenge } from "./signup-challenge";
-import { canonicalPublicOrigin, managedUserEmailAllowed, type Settings } from "@opengeni/config";
+import {
+  canonicalPublicOrigin,
+  consoleAllowedOriginEntries,
+  managedUserEmailAllowed,
+  type Settings,
+} from "@opengeni/config";
 import { MANAGED_AUTH_NEW_SIGNUPS_PAUSED_CODE } from "@opengeni/contracts";
 import {
   configureManagedUserAdmission,
@@ -974,7 +979,10 @@ function betterAuthTrustedOrigins(settings: Settings): string[] {
   if (settings.publicBaseUrl) {
     origins.add(new URL(settings.publicBaseUrl).origin);
   }
-  for (const origin of splitCsv(settings.betterAuthTrustedOrigins)) {
+  for (const origin of [
+    ...splitCsv(settings.betterAuthTrustedOrigins),
+    ...consoleAllowedOriginEntries(settings.consoleAllowedOrigins),
+  ]) {
     origins.add(origin);
   }
   return [...origins];
