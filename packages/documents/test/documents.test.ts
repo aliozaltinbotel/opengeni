@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import sharp from "sharp";
 import {
   DeterministicEmbeddingProvider,
-  OpenAIEmbeddingProvider,
   type EmbeddingProviderCompletionReceipt,
   HeuristicCurationProvider,
   indexDocumentNow,

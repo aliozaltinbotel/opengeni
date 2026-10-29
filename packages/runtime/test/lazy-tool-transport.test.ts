@@ -313,7 +313,7 @@ describe("lazy model source admission", () => {
         });
         expect(receipts).toHaveLength(requests.length);
         requests.forEach((request, index) => expect(request).toBe(receipts[index]));
-        expect(requests[0]!.tools.some(tool => tool.name === WEATHER_TOOL)).toBe(false);
+        expect(requests[0]!.tools.some(candidate => candidate.name === WEATHER_TOOL)).toBe(false);
         const previousCall = requests[1]!.input.find(item => typeof item === "object" && item.type === "function_call");
         expect(modelSourceInputBinding(previousCall)?.nativeProducerSourceKey).toBe("receipt-1");
         expect(JSON.stringify(requests)).not.toContain("nativeProducerSourceKey");

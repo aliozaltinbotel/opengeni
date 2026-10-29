@@ -39,7 +39,6 @@ import {
   type Database,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
-import { eq } from "drizzle-orm";
 import {
   CompactionNeededError,
   AnthropicRequestSizeError,

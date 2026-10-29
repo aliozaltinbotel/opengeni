@@ -23,12 +23,10 @@ import { readTurnExecutionPolicyV1, signDelegatedAccessToken } from "@opengeni/c
 import { connectSubscriptionCoreCodexConnection } from "@opengeni/db";
 import { UpdateOrganizationModelDefaultsRequest, UpdateWorkspaceSettingsRequest } from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
-import * as schema from "@opengeni/db/schema";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing/shared-pg";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
 import { testSettings } from "@opengeni/testing/settings";
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
 import * as schema from "@opengeni/db/schema";
 
 import { registerSessionRoutes } from "../src/routes/sessions";

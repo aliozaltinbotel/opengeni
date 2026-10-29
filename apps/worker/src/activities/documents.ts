@@ -31,8 +31,8 @@ export function createDocumentActivities(
         throw new Error("document account/workspace authority mismatch");
       }
       const storedAuthority = await withWorkspaceUsageLock(db, input.workspaceId, async (lockedDb) => {
-        const storedAuthority = await resolveDocumentIndexAuthority(lockedDb, input);
-        if (!storedAuthority) {
+        const lockedAuthority = await resolveDocumentIndexAuthority(lockedDb, input);
+        if (!lockedAuthority) {
           throw new Error("document authority was not found before indexing");
         }
         const suppliedAuthorityFields = [
@@ -45,11 +45,11 @@ export function createDocumentActivities(
         ).length;
         const suppliedMismatch =
           (Object.prototype.hasOwnProperty.call(input, "authorityKind") &&
-            input.authorityKind !== storedAuthority.authorityKind) ||
+            input.authorityKind !== lockedAuthority.authorityKind) ||
           (Object.prototype.hasOwnProperty.call(input, "authorityWorkspaceId") &&
-            input.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId) ||
+            input.authorityWorkspaceId !== lockedAuthority.authorityWorkspaceId) ||
           (Object.prototype.hasOwnProperty.call(input, "authoritySubjectId") &&
-            input.authoritySubjectId !== storedAuthority.authoritySubjectId);
+            input.authoritySubjectId !== lockedAuthority.authoritySubjectId);
         if (suppliedMismatch) {
           throw new Error("document authority changed before indexing");
         }
@@ -60,17 +60,17 @@ export function createDocumentActivities(
           lockedDb,
           input.workspaceId,
           input.documentId,
-          { viewerSubjectId: storedAuthority.authoritySubjectId },
+          { viewerSubjectId: lockedAuthority.authoritySubjectId },
         );
         if (
           !claimedDocument ||
-          claimedDocument.authorityKind !== storedAuthority.authorityKind ||
-          claimedDocument.authorityWorkspaceId !== storedAuthority.authorityWorkspaceId ||
-          claimedDocument.authoritySubjectId !== storedAuthority.authoritySubjectId
+          claimedDocument.authorityKind !== lockedAuthority.authorityKind ||
+          claimedDocument.authorityWorkspaceId !== lockedAuthority.authorityWorkspaceId ||
+          claimedDocument.authoritySubjectId !== lockedAuthority.authoritySubjectId
         ) {
           throw new Error("document authority changed before indexing");
         }
-        return storedAuthority;
+        return lockedAuthority;
       });
       // The installed preparation claim/complete gates own their transactions.
       // Object storage and parsing must not inherit this admission transaction.

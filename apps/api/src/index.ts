@@ -3,7 +3,6 @@ import { scheduledTaskKnowledgeSource } from "@opengeni/contracts";
 import {
   dbSearchPath,
   getSettings,
-  resolveFirstPartyDelegationSecret,
   resolveNatsCalloutConfig,
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
@@ -47,7 +46,6 @@ import {
   resolveCatalogSettings,
   knowledgeQueryOperationId,
   authorizeKnowledgeQueryOwner,
-  SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
   SESSION_WORKFLOW_WAKE_DISPATCH_REQUESTED_SIGNAL,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_ID,
   SESSION_WORKFLOW_WAKE_DISPATCHER_WORKFLOW_TYPE,
