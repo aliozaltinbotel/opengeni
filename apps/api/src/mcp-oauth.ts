@@ -57,6 +57,7 @@ import {
   prepareWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
   requireWorkspaceToolGatewayAuthorization,
+  type PreparedWorkspaceToolGateway,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
 import { requireNativeOrganizationMutation } from "./http/organization-governance";
@@ -83,6 +84,8 @@ export type McpOAuthResource = {
 export type McpOAuthRouteAccess = {
   grant: AccessGrant;
   allowedToolIdentities: ToolGatewayIdentity[];
+  /** The host tool-set versions recorded at consent, by server id; null when none were. */
+  consentedToolSetVersions: Record<string, string> | null;
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -256,6 +259,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
         organizationAccess: null,
         consentPreset: "full",
+        toolSetVersions: consentToolSetVersions(prepared),
         expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
       });
     } finally {
@@ -375,6 +379,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
           permissions: consent.permissions,
           toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog, consent),
           consentPreset: consent.preset,
+          toolSetVersions: consentToolSetVersions(prepared),
         });
         if (!rebound) {
           return oauthAuthorizeBrowserError(
@@ -583,7 +588,11 @@ export async function resolveMcpOAuthRouteAccess(
   const allowedToolIdentities = access.toolIdentities.filter((identity) =>
     requestResource.kind === "all" ? true : identity.serverId === requestResource.kind,
   );
-  return { grant, allowedToolIdentities };
+  return {
+    grant,
+    allowedToolIdentities,
+    consentedToolSetVersions: access.toolSetVersions ?? null,
+  };
 }
 
 export function mcpOAuthBearerToken(request: Request): string | null {
@@ -618,6 +627,14 @@ export function mcpOAuthConsentToolIdentities(
         connectorToolGroup({ name: entry.modelName, annotations: entry.annotations }) === "read",
     )
     .map((entry) => entry.identity);
+}
+
+/** The host tool-set versions a consent records: each used host server's, or null. */
+function consentToolSetVersions(
+  prepared: Pick<PreparedWorkspaceToolGateway, "hostToolSetVersions">,
+): Record<string, string> | null {
+  const versions = prepared.hostToolSetVersions;
+  return versions && Object.keys(versions).length > 0 ? { ...versions } : null;
 }
 
 /** A workspace consent's chosen access level and the grant permissions it leaves. */

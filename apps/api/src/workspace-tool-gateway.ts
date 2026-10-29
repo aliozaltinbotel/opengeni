@@ -154,6 +154,13 @@ export type PreparedWorkspaceToolGateway = Pick<
    * at consent, so a tool name outside it was not consented.
    */
   consentFrozen?: boolean;
+  /** Each used host tool server's published tool-set version, by server id. */
+  hostToolSetVersions?: Readonly<Record<string, string>>;
+  /**
+   * An MCP OAuth connection's tool-set versions at consent, by server id (null
+   * when it recorded none); `tools/list` shows them beside the current ones.
+   */
+  consentedToolSetVersions?: Readonly<Record<string, string>> | null;
 };
 
 /** One MCP protocol-extension method a host tool server declares. */
@@ -558,6 +565,7 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities: readonly { serverId: string; toolName: string }[],
+  consentedToolSetVersions: Readonly<Record<string, string>> | null = null,
 ): Promise<PreparedWorkspaceToolGateway> {
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
@@ -565,6 +573,7 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   return {
     ...(await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities)),
     consentFrozen: true,
+    consentedToolSetVersions,
   };
 }
 
@@ -1203,12 +1212,18 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         handler,
       })),
   );
+  const hostToolSetVersions = Object.fromEntries(
+    hostServers.registrations.flatMap(({ id, toolSetVersion }) =>
+      isHostToolSetVersion(toolSetVersion) ? [[id, toolSetVersion] as const] : [],
+    ),
+  );
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
     ...(hostViewServers.length > 0 ? { hostViewServers } : {}),
     ...(hostExtensionMethods.length > 0 ? { hostExtensionMethods } : {}),
+    ...(Object.keys(hostToolSetVersions).length > 0 ? { hostToolSetVersions } : {}),
   };
 }
 
@@ -1315,9 +1330,11 @@ export function buildWorkspaceToolGatewayMcpServer(
       },
     },
   );
+  const toolSets = toolSetVersionsMeta(prepared);
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     await prepared.reauthorize?.();
     return {
+      ...(toolSets ? { _meta: { "opengeni/toolSets": toolSets } } : {}),
       tools: callableEntries.map((entry) => ({
         name: entry.modelName,
         ...(entry.title ? { title: entry.title } : {}),
@@ -1905,6 +1922,33 @@ function hostExtensionMethodConflict(
     }
   }
   return null;
+}
+
+/** A host's declared tool-set version: 1–256 characters; anything else is ignored. */
+function isHostToolSetVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+/**
+ * `tools/list` result `_meta["opengeni/toolSets"]`: for each host tool server
+ * that publishes a tool-set version, its current `version` and, on an MCP
+ * OAuth connection, the `consentedVersion` recorded at consent (null when the
+ * consent recorded none). A client asks the person to consent again when
+ * they differ. Absent when no used host server publishes a version.
+ */
+function toolSetVersionsMeta(
+  prepared: PreparedWorkspaceToolGateway,
+): Record<string, { version: string; consentedVersion?: string | null }> | null {
+  const current = prepared.hostToolSetVersions;
+  if (!current || Object.keys(current).length === 0) return null;
+  return Object.fromEntries(
+    Object.entries(current).map(([serverId, version]) => [
+      serverId,
+      prepared.consentFrozen
+        ? { version, consentedVersion: prepared.consentedToolSetVersions?.[serverId] ?? null }
+        : { version },
+    ]),
+  );
 }
 
 /** A host tool-server registration that would shadow another gateway server. */

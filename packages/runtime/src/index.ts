@@ -5325,6 +5325,15 @@ export type LocalMcpServerRegistration = {
    * internals; any other error is answered with a generic internal error.
    */
   extensionMethods?: Readonly<Record<string, McpExtensionMethodHandler>>;
+  /**
+   * The version of the tool set this server publishes (1–256 characters, any
+   * scheme the host chooses, for example a content digest). Only the workspace
+   * MCP uses it, and only for an embedding host's registration: an MCP OAuth
+   * consent records each server's version, and `tools/list` shows a client
+   * the consented and current versions so it can ask the person to consent
+   * again when they differ.
+   */
+  toolSetVersion?: string;
 };
 
 /** One host MCP protocol-extension method, called with the request's grant. */

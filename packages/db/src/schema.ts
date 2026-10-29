@@ -4580,6 +4580,8 @@ const mcpOauthGrantColumns = () => ({
   organizationAccess: jsonb("organization_access").$type<OrganizationAccessPolicy>(),
   /** A workspace consent's access level (1021); null for organization connections and older rows. */
   consentPreset: text("consent_preset").$type<"read_only" | "full" | "custom">(),
+  /** Host tool servers' published tool-set versions at consent, by server id (1022). */
+  toolSetVersions: jsonb("tool_set_versions").$type<Record<string, string>>(),
 });
 
 export const mcpOauthAuthorizationRequests = pgTable(

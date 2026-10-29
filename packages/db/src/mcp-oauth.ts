@@ -7,9 +7,13 @@ import {
 } from "@opengeni/contracts";
 import type { HostMcpConnectionConsentScope } from "@opengeni/contracts/organization-governance";
 import { sql } from "drizzle-orm";
+import { z } from "zod";
 import { rawRows, type Database, withWorkspaceSubjectRls } from "./database";
 import { nestedPostgresSqlState } from "./persistence-errors";
 import { subjectHasLiveWorkspaceAuthorityInScope } from "./workspace-authority";
+
+/** Host tool-set versions by server id, as recorded on a consent. */
+const McpOAuthToolSetVersions = z.record(z.string().min(1), z.string().min(1).max(256));
 
 export class McpOAuthClientRegistrationRateLimitError extends Error {
   readonly name = "McpOAuthClientRegistrationRateLimitError";
@@ -41,6 +45,11 @@ export type McpOAuthGrantSnapshot = {
    * and for a consent recorded before the level existed.
    */
   consentPreset?: OrganizationAccessPreset | null;
+  /**
+   * Each host tool server's published tool-set version at consent, by server
+   * id (1022); null when none published one or the consent predates it.
+   */
+  toolSetVersions?: Record<string, string> | null;
 };
 
 export type McpOAuthAuthorizationRequest = McpOAuthGrantSnapshot & {
@@ -78,6 +87,7 @@ type GrantRow = {
   tool_identities: unknown;
   organization_access: unknown;
   consent_preset?: string | null;
+  tool_set_versions?: unknown;
 };
 
 export async function registerMcpOAuthClient(
@@ -144,12 +154,12 @@ export async function createMcpOAuthAuthorizationRequest(
 ): Promise<void> {
   await db.execute(sql`insert into mcp_oauth_authorization_requests (
     request_hash, client_id, account_id, workspace_id, subject_id, resource,
-    redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, expires_at
+    redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at
   ) values (
     ${input.requestHash}, ${input.clientId}, ${input.accountId}, ${input.workspaceId},
     ${input.subjectId}, ${input.resource}, ${input.redirectUri}, ${input.codeChallenge},
     ${input.state}, ${JSON.stringify(input.permissions)}::jsonb,
-    ${JSON.stringify(input.toolIdentities)}::jsonb, ${jsonOrNull(input.organizationAccess)}::jsonb, ${input.consentPreset ?? null},
+    ${JSON.stringify(input.toolIdentities)}::jsonb, ${jsonOrNull(input.organizationAccess)}::jsonb, ${input.consentPreset ?? null}, ${jsonOrNull(input.toolSetVersions)}::jsonb,
     ${input.expiresAt.toISOString()}::timestamptz
   )`);
 }
@@ -170,7 +180,7 @@ export async function getMcpOAuthAuthorizationRequest(
   >(
     db,
     sql`select request_hash, client_id, account_id, workspace_id, subject_id, resource,
-        redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, expires_at
+        redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at
       from mcp_oauth_authorization_requests
       where request_hash = ${requestHash} and expires_at > clock_timestamp()`,
   );
@@ -206,6 +216,7 @@ export async function rebindMcpOAuthAuthorizationRequest(
     permissions: AccessGrant["permissions"];
     toolIdentities: Array<{ serverId: string; toolName: string }>;
     consentPreset?: OrganizationAccessPreset | null;
+    toolSetVersions?: Record<string, string> | null;
   },
 ): Promise<boolean> {
   const [row] = await rawRows<{ request_hash: string }>(
@@ -215,7 +226,8 @@ export async function rebindMcpOAuthAuthorizationRequest(
           workspace_id = ${input.workspaceId},
           permissions = ${JSON.stringify(input.permissions)}::jsonb,
           tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb,
-          consent_preset = ${input.consentPreset ?? null}
+          consent_preset = ${input.consentPreset ?? null},
+          tool_set_versions = ${jsonOrNull(input.toolSetVersions)}::jsonb
       where request_hash = ${input.requestHash}
         and subject_id = ${input.subjectId}
         and expires_at > clock_timestamp()
@@ -250,17 +262,17 @@ export async function consumeMcpOAuthAuthorizationRequest(
           and subject_id = ${input.subjectId}
           and expires_at > clock_timestamp()
         returning request_hash, client_id, account_id, workspace_id, subject_id, resource,
-          redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, expires_at`,
+          redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at`,
     );
     if (!row) return null;
     await extendMcpOAuthClientRetention(tx, row.client_id);
     await tx.execute(sql`insert into mcp_oauth_authorization_codes (
       code_hash, client_id, account_id, workspace_id, subject_id, resource,
-      redirect_uri, code_challenge, permissions, tool_identities, organization_access, consent_preset, expires_at
+      redirect_uri, code_challenge, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at
     ) values (
       ${input.codeHash}, ${row.client_id}, ${row.account_id}, ${row.workspace_id},
       ${row.subject_id}, ${row.resource}, ${row.redirect_uri}, ${row.code_challenge},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null},
+      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null}, ${jsonOrNull(row.tool_set_versions)}::jsonb,
       ${input.codeExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -300,7 +312,7 @@ export async function exchangeMcpOAuthAuthorizationCode(
           and code_challenge = ${input.codeChallenge}
           and expires_at > clock_timestamp()
         returning client_id, account_id, workspace_id, subject_id, resource,
-          permissions, tool_identities, organization_access, consent_preset`,
+          permissions, tool_identities, organization_access, consent_preset, tool_set_versions`,
     );
     if (!row) return null;
     await extendMcpOAuthClientRetention(tx, row.client_id);
@@ -308,21 +320,21 @@ export async function exchangeMcpOAuthAuthorizationCode(
     if (input.refreshTokenHash) {
       await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
         token_hash, family_id, generation, client_id, account_id, workspace_id,
-        subject_id, resource, permissions, tool_identities, organization_access, consent_preset, connected_at, expires_at
+        subject_id, resource, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, connected_at, expires_at
       ) values (
         ${input.refreshTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
         ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-        ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null},
+        ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null}, ${jsonOrNull(row.tool_set_versions)}::jsonb,
         clock_timestamp(), ${input.refreshExpiresAt.toISOString()}::timestamptz
       )`);
     }
     await tx.execute(sql`insert into mcp_oauth_access_tokens (
       token_hash, refresh_family_id, refresh_generation, client_id, account_id,
-      workspace_id, subject_id, resource, permissions, tool_identities, organization_access, consent_preset, expires_at
+      workspace_id, subject_id, resource, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at
     ) values (
       ${input.accessTokenHash}, ${familyId}, 1, ${row.client_id}, ${row.account_id},
       ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null},
+      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null}, ${jsonOrNull(row.tool_set_versions)}::jsonb,
       ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -374,7 +386,7 @@ export async function rotateMcpOAuthRefreshToken(
     >(
       tx,
       sql`select client_id, family_id, generation, account_id, workspace_id,
-          subject_id, resource, permissions, tool_identities, organization_access, consent_preset, revoked_at,
+          subject_id, resource, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, revoked_at,
           expires_at > clock_timestamp() as active
         from mcp_oauth_refresh_tokens
         where token_hash = ${input.refreshTokenHash}
@@ -395,21 +407,21 @@ export async function rotateMcpOAuthRefreshToken(
     const generation = Number(row.generation) + 1;
     await tx.execute(sql`insert into mcp_oauth_refresh_tokens (
       token_hash, family_id, generation, client_id, account_id, workspace_id,
-      subject_id, resource, permissions, tool_identities, organization_access, consent_preset, connected_at, expires_at
+      subject_id, resource, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, connected_at, expires_at
     ) values (
       ${input.nextRefreshTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null},
+      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null}, ${jsonOrNull(row.tool_set_versions)}::jsonb,
       (select previous.connected_at from mcp_oauth_refresh_tokens previous
         where previous.token_hash = ${input.refreshTokenHash}), ${input.refreshExpiresAt.toISOString()}::timestamptz
     )`);
     await tx.execute(sql`insert into mcp_oauth_access_tokens (
       token_hash, refresh_family_id, refresh_generation, client_id, account_id,
-      workspace_id, subject_id, resource, permissions, tool_identities, organization_access, consent_preset, expires_at
+      workspace_id, subject_id, resource, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at
     ) values (
       ${input.accessTokenHash}, ${row.family_id}, ${generation}, ${row.client_id},
       ${row.account_id}, ${row.workspace_id}, ${row.subject_id}, ${row.resource},
-      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null},
+      ${JSON.stringify(row.permissions)}::jsonb, ${JSON.stringify(row.tool_identities)}::jsonb, ${jsonOrNull(row.organization_access)}::jsonb, ${row.consent_preset ?? null}, ${jsonOrNull(row.tool_set_versions)}::jsonb,
       ${input.accessExpiresAt.toISOString()}::timestamptz
     )`);
     return {
@@ -448,7 +460,7 @@ export async function resolveMcpOAuthAccessToken(
     db,
     sql`select token_hash, client_id, refresh_family_id, refresh_generation,
         account_id, workspace_id, subject_id, resource, permissions, tool_identities,
-        organization_access, consent_preset, expires_at
+        organization_access, consent_preset, tool_set_versions, expires_at
       from mcp_oauth_access_tokens
       where token_hash = ${tokenHash}
         and revoked_at is null
@@ -647,7 +659,7 @@ export async function getMcpOAuthConnectionRecord(
   >(
     db,
     sql`select family_id, client_id, account_id, workspace_id, subject_id, resource,
-        permissions, tool_identities, organization_access, consent_preset,
+        permissions, tool_identities, organization_access, consent_preset, tool_set_versions,
         connected_at, created_at, expires_at, revoked_at
       from mcp_oauth_refresh_tokens
       where family_id = ${input.connectionId}::uuid
@@ -756,6 +768,10 @@ function mapGrant(row: GrantRow): McpOAuthGrantSnapshot {
       row.consent_preset === null || row.consent_preset === undefined
         ? null
         : OrganizationAccessPreset.parse(row.consent_preset),
+    toolSetVersions:
+      row.tool_set_versions === null || row.tool_set_versions === undefined
+        ? null
+        : McpOAuthToolSetVersions.parse(row.tool_set_versions),
   };
 }
 

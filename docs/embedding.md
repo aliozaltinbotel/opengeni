@@ -733,6 +733,20 @@ deprecated flat `ui/resourceUri` key) and `visibility` (`["model"]`,
 returns a well-formed one. Other `_meta` keys a host sets are not forwarded,
 and first-party and remote tools never carry a view.
 
+A host tool server may also publish the version of its tool set
+(`LocalMcpServerRegistration.toolSetVersion`, 1–256 characters of the host's
+choosing, for example a digest of its published tool inventory). An MCP OAuth
+consent records each used host server's version (migration 1022), and the
+workspace MCP's `tools/list` result carries
+`_meta["opengeni/toolSets"]`: `{ [serverId]: { version, consentedVersion } }`,
+where `version` is the server's current one and `consentedVersion` the one
+recorded at consent (`null` for a consent that recorded none). A client asks
+the person to consent again when they differ. Callers that are not an MCP
+OAuth connection see `version` alone, and without any published version the
+key is absent. The tool identities frozen at consent still decide what the
+connection lists and calls, so a changed set never widens a connection before
+the person consents again.
+
 Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the
 runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact

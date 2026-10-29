@@ -39,6 +39,9 @@ let person: { cookie: string; subjectId: string };
 let workspaceId: string;
 let organizationId: string;
 
+/** The tool-set version the host server publishes now; undefined publishes none. */
+let publishedToolSetVersion: string | undefined;
+
 /** A host tool server with a read tool, a write tool and a tool that says nothing. */
 async function hostRegistration(): Promise<LocalMcpServerRegistration> {
   const server = new McpServer({ name: "host-acme", version: "1.0.0" });
@@ -62,6 +65,7 @@ async function hostRegistration(): Promise<LocalMcpServerRegistration> {
     (await mcpClient.callTool({ name: toolName, arguments: args ?? {} })) as CallToolResult;
   return {
     id: "acme",
+    ...(publishedToolSetVersion ? { toolSetVersion: publishedToolSetVersion } : {}),
     server: {
       name: "host:acme",
       cacheToolsList: false,
@@ -224,11 +228,16 @@ async function connect(fields: Array<[string, string]>) {
   return { accessToken };
 }
 
-async function mcp(accessToken: string, method: string, params: Record<string, unknown> = {}) {
+async function mcp(
+  accessToken: string,
+  method: string,
+  params: Record<string, unknown> = {},
+  credential: Record<string, string> = { authorization: `Bearer ${accessToken}` },
+) {
   const response = await app.request(`/v1/workspaces/${workspaceId}/mcp`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${accessToken}`,
+      ...credential,
       "content-type": "application/json",
       accept: "application/json, text/event-stream",
     },
@@ -236,7 +245,11 @@ async function mcp(accessToken: string, method: string, params: Record<string, u
   });
   expect(response.status).toBe(200);
   return (await response.json()) as {
-    result?: { tools?: Array<{ name: string }>; content?: Array<{ text?: string }> };
+    result?: {
+      tools?: Array<{ name: string }>;
+      content?: Array<{ text?: string }>;
+      _meta?: Record<string, unknown>;
+    };
     error?: { code: number; data?: { code?: string } };
   };
 }
@@ -342,5 +355,50 @@ describe("workspace MCP OAuth consent levels", () => {
     expect(refused).toBeDefined();
     expect(refused!.status).toBe(400);
     expect(await refused!.text()).toContain("Choose an access level");
+  });
+});
+
+describe("workspace MCP tool-set versions for re-consent", () => {
+  const toolSets = async (accessToken: string, credential?: Record<string, string>) =>
+    (await mcp(accessToken, "tools/list", {}, credential)).result?._meta?.["opengeni/toolSets"];
+
+  test("tools/list shows the consented and current version, and a changed set shows the difference", async () => {
+    publishedToolSetVersion = "sha256:v1";
+    try {
+      const first = await connect([]);
+      expect(await toolSets(first.accessToken!)).toEqual({
+        acme: { version: "sha256:v1", consentedVersion: "sha256:v1" },
+      });
+      // The host publishes a changed tool set: the old connection sees it.
+      publishedToolSetVersion = "sha256:v2";
+      expect(await toolSets(first.accessToken!)).toEqual({
+        acme: { version: "sha256:v2", consentedVersion: "sha256:v1" },
+      });
+      // Consenting again records the current version.
+      const second = await connect([]);
+      expect(await toolSets(second.accessToken!)).toEqual({
+        acme: { version: "sha256:v2", consentedVersion: "sha256:v2" },
+      });
+      // A consent recorded before versions existed has no consented version.
+      const hash = createHash("sha256").update(first.accessToken!).digest("hex");
+      await shared.admin`
+        update mcp_oauth_access_tokens set tool_set_versions = null where token_hash = ${hash}`;
+      expect(await toolSets(first.accessToken!)).toEqual({
+        acme: { version: "sha256:v2", consentedVersion: null },
+      });
+      // A caller without a consent sees the current version only.
+      expect(await toolSets("", { cookie: person.cookie })).toEqual({
+        acme: { version: "sha256:v2" },
+      });
+    } finally {
+      publishedToolSetVersion = undefined;
+    }
+  });
+
+  test("without a published version tools/list carries no tool-set metadata", async () => {
+    const { accessToken } = await connect([]);
+    const listed = await mcp(accessToken!, "tools/list");
+    expect(listed.result?.tools?.length).toBeGreaterThan(0);
+    expect(listed.result?._meta).toBeUndefined();
   });
 });
