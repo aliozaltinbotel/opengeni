@@ -117,9 +117,23 @@ export type HostExtensionNavOverride = Readonly<{
   group?: HostExtensionNavGroup;
   settingsGroup?: string;
 }>;
+export type HostExtensionCommandResult = Readonly<{ id: string; label: string; path: string; keywords?: readonly string[] }>;
+export type HostExtensionCommandMenuProvider = Readonly<{
+  id: string;
+  heading: string;
+  search: (query: string, context: HostExtensionContext, signal: AbortSignal) => Promise<readonly HostExtensionCommandResult[]>;
+}>;
+export type HostExtensionUtility = Readonly<{
+  id: string;
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  load: () => Promise<{ default: ComponentType<{ workspaceId: string }> }>;
+}>;
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
+  commandMenuProviders?: readonly HostExtensionCommandMenuProvider[];
+  utilities?: readonly HostExtensionUtility[];
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;
