@@ -1162,6 +1162,21 @@ an identity that does not exist. A token whose subject is not an active owner
 or admin of the organization is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`, the
 code every host command now gives when the database refuses its actor.
 
+#### Host session token claims
+
+A host session token (`GET /v1/auth/host-token?workspace=<id>`, enabled by
+`OPENGENI_HOST_TOKEN_AUDIENCE`) also names the identity's active login binding
+as two top-level claims: `login_binding_id` and `login_binding_revision`. They
+are the same pair this lookup answers as `activeLoginBinding`, read at mint
+time, so a host that recorded the pair when it linked the person can tell
+locally, with no identity round trip, that another sign-in method became
+active (`login_binding_id` differs) or that the binding changed state since
+(`login_binding_revision` is higher), and ask an administrator to confirm
+before the person's access carries over. A signed-in identity with no active
+binding gets no token: `403 HOST_TOKEN_LOGIN_BINDING_UNKNOWN`. The claims are
+flat snake-case keys, like the token's other claims, rather than one nested
+object.
+
 The read is one query by identity
 (`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
 adds the fences). Like every new runtime definer, its runtime `EXECUTE` is

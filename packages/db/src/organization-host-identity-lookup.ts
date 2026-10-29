@@ -13,6 +13,7 @@ import {
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "./database";
+import { activeCanonicalHumanLoginBinding } from "./canonical-human-identities";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 
 /**
@@ -94,10 +95,10 @@ async function lookupThroughMemberList(
   const [first] = matched;
   if (!first) return null;
   const { activeIdentity, loginBindings } = first.projection;
-  const binding = loginBindings.find(
-    (candidate) =>
-      candidate.id === activeIdentity.activeLoginBindingId && candidate.status === "active",
-  );
+  const active = activeCanonicalHumanLoginBinding(first.projection);
+  const binding = active
+    ? loginBindings.find((candidate) => candidate.id === active.id)
+    : undefined;
   const membershipIds = new Set(matched.map(({ member }) => member.id));
   const oldestActive = matched.find(({ member }) => member.status === "active");
   let verifiedEmail: string | null = null;

@@ -791,6 +791,9 @@ export type HostSessionTokenClaims = {
   auth_time: number;
   amr: string[];
   identity_status: "active";
+  /** The identity's active login binding (its id, and that binding's revision). */
+  login_binding_id: string;
+  login_binding_revision: number;
   iat: number;
   exp: number;
   jti: string;

@@ -7,6 +7,7 @@ import {
 } from "@opengeni/core";
 import { requireCanonicalHumanRequestIdentity } from "@opengeni/core/canonical-human-identities";
 import {
+  activeCanonicalHumanLoginBinding,
   CanonicalHumanIdentityNotFoundError,
   getCanonicalHumanIdentityProjection,
 } from "@opengeni/db/canonical-human-identities";
@@ -34,7 +35,10 @@ import {
  * Audience-bound host session token. A host that embeds Opengeni verifies the
  * person locally: `GET /v1/auth/host-token?workspace=<id>` returns a short-lived
  * ES256 JWT for one workspace, signed by Better Auth's jwt plugin, and
- * `GET /v1/auth/jwks` publishes its public keys. Without
+ * `GET /v1/auth/jwks` publishes its public keys. The token names the
+ * identity's active login binding (`login_binding_id`, and that binding's
+ * `login_binding_revision`), so a host can tell a rebound sign-in method from
+ * the one it linked without an identity round trip. Without
  * OPENGENI_HOST_TOKEN_AUDIENCE the token route refuses and every other path
  * keeps its stock behaviour.
  *
@@ -70,6 +74,11 @@ export const HOST_TOKEN_REFUSALS = {
     status: 403,
     code: "HOST_TOKEN_AUTHENTICATION_UNKNOWN",
     message: "This session has no recorded sign-in. Confirm it's you, or sign in again.",
+  },
+  loginBindingUnknown: {
+    status: 403,
+    code: "HOST_TOKEN_LOGIN_BINDING_UNKNOWN",
+    message: "Your account has no active sign-in method. Sign in again.",
   },
   rateLimited: {
     status: 429,
@@ -271,6 +280,10 @@ async function mintHostSessionToken(
   if (identity.status !== "active") {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.identityNotActive);
   }
+  // The same binding the host identity lookup names as `activeLoginBinding`,
+  // so a host compares the claim with what it recorded at link time.
+  const loginBinding = activeCanonicalHumanLoginBinding(projection);
+  if (!loginBinding) throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.loginBindingUnknown);
   const authentication = await readSessionAuthentication(deps.db, human);
   if (!authentication || authentication.identityId !== identity.id) {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.sessionRequired);
@@ -299,6 +312,8 @@ async function mintHostSessionToken(
     auth_time: Math.floor(latest.authenticatedAt.getTime() / 1000),
     amr: latest.amr,
     identity_status: "active",
+    login_binding_id: loginBinding.id,
+    login_binding_revision: loginBinding.revision,
     iat: issuedAt,
     exp: expiresAt,
     jti: crypto.randomUUID(),
