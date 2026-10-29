@@ -29,6 +29,26 @@ describe("sessions_list legacy bounded detail=full discovery projection", () => 
       expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
     }
   });
+  test("ownership-bound discovery cursors preserve scope identity within the tool input", () => {
+    for (const orderBy of ["createdAt", "updatedAt", "relevance"] as const) {
+      const cursor = {
+        orderBy,
+        sortRank: orderBy === "relevance" ? 123 : null,
+        sortRevision: orderBy === "createdAt" ? "0" : "18446744073709551615",
+        sortAt: "2026-10-17T12:00:00.123456Z",
+        id: uuid(1),
+        snapshotAt: "2026-10-17T12:00:00.123456Z",
+        snapshotRevision: orderBy === "createdAt" ? "0" : "36893488147419103231",
+        updatedAfter: orderBy === "updatedAt" ? "36893488147419103230" : null,
+        filterHash: orderBy === "relevance" ? "a".repeat(64) : null,
+        originSiteId: uuid(2),
+        authorizationScopeKey: "a".repeat(43),
+      };
+      const encoded = encodeSessionDiscoveryCursor(cursor);
+      expect(encoded.length).toBeLessThanOrEqual(512);
+      expect(decodeSessionDiscoveryCursor(encoded)).toEqual(cursor);
+    }
+  });
   test("Site-bound chronological cursors preserve origin in their versioned wire format", () => {
     const cursor = {
       orderBy: "createdAt" as const,

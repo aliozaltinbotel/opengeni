@@ -831,7 +831,11 @@ ownership or bypass recovery settlement.
 Personal connections and resources require the exact human authority that made
 them executable. Workspace-owned credentials remain workspace-scoped and are
 revalidated at use. An embedding host may narrow access through an explicit
-port; it cannot grant access that Opengeni denied.
+port; it cannot grant access that Opengeni denied. Session target facts expose
+native owner and visibility to that port without another read. Host list selectors
+can narrow to a trusted subject's owned rows, optionally including workspace-shared
+rows, inside SQL and cursor identities; durable agent-viewer and tenancy fences
+remain intersected. See [embedding session authorization](embedding.md#session-authorization).
 
 The managed personal-workspace owner receives a closed permission projection
 that includes live viewing and handoff (`stream:view`, `stream:control`,

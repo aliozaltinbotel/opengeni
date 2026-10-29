@@ -34822,7 +34822,8 @@ function sessionAuthorizationRootScopeFilter(
   scope: SessionAuthorizationListScope,
   includeExact = true,
 ): SQL {
-  let hostScope: SQL = sql`true`;
+  let hostScope: SQL =
+    scope.kind === "scoped" ? sql`true` : sessionAuthorizationHostScopeFilter(scope);
   if (scope.kind === "scoped") {
     if (
       scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
@@ -34842,6 +34843,12 @@ function sessionAuthorizationRootScopeFilter(
 
 function sessionAuthorizationHostScopeFilter(scope: SessionAuthorizationListScope): SQL {
   if (scope.kind === "all") return sql`true`;
+  if (scope.kind === "owned" || scope.kind === "owned_or_shared") {
+    const owned = eq(schema.sessions.ownerSubjectId, scope.subjectId);
+    return scope.kind === "owned"
+      ? owned
+      : or(owned, eq(schema.sessions.visibility, "workspace_shared"))!;
+  }
   if (
     scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
     scope.sessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS
@@ -34895,7 +34902,7 @@ async function sessionIdsCoveredByAuthorizationRoots(
         eq(schema.sessions.workspaceId, workspaceId),
         anyOf(schema.sessions.id, sessionIds),
         sessionAuthorizationScopeFilter(
-          scope.kind === "all"
+          scope.kind !== "scoped"
             ? scope
             : {
                 kind: "scoped",
@@ -34955,9 +34962,19 @@ function sessionSearchFilter(search: string | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-function sessionListFilterIdentity(options: SessionListFilterOptions): string {
+function sessionListFilterIdentity(
+  options: SessionListFilterOptions & Pick<ListSessionsForSubjectOptions, "authorizationScope">,
+): string {
+  const scope = options.authorizationScope;
+  const ownershipScope =
+    scope?.kind === "owned" || scope?.kind === "owned_or_shared"
+      ? createHash("sha256")
+          .update(JSON.stringify([scope.kind, scope.subjectId]))
+          .digest("base64url")
+      : null;
   const hasChannel = options.channelId !== undefined;
   if (
+    !ownershipScope &&
     !hasChannel &&
     !options.originSiteId &&
     !options.siteAccessId &&
@@ -34975,6 +34992,7 @@ function sessionListFilterIdentity(options: SessionListFilterOptions): string {
     return "all";
   }
   return JSON.stringify([
+    ...(ownershipScope ? [["ownershipScope", ownershipScope]] : []),
     ...(options.siteAccessId ? [["siteAccess", options.siteAccessId]] : []),
     ...(options.originSiteId ? [["originSite", options.originSiteId]] : []),
     // `group` returns the same rows as the default; only `include` changes them.
@@ -35151,7 +35169,7 @@ function canonicalSearchScopeIdentity(
   scope: SessionAuthorizationListScope | undefined,
 ): SessionAuthorizationListScope | null {
   if (!scope) return null;
-  if (scope.kind === "all") return scope;
+  if (scope.kind !== "scoped") return scope;
   return {
     ...scope,
     rootSessionIds: [...new Set(scope.rootSessionIds)].sort(),
@@ -36778,6 +36796,8 @@ export async function getLatestSessionModelForSubject(
 
 export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt" | "relevance";
 export type SessionDiscoveryCursor = {
+  /** Host ownership selector binding; absent for legacy host scope kinds. */
+  authorizationScopeKey?: string | undefined;
   /** Site provenance is bound for chronological as well as relevance lists. */
   originSiteId?: string;
   orderBy: SessionDiscoveryOrderBy;
@@ -37661,6 +37681,7 @@ export async function listSessionDiscoverySummaries(
   updatedAfter: string | null;
   /** Internal relevance cursor binding; omitted from row projections. */
   filterHash: string | null;
+  authorizationScopeKey?: string;
   originSiteId?: string;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
@@ -37682,7 +37703,17 @@ export async function listSessionDiscoverySummaries(
     throw new Error("sessions_list relevance order requires query or an exact subject filter");
   }
   const filterHash = relevanceRequested ? sessionDiscoveryFilterHash(filters) : null;
+  const hostScope = options.authorizationScope;
+  const authorizationScopeKey =
+    hostScope?.kind === "owned" || hostScope?.kind === "owned_or_shared"
+      ? createHash("sha256")
+          .update(JSON.stringify([hostScope.kind, hostScope.subjectId]))
+          .digest("base64url")
+      : undefined;
   const readPage = async (scopedDb: Database) => {
+    if (options.cursor && options.cursor.authorizationScopeKey !== authorizationScopeKey) {
+      throw new Error("sessions_list cursor authorization scope does not match the request");
+    }
     if (options.cursor && (options.cursor.originSiteId ?? null) !== filters.originSiteId) {
       throw new Error("sessions_list cursor Site filter does not match the request");
     }
@@ -37775,6 +37806,7 @@ export async function listSessionDiscoverySummaries(
         updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
         updatedAfter,
         filterHash,
+        ...(authorizationScopeKey ? { authorizationScopeKey } : {}),
       };
     }
 
@@ -37948,6 +37980,7 @@ export async function listSessionDiscoverySummaries(
               snapshotRevision,
               updatedAfter,
               filterHash,
+              ...(authorizationScopeKey ? { authorizationScopeKey } : {}),
               ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
             }
           : null,
@@ -37958,6 +37991,7 @@ export async function listSessionDiscoverySummaries(
       updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
       updatedAfter,
       filterHash,
+      ...(authorizationScopeKey ? { authorizationScopeKey } : {}),
       ...(filters.originSiteId ? { originSiteId: filters.originSiteId } : {}),
     };
   };
