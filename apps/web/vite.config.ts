@@ -60,6 +60,15 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The installed indicator guard is startup code, while its frame
+              // and recovery boundary also serve lazy session views. Keep this
+              // small owner out of the entry-aware session subgroups.
+              name: "host-session-indicator",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/](?:session-indicator\.tsx|session[\\/]failure-recovery-boundary\.tsx)$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // The startup routes read the workspace destination catalog, and
               // the lazy settings hub reaches it too. Entry-aware settings
               // grouping otherwise merges this small subgroup into the Meetings
@@ -350,7 +359,7 @@ export default defineConfig({
               // Session creation resolves the agent's capabilities, so their
               // helpers are startup code too.
               name: "startup-context",
-              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|host-boundary-diagnostics|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },

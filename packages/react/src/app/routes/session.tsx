@@ -1,3 +1,4 @@
+import { HostSessionIndicatorFrame } from "../components/session-indicator";
 import { t } from "../lib/console-text";
 import { Fragment } from "react";
 import {
@@ -373,19 +374,25 @@ const LazySessionRouteAuxiliary = lazy(
   () => import("../components/session/session-tenancy-control"),
 );
 
-export function SessionRoute({
-  workspaceId,
-  sessionId,
-  launch = EMPTY_COMPOSER_LAUNCH,
-  realtimeAutostartModel,
-  searchTarget = EMPTY_SEARCH_TARGET,
-}: {
+type SessionRouteProps = {
   workspaceId: string;
   sessionId: string;
   launch?: ComposerLaunchSearch | undefined;
   realtimeAutostartModel?: SessionRealtimeModel | undefined;
   searchTarget?: SessionSearchRoute | undefined;
-}) {
+};
+
+export function SessionRoute(props: SessionRouteProps) {
+  return <HostSessionIndicatorFrame workspaceId={props.workspaceId} sessionId={props.sessionId}><SessionRouteContent {...props} /></HostSessionIndicatorFrame>;
+}
+
+function SessionRouteContent({
+  workspaceId,
+  sessionId,
+  launch = EMPTY_COMPOSER_LAUNCH,
+  realtimeAutostartModel,
+  searchTarget = EMPTY_SEARCH_TARGET,
+}: SessionRouteProps) {
   const uiEvents = useUiEventTarget("document");
   const dockEnabled = useSessionUiFeature("dock");
   useReadSessionInbox(sessionId);
