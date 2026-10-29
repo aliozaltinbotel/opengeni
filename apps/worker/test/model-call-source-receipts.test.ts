@@ -769,7 +769,7 @@ test("memoized ancestry keeps depth and cycle refusals after a shallow route suc
     const basis = { kind: "COPIED", parents: [{ owner: "session_history_items", id: end.id, sha256: end.sourceSha256! }] };
     await tx`update session_history_items set source_basis=${tx.json(basis)} where id=${end.id} and account_id=${identity.accountId} and workspace_id=${identity.workspaceId}`;
   });
-  const cyclic = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, request);
+  const cyclic = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, deepRequest);
   expect(cyclic.complete).toBe(false); expect(cyclic.incompleteReasons).toContain("UNRESOLVED_PARENT");
 });
 
