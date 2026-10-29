@@ -150,9 +150,9 @@ export const GOVERNED_MEMBER_WORKSPACE_ROUTES: readonly GovernedRouteEntry[] = O
  * Session routes refused to a person in a governed workspace although their
  * operation is in `GOVERNED_MEMBER_SESSION_OPERATIONS`: they reuse a generic
  * operation (`session.read`, `session.control`) for a subject the allowlist
- * otherwise closes (coding-subscription accounts, model and account choice,
- * background processes, sandbox recovery, operator access). Paths are the
- * registered Hono templates.
+ * otherwise closes (coding-subscription accounts, model and account choice
+ * and provenance, background processes, sandbox recovery, operator access,
+ * the task budget the host sets). Paths are the registered Hono templates.
  */
 export const GOVERNED_MEMBER_SESSION_ROUTE_DENIALS: readonly GovernedRouteEntry[] = Object.freeze([
   { method: "GET", path: `${SESSION_PREFIX}/codex-accounts` },
@@ -162,6 +162,8 @@ export const GOVERNED_MEMBER_SESSION_ROUTE_DENIALS: readonly GovernedRouteEntry[
   { method: "GET", path: `${SESSION_PREFIX}/sandbox-recovery` },
   { method: "POST", path: `${SESSION_PREFIX}/sandbox-recovery` },
   { method: "GET", path: `${SESSION_PREFIX}/admin-access` },
+  { method: "GET", path: `${SESSION_PREFIX}/model-source-basis` },
+  { method: "PUT", path: `${SESSION_PREFIX}/usage-limit` },
 ]);
 
 /**

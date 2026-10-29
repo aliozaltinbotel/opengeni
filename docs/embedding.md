@@ -1019,9 +1019,11 @@ whose `sessionAuthorizationOperationForHttp` operation is in
 `GOVERNED_MEMBER_SESSION_OPERATIONS`, except the routes in
 `GOVERNED_MEMBER_SESSION_ROUTE_DENIALS`: `GET codex-accounts`,
 `GET model-account`, `GET` and `DELETE background-commands`, `GET` and
-`POST sandbox-recovery` and `GET admin-access` under a session reuse a
-generic operation (`session.read`, `session.control`) for a subject the
-allowlist otherwise closes, so they are refused too. Not on it: `/mcp`, which for a person's
+`POST sandbox-recovery`, `GET admin-access`, `GET model-source-basis`
+(model and account provenance) and `PUT usage-limit` (the task budget is the
+host's) under a session reuse a generic operation (`session.read`,
+`session.control`) for a subject the allowlist otherwise closes, so they are
+refused too. `GET usage-limit` and `POST retry` stay allowed. Not on it: `/mcp`, which for a person's
 own credential is the whole workspace tool gateway (as `tools/*`; sessions
 reach their tools through the worker's delegated tokens), and every
 organization route. `governedRouteTable(app.routes)` gives the decision for

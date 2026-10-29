@@ -187,6 +187,8 @@ describe("default-deny in a governed organization", () => {
     ["GET", `sessions/${SESSION_ID}/sandbox-recovery`],
     ["POST", `sessions/${SESSION_ID}/sandbox-recovery`],
     ["GET", `sessions/${SESSION_ID}/admin-access`],
+    ["GET", `sessions/${SESSION_ID}/model-source-basis`],
+    ["PUT", `sessions/${SESSION_ID}/usage-limit`],
   ])("a member's %s %s answers 403 WORKSPACE_ROUTE_NOT_ALLOWED", async (method, suffix) => {
     const result = await call(governedApp, `/v1/workspaces/${governed.workspaceId}/${suffix}`, {
       method,
@@ -494,9 +496,11 @@ describe("the exported route table", () => {
       ["DELETE", "admin-access"],
     ] as const)
       expect(row(method, `${session}/${suffix}`)?.allowed).toBe(false);
-    // Session reads outside the overlay stay allowed.
+    // Session reads and controls outside the overlay stay allowed.
     expect(row("GET", session)?.allowed).toBe(true);
     expect(row("GET", `${session}/events`)?.allowed).toBe(true);
+    expect(row("GET", `${session}/usage-limit`)?.allowed).toBe(true);
+    expect(row("POST", `${session}/retry`)?.allowed).toBe(true);
   });
 
   test("a session route is allowed exactly when its operation is in the member set", () => {
