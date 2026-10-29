@@ -126,6 +126,8 @@ export type HostExtension = Readonly<{
   messageContext?: (context: HostExtensionContext) => MessageContextInput;
   /** Replaces the native new-chat suggestions; up to eight, with unique ids. */
   starters?: (context: HostExtensionContext) => readonly HostExtensionStarter[];
+  /** Persistent host information above every session and the new-chat page. */
+  sessionIndicator?: ComponentType<{ workspaceId: string; sessionId: string | null }>;
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;
