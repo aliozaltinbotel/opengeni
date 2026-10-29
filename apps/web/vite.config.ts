@@ -357,7 +357,9 @@ export default defineConfig({
               // error helpers or a toast was enough to add a startup file).
               // The icons are the ones the load-error state and toasts draw.
               // Session creation resolves the agent's capabilities, so their
-              // helpers are startup code too.
+              // helpers are startup code too. The root caught-error handler
+              // shares its host-boundary marker with lazy session UI; keep
+              // that dependency-free helper here instead of session grouping.
               name: "startup-context",
               test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|host-boundary-diagnostics|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
               includeDependenciesRecursively: false,

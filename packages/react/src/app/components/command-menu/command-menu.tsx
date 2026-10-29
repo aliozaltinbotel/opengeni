@@ -1,3 +1,6 @@
+import { useAppHost } from "../../lib/app-host";
+import { useLocation, useNavigate, usePage } from "../../lib/navigation";
+import { useHostCommandMenuResults, type HostCommandGroup } from "../../lib/host-command-providers";
 /**
  * The ⌘K menu: find a chat or a Site by its title, or run any action, from
  * one field.
@@ -17,6 +20,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type Dispatch,
+  type SetStateAction,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type RefObject,
@@ -95,7 +100,7 @@ type Item = {
   run(options: { newTab: boolean }): void;
 };
 
-type Group = { label: string; items: Item[]; best: number };
+type Group = { key?: string; label: string; items: Item[]; best: number };
 
 const RECENT_LIMIT = 6;
 const CHAT_RESULT_LIMIT = 8;
@@ -388,7 +393,7 @@ export default function CommandMenu(props: {
   );
 }
 
-function CommandMenuDialog(props: {
+type CommandMenuDialogProps = {
   open: boolean;
   pickWorkspace: boolean;
   onOpenChange: (open: boolean) => void;
@@ -396,12 +401,40 @@ function CommandMenuDialog(props: {
   env: ActionEnv;
   run(action: AppAction, chat?: SessionListRow | null, chord?: Chord): void;
   chordsFor(action: AppAction): Chord[];
-}) {
-  const { env, run, chordsFor, onOpenChange } = props;
+};
+type CommandMenuContentsProps = CommandMenuDialogProps & {
+  query: string;
+  setQuery: Dispatch<SetStateAction<string>>;
+  hostResults?: readonly HostCommandGroup[];
+  hostSearching?: boolean;
+  onHostNavigate?: (href: string, newTab: boolean) => void;
+};
+
+function CommandMenuDialog(props: CommandMenuDialogProps) {
+  const [query, setQuery] = useState("");
+  const providers = useAppHost().commandMenuProviders;
+  const controlled = { ...props, query, setQuery };
+  return providers?.length ? <HostCommandMenuDialog {...controlled} /> : <CommandMenuDialogContents {...controlled} />;
+}
+
+function HostCommandMenuDialog(props: CommandMenuContentsProps) {
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const page = usePage();
+  const result = useHostCommandMenuResults({ workspaceId: props.env.workspaceId, pathname }, props.query, props.open, props.env.subjectId);
+  const surface = props.env.surface;
+  const onHostNavigate = useCallback((href: string, newTab: boolean) => {
+    if (newTab && surface === "web") page.open(href);
+    else void navigate({ href }).catch(() => console.warn("HOST_COMMAND_NAVIGATION_FAILED"));
+  }, [navigate, page, surface]);
+  return <CommandMenuDialogContents {...props} hostResults={result.groups} hostSearching={result.loading} onHostNavigate={onHostNavigate} />;
+}
+
+function CommandMenuDialogContents(props: CommandMenuContentsProps) {
+  const { env, run, chordsFor, onOpenChange, query, setQuery, hostResults, onHostNavigate } = props;
   const { workspaceId, subjectId, platform, surface, workspaces } = env;
   const directoryVersion = useChatDirectoryVersion(subjectId);
   const siteDirectoryVersion = useSiteDirectoryVersion(subjectId);
-  const [query, setQuery] = useState("");
   const [focusChat, setFocusChat] = useState<ChatRecord | null>(null);
   const [pickingWorkspace, setPickingWorkspace] = useState(props.pickWorkspace);
   const [active, setActive] = useState(0);
@@ -456,7 +489,7 @@ function CommandMenuDialog(props: {
     setActive(0);
     ranAction.current = false;
     afterClose.current = null;
-  }, [props.open, props.pickWorkspace]);
+  }, [props.open, props.pickWorkspace, setQuery]);
 
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
@@ -514,7 +547,7 @@ function CommandMenuDialog(props: {
     setPickingWorkspace(true);
     setQuery("");
     inputRef.current?.focus();
-  }, []);
+  }, [setQuery]);
 
   const actionItem = useCallback(
     (action: AppAction, chat: SessionListRow | null, group: string, highlight?: string): Item => ({
@@ -531,7 +564,7 @@ function CommandMenuDialog(props: {
     [chordsFor, env, runAction, startPickingWorkspace],
   );
 
-  const groups = useMemo<Group[]>(() => {
+  const nativeGroups = useMemo<Group[]>(() => {
     void directoryVersion;
     void siteDirectoryVersion;
     const now = Date.now();
@@ -880,6 +913,23 @@ function CommandMenuDialog(props: {
     workspaces,
   ]);
 
+  const groups = useMemo<Group[]>(() => {
+    if (focusChat || pickingWorkspace || !hostResults?.length) return nativeGroups;
+    const hostGroups: Group[] = hostResults.map((group) => ({
+      key: `host:${group.id}`,
+      label: group.heading,
+      best: 0,
+      items: group.items.map((entry) => ({
+        key: `host:${group.id}:${entry.id}`,
+        group: group.heading,
+        icon: ArrowUpRightIcon,
+        title: entry.label,
+        run: ({ newTab }) => { ranAction.current = true; close(); onHostNavigate?.(entry.path, newTab); },
+      })),
+    }));
+    return [...nativeGroups, ...hostGroups];
+  }, [nativeGroups, focusChat, pickingWorkspace, hostResults, onHostNavigate, close]);
+
   const items = useMemo(() => groups.flatMap((group) => group.items), [groups]);
   const listedChatIds = useMemo(
     () => items.flatMap((item) => (item.chat ? [item.chat.id] : [])),
@@ -892,7 +942,7 @@ function CommandMenuDialog(props: {
     Boolean(query.trim()) &&
     !focusChat &&
     !pickingWorkspace &&
-    (server.loading || serverSites.loading);
+    (server.loading || serverSites.loading || props.hostSearching);
 
   // Typing starts at the best match; the workspace list starts at the current workspace's neighbour.
   useEffect(() => {
@@ -917,12 +967,12 @@ function CommandMenuDialog(props: {
     setFocusChat(record);
     setQuery("");
     inputRef.current?.focus();
-  }, []);
+  }, [setQuery]);
   const leaveChat = useCallback(() => {
     setFocusChat(null);
     setPickingWorkspace(false);
     setQuery("");
-  }, []);
+  }, [setQuery]);
 
   const onKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
@@ -1137,7 +1187,7 @@ function CommandMenuDialog(props: {
             ) : (
               groups.map((group) =>
                 group.items.length === 0 ? null : (
-                  <div key={group.label} role="group" aria-label={group.label}>
+                  <div key={group.key ?? group.label} role="group" aria-label={group.label}>
                     {groups.length > 1 || !focusChat ? (
                       <div className="truncate px-2.5 pt-2 pb-1 text-xs leading-4.5 font-medium text-fg-muted">
                         {group.label}

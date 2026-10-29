@@ -44,6 +44,8 @@ configurePageAppHost({
     : undefined,
   starters: hostExtension.starters ? createHostStartersResolver(hostExtension.starters) : undefined,
   sessionIndicator: hostExtension.sessionIndicator ? guardHostSessionIndicator(hostExtension.sessionIndicator) : undefined,
+  commandMenuProviders: hostExtension.commandMenuProviders,
+  utilities: hostExtension.utilities,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({

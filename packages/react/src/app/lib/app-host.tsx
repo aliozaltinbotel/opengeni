@@ -68,6 +68,8 @@ export type AppHost = Readonly<{
   productName?: string | undefined;
   starters?: ((context: HostExtensionContext) => readonly HostExtensionStarter[] | undefined) | undefined;
   sessionIndicator?: HostExtension["sessionIndicator"] | undefined;
+  commandMenuProviders?: HostExtension["commandMenuProviders"] | undefined;
+  utilities?: HostExtension["utilities"] | undefined;
   /** Narrows the workspaces the console's pickers and landing offer (see `hostFilteredWorkspaces`). */
   workspaceFilter?: HostExtension["workspaceFilter"] | undefined;
   /** The host extension's hooks, awaited (bounded) before sign-out and workspace switches. */
