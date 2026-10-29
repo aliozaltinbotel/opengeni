@@ -9,7 +9,7 @@ import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { lazySurface } from "@opengeni/react/app/lib/app-surfaces";
 import type { HostExtensionContext } from "@opengeni/react/app/host-extension";
 import { createHostMessageContextStore } from "@opengeni/react/app/lib/message-context";
-import { createHostMessageContextResolver } from "@/host-extension/registry";
+import { createHostMessageContextResolver, createHostStartersResolver } from "@/host-extension/registry";
 import { hostExtension } from "@/host-extension/startup";
 
 export const webAppApiHost: AppApiHost = {
@@ -40,6 +40,7 @@ configurePageAppHost({
         return { pathname, workspaceId: decodeURIComponent(workspaceId) };
       })
     : undefined,
+  starters: hostExtension.starters ? createHostStartersResolver(hostExtension.starters) : undefined,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({

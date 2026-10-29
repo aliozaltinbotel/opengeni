@@ -39,6 +39,7 @@ export type NativeDestination =
   | "variable-sets"
   | "environments";
 
+export type HostExtensionStarter = Readonly<{ id: string; label: string; prompt: string }>;
 export type HostExtensionContext = Readonly<{ workspaceId: string; pathname: string }>;
 export type HostExtensionPage = ComponentType<{ workspaceId: string }>;
 export type HostExtensionRoute = Readonly<{
@@ -123,6 +124,8 @@ export type HostExtension = Readonly<{
   productName?: string;
   /** Labelled, dismissible context resolved for each message and realtime start. */
   messageContext?: (context: HostExtensionContext) => MessageContextInput;
+  /** Replaces the native new-chat suggestions; up to eight, with unique ids. */
+  starters?: (context: HostExtensionContext) => readonly HostExtensionStarter[];
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;

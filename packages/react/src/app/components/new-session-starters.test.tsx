@@ -1,9 +1,14 @@
-import { afterAll, beforeAll, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { NEW_SESSION_STARTERS, NewSessionStarters } from "./new-session-starters";
+import { configurePageAppHost } from "../lib/app-host";
+import { useMemoryNavigation } from "../embed/memory-navigation";
+import type { NavigateFunction } from "../lib/navigation";
+import type { HostExtension } from "../host-extension";
+import * as registry from "../../../../../apps/web/src/host-extension/registry";
+import { ADD_AGENT_DEFAULT_PROMPT, NEW_SESSION_STARTERS, NewSessionStarters } from "./new-session-starters";
 
 let priorActEnvironmentDescriptor: PropertyDescriptor | undefined;
 
@@ -87,4 +92,84 @@ test("without the chat list, the new-chat page shows no recent chats or project 
   expect(route).toContain('const chatList = useSessionUiFeature("chatList");');
   expect(route).toContain("{chatList ? <RecentSessions workspaceId={workspaceId} /> : null}");
   expect(route).toMatch(/chatList \? \(\s*<SessionSetupStrip/);
+});
+
+afterEach(() => configurePageAppHost({ starters: undefined }));
+
+async function hostStarters(
+  run: (container: HTMLDivElement, navigate: NavigateFunction) => Promise<void>,
+  source: NonNullable<HostExtension["starters"]> = (context) => [{ id: "host", label: context.pathname, prompt: "Help with this page" }],
+  expectedPrompt: string | null = "Help with this page",
+) {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  let navigate: NavigateFunction | undefined;
+  expect(registry).toHaveProperty("createHostStartersResolver");
+  const resolved = registry.createHostStartersResolver(source);
+  const selected: string[] = [];
+  function Harness() {
+    const navigation = useMemoryNavigation({ initialPath: "/workspaces/w1/sessions", consoleOrigin: "https://example.test", handles: () => true });
+    navigate = navigation.useNavigate();
+    configurePageAppHost({ starters: resolved, navigation });
+    return <NewSessionStarters workspaceId="w1" set="product" onSelect={(prompt) => selected.push(prompt)} />;
+  }
+  try {
+    await act(async () => root.render(<Harness />));
+    expect(navigate).toBeDefined();
+    await run(container, (options) => { if (!navigate) throw new Error("not mounted"); return navigate(options); });
+    await act(async () => container.querySelector("button")?.click());
+    expect(selected).toEqual(expectedPrompt === null ? [] : [expectedPrompt]);
+  } finally { await act(async () => root.unmount()); }
+}
+
+test("host starters replace the developer list", async () => {
+  await hostStarters(async (container) => {
+    expect(container.querySelectorAll("button")).toHaveLength(1);
+    expect(container.textContent).not.toContain("Connect GitHub");
+    expect(container.textContent).not.toContain("Add an agent");
+  });
+});
+test("starters follow the context's pathname", async () => {
+  await hostStarters(async (container, navigate) => {
+    expect(container.textContent).toContain("/workspaces/w1/sessions");
+    await act(async () => navigate({ to: "/workspaces/w1/overview" }));
+    expect(container.textContent).toContain("/workspaces/w1/overview");
+  });
+});
+test("a starters callback that throws falls back to the built-in list", async () => {
+  await hostStarters(async (container) => {
+    expect(container.querySelectorAll("button, a[data-starter]")).toHaveLength(6);
+    expect(container.textContent).toContain("Add an agent");
+  }, () => { throw new Error("host unavailable"); }, ADD_AGENT_DEFAULT_PROMPT);
+});
+test("duplicate ids or more than 8 fall back and warn once", async () => {
+  const starter = { id: "same", label: "Starter", prompt: "Help" };
+  const warning = spyOn(console, "warn").mockImplementation(() => undefined);
+  try {
+    for (const items of [[starter, starter], Array.from({ length: 9 }, (_, i) => ({ ...starter, id: String(i) }))]) {
+      warning.mockClear();
+      await hostStarters(async (container, navigate) => {
+        expect(container.querySelectorAll("button, a[data-starter]")).toHaveLength(6);
+        await act(async () => navigate({ to: "/workspaces/w1/next" }));
+        expect(warning.mock.calls).toEqual([["HOST_STARTERS_FAILED"]]);
+      }, () => items, ADD_AGENT_DEFAULT_PROMPT);
+    }
+  } finally { warning.mockRestore(); }
+});
+test("installation never invokes a workspace-dependent starter callback", () => {
+  let calls = 0;
+  expect(() => registry.validateHostExtension({ id: "host", starters: () => { calls += 1; throw new Error("workspace required"); } })).not.toThrow();
+  expect(calls).toBe(0);
+});
+test("an intentional empty host list shows no starters", async () => {
+  await hostStarters(async (container) => expect(container.querySelectorAll("button, a[data-starter]")).toHaveLength(0), () => [], null);
+});
+test("stock console without an extension is unchanged", async () => {
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<NewSessionStarters onSelect={() => undefined} />));
+    expect(container.querySelectorAll("button")).toHaveLength(6);
+    expect(container.textContent).toContain("Connect GitHub");
+  } finally { await act(async () => root.unmount()); }
 });

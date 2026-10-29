@@ -18,7 +18,7 @@ import {
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
 import type { ToolRegistryEntry } from "../../timeline";
-import type { HostExtension, HostExtensionContext, NativeDestination } from "../host-extension";
+import type { HostExtension, HostExtensionContext, HostExtensionStarter, NativeDestination } from "../host-extension";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import { createHostMessageContextStore, type MessageContextPill, type MessageContextStore } from "./message-context";
@@ -65,6 +65,7 @@ export type AppHost = Readonly<{
   brand?: HostExtension["brand"] | undefined;
   /** The product name the console shows in place of the stock one. */
   productName?: string | undefined;
+  starters?: ((context: HostExtensionContext) => readonly HostExtensionStarter[] | undefined) | undefined;
   /** Narrows the workspaces the console's pickers and landing offer (see `hostFilteredWorkspaces`). */
   workspaceFilter?: HostExtension["workspaceFilter"] | undefined;
   /** The host extension's hooks, awaited (bounded) before sign-out and workspace switches. */

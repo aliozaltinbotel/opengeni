@@ -1,5 +1,5 @@
-import { Link } from "../lib/navigation";
-import { useNativeDestinationVisible } from "../lib/app-host";
+import { Link, useLocation } from "../lib/navigation";
+import { useAppHost, useNativeDestinationVisible, type AppHost } from "../lib/app-host";
 import { Blocks, Clock3, PanelsTopLeft, PlayCircleIcon, Search } from "lucide-react";
 import { linearLogo, slackLogo } from "./new-session-starter-logos";
 import { Button } from "../../ui/button";
@@ -81,7 +81,19 @@ const STARTER_CLASS =
  * answer: people adding agents to a product get their own agent and the
  * playground demo first; everyone else gets the general six.
  */
-export function NewSessionStarters({
+type NewSessionStartersProps = {
+  onSelect: (prompt: string) => void;
+  disabled?: boolean | undefined;
+  set?: StarterSet | undefined;
+  workspaceId?: string | undefined;
+};
+
+export function NewSessionStarters(props: NewSessionStartersProps) {
+  const source = useAppHost().starters;
+  return source ? <HostStarters {...props} source={source} /> : <NativeSessionStarters {...props} />;
+}
+
+function NativeSessionStarters({
   onSelect,
   disabled = false,
   set = "general",
@@ -167,6 +179,23 @@ export function NewSessionStarters({
             </Button>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+function HostStarters({ source, ...props }: NewSessionStartersProps & { source: NonNullable<AppHost["starters"]> }) {
+  const { pathname } = useLocation();
+  const items = source({ workspaceId: props.workspaceId ?? "", pathname });
+  if (items === undefined) return <NativeSessionStarters {...props} />;
+  if (items.length === 0) return null;
+  return (
+    <section className="mt-8" aria-label="Starter suggestions">
+      <h2 className="mb-2 px-0.5 text-2xs font-semibold uppercase tracking-wider text-fg">Suggestions</h2>
+      <div className="grid auto-rows-fr grid-cols-1 gap-2 sm:grid-cols-2">
+        {items.map((item) => (
+          <Button key={item.id} type="button" variant="outline" disabled={props.disabled} className={STARTER_CLASS} onClick={() => props.onSelect(item.prompt)}>{item.label}</Button>
+        ))}
       </div>
     </section>
   );
