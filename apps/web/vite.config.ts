@@ -73,6 +73,19 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The workspace rail and the lazy settings rail both render
+              // these destination links. Entry-aware settings grouping
+              // otherwise places them in a chunk that a direct chat load
+              // fetches and that imports the session glyph chunk while that
+              // chunk imports it back, so the icon table workspace-config-link
+              // builds at load reads icons that are not defined yet. Keep them
+              // in a leaf.
+              name: "workspace-rail-links",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/](?:workspace-config-link|host-extension-nav-link)\.tsx$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // OpenGeniProvider's session context is session-only. Startup reads
               // small helpers from the same entry-aware subgroup, so keep the
               // provider in a leaf that stays behind the session routes.
