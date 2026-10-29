@@ -656,7 +656,7 @@ describe("host extension registry", () => {
       [[{ id: "insights", group: "chat" }], "navOverrides[0].group"],
     ])("refuses the settings-group overrides %p at %s", (navOverrides, field) => {
       expectInvalid(
-        extensionWith({ settingsGroups: [{ id: "setup", label: "Setup" }], navOverrides }),
+        { id: "fixture", settingsGroups: [{ id: "setup", label: "Setup" }], navOverrides },
         field,
       );
     });

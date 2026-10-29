@@ -206,7 +206,6 @@ describe("composePrimaryNav", () => {
   test("an entry moved into a settings group leaves the primary rail", () => {
     const composed = composePrimaryNav(
       {
-        settingsGroups: [{ id: "setup", label: "Setup" }],
         navOverrides: [
           { id: "state", label: "Know-how", settingsGroup: "setup" },
           { id: "automations", settingsGroup: "setup" },
