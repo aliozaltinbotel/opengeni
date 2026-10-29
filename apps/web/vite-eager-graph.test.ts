@@ -201,4 +201,24 @@ describe("web build configuration", () => {
     const source = await Bun.file(path.join(import.meta.dir, "vite.config.ts")).text();
     expect(source).toContain('eagerGraphPlugin({ directRoutes: ["src/routes/session-route.tsx"]');
   });
+
+  test("keeps the workspace destination catalog out of entry-aware settings merging", async () => {
+    // Startup reads this catalog. In an entry-aware group, unrelated import
+    // changes can merge it into a lazy settings chunk that the initial load
+    // then downloads in full.
+    const { default: config } = await import("./vite.config");
+    const output = config.build?.rolldownOptions?.output;
+    const codeSplitting = Array.isArray(output) ? undefined : output?.codeSplitting;
+    const groups = typeof codeSplitting === "object" ? (codeSplitting.groups ?? []) : [];
+    const catalog = path.join(import.meta.dir, "src/components/rail/workspace-nav-data.ts");
+    const matching = groups
+      .filter((group) => group.test instanceof RegExp && group.test.test(catalog))
+      .sort((left, right) => (right.priority ?? 0) - (left.priority ?? 0));
+    expect(matching[0]).toMatchObject({
+      name: "workspace-nav-data",
+      includeDependenciesRecursively: false,
+    });
+    expect(matching[0]?.entriesAware).toBeUndefined();
+    expect(matching[1]?.priority ?? 0).toBeLessThan(matching[0]?.priority ?? 0);
+  });
 });
