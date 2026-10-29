@@ -1676,6 +1676,41 @@ Browser and desktop controller requests also admit the configured
 `OPENGENI_PUBLIC_BASE_URL` and `OPENGENI_WEB_BASE_URL` origins directly; this
 does not grant those origins credentialed cross-origin responses.
 
+For a managed console on a different **same-site** origin, legacy sessions can
+opt in with `OPENGENI_CONSOLE_ALLOWED_ORIGINS`, a comma-separated list of exact
+HTTP(S) origins. Startup refuses wildcard, opaque, malformed, credential-bearing,
+or noncanonical URL entries by setting name. The list supplies credentialed CORS,
+Better Auth origin trust, and JSON browser-mutation admission; only these explicit
+console origins may use same-site fetch metadata. Existing JSON,
+origin and authentication checks still apply. An unlisted origin receives no
+credentialed CORS unless separately permitted by the existing CORS regex, and a
+present untrusted Origin is refused before host-token minting when this setting
+is enabled. Bearer credentials still cannot mint host tokens. Unset preserves
+stock behavior.
+
+Host checklist for `https://console.example` → `https://runtime.example`, sharing
+parent domain `example`:
+
+- Set `OPENGENI_PRODUCT_ACCESS_MODE=managed` and the ordinary managed-auth secrets.
+- Build the console with `VITE_API_BASE_URL=https://runtime.example`.
+- Set `OPENGENI_PUBLIC_BASE_URL=https://runtime.example` and
+  `OPENGENI_WEB_BASE_URL=https://console.example`.
+- Set `OPENGENI_CONSOLE_ALLOWED_ORIGINS=https://console.example` and retain
+  `OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy`.
+- If parent-domain cookies are desired, reuse
+  `OPENGENI_BETTER_AUTH_COOKIE_DOMAIN=.example`; without it cookies remain
+  host-only. SameSite stays `Lax`, HTTPS sets `Secure`, and `Partitioned` remains
+  absent. No SameSite override is needed for HTTPS sibling origins.
+- For host-token minting, set `OPENGENI_HOST_TOKEN_AUDIENCE=https://host.example/api`
+  to the host verifier's expected audience. Browser requests use
+  `credentials: "include"`.
+
+This support covers same-site origins, not unrelated sites requiring third-party
+cookies or SameSite=None. Startup refuses a nonempty console-origin list with
+`dual` or `broker`; those modes keep their single canonical HTTPS web/API origin
+and existing rollout requirements. This setting does not change their cookies,
+CSRF admission, or session-set behavior.
+
 The unauthenticated local development API (`OPENGENI_PRODUCT_ACCESS_MODE=local`
 with the default `OPENGENI_ENVIRONMENT=local`) uses a stricter browser boundary
 instead: no wildcard CORS, browser `Origin`s limited to its web origin, its own

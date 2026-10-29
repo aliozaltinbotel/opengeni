@@ -2138,6 +2138,8 @@ const SettingsSchema = z.object({
   betterAuthSecret: z.string().optional(),
   betterAuthAllowedHosts: z.string().default(""),
   betterAuthCookieDomain: z.string().optional(),
+  // Exact browser origins allowed to use the managed console across origins.
+  consoleAllowedOrigins: z.string().optional(),
   betterAuthTrustedOrigins: z.string().default(""),
   managedAuthGoogleClientId: z.string().optional(),
   managedAuthGoogleClientSecret: z.string().optional(),
@@ -5985,6 +5987,7 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     betterAuthSecret: optional("OPENGENI_BETTER_AUTH_SECRET"),
     betterAuthAllowedHosts: optional("OPENGENI_BETTER_AUTH_ALLOWED_HOSTS"),
     betterAuthCookieDomain: optional("OPENGENI_BETTER_AUTH_COOKIE_DOMAIN"),
+    consoleAllowedOrigins: optional("OPENGENI_CONSOLE_ALLOWED_ORIGINS"),
     betterAuthTrustedOrigins: optional("OPENGENI_BETTER_AUTH_TRUSTED_ORIGINS"),
     managedAuthGoogleClientId: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_ID"),
     managedAuthGoogleClientSecret: optional("OPENGENI_MANAGED_AUTH_GOOGLE_CLIENT_SECRET"),
@@ -11175,6 +11178,35 @@ export function localAllowedOriginEntries(raw: string | undefined): string[] {
   return origins;
 }
 
+/** Exact, canonical origins only: no wildcard or URL normalization can widen console trust. */
+export function consoleAllowedOriginEntries(raw: string | undefined): string[] {
+  const origins = new Set<string>();
+  for (const entry of (raw ?? "").split(",")) {
+    const value = entry.trim();
+    if (!value) continue;
+    let url: URL | undefined;
+    try {
+      url = new URL(value);
+    } catch {
+      // Report the setting, never untrusted URL credentials or content.
+    }
+    if (
+      !url ||
+      !["http:", "https:"].includes(url.protocol) ||
+      url.origin !== value ||
+      url.hostname.includes("*") ||
+      url.username ||
+      url.password
+    ) {
+      throw new Error(
+        "OPENGENI_CONSOLE_ALLOWED_ORIGINS must contain exact http(s) origins without paths, credentials or wildcards",
+      );
+    }
+    origins.add(value);
+  }
+  return [...origins];
+}
+
 const LOCAL_SANDBOX_API_ROUTES: readonly RegExp[] = [
   // Codemode calls, journal reads, catalog, and the Site/SDK proxy.
   /^\/v1\/workspaces\/[^/]+\/codemode(?:\/|$)/u,
@@ -11279,6 +11311,12 @@ export function assertHostWebhookSettings(
 }
 
 function validateSettings(settings: Settings, source: NodeJS.ProcessEnv = process.env): void {
+  const consoleOrigins = consoleAllowedOriginEntries(settings.consoleAllowedOrigins);
+  if (consoleOrigins.length > 0 && settings.managedAuthSessionSetMode !== "legacy") {
+    throw new Error(
+      "OPENGENI_CONSOLE_ALLOWED_ORIGINS requires OPENGENI_MANAGED_AUTH_SESSION_SET_MODE=legacy",
+    );
+  }
   temporalConnectionOptions(settings);
   localAllowedOriginEntries(settings.localAllowedOrigins);
   validateSitesDomain(settings);

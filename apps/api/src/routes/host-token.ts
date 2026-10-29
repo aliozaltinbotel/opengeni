@@ -1,4 +1,4 @@
-import { canonicalPublicOrigin } from "@opengeni/config";
+import { canonicalPublicOrigin, consoleAllowedOriginEntries } from "@opengeni/config";
 import {
   requireAccessGrantAuthorization,
   type AccessGrantAuthorization,
@@ -15,6 +15,8 @@ import {
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { HTTPException } from "hono/http-exception";
+
+import { isAllowedBrowserOrigin } from "../http/cors";
 
 import {
   hostSessionTokenJwks,
@@ -59,6 +61,11 @@ export const HOST_TOKEN_REFUSALS = {
     status: 404,
     code: "HOST_TOKEN_DISABLED",
     message: "Host session tokens are disabled",
+  },
+  originRejected: {
+    status: 403,
+    code: "HOST_TOKEN_ORIGIN_REJECTED",
+    message: "Browser origin is not allowed",
   },
   workspaceInvalid: {
     status: 400,
@@ -286,6 +293,14 @@ async function mintHostSessionToken(
   deps: ApiRouteDeps,
   configuration: HostTokenConfiguration,
 ): Promise<{ token: string; expiresAt: string }> {
+  const origin = context.req.header("origin");
+  if (
+    origin !== undefined &&
+    consoleAllowedOriginEntries(deps.settings.consoleAllowedOrigins).length > 0 &&
+    !isAllowedBrowserOrigin(origin, deps.settings)
+  ) {
+    throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.originRejected);
+  }
   const request = hostTokenRequest(context);
   // A browser session only: bearer credentials never mint a host token.
   if (context.req.header("authorization") || !context.req.header("cookie")) {
