@@ -1,8 +1,11 @@
+import { startupEnglishMessages } from "./startup-en";
+
 /**
  * The complete English catalog: the default text of every component, and the reference for
  * translations. Keys are grouped by the component or module that renders them.
  */
 export const englishMessages = {
+  ...startupEnglishMessages,
   "clerkRecovery.resetTitle": "Account change could not finish",
   "clerkRecovery.title": "Choose an organization",
   "clerkRecovery.description":
@@ -1685,10 +1688,8 @@ export const englishMessages = {
   "fileBrowser.retry": "Retry",
   "fileBrowser.thisDirectoryIsEmpty": "This directory is empty",
   "fileBrowser.workspaceFiles": "Workspace files",
-  "formDialog.cancel": "Cancel",
   "formDialog.close": "Close",
   "formDialog.loading": "Loading",
-  "formDialog.working": "Working…",
   "generatedVideoPlayer.generatedVideo": "Generated video",
   "generatedVideoPlayer.loadingLowercase": "Loading {lowerCase}",
   "generatedVideoPlayer.videoPlaybackFailed": "Video playback failed.",
@@ -1890,43 +1891,18 @@ export const englishMessages = {
     "The connected subscription kept running out of capacity, so automatic retries stopped. Retry, or send a message to continue, once it has capacity again.",
   "lib.format.days": "{count}d",
   "lib.format.hours": "{count}h",
-  "lib.format.messageReferenceCorrelationid": "{message} Reference: {correlationId}.",
   "lib.format.minutes": "{count}m",
-  "lib.format.accountUnavailable":
-    "A selected connector account is unavailable. Review accounts in + → Connectors, then edit and send your saved message.",
-  "lib.format.modelUnavailable":
-    "This chat's model is no longer available. Choose another model to continue. Your message is saved.",
   "lib.format.now": "now",
   "lib.format.outOfCreditsThisWorkspace":
     "Your remaining credits don't cover this model. Choose a model they cover or add credits. The conversation is preserved.",
   "lib.format.providerBlockedRequest": "The model provider blocked this request.",
   "lib.format.providerBlockedRequestDetail": "The model provider blocked this request. {detail}",
-  "lib.format.reconcileBeforeRetry":
-    "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
   "lib.format.seconds": "{count}s",
-  "lib.format.sessionUsageLimitReached":
-    "This task's usage limit is reached. Your message is saved.",
   "lib.format.theModelProviderRefusedThe":
     "The model provider refused the request: this deployment's provider quota is exhausted.",
   "lib.format.theModelProviderRejectedThis":
     "The model provider rejected this deployment's engine credentials. Sending messages won't help until the deployment's engine configuration is fixed.",
   "lib.format.theServiceEncounteredADatabase": "The service encountered a database error.",
-  "lib.format.thisClientCannotResumeThe":
-    "This client cannot resume the workspace. Ask your administrator for a control-capable client.",
-  "lib.format.thisSiteSAssistantCan":
-    "This Site's assistant can't do that for you. Your message is saved.",
-  "lib.format.thisSiteSAssistantHas":
-    "This Site's assistant has reached its usage limit for now. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs":
-    "This Site's assistant is busy. Try again in a moment. Your message is saved.",
-  "lib.format.thisSiteSAssistantIs2":
-    "This Site's assistant is paused for visitors right now. Your message is saved.",
-  "lib.format.usageLimitReachedAWorkspace":
-    "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.",
-  "lib.format.workspaceUsageLimitReachedAn":
-    "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
-  "lib.format.yourOrganizationDoesnTHave":
-    "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved.",
   "lib.providerRecovery.anImageFromEarlierIn":
     "An image from earlier in this conversation can't be read from storage",
   "lib.providerRecovery.opengeniToolServiceUnavailable":
@@ -3518,7 +3494,6 @@ export const englishMessages = {
   "openGeniChat.openChats": "Open chats",
   "openGeniChat.send": "Send",
   "openGeniLinks.fileIsTooLargeTo": "File is too large to download here.",
-  "organizationModel.orgShortaccountid": "Org {shortAccountId}",
   "pierreDiff.diffForPath": "Diff for {path}",
   "pierreDiff.loadingDiff": "Loading diff…",
   "pierreDiff.noChanges": "No changes",

@@ -131,7 +131,13 @@ const budgets = {
   // chunk into two (807 gzip bytes). Aggregate initial gzip stays under its cap.
   // Leaf chunks that keep module-load reads out of chunk cycles (session status
   // model, usage allowance copy) add two files to the initial graph.
-  initialFiles: 20,
+  // Base c71567250 already loads 36 initial assets after the guarded leaf
+  // decomposition (contract tables, navigation data and shared runtimes).
+  // Preserve those deliberate boundaries that keep lazy code out of startup.
+  // Both Bun 1.4.4 Linux/x64 startup-catalog-split builds still load 36 assets,
+  // with their bytes below the original raw/gzip caps. Only this count is
+  // refreshed; any future leaf-count increase requires its own evidence.
+  initialFiles: 36,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,
@@ -708,6 +714,15 @@ const effectiveBudgets = {
     // 2,927,652 -> 2,951,651 raw (+23,999) and 836,027 -> 845,410 gzip
     // (+9,383), 51 files. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(2_951_651, 1.5 * kib),
+    // The last aggregate snapshot is 11779ba7d (#4287, October 14).
+    // Localization #4731, the shared SessionApp #5252, recording client #5805
+    // and dictation #6022 subsequently grew the statically imported graph.
+    // After the synchronous startup-catalog split on the c71567250 base,
+    // Bun 1.4.4 Linux/x64 measures 3,564,805/1,018,108 raw/gzip standalone
+    // and 3,564,101/1,017,405 with the generic host fixture.
+    // Retain the existing headroom and configured-URL policies, without moving
+    // lazy code into this graph or changing either structural build guard.
+    wholeKibEnvelope(3_564_823, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -809,6 +824,8 @@ const effectiveBudgets = {
     wholeKibEnvelope(838_954, 1.5 * kib),
     // Per-task usage limits, as measured in the raw bound above.
     wholeKibEnvelope(845_410, 1.5 * kib),
+    // Same startup-split two-mode measurement documented above; bind the maximum.
+    wholeKibEnvelope(1_018_108, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
@@ -818,6 +835,9 @@ const effectiveBudgets = {
     // Same feature growth; most added files are the evaluation-order leaf
     // chunks that keep chunk cycles from reading uninitialized bindings.
     52,
+    // The startup core/shard leaf keeps the full fallback off startup and
+    // brings the standalone/composed direct-session graphs to 81/80 assets.
+    81,
   ),
 } as const;
 
