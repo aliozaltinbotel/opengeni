@@ -60,6 +60,15 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The installed indicator guard is startup code, while its frame
+              // and recovery boundary also serve lazy session views. Keep this
+              // small owner out of the entry-aware session subgroups.
+              name: "host-session-indicator",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/](?:session-indicator\.tsx|session[\\/]failure-recovery-boundary\.tsx)$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // The startup routes read the workspace destination catalog, and
               // the lazy settings hub reaches it too. Entry-aware settings
               // grouping otherwise merges this small subgroup into the Meetings

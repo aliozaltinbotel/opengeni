@@ -2,12 +2,15 @@ import { Component, type ReactNode } from "react";
 
 /** A failed recovery-options chunk must never take the conversation down. */
 export class FailureRecoveryBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode },
+  { children: ReactNode; fallback: ReactNode; onError?: (() => void) | undefined },
   { failed: boolean }
 > {
   state = { failed: false };
   static getDerivedStateFromError() {
     return { failed: true };
+  }
+  componentDidCatch() {
+    this.props.onError?.();
   }
   render() {
     return this.state.failed ? this.props.fallback : this.props.children;

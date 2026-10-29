@@ -62,6 +62,7 @@ export type AppHost = Readonly<{
   brand?: HostExtension["brand"] | undefined;
   /** The product name the console shows in place of the stock one. */
   productName?: string | undefined;
+  sessionIndicator?: HostExtension["sessionIndicator"] | undefined;
   /** Narrows the workspaces the console's pickers and landing offer (see `hostFilteredWorkspaces`). */
   workspaceFilter?: HostExtension["workspaceFilter"] | undefined;
   /** The host extension's hooks, awaited (bounded) before sign-out and workspace switches. */

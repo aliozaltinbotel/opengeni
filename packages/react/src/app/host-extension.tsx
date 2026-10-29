@@ -120,6 +120,8 @@ export type HostExtensionNavOverride = Readonly<{
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
+  /** Persistent host information above every session and the new-chat page. */
+  sessionIndicator?: ComponentType<{ workspaceId: string; sessionId: string | null }>;
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;

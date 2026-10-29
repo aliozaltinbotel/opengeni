@@ -7,6 +7,7 @@ import "@/navigation-host";
 import type { AppApiHost } from "@opengeni/react/app/lib/app-api";
 import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { lazySurface } from "@opengeni/react/app/lib/app-surfaces";
+import { guardHostSessionIndicator } from "@opengeni/react/app/components/session-indicator";
 import { hostExtension } from "@/host-extension/startup";
 
 export const webAppApiHost: AppApiHost = {
@@ -24,6 +25,7 @@ configurePageAppHost({
   productName: hostExtension.productName,
   workspaceFilter: hostExtension.workspaceFilter,
   lifecycle: hostExtension.lifecycle,
+  sessionIndicator: hostExtension.sessionIndicator ? guardHostSessionIndicator(hostExtension.sessionIndicator) : undefined,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({

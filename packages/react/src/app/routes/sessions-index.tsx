@@ -1,3 +1,4 @@
+import { HostSessionIndicatorFrame } from "../components/session-indicator";
 import { useAppApi } from "../lib/app-api";
 import { useNativeDestinationVisible } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
@@ -242,11 +243,13 @@ export function SessionsIndexRoute({
   const { accessKeyVersion, accessContext } = useAppContext();
   useForgetLastSession(accessContext.subjectId, workspaceId);
   return (
+    <HostSessionIndicatorFrame workspaceId={workspaceId} sessionId={null}>
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}
       workspaceId={workspaceId}
       launch={launch}
     />
+    </HostSessionIndicatorFrame>
   );
 }
 

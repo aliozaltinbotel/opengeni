@@ -131,6 +131,15 @@ function component(value: unknown, field: string): void {
   }
 }
 
+function checkSessionIndicator(value: unknown): void {
+  if (value === undefined) return;
+  component(value, "sessionIndicator");
+  const wrappers: readonly symbol[] = [Symbol.for("react.memo"), Symbol.for("react.forward_ref"), Symbol.for("react.lazy")];
+  if (isRecord(value) && !(typeof value.$$typeof === "symbol" && wrappers.includes(value.$$typeof))) {
+    fail("sessionIndicator", "must be a supported React component");
+  }
+}
+
 function list(value: unknown, field: string): readonly unknown[] {
   if (value === undefined) return [];
   return Array.isArray(value) ? value : fail(field, "must be an array");
@@ -328,6 +337,7 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
+  checkSessionIndicator(fields.sessionIndicator);
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   const groups = settingsGroupIds(fields.settingsGroups);
