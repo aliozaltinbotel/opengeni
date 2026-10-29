@@ -29,8 +29,9 @@ export type CanonicalHumanExactLoginBinding = {
  * The identity's active login binding as hosts see it: the binding the
  * identity names as active, while that binding is itself `active`; null
  * otherwise. `id` changes when another sign-in method becomes active;
- * `revision` increases on that binding's own state changes. The host identity
- * lookup and the host session token's `login_binding_*` claims both use it.
+ * `revision` increases on that binding's own state changes: the same rule the
+ * host identity lookup's routine applies. The host session token's
+ * `login_binding_*` claims use it.
  */
 export function activeCanonicalHumanLoginBinding(
   projection: Pick<CanonicalHumanIdentityProjectionType, "activeIdentity" | "loginBindings">,

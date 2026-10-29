@@ -1528,7 +1528,7 @@ type OrganizationSessionPolicy = {
   `opengeni_private.set_host_organization_session_recordings`, called right
   after the policy routine for the row this operation id wrote; one that leaves
   it out keeps the stored setting, and the body digest includes it only when
-  named. That routine's runtime EXECUTE is withheld for one release too: until
+  named. That routine's runtime EXECUTE is withheld for one release: until
   it is granted, a command naming `recordings` answers `503
   HOST_SESSION_POLICY_UNAVAILABLE` and records nothing, and other commands are
   unchanged. Denied, these answer `403` with `details.code

@@ -10,9 +10,9 @@ import * as schema from "./schema";
 // it may use). Whether a message waits is decided live from the chat's current
 // machine, never frozen at acceptance.
 //
-// The owner lookup is a runtime definer that 0978 creates withheld: a release
-// that does not know it rejects a runtime EXECUTE grant on it, so a later
-// migration grants it once this release is the previous one. Until then the
+// The owner lookup is a runtime definer that 0978 created withheld (a release
+// that did not know it rejected a runtime EXECUTE grant on it); 1019 grants it.
+// The grant is still checked at run time: on a database without it, the
 // lookup reports no personal machine, nothing waits, and the chat behaves as
 // before (the admission trigger still refuses the message when it is claimed).
 
@@ -26,8 +26,8 @@ export const WAITED_FOR_MACHINE_OWNER_MODEL_CONTEXT =
 const MACHINE_OWNER_LOOKUP = "opengeni_private.session_machine_owner_subject_v1(uuid, uuid, uuid)";
 
 /**
- * Whether the runtime may call the machine-owner lookup yet. False while its
- * EXECUTE grant is withheld (or the routine is absent). A separate statement:
+ * Whether the runtime may call the machine-owner lookup. False without its
+ * EXECUTE grant (or the routine). A separate statement:
  * EXECUTE is checked when a statement starts, so a guard inside the calling
  * statement would not avoid the permission error.
  */
@@ -43,7 +43,7 @@ export async function machineOwnerLookupGranted(db: Pick<Database, "execute">): 
 /**
  * The person who owns the personal machine the chat currently runs on, or null
  * when it runs on a shared machine, a cloud machine or none (or the caller's
- * scope does not match, or the lookup is not granted yet). Explanation only:
+ * scope does not match, or the lookup is not granted). Explanation only:
  * it authorizes nothing.
  */
 export async function sessionMachineOwnerSubject(

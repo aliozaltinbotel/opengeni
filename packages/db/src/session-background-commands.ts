@@ -1613,10 +1613,10 @@ const REARM_UNANSWERED_CONNECTED_COMMANDS =
  * pass asks the runner, which is talking now: an unknown operation answers
  * lost and settles. Returns how many commands were made due.
  *
- * 0984 creates the routine with its runtime EXECUTE withheld for one release
- * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES). Until a later migration
- * grants it, this makes nothing due and returns 0. The grant is checked in a
- * separate statement: EXECUTE is checked when a statement starts.
+ * 0984 created the routine with its runtime EXECUTE withheld for one release;
+ * 1019 grants it. The grant is still checked at run time: without it, this
+ * makes nothing due and returns 0. The check is a separate statement: EXECUTE
+ * is checked when a statement starts.
  */
 export async function rearmUnansweredConnectedCommands(
   db: Database,
