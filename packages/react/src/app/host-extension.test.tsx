@@ -10,7 +10,10 @@ import {
   composePrimaryNav,
   isBuiltInToolCardName,
   isWorkspaceSegmentHidden,
+  NATIVE_NAV_IDS,
   nativeDestinationsOfSegment,
+  nativeEntriesInSettingsGroup,
+  nativeNavOverride,
   workspaceLanding,
 } from "./host-extension";
 import { AppHostProvider, useNativeDestinationVisible, type AppHost } from "./lib/app-host";
@@ -198,6 +201,43 @@ describe("composePrimaryNav", () => {
       "Artifacts",
       "Operations",
     ]);
+  });
+
+  test("an entry moved into a settings group leaves the primary rail", () => {
+    const composed = composePrimaryNav(
+      {
+        settingsGroups: [{ id: "setup", label: "Setup" }],
+        navOverrides: [
+          { id: "state", label: "Know-how", settingsGroup: "setup" },
+          { id: "automations", settingsGroup: "setup" },
+        ],
+      },
+      native,
+    );
+    expect(labels(composed.peers)).toEqual(["Inbox", "Capabilities", "Meetings", "Artifacts"]);
+    expect(composed.chat).toEqual([]);
+  });
+
+  test("nativeEntriesInSettingsGroup lists a group's native entries in native order", () => {
+    const extension = {
+      settingsGroups: [
+        { id: "setup", label: "Setup" },
+        { id: "agent", label: "Agent" },
+      ],
+      hiddenNativeDestinations: ["meetings"],
+      navOverrides: [
+        { id: "insights", label: "Agent usage", settingsGroup: "setup" },
+        { id: "plugins", settingsGroup: "setup" },
+        { id: "state", settingsGroup: "agent" },
+        { id: "meetings", settingsGroup: "setup" },
+      ],
+    } as const;
+    expect(NATIVE_NAV_IDS).toContain("insights");
+    expect(nativeEntriesInSettingsGroup(extension, "setup")).toEqual(["plugins", "insights"]);
+    expect(nativeEntriesInSettingsGroup(extension, "agent")).toEqual(["state"]);
+    expect(nativeEntriesInSettingsGroup({}, "setup")).toEqual([]);
+    expect(nativeNavOverride(extension, "insights")?.label).toBe("Agent usage");
+    expect(nativeNavOverride(extension, "artifacts")).toBeUndefined();
   });
 
   test("workspaceLanding is the extension's landing, else sessions", () => {

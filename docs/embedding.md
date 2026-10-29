@@ -2415,7 +2415,7 @@ which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
 
 `navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
-`plugins`, `state`, `automations`, `meetings`, `artifacts`): `label` renames
+`plugins`, `state`, `automations`, `meetings`, `artifacts`, `insights`): `label` renames
 one wherever the rail draws it (expanded, collapsed, folded under More),
 `group: "chat"` moves it into the chat group right after "New session" (its own
 `role="group"` with a rule before the other entries), and `group: "hidden"`
@@ -2424,6 +2424,20 @@ override of a destination the extension hides is refused.
 `composePrimaryNav(extension, nativeItems, context?)` is the pure resolver the
 rail uses; it imports no React or DOM code, so a host can run it in a test or
 a child process.
+
+`insights` is a `NativeNavId` too: the workspace Insights page, which the
+settings rail lists in the workspace section. Its `label` renames it there and
+in the settings header, and `group` is `"peer"` (its own place) or
+`"hidden"`; `"chat"` is refused. `settingsGroup` (one of the extension's
+`settingsGroups`) moves a native entry into that group of the settings rail,
+listed first and in native order, before the group's own `nav` items, and off
+its native place (the primary rail, or the workspace section for Insights);
+it cannot be combined with `group`, the inbox stays on the primary rail, and
+Insights keeps its `workspace:admin` gate there.
+`nativeEntriesInSettingsGroup(extension, groupId)` and
+`nativeNavOverride(extension, id)` resolve this without React or a DOM. A
+host nav item placed in a group (`placement: { settingsGroup }`) is
+validated against `settingsGroups` the same way.
 
 `landing` is the workspace-relative page the console opens for a workspace,
 both from the root (`/`) and from `workspaces/$workspaceId/`: `"sessions"`
