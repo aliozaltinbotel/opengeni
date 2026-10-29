@@ -131,7 +131,13 @@ const budgets = {
   // chunk into two (807 gzip bytes). Aggregate initial gzip stays under its cap.
   // Leaf chunks that keep module-load reads out of chunk cycles (session status
   // model, usage allowance copy) add two files to the initial graph.
-  initialFiles: 20,
+  // Base c71567250 already loads 36 initial assets after the guarded leaf
+  // decomposition (contract tables, navigation data and shared runtimes).
+  // Preserve those deliberate boundaries that keep lazy code out of startup.
+  // Both Bun 1.4.4 Linux/x64 startup-catalog-split builds still load 36 assets,
+  // with their bytes below the original raw/gzip caps. Only this count is
+  // refreshed; any future leaf-count increase requires its own evidence.
+  initialFiles: 36,
   // The OpenSandbox session work on current main measures 2,112,678 bytes in
   // the Linux/x64 CI production build. That change advanced only the
   // direct-session raw envelope to the next whole KiB; its gzip, file-count,
