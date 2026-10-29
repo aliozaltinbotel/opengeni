@@ -114,6 +114,27 @@ describe("the runtime's direct access", () => {
     expect((await getOrganizationSessionPolicy(client.db, id))?.source).toBe("governed_default");
   });
 
+  test("the runtime's governed default cannot name recordings (1023)", async () => {
+    const id = await organization();
+    for (const recordings of ["allowed", "denied"]) {
+      expect(
+        await runtimeStatement(
+          id,
+          sql`insert into organization_session_policies
+              (account_id, attachments, tool_family_mode, tool_families, source, recordings)
+            values (${id}::uuid, 'disabled', 'deny',
+              array['shell', 'codemode', 'browser', 'computerUse']::text[], 'governed_default',
+              ${recordings})`,
+        ),
+      ).toBe("42501");
+    }
+    expect(await getOrganizationSessionPolicy(client.db, id)).toBeNull();
+    await ensureGovernedOrganizationSessionPolicy(client.db, id);
+    const stored = await getOrganizationSessionPolicy(client.db, id);
+    expect(stored?.source).toBe("governed_default");
+    expect(stored?.policy.recordings).toBeUndefined();
+  });
+
   test("the runtime can neither update nor delete a policy, nor read the receipts", async () => {
     const id = await organization(true);
     expect(
