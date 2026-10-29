@@ -566,6 +566,39 @@ describe("host extension registry", () => {
       expect(validateHostExtension(extension)).toBe(extension);
     });
 
+    test.each(["knowledge_search", "memory_propose"])(
+      "installs an exact host-prefixed entry for %s",
+      (leaf) => {
+        for (const hash of ["0123456789abcdef", "0123456789abcdef01234567"]) {
+          const extension = extensionWith({
+            toolRegistryEntries: [{ ...entry, name: `mcp_${hash}__${leaf}` }],
+          });
+          const slot = createHostExtensionSlot();
+          expect(slot.install(extension)).toBe(extension);
+          expect(slot.current()).toBe(extension);
+        }
+      },
+    );
+
+    test.each([true, undefined])(
+      "refuses a host-prefixed built-in leaf with matchPrefixedLeaf %p",
+      (matchPrefixedLeaf) => {
+        expectInvalid(
+          {
+            id: "fixture",
+            toolRegistryEntries: [
+              {
+                ...entry,
+                name: "mcp_0123456789abcdef__knowledge_search",
+                matchPrefixedLeaf,
+              },
+            ],
+          },
+          "toolRegistryEntries[0].matchPrefixedLeaf",
+        );
+      },
+    );
+
     test("refuses an entry that allows prefixed leaf matching", () => {
       expectInvalid(
         { id: "fixture", toolRegistryEntries: [{ ...entry, matchPrefixedLeaf: true }] },
@@ -591,15 +624,24 @@ describe("host extension registry", () => {
       );
     });
 
-    test.each(["artifacts_create", "host-app__exec_command"])(
-      "refuses an entry for %p, which a built-in card already renders",
-      (name) => {
-        expectInvalid(
-          extensionWith({ toolRegistryEntries: [{ ...entry, name }] }),
-          "toolRegistryEntries[0].name",
-        );
-      },
-    );
+    test.each([
+      "artifacts_create",
+      "host-app__exec_command",
+      "knowledge_search",
+      "memory_propose",
+      "opengeni__knowledge_search",
+      "mcp__opengeni__knowledge_search",
+      "opengeni__memory_propose",
+      "mcp__opengeni__memory_propose",
+      "mcp_invalid__knowledge_search",
+      "mcp_0123__knowledge_search",
+      "mcp_0123456789ABCDEF__knowledge_search",
+    ])("refuses an entry for %p, which a built-in card already renders", (name) => {
+      expectInvalid(
+        extensionWith({ toolRegistryEntries: [{ ...entry, name }] }),
+        "toolRegistryEntries[0].name",
+      );
+    });
 
     test("refuses two entries for one tool name", () => {
       expectInvalid(
