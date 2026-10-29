@@ -25,6 +25,36 @@ export type CanonicalHumanExactLoginBinding = {
   status: "active" | "recovery_pending" | "stale" | "disputed" | "revoked";
 };
 
+/**
+ * The identity's active login binding as hosts see it: the binding the
+ * identity names as active, while that binding is itself `active`; null
+ * otherwise. `id` changes when another sign-in method becomes active;
+ * `revision` increases on that binding's own state changes. The host identity
+ * lookup and the host session token's `login_binding_*` claims both use it.
+ */
+export function activeCanonicalHumanLoginBinding(
+  projection: Pick<CanonicalHumanIdentityProjectionType, "activeIdentity" | "loginBindings">,
+): { id: string; revision: number } | null {
+  const binding = projection.loginBindings.find(
+    (candidate) =>
+      candidate.id === projection.activeIdentity.activeLoginBindingId &&
+      candidate.status === "active",
+  );
+  return binding ? { id: binding.id, revision: binding.revision } : null;
+}
+
+/** The account's email when it is verified; null for an unverified or unknown account. */
+export async function getVerifiedAuthUserEmail(
+  db: Database,
+  authUserId: string,
+): Promise<string | null> {
+  const [row] = await rawRows<{ email: string }>(
+    db,
+    sql`select email from auth_users where id = ${authUserId} and email_verified`,
+  );
+  return row?.email ?? null;
+}
+
 export async function getCanonicalHumanExactLoginBindingForAuthUser(
   db: Database,
   input: { authUserId: string; providerId: string },

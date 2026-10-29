@@ -433,6 +433,7 @@ export { allowedCorsOrigin } from "./http/cors";
 export {
   GOVERNED_MEMBER_ORGANIZATION_ROUTES,
   GOVERNED_MEMBER_SESSION_OPERATIONS,
+  GOVERNED_MEMBER_SESSION_ROUTE_DENIALS,
   GOVERNED_MEMBER_WORKSPACE_ROUTES,
   governedMemberRouteAllowed,
   governedRouteTable,
@@ -1938,6 +1939,10 @@ export function createAppComposition(deps: AppDependencies): {
           routeDeps,
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
+          {
+            preset: oauthAccess.consentPreset,
+            toolSetVersions: oauthAccess.consentedToolSetVersions,
+          },
         );
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,

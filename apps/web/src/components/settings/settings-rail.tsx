@@ -29,10 +29,20 @@ import {
   ORGANIZATION_SETTINGS_ITEMS,
   organizationSettingsLabel,
 } from "./organization-settings-pages";
-import { settingsHomeLink, type SettingsRailSection } from "./settings-sidebar";
+import {
+  settingsHomeLink,
+  type SettingsRailIcon,
+  type SettingsRailSection,
+} from "./settings-sidebar";
 import { WorkspaceSwitcherMenu } from "@/components/rail/workspace-switcher";
 import { hostExtensionNavTarget } from "@/components/rail/host-extension-nav-link";
-import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
+import { WorkspaceConfigGlyph } from "@/components/rail/workspace-config-link";
+import { PRIMARY_WORKSPACE_ITEMS, visibleNativeItems } from "@/components/rail/workspace-nav-data";
+import {
+  nativeEntriesInSettingsGroup,
+  nativeNavOverride,
+  type NativeNavId,
+} from "@opengeni/react/app/host-extension";
 import { thisComputerSettingsAvailable } from "@/lib/this-computer-page";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
@@ -167,42 +177,109 @@ export function runtimePages(insideDesktopApp: boolean) {
   );
 }
 
+/** A native rail shortcut's icon, as the settings rail draws icons. */
+const NATIVE_SHORTCUT_ICONS = new Map<string, SettingsRailIcon>(
+  PRIMARY_WORKSPACE_ITEMS.map((item) => [
+    item.to,
+    function NativeShortcutIcon(props: { className?: string }) {
+      return <WorkspaceConfigGlyph icon={item.icon} {...props} />;
+    },
+  ]),
+);
+
+/**
+ * A native entry the host extension moved into one of its settings groups:
+ * its page under the override's label. Insights keeps its `workspace:admin`
+ * gate wherever it is drawn.
+ */
+function nativeSettingsGroupItem(
+  id: NativeNavId,
+  workspaceId: string,
+  canReadInsights: boolean,
+): SettingsRailSection["groups"][number]["items"][number] | null {
+  const label = nativeNavOverride(currentHostExtension(), id)?.label;
+  if (id === "insights") {
+    const page = ACTIVITY_PAGES[0];
+    if (page.requiresAdmin && !canReadInsights) return null;
+    return {
+      id: `workspace:${page.to}`,
+      label: label ?? page.label,
+      icon: page.icon,
+      link: <Link to={page.to} params={{ workspaceId }} />,
+    };
+  }
+  const item = PRIMARY_WORKSPACE_ITEMS.find((candidate) => candidate.to.endsWith(`/${id}`));
+  if (!item) return null;
+  return {
+    id: `workspace:${item.to}`,
+    label: label ?? item.label,
+    icon: NATIVE_SHORTCUT_ICONS.get(item.to)!,
+    link: <Link to={item.to} params={{ workspaceId }} />,
+  };
+}
+
 /**
  * One section per settings group of the host extension, after the workspace's
- * own: the group's nav items that show in this workspace. A group without one
- * is left out.
+ * own: the native entries the extension moved into the group, then the
+ * group's nav items that show in this workspace. A group with neither is left
+ * out.
  */
-function extensionSettingsSections(workspaceId: string, pathname: string): SettingsRailSection[] {
-  const { nav = [], settingsGroups = [] } = currentHostExtension();
+function extensionSettingsSections(
+  workspaceId: string,
+  pathname: string,
+  canReadInsights: boolean,
+): SettingsRailSection[] {
+  const extension = currentHostExtension();
+  const { nav = [], settingsGroups = [] } = extension;
   return settingsGroups.flatMap((group) => {
+    const native = nativeEntriesInSettingsGroup(extension, group.id).flatMap((id) => {
+      const item = nativeSettingsGroupItem(id, workspaceId, canReadInsights);
+      return item ? [item] : [];
+    });
     const items = nav.filter(
       (item) =>
         item.placement !== "primary" &&
         item.placement.settingsGroup === group.id &&
         (item.visible?.({ workspaceId, pathname }) ?? true),
     );
-    if (items.length === 0) return [];
+    if (native.length === 0 && items.length === 0) return [];
     return [
       {
         id: `extension-group:${group.id}`,
         label: group.label,
         groups: [
           {
-            items: items.map((item) => ({
-              id: `extension:${item.id}`,
-              label: item.label,
-              icon: item.icon,
-              link: (
-                <Link
-                  to={hostExtensionNavTarget(item) as never}
-                  params={{ workspaceId } as never}
-                />
-              ),
-            })),
+            items: [
+              ...native,
+              ...items.map((item) => ({
+                id: `extension:${item.id}`,
+                label: item.label,
+                icon: item.icon,
+                link: (
+                  <Link
+                    to={hostExtensionNavTarget(item) as never}
+                    params={{ workspaceId } as never}
+                  />
+                ),
+              })),
+            ],
           },
         ],
       },
     ];
+  });
+}
+
+/**
+ * The workspace dashboards in their own place, under the host extension's
+ * labels: none it hides, moves into a settings group or overrides as hidden.
+ */
+function workspaceActivityPages() {
+  const extension = currentHostExtension();
+  return visibleNativeItems(ACTIVITY_PAGES, hiddenNativeDestinations()).flatMap((page) => {
+    const override = nativeNavOverride(extension, "insights");
+    if (override?.group === "hidden" || override?.settingsGroup !== undefined) return [];
+    return [override?.label === undefined ? page : { ...page, label: override.label }];
   });
 }
 
@@ -217,6 +294,11 @@ export function workspacePageLabel(location: WorkspaceManagementLocation): strin
   if (location.kind === "settings")
     return WORKSPACE_SETTINGS_COPY[location.section ?? "general"].title;
   if (location.kind === "page") {
+    // Insights under the host extension's label, wherever the rail draws it.
+    if (location.target === ACTIVITY_PAGES[0].to) {
+      const label = nativeNavOverride(currentHostExtension(), "insights")?.label;
+      if (label !== undefined) return label;
+    }
     return (
       [...ACTIVITY_PAGES, ...RUNTIME_PAGES].find((page) => page.to === location.target)?.label ??
       "Settings"
@@ -416,7 +498,7 @@ export function useSettingsRail(input: {
       workspaceId,
       "workspace:admin",
     );
-    const activityPages = visibleNativeItems(ACTIVITY_PAGES, hiddenNativeDestinations()).filter(
+    const activityPages = workspaceActivityPages().filter(
       (page) => !page.requiresAdmin || canReadInsights,
     );
     sections.push({
@@ -466,7 +548,7 @@ export function useSettingsRail(input: {
         },
       ],
     });
-    sections.push(...extensionSettingsSections(workspaceId, pathname));
+    sections.push(...extensionSettingsSections(workspaceId, pathname, canReadInsights));
   }
 
   if (accountId && organizationName && access) {

@@ -54,7 +54,9 @@ import { registeredHandlerRoutePath } from "./registered-route-label";
  * organizing. Session-addressed routes whose operation is outside this set
  * (files, terminal, git, viewers, realtime, tool policy, model and account
  * choice, MCP credentials, retention, deletion, visibility, forks...) are
- * refused, and so is any operation added later.
+ * refused, and so is any operation added later. The routes in
+ * `GOVERNED_MEMBER_SESSION_ROUTE_DENIALS` are refused even though their
+ * operation is in this set.
  */
 export const GOVERNED_MEMBER_SESSION_OPERATIONS: readonly SessionAuthorizationOperation[] =
   Object.freeze([
@@ -145,6 +147,26 @@ export const GOVERNED_MEMBER_WORKSPACE_ROUTES: readonly GovernedRouteEntry[] = O
 ]);
 
 /**
+ * Session routes refused to a person in a governed workspace although their
+ * operation is in `GOVERNED_MEMBER_SESSION_OPERATIONS`: they reuse a generic
+ * operation (`session.read`, `session.control`) for a subject the allowlist
+ * otherwise closes (coding-subscription accounts, model and account choice
+ * and provenance, background processes, sandbox recovery, operator access,
+ * the task budget the host sets). Paths are the registered Hono templates.
+ */
+export const GOVERNED_MEMBER_SESSION_ROUTE_DENIALS: readonly GovernedRouteEntry[] = Object.freeze([
+  { method: "GET", path: `${SESSION_PREFIX}/codex-accounts` },
+  { method: "GET", path: `${SESSION_PREFIX}/model-account` },
+  { method: "GET", path: `${SESSION_PREFIX}/background-commands` },
+  { method: "DELETE", path: `${SESSION_PREFIX}/background-commands/:commandId` },
+  { method: "GET", path: `${SESSION_PREFIX}/sandbox-recovery` },
+  { method: "POST", path: `${SESSION_PREFIX}/sandbox-recovery` },
+  { method: "GET", path: `${SESSION_PREFIX}/admin-access` },
+  { method: "GET", path: `${SESSION_PREFIX}/model-source-basis` },
+  { method: "PUT", path: `${SESSION_PREFIX}/usage-limit` },
+]);
+
+/**
  * Organization routes a person in a governed organization may use. None: the
  * host administers its organizations, and every organization route is an
  * administration or a setting.
@@ -180,6 +202,8 @@ export function governedMemberRouteAllowed(
   pathname?: string,
 ): boolean {
   if (template === SESSION_PREFIX || template.startsWith(`${SESSION_PREFIX}/`)) {
+    if (GOVERNED_MEMBER_SESSION_ROUTE_DENIALS.some((entry) => entryAllows(entry, method, template)))
+      return false;
     const segments = template.split("/");
     const at = segments.indexOf(":sessionId");
     const sessionId = pathname?.split("/")[at] ?? TEMPLATE_SESSION_ID;

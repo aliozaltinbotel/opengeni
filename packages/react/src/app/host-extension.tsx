@@ -84,8 +84,19 @@ export type HostToolRegistryEntry = Readonly<{
   render: ToolRenderer;
   matchPrefixedLeaf: false;
 }>;
-/** Native rail entries a host extension can relabel, move or leave off the rail. */
-export type NativeNavId = "inbox" | "plugins" | "state" | "automations" | "meetings" | "artifacts";
+/**
+ * Native entries a host extension can relabel, move or leave off the rail:
+ * the primary rail's entries, and `insights` (the workspace Insights page in
+ * the settings rail).
+ */
+export type NativeNavId =
+  | "inbox"
+  | "plugins"
+  | "state"
+  | "automations"
+  | "meetings"
+  | "artifacts"
+  | "insights";
 /**
  * Where a native rail entry shows: `peer` (default) with the workspace
  * shortcuts, `chat` in the chat utility group right after "New session"
@@ -93,10 +104,18 @@ export type NativeNavId = "inbox" | "plugins" | "state" | "automations" | "meeti
  * links elsewhere stay; `hiddenNativeDestinations` removes a page).
  */
 export type HostExtensionNavGroup = "peer" | "chat" | "hidden";
+/**
+ * One native entry's override. `settingsGroup` (one of the extension's
+ * `settingsGroups`) moves the entry into that group of the settings rail,
+ * before the group's own items, and off its native place; it excludes
+ * `group`, and the inbox cannot move there. For `insights`, `group` is
+ * `peer` (its own place, the default) or `hidden`.
+ */
 export type HostExtensionNavOverride = Readonly<{
   id: NativeNavId;
   label?: string;
   group?: HostExtensionNavGroup;
+  settingsGroup?: string;
 }>;
 export type HostExtension = Readonly<{
   id: string;
@@ -176,6 +195,7 @@ export const NATIVE_NAV_IDS: readonly NativeNavId[] = Object.freeze([
   "automations",
   "meetings",
   "artifacts",
+  "insights",
 ]);
 
 export function isNativeNavId(value: unknown): value is NativeNavId {
@@ -218,6 +238,8 @@ export function composePrimaryNav<T extends NativeNavEntry>(
     if (destination !== null && hidden.includes(destination)) continue;
     const override = overrides.get(item.id);
     const entry = override?.label === undefined ? item : { ...item, label: override.label };
+    // An entry moved into a settings group is not on the primary rail.
+    if (override?.settingsGroup !== undefined) continue;
     const group = override?.group ?? "peer";
     if (group === "chat") chat.push(entry);
     else if (group === "peer") peers.push(entry);
@@ -228,6 +250,30 @@ export function composePrimaryNav<T extends NativeNavEntry>(
     peers.push(item);
   }
   return { chat, peers };
+}
+
+/** The extension's override of one native entry, if it has one. */
+export function nativeNavOverride(
+  extension: Pick<HostExtension, "navOverrides">,
+  id: NativeNavId,
+): HostExtensionNavOverride | undefined {
+  return extension.navOverrides?.find((entry) => entry.id === id);
+}
+
+/**
+ * The native entries an extension moves into settings group `groupId`, in
+ * native order, leaving out those whose destination it hides.
+ */
+export function nativeEntriesInSettingsGroup(
+  extension: Pick<HostExtension, "navOverrides" | "hiddenNativeDestinations">,
+  groupId: string,
+): readonly NativeNavId[] {
+  const hidden = extension.hiddenNativeDestinations ?? NO_ITEMS;
+  return NATIVE_NAV_IDS.filter((id) => {
+    const destination = nativeNavDestination(id);
+    if (destination !== null && hidden.includes(destination)) return false;
+    return nativeNavOverride(extension, id)?.settingsGroup === groupId;
+  });
 }
 
 /** The workspace-relative path the console opens for a workspace: the extension's `landing`, else "sessions". */

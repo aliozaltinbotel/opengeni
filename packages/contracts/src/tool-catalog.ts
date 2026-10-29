@@ -130,6 +130,22 @@ export function mcpAccountRouteReviewLabel(label: McpAccountRouteLabel): string 
   return label.account ? `${label.connector} · ${label.account}` : label.connector;
 }
 
+/**
+ * `error.data.code` of the workspace MCP's `tools/call` refusal (JSON-RPC
+ * `-32602`, as MCP answers an unknown tool) for a tool name this connection
+ * cannot call: outside the tools an MCP OAuth connection was consented to
+ * (`TOOL_NOT_CONSENTED`), not in the caller's catalog at all
+ * (`TOOL_NOT_FOUND`), or listed only for a person to approve and never
+ * callable over MCP (`TOOL_APPROVAL_REQUIRED`).
+ */
+export const WORKSPACE_MCP_TOOL_REFUSAL_CODES = Object.freeze({
+  notConsented: "TOOL_NOT_CONSENTED",
+  notFound: "TOOL_NOT_FOUND",
+  approvalRequired: "TOOL_APPROVAL_REQUIRED",
+} as const);
+export type WorkspaceMcpToolRefusalCode =
+  (typeof WORKSPACE_MCP_TOOL_REFUSAL_CODES)[keyof typeof WORKSPACE_MCP_TOOL_REFUSAL_CODES];
+
 /** MIME type of an MCP Apps view resource (SEP-1865). */
 export const MCP_APP_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app" as const;
 
@@ -141,11 +157,118 @@ export const McpAppResourceUri = /* @__PURE__ */ defineSchema(() =>
     .regex(/^ui:\/\/[a-z0-9.-]+\/[A-Za-z0-9._/-]+\.html$/u),
 );
 
-/** The tool-definition metadata a catalog keeps: only an MCP Apps view. */
+/** Who may call an MCP Apps tool: the model, the view (`app`), or both (the default). */
+export const McpAppToolVisibility = /* @__PURE__ */ defineSchema(() => z.enum(["model", "app"]));
+export type McpAppToolVisibility = z.infer<typeof McpAppToolVisibility>;
+
+/** A tool's MCP Apps `visibility`: one or both callers, each at most once. */
+const mcpAppToolVisibilityList = () =>
+  z
+    .array(McpAppToolVisibility)
+    .min(1)
+    .max(2)
+    .refine((values) => new Set(values).size === values.length, "duplicate visibility");
+
+/**
+ * A tool definition's `_meta.ui` (MCP Apps `McpUiToolMeta`): the view that
+ * renders its results and who may call it. `visibility` omitted means
+ * `["model", "app"]`.
+ */
+export const McpAppToolUiMeta = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resourceUri: McpAppResourceUri,
+      visibility: mcpAppToolVisibilityList().optional(),
+    })
+    .strict(),
+);
+export type McpAppToolUiMeta = z.infer<typeof McpAppToolUiMeta>;
+
+/**
+ * A tool definition's `_meta.ui` that names no view (MCP Apps
+ * `McpUiToolMeta.resourceUri` is optional): only who may call the tool.
+ */
+export const McpAppToolVisibilityUiMeta = /* @__PURE__ */ defineSchema(() =>
+  z.object({ visibility: mcpAppToolVisibilityList() }).strict(),
+);
+export type McpAppToolVisibilityUiMeta = z.infer<typeof McpAppToolVisibilityUiMeta>;
+
+/** Any well-formed tool `_meta.ui`: with a view, or a visibility alone. */
+export type McpAppToolUi = McpAppToolUiMeta | McpAppToolVisibilityUiMeta;
+
+/**
+ * A view resource's `_meta.ui` (MCP Apps `UIResourceMeta`), on `resources/list`
+ * and `resources/read` contents: the sandbox's content security policy, the
+ * device permissions it asks for, its dedicated origin and border preference.
+ */
+export const McpAppResourceUiMeta = /* @__PURE__ */ defineSchema(() => {
+  const domains = z.array(z.string().min(1).max(2_048)).max(64).optional();
+  const permission = z.object({}).strict().optional();
+  return z
+    .object({
+      csp: z
+        .object({
+          connectDomains: domains,
+          resourceDomains: domains,
+          frameDomains: domains,
+          baseUriDomains: domains,
+        })
+        .strict()
+        .optional(),
+      permissions: z
+        .object({
+          camera: permission,
+          microphone: permission,
+          geolocation: permission,
+          clipboardWrite: permission,
+        })
+        .strict()
+        .optional(),
+      domain: z.string().min(1).max(2_048).optional(),
+      prefersBorder: z.boolean().optional(),
+    })
+    .strict();
+});
+export type McpAppResourceUiMeta = z.infer<typeof McpAppResourceUiMeta>;
+
+function metaRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * The MCP Apps `_meta.ui` of a listed tool, or undefined when it has none
+ * that is well formed. The view comes from `ui.resourceUri`, else from the
+ * deprecated flat `ui/resourceUri` key; a tool may also name no view and only
+ * a `visibility`. A malformed `visibility` is dropped (the default then
+ * applies); a malformed view drops the whole `ui`.
+ */
+export function mcpAppToolUiMeta(meta: unknown): McpAppToolUi | undefined {
+  const record = metaRecord(meta);
+  const ui = metaRecord(record?.ui);
+  const visibility = McpAppToolVisibilityUiMeta.shape.visibility.safeParse(ui?.visibility);
+  const visible = visibility.success ? { visibility: visibility.data } : undefined;
+  const rawResourceUri = ui?.resourceUri ?? record?.["ui/resourceUri"];
+  if (rawResourceUri === undefined) return visible;
+  const resourceUri = McpAppResourceUri.safeParse(rawResourceUri);
+  return resourceUri.success ? { resourceUri: resourceUri.data, ...visible } : undefined;
+}
+
+/** The well-formed MCP Apps `_meta.ui` of a view resource, or undefined. */
+export function mcpAppResourceUiMeta(meta: unknown): McpAppResourceUiMeta | undefined {
+  const parsed = McpAppResourceUiMeta.safeParse(metaRecord(meta)?.ui);
+  return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : undefined;
+}
+
+/**
+ * The tool-definition metadata a catalog keeps: only its MCP Apps `_meta.ui`
+ * (a view, or a visibility alone).
+ */
 export const AttemptToolCatalogMeta = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      ui: z.object({ resourceUri: McpAppResourceUri }).strict().optional(),
+      ui: z.union([McpAppToolUiMeta, McpAppToolVisibilityUiMeta]).optional(),
     })
     .strict(),
 );
@@ -165,7 +288,7 @@ export const AttemptToolCatalogEntry = /* @__PURE__ */ defineSchema(() =>
       outputSchema: AttemptToolJsonSchema.optional(),
       annotations: AttemptToolAnnotations.optional(),
       icons: z.array(AttemptToolCatalogIcon).max(16).optional(),
-      /** Set only for an in-process host tool server's tool that publishes an MCP Apps view. */
+      /** Set only for an in-process host tool server's tool that publishes an MCP Apps `_meta.ui`. */
       meta: AttemptToolCatalogMeta.optional(),
       source: z.enum(["opengeni", "files", "docs", "mcp", "codex_apps", "interaction"]),
       approval: z.enum(["none", "human", "policy"]),

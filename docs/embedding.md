@@ -712,6 +712,44 @@ server-verifiable one-shot approval exchange, it omits tools classified for
 human approval and rejects direct calls to their projected names. OAuth consent
 does not satisfy that separate per-call approval requirement.
 
+A `tools/call` for a name the workspace MCP cannot call answers a named
+JSON-RPC error, `-32602` (MCP's answer to an unknown tool), never the generic
+`-32603`. Its `error.data` is `{ code, name }` with `code` one of
+`WORKSPACE_MCP_TOOL_REFUSAL_CODES` (`@opengeni/contracts`):
+`TOOL_APPROVAL_REQUIRED` for a tool classified for human approval;
+`TOOL_NOT_CONSENTED` on an MCP OAuth connection for any other name outside the
+tools frozen at its consent (the catalog holds only those, so the answer tells
+nothing about tools outside the consent); `TOOL_NOT_FOUND` for any other
+caller.
+
+An embedding host's in-process tool servers (`workspaceToolServers`) may
+publish MCP Apps views. The workspace MCP forwards a host tool's MCP Apps
+`_meta.ui` on `tools/list`: `resourceUri` (from `ui.resourceUri`, or the
+deprecated flat `ui/resourceUri` key) and `visibility` (`["model"]`,
+`["app"]` or both; omitted means both). A tool may name no view and only a
+`visibility`; its `ui` is forwarded as `{ visibility }` and serves no view.
+A malformed `ui://…html` view drops the whole `ui`. A malformed `visibility`
+alone is dropped (the default then applies) and logged as a host
+registration warning naming the server and tool.
+`resources/read` contents carry the view's resource `_meta.ui` (`csp`,
+`permissions`, `domain`, `prefersBorder`) when the host's `readResource`
+returns a well-formed one. Other `_meta` keys a host sets are not forwarded,
+and first-party and remote tools never carry a view.
+
+A host tool server may also publish the version of its tool set
+(`LocalMcpServerRegistration.toolSetVersion`, 1–256 characters of the host's
+choosing, for example a digest of its published tool inventory). An MCP OAuth
+consent records each used host server's version (migration 1022), and the
+workspace MCP's `tools/list` result carries
+`_meta["opengeni/toolSets"]`: `{ [serverId]: { version, consentedVersion } }`,
+where `version` is the server's current one and `consentedVersion` the one
+recorded at consent (`null` for a consent that recorded none). A client asks
+the person to consent again when they differ. Callers that are not an MCP
+OAuth connection see `version` alone, and without any published version the
+key is absent. The tool identities frozen at consent still decide what the
+connection lists and calls, so a changed set never widens a connection before
+the person consents again.
+
 Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the
 runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact
@@ -978,7 +1016,14 @@ itself, the session list and create, the composer's reads
 notifications, documents, Knowledge and Skills (each under its own
 permission), session feedback and artifact reads, plus every session route
 whose `sessionAuthorizationOperationForHttp` operation is in
-`GOVERNED_MEMBER_SESSION_OPERATIONS`. Not on it: `/mcp`, which for a person's
+`GOVERNED_MEMBER_SESSION_OPERATIONS`, except the routes in
+`GOVERNED_MEMBER_SESSION_ROUTE_DENIALS`: `GET codex-accounts`,
+`GET model-account`, `GET` and `DELETE background-commands`, `GET` and
+`POST sandbox-recovery`, `GET admin-access`, `GET model-source-basis`
+(model and account provenance) and `PUT usage-limit` (the task budget is the
+host's) under a session reuse a generic operation (`session.read`,
+`session.control`) for a subject the allowlist otherwise closes, so they are
+refused too. `GET usage-limit` and `POST retry` stay allowed. Not on it: `/mcp`, which for a person's
 own credential is the whole workspace tool gateway (as `tools/*`; sessions
 reach their tools through the worker's delegated tokens), and every
 organization route. `governedRouteTable(app.routes)` gives the decision for
@@ -1162,6 +1207,36 @@ an identity that does not exist. A token whose subject is not an active owner
 or admin of the organization is `403 HOST_COMMAND_ACTOR_NOT_AUTHORIZED`, the
 code every host command now gives when the database refuses its actor.
 
+#### Host session token claims
+
+A host session token (`GET /v1/auth/host-token?workspace=<id>`, enabled by
+`OPENGENI_HOST_TOKEN_AUDIENCE`) also names the identity's active login binding
+as two top-level claims: `login_binding_id` and `login_binding_revision`. They
+are the same pair this lookup answers as `activeLoginBinding`, read at mint
+time, so a host that recorded the pair when it linked the person can tell
+locally, with no identity round trip, that another sign-in method became
+active (`login_binding_id` differs) or that the binding changed state since
+(`login_binding_revision` is higher), and ask an administrator to confirm
+before the person's access carries over. A signed-in identity with no active
+binding gets no token: `403 HOST_TOKEN_LOGIN_BINDING_UNKNOWN`. The claims are
+flat snake-case keys, like the token's other claims, rather than one nested
+object.
+
+`GET /v1/auth/host-token?purpose=registration` mints the registration
+variant, for a signed-in person who may have no workspace yet (for example
+before the host creates their organization). It carries no `org` and no `ws`
+(the keys are absent, not null), `purpose: "registration"`, the account's
+verified `email` with `email_verified: true`, and the same `login_binding_*`
+claims; `aud` is the configured audience, as for a workspace token. It is
+minted only for a managed browser session (no bearer credential), refuses an
+unverified email with `403 HOST_TOKEN_EMAIL_NOT_VERIFIED`, and counts against
+the same per-session limit (30 per minute) as workspace tokens. A `purpose`
+other than `registration`, or `purpose` together with `workspace`, is
+`400 HOST_TOKEN_PURPOSE_INVALID`. A host must accept a `purpose` token only at
+its registration endpoint and refuse it everywhere else. Opengeni itself
+accepts neither kind of host session token as a credential: every Opengeni
+route answers its own authentication refusal to one.
+
 The read is one query by identity
 (`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
 adds the fences), with no member-list bound. Like every new runtime definer,
@@ -1273,6 +1348,29 @@ person no longer holds any consented permission at the organization or in a
 workspace in the consented scope (`permissions_lost`; for a workspace
 connection, the live-grant resolution its requests use refuses). Only the last
 two can become `active` again. Treat any other `reason` as not live.
+
+A workspace connection's consent offers an access level, as an organization
+sign-in does: **Full** (everything the person can do in the workspace, the
+default and the behaviour of a consent form without the field), **Read only**
+(the `read_only` preset's permissions, and only tools that declare
+`readOnlyHint: true` and are not destructive) or **Custom** (the permissions
+the person picks, plus `workspace:read`; only read tools when none of them
+changes anything). The consent form posts `access_preset`
+(`full` | `read_only` | `custom`) and, for Custom, one `permission` per
+choice; an unknown level is refused before a code is issued. The level never
+widens anything: the grant keeps only permissions the person holds at consent
+(and the live membership still caps every request), and the tool identities
+frozen into the connection are what that narrowed grant lists. The level is
+recorded on the grant (migration 1021), so `consentScope.preset` of a
+workspace connection names it; it is `null` for a consent recorded before
+the level existed. Annotations are hints a tool declares, and a tool may
+change them later, so a connection whose recorded level is read-only (Read
+only, or Custom whose permissions change nothing) checks each frozen tool's
+current annotations on every request: a tool that keeps its name but no
+longer declares that it only reads leaves `tools/list`, and `tools/call`
+answers `-32602` with `data.code: "TOOL_NOT_CONSENTED"`. The check keys on
+the recorded level, so a Full consent, or one recorded before levels, is never
+narrowed by it, whatever the person's permissions.
 
 To hear about a disconnect without polling, configure the
 `mcp_connection.revoked` host webhook on both the API and the worker:
@@ -2329,7 +2427,7 @@ which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
 
 `navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
-`plugins`, `state`, `automations`, `meetings`, `artifacts`): `label` renames
+`plugins`, `state`, `automations`, `meetings`, `artifacts`, `insights`): `label` renames
 one wherever the rail draws it (expanded, collapsed, folded under More),
 `group: "chat"` moves it into the chat group right after "New session" (its own
 `role="group"` with a rule before the other entries), and `group: "hidden"`
@@ -2338,6 +2436,20 @@ override of a destination the extension hides is refused.
 `composePrimaryNav(extension, nativeItems, context?)` is the pure resolver the
 rail uses; it imports no React or DOM code, so a host can run it in a test or
 a child process.
+
+`insights` is a `NativeNavId` too: the workspace Insights page, which the
+settings rail lists in the workspace section. Its `label` renames it there and
+in the settings header, and `group` is `"peer"` (its own place) or
+`"hidden"`; `"chat"` is refused. `settingsGroup` (one of the extension's
+`settingsGroups`) moves a native entry into that group of the settings rail,
+listed first and in native order, before the group's own `nav` items, and off
+its native place (the primary rail, or the workspace section for Insights);
+it cannot be combined with `group`, the inbox stays on the primary rail, and
+Insights keeps its `workspace:admin` gate there.
+`nativeEntriesInSettingsGroup(extension, groupId)` and
+`nativeNavOverride(extension, id)` resolve this without React or a DOM. A
+host nav item placed in a group (`placement: { settingsGroup }`) is
+validated against `settingsGroups` the same way.
 
 `landing` is the workspace-relative page the console opens for a workspace,
 both from the root (`/`) and from `workspaces/$workspaceId/`: `"sessions"`

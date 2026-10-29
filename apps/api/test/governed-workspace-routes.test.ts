@@ -23,10 +23,12 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createApp,
   GOVERNED_MEMBER_SESSION_OPERATIONS,
+  GOVERNED_MEMBER_SESSION_ROUTE_DENIALS,
   GOVERNED_MEMBER_WORKSPACE_ROUTES,
   governedMemberRouteAllowed,
   governedRouteTable,
 } from "../src/app";
+import { sessionAuthorizationOperationForHttp } from "../src/routes/sessions";
 
 /*
  * Default-deny in a host-governed organization: its people reach a workspace
@@ -177,6 +179,16 @@ describe("default-deny in a governed organization", () => {
     ["POST", `sessions/${SESSION_ID}/fs/read`],
     ["POST", `sessions/${SESSION_ID}/terminal/exec`],
     ["PUT", `sessions/${SESSION_ID}/tool-policy`],
+    // Generic operations on closed subjects (the deny overlay).
+    ["GET", `sessions/${SESSION_ID}/codex-accounts`],
+    ["GET", `sessions/${SESSION_ID}/model-account`],
+    ["GET", `sessions/${SESSION_ID}/background-commands`],
+    ["DELETE", `sessions/${SESSION_ID}/background-commands/command-1`],
+    ["GET", `sessions/${SESSION_ID}/sandbox-recovery`],
+    ["POST", `sessions/${SESSION_ID}/sandbox-recovery`],
+    ["GET", `sessions/${SESSION_ID}/admin-access`],
+    ["GET", `sessions/${SESSION_ID}/model-source-basis`],
+    ["PUT", `sessions/${SESSION_ID}/usage-limit`],
   ])("a member's %s %s answers 403 WORKSPACE_ROUTE_NOT_ALLOWED", async (method, suffix) => {
     const result = await call(governedApp, `/v1/workspaces/${governed.workspaceId}/${suffix}`, {
       method,
@@ -455,6 +467,40 @@ describe("the exported route table", () => {
     );
     for (const route of terminal)
       expect(handlerPaths.has(`${route.method} ${route.path}`)).toBe(true);
+  });
+
+  test("the deny overlay refuses its routes although their operation is allowed", () => {
+    const table = governedRouteTable(governedApp.routes);
+    const row = (method: string, path: string) =>
+      table.find((candidate) => candidate.method === method && candidate.path === path);
+    const session = "/v1/workspaces/:workspaceId/sessions/:sessionId";
+    for (const entry of GOVERNED_MEMBER_SESSION_ROUTE_DENIALS) {
+      // Every entry names a mounted route, and the table refuses it.
+      expect({ entry, allowed: row(entry.method, entry.path)?.allowed }).toEqual({
+        entry,
+        allowed: false,
+      });
+      // Its operation alone would have allowed it.
+      const operation = sessionAuthorizationOperationForHttp(
+        entry.method,
+        entry.path.replace(":sessionId", SESSION_ID).replace(":commandId", "command-1"),
+        SESSION_ID,
+      );
+      expect(operation).not.toBeNull();
+      expect(GOVERNED_MEMBER_SESSION_OPERATIONS).toContain(operation!);
+    }
+    // The writes beside them were already refused by their own operations.
+    for (const [method, suffix] of [
+      ["PUT", "model-account"],
+      ["PUT", "admin-access"],
+      ["DELETE", "admin-access"],
+    ] as const)
+      expect(row(method, `${session}/${suffix}`)?.allowed).toBe(false);
+    // Session reads and controls outside the overlay stay allowed.
+    expect(row("GET", session)?.allowed).toBe(true);
+    expect(row("GET", `${session}/events`)?.allowed).toBe(true);
+    expect(row("GET", `${session}/usage-limit`)?.allowed).toBe(true);
+    expect(row("POST", `${session}/retry`)?.allowed).toBe(true);
   });
 
   test("a session route is allowed exactly when its operation is in the member set", () => {

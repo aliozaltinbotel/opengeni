@@ -207,13 +207,21 @@ function settingsGroupIds(value: unknown): ReadonlySet<string> {
   return ids;
 }
 
-/** Native rail overrides: known ids, once each, never a destination the extension hides. */
-function checkNavOverrides(value: unknown, hidden: readonly unknown[]): void {
+/**
+ * Native entry overrides: known ids, once each, never a destination the
+ * extension hides; a settings group is a registered one, never with `group`
+ * and never for the inbox; Insights stays out of the chat group.
+ */
+function checkNavOverrides(
+  value: unknown,
+  hidden: readonly unknown[],
+  groups: ReadonlySet<string>,
+): void {
   const ids = new Set<string>();
   list(value, "navOverrides").forEach((entry, index) => {
     const field = `navOverrides[${index}]`;
     const override = record(entry, field);
-    knownKeys(override, field, ["id", "label", "group"]);
+    knownKeys(override, field, ["id", "label", "group", "settingsGroup"]);
     const id = override.id;
     if (!isNativeNavId(id)) fail(`${field}.id`, `"${String(id)}" is not a native rail entry`);
     if (ids.has(id)) fail(`${field}.id`, `"${id}" is overridden twice`);
@@ -229,6 +237,16 @@ function checkNavOverrides(value: unknown, hidden: readonly unknown[]): void {
       override.group !== "hidden"
     )
       fail(`${field}.group`, 'must be "peer", "chat" or "hidden"');
+    if (id === "insights" && override.group === "chat")
+      fail(`${field}.group`, '"insights" is a settings page and cannot join the chat group');
+    if (override.settingsGroup !== undefined) {
+      const group = text(override.settingsGroup, `${field}.settingsGroup`);
+      if (!groups.has(group))
+        fail(`${field}.settingsGroup`, `"${group}" is not a registered settings group`);
+      if (override.group !== undefined)
+        fail(`${field}.settingsGroup`, "set either group or settingsGroup, not both");
+      if (id === "inbox") fail(`${field}.settingsGroup`, '"inbox" stays on the primary rail');
+    }
   });
 }
 
@@ -312,8 +330,9 @@ export function validateHostExtension(value: unknown): HostExtension {
   checkBrand(fields.brand);
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
-  checkNav(fields.nav, paths, settingsGroupIds(fields.settingsGroups));
-  checkNavOverrides(fields.navOverrides, hidden);
+  const groups = settingsGroupIds(fields.settingsGroups);
+  checkNav(fields.nav, paths, groups);
+  checkNavOverrides(fields.navOverrides, hidden, groups);
   checkLanding(fields.landing, paths);
   checkOutsideWorkspaceRoutes(fields.outsideWorkspaceRoutes);
   list(fields.outsideWorkspaceProviders, "outsideWorkspaceProviders").forEach((provider, index) =>

@@ -5302,10 +5302,15 @@ export type LocalMcpServerRegistration = {
    * only for an embedding host's registration; model execution ignores them.
    */
   listResources?(): Promise<readonly McpResource[]>;
-  /** The HTML of one listed view, read through `resources/read`. */
+  /**
+   * The HTML of one listed view, read through `resources/read`. A well-formed
+   * MCP Apps `_meta.ui` (CSP, permissions, domain, border) reaches the client
+   * on the read contents.
+   */
   readResource?(uri: string): Promise<{
     mimeType: typeof import("@opengeni/contracts").MCP_APP_RESOURCE_MIME_TYPE;
     text: string;
+    _meta?: Record<string, unknown>;
   }>;
   /**
    * MCP protocol-extension request handlers keyed by method name, for example
@@ -5320,6 +5325,15 @@ export type LocalMcpServerRegistration = {
    * internals; any other error is answered with a generic internal error.
    */
   extensionMethods?: Readonly<Record<string, McpExtensionMethodHandler>>;
+  /**
+   * The version of the tool set this server publishes (1–256 characters, any
+   * scheme the host chooses, for example a content digest). Only the workspace
+   * MCP uses it, and only for an embedding host's registration: an MCP OAuth
+   * consent records each server's version, and `tools/list` shows a client
+   * the consented and current versions so it can ask the person to consent
+   * again when they differ.
+   */
+  toolSetVersion?: string;
 };
 
 /** One host MCP protocol-extension method, called with the request's grant. */

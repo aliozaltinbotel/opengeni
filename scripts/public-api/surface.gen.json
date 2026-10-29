@@ -11477,8 +11477,9 @@
       ],
       "shape": {
         "$": "object",
-        "$.ui": "object?",
-        "$.ui.resourceUri": "string!"
+        "$.ui": "union?=[\"0\",\"1\"]",
+        "$.ui|0": "ref(McpAppToolUiMeta)",
+        "$.ui|1": "ref(McpAppToolVisibilityUiMeta)"
       }
     },
     "AttemptToolIdentity": {
@@ -20992,6 +20993,35 @@
       ],
       "shape": {
         "$": "enum=[\"\\\"always\\\"\",\"\\\"session\\\"\"]"
+      }
+    },
+    "McpAppToolUiMeta": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.resourceUri": "string!",
+        "$.visibility": "array?",
+        "$.visibility[]": "ref(McpAppToolVisibility)"
+      }
+    },
+    "McpAppToolVisibility": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "enum=[\"\\\"app\\\"\",\"\\\"model\\\"\"]"
+      }
+    },
+    "McpAppToolVisibilityUiMeta": {
+      "io": [
+        "output"
+      ],
+      "shape": {
+        "$": "object",
+        "$.visibility": "array!",
+        "$.visibility[]": "ref(McpAppToolVisibility)"
       }
     },
     "McpConnectionAccountSelection": {

@@ -633,6 +633,34 @@ describe("host extension registry", () => {
       expectInvalid({ id: "fixture", navOverrides }, field);
     });
 
+    test("accepts native entries moved into a settings group, Insights included", () => {
+      const extension = extensionWith({
+        settingsGroups: [{ id: "setup", label: "Setup" }],
+        navOverrides: [
+          { id: "insights", label: "Agent usage", settingsGroup: "setup" },
+          { id: "state", label: "Know-how", settingsGroup: "setup" },
+        ],
+      });
+      expect(validateHostExtension(extension)).toBe(extension);
+      const hiddenInsights = extensionWith({
+        navOverrides: [{ id: "insights", group: "hidden" }],
+      });
+      expect(validateHostExtension(hiddenInsights)).toBe(hiddenInsights);
+    });
+
+    test.each([
+      [[{ id: "state", settingsGroup: "missing" }], "navOverrides[0].settingsGroup"],
+      [[{ id: "state", settingsGroup: "" }], "navOverrides[0].settingsGroup"],
+      [[{ id: "state", group: "peer", settingsGroup: "setup" }], "navOverrides[0].settingsGroup"],
+      [[{ id: "inbox", settingsGroup: "setup" }], "navOverrides[0].settingsGroup"],
+      [[{ id: "insights", group: "chat" }], "navOverrides[0].group"],
+    ])("refuses the settings-group overrides %p at %s", (navOverrides, field) => {
+      expectInvalid(
+        { id: "fixture", settingsGroups: [{ id: "setup", label: "Setup" }], navOverrides },
+        field,
+      );
+    });
+
     test("refuses an override of a destination the extension hides", () => {
       expectInvalid(
         extensionWith({

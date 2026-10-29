@@ -36,7 +36,15 @@ import {
   toolPolicyActionName,
   isSecretReferenceError,
   MCP_APP_RESOURCE_MIME_TYPE,
-  McpAppResourceUri,
+  mcpAppResourceUiMeta,
+  mcpAppToolUiMeta,
+  McpAppToolVisibilityUiMeta,
+  WORKSPACE_MCP_TOOL_REFUSAL_CODES,
+  isReadOnlyPermissionSet,
+  type McpAppToolUi,
+  type OrganizationAccessPreset,
+  type Permission,
+  type ToolGatewayCatalogEntry,
   type AccessGrant,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -63,6 +71,7 @@ import {
   type KnowledgeQueryWorkflowRequest,
   type ApiRouteDeps,
   siteViewerForGrant,
+  connectorToolGroup,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
@@ -146,7 +155,56 @@ export type PreparedWorkspaceToolGateway = Pick<
   hostViewServers?: readonly HostViewServer[];
   /** Host MCP extension methods; absent unless a host registration declares one. */
   hostExtensionMethods?: readonly HostExtensionMethod[];
+  /**
+   * True for an MCP OAuth connection: the catalog holds only the tools frozen
+   * at consent, so a tool name outside it was not consented.
+   */
+  consentFrozen?: boolean;
+  /** Each used host tool server's published tool-set version, by server id. */
+  hostToolSetVersions?: Readonly<Record<string, string>>;
+  /**
+   * An MCP OAuth connection's tool-set versions at consent, by server id (null
+   * when it recorded none); `tools/list` shows them beside the current ones.
+   */
+  consentedToolSetVersions?: Readonly<Record<string, string>> | null;
+  /**
+   * True for an MCP OAuth connection whose consent chose a read-only level: a
+   * tool is callable and listed only while its current annotations still
+   * classify it as a read (see `mcpOAuthConsentReadsOnly`).
+   */
+  readToolsOnly?: boolean;
 };
+
+/** What an MCP OAuth connection's consent recorded, as its tool gateway applies it. */
+export type McpOAuthToolGatewayConsent = {
+  /** The access level the consent chose; null for an organization or a pre-level consent. */
+  preset?: OrganizationAccessPreset | null;
+  /** Each host tool server's tool-set version at consent, by server id. */
+  toolSetVersions?: Readonly<Record<string, string>> | null;
+};
+
+/**
+ * Whether a consent limits its connection to read tools: Read only, or Custom
+ * without any permission that changes something. It keys on the recorded
+ * level, so a Full consent (or one recorded before levels existed) never
+ * narrows, whatever the person's permissions.
+ */
+export function mcpOAuthConsentReadsOnly(consent: {
+  preset: OrganizationAccessPreset | null;
+  permissions: readonly Permission[];
+}): boolean {
+  return (
+    consent.preset === "read_only" ||
+    (consent.preset === "custom" && isReadOnlyPermissionSet(consent.permissions))
+  );
+}
+
+/** Whether a catalog entry declares, by its annotations now, that it only reads. */
+export function workspaceToolDeclaresReadOnly(
+  entry: Pick<ToolGatewayCatalogEntry, "modelName" | "annotations">,
+): boolean {
+  return connectorToolGroup({ name: entry.modelName, annotations: entry.annotations }) === "read";
+}
 
 /** One MCP protocol-extension method a host tool server declares. */
 export type HostExtensionMethod = {
@@ -550,11 +608,21 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities: readonly { serverId: string; toolName: string }[],
+  consent: McpOAuthToolGatewayConsent = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
-  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
+  const readToolsOnly = mcpOAuthConsentReadsOnly({
+    preset: consent.preset ?? null,
+    permissions: grant.permissions,
+  });
+  return {
+    ...(await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities)),
+    consentFrozen: true,
+    consentedToolSetVersions: consent.toolSetVersions ?? null,
+    ...(readToolsOnly ? { readToolsOnly } : {}),
+  };
 }
 
 export async function prepareWorkspaceToolGatewayForGrant(
@@ -1074,10 +1142,8 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         }),
         mapDefinition: (definition) => {
           // Only a host tool server's own listing can attach an MCP Apps view.
-          const resourceUri = hostServers.views.get(
-            workspaceToolGatewayIdentityKey(definition.identity),
-          );
-          if (resourceUri) definition = { ...definition, meta: { ui: { resourceUri } } };
+          const ui = hostServers.views.get(workspaceToolGatewayIdentityKey(definition.identity));
+          if (ui) definition = { ...definition, meta: { ui } };
           // Raw/local providers have no native credential revision. The legacy
           // gateway fallback binds the whole public catalog, including Ask/Allow
           // presentation. Targeted approvals instead use the runtime's existing
@@ -1194,12 +1260,18 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         handler,
       })),
   );
+  const hostToolSetVersions = Object.fromEntries(
+    hostServers.registrations.flatMap(({ id, toolSetVersion }) =>
+      isHostToolSetVersion(toolSetVersion) ? [[id, toolSetVersion] as const] : [],
+    ),
+  );
   return {
     toolGateway: prepared.toolGateway,
     toolGatewayCatalog: prepared.toolGatewayCatalog,
     close: prepared.close,
     ...(hostViewServers.length > 0 ? { hostViewServers } : {}),
     ...(hostExtensionMethods.length > 0 ? { hostExtensionMethods } : {}),
+    ...(Object.keys(hostToolSetVersions).length > 0 ? { hostToolSetVersions } : {}),
   };
 }
 
@@ -1290,7 +1362,7 @@ export function buildWorkspaceToolGatewayMcpServer(
   observability?: Observability,
 ): Server {
   const callableEntries = prepared.toolGatewayCatalog.entries.filter(
-    (entry) => entry.approval !== "human",
+    (entry) => entry.approval !== "human" && consentStillAllows(prepared, entry),
   );
   const hostViewServers = prepared.hostViewServers ?? [];
   const hostExtensionMethods = prepared.hostExtensionMethods ?? [];
@@ -1306,9 +1378,11 @@ export function buildWorkspaceToolGatewayMcpServer(
       },
     },
   );
+  const toolSets = toolSetVersionsMeta(prepared);
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     await prepared.reauthorize?.();
     return {
+      ...(toolSets ? { _meta: { "opengeni/toolSets": toolSets } } : {}),
       tools: callableEntries.map((entry) => ({
         name: entry.modelName,
         ...(entry.title ? { title: entry.title } : {}),
@@ -1334,7 +1408,7 @@ export function buildWorkspaceToolGatewayMcpServer(
     registerHostExtensionMethod(server, prepared, grant, extension);
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
-    if (!entry) throw new ToolGatewayToolNotFoundError();
+    if (!entry) throw toolNotCallableError(prepared, request.params.name);
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
       operation: "call",
@@ -1362,6 +1436,46 @@ export function buildWorkspaceToolGatewayMcpServer(
     }
   });
   return server;
+}
+
+/**
+ * The named refusal for a `tools/call` name this connection cannot call:
+ * JSON-RPC `-32602` (MCP's answer to an unknown tool) with `data.code`. A
+ * tool listed for a person to approve answers `TOOL_APPROVAL_REQUIRED`; any
+ * other name answers `TOOL_NOT_CONSENTED` on an MCP OAuth connection, whose
+ * catalog holds only the consented tools (so the answer reveals nothing about
+ * tools outside the consent), and `TOOL_NOT_FOUND` otherwise.
+ */
+function toolNotCallableError(prepared: PreparedWorkspaceToolGateway, name: string): McpError {
+  const approvalOnly = prepared.toolGatewayCatalog.entries.some(
+    (candidate) =>
+      candidate.modelName === name &&
+      candidate.approval === "human" &&
+      consentStillAllows(prepared, candidate),
+  );
+  const code = approvalOnly
+    ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.approvalRequired
+    : prepared.consentFrozen
+      ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.notConsented
+      : WORKSPACE_MCP_TOOL_REFUSAL_CODES.notFound;
+  const message = approvalOnly
+    ? "This tool needs a person's approval and cannot be called here"
+    : prepared.consentFrozen
+      ? "This connection was not authorized to use this tool"
+      : "No tool by this name is available";
+  return new McpError(ErrorCode.InvalidParams, message, { code, name });
+}
+
+/**
+ * Whether the connection's consent still allows a catalog entry now: a
+ * read-only consent froze tools that declared they only read, and a tool that
+ * stops declaring it (same name, new annotations) leaves the connection.
+ */
+function consentStillAllows(
+  prepared: PreparedWorkspaceToolGateway,
+  entry: Pick<ToolGatewayCatalogEntry, "modelName" | "annotations">,
+): boolean {
+  return !prepared.readToolsOnly || workspaceToolDeclaresReadOnly(entry);
 }
 
 /** MCP error for a resource that does not exist for this caller. */
@@ -1421,7 +1535,8 @@ function registerHostViewResources(
   const hosts = new Map(hostViewServers.map((host) => [host.serverId, host]));
   const viewServers = new Map<string, HostViewServer>();
   for (const entry of callableEntries) {
-    const uri = entry.meta?.ui?.resourceUri;
+    const ui = entry.meta?.ui;
+    const uri = ui && "resourceUri" in ui ? ui.resourceUri : undefined;
     const host = hosts.get(entry.identity.serverId);
     if (uri && host && !viewServers.has(uri)) viewServers.set(uri, host);
   }
@@ -1452,7 +1567,18 @@ function registerHostViewResources(
     const view = await host.readResource(uri);
     if (view?.mimeType !== MCP_APP_RESOURCE_MIME_TYPE || typeof view.text !== "string")
       throw notFound();
-    return { contents: [{ uri, mimeType: MCP_APP_RESOURCE_MIME_TYPE, text: view.text }] };
+    // The view's own MCP Apps `_meta.ui` (CSP, permissions, domain, border).
+    const ui = mcpAppResourceUiMeta(view._meta);
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: MCP_APP_RESOURCE_MIME_TYPE,
+          text: view.text,
+          ...(ui ? { _meta: { ui } } : {}),
+        },
+      ],
+    };
   });
 }
 
@@ -1862,6 +1988,33 @@ function hostExtensionMethodConflict(
   return null;
 }
 
+/** A host's declared tool-set version: 1–256 characters; anything else is ignored. */
+function isHostToolSetVersion(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 256;
+}
+
+/**
+ * `tools/list` result `_meta["opengeni/toolSets"]`: for each host tool server
+ * that publishes a tool-set version, its current `version` and, on an MCP
+ * OAuth connection, the `consentedVersion` recorded at consent (null when the
+ * consent recorded none). A client asks the person to consent again when
+ * they differ. Absent when no used host server publishes a version.
+ */
+function toolSetVersionsMeta(
+  prepared: PreparedWorkspaceToolGateway,
+): Record<string, { version: string; consentedVersion?: string | null }> | null {
+  const current = prepared.hostToolSetVersions;
+  if (!current || Object.keys(current).length === 0) return null;
+  return Object.fromEntries(
+    Object.entries(current).map(([serverId, version]) => [
+      serverId,
+      prepared.consentFrozen
+        ? { version, consentedVersion: prepared.consentedToolSetVersions?.[serverId] ?? null }
+        : { version },
+    ]),
+  );
+}
+
 /** A host tool-server registration that would shadow another gateway server. */
 export class HostToolServerIdConflictError extends Error {
   readonly code = HOST_TOOL_SERVER_ID_CONFLICT;
@@ -1893,10 +2046,10 @@ async function workspaceHostToolServers(
 ): Promise<{
   registrations: LocalMcpServerRegistration[];
   staticIds: ReadonlySet<string>;
-  views: ReadonlyMap<string, string>;
+  views: ReadonlyMap<string, McpAppToolUi>;
 }> {
   const port = routeDeps.workspaceToolServers;
-  const views = new Map<string, string>();
+  const views = new Map<string, McpAppToolUi>();
   if (!port) return { registrations: [], staticIds: new Set(), views };
   const registrations = await port({
     grant: input.grant,
@@ -1936,12 +2089,14 @@ async function workspaceHostToolServers(
 
 /**
  * The registration with its server's `tools/list` observed: each listed tool's
- * well-formed `_meta.ui.resourceUri` is recorded under its gateway identity
- * key, and a malformed one is dropped. The listing itself passes unchanged.
+ * MCP Apps `_meta.ui` (its view and `visibility`, see `mcpAppToolUiMeta`) is
+ * recorded under its gateway identity key, and a tool without a well-formed
+ * one has none. A malformed `visibility` falls open to the default, so it is
+ * logged as a host registration warning. The listing itself passes unchanged.
  */
 function recordingHostViews(
   registration: LocalMcpServerRegistration,
-  views: Map<string, string>,
+  views: Map<string, McpAppToolUi>,
 ): LocalMcpServerRegistration {
   const listTools: LocalMcpServerRegistration["server"]["listTools"] = async () => {
     const tools = await registration.server.listTools();
@@ -1950,9 +2105,15 @@ function recordingHostViews(
         serverId: registration.id,
         toolName: tool.name,
       });
-      const uri = McpAppResourceUri.safeParse(hostToolViewUri(tool));
-      if (uri.success) views.set(key, uri.data);
+      const meta = "_meta" in tool ? tool._meta : undefined;
+      const ui = mcpAppToolUiMeta(meta);
+      if (ui) views.set(key, ui);
       else views.delete(key);
+      if (hasMalformedMcpAppVisibility(meta))
+        console.warn("[workspace-mcp] host tool _meta.ui.visibility is malformed; ignored", {
+          serverId: registration.id,
+          toolName: tool.name,
+        });
     }
     return tools;
   };
@@ -1966,10 +2127,11 @@ function recordingHostViews(
   return { ...registration, server };
 }
 
-function hostToolViewUri(tool: object): unknown {
-  const meta = "_meta" in tool ? tool._meta : undefined;
-  const ui = typeof meta === "object" && meta !== null && "ui" in meta ? meta.ui : undefined;
-  return typeof ui === "object" && ui !== null && "resourceUri" in ui ? ui.resourceUri : undefined;
+/** Whether a tool's `_meta.ui` names a `visibility` that is not well formed. */
+function hasMalformedMcpAppVisibility(meta: unknown): boolean {
+  const ui = typeof meta === "object" && meta !== null ? (meta as { ui?: unknown }).ui : undefined;
+  if (typeof ui !== "object" || ui === null || !("visibility" in ui)) return false;
+  return !McpAppToolVisibilityUiMeta.shape.visibility.safeParse(ui.visibility).success;
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {

@@ -64,7 +64,7 @@ export function installViewportMatchMedia(): () => void {
   };
 }
 
-const appContext = {
+export const appContext = {
   workspaces: [
     {
       id: WORKSPACE_ID,

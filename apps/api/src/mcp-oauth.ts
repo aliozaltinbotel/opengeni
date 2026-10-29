@@ -12,8 +12,10 @@ import {
   McpConnectionDecision,
   McpOAuthTokenResponse,
   OrganizationAccessPolicy,
+  OrganizationAccessPreset,
   organizationAccessPresetPermissions,
   type AccessContext,
+  type Permission,
   type AccessGrant,
   type ToolGatewayCatalog,
   type ToolGatewayIdentity,
@@ -50,8 +52,12 @@ import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./htt
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
 import { requireSameOriginBrowserMutation } from "./http/browser-mutation-origin";
 import {
+  mcpOAuthConsentReadsOnly,
   prepareWorkspaceToolGateway,
+  prepareWorkspaceToolGatewayForGrant,
   requireWorkspaceToolGatewayAuthorization,
+  workspaceToolDeclaresReadOnly,
+  type PreparedWorkspaceToolGateway,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
 import { requireNativeOrganizationMutation } from "./http/organization-governance";
@@ -78,6 +84,10 @@ export type McpOAuthResource = {
 export type McpOAuthRouteAccess = {
   grant: AccessGrant;
   allowedToolIdentities: ToolGatewayIdentity[];
+  /** The host tool-set versions recorded at consent, by server id; null when none were. */
+  consentedToolSetVersions: Record<string, string> | null;
+  /** The access level recorded at consent; null for a consent from before levels existed. */
+  consentPreset: OrganizationAccessPreset | null;
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -250,6 +260,8 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         permissions: grant.permissions,
         toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
         organizationAccess: null,
+        consentPreset: "full",
+        toolSetVersions: consentToolSetVersions(prepared),
         expiresAt: expiresIn(MCP_OAUTH_CONSENT_TTL_SECONDS),
       });
     } finally {
@@ -273,6 +285,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
           kind: workspace.kind,
         })),
         selectedWorkspaceId: grant.workspaceId,
+        permissions: grant.permissions,
       }),
     );
   });
@@ -335,18 +348,40 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: "OAuth consent authority changed",
       });
     }
+    const consent = workspaceConsentAccess(form, grant.permissions);
+    if (!consent) {
+      return oauthAuthorizeBrowserError(
+        c,
+        "Choose an access level before authorizing this client.",
+      );
+    }
     // Refused before the request is rebound or a code is issued.
     await requireNativeOrganizationMutation(deps, grant.accountId, "mcp_connection.create");
-    if (grant.workspaceId !== request.workspaceId || grant.accountId !== request.accountId) {
-      const prepared = await prepareWorkspaceToolGateway(deps, authorization);
+    if (
+      grant.workspaceId !== request.workspaceId ||
+      grant.accountId !== request.accountId ||
+      consent.preset !== "full" ||
+      request.consentPreset !== "full"
+    ) {
+      // A narrower level freezes what the narrowed grant would list: the
+      // same preparation the connection's tokens get.
+      const prepared =
+        consent.preset === "full"
+          ? await prepareWorkspaceToolGateway(deps, authorization)
+          : await prepareWorkspaceToolGatewayForGrant(deps, {
+              ...grant,
+              permissions: consent.permissions,
+            });
       try {
         const rebound = await rebindMcpOAuthAuthorizationRequest(deps.db, {
           requestHash: request.requestHash,
           subjectId: grant.subjectId,
           accountId: grant.accountId,
           workspaceId: grant.workspaceId,
-          permissions: grant.permissions,
-          toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog),
+          permissions: consent.permissions,
+          toolIdentities: mcpOAuthConsentToolIdentities(prepared.toolGatewayCatalog, consent),
+          consentPreset: consent.preset,
+          toolSetVersions: consentToolSetVersions(prepared),
         });
         if (!rebound) {
           return oauthAuthorizeBrowserError(
@@ -555,7 +590,12 @@ export async function resolveMcpOAuthRouteAccess(
   const allowedToolIdentities = access.toolIdentities.filter((identity) =>
     requestResource.kind === "all" ? true : identity.serverId === requestResource.kind,
   );
-  return { grant, allowedToolIdentities };
+  return {
+    grant,
+    allowedToolIdentities,
+    consentedToolSetVersions: access.toolSetVersions ?? null,
+    consentPreset: access.consentPreset ?? null,
+  };
 }
 
 export function mcpOAuthBearerToken(request: Request): string | null {
@@ -569,8 +609,64 @@ export function isMcpOAuthResourcePath(pathname: string): boolean {
   return WORKSPACE_MCP_PATH.test(pathname) || pathname === ORGANIZATION_MCP_PATH;
 }
 
-export function mcpOAuthConsentToolIdentities(catalog: ToolGatewayCatalog): ToolGatewayIdentity[] {
-  return catalog.entries.map((entry) => entry.identity);
+/**
+ * The tool identities a consent freezes. Under a read-only level (Read only,
+ * or Custom without any permission that changes something) only tools that
+ * declare `readOnlyHint: true` (and are not destructive) are kept, so a tool
+ * that says nothing about its effects is left out. The connection's tool
+ * gateway applies the same rule again on every request
+ * (`prepareMcpOAuthWorkspaceToolGateway`).
+ */
+export function mcpOAuthConsentToolIdentities(
+  catalog: ToolGatewayCatalog,
+  consent?: WorkspaceConsentAccess,
+): ToolGatewayIdentity[] {
+  const readOnly = consent !== undefined && mcpOAuthConsentReadsOnly(consent);
+  return catalog.entries
+    .filter((entry) => !readOnly || workspaceToolDeclaresReadOnly(entry))
+    .map((entry) => entry.identity);
+}
+
+/** The host tool-set versions a consent records: each used host server's, or null. */
+function consentToolSetVersions(
+  prepared: Pick<PreparedWorkspaceToolGateway, "hostToolSetVersions">,
+): Record<string, string> | null {
+  const versions = prepared.hostToolSetVersions;
+  return versions && Object.keys(versions).length > 0 ? { ...versions } : null;
+}
+
+/** A workspace consent's chosen access level and the grant permissions it leaves. */
+export type WorkspaceConsentAccess = {
+  preset: OrganizationAccessPreset;
+  permissions: Permission[];
+};
+
+/**
+ * The access level a workspace consent form chose (`access_preset`: `full`,
+ * `read_only` or `custom` with `permission` values; absent means `full`, the
+ * behaviour before the choice existed), applied to the person's live
+ * permissions in the workspace. The result never holds a permission the person
+ * lacks, and always keeps `workspace:read`, which the connection needs at all.
+ * Null for an unknown level.
+ */
+export function workspaceConsentAccess(
+  form: URLSearchParams,
+  live: readonly Permission[],
+): WorkspaceConsentAccess | null {
+  const preset = OrganizationAccessPreset.safeParse(form.get("access_preset") ?? "full");
+  if (!preset.success) return null;
+  const chosen =
+    preset.data === "full"
+      ? null
+      : new Set<string>(
+          preset.data === "read_only"
+            ? organizationAccessPresetPermissions("read_only")
+            : form.getAll("permission"),
+        );
+  const permissions = live.filter(
+    (permission) => chosen === null || permission === "workspace:read" || chosen.has(permission),
+  );
+  return { preset: preset.data, permissions };
 }
 
 export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
@@ -847,6 +943,8 @@ export function renderMcpOAuthConsentPage(input: {
   accounts: McpOAuthConsentAccount[];
   workspaces: McpOAuthConsentWorkspace[];
   selectedWorkspaceId: string;
+  /** The person's permissions in the selected workspace: the Custom level's choices. */
+  permissions?: readonly string[];
 }): string {
   const selectedWorkspace =
     input.workspaces.find((workspace) => workspace.id === input.selectedWorkspaceId) ??
@@ -873,11 +971,27 @@ export function renderMcpOAuthConsentPage(input: {
     accountId: workspace.accountId,
     label: consentWorkspaceLabel(workspace),
   }));
+  const customPermissions =
+    input.permissions && input.permissions.length > 0
+      ? `<details class="custom"><summary>Custom permissions</summary>${input.permissions
+          .filter((permission) => permission !== "workspace:read")
+          .map(
+            (permission) =>
+              `<label><input type="checkbox" name="permission" value="${escapeHtml(permission)}"> <span>${escapeHtml(permission)}</span></label>`,
+          )
+          .join("")}</details>`
+      : "";
   const body = `<p class="lede"><strong>${escapeHtml(input.clientName)}</strong> wants MCP access to the organization and workspace you choose.</p>
 <form method="post" action="/oauth/authorize" onsubmit="var submitter=event.submitter;if(submitter&&submitter.name){var input=document.createElement('input');input.type='hidden';input.name=submitter.name;input.value=submitter.value;this.appendChild(input)}this.querySelectorAll('button').forEach(function(button){button.disabled=true})">
 <input type="hidden" name="request" value="${escapeHtml(input.requestToken)}">
 <label class="field"><span>Organization</span><select id="organization" name="organization" autocomplete="off">${accountOptions}</select></label>
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
+<fieldset class="field levels"><legend>Access</legend>
+<label><input type="radio" name="access_preset" value="full" checked> <span><strong>Full</strong> Everything you can do in this workspace.</span></label>
+<label><input type="radio" name="access_preset" value="read_only"> <span><strong>Read only</strong> Only tools that declare they only read.</span></label>
+<label><input type="radio" name="access_preset" value="custom"> <span><strong>Custom</strong> Only the permissions you pick below.</span></label>
+${customPermissions}
+</fieldset>
 <p class="note">The grant is limited to tools available in the workspace you authorize. Opengeni rechecks live authority on every request.</p>
 <div class="actions"><button class="approve" name="decision" value="approve">Authorize</button><button class="deny" name="decision" value="deny">Deny</button></div>
 </form>
@@ -985,7 +1099,7 @@ function oauthDocument(input: {
 }
 
 const OAUTH_PAGE_CSS =
-  'html,body{margin:0}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f4f5;color:#18181b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}main{width:min(100%,28rem);background:#fff;border:1px solid #e4e4e7;border-radius:20px;padding:24px}h1{margin:8px 0 0;font-size:22px;line-height:1.3;font-weight:650}p{margin:12px 0 0}strong{font-weight:600}.mark{margin:0;font-size:12px;font-weight:600;color:#71717a}.lede,.note{color:#52525b}.field{display:flex;flex-direction:column;gap:6px;margin-top:16px;font-size:13px;color:#71717a}select{width:100%;border:1px solid #e4e4e7;border-radius:10px;background:#f4f4f5;color:#18181b;padding:10px 12px;font:inherit}.actions{display:flex;gap:12px;margin-top:20px}button{flex:1;min-height:40px;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}.approve{background:#18181b;color:#fff}.deny{background:#fff;color:#18181b;border:1px solid #e4e4e7}button:disabled{opacity:0.6;cursor:wait}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}h1{color:#fafafa}.mark{color:#a1a1aa}.lede,.note{color:#a1a1aa}select{background:#27272a;border-color:#3f3f46;color:#fafafa}.approve{background:#fafafa;color:#18181b}.deny{background:#27272a;color:#fafafa;border-color:#3f3f46}}';
+  'html,body{margin:0}body{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;background:#f4f4f5;color:#18181b;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}main{width:min(100%,28rem);background:#fff;border:1px solid #e4e4e7;border-radius:20px;padding:24px}h1{margin:8px 0 0;font-size:22px;line-height:1.3;font-weight:650}p{margin:12px 0 0}strong{font-weight:600}.mark{margin:0;font-size:12px;font-weight:600;color:#71717a}.lede,.note{color:#52525b}.field{display:flex;flex-direction:column;gap:6px;margin-top:16px;font-size:13px;color:#71717a}select{width:100%;border:1px solid #e4e4e7;border-radius:10px;background:#f4f4f5;color:#18181b;padding:10px 12px;font:inherit}.actions{display:flex;gap:12px;margin-top:20px}button{flex:1;min-height:40px;border:0;border-radius:10px;padding:10px 16px;font:inherit;font-weight:600;cursor:pointer}.approve{background:#18181b;color:#fff}.deny{background:#fff;color:#18181b;border:1px solid #e4e4e7}button:disabled{opacity:0.6;cursor:wait}fieldset{border:0;padding:0;margin:16px 0 0}legend{padding:0;margin-bottom:6px}.levels label{display:flex;gap:8px;align-items:flex-start;color:#18181b;font-size:14px;margin-top:6px}.levels strong{margin-right:4px}.custom{margin-top:8px}.custom summary{cursor:pointer;color:#52525b}.custom label{font-size:13px}@media(prefers-color-scheme:dark){body{background:#09090b;color:#fafafa}main{background:#18181b;border-color:#3f3f46}h1{color:#fafafa}.mark{color:#a1a1aa}.lede,.note{color:#a1a1aa}select{background:#27272a;border-color:#3f3f46;color:#fafafa}.approve{background:#fafafa;color:#18181b}.deny{background:#27272a;color:#fafafa;border-color:#3f3f46}.levels label{color:#fafafa}.custom summary{color:#a1a1aa}}';
 
 function jsonForScript(value: unknown): string {
   return JSON.stringify(value).replace(/</gu, "\\u003c");
