@@ -1,3 +1,4 @@
+import { observeWorkspaceToolGatewayMcpTransport } from "../workspace-tool-gateway-observability";
 import { fileOwnerContextForAccess } from "@opengeni/core";
 import { requireWorkspaceAttachmentsAllowed } from "../http/organization-session-policy";
 import { withSessionRlsActorContext } from "@opengeni/db";
@@ -807,6 +808,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
         try {
           await server.connect(transport);
+          observeWorkspaceToolGatewayMcpTransport(deps.observability, transport);
           return await transport.handleRequest(c.req.raw);
         } finally {
           await Promise.allSettled([server.close(), prepared.close()]);

@@ -1,3 +1,4 @@
+import { observeWorkspaceToolGatewayMcpTransport } from "../workspace-tool-gateway-observability";
 import { readSessionAttachmentFiles } from "@opengeni/core";
 import { createHash } from "node:crypto";
 import { ZodError } from "zod";
@@ -150,6 +151,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         );
         try {
           await server.connect(transport);
+          observeWorkspaceToolGatewayMcpTransport(deps.observability, transport);
           return await transport.handleRequest(c.req.raw);
         } finally {
           await Promise.allSettled([server.close(), prepared.close()]);

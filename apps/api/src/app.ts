@@ -23,7 +23,11 @@ import {
   resolveWorkspaceToolManifest,
 } from "./workspace-tool-target";
 import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
-import { recordWorkspaceToolTargetOperation } from "./workspace-tool-gateway-observability";
+import {
+  observeWorkspaceToolGatewayMcpTransport,
+  workspaceToolGatewayTimingMiddleware,
+  recordWorkspaceToolTargetOperation,
+} from "./workspace-tool-gateway-observability";
 import {
   CLIENT_ERRORS_PATH,
   isClientErrorReportRequest,
@@ -783,13 +787,13 @@ export function createAppComposition(deps: AppDependencies): {
     }
   };
 
-  app.use("*", async (c, next) => {
+  app.use("*", workspaceToolGatewayTimingMiddleware(observability, async (c, next) => {
     const correlationId =
       boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
     correlationIds.set(c, correlationId);
     c.header(OPENGENI_CORRELATION_HEADER, correlationId);
     await next();
-  });
+  }));
 
   // Unauthenticated local mode: admit only requests addressed to this computer
   // and, when a browser sent them, from this stack's web app (see
@@ -1953,6 +1957,7 @@ export function createAppComposition(deps: AppDependencies): {
         );
         try {
           await mcp.connect(transport);
+          observeWorkspaceToolGatewayMcpTransport(routeDeps.observability, transport);
           return await handleMcpRequestWithClientAbort(transport, boundedRequest, c.req.raw.signal);
         } finally {
           await Promise.allSettled([mcp.close(), prepared.close()]);
@@ -2034,6 +2039,7 @@ export function createAppComposition(deps: AppDependencies): {
           const mcp = buildWorkspaceToolGatewayMcpServer(prepared, grant, routeDeps.observability);
           try {
             await mcp.connect(transport);
+            observeWorkspaceToolGatewayMcpTransport(routeDeps.observability, transport);
             return await handleMcpRequestWithClientAbort(
               transport,
               boundedRequest,

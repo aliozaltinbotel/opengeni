@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { bindMcpTelemetry, withMcpCallIdentity, measureMcpPhase } from "@opengeni/observability";
+import {
+  bindMcpTelemetry,
+  withMcpCallIdentity,
+  measureMcpPhase,
+  beginWorkspaceMcpHostHandler,
+} from "@opengeni/observability";
 import Ajv, {
   _,
   str,
@@ -382,20 +387,22 @@ export class ToolGateway {
             await measureMcpPhase("lifecycle_begin", () => lifecycle?.begin?.());
             let result: ToolGatewayResultValue;
             try {
-              result = ToolGatewayResult.parse(
-                await definition.execute(executeArguments, {
-                  operationId,
-                  caller,
-                  ...(context.sourceCallId === undefined
-                    ? {}
-                    : { sourceCallId: context.sourceCallId }),
-                  ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
-                  ...(context.transportMeta === undefined
-                    ? {}
-                    : { transportMeta: context.transportMeta }),
-                  ...(context.signal === undefined ? {} : { signal: context.signal }),
-                }),
-              );
+              const executionContext: Parameters<ToolGatewayDefinition["execute"]>[1] = {
+                operationId,
+                caller,
+                ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
+                ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
+                ...(context.transportMeta === undefined ? {} : { transportMeta: context.transportMeta }),
+                ...(context.signal === undefined ? {} : { signal: context.signal }),
+              };
+              const hostTiming = beginWorkspaceMcpHostHandler();
+              let invocationResult: Awaited<ReturnType<ToolGatewayDefinition["execute"]>>;
+              try {
+                invocationResult = await definition.execute(executeArguments, executionContext);
+              } finally {
+                hostTiming?.end();
+              }
+              result = ToolGatewayResult.parse(invocationResult);
               if (!result.isError && definition.validateOutput) {
                 const outputMatchesSchema =
                   result.structuredContent !== undefined &&
