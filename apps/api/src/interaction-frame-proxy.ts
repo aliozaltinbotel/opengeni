@@ -379,13 +379,13 @@ function validateGrant(value: unknown): ProxyGrant {
   }
   let realtime: RealtimeProxySource | undefined;
   if (grant.realtime) {
-    const value = grant.realtime as RealtimeProxySource;
-    const authority = value.authority;
+    const realtimeGrant = grant.realtime as RealtimeProxySource;
+    const authority = realtimeGrant.authority;
     const access = AccessGrant.parse(authority.grant);
-    const source = RealtimeSessionUsageSource.parse({ ...value.source, schema: REALTIME_SESSION_SOURCE_SCHEMA, billingPath: "external" });
+    const source = RealtimeSessionUsageSource.parse({ ...realtimeGrant.source, schema: REALTIME_SESSION_SOURCE_SCHEMA, billingPath: "external" });
     if (authority.context.accountId !== access.accountId || authority.context.workspaceId !== access.workspaceId ||
-      !/^[0-9a-f-]{36}$/i.test(value.sessionId) || !["ai-gateway", "xai-subscription"].includes(source.provider)) throw new Error("invalid realtime grant");
-    realtime = { ...value, authority: { ...authority, grant: access,
+      !/^[0-9a-f-]{36}$/i.test(realtimeGrant.sessionId) || !["ai-gateway", "xai-subscription"].includes(source.provider)) throw new Error("invalid realtime grant");
+    realtime = { ...realtimeGrant, authority: { ...authority, grant: access,
       externalContinuation: authority.externalContinuation ? ExternalActorContinuation.parse(authority.externalContinuation) : null } };
   }
   return Object.freeze({

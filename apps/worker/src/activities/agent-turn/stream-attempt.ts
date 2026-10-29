@@ -184,7 +184,6 @@ import {
   processModelResponseTerminalEvent,
   processSessionTitleModelUsageEvent,
   emitModelCallUsage,
-  recordModelCallUsageEvent,
   recordModelUsageAndDebitCredits,
   recordAuthoritativeModelCallFact,
   recordAuthoritativeModelUsageMetrics,
@@ -548,7 +547,6 @@ export async function runTurnStreamAttempt(
   let parallelSessionTitleFinished = false;
   let creditPolicyRevision: number | undefined;
   let titleCreditPolicyRevision: number | undefined;
-  let titleUsageModelId: string | null = null;
   const persistParallelSessionTitle = async (
     generated: GeneratedSessionTitle | null,
   ): Promise<void> => {
@@ -1011,10 +1009,10 @@ export async function runTurnStreamAttempt(
         creditPolicyRevision,
         event,
         state: modelResponseState,
-        nativeSourceKey: (responseId, event) => {
+        nativeSourceKey: (responseId, terminalEvent) => {
           if (responseId) return sourceKeysByResponseId.get(responseId);
-          if (event.type !== "raw_model_stream_event") return undefined;
-          const data = event.data as Record<string, unknown>;
+          if (terminalEvent.type !== "raw_model_stream_event") return undefined;
+          const data = terminalEvent.data as Record<string, unknown>;
           const response =
             data.type === "response_done"
               ? data.response
@@ -2798,7 +2796,6 @@ export async function runTurnStreamAttempt(
     )
       ? serviceTierForLatencyMode(turnExecutionPolicy.providerId, turnExecutionPolicy.latencyMode)
       : undefined;
-    titleUsageModelId = titleRoute.usageModelId;
     if (
       startSessionTitleWorkflow &&
       titleRoute.resolvedModel &&

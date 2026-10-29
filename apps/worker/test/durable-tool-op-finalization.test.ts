@@ -204,9 +204,9 @@ for (const scenario of [
           withProviderRequestContext: async (operation: () => Promise<unknown>) => operation(),
           // Cendra fork (c5bea8a03): every production attempt carries the exact-call source owner.
           beforeModelCallSourceReceipt: async () => "source-key",
-          finalizeTurnOpStreamOps: async (callIds?: readonly string[]) => {
+          finalizeTurnOpStreamOps: async (finalizedCallIds?: readonly string[]) => {
             order.push("finalize");
-            finalizations.push(callIds);
+            finalizations.push(finalizedCallIds);
           },
         } as unknown as Parameters<typeof runTurnStreamAttempt>[0]);
       } catch (error) {
