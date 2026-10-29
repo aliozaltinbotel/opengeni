@@ -9,6 +9,8 @@ import { describe, expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import type { ReactNode } from "react";
 
+import { createHostExtensionSlot } from "../../../../../apps/web/src/host-extension/registry";
+
 import { registerDom, renderComponent } from "../../../test/render-hook";
 import { MessageTimeline } from "../../components/message-timeline";
 import {
@@ -91,6 +93,71 @@ function withHost(entries: readonly ToolRegistryEntry[], node: ReactNode) {
 }
 
 describe("session tool registry", () => {
+  test("an exact host-prefixed entry for a built-in leaf installs and renders the host card", async () => {
+    for (const leaf of ["knowledge_search", "memory_propose"]) {
+      const name = `mcp_0123456789abcdef__${leaf}`;
+      const slot = createHostExtensionSlot();
+      slot.install({ id: "fixture", toolRegistryEntries: [{ ...fixtureEntry, name }] });
+      const view = await renderComponent(
+        withHost(
+          slot.current().toolRegistryEntries ?? [],
+          <SessionTimeline items={[toolCall(name)]} />,
+        ),
+      );
+      try {
+        expect(view.container.querySelector('[data-testid="fixture-card"]')?.textContent).toBe(
+          `Fixture card for ${name}`,
+        );
+      } finally {
+        await view.unmount();
+      }
+    }
+  });
+
+  test("bare knowledge_search still renders the built-in card", async () => {
+    let resolved: ToolRegistry | undefined;
+    function Probe() {
+      resolved = useHostToolRegistry();
+      return null;
+    }
+    const slot = createHostExtensionSlot();
+    slot.install({
+      id: "fixture",
+      toolRegistryEntries: [
+        {
+          ...fixtureEntry,
+          name: "mcp_0123456789abcdef__knowledge_search",
+        },
+        { ...fixtureEntry, name: "mcp_0123456789abcdef__memory_propose" },
+      ],
+    });
+    const names = [
+      "knowledge_search",
+      "memory_propose",
+      "mcp_fedcba9876543210__knowledge_search",
+      "mcp_fedcba9876543210__memory_propose",
+    ];
+    const view = await renderComponent(
+      withHost(
+        slot.current().toolRegistryEntries ?? [],
+        <>
+          <Probe />
+          <SessionTimeline items={names.map(toolCall)} />
+        </>,
+      ),
+    );
+    try {
+      for (const name of names) {
+        const native = defaultToolRegistry.resolve(toolCall(name));
+        expect(native).not.toBe(defaultToolRegistry.fallback);
+        expect(resolved?.resolve(toolCall(name))).toBe(native);
+      }
+      expect(view.container.querySelector('[data-testid="fixture-card"]')).toBeNull();
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a host entry renders its card for that exact tool call", async () => {
     const view = await renderComponent(
       withHost([fixtureEntry], <SessionTimeline items={[toolCall(HOST_TOOL)]} />),
@@ -129,7 +196,7 @@ describe("session tool registry", () => {
     },
   );
 
-  test("without host entries the timeline keeps the shared default registry", async () => {
+  test("stock console without an extension is unchanged", async () => {
     const seen: ToolRegistry[] = [];
     function Probe() {
       seen.push(useHostToolRegistry());

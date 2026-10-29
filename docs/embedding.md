@@ -2424,7 +2424,10 @@ module reads the installed extension at call time. Do not import the
 specifier anywhere else. A module that lazy routes also reach statically and
 that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
-not use a tool name that a built-in card already renders.
+use an exact `mcp_<hash>__<leaf>` name whose leaf has a built-in card when the
+hash is 16 or 24 lowercase hexadecimal characters and `matchPrefixedLeaf` is
+explicitly `false`. Bare built-in names and built-in names under the native
+`opengeni__` and `mcp__opengeni__` prefixes remain protected.
 
 `navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
 `plugins`, `state`, `automations`, `meetings`, `artifacts`, `insights`): `label` renames
