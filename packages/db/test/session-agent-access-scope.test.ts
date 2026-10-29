@@ -7,6 +7,11 @@ import {
   createSession,
   getSessionAccessProjection,
   listSessionsForSubject,
+  listSessionEntriesForSubject,
+  listSessionDiscoverySummaries,
+  searchSessionMessagesForSubject,
+  decodeSessionListCursor,
+  getSessionAuthorityProjection,
   resolveSessionMemoryAgentScope,
   type Database,
   type DbClient,
@@ -218,3 +223,171 @@ describe("session agent access scope (real PostgreSQL)", () => {
     );
   });
 });
+
+async function ownershipFixture() {
+  const f = await fixture();
+  const member = `user:member-${crypto.randomUUID()}`;
+  for (const subject of [f.subjectId, member]) {
+    const personalId = crypto.randomUUID();
+    await shared!
+      .admin`insert into workspaces (id, account_id, name) values (${personalId}, ${f.accountId}, 'Ownership test personal')`;
+    await shared!
+      .admin`insert into organization_memberships (account_id, subject_id, status, personal_workspace_id)
+      values (${f.accountId}, ${subject}, 'active', ${personalId})`;
+    await shared!
+      .admin`insert into workspace_memberships (account_id, workspace_id, subject_id, role, permissions)
+      values (${f.accountId}, ${f.workspaceId}, ${subject}, 'member', '["sessions:read","sessions:write"]'::jsonb) on conflict do nothing`;
+  }
+  const own = await session(f, "ownership token", { subjectId: f.subjectId });
+  const child = await session(f, "ownership token child", {
+    parentSessionId: own.id,
+    subjectId: f.subjectId,
+  });
+  const ownPrivate = await session(f, "ownership token private", {
+    visibility: "user_private",
+    subjectId: f.subjectId,
+  });
+  const theirs = await session(f, "ownership token shared", {
+    subjectId: member,
+    createdBy: { kind: "subject", subjectId: member },
+    createdByContext: {},
+  });
+  const theirPrivate = await session(f, "ownership token hidden", {
+    subjectId: member,
+    visibility: "user_private",
+    createdBy: { kind: "subject", subjectId: member },
+    createdByContext: {},
+  });
+  for (const item of [own, child, ownPrivate, theirs, theirPrivate]) {
+    await shared!
+      .admin`insert into session_events (account_id, workspace_id, session_id, sequence, type, payload)
+      values (${f.accountId}, ${f.workspaceId}, ${item.id}, 1, 'user.message', '{"text":"ownership-search-token"}'::jsonb)`;
+  }
+  return { ...f, member, own, child, ownPrivate, theirs, theirPrivate };
+}
+
+test("a host can allow only owned sessions in a listing", async () => {
+  if (!available) return;
+  const f = await ownershipFixture();
+  expect(await getSessionAuthorityProjection(db, f.workspaceId, f.own.id)).toMatchObject({
+    ownerSubjectId: f.subjectId,
+  });
+  const authorizationScope = { kind: "owned" as const, subjectId: f.subjectId };
+  expect(await listIds(f, { authorizationScope })).toEqual(
+    new Set([f.own.id, f.child.id, f.ownPrivate.id]),
+  );
+  const roots = await listSessionEntriesForSubject(db, f.workspaceId, {
+    subjectId: f.subjectId,
+    authorizationScope,
+    parentSessionId: null,
+    includePinned: false,
+    includeTotals: true,
+  });
+  expect(new Set(roots.sessions.map((row) => row.id))).toEqual(
+    new Set([f.own.id, f.ownPrivate.id]),
+  );
+  expect(roots.totals?.groups.reduce((count, group) => count + group.total, 0)).toBe(3);
+  expect(await listIds(f, { authorizationScope, parentSessionId: f.own.id })).toEqual(
+    new Set([f.child.id]),
+  );
+  expect(await listIds(f, { authorizationScope: { kind: "owned", subjectId: f.member } })).toEqual(
+    new Set([f.theirs.id]),
+  );
+  expect(
+    await listIds(f, {
+      authorizationScope: { kind: "owned", subjectId: "user:missing' OR true --" },
+    }),
+  ).toEqual(new Set());
+}, 30_000);
+
+test("owned_or_shared adds workspace-shared sessions but never another member’s private one", async () => {
+  if (!available) return;
+  const f = await ownershipFixture();
+  const authorizationScope = { kind: "owned_or_shared" as const, subjectId: f.subjectId };
+  const expected = new Set([f.own.id, f.child.id, f.ownPrivate.id, f.theirs.id]);
+  expect(await listIds(f, { authorizationScope })).toEqual(expected);
+  const searched = await searchSessionMessagesForSubject(
+    db,
+    f.workspaceId,
+    { query: "ownership-search-token" },
+    { subjectId: f.subjectId, authorizationScope },
+  );
+  expect(new Set(searched.matches.map((row) => row.sessionId))).toEqual(expected);
+  expect(searched.matchedMessageCount).toBe(4);
+  const intersected = {
+    ...authorizationScope,
+    agentAccessViewer: viewer(f.own.id, "session", f.subjectId),
+  };
+  expect(await listIds(f, { authorizationScope: intersected })).toEqual(
+    new Set([f.own.id, f.child.id]),
+  );
+  const discovered = await listSessionDiscoverySummaries(db, f.workspaceId, {
+    limit: 100,
+    subjectId: f.subjectId,
+    authorizationScope: intersected,
+  });
+  expect(new Set(discovered.sessions.map((row) => row.id))).toEqual(
+    new Set([f.own.id, f.child.id]),
+  );
+  expect(discovered.total).toBe(2);
+}, 30_000);
+
+test("ownership scope kind and subject bind list, search and discovery continuations", async () => {
+  if (!available) return;
+  const f = await ownershipFixture();
+  const authorizationScope = { kind: "owned" as const, subjectId: f.subjectId };
+  const listOptions = {
+    subjectId: f.subjectId,
+    authorizationScope,
+    limit: 1,
+    includePinned: false,
+    materializeSnapshot: true,
+  };
+  const page = await listSessionEntriesForSubject(db, f.workspaceId, listOptions);
+  expect(page.nextCursor).not.toBeNull();
+  const cursor = decodeSessionListCursor(page.nextCursor!)!;
+  expect(
+    (await listSessionEntriesForSubject(db, f.workspaceId, { ...listOptions, cursor })).sessions,
+  ).toHaveLength(1);
+  const searchOptions = { query: "ownership-search-token", limit: 1 };
+  const search = await searchSessionMessagesForSubject(db, f.workspaceId, searchOptions, {
+    subjectId: f.subjectId,
+    authorizationScope,
+  });
+  expect(search.nextCursor).not.toBeNull();
+  const discovery = await listSessionDiscoverySummaries(db, f.workspaceId, {
+    limit: 1,
+    subjectId: f.subjectId,
+    authorizationScope,
+  });
+  expect(discovery.nextCursor).not.toBeNull();
+  for (const changedScope of [
+    { kind: "owned" as const, subjectId: f.member },
+    { kind: "owned_or_shared" as const, subjectId: f.subjectId },
+    { kind: "all" as const },
+  ]) {
+    await expect(
+      listSessionEntriesForSubject(db, f.workspaceId, {
+        ...listOptions,
+        cursor,
+        authorizationScope: changedScope,
+      }),
+    ).rejects.toThrow("cursor");
+    await expect(
+      searchSessionMessagesForSubject(
+        db,
+        f.workspaceId,
+        { ...searchOptions, cursor: search.nextCursor! },
+        { subjectId: f.subjectId, authorizationScope: changedScope },
+      ),
+    ).rejects.toThrow("cursor");
+    await expect(
+      listSessionDiscoverySummaries(db, f.workspaceId, {
+        limit: 1,
+        subjectId: f.subjectId,
+        authorizationScope: changedScope,
+        cursor: discovery.nextCursor!,
+      }),
+    ).rejects.toThrow("cursor");
+  }
+}, 30_000);

@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, expect, mock, spyOn, test } from "bun:test";
-import type { AccessGrant, SessionAuthorizationDecision } from "@opengeni/contracts";
+import {
+  SessionAuthorizationTarget,
+  type AccessGrant,
+  type SessionAuthorizationDecision,
+} from "@opengeni/contracts";
 import * as database from "@opengeni/db";
 import {
   requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
   SessionAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   withSessionAuthorizationReadReuse,
@@ -71,11 +76,20 @@ beforeEach(() => {
 });
 afterEach(() => mock.restore());
 
-test("target authorization passes durable identity to the host without expanding the chat", async () => {
+test("the authorization target carries owner and visibility", async () => {
   const result = await requireSessionAuthorization(deps, grant, input);
-  expect(result?.target).toEqual({ sessionId, rootSessionId });
+  expect(result?.target).toEqual({
+    sessionId,
+    rootSessionId,
+    ownerSubjectId: subjectId,
+    visibility: "user_private",
+  });
   expect(authorizeSession).toHaveBeenCalledWith(
-    expect.objectContaining({ accountId, workspaceId, target: { sessionId, rootSessionId } }),
+    expect.objectContaining({
+      accountId,
+      workspaceId,
+      target: { sessionId, rootSessionId, ownerSubjectId: subjectId, visibility: "user_private" },
+    }),
   );
   expect(facts).toHaveBeenCalledTimes(1);
   expect(facts).toHaveBeenCalledWith(db, { accountId, workspaceId, sessionId, caller: undefined });
@@ -140,6 +154,37 @@ test("an agent attempt's caller and target come from the same single read", asyn
     caller: { sessionId: callerId, attemptId },
   });
 
+  const durableViewer = {
+    callerRootSessionId: rootSessionId,
+    agentAccess: "session" as const,
+    scopeSubjectId: subjectId,
+  };
+  facts.mockResolvedValue({
+    target: targetFacts(),
+    caller: {
+      ...caller,
+      session: { ...caller.session!, agentAccess: "session", scopeSubjectId: subjectId },
+    },
+  });
+  for (const kind of ["owned", "owned_or_shared"] as const) {
+    const scopedDeps = {
+      ...deps,
+      sessionAuthorization: {
+        ...deps.sessionAuthorization,
+        resolveListScope: async () => ({
+          kind,
+          subjectId: "host:chosen-person",
+          agentAccessViewer: { ...durableViewer, agentAccess: "workspace" as const },
+        }),
+      },
+    };
+    expect(await requireSessionAuthorizationListScope(scopedDeps, agentGrant, "http")).toEqual({
+      kind,
+      subjectId: "host:chosen-person",
+      agentAccessViewer: durableViewer,
+    });
+  }
+
   // A target the caller cannot see is not found, whatever the caller's state.
   facts.mockResolvedValue({ target: null, caller });
   await expect(requireSessionAuthorization(deps, agentGrant, input)).rejects.toMatchObject({
@@ -174,4 +219,98 @@ test("read reuse stays request-scoped and stops at the handoff", async () => {
     SessionAuthorizationDeniedError,
   );
   expect(facts).toHaveBeenCalledTimes(3);
+});
+
+test("an old host contract is unchanged", async () => {
+  expect(SessionAuthorizationTarget.parse({ sessionId, rootSessionId })).toEqual({
+    sessionId,
+    rootSessionId,
+  });
+  expect(await requireSessionAuthorizationListScope(deps, grant, "http")).toEqual({ kind: "all" });
+  const oldHost = {
+    db,
+    sessionAuthorization: {
+      authorizeSession: async ({
+        target,
+      }: {
+        target: { sessionId: string; rootSessionId: string };
+      }): Promise<SessionAuthorizationDecision> =>
+        target.sessionId === sessionId
+          ? { allowed: true }
+          : { allowed: false, reason: "not_found" },
+      resolveListScope: async () => ({
+        kind: "scoped" as const,
+        rootSessionIds: [rootSessionId],
+        sessionIds: [],
+      }),
+    },
+  };
+  expect((await requireSessionAuthorization(oldHost, grant, input))?.target.sessionId).toBe(
+    sessionId,
+  );
+  expect(await requireSessionAuthorizationListScope(oldHost, grant, "http")).toEqual({
+    kind: "scoped",
+    rootSessionIds: [rootSessionId],
+    sessionIds: [],
+  });
+});
+
+test("host ownership scopes retain the trusted subject and reject malformed subjects", async () => {
+  for (const kind of ["owned", "owned_or_shared"] as const) {
+    const scopedDeps = {
+      ...deps,
+      sessionAuthorization: {
+        ...deps.sessionAuthorization,
+        resolveListScope: async () => ({ kind, subjectId: "external:host-person" }),
+      },
+    };
+    expect(
+      await requireSessionAuthorizationListScope(
+        scopedDeps,
+        { ...grant, principalKind: "service", subjectId: "technical-agent" },
+        "http",
+      ),
+    ).toEqual({ kind, subjectId: "external:host-person" });
+    for (const invalid of [
+      "",
+      " ",
+      "user:bad\u0000subject",
+      "user:bad\nsubject",
+      "x".repeat(1025),
+      null,
+      7,
+    ]) {
+      const resolveListScope = mock(deps.sessionAuthorization.resolveListScope);
+      resolveListScope.mockResolvedValue({ kind, subjectId: invalid } as never);
+      const invalidDeps = {
+        ...deps,
+        sessionAuthorization: { ...deps.sessionAuthorization, resolveListScope },
+      };
+      // The host port is an untrusted runtime boundary; exercise parsing before any database listing.
+      await expect(
+        requireSessionAuthorizationListScope(invalidDeps, grant, "http"),
+      ).rejects.toBeInstanceOf(SessionAuthorizationUnavailableError);
+    }
+  }
+});
+
+test("stock console without an extension is unchanged", async () => {
+  const stockDependencies = { db };
+  facts.mockResolvedValue({
+    target: targetFacts({ visibility: "workspace_shared", ownerSubjectId: null }),
+    caller: null,
+  });
+  expect(await requireSessionAuthorization(stockDependencies, grant, input)).toBeNull();
+  facts.mockResolvedValue({ target: targetFacts(), caller: null });
+  expect(
+    (await requireSessionAuthorization(stockDependencies, grant, input))?.target,
+  ).toMatchObject({ sessionId, ownerSubjectId: subjectId, visibility: "user_private" });
+  facts.mockResolvedValue({
+    target: targetFacts({ ownerSubjectId: "user:another-member" }),
+    caller: null,
+  });
+  await expect(requireSessionAuthorization(stockDependencies, grant, input)).rejects.toMatchObject({
+    reason: "forbidden",
+  });
+  expect(authorizeSession).not.toHaveBeenCalled();
 });

@@ -7,7 +7,6 @@ import {
   createDb,
   getKnowledgeEntry,
   withCreditDebitAttribution,
-  withSessionRlsActorContext,
   type KnowledgeContext,
 } from "@opengeni/db";
 import type { ObjectStorage } from "@opengeni/storage";

@@ -6279,6 +6279,9 @@ function slackWorkspaceUrl(deps: ApiRouteDeps, workspaceId: string): string | nu
 function slackSessionAuthorizationScopeKey(scope: SessionAuthorizationListScope | null): string {
   if (scope === null) return "standalone";
   if (scope.kind === "all") return "all";
+  if (scope.kind === "owned" || scope.kind === "owned_or_shared") {
+    return JSON.stringify({ kind: scope.kind, subjectId: scope.subjectId });
+  }
   return JSON.stringify({
     kind: scope.kind,
     rootSessionIds: [...scope.rootSessionIds].sort(),

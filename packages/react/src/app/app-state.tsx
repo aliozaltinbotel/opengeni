@@ -4,7 +4,7 @@
 // creation). Every host renders the session UI on top of this one state
 // machine: the web app with its own sign-in (`authority: "app"`), embeds with a
 // client the embedding page already authenticated (`authority: "host"`).
-import { t } from "./lib/console-text";
+import { t } from "./lib/startup-text";
 import {
   createSessionEventFeedStore,
   useLatestCallback,

@@ -329,7 +329,7 @@ test("open suffix retains only exact output producer bindings from the original 
   capture.callCompleted = (_key, _id, _response, restore) => sink.recordModelSourceRestorer(restore);
   const model = new ModelRequestCaptureModel({
     async getResponse() { return { usage: new Usage(), output: [call] }; },
-    async *getStreamedResponse() { throw new Error("Unexpected stream"); },
+    async *getStreamedResponse() { yield* []; throw new Error("Unexpected stream"); },
   });
   const request: ModelRequest = { input: [], tools: [], modelSettings: {}, outputType: "text", tracing: false };
   await withModelRequestCapture(capture, () => model.getResponse(request));

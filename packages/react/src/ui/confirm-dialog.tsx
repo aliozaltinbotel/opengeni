@@ -1,6 +1,7 @@
-import { useState, type ReactNode, type RefObject } from "react";
+import { useContext, useState, type ReactNode, type RefObject } from "react";
 
-import { useOpenGeniText } from "../messages/runtime";
+import { MessagesContext } from "../messages/core";
+import { startupEnglishMessages } from "../messages/startup-en";
 import { Button } from "./button";
 import {
   Dialog,
@@ -79,7 +80,7 @@ export function ConfirmDialog({
    */
   onConfirm: () => void | boolean | Promise<void | boolean>;
 }) {
-  const msg = useOpenGeniText();
+  const msg = useContext(MessagesContext)?.text;
   const [pending, setPending] = useState(false);
 
   const confirm = async () => {
@@ -126,7 +127,9 @@ export function ConfirmDialog({
             disabled={pending}
             onClick={() => onOpenChange(false)}
           >
-            {cancelLabel ?? msg("formDialog.cancel")}
+            {cancelLabel ??
+              msg?.("formDialog.cancel") ??
+              startupEnglishMessages["formDialog.cancel"]}
           </Button>
           <Button
             type="button"
@@ -135,7 +138,11 @@ export function ConfirmDialog({
             disabled={pending || confirmDisabled}
             onClick={() => void confirm()}
           >
-            {pending ? (pendingLabel ?? msg("formDialog.working")) : confirmLabel}
+            {pending
+              ? (pendingLabel ??
+                msg?.("formDialog.working") ??
+                startupEnglishMessages["formDialog.working"])
+              : confirmLabel}
           </Button>
         </DialogFooter>
       </DialogContent>

@@ -263,7 +263,12 @@ describe("session authorization round trips", () => {
       turnId: scope.live.turnId,
       initiatingHumanSubjectId: scope.human,
     });
-    expect(value?.target).toEqual({ sessionId: scope.caller.id, rootSessionId: scope.caller.id });
+    expect(value?.target).toEqual({
+      sessionId: scope.caller.id,
+      rootSessionId: scope.caller.id,
+      ownerSubjectId: null,
+      visibility: "workspace_shared",
+    });
     expect(value?.relatedSessionAccess).toBe("root");
     // BEGIN, scope setup, the facts read, COMMIT.
     expect(count).toBe(4);
@@ -382,6 +387,11 @@ describe("session authorization round trips", () => {
       { ...scope.humanGrant, subjectId: "user:slack-owner" },
       { sessionId: slackOwned.id, operation: "session.read", surface: "http" },
     );
-    expect(owner?.target).toEqual({ sessionId: slackOwned.id, rootSessionId: slackOwned.id });
+    expect(owner?.target).toEqual({
+      sessionId: slackOwned.id,
+      rootSessionId: slackOwned.id,
+      ownerSubjectId: null,
+      visibility: "workspace_shared",
+    });
   });
 });

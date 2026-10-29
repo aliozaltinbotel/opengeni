@@ -113,7 +113,10 @@ for (const fault of ["command404 while sandbox lives", "401", "500", "network un
     const rejected = command.then(() => ({ resolved: true as const }), (error: unknown) => ({ resolved: false as const, error }));
     await started.promise;
     const cleanup = cleanupThroughInstalledSdk(session);
-    for (let attempt = 0; cancellationAttempts === 0 && attempt < 100; attempt++) await Bun.sleep(2);
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (cancellationAttempts !== 0) break;
+      await Bun.sleep(2);
+    }
     expect(cancellationAttempts).toBeGreaterThan(0);
     expect(providerAlive).toBe(true);
     expect(physicalExit).toBe(false);

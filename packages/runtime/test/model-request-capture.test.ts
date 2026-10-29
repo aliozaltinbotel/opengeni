@@ -78,7 +78,7 @@ describe("model request capture", () => {
         order.push("authoritative-failed-terminal");
       } });
     const inner = new InnerModel();
-    inner.getStreamedResponse = async function* () { throw failure; };
+    inner.getStreamedResponse = async function* () { yield* []; throw failure; };
     await expect(withModelRequestCapture(capture, async () => {
       for await (const _event of new ModelRequestCaptureModel(inner).getStreamedResponse(requestWith("Fixture instruction.", []))) {}
     })).rejects.toBe(failure);

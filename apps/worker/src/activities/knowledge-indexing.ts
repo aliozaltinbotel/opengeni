@@ -35,7 +35,6 @@ import {
   isTransactionHandle,
   recordUsageEvent,
   sumUsageQuantity,
-  withWorkspaceUsageLock,
   waitKnowledgeIndexForFunding,
 } from "@opengeni/db";
 import type { DocumentServices, EmbeddingProviderCompletionReceipt } from "@opengeni/documents";

@@ -88,9 +88,9 @@ export class ResponsesStreamingTerminalError extends Error {
     const usage = record(terminal?.usage);
     const count = (value: unknown) => typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
     const pools = (value: unknown): Record<string, number> => {
-      const source = record(value), projected: Record<string, number> = {};
+      const tokenSource = record(value), projected: Record<string, number> = {};
       for (const name of ["cached_tokens", "cache_write_tokens", "cache_write_tokens_5m", "cache_write_tokens_1h", "reasoning_tokens", "audio_tokens", "text_tokens"]) {
-        const observed = count(source?.[name]); if (observed !== undefined) projected[name] = observed;
+        const observed = count(tokenSource?.[name]); if (observed !== undefined) projected[name] = observed;
       }
       return projected;
     };

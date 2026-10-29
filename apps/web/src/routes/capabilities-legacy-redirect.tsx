@@ -1,3 +1,4 @@
+import type { NativeCapabilitiesSection } from "@opengeni/react/app/host-extension";
 import { ProblemPanel } from "@opengeni/react/app/components/common";
 import { useAppContext } from "@opengeni/react/app/app-context";
 import {
@@ -22,7 +23,7 @@ export function CapabilitiesLegacyRedirect({
   section,
 }: {
   workspaceId: string;
-  section?: "skills";
+  section?: NativeCapabilitiesSection;
 }) {
   return (
     <ReplaceLocation

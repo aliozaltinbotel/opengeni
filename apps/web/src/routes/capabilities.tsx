@@ -1,3 +1,5 @@
+import { capabilitiesSectionFromSearch, isNativeSectionHidden, isNativeCapabilityDetailHidden, type NativeCapabilitiesSection, type NativeSectionId } from "@opengeni/react/app/host-extension";
+import { useHiddenNativeSections } from "@opengeni/react/app/lib/app-host";
 import {
   DRIVE_CONNECT_RETURN_PARAM,
   DRIVE_MCP_URL,
@@ -8,7 +10,7 @@ import type { SkillSummary } from "@opengeni/sdk";
 import { isPersonalWorkspace } from "@opengeni/react/app/lib/managed-self-context";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 import { sortConnectorsForPresentation } from "@/components/capabilities/catalog-presentation";
-import { useLocation, useNavigate } from "@tanstack/react-router";
+import { notFound, useLocation, useNavigate } from "@tanstack/react-router";
 import {
   ConnectionCatalog,
   McpConnectionCard,
@@ -257,9 +259,29 @@ export function canManageApiIntegrations(
   return hasWorkspacePermission(accessContext, workspaceId, "capabilities:manage");
 }
 
+export function CapabilitiesTabList({ hidden }: { hidden: readonly NativeSectionId[] }) {
+  const plugins = !isNativeSectionHidden("capabilities", "plugins", [], hidden);
+  const connections = !isNativeSectionHidden("capabilities", "connections", [], hidden);
+  return <LineTabsList aria-label="Capability types">
+    {plugins ? <LineTabsTrigger value="all">All</LineTabsTrigger> : null}
+    {connections ? <LineTabsTrigger value="connections">Connections</LineTabsTrigger> : null}
+    <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
+    {plugins ? <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger> : null}
+  </LineTabsList>;
+}
+
+export function capabilitiesTabNavigation(pathname: string, search: string, value: string): Readonly<{ href: string; replace: true }> | undefined {
+  const section = capabilitiesSectionFromSearch(value);
+  if (value !== "all" && !section) return undefined;
+  const params = new URLSearchParams(search);
+  if (section) params.set("section", section); else params.delete("section");
+  const query = params.toString();
+  return { href: `${pathname}${query ? `?${query}` : ""}`, replace: true };
+}
+
 type CapabilitiesRouteProps = {
   workspaceId: string;
-  initialSection?: "skills";
+  initialSection?: NativeCapabilitiesSection;
   slackLinkToken?: string;
   legacyRedirect?: boolean;
 };
@@ -313,7 +335,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
 
   // now, so it scrolls that section into view instead.
   const [filter] = useState<CapabilityFilter>("all");
-  const [activeTab, setActiveTab] = useState(initialSection === "skills" ? "skills" : "all");
+  const activeTab = initialSection ?? "all";
+  const hiddenSections = useHiddenNativeSections();
+  const integrationsHidden = isNativeSectionHidden("capabilities", "connections", [], hiddenSections);
+  const pluginsHidden = isNativeSectionHidden("capabilities", "plugins", [], hiddenSections);
   const [query, setQuery] = useState("");
   const hasQuery = query.trim().length > 0;
   const searchingAll = activeTab === "all";
@@ -331,6 +356,10 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // search and scroll position.
   const navigate = useNavigate();
   const searchStr = useLocation({ select: (location) => location.searchStr });
+  const setActiveTab = useCallback((value: string) => {
+    const target = capabilitiesTabNavigation(window.location.pathname, searchStr, value);
+    if (target) void navigate(target);
+  }, [navigate, searchStr]);
   const openKey = new URLSearchParams(searchStr).get("open");
   const goTo = useCallback(
     (key: string | null, replace = false) => {
@@ -344,10 +373,12 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
   // Strip one-shot return parameters (OAuth outcomes) but keep the open page.
   const clearReturnParams = useCallback(() => {
     const open = new URLSearchParams(window.location.search).get("open");
-    const next = open ? `?open=${encodeURIComponent(open)}` : "";
-    window.history.replaceState(window.history.state, "", `${window.location.pathname}${next}`);
-    void navigate({ href: `${window.location.pathname}${next}`, replace: true });
-  }, [navigate]);
+    const clean = open ? `?open=${encodeURIComponent(open)}` : "";
+    const target = capabilitiesTabNavigation(window.location.pathname, clean, activeTab);
+    if (!target) return;
+    window.history.replaceState(window.history.state, "", target.href);
+    void navigate(target);
+  }, [navigate, activeTab]);
   const [selectionSnapshot, setSelectionSnapshot] = useState<SheetSelection | null>(null);
   const itemKey = openKey?.startsWith("item:") ? openKey.slice("item:".length) : null;
   const selected: SheetSelection | null = useMemo(() => {
@@ -1838,6 +1869,8 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
     wasPageOpen.current = pageOpen;
   }, [pageOpen]);
 
+  if (isNativeCapabilityDetailHidden(openKey, hiddenSections, selectedItem?.kind)) throw notFound();
+
   return (
     // The app shell (RailShell) hands each route a fixed-height overflow-hidden
     // flex column, so the PAGE never body-scrolls - the route must own its own
@@ -1876,12 +1909,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                 />
               }
               tabs={
-                <LineTabsList aria-label="Capability types">
-                  <LineTabsTrigger value="all">All</LineTabsTrigger>
-                  <LineTabsTrigger value="connections">Connections</LineTabsTrigger>
-                  <LineTabsTrigger value="skills">Skills</LineTabsTrigger>
-                  <LineTabsTrigger value="plugins">Plugins</LineTabsTrigger>
-                </LineTabsList>
+                <CapabilitiesTabList hidden={hiddenSections} />
               }
             />
             {(connectionsAccessDenied ||
@@ -1936,7 +1964,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
             <CatalogActionContext.Provider value={catalogToolbar}>
               <div className="min-w-0">
                 <LineTabsContent value={activeTab} forceMount>
-                  <div hidden={!searchingAll && activeTab !== "connections"}>
+                  {!integrationsHidden ? <div hidden={!searchingAll && activeTab !== "connections"}>
                     {!searchingAll ? (
                       <CatalogHeader
                         title="Connections"
@@ -2145,7 +2173,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         />
                       </div>
                     ) : null}
-                  </div>
+                  </div> : null}
                   <div
                     className={searchingAll ? "capability-search-section" : "pt-6"}
                     hidden={activeTab !== "skills"}
@@ -2174,7 +2202,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                       }}
                     />
                   </div>
-                  <div
+                  {(!pluginsHidden || activeTab === "skills") ? <div
                     ref={bundlesRef}
                     className={searchingAll ? "capability-search-section" : "pt-6"}
                     hidden={!searchingAll && activeTab === "connections"}
@@ -2258,7 +2286,7 @@ function CapabilitiesBody({ workspaceId, initialSection, slackLinkToken }: Capab
                         />
                       </div>
                     ) : null}
-                  </div>
+                  </div> : null}
                 </LineTabsContent>
               </div>
             </CatalogActionContext.Provider>

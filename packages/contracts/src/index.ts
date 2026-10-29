@@ -9669,6 +9669,10 @@ export const SessionAuthorizationTarget = /* @__PURE__ */ defineSchema(() =>
     sessionId: primitives.uuid,
     /** Server-resolved workspace lineage root; never accepted from a caller. */
     rootSessionId: primitives.uuid,
+    /** Durable native ownership; absent only on older host payloads. */
+    ownerSubjectId: z.string().min(1).max(1024).nullable().optional(),
+    /** Native tenancy vocabulary, independent of host policy. */
+    visibility: SessionTenancyVisibility.optional(),
   }),
 );
 export type SessionAuthorizationTarget = z.infer<typeof SessionAuthorizationTarget>;
@@ -9796,6 +9800,17 @@ export const SessionAuthorizationListScope = /* @__PURE__ */ defineSchema(() =>
       kind: z.literal("scoped"),
       rootSessionIds: z.array(primitives.uuid).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
       sessionIds: z.array(primitives.uuid).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+      agentAccessViewer: SessionAgentAccessViewer.optional(),
+    }),
+    z.object({
+      kind: z.literal("owned"),
+      /** Trusted host policy output; never inferred from the calling agent. */
+      subjectId: primitives.nonEmptyString.max(1024).regex(/^[^\s\u0000-\u001f\u007f]+$/u),
+      agentAccessViewer: SessionAgentAccessViewer.optional(),
+    }),
+    z.object({
+      kind: z.literal("owned_or_shared"),
+      subjectId: primitives.nonEmptyString.max(1024).regex(/^[^\s\u0000-\u001f\u007f]+$/u),
       agentAccessViewer: SessionAgentAccessViewer.optional(),
     }),
   ]),

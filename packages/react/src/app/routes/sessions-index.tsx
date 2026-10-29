@@ -1,5 +1,6 @@
+import { HostSessionIndicatorFrame } from "../components/session-indicator";
 import { useAppApi } from "../lib/app-api";
-import { useNativeDestinationVisible } from "../lib/app-host";
+import { useHostMessageContext, useNativeDestinationVisible } from "../lib/app-host";
 import { useSessionUiFeature } from "../lib/session-ui-features";
 import { initialWorkspaceMachineCompute } from "../lib/workspace-default-machine";
 import { t } from "../lib/console-text";
@@ -242,11 +243,13 @@ export function SessionsIndexRoute({
   const { accessKeyVersion, accessContext } = useAppContext();
   useForgetLastSession(accessContext.subjectId, workspaceId);
   return (
+    <HostSessionIndicatorFrame workspaceId={workspaceId} sessionId={null}>
     <SessionsIndexRouteContent
       key={`${workspaceId}:${accessKeyVersion}`}
       workspaceId={workspaceId}
       launch={launch}
     />
+    </HostSessionIndicatorFrame>
   );
 }
 
@@ -257,6 +260,7 @@ function SessionsIndexRouteContent({
   workspaceId: string;
   launch: ComposerLaunchSearch;
 }) {
+  const hostMessageContext = useHostMessageContext();
   const uiEvents = useUiEventTarget("window");
   const context = useAppContext();
   const api = useAppApi();
@@ -1402,6 +1406,7 @@ function SessionsIndexRouteContent({
             const sessionPath = `/workspaces/${workspaceId}/sessions/${sessionId}`;
             const abandonVoice = realtimeModel
               ? prestartSessionRealtime({
+                  getModelContext: hostMessageContext,
                   client: api.voiceRealtimeClient(
                     context.client,
                     () => new URL(sessionPath, page.origin()).href,

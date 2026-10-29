@@ -49,6 +49,14 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              // Startup needs the shared context and its small English shard,
+              // while the complete fallback stays with lazy route consumers.
+              name: "messages-core",
+              test: /packages[\\/]react[\\/]src[\\/]messages[\\/](?:core|startup-en)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // Pure contract tables startup reads at module load: Site sign-in
               // parses hostnames, and the contracts index builds tool-name and
               // analytics schemas from the analytics tables. Keep them in one
@@ -56,6 +64,15 @@ export default defineConfig({
               // session-only code or with modules that import the index.
               name: "startup-contract-tables",
               test: /packages[\\/]contracts[\\/]src[\\/](?:site-publishing|product-analytics)\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
+              // The installed indicator guard is startup code, while its frame
+              // and recovery boundary also serve lazy session views. Keep this
+              // small owner out of the entry-aware session subgroups.
+              name: "host-session-indicator",
+              test: /packages[\\/]react[\\/]src[\\/]app[\\/]components[\\/](?:session-indicator\.tsx|session[\\/]failure-recovery-boundary\.tsx)$/,
               includeDependenciesRecursively: false,
               priority: 22,
             },
@@ -348,9 +365,11 @@ export default defineConfig({
               // error helpers or a toast was enough to add a startup file).
               // The icons are the ones the load-error state and toasts draw.
               // Session creation resolves the agent's capabilities, so their
-              // helpers are startup code too.
+              // helpers are startup code too. The root caught-error handler
+              // shares its host-boundary marker with lazy session UI; keep
+              // that dependency-free helper here instead of session grouping.
               name: "startup-context",
-              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|console-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
+              test: /(?:packages[\\/]react[\\/]src[\\/](?:ui[\\/]api-error\.tsx|hooks[\\/]shared-query\.ts)$|(?:apps[\\/]web[\\/]src|packages[\\/]react[\\/]src[\\/]app)[\\/](?:app-context\.tsx|components[\\/](?:common|secure-context-warning|sign-in-callback-notice|ui[\\/]sonner)\.tsx|lib[\\/](?:agent-capabilities|app-host|app-surfaces|startup-text|navigation|analytics-consent|analytics-login|api-error|appearance|bootstrap-error|bootstrap-read|github-installation-unlink|host-boundary-diagnostics|managed-auth-form|managed-auth-transition|managed-self-context|model-access|org|organization-invitation-continuation|permissions|personal-github-authority|personal-security-context|session-context|session-create|session-creation-handoff|session-pins|shared-query|single-flight|toast|ui-events|use-capability-tool-defaults|workspace-deletion|workspace-navigation-preference|workspace-scope-context|workspace-transition|workspaces)\.tsx?)|(?:node_modules|\.bun)[\\/]sonner(?:@|[\\/]).*|lucide-react[\\/]dist[\\/]esm[\\/]icons[\\/](?:copy|lock|octagon-x|refresh-cw)\.mjs)$/,
               includeDependenciesRecursively: false,
               priority: 5,
             },

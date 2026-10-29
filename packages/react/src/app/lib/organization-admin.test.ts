@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   beginOrganizationAdminOperation,
+  parseOrganizationSection,
   canInviteOrganizationRole,
   canRevokeOrganizationInvitation,
   maskedOrganizationSubject,
@@ -202,3 +203,8 @@ function deferred<Value>() {
   });
   return { promise, resolve };
 }
+
+test("legacy member and MCP-client sections normalize before host visibility checks", () => {
+  expect(parseOrganizationSection("members")).toBe("people");
+  expect(parseOrganizationSection("mcp-clients")).toBe("agents");
+});

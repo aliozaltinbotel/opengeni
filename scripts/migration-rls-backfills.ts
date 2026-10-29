@@ -559,13 +559,13 @@ function stripCatalogRoutinePatchLiterals(statement: string): Readonly<{ source:
     // Anchor length/containment checks over catalog source produce only scalar
     // metadata. Any other use, reassignment or execution remains opaque.
     if (use[2] === variable) {
-      const sources = [definition, ...(catalogBinding?.bodyVariables ?? [])].join("|");
+      const catalogSources = [definition, ...(catalogBinding?.bodyVariables ?? [])].join("|");
       remainder = remainder
-        .replace(new RegExp(`\\blength\\(\\s*replace\\(\\s*(?:${sources})\\s*,\\s*${variable}\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\blength\\(\\s*replace\\(\\s*(?:${catalogSources})\\s*,\\s*${variable}\\s*,\\s*''\\s*\\)\\s*\\)`, "gi"), "")
         .replace(new RegExp(`\\blength\\(\\s*${variable}\\s*\\)`, "gi"), "")
-        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?strpos\\(\\s*(?:${sources})\\s*,\\s*${variable}\\s*\\)`, "gi"), "")
-        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?position\\(\\s*${variable}\\s+IN\\s+(?:${sources})\\s*\\)`, "gi"), "")
-        .replace(new RegExp(`\\b(?:${sources})\\s+(?:NOT\\s+)?LIKE\\s*'%'\\s*\\|\\|\\s*${variable}\\s*\\|\\|\\s*'%'`, "gi"), "");
+        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?strpos\\(\\s*(?:${catalogSources})\\s*,\\s*${variable}\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:pg_catalog\\s*\\.\\s*)?position\\(\\s*${variable}\\s+IN\\s+(?:${catalogSources})\\s*\\)`, "gi"), "")
+        .replace(new RegExp(`\\b(?:${catalogSources})\\s+(?:NOT\\s+)?LIKE\\s*'%'\\s*\\|\\|\\s*${variable}\\s*\\|\\|\\s*'%'`, "gi"), "");
     }
     const variableUses = remainder.replace(/\b[Ee]'(?:[^'\\]|\\[\s\S]|'')*'|'(?:[^']|'')*'/g, "''");
     if (new RegExp(`\\b${variable}\\b`, "i").test(variableUses)) return whole;

@@ -136,12 +136,14 @@ export function mcpAccountRouteReviewLabel(label: McpAccountRouteLabel): string 
  * cannot call: outside the tools an MCP OAuth connection was consented to
  * (`TOOL_NOT_CONSENTED`), not in the caller's catalog at all
  * (`TOOL_NOT_FOUND`), or listed only for a person to approve and never
- * callable over MCP (`TOOL_APPROVAL_REQUIRED`).
+ * callable over MCP (`TOOL_APPROVAL_REQUIRED`), or app-only and never callable
+ * by a model (`TOOL_NOT_MODEL_VISIBLE`).
  */
 export const WORKSPACE_MCP_TOOL_REFUSAL_CODES = Object.freeze({
   notConsented: "TOOL_NOT_CONSENTED",
   notFound: "TOOL_NOT_FOUND",
   approvalRequired: "TOOL_APPROVAL_REQUIRED",
+  notModelVisible: "TOOL_NOT_MODEL_VISIBLE",
 } as const);
 export type WorkspaceMcpToolRefusalCode =
   (typeof WORKSPACE_MCP_TOOL_REFUSAL_CODES)[keyof typeof WORKSPACE_MCP_TOOL_REFUSAL_CODES];
@@ -242,7 +244,7 @@ function metaRecord(value: unknown): Record<string, unknown> | undefined {
  * that is well formed. The view comes from `ui.resourceUri`, else from the
  * deprecated flat `ui/resourceUri` key; a tool may also name no view and only
  * a `visibility`. A malformed `visibility` is dropped (the default then
- * applies); a malformed view drops the whole `ui`.
+ * applies); a malformed view is dropped independently of valid visibility.
  */
 export function mcpAppToolUiMeta(meta: unknown): McpAppToolUi | undefined {
   const record = metaRecord(meta);
@@ -252,7 +254,7 @@ export function mcpAppToolUiMeta(meta: unknown): McpAppToolUi | undefined {
   const rawResourceUri = ui?.resourceUri ?? record?.["ui/resourceUri"];
   if (rawResourceUri === undefined) return visible;
   const resourceUri = McpAppResourceUri.safeParse(rawResourceUri);
-  return resourceUri.success ? { resourceUri: resourceUri.data, ...visible } : undefined;
+  return resourceUri.success ? { resourceUri: resourceUri.data, ...visible } : visible;
 }
 
 /** The well-formed MCP Apps `_meta.ui` of a view resource, or undefined. */

@@ -9,6 +9,10 @@ import { useNavigate } from "@tanstack/react-router";
 import { ExternalAuthRecoveryProvider } from "./lib/external-auth-recovery";
 import { afterHostSignOut } from "@/host-extension/lifecycle";
 
+function renderClerkAccountRecovery(retry: () => void): ReactNode {
+  return <ClerkAccountRecovery retry={retry} />;
+}
+
 /** Only existing Clerk memberships are offered; this never creates access. */
 function ClerkAccountRecovery({ retry }: { retry: () => void }) {
   const { signOut } = useAuth();
@@ -220,7 +224,7 @@ function ClerkSessionBridge({
       </main>
     );
   return (
-    <ExternalAuthRecoveryProvider value={(retry) => <ClerkAccountRecovery retry={retry} />}>
+    <ExternalAuthRecoveryProvider value={renderClerkAccountRecovery}>
       <Fragment key={principal}>{children}</Fragment>
     </ExternalAuthRecoveryProvider>
   );

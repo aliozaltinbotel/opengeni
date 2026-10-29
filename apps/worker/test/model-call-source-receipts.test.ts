@@ -312,9 +312,9 @@ test(`actual SDK transient ${streaming ? "streaming" : "ordinary"} long continua
  const step=(sent:ModelRequest)=>{
   calls++;
   if(calls>toolSteps)return {outputText:"Synthetic grounded answer"};
-  const tool=sent.tools.find(value=>value.type==="function" && value.name.endsWith("__knowledge_search"));
-  if(!tool || tool.type!=="function")throw Error("Actual SDK MCP catalog tool missing");
-  return {output:[functionCall(tool.name,{},crypto.randomUUID())]};
+  const knowledgeTool=sent.tools.find(value=>value.type==="function" && value.name.endsWith("__knowledge_search"));
+  if(!knowledgeTool || knowledgeTool.type!=="function")throw Error("Actual SDK MCP catalog tool missing");
+  return {output:[functionCall(knowledgeTool.name,{},crypto.randomUUID())]};
  };
  const model=new ModelRequestCaptureModel({async getResponse(sent){return await new ScriptedModel([step(sent)]).getResponse(sent);},async *getStreamedResponse(sent){yield* new ScriptedModel([step(sent)]).getStreamedResponse(sent);}});
  try {
@@ -623,14 +623,14 @@ test("actual SDK source-bound output persists and reloads into the next admitted
  const initial=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
  const sourceBasis={kind:"INSTRUCTION" as const,parents:[{owner:"session_history_items",id:initial[0]!.id,sha256:initial[0]!.sourceSha256!}],retainedSources:[]};
  await appendSessionHistoryItems(app.db,{...write,items:[{position:Math.max(...initial.map(row=>row.position))+1,item:{type:"message",role:"developer",content:"Synthetic durable instructions"},sourceBasis}]});
- const {Agent}=await import("@openai/agents");const counts:number[]=[];
+ const {Agent: SourceAgent}=await import("@openai/agents");const counts:number[]=[];
  for(let turn=0;turn<2;turn++) {
   const stored=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
   const bound=stored.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]}));
   const input=projectHistoryForProvider(bound,"responses"),guard=new HistoryPrefixGuard();guard.seed(input,input.length);
   const capture:ModelRequestCapture=()=>{};
-  capture.beforeCall=async request=>{const receipt=await persistModelCallSourceReceipt(app.db,identity,{input:request.input,sourceBindings:modelSourceBindings(request.input)});expect(receipt.incompleteReasons).toEqual([]);expect(receipt.complete).toBe(true);return receipt.sourceKey;};
-  const result=await withModelRequestCapture(capture,()=>new Runner({tracingDisabled:true}).run(new Agent({name:"source persistence test",model:new ModelRequestCaptureModel(new ScriptedModel([{outputText:`Synthetic answer ${turn}`}]))}),input as ModelRequest["input"],{historyOwnership:"external"}));
+  capture.beforeCall=async modelRequest=>{const receipt=await persistModelCallSourceReceipt(app.db,identity,{input:modelRequest.input,sourceBindings:modelSourceBindings(modelRequest.input)});expect(receipt.incompleteReasons).toEqual([]);expect(receipt.complete).toBe(true);return receipt.sourceKey;};
+  const result=await withModelRequestCapture(capture,()=>new Runner({tracingDisabled:true}).run(new SourceAgent({name:"source persistence test",model:new ModelRequestCaptureModel(new ScriptedModel([{outputText:`Synthetic answer ${turn}`}]))}),input as ModelRequest["input"],{historyOwnership:"external"}));
   const history=result.history as Array<Record<string,unknown>>;
   expect(()=>guard.verify(history)).not.toThrow();
   const appended=historyRowsToAppend(history,input.length,Math.max(...stored.map(row=>row.position))+1);
@@ -660,12 +660,12 @@ test.each([false,true])("selective import of an actual SDK response retains its 
  const rows=await getActiveSessionHistoryItemsPaged(app.db,identity.workspaceId,identity.sessionId);
  const input=projectHistoryForProvider(rows.map(row=>bindModelSourceInput(row.item,{kind:"HISTORY_ROW",sourceRef:{owner:"session_history_items",id:row.id,sha256:row.sourceSha256!},parents:[],retainedSources:[]})),"responses");
  const capture:ModelRequestCapture=()=>{};let sourceReceipt:Awaited<ReturnType<typeof persistModelCallSourceReceipt>>|undefined;
- capture.beforeCall=async request=>{sourceReceipt=await persistModelCallSourceReceipt(app.db,identity,{input:request.input,sourceBindings:modelSourceBindings(request.input)});expect(sourceReceipt.complete).toBe(true);return sourceReceipt.sourceKey;};
+ capture.beforeCall=async modelRequest=>{sourceReceipt=await persistModelCallSourceReceipt(app.db,identity,{input:modelRequest.input,sourceBindings:modelSourceBindings(modelRequest.input)});expect(sourceReceipt.complete).toBe(true);return sourceReceipt.sourceKey;};
  let restoreHistorySources:((items:readonly unknown[])=>void)|undefined;
  capture.callCompleted=(_sourceKey,_responseId,_response,restore)=>{restoreHistorySources=restore;};
- const {Agent}=await import("@openai/agents");
+ const {Agent: SourceAgent}=await import("@openai/agents");
  const result=await withModelRequestCapture(capture,async()=>{
-  const runner=new Runner({tracingDisabled:true}),agent=new Agent({name:"Skill-informed output",model:new ModelRequestCaptureModel(new ScriptedModel([{outputText:"Synthetic Skill-informed answer"}]))});
+  const runner=new Runner({tracingDisabled:true}),agent=new SourceAgent({name:"Skill-informed output",model:new ModelRequestCaptureModel(new ScriptedModel([{outputText:"Synthetic Skill-informed answer"}]))});
   if(streaming){const stream=await runner.run(agent,input as ModelRequest["input"],{stream:true,historyOwnership:"external"});for await(const _event of stream){}await stream.completed;return stream;}
   return runner.run(agent,input as ModelRequest["input"],{historyOwnership:"external"});
  });
@@ -692,8 +692,8 @@ test.each([false,true])("selective import of an actual SDK response retains its 
  // The current host owner withdraws this exact release; no cached earlier admission can dispatch it.
  let dispatched=0,hostChecks=0;const withdrawn=new Set([skill.id]);
  const replay:ModelRequestCapture=()=>{};
- replay.beforeCall=request=>persistAndAuthorizeModelCallSource(app.db,{...next,sourceKey:crypto.randomUUID(),requestIndex:2},{input:request.input},async current=>{hostChecks++;if(current.closure.flatMap(node=>node.retainedSources).some(ref=>ref.owner===skill.owner&&withdrawn.has(ref.id)))throw Error("CURRENT_SKILL_WITHDRAWN");});
- const model=new ModelRequestCaptureModel({async getResponse(request){dispatched++;return new ScriptedModel([{outputText:"must not run"}]).getResponse(request);},async *getStreamedResponse(){throw Error("unused");}});
+ replay.beforeCall=modelRequest=>persistAndAuthorizeModelCallSource(app.db,{...next,sourceKey:crypto.randomUUID(),requestIndex:2},{input:modelRequest.input},async current=>{hostChecks++;if(current.closure.flatMap(node=>node.retainedSources).some(ref=>ref.owner===skill.owner&&withdrawn.has(ref.id)))throw Error("CURRENT_SKILL_WITHDRAWN");});
+ const model=new ModelRequestCaptureModel({async getResponse(modelRequest){dispatched++;return new ScriptedModel([{outputText:"must not run"}]).getResponse(modelRequest);},async *getStreamedResponse(){yield* [];throw Error("unused");}});
  await expect(withModelRequestCapture(replay,()=>model.getResponse(request(importedRows.map(row=>row.item))))).rejects.toThrow("CURRENT_SKILL_WITHDRAWN");
  expect(hostChecks).toBe(1);expect(dispatched).toBe(0);
 },180_000);
@@ -760,8 +760,8 @@ test("memoized ancestry keeps depth and cycle refusals after a shallow route suc
   });
   // The shallow path is visited first, so the later deep path reaches an
   // already memoized subtree whose relative depth must still count.
-  const request = { input: [chain[0]!.item, chain.at(-1)!.item] };
-  const exceeded = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, request);
+  const deepRequest = { input: [chain[0]!.item, chain.at(-1)!.item] };
+  const exceeded = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, deepRequest);
   expect(exceeded.complete).toBe(false); expect(exceeded.incompleteReasons).toContain("CAP_EXCEEDED");
   const end = chain.at(-1)!;
   await shared.admin.begin(async tx => {
@@ -769,7 +769,7 @@ test("memoized ancestry keeps depth and cycle refusals after a shallow route suc
     const basis = { kind: "COPIED", parents: [{ owner: "session_history_items", id: end.id, sha256: end.sourceSha256! }] };
     await tx`update session_history_items set source_basis=${tx.json(basis)} where id=${end.id} and account_id=${identity.accountId} and workspace_id=${identity.workspaceId}`;
   });
-  const cyclic = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, request);
+  const cyclic = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID() }, deepRequest);
   expect(cyclic.complete).toBe(false); expect(cyclic.incompleteReasons).toContain("UNRESOLVED_PARENT");
 });
 
@@ -949,7 +949,7 @@ test("fresh turn hydrates authenticated generic disclosure through the installed
   let triggerEventId = f.triggerEventId;
   let executions = 0;
   const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
-  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(httpRequest) {
     const mcp = new McpServer({ name: "durable-disclosure", version: "1.0.0" });
     mcp.registerTool("status_read", { description: "Read synthetic status", inputSchema: {} }, async () => {
       executions++;
@@ -958,7 +958,7 @@ test("fresh turn hydrates authenticated generic disclosure through the installed
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
     transports.push(transport);
     await mcp.connect(transport);
-    return transport.handleRequest(request);
+    return transport.handleRequest(httpRequest);
   } });
   const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: "strip", mcpServers: [{ id: "connected", url: `http://127.0.0.1:${server.port}/mcp`, cacheToolsList: false }] });
   const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: "connected" }], identity);
@@ -1024,7 +1024,7 @@ test("fresh turn hydrates authenticated generic disclosure through the installed
           { index: resultIndex, value: { ...result, output: "Changed result" } },
         ];
         for (const [offset, mutant] of mutants.entries()) {
-          const changed = input.map((item, index) => index === mutant.index ? mutant.value : item);
+          const changed = input.map((item, itemIndex) => itemIndex === mutant.index ? mutant.value : item);
           const projected = expandInteractionFamilyDisclosures(changed);
           const refused = await persistModelCallSourceReceipt(app.db, { ...identity, sourceKey: crypto.randomUUID(), requestIndex: 100 + offset }, { input: projected, sourceBindings: modelSourceBindings(projected) });
           expect(refused.complete).toBe(false);
@@ -1083,7 +1083,7 @@ test("actual native Knowledge GET envelopes retain exact range provenance and li
   const { registerKnowledgeEntryTools } = await import("../../api/src/mcp/knowledge-entries");
   const { buildDocumentsMcpServer } = await import("../../api/src/mcp/documents");
   const { wrapAttemptToolExecute } = await import("../../../packages/runtime/src/tool-result-spill");
-  const { withModelRequestCapture } = await import("../../../packages/runtime/src/model-request-capture");
+  const { withModelRequestCapture: withRetainedModelRequestCapture } = await import("../../../packages/runtime/src/model-request-capture");
   const { AttemptToolResult, KnowledgeEntryGetResponse } = await import("@opengeni/contracts");
   const { saveKnowledgeEntry, getKnowledgeEntry, archiveKnowledgeEntry } = await import("@opengeni/db");
   const retainedReceipt = async (owner: Awaited<ReturnType<typeof fixture>>, refs: import("@opengeni/contracts").ModelSourceRef[]) => {
@@ -1127,7 +1127,7 @@ test("actual native Knowledge GET envelopes retain exact range provenance and li
         const capture: import("../../../packages/runtime/src/model-request-capture").ModelRequestCapture = () => {};
         capture.onModelToolSource = async source => { refs = source.retainedSources; };
         const execute = wrapAttemptToolExecute(async () => raw, undefined, { serverId, toolName: "knowledge_get" });
-        await withModelRequestCapture(capture, () => execute({}, { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "worker:retained-test" }, sourceCallId: crypto.randomUUID(), nativeModelSourceKey: f.identity.sourceKey }));
+        await withRetainedModelRequestCapture(capture, () => execute({}, { operationId: crypto.randomUUID(), caller: { kind: "model", subjectId: "worker:retained-test" }, sourceCallId: crypto.randomUUID(), nativeModelSourceKey: f.identity.sourceKey }));
         expect(refs).toHaveLength(1);
         const ref = refs[0];
         if (!ref) throw Error("ACTUAL_GET_SELECTION_REQUIRED");
@@ -1207,14 +1207,14 @@ test("Knowledge GET provenance survives the real sink and fresh-turn hydration; 
     expect(saved.outcome).toBe(variant === "review-first" ? "pending" : "published");
     const serverId = variant === "third-party" ? "cendra-pms" : "opengeni";
     const transports: InstanceType<typeof WebStandardStreamableHTTPServerTransport>[] = [];
-    const http = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(request) {
+    const http = Bun.serve({ hostname: "127.0.0.1", port: 0, async fetch(httpRequest) {
       const server = new McpServer({ name: "retained-knowledge", version: "1" });
       if (variant === "error") server.registerTool("knowledge_get", { inputSchema: {} }, async () => { throw Error("Synthetic unavailable read"); });
       else registerKnowledgeEntryTools(server, { db: app.db } as import("@opengeni/core").ApiRouteDeps, {
         accountId: identity.accountId, workspaceId: identity.workspaceId, subjectId: "worker:retained-test", principalKind: "agent_attempt", permissions: ["documents:search"], metadata: { sessionId: identity.sessionId, turnId: identity.turnId, attemptId: identity.attemptId, executionGeneration: identity.executionGeneration },
       }, identity.sessionId);
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-      transports.push(transport); await server.connect(transport); return transport.handleRequest(request);
+      transports.push(transport); await server.connect(transport); return transport.handleRequest(httpRequest);
     } });
     const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false, openaiProviderItemIds: "strip", mcpServers: [{ id: serverId, url: `http://127.0.0.1:${http.port}/mcp`, cacheToolsList: false }] });
     const prepared = await prepareAgentTools(settings, [{ kind: "mcp", id: serverId }], { ...identity, onAttemptToolCatalog: async catalog => { await persistAttemptToolCatalog(app.db, catalog); } });
@@ -1334,7 +1334,7 @@ test("generated image durable projection authenticates exact ancestry and curren
   expect(producer.complete).toBe(true);
   await appendSessionHistoryItems(app.db,{...f.write,items:[{position:Math.max(...before.map(row=>row.position))+1,item:original,nativeProducerSourceKey:f.identity.sourceKey}]});
   const loaded = await getActiveSessionHistoryItemsPaged(app.db,f.identity.workspaceId,f.identity.sessionId);
-  const row = loaded.find(row=>row.item.id === "synthetic-image")!;
+  const row = loaded.find(candidate=>candidate.item.id === "synthetic-image")!;
   bindDurableModelHistoryRows([row]);
   const [projected] = projectGeneratedImageHistoryForModel([row.item]);
   const bindings = modelSourceBindings([projected]);

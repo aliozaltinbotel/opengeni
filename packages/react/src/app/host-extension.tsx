@@ -12,6 +12,7 @@
 // reads the installed extension at call time: a module with `import()` that
 // lazy routes also reach statically would reshuffle the startup chunks.
 import type { ComponentType, ReactNode } from "react";
+import type { MessageContextInput } from "./lib/message-context";
 import type { ToolRenderer } from "../timeline";
 
 export { isBuiltInToolCardName } from "./built-in-tool-names";
@@ -37,6 +38,26 @@ export type NativeDestination =
   | "read-only-chats"
   | "variable-sets"
   | "environments";
+
+export type HostExtensionStarter = Readonly<{ id: string; label: string; prompt: string }>;
+
+export type NativeSectionId =
+  | "workspace.access" | "workspace.api-keys" | "workspace.developer" | "workspace.models"
+  | "organization.members" | "organization.workspaces" | "organization.mcp-clients"
+  | "capabilities.plugins" | "capabilities.integrations";
+export type NativeCapabilitiesSection = "skills" | "connections" | "plugins";
+export const NATIVE_SECTION_IDS: readonly NativeSectionId[] = Object.freeze([
+  "workspace.access", "workspace.api-keys", "workspace.developer", "workspace.models",
+  "organization.members", "organization.workspaces", "organization.mcp-clients",
+  "capabilities.plugins", "capabilities.integrations",
+]);
+export function isNativeSectionId(value: unknown): value is NativeSectionId {
+  return typeof value === "string" && (NATIVE_SECTION_IDS as readonly string[]).includes(value);
+}
+export function capabilitiesSectionFromSearch(value: unknown): NativeCapabilitiesSection | undefined {
+  if (value === "integrations") return "connections";
+  return value === "skills" || value === "connections" || value === "plugins" ? value : undefined;
+}
 
 export type HostExtensionContext = Readonly<{ workspaceId: string; pathname: string }>;
 export type HostExtensionPage = ComponentType<{ workspaceId: string }>;
@@ -117,9 +138,29 @@ export type HostExtensionNavOverride = Readonly<{
   group?: HostExtensionNavGroup;
   settingsGroup?: string;
 }>;
+export type HostExtensionCommandResult = Readonly<{ id: string; label: string; path: string; keywords?: readonly string[] }>;
+export type HostExtensionCommandMenuProvider = Readonly<{
+  id: string;
+  heading: string;
+  search: (query: string, context: HostExtensionContext, signal: AbortSignal) => Promise<readonly HostExtensionCommandResult[]>;
+}>;
+export type HostExtensionUtility = Readonly<{
+  id: string;
+  label: string;
+  icon: ComponentType<{ className?: string }>;
+  load: () => Promise<{ default: ComponentType<{ workspaceId: string }> }>;
+}>;
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
+  /** Labelled, dismissible context resolved for each message and realtime start. */
+  messageContext?: (context: HostExtensionContext) => MessageContextInput;
+  /** Replaces the native new-chat suggestions; up to eight, with unique ids. */
+  starters?: (context: HostExtensionContext) => readonly HostExtensionStarter[];
+  /** Persistent host information above every session and the new-chat page. */
+  sessionIndicator?: ComponentType<{ workspaceId: string; sessionId: string | null }>;
+  commandMenuProviders?: readonly HostExtensionCommandMenuProvider[];
+  utilities?: readonly HostExtensionUtility[];
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;
@@ -143,6 +184,7 @@ export type HostExtension = Readonly<{
   outsideWorkspaceProviders?: readonly ComponentType<{ children: ReactNode }>[];
   settingsGroups?: readonly Readonly<{ id: string; label: string }>[];
   hiddenNativeDestinations?: readonly NativeDestination[];
+  hiddenNativeSections?: readonly NativeSectionId[];
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
   toolRegistryEntries?: readonly HostToolRegistryEntry[];
   workspaceFilter?: (workspace: Readonly<{ id: string; accountId: string }>) => boolean;
@@ -340,15 +382,44 @@ const ORGANIZATION_SECTION_DESTINATIONS: Readonly<Record<string, NativeDestinati
   insights: "insights",
 };
 
-/** Whether an organization settings section shows a destination the host extension hides. */
+const SCOPED_NATIVE_SECTIONS: Readonly<Record<"workspace" | "organization" | "capabilities", Readonly<Record<string, NativeSectionId>>>> = {
+  workspace: { access: "workspace.access", members: "workspace.access", "api-keys": "workspace.api-keys", developer: "workspace.developer", models: "workspace.models", plugins: "capabilities.plugins", capabilities: "capabilities.plugins" },
+  organization: { people: "organization.members", members: "organization.members", workspaces: "organization.workspaces", agents: "organization.mcp-clients", "mcp-clients": "organization.mcp-clients" },
+  capabilities: { all: "capabilities.plugins", plugins: "capabilities.plugins", connections: "capabilities.integrations", integrations: "capabilities.integrations" },
+};
+
+/** One hiding rule for rails, settings search, page parts and direct URLs. */
+export function isNativeSectionHidden(
+  scope: "workspace" | "organization" | "capabilities",
+  section: string,
+  hiddenDestinations: readonly NativeDestination[] = [],
+  hiddenSections: readonly NativeSectionId[] = [],
+): boolean {
+  const mapping = SCOPED_NATIVE_SECTIONS[scope];
+  const id = Object.hasOwn(mapping, section) ? mapping[section] : undefined;
+  if (id !== undefined && hiddenSections.includes(id)) return true;
+  const destination = scope === "organization" && Object.hasOwn(ORGANIZATION_SECTION_DESTINATIONS, section)
+    ? ORGANIZATION_SECTION_DESTINATIONS[section] : undefined;
+  return destination !== undefined && hiddenDestinations.includes(destination);
+}
+
+/** Existing organization callers retain their destination-based behavior. */
 export function isOrganizationSectionHidden(
   section: string,
   hidden: readonly NativeDestination[],
+  hiddenSections: readonly NativeSectionId[] = [],
 ): boolean {
-  const destination = Object.hasOwn(ORGANIZATION_SECTION_DESTINATIONS, section)
-    ? ORGANIZATION_SECTION_DESTINATIONS[section]
-    : undefined;
-  return destination !== undefined && hidden.includes(destination);
+  return isNativeSectionHidden("organization", section, hidden, hiddenSections);
+}
+
+/** Connector and plugin detail URLs follow their tab's visibility; Skills stay independent. */
+export function isNativeCapabilityDetailHidden(open: string | null, hidden: readonly NativeSectionId[], itemKind?: string | null): boolean {
+  if (!open) return false;
+  if (hidden.includes("capabilities.integrations") && (
+    open.startsWith("integration:") || open.startsWith("service:") ||
+    (open.startsWith("item:") && itemKind != null && itemKind !== "skill")
+  )) return true;
+  return hidden.includes("capabilities.plugins") && open.startsWith("package:plugin:");
 }
 
 /** Whether a first workspace segment opens a destination the host extension hides. */

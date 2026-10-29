@@ -30,6 +30,7 @@ import { useLastStartedTurnPolicy } from "../../../hooks/use-last-started-turn-p
 import { useSessionLineage } from "../../../hooks/use-session-lineage";
 import { BrandMark, Wordmark } from "../brand-mark";
 import { SessionHeader } from "./session-header";
+import { HostRailUtilities } from "./host-utilities";
 import { SessionStartupProvider } from "../../../lib/session-startup";
 import {
   requestSessionUsageLimitEditor,
@@ -209,6 +210,7 @@ export function RailBody() {
           session-row actions with their own stacking levels. The footer is a
           sibling of the clipped viewport, so it can stay transparent and let
           the rail glow run to the bottom edge. */}
+      <HostRailUtilities workspaceId={rail.workspaceId} collapsed={rail.collapsed} />
       {railFooter ? (
         <div data-rail-footer className="relative z-10 shrink-0 border-t border-border">
           {railFooter}

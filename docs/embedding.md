@@ -822,8 +822,7 @@ Canonical sources: `SessionAuthorizationPort` in
 surfaces in `apps/api/src/`.
 
 Workspace permissions answer whether a principal may use a capability at all.
-An embedding host may additionally own per-session ownership, sharing, and
-revocation by binding `AppDependencies.sessionAuthorization`:
+An embedding host may additionally narrow native per-session access by binding `AppDependencies.sessionAuthorization`:
 
 ```ts
 type SessionAuthorizationPort = {
@@ -847,8 +846,9 @@ first message, and a port without the method, check only `sessions:create`,
 as before.
 
 `authorizeSession` receives the account/workspace, requested operation and
-surface, the immediate target plus its server-resolved lineage root, and either
-the authenticated subject or a live exact agent attempt. Agent authority is
+surface, the immediate target plus its server-resolved lineage root, durable
+`ownerSubjectId` (nullable), and native `visibility` (`workspace_shared` or
+`user_private`), and either the authenticated subject or a live exact agent attempt. Agent authority is
 reconstructed from durable attempt ownership and includes the caller session,
 caller root, turn, attempt, execution generation, and frozen initiator; caller
 input cannot nominate those fields. A settled, superseded, interrupted, or
@@ -878,10 +878,19 @@ lineage, control, parent, and tree-stat projections remove information derived
 from other sessions. This projection choice never authorizes an operation on a
 second session; that target always receives its own authorization decision.
 
-`resolveListScope` returns either `all` or a bounded database-applicable scope:
-`rootSessionIds` include their descendants while `sessionIds` authorize exact
-rows only. Opengeni applies the scope inside search, pin, ordering, totals,
-snapshot continuation, and MCP discovery queries. It does not hydrate a broad
+`resolveListScope` returns `all`, a bounded `scoped` selector, or an ownership
+selector. In `scoped`, `rootSessionIds` include their descendants while
+`sessionIds` authorize exact rows only. `{ kind: "owned", subjectId }` selects
+only rows whose native `ownerSubjectId` matches; `owned_or_shared` also includes
+`workspace_shared` rows. The host supplies this well-formed subject as trusted
+policy output; Opengeni never infers a person from a technical agent identity.
+Native private-session, workspace, Slack, Site, and durable agent-viewer fences
+still intersect every selector. The target fields are optional for older host
+contracts, and the `all`/`scoped` forms retain their existing behavior. Native
+sessions have no individual-person sharing relation; these selectors add none.
+Changing an ownership selector's kind or subject invalidates list, message-search,
+and discovery continuation cursors. Opengeni applies the scope inside search, pin,
+ordering, totals, snapshot continuation, and MCP discovery queries. It does not hydrate a broad
 page and filter afterward. Revocation between cursor pages skips newly hidden
 rows and continues scanning to fill the next authorized page.
 
@@ -2424,7 +2433,10 @@ module reads the installed extension at call time. Do not import the
 specifier anywhere else. A module that lazy routes also reach statically and
 that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
-not use a tool name that a built-in card already renders.
+use an exact `mcp_<hash>__<leaf>` name whose leaf has a built-in card when the
+hash is 16 or 24 lowercase hexadecimal characters and `matchPrefixedLeaf` is
+explicitly `false`. Bare built-in names and built-in names under the native
+`opengeni__` and `mcp__opengeni__` prefixes remain protected.
 
 `navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
 `plugins`, `state`, `automations`, `meetings`, `artifacts`, `insights`): `label` renames

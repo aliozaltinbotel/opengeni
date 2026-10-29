@@ -43,20 +43,20 @@ beforeEach(() => {
     await previous; locked = true;
     try { return await transactionContext.run(true, () => fn(transaction)); } finally { locked = false; release(); }
   }));
-  spies.push(spyOn(database, "readKnowledgeQueryUsageFact").mockImplementation(async (_db, input) => {
-    const row = facts.get(`usage:${input.eventType}:query:${input.callId}`);
+  spies.push(spyOn(database, "readKnowledgeQueryUsageFact").mockImplementation(async (_db, usageInput) => {
+    const row = facts.get(`usage:${usageInput.eventType}:query:${usageInput.callId}`);
     return row ? { attributes: row.attributes!, occurredAt: row.occurredAt ?? new Date(0) } : null;
   }));
-  spies.push(spyOn(database, "pendingKnowledgeQueryPressure").mockImplementation(async (_db,input) => {
-    const pending = [...facts.values()].filter(row => row.sourceResourceId !== input.excludeQueryCallId && row.eventType === "knowledge.query.admitted" && !facts.has(`usage:knowledge.query.closed:query:${row.sourceResourceId}`));
+  spies.push(spyOn(database, "pendingKnowledgeQueryPressure").mockImplementation(async (_db,usageInput) => {
+    const pending = [...facts.values()].filter(row => row.sourceResourceId !== usageInput.excludeQueryCallId && row.eventType === "knowledge.query.admitted" && !facts.has(`usage:knowledge.query.closed:query:${row.sourceResourceId}`));
     return { bytes: pending.reduce((sum, row) => sum + Number(row.attributes!.inputBytes), 0),
       micros: pending.reduce((sum, row) => sum + Number(row.attributes!.costBoundMicros), 0), workspaceMicros: 0, memberMicros: 0, indexedChunks: 0, queryMicros: pending.reduce((sum, row) => sum + Number(row.attributes!.costBoundMicros), 0) };
   }));
-  spies.push(spyOn(database, "recordUsageEvent").mockImplementation(async (db, input) => {
-    if (input.eventType === "embedding.call") { expect(db).toBe(root); expect(transactionContext.getStore() ?? false).toBeFalse(); }
-    const existing = facts.get(input.idempotencyKey);
-    if (existing && JSON.stringify(existing.attributes) !== JSON.stringify(input.attributes)) throw new Error("immutable source conflict");
-    facts.set(input.idempotencyKey, existing ?? input); return {} as never;
+  spies.push(spyOn(database, "recordUsageEvent").mockImplementation(async (db, usageInput) => {
+    if (usageInput.eventType === "embedding.call") { expect(db).toBe(root); expect(transactionContext.getStore() ?? false).toBeFalse(); }
+    const existing = facts.get(usageInput.idempotencyKey);
+    if (existing && JSON.stringify(existing.attributes) !== JSON.stringify(usageInput.attributes)) throw new Error("immutable source conflict");
+    facts.set(usageInput.idempotencyKey, existing ?? usageInput); return {} as never;
   }));
   spies.push(spyOn(database, "findActiveWorkspaceApiKeyById").mockResolvedValue({ accountId, permissions: ["documents:search"], permissionMode: "explicit" } as never));
   spies.push(spyOn(database, "withWorkspaceSubjectRls").mockImplementation(async (_db, _workspace, _subject, callback) => callback(transaction)));
@@ -65,7 +65,7 @@ beforeEach(() => {
   spies.push(spyOn(database, "checkWorkspaceAllowance").mockResolvedValue(null));
   spies.push(spyOn(database, "sumUsageQuantity").mockResolvedValue(0));
   spies.push(spyOn(database, "listKnowledgeEntries").mockResolvedValue({ entries: [], nextCursor: null }));
-  spies.push(spyOn(database, "applyCreditDebitAfterUse").mockImplementation(async (_db, input) => { balance -= input.amountMicros; return {} as never; }));
+  spies.push(spyOn(database, "applyCreditDebitAfterUse").mockImplementation(async (_db, usageInput) => { balance -= usageInput.amountMicros; return {} as never; }));
 });
 afterEach(() => { for (const spy of spies.splice(0)) spy.mockRestore(); });
 function input(operationId: string, query = "abc") {

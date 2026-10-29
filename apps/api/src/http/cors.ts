@@ -1,3 +1,4 @@
+import { consoleAllowedOriginEntries } from "@opengeni/config";
 import { HTTPException } from "hono/http-exception";
 
 export function allowedCorsOrigin(pattern: string, origin: string): boolean {
@@ -8,6 +9,7 @@ export function validateInteractionRequestOrigin(
   value: string | undefined,
   input: {
     corsAllowOriginRegex: string;
+    consoleAllowedOrigins?: string | undefined;
     publicBaseUrl?: string | undefined;
     webBaseUrl?: string | undefined;
   },
@@ -34,13 +36,24 @@ export function validateInteractionRequestOrigin(
 
 type BrowserOriginSettings = {
   corsAllowOriginRegex: string;
+  consoleAllowedOrigins?: string | undefined;
   publicBaseUrl?: string | undefined;
   webBaseUrl?: string | undefined;
 };
 
+export function allowedCredentialedCorsOrigin(
+  settings: Pick<BrowserOriginSettings, "corsAllowOriginRegex" | "consoleAllowedOrigins">,
+  origin: string,
+): boolean {
+  return (
+    allowedCorsOrigin(settings.corsAllowOriginRegex, origin) ||
+    consoleAllowedOriginEntries(settings.consoleAllowedOrigins).includes(origin)
+  );
+}
+
 function isConfiguredBrowserOrigin(origin: string, input: BrowserOriginSettings): boolean {
   return (
-    allowedCorsOrigin(input.corsAllowOriginRegex, origin) ||
+    allowedCredentialedCorsOrigin(input, origin) ||
     [input.publicBaseUrl, input.webBaseUrl].some((baseUrl) =>
       baseUrl ? new URL(baseUrl).origin === origin : false,
     )

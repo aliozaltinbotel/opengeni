@@ -14,8 +14,101 @@ import {
   type OpenGeniText,
 } from "../src/messages/runtime";
 import { englishMessages } from "../src/messages/en";
+import { t as startupText } from "../src/app/lib/startup-text";
+import { OpenGeniApiError } from "@opengeni/sdk";
+import {
+  ComposerReconciliationRequiredError,
+  ComposerWorkspaceControlUnavailableError,
+  composerSubmissionErrorMessage,
+} from "../src/lib/format";
 
 describe("message runtime", () => {
+  test("startup refusal copy and workspace labels are available synchronously", () => {
+    expect(startupText("organizationModel.orgShortaccountid", { shortAccountId: "org-1234" })).toBe(
+      "Org org-1234",
+    );
+    const refusals: readonly (readonly [Error, string])[] = [
+      [
+        new ComposerReconciliationRequiredError(),
+        "This client cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+      ],
+      [
+        new ComposerWorkspaceControlUnavailableError(),
+        "This client cannot resume the workspace. Ask your administrator for a control-capable client.",
+      ],
+      [
+        new OpenGeniApiError(402, "", { code: "session_usage_limit_reached" }),
+        "This task's usage limit is reached. Your message is saved.",
+      ],
+      [
+        new OpenGeniApiError(402, "", { code: "allowance_exhausted" }),
+        "Usage limit reached. A workspace admin can raise this limit. Your draft is preserved.",
+      ],
+      [
+        Object.assign(new OpenGeniApiError(402, "", { code: "allowance_exhausted" }), {
+          scope: "workspace",
+        }),
+        "Workspace usage limit reached. An organization admin can raise the workspace budget. Your draft is preserved.",
+      ],
+      [
+        new OpenGeniApiError(402, "", { code: "payment_required", correlationId: "req-startup" }),
+        "Your remaining credits don't cover this model. Choose a model they cover or add credits. Your message and attachments are saved. Reference: req-startup.",
+      ],
+    ];
+    for (const [error, expected] of refusals) {
+      expect(composerSubmissionErrorMessage(startupText, error)).toBe(expected);
+    }
+    for (const [code, expected] of [
+      [
+        "not_available_for_viewer",
+        "This Site's assistant can't do that for you. Your message is saved.",
+      ],
+      [
+        "site_budget_exhausted",
+        "This Site's assistant has reached its usage limit for now. Your message is saved.",
+      ],
+      [
+        "site_budget_busy",
+        "This Site's assistant is busy. Try again in a moment. Your message is saved.",
+      ],
+      [
+        "site_platform_brake_engaged",
+        "This Site's assistant is paused for visitors right now. Your message is saved.",
+      ],
+    ] as const) {
+      const refusal = new OpenGeniApiError(
+        403,
+        JSON.stringify({
+          error: { status: 403, code: "forbidden", message: "Refused", details: { code } },
+        }),
+      );
+      expect(composerSubmissionErrorMessage(startupText, refusal)).toBe(expected);
+    }
+  });
+
+  test("startup readers do not retain the full fallback catalog", async () => {
+    const result = await Bun.build({
+      entrypoints: [
+        join(import.meta.dir, "../src/app/lib/workspace-scope-context.tsx"),
+        join(import.meta.dir, "../src/ui/confirm-dialog.tsx"),
+      ],
+      format: "esm",
+      target: "browser",
+      external: [
+        "react",
+        "react/jsx-runtime",
+        "@opengeni/contracts",
+        "@opengeni/sdk",
+        "lucide-react",
+        "radix-ui",
+      ],
+    });
+    if (!result.success) throw new AggregateError(result.logs, "Could not bundle startup readers");
+    for (const output of result.outputs) {
+      expect((await output.text()).includes('"clerkRecovery.description"')).toBe(false);
+    }
+  });
+
   test("English defaults, interpolation and missing parameters", () => {
     const t = createOpenGeniText();
     expect(t("connectPanel.connections")).toBe("Connections");
@@ -188,11 +281,13 @@ describe("English catalog", () => {
     const roots = [
       join(import.meta.dir, "../src"),
       join(import.meta.dir, "../../react-native/src"),
+      join(import.meta.dir, "../../../apps/web/src"),
     ];
     const used = new Set<string>();
     for (const root of roots) {
       for (const file of new Bun.Glob("**/*.{ts,tsx}").scanSync(root)) {
-        if (file === join("messages", "en.ts")) continue;
+        if (file === join("messages", "en.ts") || file === join("messages", "startup-en.ts"))
+          continue;
         const source = readFileSync(join(root, file), "utf8");
         for (const match of source.matchAll(/["'`]([A-Za-z0-9_.]+)["'`]/g)) used.add(match[1]!);
       }

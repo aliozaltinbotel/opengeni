@@ -12,10 +12,14 @@ import {
   isBuiltInToolCardName,
   isNativeDestination,
   isNativeNavId,
+  isNativeSectionId,
   nativeNavDestination,
   type HostExtension,
+  type HostExtensionContext,
+  type HostExtensionStarter,
   type HostExtensionOutsideWorkspaceRoute,
   type NativeDestination,
+  type NativeSectionId,
 } from "@opengeni/react/app/host-extension";
 
 /** Lowercase segments with optional `$param` segments, relative to the workspace. */
@@ -128,6 +132,15 @@ function optionalFunction(value: unknown, field: string): void {
 function component(value: unknown, field: string): void {
   if (typeof value !== "function" && !(isRecord(value) && "$$typeof" in value)) {
     fail(field, "must be a React component");
+  }
+}
+
+function checkSessionIndicator(value: unknown): void {
+  if (value === undefined) return;
+  component(value, "sessionIndicator");
+  const wrappers: readonly symbol[] = [Symbol.for("react.memo"), Symbol.for("react.forward_ref"), Symbol.for("react.lazy")];
+  if (isRecord(value) && !(typeof value.$$typeof === "symbol" && wrappers.includes(value.$$typeof))) {
+    fail("sessionIndicator", "must be a supported React component");
   }
 }
 
@@ -288,18 +301,25 @@ function checkToolRegistryEntries(value: unknown): void {
     if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
     const name = text(entry.name, `${field}.name`);
     if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
+    // An omitted flag enables leaf matching, which could capture another server's tool.
+    if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
+    const nativeLeaf = name.startsWith("mcp__opengeni__")
+      ? name.slice("mcp__opengeni__".length)
+      : name.startsWith("opengeni__")
+        ? name.slice("opengeni__".length)
+        : undefined;
+    // Only hashed MCP wire names may deliberately replace a built-in leaf's card.
+    const exactHostName = /^mcp_(?:[0-9a-f]{16}|[0-9a-f]{24})__[A-Za-z0-9_]+$/.test(name);
     // A stock build has no entries to check; the flag lets it drop the name list.
     if (
       import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" &&
-      isBuiltInToolCardName(name)
+      ((nativeLeaf !== undefined && isBuiltInToolCardName(nativeLeaf)) ||
+        (!exactHostName && isBuiltInToolCardName(name)))
     ) {
       fail(`${field}.name`, `"${name}" has a built-in card`);
     }
     names.add(name);
     component(entry.render, `${field}.render`);
-    // An omitted flag means prefixed leaf matching in the timeline registry, so
-    // only an explicit false keeps another server's same-named tool off this card.
-    if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
   });
 }
 
@@ -319,6 +339,111 @@ function checkLifecycle(value: unknown): void {
   optionalFunction(lifecycle.onWorkspaceSwitch, "lifecycle.onWorkspaceSwitch");
 }
 
+/** Host context must always be visible and dismissible; check again after every resolution. */
+export function validateHostMessageContext(value: unknown): void {
+  if (value === undefined) return;
+  const items = Array.isArray(value) ? value : [value];
+  const ids = new Set<string>();
+  items.forEach((candidate, index) => {
+    const field = `messageContext[${index}]`;
+    const item = record(candidate, field);
+    knownKeys(item, field, ["id", "text", "label", "detail"]);
+    const id = text(item.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(item.text, `${field}.text`);
+    text(item.label, `${field}.label`);
+    optionalText(item.detail, `${field}.detail`);
+  });
+}
+
+/** Host failures drop host items, preserve the person's send, and warn once per installation. */
+export function createHostMessageContextResolver(
+  source: NonNullable<HostExtension["messageContext"]>,
+): NonNullable<HostExtension["messageContext"]> {
+  let reported = false;
+  return (context) => {
+    try {
+      const value = source(context);
+      validateHostMessageContext(value);
+      return value;
+    } catch {
+      if (!reported) {
+        reported = true;
+        console.warn("HOST_MESSAGE_CONTEXT_FAILED");
+      }
+      return undefined;
+    }
+  };
+}
+
+/** Validate each result when the host resolves starters. */
+export function validateHostStarters(value: unknown): void {
+  if (!Array.isArray(value)) fail("starters", "must return an array");
+  if (value.length > 8) fail("starters", "must contain at most 8 items");
+  const ids = new Set<string>();
+  value.forEach((candidate, index) => {
+    const field = `starters[${index}]`;
+    const item = record(candidate, field);
+    knownKeys(item, field, ["id", "label", "prompt"]);
+    const id = text(item.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(item.label, `${field}.label`);
+    text(item.prompt, `${field}.prompt`);
+  });
+}
+
+/** Invalid host results retain the native starters; an intentional empty list stays empty. */
+export function createHostStartersResolver(
+  source: NonNullable<HostExtension["starters"]>,
+): (context: HostExtensionContext) => readonly HostExtensionStarter[] | undefined {
+  let reported = false;
+  return (context) => {
+    try {
+      const items = source(context);
+      validateHostStarters(items);
+      return items;
+    } catch {
+      if (!reported) {
+        reported = true;
+        console.warn("HOST_STARTERS_FAILED");
+      }
+      return undefined;
+    }
+  };
+}
+
+function checkCommandMenuProviders(value: unknown): void {
+  const ids = new Set<string>();
+  list(value, "commandMenuProviders").forEach((candidate, index) => {
+    const field = `commandMenuProviders[${index}]`;
+    const provider = record(candidate, field);
+    knownKeys(provider, field, ["id", "heading", "search"]);
+    const id = text(provider.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(provider.heading, `${field}.heading`);
+    if (typeof provider.search !== "function") fail(`${field}.search`, "must be a function");
+  });
+}
+function checkUtilities(value: unknown): void {
+  const utilities = list(value, "utilities");
+  if (utilities.length > 3) fail("utilities", "must contain at most 3 entries");
+  const ids = new Set<string>();
+  utilities.forEach((candidate, index) => {
+    const field = `utilities[${index}]`;
+    const utility = record(candidate, field);
+    knownKeys(utility, field, ["id", "label", "icon", "load"]);
+    const id = text(utility.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(utility.label, `${field}.label`);
+    component(utility.icon, `${field}.icon`);
+    if (typeof utility.load !== "function") fail(`${field}.load`, "must be a function");
+  });
+}
+
 /**
  * Checks that a value is a usable host extension and returns it unchanged.
  * Throws HostExtensionInvalidError (`HOST_EXTENSION_INVALID`) naming the field.
@@ -328,6 +453,14 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
+  optionalFunction(fields.messageContext, "messageContext");
+  optionalFunction(fields.starters, "starters");
+  checkSessionIndicator(fields.sessionIndicator);
+  list(fields.hiddenNativeSections, "hiddenNativeSections").forEach((section, index) => {
+    if (!isNativeSectionId(section)) fail(`hiddenNativeSections[${index}]`, "is not a native section");
+  });
+  checkCommandMenuProviders(fields.commandMenuProviders);
+  checkUtilities(fields.utilities);
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   const groups = settingsGroupIds(fields.settingsGroups);
@@ -435,4 +568,9 @@ export function outsideWorkspaceRouteAt(
 /** Native destinations this build's extension hides from every link source; none for the stub. */
 export function hiddenNativeDestinations(): readonly NativeDestination[] {
   return currentHostExtension().hiddenNativeDestinations ?? NONE;
+}
+
+/** Native settings sections and capability parts hidden by this build. */
+export function hiddenNativeSections(): readonly NativeSectionId[] {
+  return currentHostExtension().hiddenNativeSections ?? NONE;
 }
