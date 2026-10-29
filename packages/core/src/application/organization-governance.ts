@@ -160,15 +160,20 @@ export class OrganizationCreateGovernedError extends Error {
  * their own unless that organization's host allows `organization.create`
  * (`via: "native"`): a new organization would be outside the host's
  * governance, with the person as its owner. Every membership but a revoked one
- * counts, and each governing host is asked; any refusal refuses. Without a
- * bound port nothing is read.
+ * counts, and each governing host is asked; any refusal refuses. With
+ * `organizationCreation: "host"` on the port, a person also needs at least one
+ * governing host that allows it: someone who belongs to no governed
+ * organization (a fresh sign-up included) is refused. Without a bound port
+ * nothing is read.
  */
 export async function requireOrganizationCreateAllowed(
   deps: OrganizationGovernanceDeps,
   subjectId: string,
 ): Promise<void> {
-  if (!deps.organizationGovernance) return;
+  const port = deps.organizationGovernance;
+  if (!port) return;
   const memberships = await listSelfOrganizationMemberships(deps.db, subjectId);
+  let allowedByHost = false;
   for (const membership of memberships) {
     if (membership.status === "revoked") continue;
     const decision = await organizationGovernanceDecision(deps, {
@@ -177,7 +182,10 @@ export async function requireOrganizationCreateAllowed(
       via: "native",
     });
     if (decision === "refuse") throw new OrganizationCreateGovernedError();
+    if (decision === "allow") allowedByHost = true;
   }
+  if (port.organizationCreation === "host" && !allowedByHost)
+    throw new OrganizationCreateGovernedError();
 }
 
 export type GovernedSharedWorkspaceOperation = "invitation" | "removal" | "reactivation";

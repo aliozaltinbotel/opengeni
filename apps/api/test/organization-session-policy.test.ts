@@ -1084,7 +1084,7 @@ describe("recordings follow the session policy", () => {
     expect((await requestUpload(app, org)).status).toBe(201);
   });
 
-  test("until 1019's routine is granted, a command naming recordings is unavailable; one without it is not", async () => {
+  test("until 1020's routine is granted, a command naming recordings is unavailable; one without it is not", async () => {
     await shared.admin.unsafe(`REVOKE EXECUTE ON FUNCTION ${RECORDINGS_ROUTINE} FROM opengeni_app`);
     try {
       const app = appFor(hostPort);

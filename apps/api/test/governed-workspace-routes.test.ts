@@ -1,14 +1,20 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { signDelegatedAccessToken } from "@opengeni/contracts";
+import { createHash } from "node:crypto";
+import {
+  organizationAccessPresetPermissions,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   WORKSPACE_ROUTE_NOT_ALLOWED,
   type OrganizationGovernancePort,
 } from "@opengeni/contracts/organization-governance";
-import type { AppDependencies } from "@opengeni/core";
+import { EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS, type AppDependencies } from "@opengeni/core";
 import {
   createAdditionalManagedOrganization,
   createDb,
   createManagedOrganization,
+  createOrganizationApiKey,
   type DbClient,
 } from "@opengeni/db";
 import { MemoryEventBus } from "@opengeni/testing/fakes";
@@ -17,6 +23,7 @@ import { testSettings } from "@opengeni/testing/settings";
 import {
   createApp,
   GOVERNED_MEMBER_SESSION_OPERATIONS,
+  GOVERNED_MEMBER_WORKSPACE_ROUTES,
   governedMemberRouteAllowed,
   governedRouteTable,
 } from "../src/app";
@@ -55,7 +62,10 @@ let owner: Person;
 let governed: { organizationId: string; workspaceId: string };
 let ungoverned: { organizationId: string; workspaceId: string };
 
-function appFor(organizationGovernance?: OrganizationGovernancePort): App {
+function appFor(
+  organizationGovernance?: OrganizationGovernancePort,
+  options: { externalMemberFirstUse?: boolean } = {},
+): App {
   return createApp({
     settings: testSettings({
       databaseUrl: shared.adminUrl,
@@ -63,6 +73,7 @@ function appFor(organizationGovernance?: OrganizationGovernancePort): App {
       betterAuthSecret: "governed-workspace-routes-secret-32-bytes",
       publicBaseUrl: origin,
       delegationSecret,
+      externalMemberFirstUseEnabled: options.externalMemberFirstUse === true,
     }),
     db: client.db,
     bus: new MemoryEventBus(),
@@ -117,6 +128,13 @@ async function organization(source: string | null) {
       update managed_accounts set external_source = ${source}, external_id = ${crypto.randomUUID()}
       where id = ${created.organization.id}`;
   return { organizationId: created.organization.id, workspaceId: created.workspaceId };
+}
+
+function isGovernedRoute(path: string): boolean {
+  return (
+    path.startsWith("/v1/workspaces/:workspaceId") ||
+    path.startsWith("/v1/organizations/:organizationId")
+  );
 }
 
 function detailCode(body: unknown): string | undefined {
@@ -235,6 +253,128 @@ describe("default-deny in a governed organization", () => {
   });
 });
 
+describe("callers by credential", () => {
+  const denied = () => `/v1/workspaces/${governed.workspaceId}/automations/sources`;
+
+  test("a staff cookie on the workspace MCP endpoint (tools/list) is refused", async () => {
+    const result = await call(governedApp, `/v1/workspaces/${governed.workspaceId}/mcp`, {
+      method: "POST",
+      headers: {
+        ...browser(owner.cookie),
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": "2025-06-18",
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    });
+    expect(result).toEqual({ status: 403, code: WORKSPACE_ROUTE_NOT_ALLOWED });
+  });
+
+  test("a host-minted person token (delegated human_session) is refused like the browser", async () => {
+    const token = await signDelegatedAccessToken(delegationSecret, {
+      accountId: governed.organizationId,
+      workspaceId: governed.workspaceId,
+      subjectId: owner.subjectId,
+      permissions: ["workspace:read", "sessions:read"],
+      principalKind: "human_session",
+      exp: Math.floor(Date.now() / 1000) + 300,
+    });
+    const headers = { authorization: `Bearer ${token}` };
+    expect(await call(governedApp, denied(), { headers })).toEqual({
+      status: 403,
+      code: WORKSPACE_ROUTE_NOT_ALLOWED,
+    });
+    expect(
+      (await call(governedApp, `/v1/workspaces/${governed.workspaceId}/sessions`, { headers }))
+        .status,
+    ).toBe(200);
+  });
+
+  test("a personal API key is refused like the browser", async () => {
+    const created = await stockApp.request(
+      `/v1/organizations/${governed.organizationId}/personal-api-keys`,
+      {
+        method: "POST",
+        headers: browser(owner.cookie),
+        body: JSON.stringify({
+          name: "Laptop scripts",
+          access: {
+            preset: "full",
+            permissions: organizationAccessPresetPermissions("full"),
+            workspaceScope: { kind: "all" },
+          },
+        }),
+      },
+    );
+    expect(created.status).toBe(201);
+    const { token } = (await created.json()) as { token: string };
+    const headers = { authorization: `Bearer ${token}` };
+    expect(await call(governedApp, denied(), { headers })).toEqual({
+      status: 403,
+      code: WORKSPACE_ROUTE_NOT_ALLOWED,
+    });
+    expect((await call(stockApp, denied(), { headers })).status).toBe(200);
+  });
+
+  test("an organization key acting for a person (asUser) keeps the route's own answer", async () => {
+    const keyToken = `ogk_${crypto.randomUUID().replaceAll("-", "")}`;
+    await createOrganizationApiKey(client.db, {
+      accountId: governed.organizationId,
+      name: "Host service key",
+      prefix: keyToken.slice(0, 14),
+      keyHash: createHash("sha256").update(keyToken).digest("hex"),
+      permissions: [
+        "members:manage",
+        "account:admin",
+        ...(EXTERNAL_FIRST_USE_MEMBER_PERMISSIONS as Permission[]),
+      ],
+    });
+    const headers = {
+      authorization: `Bearer ${keyToken}`,
+      "x-opengeni-external-actor": encodeURIComponent(
+        JSON.stringify({
+          mode: "external",
+          identity: { source: "test-host:user", externalId: `person-${crypto.randomUUID()}` },
+        }),
+      ),
+    };
+    // The external person and their membership, created on first use (stock).
+    const firstUse = appFor(undefined, { externalMemberFirstUse: true });
+    expect((await firstUse.request("/v1/access/me", { headers })).status).toBe(200);
+    expect(
+      (await firstUse.request(`/v1/workspaces/${governed.workspaceId}/access/grant`, { headers }))
+        .status,
+    ).toBe(200);
+    expect(await call(governedApp, denied(), { headers })).toEqual({
+      status: 200,
+      code: undefined,
+    });
+  });
+
+  test("a path no route answers stays the pre-auth 404 for everyone, never the named refusal", async () => {
+    const path = `/v1/workspaces/${governed.workspaceId}/no-such-route`;
+    for (const init of [{ headers: browser(owner.cookie) }, {}]) {
+      const result = await call(governedApp, path, init);
+      expect(result.status).toBe(404);
+      expect(result.code).not.toBe(WORKSPACE_ROUTE_NOT_ALLOWED);
+    }
+  });
+
+  test("a person outside the organization gets the route's own answer at organization scope", async () => {
+    const outsider = await signUp(stockApp);
+    const result = await call(governedApp, `/v1/organizations/${governed.organizationId}/members`, {
+      headers: browser(outsider.cookie),
+    });
+    expect(result.code).not.toBe(WORKSPACE_ROUTE_NOT_ALLOWED);
+    expect(result.status).toBe(
+      (
+        await call(stockApp, `/v1/organizations/${governed.organizationId}/members`, {
+          headers: browser(outsider.cookie),
+        })
+      ).status,
+    );
+  });
+});
+
 describe("unchanged outside governed organizations", () => {
   test("an organization the host does not govern answers the route's own 200", async () => {
     for (const path of [
@@ -282,13 +422,39 @@ describe("the exported route table", () => {
     expect(allowed("GET", `${ws}/automations/sources`)).toBe(false);
     expect(allowed("GET", `${ws}/codex/status`)).toBe(false);
     expect(allowed("GET", `${ws}/subscription-usage-pools`)).toBe(false);
-    expect(allowed("ALL", `${ws}/mcp`)).toBe(true);
+    // For a person's own credential `/mcp` is the whole workspace tool gateway.
+    expect(allowed("ALL", `${ws}/mcp`)).toBe(false);
     // A real wildcard handler is listed; the guards' own middleware is not.
     expect(allowed("ALL", `${ws}/codemode/sdk/*`)).toBe(false);
     expect(table.some((row) => row.path === `${ws}/*`)).toBe(false);
     expect(
       table.filter((row) => row.path.startsWith("/v1/organizations/")).every((row) => !row.allowed),
     ).toBe(true);
+  });
+
+  test("every allowlist entry names a mounted route, and every mounted route has a handler template", () => {
+    const table = governedRouteTable(governedApp.routes);
+    for (const entry of GOVERNED_MEMBER_WORKSPACE_ROUTES) {
+      const prefix = entry.path.endsWith("/*") ? entry.path.slice(0, -1) : null;
+      const matched = table.some(
+        (row) =>
+          (entry.method === "ALL" || row.method === entry.method) &&
+          (prefix ? row.path.startsWith(prefix) : row.path === entry.path),
+      );
+      if (!matched) throw new Error(`stale allowlist entry ${entry.method} ${entry.path}`);
+    }
+    // The guard keys on the handler's template; a guarded path served only by
+    // middleware (no arity-1 handler) would resolve none, and is refused.
+    const handlerPaths = new Set(table.map((row) => `${row.method} ${row.path}`));
+    const terminal = governedApp.routes.filter(
+      (route) =>
+        isGovernedRoute(route.path) &&
+        !route.path.endsWith("/*") &&
+        route.method !== "ALL" &&
+        (route.handler as (...args: unknown[]) => unknown).length < 2,
+    );
+    for (const route of terminal)
+      expect(handlerPaths.has(`${route.method} ${route.path}`)).toBe(true);
   });
 
   test("a session route is allowed exactly when its operation is in the member set", () => {

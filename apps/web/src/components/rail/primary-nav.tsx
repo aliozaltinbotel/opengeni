@@ -21,6 +21,7 @@ import {
 import { currentHostExtension } from "@/host-extension/registry";
 import {
   composePrimaryNav,
+  isNativeNavId,
   type HostExtensionNavItem,
   type NativeNavId,
 } from "@opengeni/react/app/host-extension";
@@ -39,13 +40,13 @@ type RailEntry = NativeRailEntry | HostExtensionNavItem;
 /** The native rail entries in rail order: the inbox, then the shortcuts. */
 const NATIVE_RAIL_ENTRIES: readonly NativeRailEntry[] = [
   { id: "inbox", label: "Inbox" },
-  ...PRIMARY_WORKSPACE_ITEMS.map(
-    (item): NativeRailEntry => ({
-      id: item.to.split("/").at(-1) as Exclude<NativeNavId, "inbox">,
-      label: item.label,
-      item,
-    }),
-  ),
+  ...PRIMARY_WORKSPACE_ITEMS.map((item): NativeRailEntry => {
+    const id = item.to.split("/").at(-1);
+    // A shortcut the override contract does not name is a console bug: fail at load.
+    if (!isNativeNavId(id) || id === "inbox")
+      throw new Error(`rail shortcut ${item.to} is not a NativeNavId`);
+    return { id, label: item.label, item };
+  }),
 ];
 
 function isHostEntry(entry: RailEntry): entry is HostExtensionNavItem {

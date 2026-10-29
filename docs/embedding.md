@@ -912,6 +912,7 @@ type OrganizationGovernancePort = {
     via: "native" | "host";
   }): "allow" | "refuse";
   memberRouteAccess?: "allowlist";
+  organizationCreation?: "host";
 };
 ```
 
@@ -936,38 +937,52 @@ registered.
 
 **Organization creation.** A person who belongs (any membership but a revoked
 one) to a governed organization creates no organization of their own:
-`POST /v1/organizations` and `POST /v1/organizations/additional` ask `decide`
-for `organization.create` with `via: "native"` for each governed organization
+`POST /v1/organizations`, `POST /v1/organizations/additional` and the
+self-service `POST /v1/auth/organization-onboarding` ask `decide` for
+`organization.create` with `via: "native"` for each governed organization
 they belong to, and any refusal answers `403` with `error.details.code =
-"ORGANIZATION_CREATE_GOVERNED"` before anything is written. A person without a
-governed membership, and a deployment without a port, are unchanged.
+"ORGANIZATION_CREATE_GOVERNED"` before anything is written. With
+`organizationCreation: "host"` on the port, organizations are the host's to
+create: those routes also refuse every managed human who has no governed
+membership whose host allows it, a freshly signed-up identity included.
+Without the field, a person without a governed membership, and a deployment
+without a port, are unchanged.
 
 `decide` MUST answer `"refuse"` for any mutation it does not recognize:
 `GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
 stay closed until the host chooses to allow it.
 
 **Member route allowlist (opt-in).** With `memberRouteAccess: "allowlist"` on
-the port, a person of a governed organization (a `user:` or `external_user:`
-subject with their own credential: browser session, native app credential,
-personal API key) reaches `/v1/workspaces/:workspaceId/*` and
-`/v1/organizations/:organizationId/*` only through the governed allowlist;
-every other route answers `403` with `error.details.code =
-"WORKSPACE_ROUTE_NOT_ALLOWED"` and a body that names no resource, ahead of the
-route's own checks and of `decide`. The allowlist (exported from
-`@opengeni/api-router/app`) is the workspace itself, the session list and
-create, the composer's reads (`session-tenancy/capabilities`,
-`new-session-draft`, `session-message-search`, `models`, `model-catalog`,
-`usage/me`, `allowance/state`), the workspace live streams, the
-session-bound first-party MCP endpoint, the inbox and its notifications,
-documents, Knowledge and Skills (each under its own permission), session
-feedback and artifact reads, plus every session route whose
-`sessionAuthorizationOperationForHttp` operation is in
-`GOVERNED_MEMBER_SESSION_OPERATIONS`. No organization route is on it.
-`governedRouteTable(app.routes)` gives the decision for every mounted route,
-so a host can generate its refusal tests from it. Tokens signed with the
-delegation secret (host service and person tokens, agent attempts) and
-machine credentials keep each route's own checks, and a caller with no grant
-in the workspace gets the route's own answer (`401` stays `401`).
+the port, a person of a governed organization reaches
+`/v1/workspaces/:workspaceId/*` and `/v1/organizations/:organizationId/*` only
+through the governed allowlist; every other route answers `403` with
+`error.details.code = "WORKSPACE_ROUTE_NOT_ALLOWED"` and a body that names no
+resource, ahead of the route's own checks and of `decide`. A person is a
+`user:` or `external_user:` subject with their own credential (browser
+session, native app credential, personal API key), or a host-minted person
+token (`principalKind: "human_session"` signed with the delegation secret).
+The host's service tokens, the worker's agent-attempt tokens, machine
+credentials (organization and workspace keys, the configured key) and an
+organization key acting for a person (`asUser`, `x-opengeni-external-actor`)
+keep each route's own checks; so does a caller with no grant in the workspace
+(or, for an organization route, in the organization), so `401` stays `401`
+and nothing tells an outsider the organization exists. MCP OAuth clients
+authenticate inside `/mcp` and get that route's own answer. A guarded path
+that resolves no handler template is refused for a person (fail closed).
+
+The allowlist (exported from `@opengeni/api-router/app`) is the workspace
+itself, the session list and create, the composer's reads
+(`session-tenancy/capabilities`, `new-session-draft`,
+`session-message-search`, `models`, `model-catalog`, `usage/me`,
+`allowance/state`), the workspace live streams, the inbox and its
+notifications, documents, Knowledge and Skills (each under its own
+permission), session feedback and artifact reads, plus every session route
+whose `sessionAuthorizationOperationForHttp` operation is in
+`GOVERNED_MEMBER_SESSION_OPERATIONS`. Not on it: `/mcp`, which for a person's
+own credential is the whole workspace tool gateway (as `tools/*`; sessions
+reach their tools through the worker's delegated tokens), and every
+organization route. `governedRouteTable(app.routes)` gives the decision for
+every mounted route, so a host can generate its refusal tests from it.
 
 The host performs these mutations through `/v1/host/organizations/:id/...`
 (`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,
@@ -1405,7 +1420,7 @@ type OrganizationSessionPolicy = {
   revision, updatedAt }` (and `replay` on PUT). No native route writes the
   policy, and native workspace settings or session capabilities cannot widen
   it.
-- **Recordings (migration 1019).** `recordings` decides whether people may
+- **Recordings (migration 1020).** `recordings` decides whether people may
   record meetings and send recorded or dictated audio to a transcription
   provider. When the policy leaves it out it takes the default for its source
   (`sessionRecordingsAllowed`): `denied` for a stored policy (the governed

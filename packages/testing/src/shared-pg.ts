@@ -854,7 +854,7 @@ export async function acquireSharedTestDatabase(
  * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
  * on the personal-machine owner lookup (0978), the connected-command re-arm
  * (0984), the host identity lookup (1016), the host owner ensure (1017) and
- * the host session policy write (1018) and the host recordings write (1019).
+ * the host session policy write (1018) and the host recordings write (1020).
  * Tests that exercise them run as they will once they are granted.
  */
 export async function grantDeferredRuntimeAccess(

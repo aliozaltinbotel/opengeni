@@ -103,6 +103,16 @@ export type OrganizationGovernancePort = {
    * runtime's) are not affected. Unset, every route keeps its own checks.
    */
   memberRouteAccess?: "allowlist";
+  /**
+   * `"host"`: organizations in this deployment are the host's to create. The
+   * native creation routes (`POST /v1/organizations`,
+   * `/v1/organizations/additional`, `/v1/auth/organization-onboarding`) then
+   * refuse every managed human with 403 `ORGANIZATION_CREATE_GOVERNED`
+   * unless the person belongs to a governed organization whose host allows
+   * `organization.create`. Unset, only a person of a governed organization is
+   * asked (any governing host's refusal refuses).
+   */
+  organizationCreation?: "host";
 };
 
 /** Refusal detail codes (`error.details.code`). */

@@ -5026,8 +5026,7 @@ export const MODEL_CALL_DISPATCH_REFUSED_EVENT_TYPE = "model.call.dispatch.refus
 export const EMBEDDING_CALL_USAGE_EVENT_TYPE = "embedding.call" as const;
 export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.model-call-usage/v1" as const;
 export const MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.model-call-usage/v2" as const;
-export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 =
-  "opengeni.embedding-call-usage/v1" as const;
+export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA_V1 = "opengeni.embedding-call-usage/v1" as const;
 export const EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA = "opengeni.embedding-call-usage/v2" as const;
 /** The database bound on `usage_events.attributes` (UTF-8 bytes of its JSON text). */
 export const USAGE_EVENT_ATTRIBUTES_MAX_BYTES = 4096;
@@ -5073,108 +5072,72 @@ const ModelCallUsageAttributesV1Shape = z
     billingPath: z.enum(["opengeni_credits", "external"]),
   })
   .strict();
-function refineModelCallUsage(
-  value: Pick<
-    z.infer<typeof ModelCallUsageAttributesV1Shape>,
-    | "estimatedProviderCostMicros"
-    | "pricingSource"
-    | "priceVersion"
-    | "usageReported"
-    | "inputTokens"
-    | "outputTokens"
-    | "cachedTokens"
-    | "cacheWriteTokens"
-    | "reasoningTokens"
-    | "totalTokens"
-  >,
-  context: z.RefinementCtx,
-): void {
-  if ((value.estimatedProviderCostMicros === null) !== (value.pricingSource === null)) {
-    context.addIssue({
-      code: "custom",
-      message:
-        "estimatedProviderCostMicros and pricingSource are known together or unknown together",
-    });
-  }
-  if ((value.priceVersion !== null) !== (value.pricingSource === "configured_list_price")) {
-    context.addIssue({
-      code: "custom",
-      message:
-        "priceVersion names the configured schedule of a configured_list_price estimate only",
-    });
-  }
-  if (
-    !value.usageReported &&
-    (value.estimatedProviderCostMicros !== null ||
-      [
-        value.inputTokens,
-        value.outputTokens,
-        value.cachedTokens,
-        value.cacheWriteTokens,
-        value.reasoningTokens,
-        value.totalTokens,
-      ].some((count) => count !== null))
-  ) {
-    context.addIssue({
-      code: "custom",
-      message: "a call without reported usage carries no token count and no cost",
-    });
-  }
+function refineModelCallUsage(value: Pick<z.infer<typeof ModelCallUsageAttributesV1Shape>, "estimatedProviderCostMicros" | "pricingSource" | "priceVersion" | "usageReported" | "inputTokens" | "outputTokens" | "cachedTokens" | "cacheWriteTokens" | "reasoningTokens" | "totalTokens">, context: z.RefinementCtx): void {
+    if ((value.estimatedProviderCostMicros === null) !== (value.pricingSource === null)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "estimatedProviderCostMicros and pricingSource are known together or unknown together",
+      });
+    }
+    if ((value.priceVersion !== null) !== (value.pricingSource === "configured_list_price")) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "priceVersion names the configured schedule of a configured_list_price estimate only",
+      });
+    }
+    if (
+      !value.usageReported &&
+      (value.estimatedProviderCostMicros !== null ||
+        [
+          value.inputTokens,
+          value.outputTokens,
+          value.cachedTokens,
+          value.cacheWriteTokens,
+          value.reasoningTokens,
+          value.totalTokens,
+        ].some((count) => count !== null))
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "a call without reported usage carries no token count and no cost",
+      });
+    }
 }
-export const ModelCallUsageAttributesV1 =
-  ModelCallUsageAttributesV1Shape.superRefine(refineModelCallUsage);
+export const ModelCallUsageAttributesV1 = ModelCallUsageAttributesV1Shape.superRefine(refineModelCallUsage);
 /** Forward contract: a provider terminal and transport loss are distinct facts.
  * Published v1 remains readable with its completed-only semantics. */
-export const ModelCallOutcome = z.enum([
-  "completed",
-  "failed",
-  "cancelled",
-  "incomplete",
-  "indeterminate",
-]);
+export const ModelCallOutcome = z.enum(["completed", "failed", "cancelled", "incomplete", "indeterminate"]);
 export type ModelCallOutcome = z.infer<typeof ModelCallOutcome>;
-export const ModelCallUsageAttributes = z
-  .object({
-    ...ModelCallUsageAttributesV1Shape.shape,
-    schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
-    outcome: ModelCallOutcome,
-    callKind: z.enum([
-      "response",
-      "compaction",
-      "session_title",
-      "realtime_session",
-      "transcription",
-    ]),
-    provider: ModelCallUsageAttributesV1Shape.shape.provider.nullable(),
-    providerApi: ModelCallUsageAttributesV1Shape.shape.providerApi.nullable(),
-    model: ModelCallUsageAttributesV1Shape.shape.model.nullable(),
-  })
-  .strict()
-  .superRefine(refineModelCallUsage);
+export const ModelCallUsageAttributes = z.object({
+  ...ModelCallUsageAttributesV1Shape.shape,
+  schema: z.literal(MODEL_CALL_USAGE_ATTRIBUTES_SCHEMA),
+  outcome: ModelCallOutcome,
+  callKind: z.enum(["response", "compaction", "session_title", "realtime_session", "transcription"]),
+  provider: ModelCallUsageAttributesV1Shape.shape.provider.nullable(),
+  providerApi: ModelCallUsageAttributesV1Shape.shape.providerApi.nullable(),
+  model: ModelCallUsageAttributesV1Shape.shape.model.nullable(),
+}).strict().superRefine(refineModelCallUsage);
 export type ModelCallUsageAttributes = z.infer<typeof ModelCallUsageAttributes>;
-export const ReadModelCallUsageAttributes = z.union([
-  ModelCallUsageAttributesV1,
-  ModelCallUsageAttributes,
-]);
+export const ReadModelCallUsageAttributes = z.union([ModelCallUsageAttributesV1, ModelCallUsageAttributes]);
 
 /** Trusted backend observation of native voice creation. It is an occurrence,
  * not a final accounting receipt; credential mint and browser claims cannot
  * produce it. Only opaque credential references are durable, never secrets. */
 export const REALTIME_SESSION_SOURCE_EVENT_TYPE = "model.realtime.session.observed" as const;
 export const REALTIME_SESSION_SOURCE_SCHEMA = "opengeni.realtime-session-source/v2" as const;
-export const RealtimeSessionUsageSourceV1 = z
-  .object({
-    schema: z.literal("opengeni.realtime-session-source/v1"),
-    connectionId: z.string().uuid(),
-    connectionEpoch: z.number().int().positive(),
-    provider: z.enum(["codex-subscription", "azure-live", "ai-gateway", "xai-subscription"]),
-    providerSessionId: z.string().min(1).max(512),
-    providerCredentialId: z.string().uuid().nullable(),
-    model: z.string().min(1).max(512),
-    upstreamModel: z.string().min(1).max(512).nullable(),
-    billingPath: z.enum(["opengeni_credits", "external"]),
-  })
-  .strict();
+export const RealtimeSessionUsageSourceV1 = z.object({
+  schema: z.literal("opengeni.realtime-session-source/v1"),
+  connectionId: z.string().uuid(),
+  connectionEpoch: z.number().int().positive(),
+  provider: z.enum(["codex-subscription", "azure-live", "ai-gateway", "xai-subscription"]),
+  providerSessionId: z.string().min(1).max(512),
+  providerCredentialId: z.string().uuid().nullable(),
+  model: z.string().min(1).max(512),
+  upstreamModel: z.string().min(1).max(512).nullable(),
+  billingPath: z.enum(["opengeni_credits", "external"]),
+}).strict();
 export const RealtimeSessionUsageSource = RealtimeSessionUsageSourceV1.extend({
   schema: z.literal(REALTIME_SESSION_SOURCE_SCHEMA),
   // An authenticated provider session-start event can prove occurrence without
@@ -5182,34 +5145,20 @@ export const RealtimeSessionUsageSource = RealtimeSessionUsageSourceV1.extend({
   providerSessionId: z.string().min(1).max(512).nullable(),
 }).strict();
 export type RealtimeSessionUsageSource = z.infer<typeof RealtimeSessionUsageSource>;
-export const ReadRealtimeSessionUsageSource = z.union([
-  RealtimeSessionUsageSourceV1,
-  RealtimeSessionUsageSource,
-]);
+export const ReadRealtimeSessionUsageSource = z.union([RealtimeSessionUsageSourceV1, RealtimeSessionUsageSource]);
 export type ReadRealtimeSessionUsageSource = z.infer<typeof ReadRealtimeSessionUsageSource>;
 
 /** The physical owner commits this before dispatch, without claiming that a
  * provider session occurred or supplying final accounting. */
 export const RealtimeSessionDispatchUsageSource = RealtimeSessionUsageSource.extend({
-  schema: z.literal("opengeni.realtime-session-dispatch/v1"),
-  ownerId: z.string().uuid(),
-  outcome: z.literal("indeterminate"),
-  usageReported: z.literal(false),
-  inputTokens: z.null(),
-  outputTokens: z.null(),
-  cachedTokens: z.null(),
-  cacheWriteTokens: z.null(),
-  reasoningTokens: z.null(),
-  totalTokens: z.null(),
-  estimatedProviderCostMicros: z.null(),
-  pricingSource: z.null(),
-  priceVersion: z.null(),
+  schema: z.literal("opengeni.realtime-session-dispatch/v1"), ownerId: z.string().uuid(),
+  outcome: z.literal("indeterminate"), usageReported: z.literal(false),
+  inputTokens: z.null(), outputTokens: z.null(), cachedTokens: z.null(), cacheWriteTokens: z.null(),
+  reasoningTokens: z.null(), totalTokens: z.null(), estimatedProviderCostMicros: z.null(), pricingSource: z.null(), priceVersion: z.null(),
 }).strict();
 export const RealtimeConnectionClosedUsageSource = RealtimeSessionUsageSource.extend({
-  schema: z.literal("opengeni.realtime-connection-closed/v1"),
-  ownerId: z.string().uuid(),
-  providerFinalObserved: z.literal(false),
-  outcome: z.literal("indeterminate"),
+  schema: z.literal("opengeni.realtime-connection-closed/v1"), ownerId: z.string().uuid(),
+  providerFinalObserved: z.literal(false), outcome: z.literal("indeterminate"),
 }).strict();
 
 /**
@@ -5234,27 +5183,19 @@ const EmbeddingCallUsageAttributesV1Shape = z
     billingPath: z.enum(["opengeni_credits", "external"]),
   })
   .strict();
-function refineEmbeddingCallUsage(
-  value: {
-    estimatedProviderCostMicros: number | null;
-    pricingSource: string | null;
-    rateMicrosPerMillionBytes: number | null;
-  },
-  context: z.RefinementCtx,
-): void {
-  const known = value.estimatedProviderCostMicros !== null;
-  if (
-    known !== (value.pricingSource !== null) ||
-    known !== (value.rateMicrosPerMillionBytes !== null)
-  ) {
-    context.addIssue({
-      code: "custom",
-      message: "an embedding estimate, its pricing source and its rate are known together",
-    });
-  }
+function refineEmbeddingCallUsage(value: { estimatedProviderCostMicros: number | null; pricingSource: string | null; rateMicrosPerMillionBytes: number | null }, context: z.RefinementCtx): void {
+    const known = value.estimatedProviderCostMicros !== null;
+    if (
+      known !== (value.pricingSource !== null) ||
+      known !== (value.rateMicrosPerMillionBytes !== null)
+    ) {
+      context.addIssue({
+        code: "custom",
+        message: "an embedding estimate, its pricing source and its rate are known together",
+      });
+    }
 }
-export const EmbeddingCallUsageAttributesV1 =
-  EmbeddingCallUsageAttributesV1Shape.superRefine(refineEmbeddingCallUsage);
+export const EmbeddingCallUsageAttributesV1 = EmbeddingCallUsageAttributesV1Shape.superRefine(refineEmbeddingCallUsage);
 export const EmbeddingCallUsageAttributes = EmbeddingCallUsageAttributesV1Shape.extend({
   schema: z.literal(EMBEDDING_CALL_USAGE_ATTRIBUTES_SCHEMA),
   outcome: ModelCallOutcome,
@@ -5263,10 +5204,7 @@ export const EmbeddingCallUsageAttributes = EmbeddingCallUsageAttributesV1Shape.
 }).superRefine((value, context) => {
   refineEmbeddingCallUsage(value, context);
   if (value.outcome !== "completed" && value.estimatedProviderCostMicros !== null) {
-    context.addIssue({
-      code: "custom",
-      message: "unknown provider execution cannot establish a byte-priced estimate",
-    });
+    context.addIssue({ code: "custom", message: "unknown provider execution cannot establish a byte-priced estimate" });
   }
 });
 export type EmbeddingCallUsageAttributes = z.infer<typeof EmbeddingCallUsageAttributes>;
@@ -5279,26 +5217,13 @@ export const EmbeddingCallUsageSource = EmbeddingCallUsageAttributesV1Shape.exte
   provider: EmbeddingCallUsageAttributesV1Shape.shape.provider.nullable(),
   model: EmbeddingCallUsageAttributesV1Shape.shape.model.nullable(),
   outcome: z.literal("indeterminate"),
-  inputTokens: z.null(),
-  estimatedProviderCostMicros: z.null(),
-  pricingSource: z.null(),
-  rateMicrosPerMillionBytes: z.null(),
-})
-  .strict()
-  .superRefine((value, context) => {
-    const expected =
-      value.callKind === "query"
-        ? value.completionKey === `usage:embedding.call:query:${value.callId}`
-        : new RegExp(
-            `^usage:embedding\\.call:index:[0-9a-f-]{36}:[1-9][0-9]*:[0-9]+:${value.callId}$`,
-            "u",
-          ).test(value.completionKey);
-    if (!expected)
-      context.addIssue({
-        code: "custom",
-        message: "source binds the physical provider call's final receipt key",
-      });
-  });
+  inputTokens: z.null(), estimatedProviderCostMicros: z.null(),
+  pricingSource: z.null(), rateMicrosPerMillionBytes: z.null(),
+}).strict().superRefine((value, context) => {
+  const expected = value.callKind === "query" ? value.completionKey === `usage:embedding.call:query:${value.callId}`
+    : new RegExp(`^usage:embedding\\.call:index:[0-9a-f-]{36}:[1-9][0-9]*:[0-9]+:${value.callId}$`, "u").test(value.completionKey);
+  if (!expected) context.addIssue({ code: "custom", message: "source binds the physical provider call's final receipt key" });
+});
 export type EmbeddingCallUsageSource = z.infer<typeof EmbeddingCallUsageSource>;
 
 /** Bounded per-row usage attributes as persisted and exported (a JSON object). */
@@ -8772,12 +8697,7 @@ export type GoalSpec = z.infer<typeof GoalSpec>;
 
 /** Opaque request identity and its native Goal update; never continuation text or actor identity. */
 export const GoalContinuationInputAttribution = /* @__PURE__ */ defineSchema(() =>
-  z
-    .object({
-      operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
-      updateId: z.string().uuid(),
-    })
-    .strict(),
+  z.object({ operationKey: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS), updateId: z.string().uuid() }).strict(),
 );
 export type GoalContinuationInputAttribution = z.infer<typeof GoalContinuationInputAttribution>;
 
@@ -20561,11 +20481,7 @@ export const CreateSessionRequest = /* @__PURE__ */ defineSkillContractSchema(()
       });
     }
     if (value.initialMessageModelSourceRefs?.length && value.initialMessage === undefined) {
-      context.addIssue({
-        code: "custom",
-        path: ["initialMessageModelSourceRefs"],
-        message: "Source references require an initial message",
-      });
+      context.addIssue({ code: "custom", path: ["initialMessageModelSourceRefs"], message: "Source references require an initial message" });
     }
     if (value.startMode === "realtime" && value.initialMessage !== undefined) {
       context.addIssue({

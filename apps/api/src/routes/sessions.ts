@@ -1,16 +1,8 @@
 import { SessionCancelSettlementQuery } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
-import {
-  cancelHumanSessionWorkstreamWithReceipt,
-  readSessionCreationReceiptForRequest,
-  readHumanSessionCancelSettlement,
-} from "@opengeni/core";
+import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
-import {
-  authorizeRealtimeProviderDispatch,
-  createRealtimeUsageProxyAttachment,
-  realtimeProxyAuthority,
-} from "../realtime-usage-proxy";
+import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import { readSessionResponsePair } from "./session-response-reads";
 import {
   legacyVariableSetFields,
@@ -747,11 +739,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw new HTTPException(400, { message: "invalid session control request" });
       operation = sessionSuffix.endsWith("/cancel") ? "session.cancel" : "session.control";
     }
-    if (
-      sessionSuffix.endsWith(`/sessions/${sessionId}/cancel/settlement`) &&
-      c.req.method === "GET" &&
-      !SessionCancelSettlementQuery.safeParse(c.req.query()).success
-    )
+    if (sessionSuffix.endsWith(`/sessions/${sessionId}/cancel/settlement`) && c.req.method === "GET"
+      && !SessionCancelSettlementQuery.safeParse(c.req.query()).success)
       throw new HTTPException(400, { message: "invalid cancel settlement request" });
     if (operation === "session.stream.read") {
       await next();
@@ -1489,28 +1478,14 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-source-basis", async (c) => {
-    const workspaceId = c.req.param("workspaceId");
-    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    const sessionId = c.req.param("sessionId");
-    const sourceKey = c.req.query("sourceKey");
-    if (!z.string().uuid().safeParse(sessionId).success || !sourceKey || sourceKey.length > 256)
-      throw new HTTPException(400, { message: "exact model call identity required" });
-    const session = await getSessionForSubject(
-      db,
-      workspaceId,
-      sessionId,
-      grant.subjectId,
-      relatedSessionAccessFor(c),
-    );
-    if (!session) throw new HTTPException(404, { message: "session not found" });
-    return c.json(
-      await readModelCallSourceReceipt(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        sourceKey,
-      }),
-    );
+    const workspaceId=c.req.param("workspaceId");
+    const grant=await requireAccessGrant(c,deps,workspaceId,"sessions:read");
+    const sessionId=c.req.param("sessionId");
+    const sourceKey=c.req.query("sourceKey");
+    if (!z.string().uuid().safeParse(sessionId).success || !sourceKey || sourceKey.length>256) throw new HTTPException(400,{message:"exact model call identity required"});
+    const session=await getSessionForSubject(db,workspaceId,sessionId,grant.subjectId,relatedSessionAccessFor(c));
+    if (!session) throw new HTTPException(404,{message:"session not found"});
+    return c.json(await readModelCallSourceReceipt(db,{accountId:grant.accountId,workspaceId,sessionId,sourceKey}));
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/model-context", async (c) => {
@@ -1867,12 +1842,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/webrtc", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "sessions:control",
-    );
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:control");
     const grant = authorization.grant;
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
@@ -1993,87 +1963,34 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         return refused;
       }
       const authority = await realtimeProxyAuthority(deps, authorization);
-      await realtimeVoiceBilling.recordProviderSessionDispatch({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        ownerId: crypto.randomUUID(),
-        source: {
-          connectionId: claim.connection.id,
+      await realtimeVoiceBilling.recordProviderSessionDispatch({ accountId: grant.accountId, workspaceId, sessionId,
+        ownerId: crypto.randomUUID(), source: { connectionId: claim.connection.id,
           connectionEpoch: claim.connection.connectionEpoch,
           provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
-          providerSessionId: null,
-          providerCredentialId: null,
-          model: claim.mode.model,
-          upstreamModel: null,
-        },
-        authorize: (tx) =>
-          authorizeRealtimeProviderDispatch(
-            deps,
-            tx,
-            {
-              authority,
-              sessionId,
-              source: {
-                connectionId: claim.connection.id,
-                connectionEpoch: claim.connection.connectionEpoch,
-                provider:
-                  claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
-                providerSessionId: null,
-                providerCredentialId: null,
-                model: claim.mode.model,
-                upstreamModel: null,
-              },
-            },
-            "negotiation",
-          ),
+          providerSessionId: null, providerCredentialId: null, model: claim.mode.model, upstreamModel: null },
+        authorize: tx => authorizeRealtimeProviderDispatch(deps, tx, { authority, sessionId,
+          source: { connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+            provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
+            providerSessionId: null, providerCredentialId: null, model: claim.mode.model, upstreamModel: null } }, "negotiation"),
       });
-      const onProviderSessionCreated = async (source: {
-        providerSessionId: string;
-        upstreamModel: string;
-        providerCredentialId: string | null;
-      }): Promise<void> => {
+      const onProviderSessionCreated = async (source: { providerSessionId: string; upstreamModel: string; providerCredentialId: string | null }): Promise<void> => {
         await realtimeVoiceBilling.recordProviderSessionOccurrence({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
+          accountId: grant.accountId, workspaceId, sessionId,
           source: {
-            connectionId: claim.connection.id,
-            connectionEpoch: claim.connection.connectionEpoch,
-            provider:
-              claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
-            providerSessionId: source.providerSessionId,
-            providerCredentialId: source.providerCredentialId,
-            model: claim.mode.model,
-            upstreamModel: source.upstreamModel,
+            connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+            provider: claim.mode.model === AZURE_LIVE_MODEL_ID ? "azure-live" : "codex-subscription",
+            providerSessionId: source.providerSessionId, providerCredentialId: source.providerCredentialId,
+            model: claim.mode.model, upstreamModel: source.upstreamModel,
           },
         });
-        if (!deps.workflowClient.startRealtimeUsageObservation)
-          throw new Error("REALTIME_USAGE_WORKFLOW_UNAVAILABLE");
+        if (!deps.workflowClient.startRealtimeUsageObservation) throw new Error("REALTIME_USAGE_WORKFLOW_UNAVAILABLE");
         await deps.workflowClient.startRealtimeUsageObservation({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          connectionId: claim.connection.id,
+          accountId: grant.accountId, workspaceId, sessionId, connectionId: claim.connection.id,
         });
       };
-      const broker =
-        claim.mode.model === AZURE_LIVE_MODEL_ID
-          ? buildSessionAzureLiveBroker(
-              db,
-              settings,
-              workspaceId,
-              sessionId,
-              deps.codexFetch,
-              onProviderSessionCreated,
-            )
-          : buildSessionCodexRealtimeBroker(
-              db,
-              settings,
-              { accountId: grant.accountId, workspaceId, sessionId },
-              deps.codexFetch,
-              onProviderSessionCreated,
-            );
+      const broker = claim.mode.model === AZURE_LIVE_MODEL_ID
+        ? buildSessionAzureLiveBroker(db, settings, workspaceId, sessionId, deps.codexFetch, onProviderSessionCreated)
+        : buildSessionCodexRealtimeBroker(db, settings, { accountId: grant.accountId, workspaceId, sessionId }, deps.codexFetch, onProviderSessionCreated);
       try {
         const answer = await broker({
           request: providerRequest,
@@ -2179,12 +2096,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const negotiateRealtimeWebsocket = async (c: Context) => {
     const workspaceId = c.req.param("workspaceId") ?? "";
     const sessionId = c.req.param("sessionId") ?? "";
-    const authorization = await requireAccessGrantAuthorization(
-      c,
-      deps,
-      workspaceId,
-      "sessions:control",
-    );
+    const authorization = await requireAccessGrantAuthorization(c, deps, workspaceId, "sessions:control");
     const grant = authorization.grant;
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
@@ -2242,10 +2154,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         );
       }
       if (provider.id === "elevenlabs") {
-        throw new RealtimeWebsocketBrokerError(
-          "model_unavailable",
-          "This voice provider is not available in this deployment.",
-        );
+        throw new RealtimeWebsocketBrokerError("model_unavailable", "This voice provider is not available in this deployment.");
       }
       await realtimeVoiceBilling.admit({
         accountId: grant.accountId,
@@ -2268,17 +2177,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           elevenlabs: deps.codexFetch,
         },
       });
-      const proxy = await createRealtimeUsageProxyAttachment({
-        deps,
-        authorization,
-        request: c.req.raw,
-        sessionId,
-        connectionId: claim.connection.id,
-        connectionEpoch: claim.connection.connectionEpoch,
-        provider: connection.provider === "supergrok" ? "xai-subscription" : "ai-gateway",
-        model: claim.mode.model,
-        secret: connection,
-      });
+      const proxy = await createRealtimeUsageProxyAttachment({ deps, authorization, request: c.req.raw,
+        sessionId, connectionId: claim.connection.id, connectionEpoch: claim.connection.connectionEpoch,
+        provider: connection.provider === "supergrok" ? "xai-subscription" : "ai-gateway", model: claim.mode.model, secret: connection });
       const claimed = claim;
       const completed = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
         scopedDb.transaction(async (tx) =>
@@ -3460,9 +3361,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const payload = await parseRequestJson(c, UpdateSessionGoalRequest);
     const canonicalInputRoute = c.req.path.endsWith("/goal/continuation-input");
     if (canonicalInputRoute !== ("status" in payload && payload.continuationInput !== undefined)) {
-      throw new HTTPException(400, {
-        message: "Canonical Goal input requires its dedicated continuation-input route",
-      });
+      throw new HTTPException(400, { message: "Canonical Goal input requires its dedicated continuation-input route" });
     }
     const existing = await getSessionGoal(db, workspaceId, sessionId);
     if (!existing) {
@@ -3649,10 +3548,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
   };
   app.patch("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", updateSessionGoal);
-  app.post(
-    "/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input",
-    updateSessionGoal,
-  );
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/goal/continuation-input", updateSessionGoal);
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -4393,9 +4289,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         expected.data,
       );
       return c.json({ creationReceipt });
-    } catch (error) {
-      throw sessionAuthorizationHttpError(error);
-    }
+    } catch (error) { throw sessionAuthorizationHttpError(error); }
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/retry", async (c) => {

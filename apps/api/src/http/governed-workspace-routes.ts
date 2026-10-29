@@ -23,14 +23,25 @@ import { registeredHandlerRoutePath } from "./registered-route-label";
  * coding subscriptions, integrations, sandbox images...) the host never meant
  * its people to use.
  *
- * Who is refused: a person (`user:` or `external_user:` subject) with their own
- * credential (browser session, native app credential, personal API key). A
- * token signed with the deployment's delegation secret (the host's service and
- * person tokens, the worker's agent attempts) and machine credentials
- * (organization and workspace keys, the configured key) are the host's or the
- * runtime's own callers and keep each route's own checks. A caller without a
- * grant in the workspace keeps the route's own answer (401, 403 or a public
- * route's token check), so the refusal never tells an outsider anything.
+ * Who is refused, in a governed organization:
+ * - a person with their own credential: a `user:` (or `external_user:`)
+ *   subject behind a browser session, a native app credential or a personal
+ *   API key;
+ * - a person token signed with the deployment's delegation secret
+ *   (`principalKind: "human_session"`): only a host mints those, and its
+ *   people get the same allowlist as in their browser.
+ *
+ * Who keeps each route's own checks: the other delegated tokens (the host's
+ * service tokens, the worker's agent attempts), machine credentials
+ * (organization and workspace keys, the configured key) and an organization
+ * key acting for a person (`asUser`, the `x-opengeni-external-actor` lane,
+ * which only an organization key can open): those are the host's or the
+ * runtime's own callers. MCP OAuth clients authenticate inside `/mcp` and get
+ * that route's own answer. A caller without a grant in the workspace (or, at
+ * organization scope, without a grant in the organization) keeps the route's
+ * own answer (401, 403, 404 or a public route's token check), so the refusal
+ * never tells an outsider anything. A request under the guarded prefixes that
+ * resolves to no registered handler is refused for a person too (fail closed).
  *
  * The host opts in with `OrganizationGovernancePort.memberRouteAccess:
  * "allowlist"`. Without it (or without a bound port) nothing is registered,
@@ -86,7 +97,7 @@ const SESSION_PREFIX = `${ws}/sessions/:sessionId`;
  * The workspace routes, outside one session's own routes, a person in a
  * governed workspace may use: the workspace itself, the session list and
  * session creation, the composer's reads, the workspace live streams, the
- * session-bound first-party MCP endpoint, the inbox and its notifications,
+ * inbox and its notifications,
  * documents, Knowledge and Skills (under their own permissions), feedback on a
  * session, and artifact reads. Paths are the registered Hono templates.
  */
@@ -109,8 +120,9 @@ export const GOVERNED_MEMBER_WORKSPACE_ROUTES: readonly GovernedRouteEntry[] = O
   { method: "GET", path: `${ws}/control-events` },
   { method: "GET", path: `${ws}/control-events/stream` },
   { method: "GET", path: `${ws}/live-events/stream` },
-  // Tool calls of a session: the first-party MCP endpoint checks its session binding.
-  { method: "ALL", path: `${ws}/mcp` },
+  // Not `/mcp`: for a person's own credential it is the whole workspace tool
+  // gateway (as `tools/*`); sessions reach their tools through the worker's
+  // delegated tokens, which the default-deny does not refuse.
   // The inbox and its notifications.
   { method: "ALL", path: `${ws}/inbox/*` },
   // Documents, Knowledge and Skills: each route checks its own permission.
@@ -126,7 +138,6 @@ export const GOVERNED_MEMBER_WORKSPACE_ROUTES: readonly GovernedRouteEntry[] = O
   { method: "GET", path: `${ws}/artifacts/*` },
   { method: "POST", path: `${ws}/artifacts/:artifactId/playback-source` },
   { method: "GET", path: `${ws}/artifact-catalog` },
-  { method: "GET", path: `${ws}/artifact-catalog/*` },
   { method: "GET", path: `${ws}/editable-artifacts` },
   { method: "GET", path: `${ws}/editable-artifacts/*` },
   { method: "GET", path: `${ws}/published-artifacts` },
@@ -247,10 +258,24 @@ export function workspaceRouteNotAllowedHttpError(): ApiHttpError {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 
-/** A person with their own credential: the callers the default-deny refuses. */
-function isPersonWithOwnCredential(grant: AccessGrant): boolean {
-  if (grant.metadata?.delegated === true) return false;
-  return grant.subjectId.startsWith("user:") || grant.subjectId.startsWith("external_user:");
+const PERSON_SUBJECT = /^(?:user|external_user):/u;
+
+/**
+ * An organization key acting for a person (`asUser`). The header always routes
+ * resolution to the organization-key lane (and refuses any other credential),
+ * so a resolved request that carries it came through an organization key.
+ */
+function isOrganizationKeyActingForPerson(context: Context): boolean {
+  return context.req.header("x-opengeni-external-actor") !== undefined;
+}
+
+/** Whether a resolved grant is one of the callers the default-deny refuses. */
+export function governedRouteCallerIsPerson(
+  grant: Pick<AccessGrant, "subjectId" | "principalKind" | "metadata">,
+): boolean {
+  // A delegated token: only a host-minted person token is a person.
+  if (grant.metadata?.delegated === true) return grant.principalKind === "human_session";
+  return PERSON_SUBJECT.test(grant.subjectId);
 }
 
 async function workspaceCallerIsPerson(
@@ -259,18 +284,31 @@ async function workspaceCallerIsPerson(
   workspaceId: string,
 ): Promise<boolean> {
   try {
-    return isPersonWithOwnCredential(await requireAccessGrant(context, deps, workspaceId));
+    const grant = await requireAccessGrant(context, deps, workspaceId);
+    return !isOrganizationKeyActingForPerson(context) && governedRouteCallerIsPerson(grant);
   } catch {
     // No grant here (or no credential): the route gives its own answer.
     return false;
   }
 }
 
-async function organizationCallerIsPerson(context: Context, deps: ApiRouteDeps): Promise<boolean> {
+async function organizationCallerIsPerson(
+  context: Context,
+  deps: ApiRouteDeps,
+  organizationId: string,
+): Promise<boolean> {
   try {
     const access = await requireAccessContext(context, deps);
-    if (access.workspaceGrants.some((grant) => grant.metadata?.delegated === true)) return false;
-    return access.subjectId.startsWith("user:") || access.subjectId.startsWith("external_user:");
+    if (isOrganizationKeyActingForPerson(context)) return false;
+    // No grant in this organization: the route's own answer, so the refusal
+    // never tells an outsider the organization exists or is governed.
+    const inOrganization =
+      access.accountGrants.some((grant) => grant.accountId === organizationId) ||
+      access.workspaceGrants.some((grant) => grant.accountId === organizationId);
+    if (!inOrganization) return false;
+    const delegated = access.workspaceGrants.find((grant) => grant.metadata?.delegated === true);
+    if (delegated) return governedRouteCallerIsPerson(delegated);
+    return PERSON_SUBJECT.test(access.subjectId);
   } catch {
     return false;
   }
@@ -288,10 +326,16 @@ export function registerGovernedWorkspaceRouteGuards(app: Hono, deps: ApiRouteDe
     async (context: Context, next: () => Promise<void>): Promise<Response | void> => {
       const method = context.req.method;
       if (method === "OPTIONS") return await next();
+      // No registered handler under the guarded prefixes is refused for a
+      // person too (fail closed); an allowed route returns before any read.
       const template = registeredHandlerRoutePath(context);
-      if (!template || !isGovernedRoutePrefix(template)) return await next();
       const pathname = new URL(context.req.url).pathname;
-      if (governedMemberRouteAllowed(method, template, pathname)) return await next();
+      if (
+        template &&
+        isGovernedRoutePrefix(template) &&
+        governedMemberRouteAllowed(method, template, pathname)
+      )
+        return await next();
       const id =
         scope === "workspace"
           ? (context.req.param("workspaceId") ?? "")
@@ -304,7 +348,7 @@ export function registerGovernedWorkspaceRouteGuards(app: Hono, deps: ApiRouteDe
       const person =
         scope === "workspace"
           ? await workspaceCallerIsPerson(context, deps, id)
-          : await organizationCallerIsPerson(context, deps);
+          : await organizationCallerIsPerson(context, deps, id);
       if (!person) return await next();
       throw workspaceRouteNotAllowedHttpError();
     };

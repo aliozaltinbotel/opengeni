@@ -28,7 +28,7 @@ export const HOST_SESSION_POLICY_ROUTINE =
   "opengeni_private.put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)";
 
 /**
- * Migration 1019's host write of the recordings setting, called after 1018's
+ * Migration 1020's host write of the recordings setting, called after 1018's
  * routine in the same command. Its runtime EXECUTE is withheld for one release
  * too; until it is granted, a command that names recordings is "not yet".
  */
@@ -176,7 +176,7 @@ export async function listManagedAccountExternalSources(
 
 /**
  * Whether 1018's routine exists and the runtime may call it, and, for a policy
- * that names `recordings`, 1019's routine too.
+ * that names `recordings`, 1020's routine too.
  */
 export async function hostSessionPolicyWriteGranted(
   db: Pick<Database, "execute">,
@@ -219,7 +219,7 @@ export function organizationSessionPolicyDigest(policy: OrganizationSessionPolic
  * this subject). A replay of the same operation and body changes nothing; the
  * same operation with another body, and a stale `expectedRevision`, are
  * refused. Null while 1018's routine is not granted ("not yet"), and, for a
- * policy that names `recordings`, while 1019's is not. A policy without
+ * policy that names `recordings`, while 1020's is not. A policy without
  * `recordings` leaves the stored setting as it is.
  */
 export async function putHostOrganizationSessionPolicy(

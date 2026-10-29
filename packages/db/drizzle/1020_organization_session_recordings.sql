@@ -25,6 +25,9 @@
 -- until a later migration grants it, a host command that names recordings
 -- answers HOST_SESSION_POLICY_UNAVAILABLE and writes nothing, and every other
 -- host command is unchanged.
+--
+-- Ordinal 1019 belongs to a sibling change (the grant release that follows
+-- 1016-1018); this migration takes the next free ordinal.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 

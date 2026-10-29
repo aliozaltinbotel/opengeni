@@ -31,6 +31,15 @@ const allowingHost: OrganizationGovernancePort = {
   decide: ({ via, mutation }) =>
     via === "host" || mutation === "organization.create" ? "allow" : "refuse",
 };
+/** Organizations here are the host's to create (`organizationCreation: "host"`). */
+const hostCreatesRefusing: OrganizationGovernancePort = {
+  ...refusingHost,
+  organizationCreation: "host",
+};
+const hostCreatesAllowing: OrganizationGovernancePort = {
+  ...allowingHost,
+  organizationCreation: "host",
+};
 
 type App = ReturnType<typeof createApp>;
 type Person = { cookie: string; email: string; subjectId: string };
@@ -58,7 +67,10 @@ function browser(cookie: string): Record<string, string> {
   return { cookie, origin, "sec-fetch-site": "same-origin", "content-type": "application/json" };
 }
 
-/** A signed-in person whose first organization carries `source` (null: ungoverned). */
+/**
+ * A signed-in person whose first organization carries `source` (null:
+ * ungoverned; "none": a fresh sign-up with no organization at all).
+ */
 async function personWithFirstOrganization(source: string | null): Promise<Person> {
   const app = appFor();
   const email = `${crypto.randomUUID()}@example.test`;
@@ -80,6 +92,7 @@ async function personWithFirstOrganization(source: string | null): Promise<Perso
   const [user] = await shared.admin<{ id: string }[]>`
     select id from auth_users where email = ${email}`;
   const subjectId = `user:${user!.id}`;
+  if (source === "none") return { cookie: cookie.split(";", 1)[0]!, email, subjectId };
   const created = await createManagedOrganization(client.db, {
     subjectId,
     subjectLabel: email,
@@ -97,19 +110,25 @@ function detailCode(body: unknown): string | undefined {
   return (body as { error?: { details?: { code?: string } } } | null)?.error?.details?.code;
 }
 
-async function create(app: App, person: Person, route: "initial" | "additional") {
-  const response = await app.request(
-    route === "initial" ? "/v1/organizations" : "/v1/organizations/additional",
-    {
-      method: "POST",
-      headers: browser(person.cookie),
-      body: JSON.stringify({
-        name: "Own organization",
-        ...(route === "additional" ? { workspaceName: "Own workspace" } : {}),
-        operationId: crypto.randomUUID(),
-      }),
-    },
-  );
+type CreateRoute = "initial" | "additional" | "onboarding";
+const CREATE_PATHS: Readonly<Record<CreateRoute, string>> = {
+  initial: "/v1/organizations",
+  additional: "/v1/organizations/additional",
+  onboarding: "/v1/auth/organization-onboarding",
+};
+
+async function create(app: App, person: Person, route: CreateRoute) {
+  const response = await app.request(CREATE_PATHS[route], {
+    method: "POST",
+    headers: browser(person.cookie),
+    body: JSON.stringify({
+      ...(route === "onboarding"
+        ? { organizationName: "Own organization" }
+        : { name: "Own organization" }),
+      ...(route === "additional" ? { workspaceName: "Own workspace" } : {}),
+      operationId: crypto.randomUUID(),
+    }),
+  });
   return { status: response.status, code: detailCode(await response.json().catch(() => null)) };
 }
 
@@ -176,5 +195,62 @@ describe("unchanged without a governed membership", () => {
   test("without a port a governed-source person creates an organization", async () => {
     const person = await personWithFirstOrganization(HOST_SOURCE);
     expect((await create(appFor(), person, "additional")).status).toBe(201);
+  }, 60_000);
+});
+
+describe("organizationCreation: host", () => {
+  test.each(["initial", "additional", "onboarding"] as const)(
+    "POST %s refuses a freshly signed-up identity with no membership",
+    async (route) => {
+      const person = await personWithFirstOrganization("none");
+      expect(await create(appFor(hostCreatesAllowing), person, route)).toEqual({
+        status: 403,
+        code: ORGANIZATION_CREATE_GOVERNED,
+      });
+      const [row] = await shared.admin<{ count: number }[]>`
+        select count(*)::int as count from organization_memberships
+        where subject_id = ${person.subjectId}`;
+      expect(row!.count).toBe(0);
+    },
+    60_000,
+  );
+
+  test.each(["initial", "additional"] as const)(
+    "POST %s refuses a person of an ungoverned organization",
+    async (route) => {
+      const person = await personWithFirstOrganization(null);
+      expect(await create(appFor(hostCreatesAllowing), person, route)).toEqual({
+        status: 403,
+        code: ORGANIZATION_CREATE_GOVERNED,
+      });
+    },
+    60_000,
+  );
+
+  test.each(["initial", "additional"] as const)(
+    "POST %s refuses a governed person whose host refuses",
+    async (route) => {
+      const person = await personWithFirstOrganization(HOST_SOURCE);
+      expect(await create(appFor(hostCreatesRefusing), person, route)).toEqual({
+        status: 403,
+        code: ORGANIZATION_CREATE_GOVERNED,
+      });
+    },
+    60_000,
+  );
+
+  test("a governed person whose host allows organization.create creates one; initial reaches its own answer", async () => {
+    const person = await personWithFirstOrganization(HOST_SOURCE);
+    expect((await create(appFor(hostCreatesAllowing), person, "additional")).status).toBe(201);
+    const allowed = await create(appFor(hostCreatesAllowing), person, "initial");
+    expect(allowed.code).not.toBe(ORGANIZATION_CREATE_GOVERNED);
+    expect(allowed.status).toBe((await create(appFor(), person, "initial")).status);
+  }, 60_000);
+
+  test("without the field a freshly signed-up identity keeps the stock answers", async () => {
+    const person = await personWithFirstOrganization("none");
+    const governed = await create(appFor(allowingHost), person, "onboarding");
+    expect(governed.code).not.toBe(ORGANIZATION_CREATE_GOVERNED);
+    expect(governed.status).toBe(200);
   }, 60_000);
 });
