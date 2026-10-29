@@ -333,10 +333,12 @@ describe("ordinary session Codex realtime control", () => {
 
   test("adopts a call the host started before the view mounted and flushes on turn outcomes", async () => {
     const calls: string[] = [];
+    let capturedContext: (() => string | undefined) | undefined;
     let current: SessionRealtimeControllerSnapshot = idle;
     const listeners = new Set<(snapshot: SessionRealtimeControllerSnapshot) => void>();
     const factory: SessionRealtimeControllerFactory = (options) => {
       calls.push(`create:${options.model}`);
+      capturedContext = options.getModelContext;
       return {
         snapshot: () => current,
         subscribe(listener) {
@@ -378,7 +380,13 @@ describe("ordinary session Codex realtime control", () => {
       sessionId,
       model: "gpt-live-1-boulder-alpha",
       controllerFactory: factory,
+      getModelContext: () => "before adoption",
     });
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (capturedContext) break;
+      await act(async () => await new Promise((resolve) => setTimeout(resolve, 0)));
+    }
+    expect(capturedContext?.()).toBe("before adoption");
     let consumed = 0;
     const turnCompleted = {
       id: "77777777-7777-4777-8777-777777777777",
@@ -392,6 +400,7 @@ describe("ordinary session Codex realtime control", () => {
     const render = (events: SessionEvent[]) =>
       root.render(
         <SessionRealtimeControl
+          getModelContext={() => "after adoption"}
           client={client}
           workspaceId={workspaceId}
           sessionId={sessionId}
@@ -416,6 +425,7 @@ describe("ordinary session Codex realtime control", () => {
     // One controller, started once by the host; the view's autostart is consumed.
     expect(calls).toEqual(["create:gpt-live-1-boulder-alpha", "start"]);
     expect(consumed).toBe(1);
+    expect(capturedContext?.()).toBe("after adoption");
 
     await act(async () => render([turnCompleted]));
     await act(async () => render([turnCompleted]));
