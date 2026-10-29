@@ -14,6 +14,8 @@ import {
   isNativeNavId,
   nativeNavDestination,
   type HostExtension,
+  type HostExtensionContext,
+  type HostExtensionStarter,
   type HostExtensionOutsideWorkspaceRoute,
   type NativeDestination,
 } from "@opengeni/react/app/host-extension";
@@ -319,6 +321,43 @@ function checkLifecycle(value: unknown): void {
   optionalFunction(lifecycle.onWorkspaceSwitch, "lifecycle.onWorkspaceSwitch");
 }
 
+/** Validate each result when the host resolves starters. */
+export function validateHostStarters(value: unknown): void {
+  if (!Array.isArray(value)) fail("starters", "must return an array");
+  if (value.length > 8) fail("starters", "must contain at most 8 items");
+  const ids = new Set<string>();
+  value.forEach((candidate, index) => {
+    const field = `starters[${index}]`;
+    const item = record(candidate, field);
+    knownKeys(item, field, ["id", "label", "prompt"]);
+    const id = text(item.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(item.label, `${field}.label`);
+    text(item.prompt, `${field}.prompt`);
+  });
+}
+
+/** Invalid host results retain the native starters; an intentional empty list stays empty. */
+export function createHostStartersResolver(
+  source: NonNullable<HostExtension["starters"]>,
+): (context: HostExtensionContext) => readonly HostExtensionStarter[] | undefined {
+  let reported = false;
+  return (context) => {
+    try {
+      const items = source(context);
+      validateHostStarters(items);
+      return items;
+    } catch {
+      if (!reported) {
+        reported = true;
+        console.warn("HOST_STARTERS_FAILED");
+      }
+      return undefined;
+    }
+  };
+}
+
 /**
  * Checks that a value is a usable host extension and returns it unchanged.
  * Throws HostExtensionInvalidError (`HOST_EXTENSION_INVALID`) naming the field.
@@ -328,6 +367,7 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
+  optionalFunction(fields.starters, "starters");
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   const groups = settingsGroupIds(fields.settingsGroups);
