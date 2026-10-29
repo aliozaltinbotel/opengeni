@@ -10,16 +10,18 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
+  useRef,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
 import type { ToolRegistryEntry } from "../../timeline";
-import type { HostExtension, NativeDestination } from "../host-extension";
+import type { HostExtension, HostExtensionContext, NativeDestination } from "../host-extension";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
-import type { MessageContextPill, MessageContextStore } from "./message-context";
+import { createHostMessageContextStore, type MessageContextPill, type MessageContextStore } from "./message-context";
 import type { NavigationHost } from "./navigation";
 
 /** The open chat as its page holds it, for a host that reacts to its progress. */
@@ -49,6 +51,7 @@ export type AppHost = Readonly<{
    * instructions.
    */
   messageContext?: MessageContextStore | undefined;
+  extensionMessageContext?: HostExtension["messageContext"] | undefined;
   /**
    * Receives the open chat's state each time it changes, read from the
    * page's own event stream (no second connection).
@@ -119,9 +122,51 @@ export function useReportSessionState(state: SessionViewState): void {
   }, [events, initialLoading, report, sessionId, status]);
 }
 
+const HostMessageContext = createContext<MessageContextStore | null>(null);
+
+/** A workspace-scoped context store shared by sends, realtime and composer pills. */
+export function HostMessageContextProvider({
+  context,
+  resolve,
+  children,
+}: {
+  context: HostExtensionContext;
+  resolve: HostExtension["messageContext"] | undefined;
+  children: ReactNode;
+}) {
+  const current = useRef({ context, resolve });
+  current.current = { context, resolve };
+  // The page store also serves new-chat creation above this workspace boundary.
+  const pageStore = useAppHost().messageContext;
+  const { workspaceId, pathname } = context;
+  const store = useMemo(() => {
+    if (!resolve) return null;
+    if (pageStore) return pageStore;
+    return createHostMessageContextStore(
+      (sourceContext) => current.current.resolve?.(sourceContext),
+      () => ({ ...current.current.context, workspaceId }),
+    );
+    // A workspace change retires all exclusions; ordinary renders retain them.
+  }, [workspaceId, resolve, pageStore]);
+  useEffect(() => {
+    store?.set(resolve?.({ workspaceId, pathname }));
+  }, [store, resolve, workspaceId, pathname]);
+  return (
+    <HostMessageContext.Provider value={store}>
+      {children}
+    </HostMessageContext.Provider>
+  );
+}
+
+function useContextStore(): MessageContextStore | undefined {
+  const supplied = useContext(HostMessageContext);
+  const host = useAppHost();
+  return supplied ?? host.messageContext;
+}
+
 /** Reads the host's per-message model context at send time, if it supplies one. */
 export function useHostMessageContext(): (() => string | undefined) | undefined {
-  const store = useAppHost().messageContext;
+  const store = useContextStore();
   const read = useCallback(() => store?.forSend(), [store]);
   return store ? read : undefined;
 }
@@ -135,7 +180,7 @@ export function useMessageContextPills(): {
   exclude: (id: string) => void;
   include: (id: string) => void;
 } {
-  const store = useAppHost().messageContext;
+  const store = useContextStore();
   const pills = useSyncExternalStore(
     store?.subscribe ?? noSubscription,
     store?.pills ?? (() => NO_PILLS),

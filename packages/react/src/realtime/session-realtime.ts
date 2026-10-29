@@ -294,7 +294,7 @@ export type SessionRealtimeControllerFactory = (
 type PrestartedSessionRealtime = {
   model: SessionRealtimeModel;
   controller: Promise<SessionRealtimeController>;
-  /** Filled in by the session view that adopts the call. */
+  /** Supplied at prestart; the adopting session view takes it over. */
   modelContext: { current: (() => string | undefined) | undefined };
   /** The conversation language; the adopting view takes it over. */
   language: { current: () => string | undefined };
@@ -335,6 +335,8 @@ export function prestartSessionRealtime(input: {
    * workspace's saved settings for the model.
    */
   voiceSettings?: RealtimeVoiceSettings | undefined;
+  /** Per-message context, available before the session view adopts the call. */
+  getModelContext?: (() => string | undefined) | undefined;
   controllerFactory?: SessionRealtimeControllerFactory | undefined;
 }): () => void {
   const key = prestartKey(input.workspaceId, input.sessionId);
@@ -342,7 +344,7 @@ export function prestartSessionRealtime(input: {
   // A retried handoff keeps the call already starting for the same model.
   if (existing?.model === input.model) return abandonPrestarted(key, existing);
   if (existing) abandonPrestarted(key, existing)();
-  const modelContext: PrestartedSessionRealtime["modelContext"] = { current: undefined };
+  const modelContext: PrestartedSessionRealtime["modelContext"] = { current: input.getModelContext };
   const language: PrestartedSessionRealtime["language"] = { current: () => input.language };
   const voiceSettings: PrestartedSessionRealtime["voiceSettings"] = {
     current: () => input.voiceSettings,

@@ -319,6 +319,44 @@ function checkLifecycle(value: unknown): void {
   optionalFunction(lifecycle.onWorkspaceSwitch, "lifecycle.onWorkspaceSwitch");
 }
 
+/** Host context must always be visible and dismissible; check again after every resolution. */
+export function validateHostMessageContext(value: unknown): void {
+  if (value === undefined) return;
+  const items = Array.isArray(value) ? value : [value];
+  const ids = new Set<string>();
+  items.forEach((candidate, index) => {
+    const field = `messageContext[${index}]`;
+    const item = record(candidate, field);
+    knownKeys(item, field, ["id", "text", "label", "detail"]);
+    const id = text(item.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(item.text, `${field}.text`);
+    text(item.label, `${field}.label`);
+    optionalText(item.detail, `${field}.detail`);
+  });
+}
+
+/** Host failures drop host items, preserve the person's send, and warn once per installation. */
+export function createHostMessageContextResolver(
+  source: NonNullable<HostExtension["messageContext"]>,
+): NonNullable<HostExtension["messageContext"]> {
+  let reported = false;
+  return (context) => {
+    try {
+      const value = source(context);
+      validateHostMessageContext(value);
+      return value;
+    } catch {
+      if (!reported) {
+        reported = true;
+        console.warn("HOST_MESSAGE_CONTEXT_FAILED");
+      }
+      return undefined;
+    }
+  };
+}
+
 /**
  * Checks that a value is a usable host extension and returns it unchanged.
  * Throws HostExtensionInvalidError (`HOST_EXTENSION_INVALID`) naming the field.
@@ -328,6 +366,7 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
+  optionalFunction(fields.messageContext, "messageContext");
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   const groups = settingsGroupIds(fields.settingsGroups);
