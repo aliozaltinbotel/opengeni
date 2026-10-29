@@ -5,6 +5,7 @@ import "./lib/crypto-random-uuid";
 import "./lib/signup-attribution-boot";
 // Backs the shared session UI with this app's router and API helpers.
 import "./app-host";
+import { reportCaughtError } from "@opengeni/react/app/lib/host-boundary-diagnostics";
 import { AppearanceProvider } from "@opengeni/react/app/lib/appearance";
 import { markClassicScrollbars } from "@opengeni/react/scrollbars";
 import React from "react";
@@ -98,7 +99,7 @@ const ClerkConsoleAuth = React.lazy(() =>
 );
 
 function renderApp() {
-  createRoot(document.getElementById("root")!).render(
+  createRoot(document.getElementById("root")!, { onCaughtError: reportCaughtError }).render(
     <React.StrictMode>
       <AppearanceProvider>
         {import.meta.env.VITE_CLERK_PUBLISHABLE_KEY?.trim() ? (

@@ -12,7 +12,7 @@ export function guardHostSessionIndicator(Indicator: NonNullable<HostExtension["
     console.warn("HOST_SESSION_INDICATOR_FAILED");
   };
   return function GuardedIndicator(props) {
-    return <FailureRecoveryBoundary key={`${props.workspaceId}:${props.sessionId ?? ""}`} fallback={null} onError={warn}><Suspense fallback={null}><Indicator {...props} /></Suspense></FailureRecoveryBoundary>;
+    return <FailureRecoveryBoundary key={`${props.workspaceId}:${props.sessionId ?? ""}`} fallback={null} onError={warn} hostDiagnostics><Suspense fallback={null}><Indicator {...props} /></Suspense></FailureRecoveryBoundary>;
   };
 }
 

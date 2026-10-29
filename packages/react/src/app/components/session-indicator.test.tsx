@@ -3,6 +3,8 @@ import { existsSync, readFileSync } from "node:fs";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
+import { reportCaughtError } from "../lib/host-boundary-diagnostics";
+import { FailureRecoveryBoundary } from "./session/failure-recovery-boundary";
 import { configurePageAppHost } from "../lib/app-host";
 import { validateHostExtension } from "../../../../../apps/web/src/host-extension/registry";
 
@@ -25,7 +27,7 @@ test("the host indicator renders on a session and on the new-chat page", async (
   const { HostSessionIndicatorFrame } = await surface();
   configurePageAppHost({ sessionIndicator: Indicator });
   const container = document.createElement("div");
-  const root = createRoot(container);
+  const root = createRoot(container, { onCaughtError: reportCaughtError });
   try {
     await act(async () => root.render(<><HostSessionIndicatorFrame workspaceId="w1" sessionId="s1"><p>Conversation</p></HostSessionIndicatorFrame><HostSessionIndicatorFrame workspaceId="w1" sessionId={null}><p>New chat</p></HostSessionIndicatorFrame></>));
     expect(container.textContent).toBe("w1:s1Conversationw1:newNew chat");
@@ -35,7 +37,7 @@ test("the indicator has no dismiss control", async () => {
   const { HostSessionIndicatorFrame } = await surface();
   configurePageAppHost({ sessionIndicator: Indicator });
   const container = document.createElement("div");
-  const root = createRoot(container);
+  const root = createRoot(container, { onCaughtError: reportCaughtError });
   try {
     await act(async () => root.render(<HostSessionIndicatorFrame workspaceId="w1" sessionId="s1"><div data-pill-row><button>Leave context out</button></div></HostSessionIndicatorFrame>));
     const indicator = container.querySelector("[data-host-session-indicator]");
@@ -47,7 +49,7 @@ test("the indicator has no dismiss control", async () => {
 test("stock console without an extension is unchanged", async () => {
   const { HostSessionIndicatorFrame } = await surface();
   const container = document.createElement("div");
-  const root = createRoot(container);
+  const root = createRoot(container, { onCaughtError: reportCaughtError });
   try {
     await act(async () => root.render(<HostSessionIndicatorFrame workspaceId="w1" sessionId={null}><p>Composer</p></HostSessionIndicatorFrame>));
     expect(container.innerHTML).toBe("<p>Composer</p>");
@@ -69,17 +71,18 @@ test("a failing host indicator preserves the native view and warns once", async 
   const warning = spyOn(console, "warn").mockImplementation(() => undefined);
   const errors = spyOn(console, "error").mockImplementation(() => undefined);
   configurePageAppHost({ sessionIndicator: guardHostSessionIndicator(({ sessionId }) => {
-    if (sessionId !== "good") throw new Error("host unavailable");
+    if (sessionId !== "good") throw new Error("private host indicator payload");
     return <p>Ready</p>;
   }) });
   const container = document.createElement("div");
-  const root = createRoot(container);
+  const root = createRoot(container, { onCaughtError: reportCaughtError });
   const render = (sessionId: string) => root.render(<HostSessionIndicatorFrame workspaceId="w1" sessionId={sessionId}><p>Composer</p></HostSessionIndicatorFrame>);
   try {
     await act(async () => render("broken"));
     expect(container.textContent).toBe("Composer");
     await act(async () => render("broken-again"));
     expect(warning.mock.calls).toEqual([["HOST_SESSION_INDICATOR_FAILED"]]);
+    expect(errors.mock.calls).toEqual([]);
     await act(async () => render("good"));
     expect(container.textContent).toBe("ReadyComposer");
   } finally { await act(async () => root.unmount()); warning.mockRestore(); errors.mockRestore(); }
@@ -89,4 +92,22 @@ test("existing component fields retain their base validator while indicator vali
   const legacy = { $$typeof: "legacy-wrapper" };
   expect(() => validateHostExtension({ id: "host", brand: { mark: legacy, wordmark: legacy } })).not.toThrow();
   expect(() => validateHostExtension({ id: "host", sessionIndicator: legacy })).toThrow("sessionIndicator");
+});
+
+
+test("ordinary recovery boundaries retain the original error and React component stack", async () => {
+  const errors = spyOn(console, "error").mockImplementation(() => undefined);
+  const ordinaryError = new Error("ordinary component failed");
+  const Broken = () => { throw ordinaryError; };
+  const container = document.createElement("div");
+  const root = createRoot(container, { onCaughtError: reportCaughtError });
+  try {
+    await act(async () => root.render(<FailureRecoveryBoundary fallback={<p>Ordinary fallback</p>}><Broken /></FailureRecoveryBoundary>));
+    expect(container.textContent).toBe("Ordinary fallback");
+    const diagnostic = errors.mock.calls.find((call) => call[0] === ordinaryError);
+    expect(diagnostic).toHaveLength(2);
+    expect(typeof diagnostic?.[1]).toBe("string");
+    expect(diagnostic?.[1]).toContain("Broken");
+    expect(diagnostic?.[1]).toContain("FailureRecoveryBoundary");
+  } finally { await act(async () => root.unmount()); errors.mockRestore(); }
 });
