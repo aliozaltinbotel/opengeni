@@ -1,3 +1,4 @@
+import { consoleAllowedOriginEntries } from "@opengeni/config";
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -5,7 +6,7 @@ import { isAgentActingAsPerson } from "./acting-person";
 
 type TrustedBrowserOriginSettings = Pick<
   ApiRouteDeps["settings"],
-  "publicBaseUrl" | "webBaseUrl" | "betterAuthTrustedOrigins"
+  "publicBaseUrl" | "webBaseUrl" | "betterAuthTrustedOrigins" | "consoleAllowedOrigins"
 >;
 
 /**
@@ -21,6 +22,7 @@ export function trustedBrowserOrigins(settings: TrustedBrowserOriginSettings): s
     settings.publicBaseUrl,
     settings.webBaseUrl,
     ...(settings.betterAuthTrustedOrigins ?? "").split(","),
+    ...consoleAllowedOriginEntries(settings.consoleAllowedOrigins),
   ]) {
     if (!candidate?.trim()) continue;
     try {
@@ -39,7 +41,9 @@ export function trustedBrowserOrigins(settings: TrustedBrowserOriginSettings): s
  *
  * Managed and configured access modes accept only a JSON request whose
  * `Origin` is one of the deployment's trusted browser origins and whose fetch
- * metadata says `same-origin`. Local access mode (the `bun run dev` stack) has no public
+ * metadata says `same-origin`. Explicit console origins may also use same-site
+ * fetches in legacy session mode; JSON and origin checks remain.
+ * Local access mode (the `bun run dev` stack) has no public
  * base URL and serves the web app and the API on different loopback ports,
  * so it accepts this stack's own browser origin instead, as the local
  * browser boundary does.
@@ -72,6 +76,11 @@ export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps)
     });
   }
   const fetchSite = c.req.header("sec-fetch-site")?.toLowerCase();
+  const consoleFetchSiteMatches =
+    deps.settings.managedAuthSessionSetMode === "legacy" &&
+    origin !== undefined &&
+    consoleAllowedOriginEntries(deps.settings.consoleAllowedOrigins).includes(origin) &&
+    fetchSite === "same-site";
   const localFetchSiteMatches =
     localOriginMatches &&
     (fetchSite === "same-origin" ||
@@ -80,7 +89,7 @@ export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps)
   if (
     deps.settings.productAccessMode === "local"
       ? !localFetchSiteMatches
-      : fetchSite !== "same-origin"
+      : fetchSite !== "same-origin" && !consoleFetchSiteMatches
   ) {
     throw new HTTPException(403, {
       message: "same-origin fetch metadata required",
