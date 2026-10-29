@@ -433,6 +433,7 @@ export { allowedCorsOrigin } from "./http/cors";
 export {
   GOVERNED_MEMBER_ORGANIZATION_ROUTES,
   GOVERNED_MEMBER_SESSION_OPERATIONS,
+  GOVERNED_MEMBER_SESSION_ROUTE_DENIALS,
   GOVERNED_MEMBER_WORKSPACE_ROUTES,
   governedMemberRouteAllowed,
   governedRouteTable,

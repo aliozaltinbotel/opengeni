@@ -978,7 +978,12 @@ itself, the session list and create, the composer's reads
 notifications, documents, Knowledge and Skills (each under its own
 permission), session feedback and artifact reads, plus every session route
 whose `sessionAuthorizationOperationForHttp` operation is in
-`GOVERNED_MEMBER_SESSION_OPERATIONS`. Not on it: `/mcp`, which for a person's
+`GOVERNED_MEMBER_SESSION_OPERATIONS`, except the routes in
+`GOVERNED_MEMBER_SESSION_ROUTE_DENIALS`: `GET codex-accounts`,
+`GET model-account`, `GET` and `DELETE background-commands`, `GET` and
+`POST sandbox-recovery` and `GET admin-access` under a session reuse a
+generic operation (`session.read`, `session.control`) for a subject the
+allowlist otherwise closes, so they are refused too. Not on it: `/mcp`, which for a person's
 own credential is the whole workspace tool gateway (as `tools/*`; sessions
 reach their tools through the worker's delegated tokens), and every
 organization route. `governedRouteTable(app.routes)` gives the decision for
