@@ -1937,7 +1937,10 @@ export function createAppComposition(deps: AppDependencies): {
           routeDeps,
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
-          oauthAccess.consentedToolSetVersions,
+          {
+            preset: oauthAccess.consentPreset,
+            toolSetVersions: oauthAccess.consentedToolSetVersions,
+          },
         );
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,

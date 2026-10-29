@@ -795,6 +795,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
           deps,
           oauthAccess.grant,
           oauthAccess.allowedToolIdentities,
+          { preset: oauthAccess.consentPreset },
         );
         const transport = new WebStandardStreamableHTTPServerTransport({
           enableJsonResponse: true,

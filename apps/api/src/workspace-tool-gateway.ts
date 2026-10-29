@@ -40,7 +40,11 @@ import {
   mcpAppToolUiMeta,
   McpAppToolVisibilityUiMeta,
   WORKSPACE_MCP_TOOL_REFUSAL_CODES,
+  isReadOnlyPermissionSet,
   type McpAppToolUi,
+  type OrganizationAccessPreset,
+  type Permission,
+  type ToolGatewayCatalogEntry,
   type AccessGrant,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -67,6 +71,7 @@ import {
   type KnowledgeQueryWorkflowRequest,
   type ApiRouteDeps,
   siteViewerForGrant,
+  connectorToolGroup,
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
@@ -162,7 +167,44 @@ export type PreparedWorkspaceToolGateway = Pick<
    * when it recorded none); `tools/list` shows them beside the current ones.
    */
   consentedToolSetVersions?: Readonly<Record<string, string>> | null;
+  /**
+   * True for an MCP OAuth connection whose consent chose a read-only level: a
+   * tool is callable and listed only while its current annotations still
+   * classify it as a read (see `mcpOAuthConsentReadsOnly`).
+   */
+  readToolsOnly?: boolean;
 };
+
+/** What an MCP OAuth connection's consent recorded, as its tool gateway applies it. */
+export type McpOAuthToolGatewayConsent = {
+  /** The access level the consent chose; null for an organization or a pre-level consent. */
+  preset?: OrganizationAccessPreset | null;
+  /** Each host tool server's tool-set version at consent, by server id. */
+  toolSetVersions?: Readonly<Record<string, string>> | null;
+};
+
+/**
+ * Whether a consent limits its connection to read tools: Read only, or Custom
+ * without any permission that changes something. It keys on the recorded
+ * level, so a Full consent (or one recorded before levels existed) never
+ * narrows, whatever the person's permissions.
+ */
+export function mcpOAuthConsentReadsOnly(consent: {
+  preset: OrganizationAccessPreset | null;
+  permissions: readonly Permission[];
+}): boolean {
+  return (
+    consent.preset === "read_only" ||
+    (consent.preset === "custom" && isReadOnlyPermissionSet(consent.permissions))
+  );
+}
+
+/** Whether a catalog entry declares, by its annotations now, that it only reads. */
+export function workspaceToolDeclaresReadOnly(
+  entry: Pick<ToolGatewayCatalogEntry, "modelName" | "annotations">,
+): boolean {
+  return connectorToolGroup({ name: entry.modelName, annotations: entry.annotations }) === "read";
+}
 
 /** One MCP protocol-extension method a host tool server declares. */
 export type HostExtensionMethod = {
@@ -566,15 +608,20 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   routeDeps: ApiRouteDeps,
   grant: AccessGrant,
   allowedIdentities: readonly { serverId: string; toolName: string }[],
-  consentedToolSetVersions: Readonly<Record<string, string>> | null = null,
+  consent: McpOAuthToolGatewayConsent = {},
 ): Promise<PreparedWorkspaceToolGateway> {
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
+  const readToolsOnly = mcpOAuthConsentReadsOnly({
+    preset: consent.preset ?? null,
+    permissions: grant.permissions,
+  });
   return {
     ...(await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities)),
     consentFrozen: true,
-    consentedToolSetVersions,
+    consentedToolSetVersions: consent.toolSetVersions ?? null,
+    ...(readToolsOnly ? { readToolsOnly } : {}),
   };
 }
 
@@ -1315,7 +1362,7 @@ export function buildWorkspaceToolGatewayMcpServer(
   observability?: Observability,
 ): Server {
   const callableEntries = prepared.toolGatewayCatalog.entries.filter(
-    (entry) => entry.approval !== "human",
+    (entry) => entry.approval !== "human" && consentStillAllows(prepared, entry),
   );
   const hostViewServers = prepared.hostViewServers ?? [];
   const hostExtensionMethods = prepared.hostExtensionMethods ?? [];
@@ -1401,7 +1448,10 @@ export function buildWorkspaceToolGatewayMcpServer(
  */
 function toolNotCallableError(prepared: PreparedWorkspaceToolGateway, name: string): McpError {
   const approvalOnly = prepared.toolGatewayCatalog.entries.some(
-    (candidate) => candidate.modelName === name && candidate.approval === "human",
+    (candidate) =>
+      candidate.modelName === name &&
+      candidate.approval === "human" &&
+      consentStillAllows(prepared, candidate),
   );
   const code = approvalOnly
     ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.approvalRequired
@@ -1414,6 +1464,18 @@ function toolNotCallableError(prepared: PreparedWorkspaceToolGateway, name: stri
       ? "This connection was not authorized to use this tool"
       : "No tool by this name is available";
   return new McpError(ErrorCode.InvalidParams, message, { code, name });
+}
+
+/**
+ * Whether the connection's consent still allows a catalog entry now: a
+ * read-only consent froze tools that declared they only read, and a tool that
+ * stops declaring it (same name, new annotations) leaves the connection.
+ */
+function consentStillAllows(
+  prepared: PreparedWorkspaceToolGateway,
+  entry: Pick<ToolGatewayCatalogEntry, "modelName" | "annotations">,
+): boolean {
+  return !prepared.readToolsOnly || workspaceToolDeclaresReadOnly(entry);
 }
 
 /** MCP error for a resource that does not exist for this caller. */

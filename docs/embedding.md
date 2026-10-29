@@ -1366,7 +1366,14 @@ widens anything: the grant keeps only permissions the person holds at consent
 frozen into the connection are what that narrowed grant lists. The level is
 recorded on the grant (migration 1021), so `consentScope.preset` of a
 workspace connection names it; it is `null` for a consent recorded before
-the level existed.
+the level existed. Annotations are hints a tool declares, and a tool may
+change them later, so a connection whose recorded level is read-only (Read
+only, or Custom whose permissions change nothing) checks each frozen tool's
+current annotations on every request: a tool that keeps its name but no
+longer declares that it only reads leaves `tools/list`, and `tools/call`
+answers `-32602` with `data.code: "TOOL_NOT_CONSENTED"`. The check keys on
+the recorded level, so a Full consent, or one recorded before levels, is never
+narrowed by it, whatever the person's permissions.
 
 To hear about a disconnect without polling, configure the
 `mcp_connection.revoked` host webhook on both the API and the worker:

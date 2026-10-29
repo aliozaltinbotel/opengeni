@@ -4,7 +4,11 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { isReadOnlyPermissionSet, type Permission } from "@opengeni/contracts";
+import {
+  isReadOnlyPermissionSet,
+  organizationAccessPresetPermissions,
+  type Permission,
+} from "@opengeni/contracts";
 import type { AppDependencies } from "@opengeni/core";
 import {
   createDb,
@@ -42,14 +46,26 @@ let organizationId: string;
 /** The tool-set version the host server publishes now; undefined publishes none. */
 let publishedToolSetVersion: string | undefined;
 
+/** Whether the host's `get_status` declares `readOnlyHint: true` now. */
+let statusDeclaresReadOnly = true;
+
+/** How many times the host's `get_status` ran. */
+let statusCalls = 0;
+
 /** A host tool server with a read tool, a write tool and a tool that says nothing. */
 async function hostRegistration(): Promise<LocalMcpServerRegistration> {
   const server = new McpServer({ name: "host-acme", version: "1.0.0" });
   const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
   server.registerTool(
     "get_status",
-    { description: "Read the status.", annotations: { readOnlyHint: true } },
-    async () => text("status ok"),
+    {
+      description: "Read the status.",
+      ...(statusDeclaresReadOnly ? { annotations: { readOnlyHint: true } } : {}),
+    },
+    async () => {
+      statusCalls += 1;
+      return text("status ok");
+    },
   );
   server.registerTool(
     "reserve",
@@ -287,6 +303,8 @@ describe("workspace MCP OAuth consent levels", () => {
     const { html } = await openConsent(await registerClient());
     expect(html).toContain('name="access_preset" value="full" checked');
     expect(html).toContain('name="access_preset" value="read_only"');
+    // Annotations are hints a tool declares, so the label says so.
+    expect(html).toContain("Only tools that declare they only read.");
     expect(html).toContain('name="access_preset" value="custom"');
     expect(html).toContain('name="permission" value="sessions:read"');
     expect(html).not.toContain('name="permission" value="workspace:read"');
@@ -355,6 +373,60 @@ describe("workspace MCP OAuth consent levels", () => {
     expect(refused).toBeDefined();
     expect(refused!.status).toBe(400);
     expect(await refused!.text()).toContain("Choose an access level");
+  });
+});
+
+describe("a read-only consent checks each tool's current annotations", () => {
+  const callStatus = async (accessToken: string) =>
+    await mcp(accessToken, "tools/call", { name: "acme__get_status", arguments: {} });
+
+  test("a tool that stops declaring readOnlyHint is refused at list and call under Read only and read-only Custom", async () => {
+    const readOnly = await connect([["access_preset", "read_only"]]);
+    const custom = await connect([
+      ["access_preset", "custom"],
+      ["permission", "sessions:read"],
+    ]);
+    try {
+      for (const { accessToken } of [readOnly, custom]) {
+        expect(await acmeTools(accessToken!)).toEqual(["acme__get_status"]);
+        expect((await callStatus(accessToken!)).result?.content?.[0]?.text).toBe("status ok");
+      }
+      // The host republishes the same tool name without its read-only hint.
+      statusDeclaresReadOnly = false;
+      const before = statusCalls;
+      for (const { accessToken } of [readOnly, custom]) {
+        expect(await acmeTools(accessToken!)).toEqual([]);
+        expect((await callStatus(accessToken!)).error).toMatchObject({
+          code: -32602,
+          data: { code: "TOOL_NOT_CONSENTED" },
+        });
+      }
+      expect(statusCalls).toBe(before);
+    } finally {
+      statusDeclaresReadOnly = true;
+    }
+  });
+
+  test("a Full consent with read-only permissions, or one recorded before levels, is not narrowed", async () => {
+    const full = await connect([]);
+    const hash = createHash("sha256").update(full.accessToken!).digest("hex");
+    // A viewer's Full consent: its recorded permissions are read-only.
+    const viewer = JSON.stringify(organizationAccessPresetPermissions("read_only"));
+    await shared.admin`
+      update mcp_oauth_access_tokens set permissions = ${viewer}::text::jsonb where token_hash = ${hash}`;
+    statusDeclaresReadOnly = false;
+    try {
+      const everyTool = ["acme__get_status", "acme__note", "acme__reserve"];
+      expect(await acmeTools(full.accessToken!)).toEqual(everyTool);
+      expect((await callStatus(full.accessToken!)).result?.content?.[0]?.text).toBe("status ok");
+      // A consent recorded before the level existed has no preset.
+      await shared.admin`
+        update mcp_oauth_access_tokens set consent_preset = null where token_hash = ${hash}`;
+      expect(await acmeTools(full.accessToken!)).toEqual(everyTool);
+      expect((await callStatus(full.accessToken!)).result?.content?.[0]?.text).toBe("status ok");
+    } finally {
+      statusDeclaresReadOnly = true;
+    }
   });
 });
 

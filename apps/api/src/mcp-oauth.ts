@@ -13,7 +13,6 @@ import {
   McpOAuthTokenResponse,
   OrganizationAccessPolicy,
   OrganizationAccessPreset,
-  isReadOnlyPermissionSet,
   organizationAccessPresetPermissions,
   type AccessContext,
   type Permission,
@@ -42,7 +41,6 @@ import {
   type McpOAuthAccess,
 } from "@opengeni/db";
 import {
-  connectorToolGroup,
   hasPermission,
   requireAccessContext,
   requireAccessGrantAuthorization,
@@ -54,9 +52,11 @@ import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./htt
 import { isAgentActingAsPerson, requireFullAccessIfAgent } from "./http/acting-person";
 import { requireSameOriginBrowserMutation } from "./http/browser-mutation-origin";
 import {
+  mcpOAuthConsentReadsOnly,
   prepareWorkspaceToolGateway,
   prepareWorkspaceToolGatewayForGrant,
   requireWorkspaceToolGatewayAuthorization,
+  workspaceToolDeclaresReadOnly,
   type PreparedWorkspaceToolGateway,
 } from "./workspace-tool-gateway";
 import { parseRequestBody } from "./http/request-body";
@@ -86,6 +86,8 @@ export type McpOAuthRouteAccess = {
   allowedToolIdentities: ToolGatewayIdentity[];
   /** The host tool-set versions recorded at consent, by server id; null when none were. */
   consentedToolSetVersions: Record<string, string> | null;
+  /** The access level recorded at consent; null for a consent from before levels existed. */
+  consentPreset: OrganizationAccessPreset | null;
 };
 
 export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
@@ -592,6 +594,7 @@ export async function resolveMcpOAuthRouteAccess(
     grant,
     allowedToolIdentities,
     consentedToolSetVersions: access.toolSetVersions ?? null,
+    consentPreset: access.consentPreset ?? null,
   };
 }
 
@@ -610,22 +613,17 @@ export function isMcpOAuthResourcePath(pathname: string): boolean {
  * The tool identities a consent freezes. Under a read-only level (Read only,
  * or Custom without any permission that changes something) only tools that
  * declare `readOnlyHint: true` (and are not destructive) are kept, so a tool
- * that says nothing about its effects is left out.
+ * that says nothing about its effects is left out. The connection's tool
+ * gateway applies the same rule again on every request
+ * (`prepareMcpOAuthWorkspaceToolGateway`).
  */
 export function mcpOAuthConsentToolIdentities(
   catalog: ToolGatewayCatalog,
   consent?: WorkspaceConsentAccess,
 ): ToolGatewayIdentity[] {
-  const readOnly =
-    consent !== undefined &&
-    (consent.preset === "read_only" ||
-      (consent.preset === "custom" && isReadOnlyPermissionSet(consent.permissions)));
+  const readOnly = consent !== undefined && mcpOAuthConsentReadsOnly(consent);
   return catalog.entries
-    .filter(
-      (entry) =>
-        !readOnly ||
-        connectorToolGroup({ name: entry.modelName, annotations: entry.annotations }) === "read",
-    )
+    .filter((entry) => !readOnly || workspaceToolDeclaresReadOnly(entry))
     .map((entry) => entry.identity);
 }
 
@@ -990,7 +988,7 @@ export function renderMcpOAuthConsentPage(input: {
 <label class="field"><span>Workspace</span><select id="workspace_id" name="workspace_id" autocomplete="off">${workspaceOptions}</select></label>
 <fieldset class="field levels"><legend>Access</legend>
 <label><input type="radio" name="access_preset" value="full" checked> <span><strong>Full</strong> Everything you can do in this workspace.</span></label>
-<label><input type="radio" name="access_preset" value="read_only"> <span><strong>Read only</strong> Only tools that read; nothing can be changed.</span></label>
+<label><input type="radio" name="access_preset" value="read_only"> <span><strong>Read only</strong> Only tools that declare they only read.</span></label>
 <label><input type="radio" name="access_preset" value="custom"> <span><strong>Custom</strong> Only the permissions you pick below.</span></label>
 ${customPermissions}
 </fieldset>
