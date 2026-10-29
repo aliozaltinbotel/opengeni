@@ -843,7 +843,8 @@ function sessionPolicyConflict(code: string, message: string): ApiHttpError {
 function hostSessionPolicyUnavailable(): ApiHttpError {
   return new ApiHttpError(503, {
     code: "upstream_unavailable",
-    message: "Setting a host session policy that names recordings is not available on this deployment yet.",
+    message:
+      "Setting a host session policy that names recordings is not available on this deployment yet.",
     retryable: true,
     outcomeUnknown: false,
     details: { code: HOST_SESSION_POLICY_UNAVAILABLE },
