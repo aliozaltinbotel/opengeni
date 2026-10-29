@@ -1,5 +1,5 @@
 import { AccessGrant as AccessGrantSchema } from "@opengeni/contracts";
-import { t } from "./console-text";
+import { t } from "./startup-text";
 import type { AccessContext, Workspace } from "../types";
 
 import type { ManagedSelfContext } from "./managed-self-context";
