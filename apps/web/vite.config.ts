@@ -60,6 +60,19 @@ export default defineConfig({
               priority: 22,
             },
             {
+              // The startup routes read the workspace destination catalog, and
+              // the lazy settings hub reaches it too. Entry-aware settings
+              // grouping otherwise merges this small subgroup into the Meetings
+              // settings chunk, whose imports pull management primitives and
+              // session chunks into the initial load. A new import of the host
+              // extension slot can reshuffle those subgroups, so keep the
+              // catalog in a leaf.
+              name: "workspace-nav-data",
+              test: /apps[\\/]web[\\/]src[\\/]components[\\/]rail[\\/]workspace-nav-data\.tsx?$/,
+              includeDependenciesRecursively: false,
+              priority: 22,
+            },
+            {
               // OpenGeniProvider's session context is session-only. Startup reads
               // small helpers from the same entry-aware subgroup, so keep the
               // provider in a leaf that stays behind the session routes.
