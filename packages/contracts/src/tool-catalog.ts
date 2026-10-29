@@ -130,6 +130,22 @@ export function mcpAccountRouteReviewLabel(label: McpAccountRouteLabel): string 
   return label.account ? `${label.connector} · ${label.account}` : label.connector;
 }
 
+/**
+ * `error.data.code` of the workspace MCP's `tools/call` refusal (JSON-RPC
+ * `-32602`, as MCP answers an unknown tool) for a tool name this connection
+ * cannot call: outside the tools an MCP OAuth connection was consented to
+ * (`TOOL_NOT_CONSENTED`), not in the caller's catalog at all
+ * (`TOOL_NOT_FOUND`), or listed only for a person to approve and never
+ * callable over MCP (`TOOL_APPROVAL_REQUIRED`).
+ */
+export const WORKSPACE_MCP_TOOL_REFUSAL_CODES = Object.freeze({
+  notConsented: "TOOL_NOT_CONSENTED",
+  notFound: "TOOL_NOT_FOUND",
+  approvalRequired: "TOOL_APPROVAL_REQUIRED",
+} as const);
+export type WorkspaceMcpToolRefusalCode =
+  (typeof WORKSPACE_MCP_TOOL_REFUSAL_CODES)[keyof typeof WORKSPACE_MCP_TOOL_REFUSAL_CODES];
+
 /** MIME type of an MCP Apps view resource (SEP-1865). */
 export const MCP_APP_RESOURCE_MIME_TYPE = "text/html;profile=mcp-app" as const;
 

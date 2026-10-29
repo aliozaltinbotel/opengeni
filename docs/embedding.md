@@ -712,6 +712,16 @@ server-verifiable one-shot approval exchange, it omits tools classified for
 human approval and rejects direct calls to their projected names. OAuth consent
 does not satisfy that separate per-call approval requirement.
 
+A `tools/call` for a name the workspace MCP cannot call answers a named
+JSON-RPC error, `-32602` (MCP's answer to an unknown tool), never the generic
+`-32603`. Its `error.data` is `{ code, name }` with `code` one of
+`WORKSPACE_MCP_TOOL_REFUSAL_CODES` (`@opengeni/contracts`):
+`TOOL_APPROVAL_REQUIRED` for a tool classified for human approval;
+`TOOL_NOT_CONSENTED` on an MCP OAuth connection for any other name outside the
+tools frozen at its consent (the catalog holds only those, so the answer tells
+nothing about tools outside the consent); `TOOL_NOT_FOUND` for any other
+caller.
+
 Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the
 runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact

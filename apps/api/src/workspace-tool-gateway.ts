@@ -37,6 +37,7 @@ import {
   isSecretReferenceError,
   MCP_APP_RESOURCE_MIME_TYPE,
   McpAppResourceUri,
+  WORKSPACE_MCP_TOOL_REFUSAL_CODES,
   type AccessGrant,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -146,6 +147,11 @@ export type PreparedWorkspaceToolGateway = Pick<
   hostViewServers?: readonly HostViewServer[];
   /** Host MCP extension methods; absent unless a host registration declares one. */
   hostExtensionMethods?: readonly HostExtensionMethod[];
+  /**
+   * True for an MCP OAuth connection: the catalog holds only the tools frozen
+   * at consent, so a tool name outside it was not consented.
+   */
+  consentFrozen?: boolean;
 };
 
 /** One MCP protocol-extension method a host tool server declares. */
@@ -554,7 +560,10 @@ export async function prepareMcpOAuthWorkspaceToolGateway(
   if (grant.metadata?.mcpOAuth !== true || grant.principalKind !== "human_session") {
     throw new HTTPException(403, { message: "MCP OAuth authority is invalid" });
   }
-  return await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities);
+  return {
+    ...(await prepareWorkspaceToolGatewayForGrant(routeDeps, grant, allowedIdentities)),
+    consentFrozen: true,
+  };
 }
 
 export async function prepareWorkspaceToolGatewayForGrant(
@@ -1334,7 +1343,7 @@ export function buildWorkspaceToolGatewayMcpServer(
     registerHostExtensionMethod(server, prepared, grant, extension);
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
-    if (!entry) throw new ToolGatewayToolNotFoundError();
+    if (!entry) throw toolNotCallableError(prepared, request.params.name);
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
       operation: "call",
@@ -1362,6 +1371,31 @@ export function buildWorkspaceToolGatewayMcpServer(
     }
   });
   return server;
+}
+
+/**
+ * The named refusal for a `tools/call` name this connection cannot call:
+ * JSON-RPC `-32602` (MCP's answer to an unknown tool) with `data.code`. A
+ * tool listed for a person to approve answers `TOOL_APPROVAL_REQUIRED`; any
+ * other name answers `TOOL_NOT_CONSENTED` on an MCP OAuth connection, whose
+ * catalog holds only the consented tools (so the answer reveals nothing about
+ * tools outside the consent), and `TOOL_NOT_FOUND` otherwise.
+ */
+function toolNotCallableError(prepared: PreparedWorkspaceToolGateway, name: string): McpError {
+  const approvalOnly = prepared.toolGatewayCatalog.entries.some(
+    (candidate) => candidate.modelName === name && candidate.approval === "human",
+  );
+  const code = approvalOnly
+    ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.approvalRequired
+    : prepared.consentFrozen
+      ? WORKSPACE_MCP_TOOL_REFUSAL_CODES.notConsented
+      : WORKSPACE_MCP_TOOL_REFUSAL_CODES.notFound;
+  const message = approvalOnly
+    ? "This tool needs a person's approval and cannot be called here"
+    : prepared.consentFrozen
+      ? "This connection was not authorized to use this tool"
+      : "No tool by this name is available";
+  return new McpError(ErrorCode.InvalidParams, message, { code, name });
 }
 
 /** MCP error for a resource that does not exist for this caller. */
