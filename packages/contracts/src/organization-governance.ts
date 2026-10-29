@@ -127,12 +127,6 @@ export const HOST_INVITATION_REVISION_CONFLICT = "HOST_INVITATION_REVISION_CONFL
  */
 export const HOST_INVITATION_NOT_PENDING = "HOST_INVITATION_NOT_PENDING";
 /**
- * The host owner ensure is not available on this deployment yet (503,
- * retryable): its database routine ships ungranted and a later release grants
- * it. Nothing was written.
- */
-export const HOST_ORGANIZATION_OWNER_UNAVAILABLE = "HOST_ORGANIZATION_OWNER_UNAVAILABLE";
-/**
  * The host owner ensure refused (409) because the token's subject already has
  * a membership in the organization that is not an active owner. The ensure
  * never promotes or reactivates a membership; nothing was changed.

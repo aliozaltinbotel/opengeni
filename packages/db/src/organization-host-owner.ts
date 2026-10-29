@@ -4,9 +4,8 @@ import type { Database } from "./database";
 import { rawRows, setSubjectRlsContext, withRlsContext } from "./database";
 
 /**
- * Migration 1017's host owner ensure. Its runtime EXECUTE is withheld for one
- * release (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES); until it is
- * granted, nothing can make a host's subject an organization owner.
+ * Migration 1017's host owner ensure (runtime EXECUTE granted by 1019;
+ * readiness requires it).
  */
 export const HOST_ORGANIZATION_OWNER_ROUTINE =
   "opengeni_private.ensure_organization_host_owner(uuid, text, uuid)";
@@ -40,19 +39,6 @@ export type HostOrganizationOwnerResult = z.infer<typeof HostOrganizationOwnerRo
 
 type HostOwnerInput = { organizationId: string; subjectId: string };
 
-/** Whether 1017's routine exists and the runtime may call it. */
-export async function hostOrganizationOwnerGranted(
-  db: Pick<Database, "execute">,
-): Promise<boolean> {
-  const [row] = await rawRows<{ granted: boolean | null }>(
-    db,
-    sql`select has_function_privilege(
-      to_regprocedure(${HOST_ORGANIZATION_OWNER_ROUTINE})::oid, 'EXECUTE'
-    ) as granted`,
-  );
-  return row?.granted === true;
-}
-
 /**
  * The host command's half: makes the subject the active owner of the
  * organization, as that subject in that organization, for a host command
@@ -61,18 +47,16 @@ export async function hostOrganizationOwnerGranted(
  * subject or organization, a subject that owns none of the organization's
  * workspaces, and a missing attribution (all 42501), and a membership of the
  * subject that is not already an active owner (55000). Idempotent: `created`
- * is false when the owner membership already existed. Null while the routine
- * is not granted ("not yet").
+ * is false when the owner membership already existed.
  */
 export async function ensureOrganizationHostOwner(
   db: Database,
   input: HostOwnerInput & { operationId: string },
-): Promise<HostOrganizationOwnerResult | null> {
+): Promise<HostOrganizationOwnerResult> {
   return await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
-      if (!(await hostOrganizationOwnerGranted(scopedDb))) return null;
       await setSubjectRlsContext(scopedDb, input.subjectId);
       return await callOwnerRoutine(scopedDb, input, input.operationId);
     },
@@ -85,8 +69,7 @@ export async function ensureOrganizationHostOwner(
  * workspace grant. Without an operation id the routine writes an owner only
  * into an organization with no membership yet. The caller has set the
  * organization's account context; this sets the subject's only when it calls
- * the routine, so a skipped or not-yet-granted owner leaves the caller's
- * transaction as it was.
+ * the routine, so a skipped owner leaves the caller's transaction as it was.
  */
 export async function ensureBootstrappedOrganizationOwner(
   tx: Database,
@@ -94,8 +77,6 @@ export async function ensureBootstrappedOrganizationOwner(
 ): Promise<void> {
   if (OWN_MEMBERSHIP_SOURCES.has(input.accountExternalSource)) return;
   if (IDENTITY_SUBJECT_PREFIXES.some((prefix) => input.subjectId.startsWith(prefix))) return;
-  // Checked first: a permission error would abort the caller's transaction.
-  if (!(await hostOrganizationOwnerGranted(tx))) return;
   await setSubjectRlsContext(tx, input.subjectId);
   await callOwnerRoutine(tx, input, null);
 }

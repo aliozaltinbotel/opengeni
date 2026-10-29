@@ -431,8 +431,12 @@ UUID, closed code/stage/retry decision, reviewed constraint names, SQLSTATE,
 bounded contract event types, exact UUID attempt/session/turn/process correlation, the
 exact UUID organization of a tenant-wide operation (the API's startup session-policy
 pass, stage `governed_session_policy.startup_pass`, whose public warning carries only
-the diagnostic UUID as `correlationId`) and the 40-hex deployment revision when
-configured. IDs belong in restricted log
+the diagnostic UUID as `correlationId`), the exact UUID connection and delivery of a
+host webhook delivery that could not be started (code
+`host_webhook_delivery_start_failed`, stage `host_webhook.delivery_start`, with its
+organization; the public warning carries only the closed code and `correlationId`,
+and `opengeni_host_webhook_delivery_start_failures_total{event,change}` counts it)
+and the 40-hex deployment revision when configured. IDs belong in restricted log
 bodies, never indexed metric labels. Unknown constraints and invalid IDs are
 omitted. Source failure classification and retries remain owned by the DB layer.
 

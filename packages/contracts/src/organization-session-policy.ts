@@ -122,8 +122,6 @@ export const SESSION_TOOL_FAMILY_DENIED = "SESSION_TOOL_FAMILY_DENIED";
 export const SESSION_POLICY_OPERATION_CONFLICT = "SESSION_POLICY_OPERATION_CONFLICT";
 /** 409: `expectedRevision` is not the stored revision. */
 export const SESSION_POLICY_REVISION_CONFLICT = "SESSION_POLICY_REVISION_CONFLICT";
-/** 503: this deployment cannot write a host's session policy yet (1018's routine is not granted). */
-export const HOST_SESSION_POLICY_UNAVAILABLE = "HOST_SESSION_POLICY_UNAVAILABLE";
 
 /** The digest a host command's policy is idempotent on: canonical JSON, families sorted. */
 export function organizationSessionPolicyDigestInput(policy: OrganizationSessionPolicy): string {

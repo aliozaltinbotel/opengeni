@@ -78,37 +78,20 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * (and provisioning) waits until a binary that knows it is the previous
  * release; until then readiness accepts the routine with or without runtime
  * EXECUTE. 0937 withheld the first five and 0947 granted them; 0946 withheld
- * the recording retention inventory and 0950 granted it. 0978 withholds the
- * personal-machine owner lookup; until a later migration grants it, the
- * runtime treats the lookup as unavailable and keeps the earlier behaviour.
- * 0984 withholds the connected-command re-arm the same way; until it is
- * granted, a runner's inventory report skips it. 1016 withholds the host
- * identity lookup; until it is granted, the lookup resolves the identity
- * through the organization's member list. 1017 withholds the host owner
- * ensure; until it is granted, bootstrapWorkspace writes no owner membership
- * and the host's ensure command answers HOST_ORGANIZATION_OWNER_UNAVAILABLE.
- * 1018 withholds the host session policy write; until it is granted, the
- * host's session-policy command answers HOST_SESSION_POLICY_UNAVAILABLE and a
- * governed organization keeps the governed default.
+ * the recording retention inventory and 0950 granted it. 0978 withheld the
+ * personal-machine owner lookup and 0984 the connected-command re-arm (their
+ * callers still check the grant first); 1016, 1017 and 1018 withheld the host
+ * identity lookup, the host owner ensure and the host session policy write.
+ * 1019 granted all five. None is withheld now.
  *
  * runtime-posture-compatibility-postgres fails once the pinned previous
  * release knows a routine listed here: grant it then in a rolling migration
- * (for 1016: GRANT EXECUTE ON FUNCTION
- * opengeni_private.lookup_organization_host_identity(uuid, text, uuid) to
- * every application role, as 0947 does), drop it from this list, and remove
- * its "not yet" path (lookupThroughMemberList for 1016; for 1017, GRANT
- * EXECUTE ON FUNCTION opengeni_private.ensure_organization_host_owner(uuid,
- * text, uuid) the same way and drop HOST_ORGANIZATION_OWNER_UNAVAILABLE's path;
- * for 1018, grant put_host_organization_session_policy(uuid, text, uuid, text,
- * text, text[], text, bigint) and drop HOST_SESSION_POLICY_UNAVAILABLE's path).
+ * (GRANT EXECUTE ON FUNCTION opengeni_private.<signature> to every
+ * application role, as 0947 and 1019 do), drop it from this list, and remove
+ * its "not yet" path.
  */
-export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
-  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
-  "rearm_unanswered_connected_commands(uuid, uuid, text)",
-  "lookup_organization_host_identity(uuid, text, uuid)",
-  "ensure_organization_host_owner(uuid, text, uuid)",
-  "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
-] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES =
+  [] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all

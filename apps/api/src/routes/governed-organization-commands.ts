@@ -20,7 +20,6 @@ import {
   HOST_MEMBER_NOT_IN_ORGANIZATION,
   HOST_ORGANIZATION_OWNER_CONFLICT,
   HOST_ORGANIZATION_OWNER_ENSURE,
-  HOST_ORGANIZATION_OWNER_UNAVAILABLE,
   HostChangeOrganizationMemberRoleRequest,
   HostEnsureOrganizationOwnerRequest,
   HostInviteOrganizationMemberRequest,
@@ -40,7 +39,6 @@ import {
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
 import {
-  HOST_SESSION_POLICY_UNAVAILABLE,
   HostPutOrganizationSessionPolicyRequest,
   HostPutOrganizationSessionPolicyResponse,
   OrganizationSessionPolicyView,
@@ -59,8 +57,6 @@ import {
   ensureOrganizationHostOwner,
   getOrganizationInvitationForAdministration,
   getWorkspace,
-  hostOrganizationOwnerGranted,
-  hostSessionPolicyWriteGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
@@ -95,9 +91,6 @@ import {
 
 const Uuid = z.string().uuid();
 const SERVICE_TOKEN_PREFIX = "ogd2_";
-/** The 409 message when the identity lookup's member-list fallback is past its bound (54000). */
-const HOST_IDENTITY_LOOKUP_RESOURCE_LIMIT =
-  "organization access inventory exceeds the identity lookup's member-list bound";
 /** The 409 message when the member read's administration overview is past its bound (54000). */
 const HOST_MEMBER_READ_RESOURCE_LIMIT =
   "organization access inventory exceeds the member read's overview bound";
@@ -429,8 +422,9 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
 
   // The token's own subject becomes the owner of the token's own organization,
   // for an organization bootstrapped without that owner (without
-  // governedOrganizationOwner, or before its routine was granted). Not a governed mutation: no native route does it, and the host is
-  // the caller. Recorded like a host command, under its own attribution name.
+  // governedOrganizationOwner, or before 1019 granted its routine). Not a
+  // governed mutation: no native route does it, and the host is the caller.
+  // Recorded like a host command, under its own attribution name.
   // Before the owner exists the subject is no administrator, so this runs on
   // requireHostService and applies the governed policy only afterwards.
   app.post(`${base}/host-owner/ensure`, async (context) => {
@@ -442,13 +436,12 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       context,
       HostEnsureOrganizationOwnerRequest,
     );
-    if (!(await hostOrganizationOwnerGranted(deps.db))) throw hostOrganizationOwnerUnavailable();
     await recordAttribution(deps, authority, {
       mutation: HOST_ORGANIZATION_OWNER_ENSURE,
       operationId: command.operationId,
       actingExternalUser,
     });
-    let owner: HostOrganizationOwner | null;
+    let owner: HostOrganizationOwner;
     try {
       owner = await ensureOrganizationHostOwner(deps.db, {
         organizationId: authority.organizationId,
@@ -466,7 +459,6 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         });
       rethrowHostMembershipError(error);
     }
-    if (!owner) throw hostOrganizationOwnerUnavailable();
     try {
       await applyGovernedOrganizationPolicy(deps, {
         organizationId: authority.organizationId,
@@ -498,9 +490,7 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         identityId: identityId.toLowerCase(),
       });
     } catch (error) {
-      // The member-list fallback reads the administration overview, which is
-      // bounded (500 shared workspaces, 1000 grants each).
-      rethrowHostMembershipError(error, HOST_IDENTITY_LOOKUP_RESOURCE_LIMIT);
+      rethrowHostMembershipError(error);
     }
     // An identity elsewhere and an unknown one get this same answer.
     if (!identity)
@@ -536,9 +526,6 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       context,
       HostPutOrganizationSessionPolicyRequest,
     );
-    // Before anything is recorded, as the owner ensure does: an unavailable
-    // command leaves its operation id unused.
-    if (!(await hostSessionPolicyWriteGranted(deps.db))) throw hostSessionPolicyUnavailable();
     await recordAttribution(deps, authority, {
       mutation: "session_policy.update",
       operationId: command.operationId,
@@ -560,7 +547,6 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         throw sessionPolicyConflict(SESSION_POLICY_REVISION_CONFLICT, error.message);
       rethrowHostMembershipError(error);
     }
-    if (!written) throw hostSessionPolicyUnavailable();
     const { stored, replay } = written;
     return context.json(
       HostPutOrganizationSessionPolicyResponse.parse({
@@ -827,16 +813,6 @@ function organizationNotHostGoverned(): ApiHttpError {
   });
 }
 
-function hostOrganizationOwnerUnavailable(): ApiHttpError {
-  return new ApiHttpError(503, {
-    code: "upstream_unavailable",
-    message: "Ensuring a host owner is not available on this deployment yet.",
-    retryable: true,
-    outcomeUnknown: false,
-    details: { code: HOST_ORGANIZATION_OWNER_UNAVAILABLE },
-  });
-}
-
 function serviceTokenRequired(): ApiHttpError {
   return new ApiHttpError(401, {
     code: "unauthenticated",
@@ -854,15 +830,5 @@ function sessionPolicyConflict(code: string, message: string): ApiHttpError {
     retryable: false,
     outcomeUnknown: false,
     details: { code },
-  });
-}
-
-function hostSessionPolicyUnavailable(): ApiHttpError {
-  return new ApiHttpError(503, {
-    code: "upstream_unavailable",
-    message: "Setting a host session policy is not available on this deployment yet.",
-    retryable: true,
-    outcomeUnknown: false,
-    details: { code: HOST_SESSION_POLICY_UNAVAILABLE },
   });
 }

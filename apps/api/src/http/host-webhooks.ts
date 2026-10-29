@@ -47,11 +47,12 @@ export function assertHostWebhookDeliveryConfigured(
  * delivery id per connection, so concurrent revokes share one delivery.
  *
  * A notification never blocks the change: when the delivery can't be started
- * (Temporal unreachable), one structured warning is logged and the caller
- * writes the change anyway. The host MCP connection read stays authoritative.
+ * (Temporal unreachable), the failure is counted and warned about once (see
+ * `reportDeliveryStartFailure`) and the caller writes the change anyway. The
+ * host MCP connection read stays authoritative.
  */
 export async function startMcpConnectionRevokedDelivery(
-  deps: Pick<ApiRouteDeps, "settings" | "workflowClient">,
+  deps: Pick<ApiRouteDeps, "settings" | "workflowClient" | "observability">,
   input: { organizationId: string; connectionId: string } & McpConnectionChange,
 ): Promise<void> {
   if (!deps.settings.hostWebhooks?.mcpConnectionRevoked) return;
@@ -78,44 +79,80 @@ export async function startMcpConnectionRevokedDelivery(
             consentScope: input.consentScope,
           },
         };
-  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const start = deps.workflowClient.startHostWebhookDelivery;
     if (!start) throw new Error(HOST_WEBHOOK_DELIVERY_UNAVAILABLE);
-    // A hung start counts as a failed one. A start that succeeds late is
-    // harmless: the worker still waits to see the change committed.
-    await Promise.race([
-      start(request),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new HostWebhookDeliveryStartTimeoutError()),
-          HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS,
-        );
-      }),
-    ]);
+    // The workflow client bounds the start itself (the API's Temporal client:
+    // HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS through withDeadline), so a hung
+    // connection fails here like any other start.
+    await start(request);
   } catch (error) {
-    console.warn("host_webhook.delivery_start_failed", {
-      event: request.event.type,
-      change: request.event.change,
-      organizationId,
-      connectionId,
+    reportDeliveryStartFailure(deps.observability, request, error);
+  }
+}
+
+/** The closed error code of a delivery that could not be started. */
+export const HOST_WEBHOOK_DELIVERY_START_FAILED = "host_webhook_delivery_start_failed";
+
+const DELIVERY_START_FAILURES_METRIC = {
+  name: "opengeni_host_webhook_delivery_start_failures_total",
+  help: "Host webhook deliveries that could not be started, by event and change.",
+} as const;
+
+/**
+ * Counts the failure by event and change, records the protected failure
+ * diagnostic (exported only to OPENGENI_OBSERVABILITY_DIAGNOSTICS_ENDPOINT)
+ * with the organization, connection and delivery ids, and logs one public
+ * warning with the closed error code and the diagnostic's id as
+ * `correlationId`, never an identifier. Observer failures never reach the
+ * caller: the change is written either way.
+ */
+function reportDeliveryStartFailure(
+  observability: ApiRouteDeps["observability"],
+  request: HostWebhookDeliveryRequest,
+  error: unknown,
+): void {
+  const { event } = request;
+  observe(() =>
+    observability?.incrementCounter({
+      ...DELIVERY_START_FAILURES_METRIC,
+      labels: { event: event.type, change: event.change },
+    }),
+  );
+  let correlationId: string | undefined;
+  observe(() => {
+    correlationId = observability?.recordFailureDiagnostic({
+      code: HOST_WEBHOOK_DELIVERY_START_FAILED,
+      stage: "host_webhook.delivery_start",
+      error,
+      organizationId: event.organizationId,
+      connectionId: event.connectionId,
       deliveryId: request.deliveryId,
-      errorClass: error instanceof Error ? error.name : typeof error,
     });
-  } finally {
-    clearTimeout(timer);
+  });
+  observe(() =>
+    observability?.warn("host webhook delivery could not be started", {
+      errorClass: "OperationError",
+      errorCode: HOST_WEBHOOK_DELIVERY_START_FAILED,
+      origin: "api",
+      ...(correlationId ? { correlationId } : {}),
+    }),
+  );
+}
+
+function observe(report: () => void): void {
+  try {
+    report();
+  } catch {
+    // The metrics or logging sink is unhealthy; the change is written anyway.
   }
 }
 
-/** How long a disconnect or access change waits for its delivery to start. */
+/**
+ * How long a disconnect or access change waits for its delivery to start: the
+ * deadline the API's Temporal workflow client gives the start.
+ */
 export const HOST_WEBHOOK_DELIVERY_START_TIMEOUT_MS = 3_000;
-
-class HostWebhookDeliveryStartTimeoutError extends Error {
-  constructor() {
-    super("the host webhook delivery did not start in time");
-    this.name = "HostWebhookDeliveryStartTimeoutError";
-  }
-}
 
 /** Whether a new access setting takes a permission or a workspace away (see `isConsentScopeDowngrade`). */
 export function isConsentDowngrade(

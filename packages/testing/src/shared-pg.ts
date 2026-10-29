@@ -850,12 +850,9 @@ export async function acquireSharedTestDatabase(
 }
 
 /**
- * Grant the runtime role what a migration withholds until the previous
- * release knows it (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): EXECUTE
- * on the personal-machine owner lookup (0978), the connected-command re-arm
- * (0984), the host identity lookup (1016), the host owner ensure (1017) and
- * the host session policy write (1018).
- * Tests that exercise them run as they will once they are granted.
+ * Restore the runtime role's EXECUTE on the personal-machine owner lookup
+ * (0978) and the connected-command re-arm (0984), which 1019 grants, after a
+ * test revoked it to exercise its callers' "not granted" path.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -866,13 +863,6 @@ export async function grantDeferredRuntimeAccess(
       TO "${role.replaceAll('"', '""')}";
     GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text)
       TO "${role.replaceAll('"', '""')}";
-    GRANT EXECUTE ON FUNCTION opengeni_private.lookup_organization_host_identity(uuid, text, uuid)
-      TO "${role.replaceAll('"', '""')}";
-    GRANT EXECUTE ON FUNCTION opengeni_private.ensure_organization_host_owner(uuid, text, uuid)
-      TO "${role.replaceAll('"', '""')}";
-    GRANT EXECUTE ON FUNCTION opengeni_private.put_host_organization_session_policy(
-      uuid, text, uuid, text, text, text[], text, bigint
-    ) TO "${role.replaceAll('"', '""')}";
   `);
 }
 

@@ -12,7 +12,6 @@ import {
   createManagedOrganization,
   createOrganizationInvitation,
   createOrganizationWorkspace,
-  hostIdentityLookupGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
   putOrganizationWorkspaceMember,
@@ -24,9 +23,8 @@ import { rawRows, setSubjectRlsContext, withRlsContext } from "../src/database";
 /*
  * Migration 1016 under the deployed posture: a NOSUPERUSER, NOBYPASSRLS
  * migration owner whose definers FORCE RLS binds, and the restricted runtime
- * role. The lookup by identity and the member-list path give the same answer;
- * the acceptance trigger and the backfill of earlier acceptances run as that
- * owner.
+ * role, which 1019 grants the lookup by identity. The acceptance trigger and
+ * the backfill of earlier acceptances run as that owner.
  */
 
 const MIGRATION = readFileSync(
@@ -152,20 +150,13 @@ async function attachAccount(identityId: string, authUserId: string): Promise<vo
     values (${authUserId}, ${identityId})`;
 }
 
-/** Both paths' answers for one identity. */
-async function bothPaths(identityId: string) {
-  await setLookupGrant(false);
-  const throughMembers = await lookup(identityId);
-  await setLookupGrant(true);
-  const byIdentity = await lookup(identityId);
-  return { throughMembers, byIdentity };
-}
-
-async function setLookupGrant(granted: boolean): Promise<void> {
-  await fixture!.admin.unsafe(
-    `${granted ? "GRANT" : "REVOKE"} EXECUTE ON FUNCTION ${LOOKUP} ${granted ? "TO" : "FROM"} opengeni_app`,
+/** Whether the runtime may call 1016's lookup (1019 grants it). */
+async function lookupGranted(): Promise<boolean> {
+  const [row] = await rawRows<{ granted: boolean | null }>(
+    client!.db,
+    sql`select has_function_privilege(to_regprocedure(${LOOKUP})::oid, 'EXECUTE') as granted`,
   );
-  expect(await hostIdentityLookupGranted(client!.db)).toBe(granted);
+  return row?.granted === true;
 }
 
 async function lookup(identityId: string, actorSubjectId = world.ownerSubjectId) {
@@ -186,16 +177,13 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
     expect(row!.accepted_at).toEqual(row!.updated_at);
   });
 
-  test("the lookup is withheld from the runtime until a later migration grants it", async () => {
+  test("1019 grants the lookup to the runtime", async () => {
     if (!fixture) return;
-    expect(await hostIdentityLookupGranted(client!.db)).toBe(false);
+    expect(await lookupGranted()).toBe(true);
   });
 
-  test("the lookup by identity and the member-list path give the same answer", async () => {
+  test("the lookup by identity answers the memberships, invitations, email and binding", async () => {
     if (!fixture) return;
-    await setLookupGrant(false);
-    const throughMembers = await lookup(world.identityId);
-    await setLookupGrant(true);
     const byIdentity = await lookup(world.identityId);
     const [membership] = await fixture.admin<{ id: string; authorization_revision: string }[]>`
       select id, authorization_revision from organization_memberships
@@ -223,12 +211,10 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
         },
       ],
     });
-    expect(throughMembers).toEqual(byIdentity);
   });
 
   test("the lookup by identity leaves the caller's lifecycle markers as it found them", async () => {
     if (!fixture) return;
-    await setLookupGrant(true);
     const markers = await withRlsContext(
       client!.db,
       { accountId: world.organizationId, workspaceId: null },
@@ -253,29 +239,23 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
     expect(markers).toEqual({ found: true, tenancy: "", identity: "" });
   });
 
-  test("both paths answer nothing for an unknown identity or a non-member one", async () => {
+  test("the lookup answers nothing for an unknown identity or a non-member one", async () => {
     if (!fixture) return;
     const outsiderId = await authUser(`${crypto.randomUUID()}@example.test`, true);
     const { identityId: outsider } = await synchronizeCanonicalHumanLoginBindings(
       client!.db,
       outsiderId,
     );
-    for (const granted of [false, true]) {
-      await setLookupGrant(granted);
-      expect(await lookup(crypto.randomUUID())).toBeNull();
-      expect(await lookup(outsider)).toBeNull();
-    }
+    expect(await lookup(crypto.randomUUID())).toBeNull();
+    expect(await lookup(outsider)).toBeNull();
   });
 
-  test("both paths refuse an actor that is not an organization administrator", async () => {
+  test("the lookup refuses an actor that is not an organization administrator", async () => {
     if (!fixture) return;
-    for (const granted of [false, true]) {
-      await setLookupGrant(granted);
-      const failure = await lookup(world.identityId, world.memberSubjectId).catch(
-        (error: unknown) => error,
-      );
-      expect(nestedPostgresSqlState(failure)).toBe("42501");
-    }
+    const failure = await lookup(world.identityId, world.memberSubjectId).catch(
+      (error: unknown) => error,
+    );
+    expect(nestedPostgresSqlState(failure)).toBe("42501");
   });
 
   test("the backfill fills earlier acceptances as the owner, which FORCE RLS binds", async () => {
@@ -324,14 +304,13 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
     await fixture.admin`
       update canonical_human_identities set active_login_binding_id = ${binding!.id}
       where id = ${identityId}`;
-    const { throughMembers, byIdentity } = await bothPaths(identityId);
+    const byIdentity = await lookup(identityId);
     expect(byIdentity?.verifiedEmail).toBeNull();
     expect(byIdentity?.activeLoginBinding).toEqual({ id: binding!.id, revision: 1 });
     expect(byIdentity?.memberships).toHaveLength(1);
-    expect(throughMembers).toEqual(byIdentity);
   });
 
-  test("both paths answer the revision and shared-workspace grants the fences compare", async () => {
+  test("the lookup answers the revision and shared-workspace grants the fences compare", async () => {
     if (!fixture) return;
     const db = client!.db;
     const member = await memberAccount();
@@ -387,7 +366,7 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
         and access.account_id = ${world.organizationId}
         and access.workspace_id in (${workspaces[0]!.id}, ${workspaces[1]!.id})
       order by lower(workspace.name), workspace.id`;
-    const { throughMembers, byIdentity } = await bothPaths(identityId);
+    const byIdentity = await lookup(identityId);
     expect(byIdentity?.memberships).toEqual([
       {
         id: membership!.id,
@@ -407,10 +386,9 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
       "custom",
       "viewer",
     ]);
-    expect(throughMembers).toEqual(byIdentity);
   });
 
-  test("an identity with two member accounts answers both, the same on both paths", async () => {
+  test("an identity with two member accounts answers both", async () => {
     if (!fixture) return;
     const first = await memberAccount();
     const { identityId } = await synchronizeCanonicalHumanLoginBindings(client!.db, first.userId);
@@ -421,13 +399,12 @@ describe("1016 under a NOSUPERUSER migration owner", () => {
       where account_id = ${world.organizationId}
         and subject_id in (${first.subjectId}, ${second.subjectId})
       order by created_at, id`;
-    const { throughMembers, byIdentity } = await bothPaths(identityId);
+    const byIdentity = await lookup(identityId);
     expect(byIdentity?.memberships.map((membership) => membership.id)).toEqual(
       memberships.map((membership) => membership.id),
     );
     expect(byIdentity?.acceptedInvitations).toHaveLength(2);
     // The active binding signs in to the first account, a member here.
     expect(byIdentity?.verifiedEmail).toBe(first.email);
-    expect(throughMembers).toEqual(byIdentity);
   });
 });

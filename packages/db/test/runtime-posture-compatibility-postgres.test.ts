@@ -53,7 +53,7 @@ afterAll(async () => {
 
 const realTest = test.skipIf(process.env.OPENGENI_REQUIRE_REAL_DB !== "1");
 
-// A withheld definer (0978, 0984, 1016's host identity lookup) waits only for a
+// A withheld definer waits only for a
 // previous release that knows it. Once the pin advances past it, this fails
 // until a rolling migration grants it and it leaves the deferred list.
 realTest("no withheld runtime definer is already known to the pinned release", () => {
@@ -400,6 +400,51 @@ realTest(
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_stalled_recording_work_v1(integer) TO opengeni_app`;
       await admin`GRANT DELETE ON TABLE event_ingress_routes TO opengeni_app`;
       await admin`GRANT EXECUTE ON FUNCTION opengeni_private.list_due_recording_retention_v1(integer) TO opengeni_app`;
+    }
+    expect(await current()).toEqual([]);
+  },
+  180_000,
+);
+
+const DEFINERS_GRANTED_BY_1019 = [
+  "session_machine_owner_subject_v1(uuid, uuid, uuid)",
+  "rearm_unanswered_connected_commands(uuid, uuid, text)",
+  "lookup_organization_host_identity(uuid, text, uuid)",
+  "ensure_organization_host_owner(uuid, text, uuid)",
+  "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
+] as const;
+
+realTest(
+  "1019 grants the definers 0978, 0984 and 1016-1018 withheld; a missing grant fails readiness by name",
+  async () => {
+    const admin = database!.admin;
+    const current = async () =>
+      evaluateRuntimeDatabasePosture(
+        await inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      );
+    for (const name of DEFINERS_GRANTED_BY_1019) {
+      expect(DEFERRED_RUNTIME_PRIVATE_ROUTINES as readonly string[]).not.toContain(name);
+      const [row] = await admin<{ granted: boolean }[]>`
+        select has_function_privilege('opengeni_app',
+          to_regprocedure(${`opengeni_private.${name}`}), 'EXECUTE') as granted`;
+      expect(row!.granted).toBe(true);
+    }
+    expect(await current()).toEqual([]);
+    // The pinned previous release accepts them granted.
+    expect(
+      baseline!.module.evaluateRuntimeDatabasePosture(
+        await baseline!.module.inspectRuntimeDatabasePosture(client!.db, options),
+        options,
+      ),
+    ).toEqual([]);
+    for (const name of DEFINERS_GRANTED_BY_1019) {
+      await admin.unsafe(`REVOKE EXECUTE ON FUNCTION opengeni_private.${name} FROM opengeni_app`);
+      try {
+        expect(await current()).toEqual([`runtime role lacks EXECUTE on private routine ${name}`]);
+      } finally {
+        await admin.unsafe(`GRANT EXECUTE ON FUNCTION opengeni_private.${name} TO opengeni_app`);
+      }
     }
     expect(await current()).toEqual([]);
   },

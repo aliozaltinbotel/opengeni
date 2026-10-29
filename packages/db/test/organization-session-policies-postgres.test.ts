@@ -12,7 +12,6 @@ import {
   ensureGovernedOrganizationSessionPolicy,
   getOrganizationSessionPolicy,
   HOST_SESSION_POLICY_ROUTINE,
-  hostSessionPolicyWriteGranted,
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
   recordOrganizationHostCommandAttribution,
@@ -24,7 +23,7 @@ import {
  * Migration 1018's write boundary, as the runtime role under FORCE RLS: the
  * runtime may read a policy and insert exactly the governed default; it can
  * never widen, update or delete one, nor touch the receipts. A host's policy
- * goes through the withheld routine, only for a recorded host command.
+ * goes through the routine (granted by 1019), only for a recorded host command.
  */
 
 // The documented posture: a NOSUPERUSER, NOBYPASSRLS migration owner (which
@@ -140,28 +139,19 @@ describe("the runtime's direct access", () => {
 });
 
 describe("the host's routine", () => {
-  test("is withheld until a later release grants it", async () => {
+  test("is granted to the runtime by 1019", async () => {
     // It runs as a migration owner that FORCE RLS binds.
     const [owner] = await shared.admin<{ bypass: boolean }[]>`
       select role.rolbypassrls as bypass from pg_proc proc
       join pg_roles role on role.oid = proc.proowner
       where proc.proname = 'put_host_organization_session_policy'`;
     expect(owner?.bypass).toBe(false);
-    expect(await hostSessionPolicyWriteGranted(client.db)).toBe(false);
-    const id = await organization(true);
-    expect(
-      await putHostOrganizationSessionPolicy(client.db, {
-        organizationId: id,
-        subjectId: SERVICE_SUBJECT,
-        operationId: crypto.randomUUID(),
-        policy: OPEN,
-        expectedRevision: 0,
-      }),
-    ).toBeNull();
-    await shared.admin.unsafe(
-      `GRANT EXECUTE ON FUNCTION ${HOST_SESSION_POLICY_ROUTINE} TO opengeni_app`,
+    const [row] = await rawRows<{ granted: boolean | null }>(
+      client.db,
+      sql`select has_function_privilege(
+        to_regprocedure(${HOST_SESSION_POLICY_ROUTINE})::oid, 'EXECUTE') as granted`,
     );
-    expect(await hostSessionPolicyWriteGranted(client.db)).toBe(true);
+    expect(row?.granted).toBe(true);
   });
 
   test("writes only for a recorded host command, replays by body and refuses stale revisions", async () => {
