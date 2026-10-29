@@ -57,6 +57,10 @@
       "sha256": "1e91ea9240f054e85160a461fd40bf92d1480709c0cf77ac41a41f0b4dbe815c"
     },
     {
+      "path": ".github/workflows/fork-web-builds.yml",
+      "sha256": "99fa294b392e144f82c7a26a89b3e41f17281e289997eae28ad0715d7b080aaa"
+    },
+    {
       "path": ".github/workflows/local-startup.yml",
       "sha256": "fb1ee347cf037689810c03a4105bfc09de906fa19d1392484763f6b7d4a7b715"
     },
@@ -1444,6 +1448,24 @@
       "job": "desktop-image",
       "step": "Install dependencies",
       "sha256": "13753204e14b60ac778c84fa19b0c08b7a529710253a322d3ef40f64119448fa"
+    },
+    {
+      "workflow": ".github/workflows/fork-web-builds.yml",
+      "job": "web-build",
+      "step": "Build web with eager-graph and chunk-evaluation-order guards",
+      "sha256": "5f9434e78910fc48d954b92fdfc6430b5f25d611158d8215cf6b2aff6cc7d365"
+    },
+    {
+      "workflow": ".github/workflows/fork-web-builds.yml",
+      "job": "web-build",
+      "step": "Install dependencies",
+      "sha256": "e14eb02df05b724ee1c991c3202abc008baab6c93bbf81534aef1172fbbd9a70"
+    },
+    {
+      "workflow": ".github/workflows/fork-web-builds.yml",
+      "job": "web-build",
+      "step": "Verify pinned Bun",
+      "sha256": "ccf905e44ed56304c8d6ac73204e1f3036c205743962f34e0efa72a06e3be404"
     },
     {
       "workflow": ".github/workflows/main-approval-superseded.yml",
