@@ -708,6 +708,15 @@ const effectiveBudgets = {
     // 2,927,652 -> 2,951,651 raw (+23,999) and 836,027 -> 845,410 gzip
     // (+9,383), 51 files. Keep the established 1.5 KiB allowance.
     wholeKibEnvelope(2_951_651, 1.5 * kib),
+    // The last aggregate snapshot is 11779ba7d (#4287, October 14).
+    // Localization #4731, the shared SessionApp #5252, recording client #5805
+    // and dictation #6022 subsequently grew the statically imported graph.
+    // After the synchronous startup-catalog split on the c71567250 base,
+    // Bun 1.4.4 Linux/x64 measures 3,564,805/1,018,108 raw/gzip standalone
+    // and 3,564,101/1,017,405 with the generic host fixture.
+    // Retain the existing headroom and configured-URL policies, without moving
+    // lazy code into this graph or changing either structural build guard.
+    wholeKibEnvelope(3_564_823, 1.5 * kib),
   ),
   directSessionGzip: Math.max(
     budgets.directSessionGzip,
@@ -809,6 +818,8 @@ const effectiveBudgets = {
     wholeKibEnvelope(838_954, 1.5 * kib),
     // Per-task usage limits, as measured in the raw bound above.
     wholeKibEnvelope(845_410, 1.5 * kib),
+    // Same startup-split two-mode measurement documented above; bind the maximum.
+    wholeKibEnvelope(1_018_108, 1.5 * kib),
   ),
   directSessionFiles: Math.max(
     budgets.directSessionFiles,
@@ -818,6 +829,9 @@ const effectiveBudgets = {
     // Same feature growth; most added files are the evaluation-order leaf
     // chunks that keep chunk cycles from reading uninitialized bindings.
     52,
+    // The startup core/shard leaf keeps the full fallback off startup and
+    // brings the standalone/composed direct-session graphs to 81/80 assets.
+    81,
   ),
 } as const;
 

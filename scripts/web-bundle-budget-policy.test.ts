@@ -119,7 +119,7 @@ describe("web bundle budget policy", () => {
     expect(source).toContain("wholeKibEnvelope(2_933_830, 1.5 * kib)");
     expect(source).toContain("wholeKibEnvelope(838_954, 1.5 * kib)");
     expect(source).toContain("apps/web/vite-eager-graph.ts");
-    expect(source).toContain("    52,\n  ),");
+    expect(source).toContain("    81,\n  ),");
     for (const [measured, limit] of [
       [2_933_830, wholeKibEnvelope(2_933_830, 1.5 * KIB)],
       [838_954, wholeKibEnvelope(838_954, 1.5 * KIB)],
