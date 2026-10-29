@@ -7792,7 +7792,7 @@ function boundedSessionDiscoveryLimit(limit: number | undefined): number {
 }
 
 export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): string {
-  if (BigInt(cursor.snapshotRevision) >= 1n << 64n) {
+  if (cursor.authorizationScopeKey || BigInt(cursor.snapshotRevision) >= 1n << 64n) {
     // Compact positional envelope keeps even relevance/Site cursors inside the
     // existing 512-character tool input. No PostgreSQL snapshot is embedded.
     return Buffer.from(
@@ -7808,6 +7808,7 @@ export function encodeSessionDiscoveryCursor(cursor: SessionDiscoveryCursor): st
         cursor.updatedAfter,
         cursor.filterHash,
         cursor.originSiteId ?? null,
+        ...(cursor.authorizationScopeKey ? [cursor.authorizationScopeKey] : []),
       ]),
       "utf8",
     ).toString("base64url");
@@ -7861,7 +7862,11 @@ function normalizeSessionDiscoveryRevision(value: string, label: string): string
 export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCursor {
   try {
     let decoded = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-    if (Array.isArray(decoded) && decoded[0] === 5 && decoded.length === 11) {
+    if (
+      Array.isArray(decoded) &&
+      decoded[0] === 5 &&
+      (decoded.length === 11 || decoded.length === 12)
+    ) {
       const [
         ,
         orderBy,
@@ -7874,6 +7879,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         updatedAfter,
         filterHash,
         originSiteId,
+        authorizationScopeKey,
       ] = decoded;
       if (
         (orderBy !== "relevance" && (sortRank !== null || filterHash !== null)) ||
@@ -7893,6 +7899,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         updatedAfter,
         ...(orderBy === "relevance" ? { sortRank, filterHash } : {}),
         ...(originSiteId ? { originSiteId } : {}),
+        ...(authorizationScopeKey !== undefined ? { authorizationScopeKey } : {}),
       };
     }
     const parsed = decoded as {
@@ -7908,6 +7915,7 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       sortRank?: unknown;
       filterHash?: unknown;
       originSiteId?: unknown;
+      authorizationScopeKey?: unknown;
     };
     if (
       parsed.v === undefined &&
@@ -7954,6 +7962,13 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
         updatedAfter: null,
         filterHash: null,
       };
+    }
+    if (
+      parsed.authorizationScopeKey !== undefined &&
+      (typeof parsed.authorizationScopeKey !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/.test(parsed.authorizationScopeKey))
+    ) {
+      throw new Error("invalid authorization scope cursor identity");
     }
     const isV2 = parsed.v === 2;
     const isV3 = parsed.v === 3;
@@ -8026,6 +8041,9 @@ export function decodeSessionDiscoveryCursor(value: string): SessionDiscoveryCur
       updatedAfter: normalizedUpdatedAfter,
       filterHash: relevance ? (parsed.filterHash as string) : null,
       ...(isV4 ? { originSiteId: parsed.originSiteId as string } : {}),
+      ...(typeof parsed.authorizationScopeKey === "string"
+        ? { authorizationScopeKey: parsed.authorizationScopeKey }
+        : {}),
     };
   } catch {
     throw new Error("sessions_list cursor is invalid");
@@ -8098,6 +8116,9 @@ export function capSessionDiscoveryCompactPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.authorizationScopeKey
+              ? { authorizationScopeKey: page.authorizationScopeKey }
+              : {}),
             ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           }
         : page.nextCursor;
@@ -8267,6 +8288,9 @@ export function capSessionDiscoveryPage(
             snapshotRevision: page.snapshotRevision,
             updatedAfter: page.updatedAfter,
             filterHash: page.filterHash,
+            ...(page.authorizationScopeKey
+              ? { authorizationScopeKey: page.authorizationScopeKey }
+              : {}),
             ...(page.originSiteId ? { originSiteId: page.originSiteId } : {}),
           })
         : null
