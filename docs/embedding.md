@@ -1333,6 +1333,22 @@ workspace in the consented scope (`permissions_lost`; for a workspace
 connection, the live-grant resolution its requests use refuses). Only the last
 two can become `active` again. Treat any other `reason` as not live.
 
+A workspace connection's consent offers an access level, as an organization
+sign-in does: **Full** (everything the person can do in the workspace, the
+default and the behaviour of a consent form without the field), **Read only**
+(the `read_only` preset's permissions, and only tools that declare
+`readOnlyHint: true` and are not destructive) or **Custom** (the permissions
+the person picks, plus `workspace:read`; only read tools when none of them
+changes anything). The consent form posts `access_preset`
+(`full` | `read_only` | `custom`) and, for Custom, one `permission` per
+choice; an unknown level is refused before a code is issued. The level never
+widens anything: the grant keeps only permissions the person holds at consent
+(and the live membership still caps every request), and the tool identities
+frozen into the connection are what that narrowed grant lists. The level is
+recorded on the grant (migration 1021), so `consentScope.preset` of a
+workspace connection names it; it is `null` for a consent recorded before
+the level existed.
+
 To hear about a disconnect without polling, configure the
 `mcp_connection.revoked` host webhook on both the API and the worker:
 `OPENGENI_HOST_WEBHOOK_MCP_CONNECTION_REVOKED_URL` (http(s)) and

@@ -3055,6 +3055,7 @@ describe("release schema contract", () => {
       "1017_organization_host_owner.sql",
       "1018_organization_session_policies.sql",
       "1020_organization_session_recordings.sql",
+      "1021_mcp_oauth_workspace_consent_preset.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );
