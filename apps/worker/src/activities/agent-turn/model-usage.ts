@@ -6,7 +6,6 @@ import {
   type PromptCacheRequestFingerprint,
 } from "@opengeni/contracts";
 import {
-  applyCreditDebitUpToBalance,
   existingUsageEventIdempotencyKeys,
   isTransactionHandle,
   recordUsageEvent,

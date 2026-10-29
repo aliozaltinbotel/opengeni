@@ -535,11 +535,11 @@ async function wireSession(
           const file = form.get("file");
           if (file instanceof Blob) uploadedBytes.set(entry.path, new Uint8Array(await file.arrayBuffer()));
         } else {
-          const body: unknown = await request.json();
-          if (typeof body !== "object" || body === null || Array.isArray(body)) {
+          const permissionBody: unknown = await request.json();
+          if (typeof permissionBody !== "object" || permissionBody === null || Array.isArray(permissionBody)) {
             return new Response("invalid permission map", { status: 400 });
           }
-          for (const [path, permission] of Object.entries(body)) {
+          for (const [path, permission] of Object.entries(permissionBody)) {
             if (typeof permission !== "object" || permission === null ||
                 !("mode" in permission) || typeof permission.mode !== "number") {
               return new Response("invalid permission", { status: 400 });
@@ -1391,7 +1391,7 @@ describe("OpenSandbox adapter", () => {
       expect(resolver.calls).toHaveLength(1);
       await controller.waitForQuiescence();
       await controller.clearSecretFiles!();
-      expect([...fake.files.keys()].some((path) => path.startsWith(directory))).toBe(false);
+      expect([...fake.files.keys()].some((filePath) => filePath.startsWith(directory))).toBe(false);
     } finally {
       await session.close();
     }

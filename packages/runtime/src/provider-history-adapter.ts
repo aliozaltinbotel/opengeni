@@ -406,10 +406,10 @@ function projectWireHistory(
       let next: Record<string, unknown>;
       const tools = disclosedTools(item);
       if (tools) {
-        const projected = options.declaresAdditionalTools
+        const projectedDisclosure = options.declaresAdditionalTools
           ? { type: "unknown", providerData: { type: "additional_tools", role: "developer", tools } }
           : { type: "unknown", providerData: { type: "message", role: "developer", content: item.content } };
-        next = withProjectedSourceBinding(item, projected)!;
+        next = withProjectedSourceBinding(item, projectedDisclosure)!;
       } else if (item.type === "message" && item.role === "developer") {
         // The SDK raw-item wrapper is a projection of the same durable row. Keep
         // its provenance on the model input, outside the provider's wire object.

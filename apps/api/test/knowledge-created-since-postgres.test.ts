@@ -132,7 +132,6 @@ test("list query strings and search JSON apply the same creation cutoff, paginat
 
 
 test("human save refuses current external document revocation after body admission without native writes", async () => {
-  const secret = "knowledge-human-proposal-revocation-test";
   const ownerId = crypto.randomUUID(), ownerSubject = `user:${ownerId}`, subjectId = `user:${crypto.randomUUID()}`;
   await ensureManagedAccessForUser(client.db, {userId: ownerId, email: `${ownerId}@example.test`, name: "Synthetic proposal owner"});
   const [organization] = await listSelfOrganizationMemberships(client.db, ownerSubject);

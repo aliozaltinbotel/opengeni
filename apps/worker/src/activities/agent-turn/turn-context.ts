@@ -12,7 +12,6 @@ import type {
   ModelContextContributionSummary,
   SessionStatus,
   TurnRouteDeclarationV1,
-  XaiProviderAccountAuthoritySnapshotV1,
 } from "@opengeni/contracts";
 import type {
   EstablishedSandboxSession,

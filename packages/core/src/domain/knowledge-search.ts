@@ -274,6 +274,8 @@ export async function searchKnowledgeEntries(
       if (dispatched && completedCalls.length === 0) {
         const admission = await readKnowledgeQueryUsageFact(db, { ...callOwner, callId: usageId, eventType: "knowledge.query.admitted" });
         const dispatch = await readKnowledgeQueryUsageFact(db, { ...callOwner, callId: usageId, eventType: "knowledge.query.dispatched" });
+        // Provider errors can carry secrets or customer content; keep this fault content-free.
+        // eslint-disable-next-line preserve-caught-error
         if (!admission || !dispatch) throw new Error("KNOWLEDGE_QUERY_SOURCE_INVALID");
         await recordUsageEvent(db, { ...callOwner, eventType: "knowledge.query.indeterminate", quantity: 1, unit: "call",
           sourceResourceType: "knowledge_query", sourceResourceId: usageId,
