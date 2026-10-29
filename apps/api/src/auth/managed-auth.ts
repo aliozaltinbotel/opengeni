@@ -780,14 +780,12 @@ function hostSessionTokenPlugin(settings: Settings) {
   });
 }
 
-/** The exact claim set of a host session token. */
-export type HostSessionTokenClaims = {
+/** The claims every host session token carries. */
+type HostSessionTokenCommonClaims = {
   iss: string;
   aud: string;
   sub: string;
   sid: string;
-  org: string;
-  ws: string;
   auth_time: number;
   amr: string[];
   identity_status: "active";
@@ -798,6 +796,19 @@ export type HostSessionTokenClaims = {
   exp: number;
   jti: string;
 };
+
+/**
+ * The exact claim set of a host session token: a workspace token (`org`,
+ * `ws`), or a registration-purpose token, which names no organization or
+ * workspace (the keys are absent) and carries the verified email instead.
+ */
+export type HostSessionTokenClaims =
+  | (HostSessionTokenCommonClaims & { org: string; ws: string })
+  | (HostSessionTokenCommonClaims & {
+      purpose: "registration";
+      email: string;
+      email_verified: true;
+    });
 
 export type HostSessionTokenJwks = { keys: Array<Record<string, unknown>> };
 

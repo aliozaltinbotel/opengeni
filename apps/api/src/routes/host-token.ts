@@ -10,6 +10,7 @@ import {
   activeCanonicalHumanLoginBinding,
   CanonicalHumanIdentityNotFoundError,
   getCanonicalHumanIdentityProjection,
+  getVerifiedAuthUserEmail,
 } from "@opengeni/db/canonical-human-identities";
 import type { Context, Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
@@ -38,7 +39,16 @@ import {
  * `GET /v1/auth/jwks` publishes its public keys. The token names the
  * identity's active login binding (`login_binding_id`, and that binding's
  * `login_binding_revision`), so a host can tell a rebound sign-in method from
- * the one it linked without an identity round trip. Without
+ * the one it linked without an identity round trip.
+ *
+ * `GET /v1/auth/host-token?purpose=registration` mints the registration
+ * variant for a signed-in person who may have no workspace yet: no `org` and
+ * no `ws` (the keys are absent), `purpose: "registration"`, the verified
+ * `email` with `email_verified: true`, and the same login binding claims. It
+ * shares the per-session mint limit. Opengeni itself accepts no host session
+ * token of either kind as a credential: every route here answers its own
+ * authentication refusal to one, and a host must refuse a `purpose` token
+ * anywhere but its registration endpoint. Without
  * OPENGENI_HOST_TOKEN_AUDIENCE the token route refuses and every other path
  * keeps its stock behaviour.
  *
@@ -59,6 +69,16 @@ export const HOST_TOKEN_REFUSALS = {
     status: 401,
     code: "HOST_TOKEN_SESSION_REQUIRED",
     message: "A signed-in browser session is required",
+  },
+  purposeInvalid: {
+    status: 400,
+    code: "HOST_TOKEN_PURPOSE_INVALID",
+    message: "Query parameter purpose must be registration, without a workspace",
+  },
+  emailNotVerified: {
+    status: 403,
+    code: "HOST_TOKEN_EMAIL_NOT_VERIFIED",
+    message: "Verify your email address first",
   },
   notMember: {
     status: 403,
@@ -242,15 +262,31 @@ function refuse(context: Context, refusal: HostTokenRefusal): Response {
   return context.json({ code: refusal.code, message: refusal.message }, refusal.status);
 }
 
+/** What a mint request asks for: one workspace, or registration (no workspace). */
+type HostTokenRequest = { purpose: "workspace"; workspaceId: string } | { purpose: "registration" };
+
+function hostTokenRequest(context: Context): HostTokenRequest {
+  const purpose = context.req.query("purpose");
+  const workspaceId = context.req.query("workspace");
+  if (purpose !== undefined) {
+    // A registration token names no workspace, so a request for both is refused.
+    if (purpose !== "registration" || workspaceId !== undefined) {
+      throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.purposeInvalid);
+    }
+    return { purpose: "registration" };
+  }
+  if (!workspaceId || !UUID.test(workspaceId)) {
+    throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.workspaceInvalid);
+  }
+  return { purpose: "workspace", workspaceId };
+}
+
 async function mintHostSessionToken(
   context: Context,
   deps: ApiRouteDeps,
   configuration: HostTokenConfiguration,
 ): Promise<{ token: string; expiresAt: string }> {
-  const workspaceId = context.req.query("workspace");
-  if (!workspaceId || !UUID.test(workspaceId)) {
-    throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.workspaceInvalid);
-  }
+  const request = hostTokenRequest(context);
   // A browser session only: bearer credentials never mint a host token.
   if (context.req.header("authorization") || !context.req.header("cookie")) {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.sessionRequired);
@@ -267,6 +303,7 @@ async function mintHostSessionToken(
     }),
     { 401: HOST_TOKEN_REFUSALS.sessionRequired },
   );
+  // One counter per session, whatever the purpose.
   await throttleHostTokenSession(deps, human.authSessionId);
   const projection = await getCanonicalHumanIdentityProjection(deps.db, human.authUserId).catch(
     (error: unknown) => {
@@ -288,17 +325,10 @@ async function mintHostSessionToken(
   if (!authentication || authentication.identityId !== identity.id) {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.sessionRequired);
   }
-  // The canonical access resolver re-derives live membership: a suspended or
-  // revoked organization membership has no grant here.
-  const authorization = await refuseOnHttpStatus(
-    requireAccessGrantAuthorization(context, deps, workspaceId, "workspace:read"),
-    {
-      401: HOST_TOKEN_REFUSALS.sessionRequired,
-      403: HOST_TOKEN_REFUSALS.notMember,
-      404: HOST_TOKEN_REFUSALS.notMember,
-    },
-  );
-  const organizationId = activeOrganizationOf(authorization, human.authUserId, workspaceId);
+  const target =
+    request.purpose === "registration"
+      ? await registrationClaims(deps, human.authUserId)
+      : await workspaceClaims(context, deps, human.authUserId, request.workspaceId);
   const latest = latestAuthentication(authentication);
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + configuration.ttlSeconds;
@@ -307,8 +337,7 @@ async function mintHostSessionToken(
     aud: configuration.audience,
     sub: identity.id,
     sid: human.authSessionId,
-    org: organizationId,
-    ws: workspaceId,
+    ...target,
     auth_time: Math.floor(latest.authenticatedAt.getTime() / 1000),
     amr: latest.amr,
     identity_status: "active",
@@ -320,6 +349,40 @@ async function mintHostSessionToken(
   });
   configuration.jwks.noteSigningKey(signingKeyId(token));
   return { token, expiresAt: new Date(expiresAt * 1000).toISOString() };
+}
+
+/** A workspace token's target: the workspace and its organization, from a live membership. */
+async function workspaceClaims(
+  context: Context,
+  deps: ApiRouteDeps,
+  authUserId: string,
+  workspaceId: string,
+): Promise<{ org: string; ws: string }> {
+  // The canonical access resolver re-derives live membership: a suspended or
+  // revoked organization membership has no grant here.
+  const authorization = await refuseOnHttpStatus(
+    requireAccessGrantAuthorization(context, deps, workspaceId, "workspace:read"),
+    {
+      401: HOST_TOKEN_REFUSALS.sessionRequired,
+      403: HOST_TOKEN_REFUSALS.notMember,
+      404: HOST_TOKEN_REFUSALS.notMember,
+    },
+  );
+  return { org: activeOrganizationOf(authorization, authUserId, workspaceId), ws: workspaceId };
+}
+
+/**
+ * A registration token's target: no organization or workspace (the keys are
+ * absent), the account's verified email. It never depends on a membership,
+ * so a signed-in person with no workspace can register one with the host.
+ */
+async function registrationClaims(
+  deps: ApiRouteDeps,
+  authUserId: string,
+): Promise<{ purpose: "registration"; email: string; email_verified: true }> {
+  const email = await getVerifiedAuthUserEmail(deps.db, authUserId);
+  if (!email) throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.emailNotVerified);
+  return { purpose: "registration", email, email_verified: true };
 }
 
 /** The organization of an exact, cookie-authenticated, active membership grant. */

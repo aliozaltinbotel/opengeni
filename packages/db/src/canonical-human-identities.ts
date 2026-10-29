@@ -43,6 +43,18 @@ export function activeCanonicalHumanLoginBinding(
   return binding ? { id: binding.id, revision: binding.revision } : null;
 }
 
+/** The account's email when it is verified; null for an unverified or unknown account. */
+export async function getVerifiedAuthUserEmail(
+  db: Database,
+  authUserId: string,
+): Promise<string | null> {
+  const [row] = await rawRows<{ email: string }>(
+    db,
+    sql`select email from auth_users where id = ${authUserId} and email_verified`,
+  );
+  return row?.email ?? null;
+}
+
 export async function getCanonicalHumanExactLoginBindingForAuthUser(
   db: Database,
   input: { authUserId: string; providerId: string },

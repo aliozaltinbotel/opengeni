@@ -1177,6 +1177,21 @@ binding gets no token: `403 HOST_TOKEN_LOGIN_BINDING_UNKNOWN`. The claims are
 flat snake-case keys, like the token's other claims, rather than one nested
 object.
 
+`GET /v1/auth/host-token?purpose=registration` mints the registration
+variant, for a signed-in person who may have no workspace yet (for example
+before the host creates their organization). It carries no `org` and no `ws`
+(the keys are absent, not null), `purpose: "registration"`, the account's
+verified `email` with `email_verified: true`, and the same `login_binding_*`
+claims; `aud` is the configured audience, as for a workspace token. It is
+minted only for a managed browser session (no bearer credential), refuses an
+unverified email with `403 HOST_TOKEN_EMAIL_NOT_VERIFIED`, and counts against
+the same per-session limit (30 per minute) as workspace tokens. A `purpose`
+other than `registration`, or `purpose` together with `workspace`, is
+`400 HOST_TOKEN_PURPOSE_INVALID`. A host must accept a `purpose` token only at
+its registration endpoint and refuse it everywhere else. Opengeni itself
+accepts neither kind of host session token as a credential: every Opengeni
+route answers its own authentication refusal to one.
+
 The read is one query by identity
 (`opengeni_private.lookup_organization_host_identity`, migration 1016; 1017
 adds the fences). Like every new runtime definer, its runtime `EXECUTE` is

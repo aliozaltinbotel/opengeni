@@ -648,6 +648,178 @@ describe("host session token login binding claims", () => {
   }, 60_000);
 });
 
+describe("registration-purpose host session token", () => {
+  const app = () => managedApp({ hostTokenAudience: audience });
+  const registrationClaims = [
+    "amr",
+    "aud",
+    "auth_time",
+    "email",
+    "email_verified",
+    "exp",
+    "iat",
+    "identity_status",
+    "iss",
+    "jti",
+    "login_binding_id",
+    "login_binding_revision",
+    "purpose",
+    "sid",
+    "sub",
+  ];
+
+  async function mintRegistration(instance: ManagedApp, headers: Record<string, string>) {
+    return await instance.request("/v1/auth/host-token?purpose=registration", { headers });
+  }
+
+  test("a signed-in person with no workspace gets a token with no org or ws", async () => {
+    const instance = app();
+    const person = await signUp(instance, "Registering Person");
+    expect((await accessOf(instance, person.cookie)).workspaceGrants).toEqual([]);
+    const response = await mintRegistration(instance, { cookie: person.cookie });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    const body = (await response.json()) as { token: string; expiresAt: string };
+    const jwks = (await (await instance.request("/v1/auth/jwks")).json()) as JSONWebKeySet;
+    const { payload } = await jwtVerify(body.token, createLocalJWKSet(jwks), {
+      issuer: origin,
+      audience,
+      algorithms: ["ES256"],
+    });
+    expect(Object.keys(payload).sort()).toEqual(registrationClaims);
+    expect(Object.hasOwn(payload, "org")).toBe(false);
+    expect(Object.hasOwn(payload, "ws")).toBe(false);
+    const identity = await getCanonicalHumanIdentityProjection(client.db, person.userId);
+    const { id: sessionId } = await sessionRow(person.cookie);
+    expect(payload).toMatchObject({
+      sub: identity.activeIdentity.id,
+      sid: sessionId,
+      purpose: "registration",
+      email: person.email,
+      email_verified: true,
+      identity_status: "active",
+      amr: ["pwd"],
+      login_binding_id: activeCanonicalHumanLoginBinding(identity)!.id,
+      login_binding_revision: activeCanonicalHumanLoginBinding(identity)!.revision,
+    });
+    expect(payload.exp! - payload.iat!).toBe(300);
+    expect(body.expiresAt).toBe(new Date(payload.exp! * 1000).toISOString());
+  }, 60_000);
+
+  test("a member gets one too, still without a workspace", async () => {
+    const instance = app();
+    const owner = await ownerWithOrganization(instance, "Registering Owner");
+    const response = await mintRegistration(instance, { cookie: owner.cookie });
+    expect(response.status).toBe(200);
+    const { token } = (await response.json()) as { token: string };
+    const claims = JSON.parse(Buffer.from(token.split(".")[1]!, "base64url").toString("utf8"));
+    expect(claims).not.toHaveProperty("org");
+    expect(claims).not.toHaveProperty("ws");
+  }, 60_000);
+
+  test("is minted only for a managed signed-in human with a verified email", async () => {
+    const instance = app();
+    const person = await signUp(instance, "Unverified Person");
+    // No browser session, or a bearer credential beside it.
+    await expectRefusal(await mintRegistration(instance, {}), 401, "HOST_TOKEN_SESSION_REQUIRED");
+    await expectRefusal(
+      await mintRegistration(instance, {
+        cookie: person.cookie,
+        authorization: "Bearer ogk_not_a_session",
+      }),
+      401,
+      "HOST_TOKEN_SESSION_REQUIRED",
+    );
+    await expectRefusal(
+      await mintRegistration(instance, { cookie: "better-auth.session_token=forged" }),
+      401,
+      "HOST_TOKEN_SESSION_REQUIRED",
+    );
+    // A purpose other than registration, or with a workspace, is refused.
+    for (const query of [
+      "purpose=other",
+      `purpose=registration&workspace=${crypto.randomUUID()}`,
+    ]) {
+      await expectRefusal(
+        await instance.request(`/v1/auth/host-token?${query}`, {
+          headers: { cookie: person.cookie },
+        }),
+        400,
+        "HOST_TOKEN_PURPOSE_INVALID",
+      );
+    }
+    await shared.admin`update auth_users set email_verified = false where id = ${person.userId}`;
+    await expectRefusal(
+      await mintRegistration(instance, { cookie: person.cookie }),
+      403,
+      "HOST_TOKEN_EMAIL_NOT_VERIFIED",
+    );
+    // A deployment without the audience mints neither kind.
+    await expectRefusal(
+      await mintRegistration(managedApp(), { cookie: person.cookie }),
+      404,
+      "HOST_TOKEN_DISABLED",
+    );
+  }, 60_000);
+
+  test("Opengeni accepts neither kind of host token as a credential", async () => {
+    const instance = app();
+    const owner = await ownerWithOrganization(instance, "Credential Owner");
+    const registration = (await (
+      await mintRegistration(instance, { cookie: owner.cookie })
+    ).json()) as { token: string };
+    const workspace = (await (
+      await mint(instance, { cookie: owner.cookie }, owner.workspaceId)
+    ).json()) as { token: string };
+    for (const token of [registration.token, workspace.token]) {
+      const headers = { authorization: `Bearer ${token}` };
+      for (const path of [
+        "/v1/access/me",
+        `/v1/workspaces/${owner.workspaceId}`,
+        `/v1/workspaces/${owner.workspaceId}/sessions`,
+        `/v1/organizations/${owner.organizationId}/members`,
+        `/v1/auth/host-token?workspace=${owner.workspaceId}`,
+        "/v1/auth/host-token?purpose=registration",
+      ]) {
+        const response = await instance.request(path, { headers });
+        expect({ path, status: response.status }).toEqual({ path, status: 401 });
+      }
+      const mcp = await instance.request(`/v1/workspaces/${owner.workspaceId}/mcp`, {
+        method: "POST",
+        headers: {
+          ...headers,
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+      });
+      expect(mcp.status).toBe(401);
+    }
+  }, 60_000);
+
+  test("shares the per-session mint limit with workspace tokens", async () => {
+    const instance = app();
+    const owner = await ownerWithOrganization(instance, "Shared Limit Owner");
+    const half = MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT.max / 2;
+    for (let attempt = 0; attempt < MANAGED_AUTH_HOST_TOKEN_RATE_LIMIT.max; attempt += 1) {
+      const minted =
+        attempt < half
+          ? await mint(instance, { cookie: owner.cookie }, owner.workspaceId)
+          : await mintRegistration(instance, { cookie: owner.cookie });
+      expect({ attempt, status: minted.status }).toEqual({ attempt, status: 200 });
+    }
+    const limited = await mintRegistration(instance, { cookie: owner.cookie });
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
+    expect(await refusalCode(limited)).toBe("HOST_TOKEN_RATE_LIMITED");
+    await expectRefusal(
+      await mint(instance, { cookie: owner.cookie }, owner.workspaceId),
+      429,
+      "HOST_TOKEN_RATE_LIMITED",
+    );
+  }, 120_000);
+});
+
 describe("host session token with browser session sets", () => {
   for (const mode of ["dual", "broker"] as const) {
     test(`mints for an active member and refuses a non-member in ${mode} mode`, async () => {
