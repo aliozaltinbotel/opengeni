@@ -38,8 +38,9 @@ import {
   MCP_APP_RESOURCE_MIME_TYPE,
   mcpAppResourceUiMeta,
   mcpAppToolUiMeta,
+  McpAppToolVisibilityUiMeta,
   WORKSPACE_MCP_TOOL_REFUSAL_CODES,
-  type McpAppToolUiMeta,
+  type McpAppToolUi,
   type AccessGrant,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -1472,7 +1473,8 @@ function registerHostViewResources(
   const hosts = new Map(hostViewServers.map((host) => [host.serverId, host]));
   const viewServers = new Map<string, HostViewServer>();
   for (const entry of callableEntries) {
-    const uri = entry.meta?.ui?.resourceUri;
+    const ui = entry.meta?.ui;
+    const uri = ui && "resourceUri" in ui ? ui.resourceUri : undefined;
     const host = hosts.get(entry.identity.serverId);
     if (uri && host && !viewServers.has(uri)) viewServers.set(uri, host);
   }
@@ -1982,10 +1984,10 @@ async function workspaceHostToolServers(
 ): Promise<{
   registrations: LocalMcpServerRegistration[];
   staticIds: ReadonlySet<string>;
-  views: ReadonlyMap<string, McpAppToolUiMeta>;
+  views: ReadonlyMap<string, McpAppToolUi>;
 }> {
   const port = routeDeps.workspaceToolServers;
-  const views = new Map<string, McpAppToolUiMeta>();
+  const views = new Map<string, McpAppToolUi>();
   if (!port) return { registrations: [], staticIds: new Set(), views };
   const registrations = await port({
     grant: input.grant,
@@ -2027,11 +2029,12 @@ async function workspaceHostToolServers(
  * The registration with its server's `tools/list` observed: each listed tool's
  * MCP Apps `_meta.ui` (its view and `visibility`, see `mcpAppToolUiMeta`) is
  * recorded under its gateway identity key, and a tool without a well-formed
- * view has none. The listing itself passes unchanged.
+ * one has none. A malformed `visibility` falls open to the default, so it is
+ * logged as a host registration warning. The listing itself passes unchanged.
  */
 function recordingHostViews(
   registration: LocalMcpServerRegistration,
-  views: Map<string, McpAppToolUiMeta>,
+  views: Map<string, McpAppToolUi>,
 ): LocalMcpServerRegistration {
   const listTools: LocalMcpServerRegistration["server"]["listTools"] = async () => {
     const tools = await registration.server.listTools();
@@ -2040,9 +2043,15 @@ function recordingHostViews(
         serverId: registration.id,
         toolName: tool.name,
       });
-      const ui = mcpAppToolUiMeta("_meta" in tool ? tool._meta : undefined);
+      const meta = "_meta" in tool ? tool._meta : undefined;
+      const ui = mcpAppToolUiMeta(meta);
       if (ui) views.set(key, ui);
       else views.delete(key);
+      if (hasMalformedMcpAppVisibility(meta))
+        console.warn("[workspace-mcp] host tool _meta.ui.visibility is malformed; ignored", {
+          serverId: registration.id,
+          toolName: tool.name,
+        });
     }
     return tools;
   };
@@ -2054,6 +2063,13 @@ function recordingHostViews(
     },
   });
   return { ...registration, server };
+}
+
+/** Whether a tool's `_meta.ui` names a `visibility` that is not well formed. */
+function hasMalformedMcpAppVisibility(meta: unknown): boolean {
+  const ui = typeof meta === "object" && meta !== null ? (meta as { ui?: unknown }).ui : undefined;
+  if (typeof ui !== "object" || ui === null || !("visibility" in ui)) return false;
+  return !McpAppToolVisibilityUiMeta.shape.visibility.safeParse(ui.visibility).success;
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {

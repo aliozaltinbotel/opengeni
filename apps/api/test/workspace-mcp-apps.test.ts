@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -326,6 +326,16 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
         { description: "Deprecated flat key.", _meta: { "ui/resourceUri": FLAT_VIEW } },
         async () => text("flat"),
       );
+      server.registerTool(
+        "model_only",
+        { description: "No view; the model alone.", _meta: { ui: { visibility: ["model"] } } },
+        async () => text("model"),
+      );
+      server.registerTool(
+        "bad_visibility_only",
+        { description: "No view; malformed visibility.", _meta: { ui: { visibility: "model" } } },
+        async () => text("bad"),
+      );
       return [
         await hostRegistration("acme", server, {
           listResources: async () => [{ uri: STATUS_VIEW, name: "status", mimeType: MCP_APP_MIME }],
@@ -337,9 +347,21 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
         }),
       ];
     });
+    const warn = spyOn(console, "warn").mockImplementation(() => undefined);
     try {
       const listed = await w.post(listTools);
       expect(listed.status).toBe(200);
+      // A visibility without a view is forwarded unchanged and serves no view.
+      expect(tool(listed.body, "acme__model_only")?._meta?.ui).toEqual({ visibility: ["model"] });
+      expect(tool(listed.body, "acme__bad_visibility_only")?._meta?.ui).toBeUndefined();
+      // A malformed visibility falls open, with a warning naming the server and tool.
+      const warned = warn.mock.calls.map(([, fields]) => fields);
+      expect(warned).toContainEqual({ serverId: "acme", toolName: "get_bad_visibility" });
+      expect(warned).toContainEqual({ serverId: "acme", toolName: "bad_visibility_only" });
+      expect(warned).not.toContainEqual({ serverId: "acme", toolName: "model_only" });
+      expect(warned).not.toContainEqual({ serverId: "acme", toolName: "get_both" });
+      const resources = await w.post(listResources);
+      expect(resources.body.result?.resources?.map(({ uri }) => uri)).toEqual([STATUS_VIEW]);
       expect(tool(listed.body, "acme__app_refresh")?._meta?.ui).toEqual({
         resourceUri: STATUS_VIEW,
         visibility: ["app"],
@@ -359,6 +381,7 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
         { uri: STATUS_VIEW, mimeType: MCP_APP_MIME, text: STATUS_HTML, _meta: { ui: resourceUi } },
       ]);
     } finally {
+      warn.mockRestore();
       await w.cleanup();
     }
   });

@@ -726,8 +726,11 @@ An embedding host's in-process tool servers (`workspaceToolServers`) may
 publish MCP Apps views. The workspace MCP forwards a host tool's MCP Apps
 `_meta.ui` on `tools/list`: `resourceUri` (from `ui.resourceUri`, or the
 deprecated flat `ui/resourceUri` key) and `visibility` (`["model"]`,
-`["app"]` or both; omitted means both). A tool without a well-formed
-`ui://…html` view carries no `ui`; a malformed `visibility` alone is dropped.
+`["app"]` or both; omitted means both). A tool may name no view and only a
+`visibility`; its `ui` is forwarded as `{ visibility }` and serves no view.
+A malformed `ui://…html` view drops the whole `ui`. A malformed `visibility`
+alone is dropped (the default then applies) and logged as a host
+registration warning naming the server and tool.
 `resources/read` contents carry the view's resource `_meta.ui` (`csp`,
 `permissions`, `domain`, `prefersBorder`) when the host's `readResource`
 returns a well-formed one. Other `_meta` keys a host sets are not forwarded,
