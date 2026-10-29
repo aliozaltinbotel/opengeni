@@ -38,6 +38,7 @@ export type NativeDestination =
   | "variable-sets"
   | "environments";
 
+export type HostExtensionStarter = Readonly<{ id: string; label: string; prompt: string }>;
 export type HostExtensionContext = Readonly<{ workspaceId: string; pathname: string }>;
 export type HostExtensionPage = ComponentType<{ workspaceId: string }>;
 export type HostExtensionRoute = Readonly<{
@@ -120,6 +121,8 @@ export type HostExtensionNavOverride = Readonly<{
 export type HostExtension = Readonly<{
   id: string;
   productName?: string;
+  /** Replaces the native new-chat suggestions; up to eight, with unique ids. */
+  starters?: (context: HostExtensionContext) => readonly HostExtensionStarter[];
   brand?: Readonly<{
     mark: ComponentType<{ className?: string }>;
     wordmark: ComponentType<{ className?: string }>;
