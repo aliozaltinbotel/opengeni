@@ -1,6 +1,6 @@
-import { afterAll, afterEach, beforeAll, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, mock, spyOn, test } from "bun:test";
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
-import type { ComponentType, RefObject } from "react";
+import type { ComponentType, ReactNode, RefObject } from "react";
 import type { Root } from "react-dom/client";
 import type { ActionEnv } from "../../lib/actions/registry";
 
@@ -11,6 +11,8 @@ GlobalRegistrator.register({ url: "https://app.test/" });
   true;
 const { act } = await import("react");
 const { createRoot } = await import("react-dom/client");
+const { configurePageAppHost } = await import("../../lib/app-host");
+const { useMemoryNavigation } = await import("../../embed/memory-navigation");
 
 const workspaceId = "11111111-1111-4111-8111-111111111111";
 const subjectId = `reader-${crypto.randomUUID()}`;
@@ -63,6 +65,7 @@ const client = {
 const opened: string[] = [];
 const newTabs: string[] = [];
 const closes: boolean[] = [];
+const hostNavigations: string[] = [];
 
 function env(overrides: Partial<ActionEnv> = {}): ActionEnv {
   const noop = () => {};
@@ -142,6 +145,8 @@ afterEach(async () => {
   host?.remove();
   root = null;
   host = null;
+  configurePageAppHost({ commandMenuProviders: undefined });
+  hostNavigations.length = 0;
   catalogCalls.length = 0;
   opened.length = 0;
   newTabs.length = 0;
@@ -155,20 +160,20 @@ afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
 
-async function openMenu() {
+function HostNavigation({ children }: { children: ReactNode }) {
+  const navigation = useMemoryNavigation({ initialPath: `/workspaces/${workspaceId}/sessions`, consoleOrigin: "https://app.test", handles: () => true, onLocationChange: (location) => hostNavigations.push(location.pathname) });
+  configurePageAppHost({ navigation });
+  return children;
+}
+
+async function openMenu(withHostNavigation = false) {
   host = document.createElement("div");
   document.body.append(host);
   root = createRoot(host);
   const returnFocus = { current: null };
   await act(async () => {
-    root!.render(
-      <CommandMenu
-        open
-        pickWorkspace={false}
-        onOpenChange={(open) => closes.push(open)}
-        returnFocus={returnFocus}
-      />,
-    );
+    const menu = <CommandMenu open pickWorkspace={false} onOpenChange={(open) => closes.push(open)} returnFocus={returnFocus} />;
+    root!.render(withHostNavigation ? <HostNavigation>{menu}</HostNavigation> : menu);
   });
 }
 
@@ -408,4 +413,62 @@ test("one letter matches the sidebar's Sites without asking the server", async (
   await type("r");
   expect(catalogCalls).toEqual([]);
   expect(groups().find((group) => group.label === "Sites")?.options).toContain("Roadmap");
+});
+
+test("a host command provider's results appear under its heading and navigate", async () => {
+  configurePageAppHost({ commandMenuProviders: [{ id: "host", heading: "Host records", search: async (query, context) => {
+    expect(context.workspaceId).toBe(workspaceId);
+    expect(context.pathname).toContain(`/workspaces/${workspaceId}/`);
+    return query ? [{ id: "record", label: "Arrival task", path: "host/today", keywords: ["booking"] }] : [];
+  } }] });
+  await openMenu(true);
+  await type("booking");
+  expect(groups().find((group) => group.label === "Host records")?.options).toEqual(["Arrival task"]);
+  await act(async () => option("Arrival task").click());
+  expect(hostNavigations).toContain(`/workspaces/${workspaceId}/host/today`);
+  expect(closes).toContain(false);
+});
+test("a provider that rejects or times out does not break the menu", async () => {
+  const warning = spyOn(console, "warn").mockImplementation(() => undefined);
+  configurePageAppHost({ commandMenuProviders: [
+    { id: "reject", heading: "Reject", search: async () => { throw new Error("host unavailable"); } },
+    { id: "slow", heading: "Slow", search: async () => new Promise<never>(() => undefined) },
+    { id: "good", heading: "Host records", search: async () => [{ id: "record", label: "Host result", path: "host/today" }] },
+  ] });
+  try {
+    await openMenu(true);
+    await type("usage");
+    expect(groups().some((group) => group.label === "Sites")).toBe(true);
+    await act(async () => await new Promise((resolve) => setTimeout(resolve, 1600)));
+    expect(groups().find((group) => group.label === "Host records")?.options).toEqual(["Host result"]);
+    expect(warning.mock.calls).toEqual([["HOST_COMMAND_PROVIDER_FAILED"]]);
+  } finally { warning.mockRestore(); }
+});
+test("stock console without an extension is unchanged", async () => {
+  await openMenu();
+  expect(input().getAttribute("aria-label")).toBe("Search chats, Sites and actions");
+  expect(groups().some((group) => group.label === "Recent Sites")).toBe(true);
+  expect(groups().some((group) => group.label === "Host records")).toBe(false);
+});
+
+test("a late host result from a previous actor never appears for the current actor", async () => {
+  const oldActor = currentEnv.subjectId;
+  let release: () => void = () => undefined;
+  let oldReads = 0;
+  configurePageAppHost({ commandMenuProviders: [{ id: "host", heading: "Host records", search: async (query) => {
+    if (!query) return [];
+    if (currentEnv.subjectId === oldActor) {
+      oldReads += 1;
+      return new Promise((resolve) => { release = () => resolve([{ id: "old", label: "Previous actor record", path: "host/old" }]); });
+    }
+    return [{ id: "current", label: "Current actor record", path: "host/current" }];
+  } }] });
+  await openMenu(true);
+  await type("record");
+  expect(oldReads).toBe(1);
+  currentEnv = env({ subjectId: "current-actor" });
+  await act(async () => root?.render(<HostNavigation><CommandMenu open pickWorkspace={false} onOpenChange={(open) => closes.push(open)} returnFocus={{ current: null }} /></HostNavigation>));
+  await act(async () => release());
+  expect(groups().find((group) => group.label === "Host records")?.options).toEqual(["Current actor record"]);
+  expect(document.body.textContent).not.toContain("Previous actor record");
 });

@@ -319,6 +319,36 @@ function checkLifecycle(value: unknown): void {
   optionalFunction(lifecycle.onWorkspaceSwitch, "lifecycle.onWorkspaceSwitch");
 }
 
+function checkCommandMenuProviders(value: unknown): void {
+  const ids = new Set<string>();
+  list(value, "commandMenuProviders").forEach((candidate, index) => {
+    const field = `commandMenuProviders[${index}]`;
+    const provider = record(candidate, field);
+    knownKeys(provider, field, ["id", "heading", "search"]);
+    const id = text(provider.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(provider.heading, `${field}.heading`);
+    if (typeof provider.search !== "function") fail(`${field}.search`, "must be a function");
+  });
+}
+function checkUtilities(value: unknown): void {
+  const utilities = list(value, "utilities");
+  if (utilities.length > 3) fail("utilities", "must contain at most 3 entries");
+  const ids = new Set<string>();
+  utilities.forEach((candidate, index) => {
+    const field = `utilities[${index}]`;
+    const utility = record(candidate, field);
+    knownKeys(utility, field, ["id", "label", "icon", "load"]);
+    const id = text(utility.id, `${field}.id`);
+    if (ids.has(id)) fail(`${field}.id`, "is duplicated");
+    ids.add(id);
+    text(utility.label, `${field}.label`);
+    component(utility.icon, `${field}.icon`);
+    if (typeof utility.load !== "function") fail(`${field}.load`, "must be a function");
+  });
+}
+
 /**
  * Checks that a value is a usable host extension and returns it unchanged.
  * Throws HostExtensionInvalidError (`HOST_EXTENSION_INVALID`) naming the field.
@@ -328,6 +358,8 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
+  checkCommandMenuProviders(fields.commandMenuProviders);
+  checkUtilities(fields.utilities);
   const paths = routePaths(fields.routes);
   const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
   const groups = settingsGroupIds(fields.settingsGroups);

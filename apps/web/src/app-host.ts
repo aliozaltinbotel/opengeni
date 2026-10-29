@@ -24,6 +24,8 @@ configurePageAppHost({
   productName: hostExtension.productName,
   workspaceFilter: hostExtension.workspaceFilter,
   lifecycle: hostExtension.lifecycle,
+  commandMenuProviders: hostExtension.commandMenuProviders,
+  utilities: hostExtension.utilities,
   surfaces: {
     pdfPreview: lazySurface(() => import("@/components/artifacts/pdf-file-preview")),
     codexSubscriptions: lazySurface(async () => ({
