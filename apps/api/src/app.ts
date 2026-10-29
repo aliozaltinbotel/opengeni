@@ -398,6 +398,8 @@ import {
   registerSessionToolFamilyRouteGuards,
 } from "./http/organization-session-policy";
 import { organizationGovernedByHostError } from "./http/organization-governance";
+import { registerGovernedWorkspaceRouteGuards } from "./http/governed-workspace-routes";
+import { sessionRecordingsAllowed } from "@opengeni/contracts/organization-session-policy";
 import { assertHostWebhookDeliveryConfigured } from "./http/host-webhooks";
 import { registerOrganizationSessionRoutes } from "./routes/organization-sessions";
 import { registerOrganizationRecoveryRoutes } from "./routes/organization-recovery";
@@ -428,6 +430,15 @@ import { registerSlackInteractionRoutes } from "./integrations/slack-interaction
 import { resolveSignedStateSecret } from "./signed-state-secret";
 
 export { allowedCorsOrigin } from "./http/cors";
+export {
+  GOVERNED_MEMBER_ORGANIZATION_ROUTES,
+  GOVERNED_MEMBER_SESSION_OPERATIONS,
+  GOVERNED_MEMBER_WORKSPACE_ROUTES,
+  governedMemberRouteAllowed,
+  governedRouteTable,
+  type GovernedRouteEntry,
+  type GovernedRouteTableRow,
+} from "./http/governed-workspace-routes";
 
 export type {
   ApiRouteDeps,
@@ -1498,6 +1509,9 @@ export function createAppComposition(deps: AppDependencies): {
   registerClientErrorRoutes(app, { observability, settings: deps.settings });
   registerAnalyticsConsentRoutes(app, { observability, settings: deps.settings });
 
+  // Before every workspace and organization route: a governed organization's
+  // people reach only its allowlist (and are refused by that name first).
+  registerGovernedWorkspaceRouteGuards(app, routeDeps);
   // Before every route a generic tool family's refusal guards.
   registerSessionToolFamilyRouteGuards(app, routeDeps);
 
@@ -1574,12 +1588,16 @@ export function createAppComposition(deps: AppDependencies): {
             selections = [];
           }
           const workspace = await getWorkspace(deps.db, workspaceId);
+          // Voice input records audio, which the organization's policy may deny.
           // A read: the side-effect-free answer, as the route guards use; it
           // never stores the governed default.
-          if (routeDeps.organizationGovernance && workspace)
-            workspaceAttachmentsAllowed =
-              (await readOrganizationSessionPolicy(routeDeps, workspace.accountId)).policy
-                .attachments === "enabled";
+          let workspaceRecordingsAllowed = true;
+          if (routeDeps.organizationGovernance && workspace) {
+            const view = await readOrganizationSessionPolicy(routeDeps, workspace.accountId);
+            workspaceAttachmentsAllowed = view.policy.attachments === "enabled";
+            workspaceRecordingsAllowed =
+              sessionRecordingsAllowed(view) && workspaceAttachmentsAllowed;
+          }
           const voicePreferences = WorkspaceVoiceInputSettings.safeParse(
             workspace?.settings.voiceInput,
           ).data;
@@ -1590,7 +1608,11 @@ export function createAppComposition(deps: AppDependencies): {
             preferredProvider: voicePreferences?.preferredProvider,
             fallbackEnabled: voicePreferences?.fallbackEnabled,
           };
-          if (hasPermission(grant.permissions, "sessions:create") && transcription) {
+          if (
+            hasPermission(grant.permissions, "sessions:create") &&
+            transcription &&
+            workspaceRecordingsAllowed
+          ) {
             // `providers` lists every ready provider (the workspace picker);
             // `available` honours the workspace preference and fallback, so
             // the composer never offers a mic every request would refuse.

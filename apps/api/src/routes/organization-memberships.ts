@@ -108,6 +108,7 @@ import {
   requireGovernedReactivationWorkspaces,
   requireNativeOrganizationMutation,
   requireNativeOrganizationMutationForRequest,
+  requireOrganizationCreate,
   requirePersonalWorkspacesSetting,
 } from "../http/organization-governance";
 import type { GovernedMutation } from "@opengeni/contracts/organization-governance";
@@ -345,6 +346,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
   });
   app.post("/v1/organizations", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
+    await requireOrganizationCreate(deps, subjectId);
     const payload = await parseBody(context, CreateOrganizationRequest);
     try {
       const created = CreateOrganizationResponse.parse(
@@ -370,6 +372,7 @@ export function registerOrganizationMembershipRoutes(app: Hono, deps: ApiRouteDe
 
   app.post("/v1/organizations/additional", async (context) => {
     const { session, subjectId } = await requireManagedHuman(context, deps);
+    await requireOrganizationCreate(deps, subjectId);
     const payload = await parseBody(context, CreateAdditionalOrganizationRequest);
     try {
       const created = CreateAdditionalOrganizationResponse.parse(

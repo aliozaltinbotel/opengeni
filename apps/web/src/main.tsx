@@ -1,3 +1,5 @@
+// Before any module that injects <style>: the page's CSP nonce, if it has one.
+import "./lib/csp-nonce-boot";
 import "./lib/crypto-random-uuid";
 // Must evaluate before ./App creates the router from the current URL.
 import "./lib/signup-attribution-boot";

@@ -9682,6 +9682,14 @@ export type AuthorizeSessionInput = {
   surface: SessionAuthorizationSurface;
 };
 
+/** A session create that admits a first turn: there is no target session yet. */
+export type AuthorizeSessionCreateInput = {
+  accountId: string;
+  workspaceId: string;
+  actor: SessionAuthorizationActor;
+  surface: SessionAuthorizationSurface;
+};
+
 export const SessionAuthorizationDecision = /* @__PURE__ */ defineSchema(() =>
   z.discriminatedUnion("allowed", [
     z.object({
@@ -9811,6 +9819,18 @@ export type SessionAuthorizationPort = {
     modelAccountOperation?: boolean;
   };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  /**
+   * Optional, target-free: asked before `POST /v1/workspaces/:id/sessions`
+   * creates a session whose request carries an `initialMessage` (the first
+   * turn the default start mode admits). A refusal answers 403
+   * `SESSION_CREATE_NOT_AUTHORIZED` and creates nothing; a throw or an
+   * unreadable answer answers 503 `SESSION_AUTHORIZATION_UNAVAILABLE`.
+   * Without it, creation checks only the native `sessions:create` permission,
+   * as before. `relatedSessionAccess` and `reauthorizeAfterMs` are ignored.
+   */
+  authorizeSessionCreate?(
+    input: AuthorizeSessionCreateInput,
+  ): Promise<SessionAuthorizationDecision>;
   /**
    * Return the complete current scope used inside Opengeni's cursor query.
    * This is deliberately not a post-filter callback: search, pinning, ordering,

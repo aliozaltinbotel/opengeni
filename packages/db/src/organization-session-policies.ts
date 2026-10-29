@@ -26,6 +26,14 @@ export type StoredOrganizationSessionPolicy = {
 export const HOST_SESSION_POLICY_ROUTINE =
   "opengeni_private.put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)";
 
+/**
+ * Migration 1020's host write of the recordings setting, called after 1018's
+ * routine in the same command. Its runtime EXECUTE is withheld for one release;
+ * until it is granted, a command that names recordings is "not yet".
+ */
+export const HOST_SESSION_RECORDINGS_ROUTINE =
+  "opengeni_private.set_host_organization_session_recordings(uuid, text, uuid, text)";
+
 type PolicyRow = {
   account_id: string;
   attachments: string;
@@ -35,6 +43,7 @@ type PolicyRow = {
   revision: string | number;
   last_operation_id: string | null;
   updated_at: Date | string;
+  recordings: string | null;
 };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
@@ -47,6 +56,8 @@ function storedPolicy(row: PolicyRow): StoredOrganizationSessionPolicy {
     policy: OrganizationSessionPolicy.parse({
       attachments: row.attachments,
       toolFamilies: { mode: row.tool_family_mode, families: row.tool_families },
+      // NULL (never set) stays absent: the reader applies the source's default.
+      ...(row.recordings === null ? {} : { recordings: row.recordings }),
     }),
     source: row.source === "host" ? "host" : "governed_default",
     revision: Number(row.revision),
@@ -56,7 +67,7 @@ function storedPolicy(row: PolicyRow): StoredOrganizationSessionPolicy {
 }
 
 const SELECT_COLUMNS = sql`account_id, attachments, tool_family_mode, tool_families, source,
-  revision, last_operation_id, updated_at`;
+  revision, last_operation_id, updated_at, recordings`;
 
 async function readPolicyInScope(
   scopedDb: Database,
@@ -162,6 +173,26 @@ export async function listManagedAccountExternalSources(
   return rows.map((row) => ({ id: row.id, externalSource: row.external_source }));
 }
 
+/**
+ * Whether the runtime may write `policy`: always for a policy without
+ * `recordings` (1019 granted 1018's routine; readiness requires it), and, for
+ * one that names `recordings`, whether 1020's routine exists and the runtime
+ * may call it.
+ */
+export async function hostSessionPolicyWriteGranted(
+  db: Pick<Database, "execute">,
+  policy?: Pick<OrganizationSessionPolicy, "recordings">,
+): Promise<boolean> {
+  if (policy?.recordings === undefined) return true;
+  const [row] = await rawRows<{ recordings: boolean | null }>(
+    db,
+    sql`select has_function_privilege(
+      to_regprocedure(${HOST_SESSION_RECORDINGS_ROUTINE})::oid, 'EXECUTE'
+    ) as recordings`,
+  );
+  return row?.recordings === true;
+}
+
 /** This operation id already wrote a policy with another body. */
 export class SessionPolicyOperationConflictError extends Error {
   readonly name = "SessionPolicyOperationConflictError";
@@ -185,7 +216,9 @@ export function organizationSessionPolicyDigest(policy: OrganizationSessionPolic
  * (recordOrganizationHostCommandAttribution, mutation `session_policy.update`,
  * this subject). A replay of the same operation and body changes nothing; the
  * same operation with another body, and a stale `expectedRevision`, are
- * refused.
+ * refused. Null, for a policy that names `recordings`, while 1020's routine is
+ * not granted ("not yet"). A policy without `recordings` leaves the stored
+ * setting as it is.
  */
 export async function putHostOrganizationSessionPolicy(
   db: Database,
@@ -196,13 +229,14 @@ export async function putHostOrganizationSessionPolicy(
     policy: OrganizationSessionPolicy;
     expectedRevision: number;
   },
-): Promise<{ stored: StoredOrganizationSessionPolicy; replay: boolean }> {
+): Promise<{ stored: StoredOrganizationSessionPolicy; replay: boolean } | null> {
   const policy = OrganizationSessionPolicy.parse(input.policy);
   const digest = organizationSessionPolicyDigest(policy);
   return await withRlsContext(
     db,
     { accountId: input.organizationId, workspaceId: null },
     async (scopedDb) => {
+      if (!(await hostSessionPolicyWriteGranted(scopedDb, policy))) return null;
       await setSubjectRlsContext(scopedDb, input.subjectId);
       let replay: boolean;
       try {
@@ -215,6 +249,15 @@ export async function putHostOrganizationSessionPolicy(
             ) as result`,
         );
         replay = row?.result.replay === true;
+        // A replay already set it; a command that does not name it keeps it.
+        if (!replay && policy.recordings !== undefined)
+          await rawRows(
+            scopedDb,
+            sql`select opengeni_private.set_host_organization_session_recordings(
+                ${input.organizationId}::uuid, ${input.subjectId}, ${input.operationId}::uuid,
+                ${policy.recordings}
+              ) as result`,
+          );
       } catch (error) {
         const state = nestedPostgresSqlState(error);
         if (state === "OGSP1")

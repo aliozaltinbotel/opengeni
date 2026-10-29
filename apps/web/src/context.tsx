@@ -56,6 +56,7 @@ import { CreditRequiredGate } from "@opengeni/react/app/components/credit-requir
 import type { PendingSlackLink } from "@opengeni/react/app/app-context";
 import type { ClientConfig, SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
 import { afterHostSignOut } from "@/host-extension/lifecycle";
+import { outsideWorkspaceRouteAt } from "@/host-extension/registry";
 import {
   clearPendingDeveloperSetup,
   pendingDeveloperSetupFor,
@@ -184,7 +185,11 @@ export function RootRouteComponent() {
       pathname === "/dev/onboarding" ||
       pathname === "/dev/session-timeline" ||
       pathname === "/dev/ui-kit");
+  // A host extension's page outside any workspace: public ones render with the
+  // public pages, signed-in ones once the person is signed in (below).
+  const hostOutsideRoute = outsideWorkspaceRouteAt(pathname);
   const isPublicAuthRoute =
+    hostOutsideRoute?.access === "public" ||
     pathname === "/reset-password" ||
     pathname === "/setup-account" ||
     pathname === "/account-auth" ||
@@ -327,6 +332,14 @@ export function RootRouteComponent() {
         </SignedOutPage>
       </Suspense>
     </DesktopSignedOutRecovery>
+  ) : hostOutsideRoute && clientConfig && (!managedAuthRequired || authSession) ? (
+    // Before the access and onboarding gates: the person may have no
+    // workspace yet (the host's registration, not-admitted or identity pages).
+    browserAccountsConfigured && !browserAccountsEnabled ? (
+      <LoadingPanel />
+    ) : (
+      <Outlet />
+    )
   ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&
     authSession &&

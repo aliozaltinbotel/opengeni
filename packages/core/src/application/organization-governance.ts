@@ -1,5 +1,6 @@
 import {
   GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE,
+  ORGANIZATION_CREATE_GOVERNED,
   ORGANIZATION_GOVERNED_BY_HOST,
   type GovernedMutation,
   type GovernedMutationChannel,
@@ -9,6 +10,7 @@ import {
   ensureGovernedOrganizationSessionPolicy,
   getManagedAccount,
   getOrganizationPrivacyPreferences,
+  listSelfOrganizationMemberships,
   updateOrganizationPrivacyPreferences,
   withAccountRls,
   type Database,
@@ -142,6 +144,48 @@ export async function requireNativeOrganizationMutationAllowed(
     via: "native",
   });
   if (decision === "refuse") throw new OrganizationGovernedByHostError(mutation);
+}
+
+/** Raised where a person of a governed organization may not create another organization. */
+export class OrganizationCreateGovernedError extends Error {
+  readonly name = "OrganizationCreateGovernedError";
+  readonly code = ORGANIZATION_CREATE_GOVERNED;
+  constructor() {
+    super("Organizations for your account are created by the application that manages it.");
+  }
+}
+
+/**
+ * A person who belongs to a governed organization creates no organization of
+ * their own unless that organization's host allows `organization.create`
+ * (`via: "native"`): a new organization would be outside the host's
+ * governance, with the person as its owner. Every membership but a revoked one
+ * counts, and each governing host is asked; any refusal refuses. With
+ * `organizationCreation: "host"` on the port, a person also needs at least one
+ * governing host that allows it: someone who belongs to no governed
+ * organization (a fresh sign-up included) is refused. Without a bound port
+ * nothing is read.
+ */
+export async function requireOrganizationCreateAllowed(
+  deps: OrganizationGovernanceDeps,
+  subjectId: string,
+): Promise<void> {
+  const port = deps.organizationGovernance;
+  if (!port) return;
+  const memberships = await listSelfOrganizationMemberships(deps.db, subjectId);
+  let allowedByHost = false;
+  for (const membership of memberships) {
+    if (membership.status === "revoked") continue;
+    const decision = await organizationGovernanceDecision(deps, {
+      organizationId: membership.organizationId,
+      mutation: "organization.create",
+      via: "native",
+    });
+    if (decision === "refuse") throw new OrganizationCreateGovernedError();
+    if (decision === "allow") allowedByHost = true;
+  }
+  if (port.organizationCreation === "host" && !allowedByHost)
+    throw new OrganizationCreateGovernedError();
 }
 
 export type GovernedSharedWorkspaceOperation = "invitation" | "removal" | "reactivation";

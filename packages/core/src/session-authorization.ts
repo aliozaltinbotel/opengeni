@@ -502,6 +502,42 @@ async function authorizeSessionFromFacts(
   };
 }
 
+/**
+ * The host's target-free check before a session create that admits a first
+ * turn (`initialMessage`). Without a bound port or its optional
+ * `authorizeSessionCreate`, nothing is asked. The actor is resolved as for
+ * every other check; a refusal throws SessionAuthorizationDeniedError, a
+ * throw or an unreadable answer SessionAuthorizationUnavailableError.
+ */
+export async function requireSessionCreateAuthorization(
+  deps: SessionAuthorizationDependencies,
+  grant: AccessGrant,
+  surface: SessionAuthorizationSurface,
+): Promise<void> {
+  const port = deps.sessionAuthorization;
+  if (!port?.authorizeSessionCreate) return;
+  const reads = claimSessionAuthorizationReads();
+  const claims = agentAttemptClaims(grant);
+  const facts = claims
+    ? await readSessionAuthorizationFacts(deps.db, grant, claims.callerSessionId, claims, reads)
+    : null;
+  const { actor } = resolveSessionAuthorizationActor(grant, claims, facts);
+  let rawDecision: unknown;
+  try {
+    rawDecision = await port.authorizeSessionCreate({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      actor,
+      surface,
+    });
+  } catch (error) {
+    throw new SessionAuthorizationUnavailableError({ cause: error });
+  }
+  const parsed = SessionAuthorizationDecision.safeParse(rawDecision);
+  if (!parsed.success) throw new SessionAuthorizationUnavailableError({ cause: parsed.error });
+  if (!parsed.data.allowed) throw new SessionAuthorizationDeniedError(parsed.data.reason);
+}
+
 /** Resolve the host's complete current list scope for an in-database query. */
 export async function requireSessionAuthorizationListScope(
   deps: SessionAuthorizationDependencies,

@@ -30,6 +30,7 @@ import { recordOrganizationSetupOutcome } from "../auth/signup-funnel-metrics";
 import { hashManagedAuthPassword } from "../auth/managed-auth";
 import { trustedRequestSourceRateLimitKey } from "../http/request-source";
 import { parseRequestBody, requestValidationError } from "../http/request-body";
+import { requireOrganizationCreate } from "../http/organization-governance";
 
 export type ManagedOnboardingRouteOptions = {
   accountSetupLimiter?: { take(key: string): boolean };
@@ -60,6 +61,8 @@ export function registerManagedOnboardingRoutes(
 
   app.post("/v1/auth/organization-onboarding", async (context) => {
     const session = await requireManagedHuman(context, deps);
+    // Self-service setup creates an organization: the governing host decides.
+    await requireOrganizationCreate(deps, `user:${session.user.id}`);
     const parsed = CompleteSelfServiceOrganizationSetupRequest.safeParse(
       await context.req.json().catch(() => null),
     );

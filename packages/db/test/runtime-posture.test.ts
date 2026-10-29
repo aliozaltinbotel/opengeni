@@ -4018,9 +4018,13 @@ describe("runtime definers: 0947, 0950 and 1019 grant what 0937, 0946, 0978, 098
       "lookup_organization_host_identity(uuid, text, uuid)",
       "ensure_organization_host_owner(uuid, text, uuid)",
       "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
+      "set_host_organization_session_recordings(uuid, text, uuid, text)",
     ]);
-    // 1019 granted what 0978, 0984, 1016, 1017 and 1018 withheld.
-    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([]);
+    // 1019 granted what 0978, 0984, 1016, 1017 and 1018 withheld; 1020 withholds
+    // the recordings write.
+    expect(runtimePosture.DEFERRED_RUNTIME_PRIVATE_ROUTINES).toEqual([
+      "set_host_organization_session_recordings(uuid, text, uuid, text)",
+    ]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(true), eventOptions)).toEqual([]);
     expect(evaluateRuntimeDatabasePosture(eventPosture(false), eventOptions)).toEqual(
       runtimePosture.RUNTIME_DEFINER_ROUTINES.filter(
@@ -4073,6 +4077,7 @@ describe("runtime definers: 0947, 0950 and 1019 grant what 0937, 0946, 0978, 098
       "lookup_organization_host_identity(uuid, text, uuid)",
       "ensure_organization_host_owner(uuid, text, uuid)",
       "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
+      "set_host_organization_session_recordings(uuid, text, uuid, text)",
     ]) {
       const posture = eventPosture(false);
       posture.privateRoutines = posture.privateRoutines.filter((entry) => entry.name !== name);

@@ -19,6 +19,11 @@ import { ActingExternalUser } from "./organization-governance";
  *   catalog and refused at call admission. `deny` names the removed families;
  *   `allow` names the only families kept. Either way the policy only narrows:
  *   a family it keeps still follows the session's own capabilities.
+ * - `recordings` (optional): whether people may record meetings and send
+ *   recorded or dictated audio to a transcription provider. Absent means the
+ *   default for the policy's source (`sessionRecordingsAllowed`): `denied` for
+ *   a stored policy (a governed organization), `allowed` for stock. A host
+ *   command that leaves it out keeps the stored setting.
  */
 export const SESSION_TOOL_FAMILIES = ["shell", "codemode", "browser", "computerUse"] as const;
 export const SessionToolFamily = /* @__PURE__ */ defineSchema(() => z.enum(SESSION_TOOL_FAMILIES));
@@ -28,6 +33,11 @@ export const OrganizationSessionAttachments = /* @__PURE__ */ defineSchema(() =>
   z.enum(["enabled", "disabled"]),
 );
 export type OrganizationSessionAttachments = z.infer<typeof OrganizationSessionAttachments>;
+
+export const OrganizationSessionRecordings = /* @__PURE__ */ defineSchema(() =>
+  z.enum(["allowed", "denied"]),
+);
+export type OrganizationSessionRecordings = z.infer<typeof OrganizationSessionRecordings>;
 
 export const OrganizationSessionPolicy = /* @__PURE__ */ defineSchema(() =>
   z
@@ -44,6 +54,7 @@ export const OrganizationSessionPolicy = /* @__PURE__ */ defineSchema(() =>
             }),
         })
         .strict(),
+      recordings: OrganizationSessionRecordings.optional(),
     })
     .strict(),
 );
@@ -118,12 +129,23 @@ export type HostPutOrganizationSessionPolicyRequest = z.infer<
 /** Refusal detail codes (`error.details.code`). */
 export const ATTACHMENTS_DISABLED = "ATTACHMENTS_DISABLED";
 export const SESSION_TOOL_FAMILY_DENIED = "SESSION_TOOL_FAMILY_DENIED";
+/** 403: the organization's session policy turns recordings and transcription off. */
+export const SESSION_RECORDINGS_DENIED = "SESSION_RECORDINGS_DENIED";
 /** 409: this operation id already wrote a different policy. */
 export const SESSION_POLICY_OPERATION_CONFLICT = "SESSION_POLICY_OPERATION_CONFLICT";
 /** 409: `expectedRevision` is not the stored revision. */
 export const SESSION_POLICY_REVISION_CONFLICT = "SESSION_POLICY_REVISION_CONFLICT";
+/**
+ * 503: this deployment cannot write a host session policy that names
+ * `recordings` yet (1020's routine is not granted). Nothing was recorded.
+ */
+export const HOST_SESSION_POLICY_UNAVAILABLE = "HOST_SESSION_POLICY_UNAVAILABLE";
 
-/** The digest a host command's policy is idempotent on: canonical JSON, families sorted. */
+/**
+ * The digest a host command's policy is idempotent on: canonical JSON, families
+ * sorted. `recordings` is part of it only when the command names it, so a body
+ * without it keeps the digest it had before the setting existed.
+ */
 export function organizationSessionPolicyDigestInput(policy: OrganizationSessionPolicy): string {
   return JSON.stringify({
     attachments: policy.attachments,
@@ -131,7 +153,19 @@ export function organizationSessionPolicyDigestInput(policy: OrganizationSession
       mode: policy.toolFamilies.mode,
       families: [...policy.toolFamilies.families].sort(),
     },
+    ...(policy.recordings === undefined ? {} : { recordings: policy.recordings }),
   });
+}
+
+/**
+ * Whether a policy lets people record and transcribe: its `recordings`
+ * setting, else the default for its source (`stock` allows, a stored governed
+ * default or host policy denies).
+ */
+export function sessionRecordingsAllowed(
+  view: Readonly<{ policy: OrganizationSessionPolicy; source: OrganizationSessionPolicySource }>,
+): boolean {
+  return (view.policy.recordings ?? (view.source === "stock" ? "allowed" : "denied")) === "allowed";
 }
 
 /** The families a policy removes, in `SESSION_TOOL_FAMILIES` order. */

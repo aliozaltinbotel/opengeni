@@ -11,7 +11,10 @@ import {
   EMPTY_HOST_EXTENSION,
   isBuiltInToolCardName,
   isNativeDestination,
+  isNativeNavId,
+  nativeNavDestination,
   type HostExtension,
+  type HostExtensionOutsideWorkspaceRoute,
   type NativeDestination,
 } from "@opengeni/react/app/host-extension";
 
@@ -41,6 +44,42 @@ const OTHER_NATIVE_SEGMENTS: ReadonlySet<string> = new Set([
   "memory",
   "sites",
 ]);
+
+/**
+ * First path segments the native console owns at its top level (App.tsx's
+ * root routes, and the API and asset paths served beside it). A host page
+ * outside any workspace must start with another segment; registry.test.ts
+ * fails when App.tsx adds a root route not listed.
+ */
+const NATIVE_TOP_LEVEL_SEGMENTS: ReadonlySet<string> = new Set([
+  "sessions",
+  "identity-links",
+  "billing",
+  "integrations",
+  "teams",
+  "connect-agent",
+  "device",
+  "reset-password",
+  "excel",
+  "desktop-return",
+  "setup-account",
+  "account-auth",
+  "settings",
+  "reauthenticate",
+  "native-sign-in",
+  "site-auth",
+  "dev",
+  "workspaces",
+  "v1",
+  "api",
+  "assets",
+  "auth",
+  "oauth",
+  "mcp",
+]);
+
+/** Lowercase static segments: an outside-workspace page path (no params). */
+const OUTSIDE_ROUTE_PATH = /^[a-z][a-z0-9-]*(\/[a-z0-9-]+)*$/;
 
 /** The workspace route's own param, which an extension path must not redeclare. */
 const WORKSPACE_PARAM = "$workspaceId";
@@ -111,6 +150,32 @@ function checkRoutePath(path: string, field: string): void {
   }
 }
 
+/** Only these keys, or the field names the first one it does not know. */
+function knownKeys(value: Fields, field: string, keys: readonly string[]): void {
+  const unknown = Object.keys(value).find((key) => !keys.includes(key));
+  if (unknown !== undefined) fail(`${field}.${unknown}`, "is not a known field");
+}
+
+function checkOutsideWorkspaceRoutes(value: unknown): void {
+  const paths = new Set<string>();
+  list(value, "outsideWorkspaceRoutes").forEach((entry, index) => {
+    const field = `outsideWorkspaceRoutes[${index}]`;
+    const route = record(entry, field);
+    const path =
+      typeof route.path === "string" ? route.path : fail(`${field}.path`, "must be a string");
+    if (!OUTSIDE_ROUTE_PATH.test(path))
+      fail(`${field}.path`, `"${path}" is not a lowercase static route path`);
+    const first = path.split("/")[0] ?? "";
+    if (NATIVE_TOP_LEVEL_SEGMENTS.has(first))
+      fail(`${field}.path`, `"${path}" collides with the native "${first}" route`);
+    if (paths.has(path)) fail(`${field}.path`, `"${path}" is registered twice`);
+    if (typeof route.load !== "function") fail(`${field}.load`, "must be a function");
+    if (route.access !== undefined && route.access !== "public" && route.access !== "signedIn")
+      fail(`${field}.access`, 'must be "public" or "signedIn"');
+    paths.add(path);
+  });
+}
+
 function routePaths(value: unknown): ReadonlySet<string> {
   const paths = new Set<string>();
   list(value, "routes").forEach((entry, index) => {
@@ -140,6 +205,31 @@ function settingsGroupIds(value: unknown): ReadonlySet<string> {
     ids.add(id);
   });
   return ids;
+}
+
+/** Native rail overrides: known ids, once each, never a destination the extension hides. */
+function checkNavOverrides(value: unknown, hidden: readonly unknown[]): void {
+  const ids = new Set<string>();
+  list(value, "navOverrides").forEach((entry, index) => {
+    const field = `navOverrides[${index}]`;
+    const override = record(entry, field);
+    knownKeys(override, field, ["id", "label", "group"]);
+    const id = override.id;
+    if (!isNativeNavId(id)) fail(`${field}.id`, `"${String(id)}" is not a native rail entry`);
+    if (ids.has(id)) fail(`${field}.id`, `"${id}" is overridden twice`);
+    const destination = nativeNavDestination(id);
+    if (destination !== null && hidden.includes(destination))
+      fail(`${field}.id`, `"${id}" is a hidden native destination`);
+    ids.add(id);
+    optionalText(override.label, `${field}.label`);
+    if (
+      override.group !== undefined &&
+      override.group !== "peer" &&
+      override.group !== "chat" &&
+      override.group !== "hidden"
+    )
+      fail(`${field}.group`, 'must be "peer", "chat" or "hidden"');
+  });
 }
 
 function checkNav(value: unknown, paths: ReadonlySet<string>, groups: ReadonlySet<string>): void {
@@ -195,6 +285,15 @@ function checkToolRegistryEntries(value: unknown): void {
   });
 }
 
+/** "sessions" or one of the extension's own workspace pages without params. */
+function checkLanding(value: unknown, paths: ReadonlySet<string>): void {
+  if (value === undefined) return;
+  const landing = text(value, "landing");
+  if (landing === "sessions") return;
+  if (landing.includes("$")) fail("landing", `"${landing}" has a param no redirect can fill`);
+  if (!paths.has(landing)) fail("landing", `"${landing}" is not a registered route`);
+}
+
 function checkLifecycle(value: unknown): void {
   if (value === undefined) return;
   const lifecycle = record(value, "lifecycle");
@@ -211,17 +310,23 @@ export function validateHostExtension(value: unknown): HostExtension {
   text(fields.id, "id");
   optionalText(fields.productName, "productName");
   checkBrand(fields.brand);
-  checkNav(fields.nav, routePaths(fields.routes), settingsGroupIds(fields.settingsGroups));
-  list(fields.hiddenNativeDestinations, "hiddenNativeDestinations").forEach(
-    (destination, index) => {
-      if (!isNativeDestination(destination)) {
-        fail(
-          `hiddenNativeDestinations[${index}]`,
-          `"${String(destination)}" is not a native destination`,
-        );
-      }
-    },
+  const paths = routePaths(fields.routes);
+  const hidden = list(fields.hiddenNativeDestinations, "hiddenNativeDestinations");
+  checkNav(fields.nav, paths, settingsGroupIds(fields.settingsGroups));
+  checkNavOverrides(fields.navOverrides, hidden);
+  checkLanding(fields.landing, paths);
+  checkOutsideWorkspaceRoutes(fields.outsideWorkspaceRoutes);
+  list(fields.outsideWorkspaceProviders, "outsideWorkspaceProviders").forEach((provider, index) =>
+    component(provider, `outsideWorkspaceProviders[${index}]`),
   );
+  hidden.forEach((destination, index) => {
+    if (!isNativeDestination(destination)) {
+      fail(
+        `hiddenNativeDestinations[${index}]`,
+        `"${String(destination)}" is not a native destination`,
+      );
+    }
+  });
   list(fields.shellProviders, "shellProviders").forEach((provider, index) =>
     component(provider, `shellProviders[${index}]`),
   );
@@ -294,6 +399,19 @@ export const currentHostExtension: HostExtensionSlot["current"] = slot.current;
  * The same array on every call, so it can be a memo input.
  */
 export const extensionSettingsPaths: HostExtensionSlot["settingsPaths"] = slot.settingsPaths;
+
+/** This build's extension pages outside any workspace (read at call time). */
+export function outsideWorkspaceRoutes(): readonly HostExtensionOutsideWorkspaceRoute[] {
+  return currentHostExtension().outsideWorkspaceRoutes ?? NONE;
+}
+
+/** The outside-workspace page at `pathname` (exact, trailing slash allowed), if any. */
+export function outsideWorkspaceRouteAt(
+  pathname: string,
+): HostExtensionOutsideWorkspaceRoute | undefined {
+  const path = pathname.replace(/^\/+|\/+$/g, "");
+  return outsideWorkspaceRoutes().find((route) => route.path === path);
+}
 
 /** Native destinations this build's extension hides from every link source; none for the stub. */
 export function hiddenNativeDestinations(): readonly NativeDestination[] {

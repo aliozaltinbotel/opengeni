@@ -347,6 +347,8 @@ import {
   hasVerifiedOwningUserAuthorization,
   requirePermission,
   requireSessionAuthorization,
+  requireSessionCreateAuthorization,
+  type SessionAuthorizationDependencies,
   requireSessionAuthorizationListScope,
   resolveWorkspaceCatalogSettings,
   withResolvedSessionAuthorization,
@@ -817,6 +819,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         422,
       );
     }
+    // A request that admits a first turn asks the host first (TL3's create window).
+    if (typeof (payload as { initialMessage?: unknown } | null)?.initialMessage === "string")
+      await requireSessionCreateAuthorizationForHttp(deps, grant);
     let result: CreateSessionRequestOutcome;
     try {
       const legacyFields = legacyVariableSetFields(payload);
@@ -6116,6 +6121,34 @@ export function sessionAuthorizationOperationForHttp(
     return "session.terminal.control";
   }
   return null;
+}
+
+/** The host's create check, as the API envelope: 403 SESSION_CREATE_NOT_AUTHORIZED or 503. */
+async function requireSessionCreateAuthorizationForHttp(
+  deps: SessionAuthorizationDependencies,
+  grant: AccessGrant,
+): Promise<void> {
+  try {
+    await requireSessionCreateAuthorization(deps, grant, "http");
+  } catch (error) {
+    if (error instanceof SessionAuthorizationDeniedError)
+      throw new ApiHttpError(403, {
+        code: "forbidden",
+        message: "You can't start a session here.",
+        retryable: false,
+        outcomeUnknown: false,
+        details: { code: "SESSION_CREATE_NOT_AUTHORIZED" },
+      });
+    if (error instanceof SessionAuthorizationUnavailableError)
+      throw new ApiHttpError(503, {
+        code: "upstream_unavailable",
+        message: "Session authorization is unavailable.",
+        retryable: true,
+        outcomeUnknown: false,
+        details: { code: "SESSION_AUTHORIZATION_UNAVAILABLE" },
+      });
+    throw error;
+  }
 }
 
 export function sessionAuthorizationHttpError(error: unknown): HTTPException {

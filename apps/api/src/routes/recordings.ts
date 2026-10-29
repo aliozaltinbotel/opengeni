@@ -72,6 +72,7 @@ import { voiceInputCreditBillingActive } from "@opengeni/config";
 import type { Context, Hono } from "hono";
 import { z } from "zod";
 import { ApiHttpError } from "../http/api-error";
+import { requireWorkspaceRecordingsAllowed } from "../http/organization-session-policy";
 import { parseRequestJson } from "../http/request-body";
 import { userContentSignedGetUrlOptions } from "../http/user-content";
 import {
@@ -149,6 +150,19 @@ export function registerRecordingRoutes(
       /** Who a deployment-funded transcript this request asks for is billed to. */
       creditAttribution: creditDebitAttributionForGrant(grant),
     };
+  }
+
+  /**
+   * A person (or agent) adding audio or asking for transcription: a new
+   * recording, its uploads and finalize, a new transcript and live text. The
+   * organization's session policy decides first (SESSION_RECORDINGS_DENIED,
+   * then ATTACHMENTS_DISABLED); reading, editing and deleting what exists stay
+   * open, so a policy change never hides what already happened.
+   */
+  async function recordingInputActorFor(c: Context) {
+    const actor = await actorFor(c, "sessions:create");
+    await requireWorkspaceRecordingsAllowed(deps, actor.accountId);
+    return actor;
   }
 
   /**
@@ -455,7 +469,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(base, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const body = await parseRequestJson(c, CreateRecordingRequest);
     if (body.purpose === "dictation") {
       // Dictation is typing by voice: the workspace's voice input decides
@@ -556,7 +570,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/uploads`, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingUploadsRequest);
     const objects = storage();
@@ -621,7 +635,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/chunks/complete`, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CompleteRecordingChunksRequest);
     const objects = storage();
@@ -675,7 +689,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/finalize`, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, FinalizeRecordingRequest);
     const current = await guard(() => getRecording(db, { ...actor, recordingId }));
@@ -706,7 +720,7 @@ export function registerRecordingRoutes(
   });
 
   app.post(`${base}/:recordingId/transcripts`, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingTranscriptRequest);
     const recording = await guard(() => getRecording(db, { ...actor, recordingId }));
@@ -1022,7 +1036,7 @@ export function registerRecordingRoutes(
    * single-use credential, never the workspace's key.
    */
   app.post(`${base}/:recordingId/live-session`, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, CreateRecordingLiveSessionRequest);
     const { provider, spec } = liveModelChoice(body);
@@ -1094,7 +1108,7 @@ export function registerRecordingRoutes(
 
   /** Save finished live text for one track; only the person recording may. */
   app.post(`${base}/:recordingId/live-segments`, async (c) => {
-    const actor = await actorFor(c, "sessions:create");
+    const actor = await recordingInputActorFor(c);
     const recordingId = recordingIdParam(c);
     const body = await parseRequestJson(c, AppendRecordingLiveSegmentsRequest);
     const recording = await guard(() => getRecording(db, { ...actor, recordingId }));

@@ -1,17 +1,20 @@
 import {
   ATTACHMENTS_DISABLED,
+  SESSION_RECORDINGS_DENIED,
   SESSION_TOOL_FAMILY_DENIED,
   sessionToolFamilyGate,
   type SessionToolFamily,
 } from "@opengeni/contracts/organization-session-policy";
 import {
   AttachmentsDisabledError,
+  SessionRecordingsDeniedError,
   SessionToolFamilyDeniedError,
   ensureOrganizationSessionPolicyAtEntry,
   organizationSessionToolFamilyGate,
   readOrganizationSessionPolicy,
   requireAccessGrant,
   requireOrganizationAttachmentsAllowed,
+  requireOrganizationRecordingsAllowed,
   type ApiRouteDeps,
 } from "@opengeni/core";
 import { getWorkspace } from "@opengeni/db";
@@ -40,8 +43,19 @@ export function sessionToolFamilyDeniedHttpError(family: SessionToolFamily): Api
   });
 }
 
+export function sessionRecordingsDeniedHttpError(): ApiHttpError {
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: new SessionRecordingsDeniedError().message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: SESSION_RECORDINGS_DENIED },
+  });
+}
+
 /** Maps the core refusals onto the API envelope; null for any other error. */
 export function organizationSessionPolicyHttpError(error: unknown): ApiHttpError | null {
+  if (error instanceof SessionRecordingsDeniedError) return sessionRecordingsDeniedHttpError();
   if (error instanceof AttachmentsDisabledError) return attachmentsDisabledHttpError();
   if (error instanceof SessionToolFamilyDeniedError)
     return sessionToolFamilyDeniedHttpError(error.family);
@@ -58,6 +72,23 @@ export async function requireWorkspaceAttachmentsAllowed(
 ): Promise<void> {
   try {
     await requireOrganizationAttachmentsAllowed(deps, organizationId);
+  } catch (error) {
+    throw organizationSessionPolicyHttpError(error) ?? error;
+  }
+}
+
+/**
+ * Refuses a new recording, its audio and transcription in the workspace's
+ * organization: SESSION_RECORDINGS_DENIED when its policy denies recordings,
+ * else ATTACHMENTS_DISABLED when it turns attachments off. Called after the
+ * route authenticated the caller.
+ */
+export async function requireWorkspaceRecordingsAllowed(
+  deps: PolicyDeps,
+  organizationId: string,
+): Promise<void> {
+  try {
+    await requireOrganizationRecordingsAllowed(deps, organizationId);
   } catch (error) {
     throw organizationSessionPolicyHttpError(error) ?? error;
   }

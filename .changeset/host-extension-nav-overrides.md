@@ -1,0 +1,5 @@
+---
+"@opengeni/react": minor
+---
+
+The web console host extension can relabel native rail entries, move them into the chat group after "New session", or leave them off the rail: `HostExtension.navOverrides` takes `{ id, label?, group? }` entries (`id` a `NativeNavId`: `inbox`, `plugins`, `state`, `automations`, `meetings`, `artifacts`; `group` `"peer"`, `"chat"` or `"hidden"`). The chat group renders as its own group with a rule before the peers. The console refuses an unknown or repeated id, and an override of a destination the extension hides. `composePrimaryNav(extension, nativeItems, context?)`, a pure resolver with no React or DOM imports, gives the composed rail (`chat` and `peers`, host primary items after the native peers) so a host can test its rail outside a browser. New exports: `NATIVE_NAV_IDS`, `isNativeNavId`, `nativeNavDestination`, `composePrimaryNav` and the `NativeNavId`, `HostExtensionNavGroup`, `HostExtensionNavOverride`, `NativeNavEntry` and `ComposedPrimaryNav` types. A console without overrides renders its rail as before.

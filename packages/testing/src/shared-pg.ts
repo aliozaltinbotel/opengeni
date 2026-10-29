@@ -852,7 +852,10 @@ export async function acquireSharedTestDatabase(
 /**
  * Restore the runtime role's EXECUTE on the personal-machine owner lookup
  * (0978) and the connected-command re-arm (0984), which 1019 grants, after a
- * test revoked it to exercise its callers' "not granted" path.
+ * test revoked it to exercise its callers' "not granted" path, and grant what
+ * a migration still withholds until the previous release knows it
+ * (runtime-posture DEFERRED_RUNTIME_PRIVATE_ROUTINES): the host recordings
+ * write (1020). Tests that exercise it run as they will once it is granted.
  */
 export async function grantDeferredRuntimeAccess(
   admin: postgres.Sql,
@@ -863,6 +866,9 @@ export async function grantDeferredRuntimeAccess(
       TO "${role.replaceAll('"', '""')}";
     GRANT EXECUTE ON FUNCTION opengeni_private.rearm_unanswered_connected_commands(uuid, uuid, text)
       TO "${role.replaceAll('"', '""')}";
+    GRANT EXECUTE ON FUNCTION opengeni_private.set_host_organization_session_recordings(
+      uuid, text, uuid, text
+    ) TO "${role.replaceAll('"', '""')}";
   `);
 }
 

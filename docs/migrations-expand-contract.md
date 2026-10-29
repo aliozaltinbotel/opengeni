@@ -270,7 +270,11 @@ withheld; while withheld, the lookup answered through the organization's
 member list and the ensure and session-policy commands answered 503 "not
 yet". 1019 granted all three, readiness requires them, and those "not yet"
 paths are gone: a runtime without the grant is unready and names the routine
-it lacks.
+it lacks. 1020 created the host recordings write
+(`opengeni_private.set_host_organization_session_recordings`) withheld; until
+it is granted, a session-policy command that names `recordings` answers
+`HOST_SESSION_POLICY_UNAVAILABLE` before it records anything, and other
+commands are unchanged.
 
 **If `migrate` stops anywhere between 0929 and 0937, fix it and rerun it
 immediately.** Until 0937 commits, the previous release's readiness rejects

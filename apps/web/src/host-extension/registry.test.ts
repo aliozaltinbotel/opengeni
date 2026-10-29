@@ -609,6 +609,156 @@ describe("host extension registry", () => {
     });
   });
 
+  describe("native rail overrides", () => {
+    test("accepts a relabel, a move to chat and an entry left off the rail", () => {
+      const extension = extensionWith({
+        navOverrides: [
+          { id: "inbox", label: "Agent requests", group: "chat" },
+          { id: "artifacts", group: "chat" },
+          { id: "meetings", group: "hidden" },
+          { id: "plugins", label: "Agent skills", group: "peer" },
+        ],
+      });
+      expect(validateHostExtension(extension)).toBe(extension);
+    });
+
+    test.each([
+      [[{ id: "secrets" }], "navOverrides[0].id"],
+      [[{ id: "pms" }], "navOverrides[0].id"],
+      [[{ id: "inbox" }, { id: "state" }, { id: "inbox", label: "Again" }], "navOverrides[2].id"],
+      [[{ id: "inbox", label: "" }], "navOverrides[0].label"],
+      [[{ id: "inbox", group: "settings" }], "navOverrides[0].group"],
+      [[{ id: "inbox", icon: Icon }], "navOverrides[0].icon"],
+    ])("refuses the overrides %p at %s", (navOverrides, field) => {
+      expectInvalid({ id: "fixture", navOverrides }, field);
+    });
+
+    test("refuses an override of a destination the extension hides", () => {
+      expectInvalid(
+        extensionWith({
+          hiddenNativeDestinations: ["meetings"],
+          navOverrides: [{ id: "meetings", label: "Calls" }],
+        }),
+        "navOverrides[0].id",
+      );
+    });
+  });
+
+  describe("landing", () => {
+    test("accepts sessions and one of the extension's own static routes", () => {
+      for (const landing of ["sessions", "operations/today"]) {
+        const extension = extensionWith({ routes: [route("operations/today")], landing });
+        expect(validateHostExtension(extension)).toBe(extension);
+      }
+    });
+
+    test.each([
+      ["reports", [route("operations")]],
+      ["inbox", [route("operations")]],
+      ["operations/$itemId", [route("operations/$itemId")]],
+      ["", [route("operations")]],
+    ])("refuses the landing %p", (landing, routes) => {
+      expectInvalid(extensionWith({ routes, landing }), "landing");
+    });
+  });
+
+  describe("outside-workspace routes", () => {
+    const OutsidePage = () => null;
+    const outsideLoad = async () => ({ default: OutsidePage });
+
+    test("accepts public and signed-in pages at their own top-level segments", () => {
+      const extension = extensionWith({
+        outsideWorkspaceRoutes: [
+          { path: "register", load: outsideLoad, access: "public" },
+          { path: "not-admitted", load: outsideLoad },
+          { path: "identity/ambiguous", load: outsideLoad, access: "signedIn" },
+        ],
+        outsideWorkspaceProviders: [Page],
+      });
+      expect(validateHostExtension(extension)).toBe(extension);
+    });
+
+    test.each([
+      "workspaces",
+      "sessions/mine",
+      "settings",
+      "reset-password",
+      "v1/thing",
+      "dev",
+      "Register",
+      "register/$token",
+      "/register",
+    ])("refuses the outside path %p", (path) => {
+      expectInvalid(
+        extensionWith({ outsideWorkspaceRoutes: [{ path, load: outsideLoad }] }),
+        "outsideWorkspaceRoutes[0].path",
+      );
+    });
+
+    test("refuses a path registered twice, a missing load and an unknown access", () => {
+      expectInvalid(
+        extensionWith({
+          outsideWorkspaceRoutes: [
+            { path: "register", load: outsideLoad },
+            { path: "register", load: outsideLoad },
+          ],
+        }),
+        "outsideWorkspaceRoutes[1].path",
+      );
+      expectInvalid(
+        { id: "fixture", outsideWorkspaceRoutes: [{ path: "register" }] },
+        "outsideWorkspaceRoutes[0].load",
+      );
+      expectInvalid(
+        {
+          id: "fixture",
+          outsideWorkspaceRoutes: [{ path: "register", load: outsideLoad, access: "admin" }],
+        },
+        "outsideWorkspaceRoutes[0].access",
+      );
+      expectInvalid(
+        { id: "fixture", outsideWorkspaceProviders: ["provider"] },
+        "outsideWorkspaceProviders[0]",
+      );
+    });
+
+    test("refuses a page under every first segment App.tsx registers at the top level", async () => {
+      const app = await readFile(new URL("../App.tsx", import.meta.url), "utf8");
+      const parentCount = app.split("getParentRoute: () => rootRoute,").length - 1;
+      const paths = Array.from(
+        app.matchAll(
+          /getParentRoute: \(\) => rootRoute,((?:(?!createRoute\()[\s\S])*?)\bpath: ([^,]+),/g,
+        ),
+        (match) => match[2] ?? "",
+      );
+      expect(paths.length).toBe(parentCount);
+      const segments = new Set(
+        paths
+          .map((path) =>
+            path.startsWith('"')
+              ? path.slice(1, -1)
+              : path === "EXCEL_ADDIN_PATH.slice(1)"
+                ? "excel"
+                : path === "DESKTOP_APP_RETURN_PATH.slice(1)"
+                  ? "desktop-return"
+                  : `unknown:${path}`,
+          )
+          .map((path) => path.replace(/^\//, "").split("/")[0] ?? "")
+          .filter((segment) => segment !== ""),
+      );
+      expect([...segments].filter((segment) => segment.startsWith("unknown:"))).toEqual([]);
+      expect(segments.size).toBeGreaterThanOrEqual(15);
+      for (const segment of segments) {
+        expectInvalid(
+          extensionWith({
+            outsideWorkspaceRoutes: [{ path: `${segment}/host-page`, load: outsideLoad }],
+          }),
+          "outsideWorkspaceRoutes[0].path",
+        );
+      }
+    });
+  });
+
   test("the prebuilt extension dist fixture is a valid extension with lazy pages", async () => {
     const fixture = new URL("../../test/fixtures/host-extension-dist/", import.meta.url);
     const loaded: { default: unknown } = await import(new URL("index.js", fixture).href);

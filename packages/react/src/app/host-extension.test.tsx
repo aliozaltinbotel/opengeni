@@ -7,9 +7,11 @@ import type { ToolCallItem } from "../timeline";
 import { builtInToolRegistryEntries, defaultToolRegistry } from "../timeline/tool-renderers";
 import { builtInToolCardNames } from "./built-in-tool-names";
 import {
+  composePrimaryNav,
   isBuiltInToolCardName,
   isWorkspaceSegmentHidden,
   nativeDestinationsOfSegment,
+  workspaceLanding,
 } from "./host-extension";
 import { AppHostProvider, useNativeDestinationVisible, type AppHost } from "./lib/app-host";
 
@@ -119,5 +121,111 @@ describe("built-in tool card names", () => {
     expect(isBuiltInToolCardName("artifacts_create")).toBe(true);
     expect(isBuiltInToolCardName("evil__artifacts_create")).toBe(false);
     expect(isBuiltInToolCardName("evil__exec_command")).toBe(true);
+  });
+});
+
+describe("composePrimaryNav", () => {
+  const Icon = () => null;
+  const native = [
+    { id: "inbox", label: "Inbox" },
+    { id: "plugins", label: "Capabilities" },
+    { id: "state", label: "Knowledge" },
+    { id: "automations", label: "Automations" },
+    { id: "meetings", label: "Meetings" },
+    { id: "artifacts", label: "Artifacts" },
+  ] as const;
+  const labels = (entries: readonly { label: string }[]) => entries.map((entry) => entry.label);
+
+  test("stock: every native entry is a peer, in rail order", () => {
+    const composed = composePrimaryNav({}, native);
+    expect(composed.chat).toEqual([]);
+    expect(composed.peers).toEqual([...native]);
+  });
+
+  test("an override relabels an entry and keeps its other fields", () => {
+    const composed = composePrimaryNav(
+      { navOverrides: [{ id: "plugins", label: "Agent skills" }] },
+      [{ id: "plugins", label: "Capabilities", to: "/plugins" }],
+    );
+    expect(composed.peers).toEqual([{ id: "plugins", label: "Agent skills", to: "/plugins" }]);
+  });
+
+  test("chat moves entries next to New session in rail order; hidden leaves the rail", () => {
+    const composed = composePrimaryNav(
+      {
+        navOverrides: [
+          { id: "artifacts", group: "chat" },
+          { id: "inbox", label: "Agent requests", group: "chat" },
+          { id: "meetings", group: "hidden" },
+        ],
+      },
+      native,
+    );
+    expect(labels(composed.chat)).toEqual(["Agent requests", "Artifacts"]);
+    expect(labels(composed.peers)).toEqual(["Capabilities", "Knowledge", "Automations"]);
+  });
+
+  test("hidden destinations are left out and host primary items follow the native peers", () => {
+    const composed = composePrimaryNav(
+      {
+        hiddenNativeDestinations: ["automations", "meetings"],
+        nav: [
+          { id: "ops", label: "Operations", icon: Icon, path: "operations", placement: "primary" },
+          {
+            id: "setup",
+            label: "Setup",
+            icon: Icon,
+            path: "setup",
+            placement: { settingsGroup: "host" },
+          },
+          {
+            id: "later",
+            label: "Later",
+            icon: Icon,
+            path: "later",
+            placement: "primary",
+            visible: () => false,
+          },
+        ],
+      },
+      native,
+      { workspaceId: "w1", pathname: "/workspaces/w1/sessions" },
+    );
+    expect(labels(composed.peers)).toEqual([
+      "Inbox",
+      "Capabilities",
+      "Knowledge",
+      "Artifacts",
+      "Operations",
+    ]);
+  });
+
+  test("workspaceLanding is the extension's landing, else sessions", () => {
+    expect(workspaceLanding({})).toBe("sessions");
+    expect(workspaceLanding({ landing: "operations/today" })).toBe("operations/today");
+  });
+});
+
+describe("the resolvers outside a DOM", () => {
+  test("a child process with no DOM composes the rail and the landing from the contract module", () => {
+    const script = `
+      const { composePrimaryNav, workspaceLanding } = await import(${JSON.stringify(
+        new URL("./host-extension.tsx", import.meta.url).pathname,
+      )});
+      const composed = composePrimaryNav(
+        { navOverrides: [{ id: "inbox", label: "Agent requests", group: "chat" }] },
+        [{ id: "inbox", label: "Inbox" }, { id: "state", label: "Knowledge" }],
+      );
+      console.log(JSON.stringify({ composed, landing: workspaceLanding({ landing: "operations/today" }) }));
+    `;
+    const child = Bun.spawnSync([process.execPath, "-e", script], { stderr: "pipe" });
+    expect(child.stderr.toString()).toBe("");
+    expect(JSON.parse(child.stdout.toString())).toEqual({
+      composed: {
+        chat: [{ id: "inbox", label: "Agent requests" }],
+        peers: [{ id: "state", label: "Knowledge" }],
+      },
+      landing: "operations/today",
+    });
   });
 });

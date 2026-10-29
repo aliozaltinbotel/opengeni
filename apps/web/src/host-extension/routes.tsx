@@ -3,8 +3,11 @@
 // code to the initial load, and the stub adds no routes at all. Paths were
 // checked at registration (registry.ts): none shadows a native route.
 import { createRoute, lazyRouteComponent, useParams, type AnyRoute } from "@tanstack/react-router";
-import type { HostExtensionRoute } from "@opengeni/react/app/host-extension";
-import type { ReactElement } from "react";
+import type {
+  HostExtensionOutsideWorkspaceRoute,
+  HostExtensionRoute,
+} from "@opengeni/react/app/host-extension";
+import type { ComponentType, ReactElement, ReactNode } from "react";
 
 /** A loaded extension page as a plain function component, the shape the lazy route wants. */
 export type HostExtensionPageFunction = (props: { workspaceId: string }) => ReactElement;
@@ -50,4 +53,50 @@ export function buildHostExtensionWorkspaceRoutes(
   routes: readonly HostExtensionRoute[] | undefined,
 ): AnyRoute[] {
   return (routes ?? []).map((route) => hostExtensionWorkspaceRoute(parent, route));
+}
+
+/** Nests `providers` around `children`, the first outermost. */
+function withProviders(
+  providers: readonly ComponentType<{ children: ReactNode }>[],
+  children: ReactNode,
+): ReactNode {
+  return providers.reduceRight<ReactNode>(
+    (inner, Provider) => <Provider>{inner}</Provider>,
+    children,
+  );
+}
+
+function hostExtensionOutsideWorkspaceRoute(
+  parent: AnyRoute,
+  route: HostExtensionOutsideWorkspaceRoute,
+  providers: readonly ComponentType<{ children: ReactNode }>[],
+): AnyRoute {
+  // The loaded page as a plain function component, the shape the lazy route wants.
+  const Page = lazyRouteComponent(async (): Promise<{ default: () => ReactElement }> => {
+    const { default: Loaded } = await route.load();
+    return { default: () => <Loaded /> };
+  });
+  function HostExtensionOutsideWorkspaceRouteComponent() {
+    return withProviders(providers, <Page />);
+  }
+  return createRoute({
+    getParentRoute: () => parent,
+    path: route.path,
+    component: HostExtensionOutsideWorkspaceRouteComponent,
+  });
+}
+
+/**
+ * One lazy child route of the root per outside-workspace page, in declaration
+ * order, each inside `providers`. Paths were checked at registration: none
+ * shares a first segment with a native top-level route.
+ */
+export function buildHostExtensionOutsideWorkspaceRoutes(
+  parent: AnyRoute,
+  routes: readonly HostExtensionOutsideWorkspaceRoute[] | undefined,
+  providers: readonly ComponentType<{ children: ReactNode }>[] | undefined,
+): AnyRoute[] {
+  return (routes ?? []).map((route) =>
+    hostExtensionOutsideWorkspaceRoute(parent, route, providers ?? []),
+  );
 }

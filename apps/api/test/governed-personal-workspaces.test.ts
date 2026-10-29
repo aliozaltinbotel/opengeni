@@ -57,9 +57,11 @@ const removalAllowedPort: OrganizationGovernancePort = {
       ? "allow"
       : "refuse",
 };
+/** Governs every organization; lets its people create organizations natively (fork 8j). */
 const governsEveryOrganization: OrganizationGovernancePort = {
   governs: () => true,
-  decide: ({ via }) => (via === "host" ? "allow" : "refuse"),
+  decide: ({ via, mutation }) =>
+    via === "host" || mutation === "organization.create" ? "allow" : "refuse",
 };
 
 type App = ReturnType<typeof createApp>;

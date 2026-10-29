@@ -55,6 +55,9 @@ export const GOVERNED_MUTATIONS = [
   "workspace.delete",
   // Host command only: no native route writes an organization's session policy.
   "session_policy.update",
+  // A person creating another organization (`POST /v1/organizations` and
+  // `/v1/organizations/additional`) while they belong to this governed one.
+  "organization.create",
 ] as const;
 export type GovernedMutation = (typeof GOVERNED_MUTATIONS)[number];
 
@@ -90,11 +93,42 @@ export type OrganizationGovernancePort = {
     mutation: GovernedMutation;
     via: GovernedMutationChannel;
   }): "allow" | "refuse";
+  /**
+   * `"allowlist"`: a person of an organization this host governs reaches its
+   * workspace and organization routes (`/v1/workspaces/:workspaceId/*`,
+   * `/v1/organizations/:organizationId/*`) only when the route is on the
+   * governed allowlist the API exports (`governedRouteTable`); every other
+   * route answers 403 `WORKSPACE_ROUTE_NOT_ALLOWED`, ahead of `decide`. Tokens
+   * signed with the deployment's delegation secret (the host's own and the
+   * runtime's) are not affected. Unset, every route keeps its own checks.
+   */
+  memberRouteAccess?: "allowlist";
+  /**
+   * `"host"`: organizations in this deployment are the host's to create. The
+   * native creation routes (`POST /v1/organizations`,
+   * `/v1/organizations/additional`, `/v1/auth/organization-onboarding`) then
+   * refuse every managed human with 403 `ORGANIZATION_CREATE_GOVERNED`
+   * unless the person belongs to a governed organization whose host allows
+   * `organization.create`. Unset, only a person of a governed organization is
+   * asked (any governing host's refusal refuses).
+   */
+  organizationCreation?: "host";
 };
 
 /** Refusal detail codes (`error.details.code`). */
 export const ORGANIZATION_GOVERNED_BY_HOST = "ORGANIZATION_GOVERNED_BY_HOST";
 export const ORGANIZATION_NOT_HOST_GOVERNED = "ORGANIZATION_NOT_HOST_GOVERNED";
+/**
+ * 403: a person of a governed organization called a workspace or organization
+ * route outside the governed allowlist (the API's default-deny).
+ */
+export const WORKSPACE_ROUTE_NOT_ALLOWED = "WORKSPACE_ROUTE_NOT_ALLOWED";
+/**
+ * 403: a person who belongs to a governed organization tried to create an
+ * organization, and that organization's host does not allow
+ * `organization.create` natively.
+ */
+export const ORGANIZATION_CREATE_GOVERNED = "ORGANIZATION_CREATE_GOVERNED";
 export const HOST_COMMAND_SERVICE_TOKEN_REQUIRED = "HOST_COMMAND_SERVICE_TOKEN_REQUIRED";
 export const HOST_COMMAND_PERMISSION_REQUIRED = "HOST_COMMAND_PERMISSION_REQUIRED";
 export const HOST_COMMAND_OPERATION_CONFLICT = "HOST_COMMAND_OPERATION_CONFLICT";

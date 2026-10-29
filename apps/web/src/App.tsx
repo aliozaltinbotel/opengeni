@@ -136,6 +136,7 @@ import { installDesktopShell, warmDesktopPages } from "@opengeni/react/app/lib/d
 import type { DocumentAuthorityKind } from "@opengeni/sdk";
 // Installs the build's host extension before this module's routes read it.
 import { hostExtension } from "@/host-extension/startup";
+import { WorkspaceLandingRedirect } from "@/host-extension/landing";
 import { hiddenNativeDestinations } from "@/host-extension/registry";
 import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
 import {
@@ -143,7 +144,10 @@ import {
   isOrganizationSectionHidden,
 } from "@opengeni/react/app/host-extension";
 import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
-import { buildHostExtensionWorkspaceRoutes } from "@/host-extension/routes";
+import {
+  buildHostExtensionOutsideWorkspaceRoutes,
+  buildHostExtensionWorkspaceRoutes,
+} from "@/host-extension/routes";
 
 // Legacy section names (overview, knowledge, recovery, retention) still parse,
 // so older links keep working; they land on the page that holds them now.
@@ -1054,6 +1058,13 @@ export const hostExtensionWorkspaceRoutes = buildHostExtensionWorkspaceRoutes(
   workspaceRoute,
   hostExtension.routes,
 );
+// The host extension's pages outside any workspace: registration refused any
+// path that shares a first segment with a native top-level route.
+export const hostExtensionOutsideWorkspaceRoutes = buildHostExtensionOutsideWorkspaceRoutes(
+  rootRoute,
+  hostExtension.outsideWorkspaceRoutes,
+  hostExtension.outsideWorkspaceProviders,
+);
 export const routeTree = rootRoute.addChildren([
   indexRoute,
   sessionDeepLinkRoute,
@@ -1082,6 +1093,8 @@ export const routeTree = rootRoute.addChildren([
     : []),
   ...(import.meta.env.DEV && composerStackPreviewRoute ? [composerStackPreviewRoute] : []),
   ...(import.meta.env.DEV && uiKitRoute ? [uiKitRoute] : []),
+  // Typed `never` like the workspace pages below, so the typed tree stays native.
+  ...(hostExtensionOutsideWorkspaceRoutes as readonly unknown[] as readonly never[]),
   // A destination the host extension hides has no route: its URL renders the
   // root not-found page, like any unknown URL.
   workspaceRoute.addChildren(
@@ -1228,12 +1241,12 @@ function RootIndexRoute() {
       />
     );
   }
-  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
+  return <WorkspaceLandingRedirect workspaceId={workspaceId} />;
 }
 
 function WorkspaceIndexRedirect() {
   const { workspaceId } = workspaceRoute.useParams();
-  return <Navigate to="/workspaces/$workspaceId/sessions" params={{ workspaceId }} replace />;
+  return <WorkspaceLandingRedirect workspaceId={workspaceId} />;
 }
 
 function WorkspaceShell() {

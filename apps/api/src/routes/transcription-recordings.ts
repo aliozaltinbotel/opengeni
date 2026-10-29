@@ -50,6 +50,7 @@ import { getWorkspace, type CreditDebitAttribution } from "@opengeni/db";
 import type { Context, Hono } from "hono";
 import { creditDebitAttributionForGrant } from "../access-grant-rls";
 import { ApiHttpError } from "../http/api-error";
+import { requireWorkspaceRecordingsAllowed } from "../http/organization-session-policy";
 import { wavDurationSeconds } from "@opengeni/core/transcription-service";
 import { TranscriptionSegmenterError } from "@opengeni/core/transcription-service";
 import { transcriptionBillingRefusal } from "../transcription/billing-refusal";
@@ -594,6 +595,9 @@ async function requireRecordingAuthority(
   const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
   const workspace = await getWorkspace(deps.db, workspaceId);
   if (requirePolicy) {
+    // The organization's session policy first: SESSION_RECORDINGS_DENIED, then
+    // ATTACHMENTS_DISABLED (both thrown past routeError as the API envelope).
+    await requireWorkspaceRecordingsAllowed(deps, grant.accountId);
     if (!workspace) throw new TranscriptionRecordingNotFoundError("Workspace not found");
     if (resolveWorkspaceVoiceInputEnabled(workspace.settings) === false) {
       throw new RecordingProcessingError("Voice input is disabled", "policy_blocked", false);

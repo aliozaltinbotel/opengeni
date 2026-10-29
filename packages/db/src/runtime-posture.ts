@@ -53,7 +53,8 @@ const AUTOMATIC_SESSION_TITLE_FANOUT_RUNTIME_ROUTINES = [
  * the running commands a returning runner did not answer for (0984), the
  * host's lookup of a native identity in its organization (1016), the
  * host's ensure of its own owner membership in its organization (1017) and the
- * host's write of its organization's session policy (1018). Each is
+ * host's write of its organization's session policy (1018) and of its
+ * recordings setting (1020). Each is
  * owned by its tables' owner, never PUBLIC, with a pinned search_path. Runtime
  * EXECUTE is required, except while a routine is in
  * DEFERRED_RUNTIME_PRIVATE_ROUTINES.
@@ -70,6 +71,7 @@ export const RUNTIME_DEFINER_ROUTINES = [
   "lookup_organization_host_identity(uuid, text, uuid)",
   "ensure_organization_host_owner(uuid, text, uuid)",
   "put_host_organization_session_policy(uuid, text, uuid, text, text, text[], text, bigint)",
+  "set_host_organization_session_recordings(uuid, text, uuid, text)",
 ] as const;
 
 /**
@@ -82,16 +84,21 @@ export const RUNTIME_DEFINER_ROUTINES = [
  * personal-machine owner lookup and 0984 the connected-command re-arm (their
  * callers still check the grant first); 1016, 1017 and 1018 withheld the host
  * identity lookup, the host owner ensure and the host session policy write.
- * 1019 granted all five. None is withheld now.
+ * 1019 granted all five. 1020 withholds the host recordings write; until it is
+ * granted, a session-policy command that names `recordings` answers
+ * HOST_SESSION_POLICY_UNAVAILABLE and the recordings default (denied for a
+ * governed organization) holds.
  *
  * runtime-posture-compatibility-postgres fails once the pinned previous
  * release knows a routine listed here: grant it then in a rolling migration
  * (GRANT EXECUTE ON FUNCTION opengeni_private.<signature> to every
  * application role, as 0947 and 1019 do), drop it from this list, and remove
- * its "not yet" path.
+ * its "not yet" path (for 1020, the recordings check in
+ * hostSessionPolicyWriteGranted and HOST_SESSION_POLICY_UNAVAILABLE's path).
  */
-export const DEFERRED_RUNTIME_PRIVATE_ROUTINES =
-  [] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
+export const DEFERRED_RUNTIME_PRIVATE_ROUTINES = [
+  "set_host_organization_session_recordings(uuid, text, uuid, text)",
+] as const satisfies readonly (typeof RUNTIME_DEFINER_ROUTINES)[number][];
 
 /**
  * The tables each runtime definer reads or writes as its owner. Once they all
@@ -140,6 +147,10 @@ const RUNTIME_DEFINER_ROUTINE_TABLES: Readonly<
     "organization_host_command_attributions",
     "organization_session_policies",
     "organization_session_policy_receipts",
+  ],
+  "set_host_organization_session_recordings(uuid, text, uuid, text)": [
+    "organization_host_command_attributions",
+    "organization_session_policies",
   ],
 };
 

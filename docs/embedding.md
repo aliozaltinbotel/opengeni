@@ -791,11 +791,22 @@ revocation by binding `AppDependencies.sessionAuthorization`:
 type SessionAuthorizationPort = {
   capabilities?: { modelAccountOperation?: boolean };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  authorizeSessionCreate?(input: AuthorizeSessionCreateInput): Promise<SessionAuthorizationDecision>;
   resolveListScope(
     input: ResolveSessionAuthorizationListScopeInput,
   ): Promise<SessionAuthorizationListScope>;
 };
 ```
+
+`authorizeSessionCreate` is optional and target-free (`{ accountId,
+workspaceId, actor, surface }`, no session yet). When the host provides it,
+`POST /v1/workspaces/:workspaceId/sessions` whose body carries an
+`initialMessage` (a first turn the default start mode admits without any other
+check) asks it before anything is created: a refusal answers `403` with
+`error.details.code = "SESSION_CREATE_NOT_AUTHORIZED"`, and a throw or an
+unreadable answer `503 SESSION_AUTHORIZATION_UNAVAILABLE`. A create without a
+first message, and a port without the method, check only `sessions:create`,
+as before.
 
 `authorizeSession` receives the account/workspace, requested operation and
 surface, the immediate target plus its server-resolved lineage root, and either
@@ -900,6 +911,8 @@ type OrganizationGovernancePort = {
     mutation: GovernedMutation;
     via: "native" | "host";
   }): "allow" | "refuse";
+  memberRouteAccess?: "allowlist";
+  organizationCreation?: "host";
 };
 ```
 
@@ -922,9 +935,54 @@ refusal is `403` with `error.details.code = "ORGANIZATION_GOVERNED_BY_HOST"`,
 for owners too. Unbound, nothing changes and the host routes below are not
 registered.
 
+**Organization creation.** A person who belongs (any membership but a revoked
+one) to a governed organization creates no organization of their own:
+`POST /v1/organizations`, `POST /v1/organizations/additional` and the
+self-service `POST /v1/auth/organization-onboarding` ask `decide` for
+`organization.create` with `via: "native"` for each governed organization
+they belong to, and any refusal answers `403` with `error.details.code =
+"ORGANIZATION_CREATE_GOVERNED"` before anything is written. With
+`organizationCreation: "host"` on the port, organizations are the host's to
+create: those routes also refuse every managed human who has no governed
+membership whose host allows it, a freshly signed-up identity included.
+Without the field, a person without a governed membership, and a deployment
+without a port, are unchanged.
+
 `decide` MUST answer `"refuse"` for any mutation it does not recognize:
 `GOVERNED_MUTATIONS` may grow in a later release, and a new mutation has to
 stay closed until the host chooses to allow it.
+
+**Member route allowlist (opt-in).** With `memberRouteAccess: "allowlist"` on
+the port, a person of a governed organization reaches
+`/v1/workspaces/:workspaceId/*` and `/v1/organizations/:organizationId/*` only
+through the governed allowlist; every other route answers `403` with
+`error.details.code = "WORKSPACE_ROUTE_NOT_ALLOWED"` and a body that names no
+resource, ahead of the route's own checks and of `decide`. A person is a
+`user:` or `external_user:` subject with their own credential (browser
+session, native app credential, personal API key), or a host-minted person
+token (`principalKind: "human_session"` signed with the delegation secret).
+The host's service tokens, the worker's agent-attempt tokens, machine
+credentials (organization and workspace keys, the configured key) and an
+organization key acting for a person (`asUser`, `x-opengeni-external-actor`)
+keep each route's own checks; so does a caller with no grant in the workspace
+(or, for an organization route, in the organization), so `401` stays `401`
+and nothing tells an outsider the organization exists. MCP OAuth clients
+authenticate inside `/mcp` and get that route's own answer. A guarded path
+that resolves no handler template is refused for a person (fail closed).
+
+The allowlist (exported from `@opengeni/api-router/app`) is the workspace
+itself, the session list and create, the composer's reads
+(`session-tenancy/capabilities`, `new-session-draft`,
+`session-message-search`, `models`, `model-catalog`, `usage/me`,
+`allowance/state`), the workspace live streams, the inbox and its
+notifications, documents, Knowledge and Skills (each under its own
+permission), session feedback and artifact reads, plus every session route
+whose `sessionAuthorizationOperationForHttp` operation is in
+`GOVERNED_MEMBER_SESSION_OPERATIONS`. Not on it: `/mcp`, which for a person's
+own credential is the whole workspace tool gateway (as `tools/*`; sessions
+reach their tools through the worker's delegated tokens), and every
+organization route. `governedRouteTable(app.routes)` gives the decision for
+every mounted route, so a host can generate its refusal tests from it.
 
 The host performs these mutations through `/v1/host/organizations/:id/...`
 (`invitations`, `invitations/:id/revoke`, `members/:id/change-role`,
@@ -1277,6 +1335,7 @@ type OrganizationSessionPolicy = {
     mode: "deny" | "allow";
     families: ("shell" | "codemode" | "browser" | "computerUse")[];
   };
+  recordings?: "allowed" | "denied";
 };
 ```
 
@@ -1361,6 +1420,31 @@ type OrganizationSessionPolicy = {
   revision, updatedAt }` (and `replay` on PUT). No native route writes the
   policy, and native workspace settings or session capabilities cannot widen
   it.
+- **Recordings (migration 1020).** `recordings` decides whether people may
+  record meetings and send recorded or dictated audio to a transcription
+  provider. When the policy leaves it out it takes the default for its source
+  (`sessionRecordingsAllowed`): `denied` for a stored policy (the governed
+  default or a host policy), `allowed` for stock. Answers name it only once a
+  host has set it, so a stored governed default reads back exactly as before.
+  A host command that names it sets it through
+  `opengeni_private.set_host_organization_session_recordings`, called right
+  after the policy routine for the row this operation id wrote; one that leaves
+  it out keeps the stored setting, and the body digest includes it only when
+  named. That routine's runtime EXECUTE is withheld for one release too: until
+  it is granted, a command naming `recordings` answers `503
+  HOST_SESSION_POLICY_UNAVAILABLE` and records nothing, and other commands are
+  unchanged. Denied, these answer `403` with `details.code
+  SESSION_RECORDINGS_DENIED`; allowed, they still answer `403
+  ATTACHMENTS_DISABLED` while attachments are off:
+  - `POST /v1/workspaces/:ws/recordings` (meetings and dictation) and a
+    recording's `uploads`, `chunks/complete`, `finalize`, `transcripts`,
+    `live-session` and `live-segments`;
+  - `POST /v1/workspaces/:ws/transcription-recordings`, its chunk `PUT`,
+    `finalize` and `process-next`;
+  - `POST /v1/workspaces/:ws/transcriptions`.
+
+  Reading, editing and deleting existing recordings stay open, and the
+  workspace-scoped client config reports voice input unavailable.
 - **Attachments off.** These answer `403` with `details.code
   ATTACHMENTS_DISABLED`:
   - a person's `POST /v1/workspaces/:ws/files/uploads` and its `/complete`;
@@ -2244,6 +2328,35 @@ that holds `import()` reshuffles the bundler's route-aware startup chunks,
 which can pull whole lazy surfaces into the first load. A host tool card may
 not use a tool name that a built-in card already renders.
 
+`navOverrides` changes the native rail entries (`NativeNavId`: `inbox`,
+`plugins`, `state`, `automations`, `meetings`, `artifacts`): `label` renames
+one wherever the rail draws it (expanded, collapsed, folded under More),
+`group: "chat"` moves it into the chat group right after "New session" (its own
+`role="group"` with a rule before the other entries), and `group: "hidden"`
+leaves it off the rail while its page stays. Each id appears once, and an
+override of a destination the extension hides is refused.
+`composePrimaryNav(extension, nativeItems, context?)` is the pure resolver the
+rail uses; it imports no React or DOM code, so a host can run it in a test or
+a child process.
+
+`landing` is the workspace-relative page the console opens for a workspace,
+both from the root (`/`) and from `workspaces/$workspaceId/`: `"sessions"`
+(the default) or one of the extension's own `routes` without a `$param`; any
+other value is refused at registration. `workspaceLanding(extension)` resolves
+it without React or a DOM.
+
+`outsideWorkspaceRoutes` mounts host pages at the console's top level,
+outside any workspace (for example `register`, `not-admitted`), for people
+who have no workspace yet. Each is `{ path, load, access? }`: `path` is
+lowercase static segments whose first segment is not one of the console's own
+top-level routes (or `v1`, `api`, `assets`, `auth`, `oauth`, `mcp`), which
+registration refuses; `access: "public"` renders the page before configuration
+and sign-in, like the reset-password page, and `"signedIn"` (the default)
+renders it once the person is signed in, before the workspace access and
+onboarding gates. These pages render inside `outsideWorkspaceProviders`
+(components taking only `children`), not inside `shellProviders`, which take a
+workspace.
+
 `hiddenNativeDestinations` hides a native destination wherever the console
 offers it: its nav entries, its settings-rail and settings-search entries, its
 links, and its URL, which renders the not-found page. `insights` also hides the
@@ -2251,6 +2364,17 @@ organization settings page Organization > Insights:
 `organization?section=insights` renders the not-found page. `productName`
 replaces "Opengeni" in the document title and in the panel that asks to reload
 after a new version.
+
+**Content-Security-Policy nonce.** A host that serves the console under a
+nonce CSP (never `'unsafe-inline'`) puts the response's nonce in
+`<meta property="csp-nonce" nonce="…">` first in `<head>`, ahead of the
+console's scripts, which carry the same nonce. An inline bootstrap in
+`index.html` (`opengeni-csp-nonce-bootstrap`) then stamps it on every `<style>`
+element the document creates (sonner's stylesheet, xterm's renderer styles)
+and sets `__webpack_nonce__` for get-nonce (radix's scroll lock), before any
+module runs; the main entry installs it again for the dev server. Only
+`<style>` is stamped: a script the page creates stays under `script-src`.
+Extensions read it with `nonce()` from `@opengeni/react/app/host-extension`.
 
 Bundle the extension's own icon set (for example `lucide-react`) into its
 build rather than leaving it external to share the console's modules. The

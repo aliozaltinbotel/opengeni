@@ -39,6 +39,7 @@ import {
   type GovernedMutation,
 } from "@opengeni/contracts/organization-governance";
 import {
+  HOST_SESSION_POLICY_UNAVAILABLE,
   HostPutOrganizationSessionPolicyRequest,
   HostPutOrganizationSessionPolicyResponse,
   OrganizationSessionPolicyView,
@@ -57,6 +58,7 @@ import {
   ensureOrganizationHostOwner,
   getOrganizationInvitationForAdministration,
   getWorkspace,
+  hostSessionPolicyWriteGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
   putHostOrganizationSessionPolicy,
@@ -526,6 +528,10 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
       context,
       HostPutOrganizationSessionPolicyRequest,
     );
+    // Before anything is recorded: a command naming `recordings` while 1020's
+    // routine is not granted leaves its operation id unused.
+    if (!(await hostSessionPolicyWriteGranted(deps.db, command.policy)))
+      throw hostSessionPolicyUnavailable();
     await recordAttribution(deps, authority, {
       mutation: "session_policy.update",
       operationId: command.operationId,
@@ -547,6 +553,7 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         throw sessionPolicyConflict(SESSION_POLICY_REVISION_CONFLICT, error.message);
       rethrowHostMembershipError(error);
     }
+    if (!written) throw hostSessionPolicyUnavailable();
     const { stored, replay } = written;
     return context.json(
       HostPutOrganizationSessionPolicyResponse.parse({
@@ -830,5 +837,15 @@ function sessionPolicyConflict(code: string, message: string): ApiHttpError {
     retryable: false,
     outcomeUnknown: false,
     details: { code },
+  });
+}
+
+function hostSessionPolicyUnavailable(): ApiHttpError {
+  return new ApiHttpError(503, {
+    code: "upstream_unavailable",
+    message: "Setting a host session policy that names recordings is not available on this deployment yet.",
+    retryable: true,
+    outcomeUnknown: false,
+    details: { code: HOST_SESSION_POLICY_UNAVAILABLE },
   });
 }
