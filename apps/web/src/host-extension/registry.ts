@@ -288,18 +288,25 @@ function checkToolRegistryEntries(value: unknown): void {
     if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
     const name = text(entry.name, `${field}.name`);
     if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
+    // An omitted flag enables leaf matching, which could capture another server's tool.
+    if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
+    const nativeLeaf = name.startsWith("mcp__opengeni__")
+      ? name.slice("mcp__opengeni__".length)
+      : name.startsWith("opengeni__")
+        ? name.slice("opengeni__".length)
+        : undefined;
+    // Only hashed MCP wire names may deliberately replace a built-in leaf's card.
+    const exactHostName = /^mcp_(?:[0-9a-f]{16}|[0-9a-f]{24})__[A-Za-z0-9_]+$/.test(name);
     // A stock build has no entries to check; the flag lets it drop the name list.
     if (
       import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" &&
-      isBuiltInToolCardName(name)
+      ((nativeLeaf !== undefined && isBuiltInToolCardName(nativeLeaf)) ||
+        (!exactHostName && isBuiltInToolCardName(name)))
     ) {
       fail(`${field}.name`, `"${name}" has a built-in card`);
     }
     names.add(name);
     component(entry.render, `${field}.render`);
-    // An omitted flag means prefixed leaf matching in the timeline registry, so
-    // only an explicit false keeps another server's same-named tool off this card.
-    if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
   });
 }
 
