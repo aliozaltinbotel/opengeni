@@ -153,13 +153,33 @@ describe("tool catalog MCP Apps view", () => {
       mcpAppToolUiMeta({
         ui: { resourceUri: "https://acme.example/x.html", visibility: ["model"] },
       }),
-    ).toBeUndefined();
+    ).toEqual({ visibility: ["model"] });
     expect(
       mcpAppToolUiMeta({ "ui/resourceUri": "ui://acme", ui: { visibility: ["model"] } }),
-    ).toBeUndefined();
+    ).toEqual({ visibility: ["model"] });
     expect(
       mcpAppToolUiMeta({ ui: { resourceUri: "ui://acme/views/status.html", visibility: ["app"] } }),
     ).toEqual({ resourceUri: "ui://acme/views/status.html", visibility: ["app"] });
+  });
+
+  test("a malformed view preserves independently valid visibility", () => {
+    const visibilityOptions: Array<Array<"app" | "model">> = [["app"], ["model"], ["model", "app"]];
+    for (const visibility of visibilityOptions) {
+      expect(
+        mcpAppToolUiMeta({ ui: { resourceUri: "https://host.invalid/view.html", visibility } }),
+      ).toEqual({ visibility });
+    }
+    expect(
+      mcpAppToolUiMeta({ ui: { resourceUri: "https://host.invalid/view.html" } }),
+    ).toBeUndefined();
+    expect(
+      mcpAppToolUiMeta({
+        ui: {
+          resourceUri: "https://host.invalid/view.html",
+          visibility: ["everyone"],
+        },
+      }),
+    ).toBeUndefined();
   });
 
   test("rejects other tool metadata", () => {
