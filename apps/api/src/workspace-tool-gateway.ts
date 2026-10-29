@@ -1364,6 +1364,9 @@ export function buildWorkspaceToolGatewayMcpServer(
   const callableEntries = prepared.toolGatewayCatalog.entries.filter(
     (entry) => entry.approval !== "human" && consentStillAllows(prepared, entry),
   );
+  const modelEntries = callableEntries.filter(
+    (entry) => !entry.meta?.ui?.visibility || entry.meta.ui.visibility.includes("model"),
+  );
   const hostViewServers = prepared.hostViewServers ?? [];
   const hostExtensionMethods = prepared.hostExtensionMethods ?? [];
   const server = new Server(
@@ -1383,7 +1386,7 @@ export function buildWorkspaceToolGatewayMcpServer(
     await prepared.reauthorize?.();
     return {
       ...(toolSets ? { _meta: { "opengeni/toolSets": toolSets } } : {}),
-      tools: callableEntries.map((entry) => ({
+      tools: modelEntries.map((entry) => ({
         name: entry.modelName,
         ...(entry.title ? { title: entry.title } : {}),
         ...(entry.description ? { description: entry.description } : {}),
@@ -1407,7 +1410,7 @@ export function buildWorkspaceToolGatewayMcpServer(
   for (const extension of hostExtensionMethods)
     registerHostExtensionMethod(server, prepared, grant, extension);
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
-    const entry = callableEntries.find((candidate) => candidate.modelName === request.params.name);
+    const entry = modelEntries.find((candidate) => candidate.modelName === request.params.name);
     if (!entry) throw toolNotCallableError(prepared, request.params.name);
     const observation = startWorkspaceToolGatewayObservation(observability, {
       adapter: "mcp",
@@ -1441,12 +1444,22 @@ export function buildWorkspaceToolGatewayMcpServer(
 /**
  * The named refusal for a `tools/call` name this connection cannot call:
  * JSON-RPC `-32602` (MCP's answer to an unknown tool) with `data.code`. A
- * tool listed for a person to approve answers `TOOL_APPROVAL_REQUIRED`; any
+ * app-only tool answers `TOOL_NOT_MODEL_VISIBLE`; a model-visible tool listed
+ * for a person to approve answers `TOOL_APPROVAL_REQUIRED`; any
  * other name answers `TOOL_NOT_CONSENTED` on an MCP OAuth connection, whose
  * catalog holds only the consented tools (so the answer reveals nothing about
  * tools outside the consent), and `TOOL_NOT_FOUND` otherwise.
  */
 function toolNotCallableError(prepared: PreparedWorkspaceToolGateway, name: string): McpError {
+  const namedEntry = prepared.toolGatewayCatalog.entries.find(
+    (entry) => entry.modelName === name && consentStillAllows(prepared, entry),
+  );
+  if (namedEntry?.meta?.ui?.visibility && !namedEntry.meta.ui.visibility.includes("model")) {
+    return new McpError(ErrorCode.InvalidParams, "This tool is not available to the model", {
+      code: WORKSPACE_MCP_TOOL_REFUSAL_CODES.notModelVisible,
+      name,
+    });
+  }
   const approvalOnly = prepared.toolGatewayCatalog.entries.some(
     (candidate) =>
       candidate.modelName === name &&
