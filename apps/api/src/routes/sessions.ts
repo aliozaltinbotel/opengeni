@@ -6681,6 +6681,10 @@ function decodeAgentTopologyCursor(value: string): AgentTopologyCursorEnvelope {
           .nullable(),
         claimLimit: z.number().int().positive().max(WORK_CLAIM_DISCOVERY_LIMIT).nullable(),
         cursor: z.object({
+          authorizationScopeKey: z
+            .string()
+            .regex(/^[A-Za-z0-9_-]{43}$/)
+            .optional(),
           orderBy: z.enum(["updatedAt", "relevance"]),
           sortRank: z.number().int().nonnegative().nullable(),
           sortRevision: z.string().max(64),

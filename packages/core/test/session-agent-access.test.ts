@@ -94,6 +94,22 @@ describe("agent access list scope", () => {
       agentAccessViewer: { ...viewer, agentAccess: "session" },
     });
   });
+  test("ownership scopes preserve the durable viewer intersection", () => {
+    const durableViewer = {
+      callerRootSessionId: root,
+      agentAccess: "session" as const,
+      scopeSubjectId: acme,
+    };
+    for (const kind of ["owned", "owned_or_shared"] as const) {
+      expect(
+        agentAccessListScopeForViewer(durableViewer, {
+          kind,
+          subjectId: other,
+          agentAccessViewer: { ...durableViewer, agentAccess: "workspace" },
+        }),
+      ).toEqual({ kind, subjectId: other, agentAccessViewer: durableViewer });
+    }
+  });
 });
 
 describe("session create scope resolution", () => {

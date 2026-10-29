@@ -22,6 +22,21 @@ const RELEVANCE_CURSOR = {
 };
 
 describe("agent topology query", () => {
+  test("ownership-bound topology cursors retain authorization scope identity", () => {
+    const cursor = { ...CURSOR, authorizationScopeKey: "a".repeat(43) };
+    const encoded = encodeAgentTopologyCursor({
+      cursor,
+      parentSessionId: null,
+      rootSessionId: null,
+      query: null,
+      statuses: [],
+      activeOnly: false,
+      recentHours: null,
+      subject: null,
+      claimLimit: null,
+    });
+    expect(agentTopologyQuery({ cursor: encoded }).cursor).toEqual(cursor);
+  });
   test("defaults to a bounded root page", () => {
     expect(agentTopologyQuery({})).toEqual({
       limit: 25,

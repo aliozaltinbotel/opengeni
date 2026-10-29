@@ -188,6 +188,9 @@ export function agentAccessListScopeForViewer(
   if (!hostScope || hostScope.kind === "all") {
     return { kind: "all", agentAccessViewer: viewer };
   }
+  if (hostScope.kind === "owned" || hostScope.kind === "owned_or_shared") {
+    return { kind: hostScope.kind, subjectId: hostScope.subjectId, agentAccessViewer: viewer };
+  }
   return {
     kind: "scoped",
     rootSessionIds: [...new Set(hostScope.rootSessionIds)],
@@ -410,6 +413,8 @@ async function authorizeSessionFromFacts(
   const target: SessionAuthorizationTarget = {
     sessionId: authority.sessionId,
     rootSessionId: authority.rootSessionId,
+    ownerSubjectId: authority.ownerSubjectId,
+    visibility: authority.visibility,
   };
   const agentRelatedSessionAccess =
     actor.kind === "agent_attempt"
@@ -586,11 +591,13 @@ export async function requireSessionAuthorizationListScope(
   const hostScope: SessionAuthorizationListScope =
     parsed.data.kind === "all"
       ? { kind: "all" }
-      : {
-          kind: "scoped",
-          rootSessionIds: [...new Set(parsed.data.rootSessionIds)],
-          sessionIds: [...new Set(parsed.data.sessionIds)],
-        };
+      : parsed.data.kind === "owned" || parsed.data.kind === "owned_or_shared"
+        ? { kind: parsed.data.kind, subjectId: parsed.data.subjectId }
+        : {
+            kind: "scoped",
+            rootSessionIds: [...new Set(parsed.data.rootSessionIds)],
+            sessionIds: [...new Set(parsed.data.sessionIds)],
+          };
   return viewer ? agentAccessListScopeForViewer(viewer, hostScope) : hostScope;
 }
 
