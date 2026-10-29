@@ -14,7 +14,7 @@ import type {
   ClientConfig,
   OrganizationMembershipRole,
 } from "@opengeni/react/app/types";
-import { hiddenNativeDestinations } from "@/host-extension/registry";
+import { hiddenNativeDestinations, hiddenNativeSections } from "@/host-extension/registry";
 
 export type OrganizationSettingsAccess = {
   actorRole: OrganizationMembershipRole | null;
@@ -123,7 +123,7 @@ export function organizationSettingsAccess(input: {
   // A section showing a destination the host extension hides is no one's page.
   const hidden = hiddenNativeDestinations();
   for (const section of visible)
-    if (isOrganizationSectionHidden(section, hidden)) visible.delete(section);
+    if (isOrganizationSectionHidden(section, hidden, hiddenNativeSections())) visible.delete(section);
 
   return {
     actorRole,

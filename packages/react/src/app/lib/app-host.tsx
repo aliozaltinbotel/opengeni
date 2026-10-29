@@ -16,7 +16,7 @@ import {
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
 
 import type { ToolRegistryEntry } from "../../timeline";
-import type { HostExtension, NativeDestination } from "../host-extension";
+import type { HostExtension, NativeDestination, NativeSectionId } from "../host-extension";
 import type { AppApiHost } from "./app-api";
 import type { AppSurfaces } from "./app-surfaces";
 import type { MessageContextPill, MessageContextStore } from "./message-context";
@@ -58,6 +58,7 @@ export type AppHost = Readonly<{
   toolRegistryEntries?: readonly ToolRegistryEntry[] | undefined;
   /** Native destinations the host extension hides from every link source. */
   hiddenNativeDestinations?: readonly NativeDestination[] | undefined;
+  hiddenNativeSections?: readonly NativeSectionId[] | undefined;
   /** The host extension's mark and wordmark, in place of the stock brand. */
   brand?: HostExtension["brand"] | undefined;
   /** The product name the console shows in place of the stock one. */
@@ -98,6 +99,11 @@ const NOTHING_HIDDEN: readonly NativeDestination[] = [];
 /** The native destinations the host extension hides; none in the stock console. */
 export function useHiddenNativeDestinations(): readonly NativeDestination[] {
   return useAppHost().hiddenNativeDestinations ?? NOTHING_HIDDEN;
+}
+
+const NO_HIDDEN_SECTIONS: readonly NativeSectionId[] = [];
+export function useHiddenNativeSections(): readonly NativeSectionId[] {
+  return useAppHost().hiddenNativeSections ?? NO_HIDDEN_SECTIONS;
 }
 
 /** Whether a link to this native destination may be offered. */

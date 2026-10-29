@@ -137,11 +137,15 @@ import type { DocumentAuthorityKind } from "@opengeni/sdk";
 // Installs the build's host extension before this module's routes read it.
 import { hostExtension } from "@/host-extension/startup";
 import { WorkspaceLandingRedirect } from "@/host-extension/landing";
-import { hiddenNativeDestinations } from "@/host-extension/registry";
+import { hiddenNativeDestinations, hiddenNativeSections } from "@/host-extension/registry";
 import { visibleNativeRoutes } from "@/host-extension/hidden-destinations";
 import {
   hostFilteredWorkspaces,
   isOrganizationSectionHidden,
+  isNativeSectionHidden,
+  isNativeCapabilityDetailHidden,
+  capabilitiesSectionFromSearch,
+  type NativeCapabilitiesSection,
 } from "@opengeni/react/app/host-extension";
 import { visibleNativeItems } from "@/components/rail/workspace-nav-data";
 import {
@@ -695,20 +699,27 @@ const workspaceInsightsRoute = createRoute({
   }),
   component: Insights,
 });
+function capabilitiesSearch(search: Record<string, unknown>): { section?: NativeCapabilitiesSection } {
+  const section = capabilitiesSectionFromSearch(search.section);
+  return section ? { section } : {};
+}
+function refuseHiddenCapabilities(search: { section?: NativeCapabilitiesSection }, searchStr: string): void {
+  const hidden = hiddenNativeSections();
+  if (isNativeSectionHidden("capabilities", search.section ?? "all", [], hidden) ||
+      isNativeCapabilityDetailHidden(new URLSearchParams(searchStr).get("open"), hidden)) throw notFound();
+}
 const workspaceCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "plugins",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
+  beforeLoad: ({ search, location }) => refuseHiddenCapabilities(search, location.searchStr),
   component: Capabilities,
 });
 const workspaceLegacyCapabilitiesRoute = createRoute({
   getParentRoute: () => workspaceRoute,
   path: "capabilities",
-  validateSearch: (search: Record<string, unknown>): { section?: "skills" } => ({
-    ...(search.section === "skills" ? { section: "skills" as const } : {}),
-  }),
+  validateSearch: capabilitiesSearch,
+  beforeLoad: ({ search, location }) => refuseHiddenCapabilities(search, location.searchStr),
   component: CapabilitiesLegacyRedirect,
 });
 const AUTOMATIONS_SEARCH_UUID =
@@ -913,6 +924,9 @@ const workspaceSettingsRoute = createRoute({
       ...parseReturnTo(search),
     };
   },
+  beforeLoad: ({ search }) => {
+    if (isNativeSectionHidden("workspace", search.section ?? "general", [], hiddenNativeSections())) throw notFound();
+  },
   component: WorkspaceSettings,
 });
 const workspaceStateRoute = createRoute({
@@ -1036,7 +1050,7 @@ const workspaceOrganizationRoute = createRoute({
   },
   // A section showing a destination the host extension hides has no page.
   beforeLoad: ({ search }) => {
-    if (search.section && isOrganizationSectionHidden(search.section, hiddenNativeDestinations()))
+    if (search.section && isOrganizationSectionHidden(search.section, hiddenNativeDestinations(), hiddenNativeSections()))
       throw notFound();
   },
   component: Organization,

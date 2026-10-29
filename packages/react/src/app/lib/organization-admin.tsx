@@ -25,6 +25,8 @@ export type OrganizationAdminSection = (typeof ORGANIZATION_ADMIN_SECTIONS)[numb
 /** Section names older links still use, and the page each one now lives on. */
 export const LEGACY_ORGANIZATION_SECTIONS = {
   overview: "general",
+  members: "people",
+  "mcp-clients": "agents",
   knowledge: "identity",
   recovery: "security",
   retention: "security",
