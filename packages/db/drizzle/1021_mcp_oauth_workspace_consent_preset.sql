@@ -16,22 +16,24 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- Each check is added NOT VALID, so adding it scans no rows (every existing
+-- row holds NULL); 1024 validates them in their own transaction.
 ALTER TABLE mcp_oauth_authorization_requests
   ADD COLUMN consent_preset text,
   ADD CONSTRAINT mcp_oauth_authorization_requests_consent_preset_check
-    CHECK (consent_preset IN ('read_only', 'full', 'custom'));
+    CHECK (consent_preset IN ('read_only', 'full', 'custom')) NOT VALID;
 
 ALTER TABLE mcp_oauth_authorization_codes
   ADD COLUMN consent_preset text,
   ADD CONSTRAINT mcp_oauth_authorization_codes_consent_preset_check
-    CHECK (consent_preset IN ('read_only', 'full', 'custom'));
+    CHECK (consent_preset IN ('read_only', 'full', 'custom')) NOT VALID;
 
 ALTER TABLE mcp_oauth_refresh_tokens
   ADD COLUMN consent_preset text,
   ADD CONSTRAINT mcp_oauth_refresh_tokens_consent_preset_check
-    CHECK (consent_preset IN ('read_only', 'full', 'custom'));
+    CHECK (consent_preset IN ('read_only', 'full', 'custom')) NOT VALID;
 
 ALTER TABLE mcp_oauth_access_tokens
   ADD COLUMN consent_preset text,
   ADD CONSTRAINT mcp_oauth_access_tokens_consent_preset_check
-    CHECK (consent_preset IN ('read_only', 'full', 'custom'));
+    CHECK (consent_preset IN ('read_only', 'full', 'custom')) NOT VALID;

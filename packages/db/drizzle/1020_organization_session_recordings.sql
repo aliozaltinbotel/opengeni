@@ -31,9 +31,12 @@
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
 
+-- The column's check is added NOT VALID, so adding it scans no rows (every
+-- existing row holds NULL); 1024 validates it in its own transaction.
 ALTER TABLE organization_session_policies
-  ADD COLUMN recordings text
-    CHECK (recordings IS NULL OR recordings IN ('allowed', 'denied'));
+  ADD COLUMN recordings text,
+  ADD CONSTRAINT organization_session_policies_recordings_check
+    CHECK (recordings IS NULL OR recordings IN ('allowed', 'denied')) NOT VALID;
 
 CREATE FUNCTION opengeni_private.set_host_organization_session_recordings(
   p_account_id uuid,
