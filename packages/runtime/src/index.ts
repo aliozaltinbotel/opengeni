@@ -51,10 +51,13 @@ export {
   type SingleModelCallTarget,
 } from "./single-model-call";
 import { instrumentedModelFetch } from "./model-provider-client";
+import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { ModelProviderApi, ResolvedModelProvider, Settings } from "@opengeni/config";
 import { isRunMcpCredentialError, RunMcpCredentials } from "./mcp-run-credentials";
 import {
   canonicalModelSourceJson,
+  mcpAppToolUiMeta,
+  WORKSPACE_MCP_TOOL_REFUSAL_CODES,
   sessionTitleGenerationInput,
   mcpToolRecommendsApproval,
   normalizeCredentialProviderMcpUrl,
@@ -1001,7 +1004,9 @@ const SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS = 120_000;
  * presentation/effect metadata.
  */
 type RuntimeMcpTool = Awaited<ReturnType<MCPServer["listTools"]>>[number] &
-  Pick<AttemptToolDefinition, "title" | "outputSchema" | "annotations" | "icons">;
+  Pick<AttemptToolDefinition, "title" | "outputSchema" | "annotations" | "icons"> & {
+    _meta?: unknown;
+  };
 
 type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -7170,7 +7175,7 @@ async function prepareToolGatewayDefinitionsFromServers(
       const modelSourceRefs = localServers.find(
         (local) => local.id === server.registryId,
       )?.modelSourceRefs;
-      const listed = await server.freezeTools();
+      const listed = callIdentity ? await server.listTools() : await server.freezeTools();
       return listed.map((tool) => {
         const toolName = server.unprefixedToolName(tool.name);
         return {
@@ -9386,6 +9391,7 @@ export class PrefixedMcpServer implements MCPServer {
   private readonly firstRequestModelNames = new Set<string>();
   private frozenTools: Promise<RuntimeMcpTool[]> | null = null;
   private readonly originalToolNames = new Map<string, string>();
+  private readonly modelHiddenToolNames = new Set<string>();
   private readonly displayMetadata = new Map<string, ToolDisplayMetadata>();
 
   toolDisplayMetadata(name: string): ToolDisplayMetadata | undefined {
@@ -9398,7 +9404,9 @@ export class PrefixedMcpServer implements MCPServer {
   }
   /** Exact attempt-local classification, including names too long for a prefix. */
   modelToolNames(): Iterable<string> {
-    return this.originalToolNames.keys();
+    return [...this.originalToolNames.keys()].filter(
+      (name) => !this.modelHiddenToolNames.has(name),
+    );
   }
   /**
    * Model names of the listed tools that stay on the first request although
@@ -9558,6 +9566,11 @@ export class PrefixedMcpServer implements MCPServer {
   }
 
   async listTools(): Promise<RuntimeMcpTool[]> {
+    return (await this.freezeTools()).filter((tool) => !this.modelHiddenToolNames.has(tool.name));
+  }
+
+  /** Complete provider snapshot for current-human gateways, independent of model disclosure. */
+  async freezeTools(): Promise<RuntimeMcpTool[]> {
     const startedAt = performance.now();
     let outcome: "completed" | "failed" = "completed";
     let count: number | undefined;
@@ -9579,10 +9592,6 @@ export class PrefixedMcpServer implements MCPServer {
     }
   }
 
-  freezeTools(): Promise<RuntimeMcpTool[]> {
-    return this.listTools();
-  }
-
   bindAttemptToolEnvironment(
     environment: AttemptToolEnvironment,
     subjectId: string,
@@ -9596,10 +9605,19 @@ export class PrefixedMcpServer implements MCPServer {
     if (projectDescriptions) {
       const prior = this.frozenTools ?? this.loadAndFreezeTools();
       this.frozenTools = prior.then((tools) => {
-        const projected = projectAttemptToolDescriptions(tools, environment.catalog);
+        const modelTools = tools.filter((tool) => !this.modelHiddenToolNames.has(tool.name));
+        const projectedModelTools = new Map(
+          projectAttemptToolDescriptions(modelTools, environment.catalog).map((tool) => [
+            tool.name,
+            tool,
+          ]),
+        );
+        const projected = tools.map((tool) => projectedModelTools.get(tool.name) ?? tool);
         const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, projected) ??
           assertMcpToolListWithinBounds(projected)) as RuntimeMcpTool[];
-        this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
+        this.listedToolSchemaTokens = estimateSerializedValueTokens(
+          bounded.filter((tool) => !this.modelHiddenToolNames.has(tool.name)),
+        );
         return bounded;
       });
     }
@@ -9678,6 +9696,9 @@ export class PrefixedMcpServer implements MCPServer {
           if (prior !== undefined && prior !== tool.name)
             throw new Error("MCP model tool identity collision");
           this.originalToolNames.set(name, tool.name);
+          const ui = mcpAppToolUiMeta(tool._meta);
+          if (ui?.visibility && !ui.visibility.includes("model"))
+            this.modelHiddenToolNames.add(name);
           const display: ToolDisplayMetadata = {
             toolName: tool.name,
             ...(tool.title ? { title: tool.title } : {}),
@@ -9707,8 +9728,9 @@ export class PrefixedMcpServer implements MCPServer {
         });
       const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
         assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
-      this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
-      const alwaysVisible = bounded.filter(
+      const modelTools = bounded.filter((tool) => !this.modelHiddenToolNames.has(tool.name));
+      this.listedToolSchemaTokens = estimateSerializedValueTokens(modelTools);
+      const alwaysVisible = modelTools.filter(
         (tool) =>
           isHarnessControlMcpToolName(this.registryId, tool.name) ||
           this.eagerToolNames.has(this.originalToolNames.get(tool.name) ?? ""),
@@ -9791,6 +9813,13 @@ export class PrefixedMcpServer implements MCPServer {
     const unprefixed = this.unprefixToolName(toolName);
     if (!this.isAllowed(unprefixed)) {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.registryId}`);
+    }
+    await this.freezeTools();
+    if (this.modelHiddenToolNames.has(toolName)) {
+      throw new McpError(ErrorCode.InvalidParams, "This tool is not available to the model", {
+        code: WORKSPACE_MCP_TOOL_REFUSAL_CODES.notModelVisible,
+        name: toolName,
+      });
     }
     return await this.resultCustomDataBridge.captureResult(args, async (cleanArgs) => {
       if (this.attemptToolEnvironment) {

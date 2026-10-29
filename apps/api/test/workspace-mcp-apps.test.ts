@@ -42,7 +42,7 @@ type JsonRpcBody = {
     }>;
     capabilities?: Record<string, unknown>;
   };
-  error?: { code?: number; message?: string };
+  error?: { code?: number; message?: string; data?: unknown };
 };
 
 const MCP_APP_MIME = "text/html;profile=mcp-app";
@@ -149,6 +149,7 @@ function acmeResources(reads: string[]): HostResources {
 
 type World = {
   post: (body: unknown) => Promise<{ status: number; body: JsonRpcBody }>;
+  invoke: (toolName: string) => Promise<Response>;
   cleanup: () => Promise<void>;
 };
 
@@ -201,7 +202,21 @@ async function world(
     const text = await response.text();
     return { status: response.status, body: (text ? JSON.parse(text) : {}) as JsonRpcBody };
   };
-  return { post, cleanup: async () => void (await deleteWorkspace(client!.db, owner.workspaceId)) };
+  const invoke = async (toolName: string) =>
+    await app.request(`http://localhost/v1/workspaces/${owner.workspaceId}/tools/invoke`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${bearer}`, "content-type": "application/json" },
+      body: JSON.stringify({
+        target: { identity: { serverId: "acme", toolName } },
+        arguments: {},
+        operationId: crypto.randomUUID(),
+      }),
+    });
+  return {
+    post,
+    invoke,
+    cleanup: async () => void (await deleteWorkspace(client!.db, owner.workspaceId)),
+  };
 }
 
 const initialize = {
@@ -362,11 +377,7 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
       expect(warned).not.toContainEqual({ serverId: "acme", toolName: "get_both" });
       const resources = await w.post(listResources);
       expect(resources.body.result?.resources?.map(({ uri }) => uri)).toEqual([STATUS_VIEW]);
-      expect(tool(listed.body, "acme__app_refresh")?._meta?.ui).toEqual({
-        resourceUri: STATUS_VIEW,
-        visibility: ["app"],
-      });
-      expect(tool(listed.body, "acme__app_refresh")?._meta).not.toHaveProperty("vendor");
+      expect(tool(listed.body, "acme__app_refresh")).toBeUndefined();
       expect(tool(listed.body, "acme__get_both")?._meta?.ui).toEqual({
         resourceUri: RESERVE_VIEW,
         visibility: ["model", "app"],
@@ -382,6 +393,113 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
       ]);
     } finally {
       warn.mockRestore();
+      await w.cleanup();
+    }
+  });
+
+  for (const approval of [false, true])
+    test(`a model call to an app-only host tool is refused by name over MCP (approval: ${approval})`, async () => {
+      const calls: string[] = [];
+      const w = await world(
+        [{ ...acmeEntry, ...(approval ? { requireApproval: ["app_refresh"] } : {}) }],
+        async () => {
+          const server = new McpServer({ name: "host-acme", version: "1" });
+          server.registerTool(
+            "app_refresh",
+            { _meta: { ui: { visibility: ["app"] } } },
+            async () => {
+              calls.push("app_refresh");
+              return { content: [{ type: "text", text: "refreshed" }] };
+            },
+          );
+          return [await hostRegistration("acme", server)];
+        },
+      );
+      try {
+        const called = await w.post({
+          method: "tools/call",
+          params: { name: "acme__app_refresh", arguments: {}, _meta: { caller: "app" } },
+        });
+        expect(called.body.error).toMatchObject({
+          code: -32602,
+          data: { code: "TOOL_NOT_MODEL_VISIBLE", name: "acme__app_refresh" },
+        });
+        expect(calls).toEqual([]);
+        expect(tool((await w.post(listTools)).body, "acme__app_refresh")).toBeUndefined();
+      } finally {
+        await w.cleanup();
+      }
+    });
+
+  test("the view can still call an app-only tool through the host HTTP bridge", async () => {
+    const calls: string[] = [];
+    const w = await world([acmeEntry], async () => {
+      const server = new McpServer({ name: "host-acme", version: "1" });
+      server.registerTool(
+        "app_refresh",
+        {
+          _meta: { ui: { resourceUri: STATUS_VIEW, visibility: ["app"] } },
+        },
+        async () => {
+          calls.push("app_refresh");
+          return { content: [{ type: "text", text: "refreshed" }] };
+        },
+      );
+      return [await hostRegistration("acme", server, acmeResources([]))];
+    });
+    try {
+      const response = await w.invoke("app_refresh");
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("refreshed");
+      expect(calls).toEqual(["app_refresh"]);
+      expect((await w.post(readResource(STATUS_VIEW))).body.result?.contents?.[0]?.text).toBe(
+        STATUS_HTML,
+      );
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("an app-only tool with a malformed view stays hidden from the model and refused", async () => {
+    const calls: string[] = [];
+    const reads: string[] = [];
+    const w = await world([acmeEntry], async () => {
+      const server = new McpServer({ name: "host-acme", version: "1" });
+      server.registerTool(
+        "app_refresh",
+        {
+          _meta: { ui: { resourceUri: MALFORMED_VIEW, visibility: ["app"] } },
+        },
+        async () => {
+          calls.push("app_refresh");
+          return { content: [{ type: "text", text: "refreshed" }] };
+        },
+      );
+      return [await hostRegistration("acme", server, acmeResources(reads))];
+    });
+    try {
+      const called = await w.post({
+        method: "tools/call",
+        params: {
+          name: "acme__app_refresh",
+          arguments: {},
+          _meta: { caller: "app" },
+        },
+      });
+      expect(called.body.error).toMatchObject({
+        code: -32602,
+        data: { code: "TOOL_NOT_MODEL_VISIBLE", name: "acme__app_refresh" },
+      });
+      expect(calls).toEqual([]);
+      expect(tool((await w.post(listTools)).body, "acme__app_refresh")).toBeUndefined();
+      expect((await w.post(listResources)).body.result?.resources).toEqual([]);
+      expect((await w.post(readResource(MALFORMED_VIEW))).body.error?.code).toBe(-32002);
+      expect(reads).toEqual([]);
+      const response = await w.invoke("app_refresh");
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("refreshed");
+      expect(calls).toEqual(["app_refresh"]);
+    } finally {
       await w.cleanup();
     }
   });
