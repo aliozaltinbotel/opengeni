@@ -722,6 +722,17 @@ tools frozen at its consent (the catalog holds only those, so the answer tells
 nothing about tools outside the consent); `TOOL_NOT_FOUND` for any other
 caller.
 
+An embedding host's in-process tool servers (`workspaceToolServers`) may
+publish MCP Apps views. The workspace MCP forwards a host tool's MCP Apps
+`_meta.ui` on `tools/list`: `resourceUri` (from `ui.resourceUri`, or the
+deprecated flat `ui/resourceUri` key) and `visibility` (`["model"]`,
+`["app"]` or both; omitted means both). A tool without a well-formed
+`ui://…html` view carries no `ui`; a malformed `visibility` alone is dropped.
+`resources/read` contents carry the view's resource `_meta.ui` (`csp`,
+`permissions`, `domain`, `prefersBorder`) when the host's `readResource`
+returns a well-formed one. Other `_meta` keys a host sets are not forwarded,
+and first-party and remote tools never carry a view.
+
 Workspace Sites retain a self-contained HTML runtime, bounded source bundle,
 and requested tool identities per immutable version. The parent renders the
 runtime in a sandboxed iframe and transfers one `MessagePort` only to that exact

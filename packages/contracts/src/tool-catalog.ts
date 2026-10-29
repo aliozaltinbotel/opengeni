@@ -157,11 +157,100 @@ export const McpAppResourceUri = /* @__PURE__ */ defineSchema(() =>
     .regex(/^ui:\/\/[a-z0-9.-]+\/[A-Za-z0-9._/-]+\.html$/u),
 );
 
-/** The tool-definition metadata a catalog keeps: only an MCP Apps view. */
+/** Who may call an MCP Apps tool: the model, the view (`app`), or both (the default). */
+export const McpAppToolVisibility = /* @__PURE__ */ defineSchema(() => z.enum(["model", "app"]));
+export type McpAppToolVisibility = z.infer<typeof McpAppToolVisibility>;
+
+/**
+ * A tool definition's `_meta.ui` (MCP Apps `McpUiToolMeta`): the view that
+ * renders its results and who may call it. `visibility` omitted means
+ * `["model", "app"]`.
+ */
+export const McpAppToolUiMeta = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      resourceUri: McpAppResourceUri,
+      visibility: z
+        .array(McpAppToolVisibility)
+        .min(1)
+        .max(2)
+        .refine((values) => new Set(values).size === values.length, "duplicate visibility")
+        .optional(),
+    })
+    .strict(),
+);
+export type McpAppToolUiMeta = z.infer<typeof McpAppToolUiMeta>;
+
+/**
+ * A view resource's `_meta.ui` (MCP Apps `UIResourceMeta`), on `resources/list`
+ * and `resources/read` contents: the sandbox's content security policy, the
+ * device permissions it asks for, its dedicated origin and border preference.
+ */
+export const McpAppResourceUiMeta = /* @__PURE__ */ defineSchema(() => {
+  const domains = z.array(z.string().min(1).max(2_048)).max(64).optional();
+  const permission = z.object({}).strict().optional();
+  return z
+    .object({
+      csp: z
+        .object({
+          connectDomains: domains,
+          resourceDomains: domains,
+          frameDomains: domains,
+          baseUriDomains: domains,
+        })
+        .strict()
+        .optional(),
+      permissions: z
+        .object({
+          camera: permission,
+          microphone: permission,
+          geolocation: permission,
+          clipboardWrite: permission,
+        })
+        .strict()
+        .optional(),
+      domain: z.string().min(1).max(2_048).optional(),
+      prefersBorder: z.boolean().optional(),
+    })
+    .strict();
+});
+export type McpAppResourceUiMeta = z.infer<typeof McpAppResourceUiMeta>;
+
+function metaRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+/**
+ * The MCP Apps `_meta.ui` of a listed tool, or undefined when it has no
+ * well-formed view. The view comes from `ui.resourceUri`, else from the
+ * deprecated flat `ui/resourceUri` key. A malformed `visibility` is dropped
+ * (the default then applies); a malformed view drops the whole `ui`.
+ */
+export function mcpAppToolUiMeta(meta: unknown): McpAppToolUiMeta | undefined {
+  const record = metaRecord(meta);
+  const ui = metaRecord(record?.ui);
+  const resourceUri = McpAppResourceUri.safeParse(ui?.resourceUri ?? record?.["ui/resourceUri"]);
+  if (!resourceUri.success) return undefined;
+  const visibility = McpAppToolUiMeta.shape.visibility.safeParse(ui?.visibility);
+  return {
+    resourceUri: resourceUri.data,
+    ...(visibility.success && visibility.data ? { visibility: visibility.data } : {}),
+  };
+}
+
+/** The well-formed MCP Apps `_meta.ui` of a view resource, or undefined. */
+export function mcpAppResourceUiMeta(meta: unknown): McpAppResourceUiMeta | undefined {
+  const parsed = McpAppResourceUiMeta.safeParse(metaRecord(meta)?.ui);
+  return parsed.success && Object.keys(parsed.data).length > 0 ? parsed.data : undefined;
+}
+
+/** The tool-definition metadata a catalog keeps: only an MCP Apps view (`_meta.ui`). */
 export const AttemptToolCatalogMeta = /* @__PURE__ */ defineSchema(() =>
   z
     .object({
-      ui: z.object({ resourceUri: McpAppResourceUri }).strict().optional(),
+      ui: McpAppToolUiMeta.optional(),
     })
     .strict(),
 );

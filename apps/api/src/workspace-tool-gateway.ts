@@ -36,8 +36,10 @@ import {
   toolPolicyActionName,
   isSecretReferenceError,
   MCP_APP_RESOURCE_MIME_TYPE,
-  McpAppResourceUri,
+  mcpAppResourceUiMeta,
+  mcpAppToolUiMeta,
   WORKSPACE_MCP_TOOL_REFUSAL_CODES,
+  type McpAppToolUiMeta,
   type AccessGrant,
   type ToolGatewayIdentity,
   type ToolRef,
@@ -1083,10 +1085,8 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
         }),
         mapDefinition: (definition) => {
           // Only a host tool server's own listing can attach an MCP Apps view.
-          const resourceUri = hostServers.views.get(
-            workspaceToolGatewayIdentityKey(definition.identity),
-          );
-          if (resourceUri) definition = { ...definition, meta: { ui: { resourceUri } } };
+          const ui = hostServers.views.get(workspaceToolGatewayIdentityKey(definition.identity));
+          if (ui) definition = { ...definition, meta: { ui } };
           // Raw/local providers have no native credential revision. The legacy
           // gateway fallback binds the whole public catalog, including Ask/Allow
           // presentation. Targeted approvals instead use the runtime's existing
@@ -1486,7 +1486,18 @@ function registerHostViewResources(
     const view = await host.readResource(uri);
     if (view?.mimeType !== MCP_APP_RESOURCE_MIME_TYPE || typeof view.text !== "string")
       throw notFound();
-    return { contents: [{ uri, mimeType: MCP_APP_RESOURCE_MIME_TYPE, text: view.text }] };
+    // The view's own MCP Apps `_meta.ui` (CSP, permissions, domain, border).
+    const ui = mcpAppResourceUiMeta(view._meta);
+    return {
+      contents: [
+        {
+          uri,
+          mimeType: MCP_APP_RESOURCE_MIME_TYPE,
+          text: view.text,
+          ...(ui ? { _meta: { ui } } : {}),
+        },
+      ],
+    };
   });
 }
 
@@ -1927,10 +1938,10 @@ async function workspaceHostToolServers(
 ): Promise<{
   registrations: LocalMcpServerRegistration[];
   staticIds: ReadonlySet<string>;
-  views: ReadonlyMap<string, string>;
+  views: ReadonlyMap<string, McpAppToolUiMeta>;
 }> {
   const port = routeDeps.workspaceToolServers;
-  const views = new Map<string, string>();
+  const views = new Map<string, McpAppToolUiMeta>();
   if (!port) return { registrations: [], staticIds: new Set(), views };
   const registrations = await port({
     grant: input.grant,
@@ -1970,12 +1981,13 @@ async function workspaceHostToolServers(
 
 /**
  * The registration with its server's `tools/list` observed: each listed tool's
- * well-formed `_meta.ui.resourceUri` is recorded under its gateway identity
- * key, and a malformed one is dropped. The listing itself passes unchanged.
+ * MCP Apps `_meta.ui` (its view and `visibility`, see `mcpAppToolUiMeta`) is
+ * recorded under its gateway identity key, and a tool without a well-formed
+ * view has none. The listing itself passes unchanged.
  */
 function recordingHostViews(
   registration: LocalMcpServerRegistration,
-  views: Map<string, string>,
+  views: Map<string, McpAppToolUiMeta>,
 ): LocalMcpServerRegistration {
   const listTools: LocalMcpServerRegistration["server"]["listTools"] = async () => {
     const tools = await registration.server.listTools();
@@ -1984,8 +1996,8 @@ function recordingHostViews(
         serverId: registration.id,
         toolName: tool.name,
       });
-      const uri = McpAppResourceUri.safeParse(hostToolViewUri(tool));
-      if (uri.success) views.set(key, uri.data);
+      const ui = mcpAppToolUiMeta("_meta" in tool ? tool._meta : undefined);
+      if (ui) views.set(key, ui);
       else views.delete(key);
     }
     return tools;
@@ -1998,12 +2010,6 @@ function recordingHostViews(
     },
   });
   return { ...registration, server };
-}
-
-function hostToolViewUri(tool: object): unknown {
-  const meta = "_meta" in tool ? tool._meta : undefined;
-  const ui = typeof meta === "object" && meta !== null && "ui" in meta ? meta.ui : undefined;
-  return typeof ui === "object" && ui !== null && "resourceUri" in ui ? ui.resourceUri : undefined;
 }
 
 function allGatewayToolRefs(settings: Settings): ToolRef[] {

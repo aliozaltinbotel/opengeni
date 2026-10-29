@@ -5302,10 +5302,15 @@ export type LocalMcpServerRegistration = {
    * only for an embedding host's registration; model execution ignores them.
    */
   listResources?(): Promise<readonly McpResource[]>;
-  /** The HTML of one listed view, read through `resources/read`. */
+  /**
+   * The HTML of one listed view, read through `resources/read`. A well-formed
+   * MCP Apps `_meta.ui` (CSP, permissions, domain, border) reaches the client
+   * on the read contents.
+   */
   readResource?(uri: string): Promise<{
     mimeType: typeof import("@opengeni/contracts").MCP_APP_RESOURCE_MIME_TYPE;
     text: string;
+    _meta?: Record<string, unknown>;
   }>;
   /**
    * MCP protocol-extension request handlers keyed by method name, for example

@@ -34,7 +34,12 @@ type JsonRpcBody = {
   result?: {
     tools?: ListedTool[];
     resources?: Array<{ uri: string; name?: string; mimeType?: string }>;
-    contents?: Array<{ uri: string; mimeType?: string; text?: string }>;
+    contents?: Array<{
+      uri: string;
+      mimeType?: string;
+      text?: string;
+      _meta?: Record<string, unknown>;
+    }>;
     capabilities?: Record<string, unknown>;
   };
   error?: { code?: number; message?: string };
@@ -276,6 +281,83 @@ describe("MCP Apps metadata and resources on the workspace MCP", () => {
         { uri: STATUS_VIEW, mimeType: MCP_APP_MIME, text: STATUS_HTML },
       ]);
       expect(reads).toEqual([STATUS_VIEW]);
+    } finally {
+      await w.cleanup();
+    }
+  });
+
+  test("the gateway forwards a tool's MCP Apps _meta.ui and a view's resource _meta.ui", async () => {
+    const FLAT_VIEW = "ui://acme/views/flat.html";
+    const resourceUi = {
+      csp: { connectDomains: ["https://api.acme.example"], resourceDomains: [] },
+      permissions: { clipboardWrite: {} },
+      domain: "views.acme.example",
+      prefersBorder: false,
+    };
+    const w = await world([remoteServer, acmeEntry], async () => {
+      const server = new McpServer({ name: "host-acme", version: "1.0.0" });
+      const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
+      server.registerTool(
+        "app_refresh",
+        {
+          description: "Called by the view only.",
+          _meta: { ui: { resourceUri: STATUS_VIEW, visibility: ["app"] }, vendor: "dropped" },
+        },
+        async () => text("refreshed"),
+      );
+      server.registerTool(
+        "get_both",
+        {
+          description: "Model and view.",
+          _meta: { ui: { resourceUri: RESERVE_VIEW, visibility: ["model", "app"] } },
+        },
+        async () => text("both"),
+      );
+      server.registerTool(
+        "get_bad_visibility",
+        {
+          description: "A malformed visibility keeps the view.",
+          _meta: { ui: { resourceUri: RESERVE_VIEW, visibility: ["everyone"] } },
+        },
+        async () => text("bad"),
+      );
+      server.registerTool(
+        "get_flat",
+        { description: "Deprecated flat key.", _meta: { "ui/resourceUri": FLAT_VIEW } },
+        async () => text("flat"),
+      );
+      return [
+        await hostRegistration("acme", server, {
+          listResources: async () => [{ uri: STATUS_VIEW, name: "status", mimeType: MCP_APP_MIME }],
+          readResource: async () => ({
+            mimeType: MCP_APP_MIME,
+            text: STATUS_HTML,
+            _meta: { ui: resourceUi, "vendor/extra": true },
+          }),
+        }),
+      ];
+    });
+    try {
+      const listed = await w.post(listTools);
+      expect(listed.status).toBe(200);
+      expect(tool(listed.body, "acme__app_refresh")?._meta?.ui).toEqual({
+        resourceUri: STATUS_VIEW,
+        visibility: ["app"],
+      });
+      expect(tool(listed.body, "acme__app_refresh")?._meta).not.toHaveProperty("vendor");
+      expect(tool(listed.body, "acme__get_both")?._meta?.ui).toEqual({
+        resourceUri: RESERVE_VIEW,
+        visibility: ["model", "app"],
+      });
+      expect(tool(listed.body, "acme__get_bad_visibility")?._meta?.ui).toEqual({
+        resourceUri: RESERVE_VIEW,
+      });
+      expect(tool(listed.body, "acme__get_flat")?._meta?.ui).toEqual({ resourceUri: FLAT_VIEW });
+      const read = await w.post(readResource(STATUS_VIEW));
+      expect(read.status).toBe(200);
+      expect(read.body.result?.contents).toEqual([
+        { uri: STATUS_VIEW, mimeType: MCP_APP_MIME, text: STATUS_HTML, _meta: { ui: resourceUi } },
+      ]);
     } finally {
       await w.cleanup();
     }
