@@ -16,6 +16,10 @@
   "module": "./src/index.ts",
   "types": "./src/index.ts",
   "exports": {
+    "./internal/workspace-mcp-timing": {
+      "types": "./src/internal/workspace-mcp-timing.ts",
+      "default": "./src/internal/workspace-mcp-timing.ts"
+    },
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"

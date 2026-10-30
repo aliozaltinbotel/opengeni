@@ -867,3 +867,87 @@ per-session servers in [session-mcp-servers.md](session-mcp-servers.md),
 workspace capabilities in [capabilities.md](capabilities.md), credential
 handling in [credentials.md](credentials.md), and the full Codemode design in
 [design/codemode.md](design/codemode.md).
+
+## Workspace gateway request timings
+
+A host can subscribe on the same `Observability` instance passed to the API:
+
+```ts
+const unsubscribe = observability.onWorkspaceMcpTiming((event) => {
+  // Join the five events by event.requestId; each carries the same totalMs.
+  collectTiming(event);
+});
+// Stop collecting when the host disposes its diagnostics integration.
+unsubscribe();
+```
+
+The hook follows this recognition contract: observations are emitted only for canonically recognised `tools/call` and `tools/list`; pre-admission rejections are best-effort and may emit nothing.
+
+Each `tools/call` or `tools/list` request recognized by canonical SDK dispatch
+emits one closed event for each of these exclusive phases, in order:
+
+| Phase | Measured boundary |
+| --- | --- |
+| `route_prepare` | Entry into the API's Hono middleware, before authentication, through `transport.handleRequest` entry; includes grant resolution and catalog preparation. |
+| `transport_setup` | `handleRequest` entry through the transport's parsed-message handoff to the MCP SDK. |
+| `sdk_dispatch` | SDK dispatch, gateway policy/preparation, secret resolution, lifecycle hooks and output validation, excluding the downstream execution interval and response write. |
+| `host_handler` | The exact downstream `ToolGatewayDefinition.execute` await. Nested/overlapping invocations count their union. `tools/list` projects an already prepared catalog, so this phase is zero. |
+| `response_write` | The SDK's actual response `transport.send` entry through `handleRequest` returning its constructed `Response`, including JSON serialization. |
+
+The closed shape is
+`{ requestId, totalMs, phase, durationMs, toolKind, outcome }`.
+`toolKind` is `call` or `list`; `outcome` is `ok`, `tool_error`, `refused`,
+`rejected`, `failed` or `cancelled`. A recognized complete-body pre-admission
+rejection uses `refused`; a canonical gateway/tool rejection uses `rejected`.
+All five events share the API's per-request `x-opengeni-correlation-id`, including
+an accepted inbound value or the opaque id the API generates for its response
+and logs. Hosts can join the phases to those request logs. A standalone transport
+uses its inbound correlation id or mints one opaque id for that HTTP request.
+The events share the same measured `totalMs`; their durations add to that total.
+No tool name, arguments, results, JSON-RPC id, caller identity, tenant, other
+headers or error body is included. A host may compute its own SLO, for example `totalMs - host_handler`;
+these measurements establish no latency guarantee.
+
+The successful boundary ends when the SDK makes its in-process HTTP `Response`
+available. Socket writes, TLS, proxies, network transit, client receipt and
+post-Response server/gateway cleanup are excluded. The downstream execution
+boundary includes the selected runtime/provider executor; it does not instrument
+inside a host's SDK or remote service. Request upload buffering on the
+aggregate `/mcp` endpoint occurs in `boundedMcpRequest` and belongs to
+`route_prepare`. On the dedicated `/mcp/docs` and `/mcp/files` OAuth gateways,
+the SDK reads the body inside `transport_setup`; upload waiting there belongs to
+that phase. Excluding socket writes does not exclude those upload waits. Before-dispatch HTTP/authentication
+refusals close requests recognized by best-effort discovery, with unentered
+phases zero. Discovery only buffers while the request runs. Canonical SDK
+recognition skips the duplicate diagnostic JSON parse; refusal-only discovery
+parses in a queued task after the outer API middleware has awaited route cleanup,
+outside `totalMs` and every phase. Subscriber delivery is released at that same
+boundary and runs in a queued task, so the API Response returns before synchronous
+observer work begins. SDK completion still closes the measured intervals and
+clears inherited timing scopes immediately; cleanup time is not added. Standalone
+transport instrumentation queues delivery at its own terminal boundary. Throwing and
+rejecting observers remain isolated. Diagnostic body reads never postpone authentication,
+header refusals or other canonical responses, and stop on response, abort or
+transport close. Incomplete or otherwise undiscovered bodies produce no events.
+Cancellation closes at the transport's terminal close; a transport failure closes
+at its rejection after canonical dispatch. Exceptions before canonical dispatch,
+including stateless transport reuse, emit no events because the SDK exposes no
+stable refusal code. No `response_write` interval is invented when SDK send was
+never entered. Unparseable, oversized or incomplete bodies cannot supply a
+recognizable tools request and emit no timing events.
+
+The aggregate workspace endpoint and the OAuth gateway on the dedicated
+`/mcp/docs` and `/mcp/files` endpoints share this instrumentation. Native
+agent-attempt, delegated, session-bound and ordinary dedicated first-party
+servers explicitly stop discovery and emit no gateway timings, including on
+native refusals and cancellations. Completed requests clear both shared timing
+scope references, so background work inherited from a tool cannot retain or
+restart the completed measurement. The package root exports the observation and
+observer types plus `Observability.onWorkspaceMcpTiming`; transport and host
+plumbing lives under the internal subpath and is not a host integration API.
+With no subscriber, the wrapper delegates directly to the existing middleware
+and transport methods stay unchanged: there is no measurement allocation, clock/UUID work, body clone
+or diagnostic async context. When subscribed, method/id discovery reads a bounded
+clone concurrently with admission; canonical SDK dispatch also recognizes
+requests, and the SDK still validates the original request. Observer exceptions and
+rejected observer promises are isolated, without recording their error bodies.
