@@ -335,8 +335,15 @@ export function RootRouteComponent() {
   ) : hostOutsideRoute && clientConfig && (!managedAuthRequired || authSession) ? (
     // Before the access and onboarding gates: the person may have no
     // workspace yet (the host's registration, not-admitted or identity pages).
+    // A signed-in person's own app context, once resolved, so a host page can
+    // read that person's workspaces (useAppContext().workspaces). It opens no
+    // workspace: workspace-scoped hooks still refuse here.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
+    ) : appContext ? (
+      <AppContext.Provider value={appContext}>
+        <Outlet />
+      </AppContext.Provider>
     ) : (
       <Outlet />
     )
