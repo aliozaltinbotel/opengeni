@@ -9,6 +9,7 @@ export {
 } from "./durable-fanout";
 import {
   boundSessionEvent,
+  projectSessionEventForPublic,
   boundWorkspaceControlEvent,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -1397,14 +1398,14 @@ export function formatWorkspaceControlCursorSse(workspaceId: string, sequence: n
   return formatSse({ type: "workspace.control.cursor", workspaceId, sequence });
 }
 
-/** Serialize exact durable content; the SSE queue backpressures whole frames. */
+/** Serialize public durable content; the SSE queue backpressures whole frames. */
 export function formatSessionEventSse(
   event: SessionEvent,
   coveredThrough = event.sequence,
 ): string {
   // Session content is not a diagnostic preview. Page replay and coalescing
-  // bound accumulation without rewriting an individual durable event.
-  return formatSse(event, coveredThrough);
+  // bound accumulation. Only host-context fields are omitted at this public boundary.
+  return formatSse(projectSessionEventForPublic(event), coveredThrough);
 }
 
 /**
@@ -1471,10 +1472,11 @@ export function boundSessionEventHttpPage(
   const maxBytes = options.maxBytes ?? SESSION_EVENT_HTTP_PAGE_MAX_BYTES;
   const selected: SessionEvent[] = [];
   let bytes = 2; // []
+  const publicEvents = events.map(projectSessionEventForPublic);
   const projected =
     options.eventProjection !== "bounded"
-      ? [...events]
-      : events.map((event) => boundSessionEventForSurface(event, "http_projection"));
+      ? publicEvents
+      : publicEvents.map((event) => boundSessionEventForSurface(event, "http_projection"));
   const candidates = options.direction === "after" ? projected : [...projected].reverse();
   for (const event of candidates) {
     const eventBytes = sessionEventJsonBytes(event);

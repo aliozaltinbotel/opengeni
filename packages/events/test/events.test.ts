@@ -16,6 +16,7 @@ import {
 } from "../src/index";
 import {
   boundSessionEvent,
+  projectSessionEventForPublic,
   boundSessionEventPayload,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
@@ -68,6 +69,44 @@ function controlEvent(sequence: number, reason = "operator pause"): WorkspaceCon
 }
 
 describe("SSE formatting", () => {
+  test("public projection preserves ordinary tool data and visible nested message data", () => {
+    const toolEvent = event(1, { modelContext: "ordinary tool field" });
+    expect(projectSessionEventForPublic(toolEvent)).toBe(toolEvent);
+    const message: SessionEvent = {
+      ...event(2, { text: "visible", metadata: { modelContext: "ordinary nested field" } }),
+      type: "user.message",
+    };
+    expect(projectSessionEventForPublic(message)).toBe(message);
+  });
+
+  test("public HTTP and SSE events omit host context without changing durable payloads", () => {
+    const retained: SessionEvent = {
+      ...event(7, {
+        text: "visible message",
+        modelContext: "host-only selected-record context",
+        initialModelContext: "host-only initial context",
+      }),
+      type: "user.message",
+    };
+    const frame = formatSessionEventSse(retained, 9);
+    expect(frame).toContain('"payload":{"text":"visible message"}');
+    expect(frame).not.toContain("host-only");
+    expect(frame).toStartWith("id: 9\n");
+    for (const eventProjection of ["exact", "bounded"] as const) {
+      const page = boundSessionEventHttpPage([retained], {
+        direction: "after",
+        eventProjection,
+      });
+      expect(page.events[0]?.payload).toEqual({ text: "visible message" });
+      expect(page.nextSequence).toBe(7);
+      expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page.events)));
+    }
+    expect(retained.payload).toMatchObject({
+      modelContext: "host-only selected-record context",
+      initialModelContext: "host-only initial context",
+    });
+  });
+
   test("formats session events as named SSE messages", () => {
     const text = formatSse({
       id: "00000000-0000-4000-8000-000000000001",

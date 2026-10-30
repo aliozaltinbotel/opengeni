@@ -435,6 +435,49 @@ describe("REST committed fresh session outcome (real PostgreSQL, real API compos
 });
 
 
+test("send and steer acceptance replies omit host model context", async () => {
+  for (const mode of ["send", "steer"] as const) {
+    const { grant, request } = await fixture();
+    const created = await post(grant, {
+      ...request,
+      initialMessage: undefined,
+      startMode: "realtime",
+    });
+    expect(created.status).toBe(202);
+    const session = Session.parse(await created.json());
+    const payload = {
+      text: "Visible host message",
+      modelContext: "Host-only acceptance context",
+      clientEventId: crypto.randomUUID(),
+    };
+    const response = await fetch(
+      `${server.url}v1/workspaces/${grant.workspaceId}/sessions/${session.id}/${mode === "send" ? "events" : "steer"}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: await bearer(grant),
+          "content-type": "application/json",
+          [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+        },
+        body: JSON.stringify(
+          mode === "send"
+            ? {
+                type: "user.message",
+                clientEventId: payload.clientEventId,
+                payload: { text: payload.text, modelContext: payload.modelContext },
+              }
+            : payload,
+        ),
+      },
+    );
+    expect(response.status).toBe(202);
+    const body = await response.text();
+    expect(body).toContain("Visible host message");
+    expect(body).not.toContain('"modelContext"');
+    expect(body).not.toContain("Host-only acceptance context");
+  }
+}, 60_000);
+
 test("public host message origins survive create/send/steer into exact first-call receipt", async () => {
   for(const mode of ["create","send","steer"] as const) {
     const {grant,request}=await fixture();

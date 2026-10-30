@@ -104,8 +104,8 @@ test("HTTP searches old visible content and existing bounded event reader loads 
   expect(context.status).toBe(200);
   const events = (await context.json()) as Array<{ sequence: number; payload: { text?: string } }>;
   expect(events.map((event) => event.sequence)).toEqual([1, 2, 3]);
-  // The existing reader is also an audit API and retains modelContext even on
-  // small summary payloads. Preview only the explicitly visible text field.
+  // Public audit reads keep visible text but omit host-only context.
+  expect(JSON.stringify(events)).not.toContain("hidden model context");
   expect(events.map((event) => event.payload.text)).toEqual([
     "before",
     "literal %_\\🙂 twice TWICE",

@@ -23,6 +23,7 @@ import type {
 } from "@opengeni/contracts";
 import {
   boundSessionEventPayload,
+  projectSessionEventForPublic,
   measureSessionEventJson,
   sessionEventJsonBytes,
   compactSessionMcpDetail,
@@ -234,8 +235,9 @@ export function boundSessionEventMcpPage(input: SessionEventMcpPageInput): Sessi
   const maxBytes = Math.max(8 * 1024, input.maxBytes ?? SESSION_EVENT_MCP_MAX_BYTES);
   let payloadTrimmed = false;
   const events = input.events.map((event) => {
-    const capped = capEventPayload(event, SESSION_EVENT_MCP_FIELD_MAX_CHARS);
-    if (capped !== event) payloadTrimmed = true;
+    const publicEvent = projectSessionEventForPublic(event);
+    const capped = capEventPayload(publicEvent, SESSION_EVENT_MCP_FIELD_MAX_CHARS);
+    if (capped !== publicEvent) payloadTrimmed = true;
     return capped;
   });
   let modelRowsDropped = false;
