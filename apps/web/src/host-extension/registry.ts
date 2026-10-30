@@ -18,6 +18,7 @@ import {
   type HostExtensionContext,
   type HostExtensionStarter,
   type HostExtensionOutsideWorkspaceRoute,
+  type HostToolRegistryEntry,
   type NativeDestination,
   type NativeSectionId,
 } from "@opengeni/react/app/host-extension";
@@ -293,34 +294,75 @@ function checkBrand(value: unknown): void {
   component(brand.wordmark, "brand.wordmark");
 }
 
+/**
+ * One tool card's rules, shared by install and the lazy loader: an exact
+ * name, once among `names` (which then holds it), leaf matching off, no
+ * built-in card's name, and a component.
+ */
+function checkToolRegistryEntry(item: unknown, field: string, names: Set<string>): void {
+  const entry = record(item, field);
+  if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
+  const name = text(entry.name, `${field}.name`);
+  if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
+  // An omitted flag enables leaf matching, which could capture another server's tool.
+  if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
+  const nativeLeaf = name.startsWith("mcp__opengeni__")
+    ? name.slice("mcp__opengeni__".length)
+    : name.startsWith("opengeni__")
+      ? name.slice("opengeni__".length)
+      : undefined;
+  // Only hashed MCP wire names may deliberately replace a built-in leaf's card.
+  const exactHostName = /^mcp_(?:[0-9a-f]{16}|[0-9a-f]{24})__[A-Za-z0-9_]+$/.test(name);
+  // A stock build has no entries to check; the flag lets it drop the name list.
+  if (
+    import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" &&
+    ((nativeLeaf !== undefined && isBuiltInToolCardName(nativeLeaf)) ||
+      (!exactHostName && isBuiltInToolCardName(name)))
+  ) {
+    fail(`${field}.name`, `"${name}" has a built-in card`);
+  }
+  component(entry.render, `${field}.render`);
+  names.add(name);
+}
+
 function checkToolRegistryEntries(value: unknown): void {
   const names = new Set<string>();
-  list(value, "toolRegistryEntries").forEach((item, index) => {
-    const field = `toolRegistryEntries[${index}]`;
-    const entry = record(item, field);
-    if (entry.match !== "name") fail(`${field}.match`, 'must be "name"');
-    const name = text(entry.name, `${field}.name`);
-    if (names.has(name)) fail(`${field}.name`, `"${name}" is registered twice`);
-    // An omitted flag enables leaf matching, which could capture another server's tool.
-    if (entry.matchPrefixedLeaf !== false) fail(`${field}.matchPrefixedLeaf`, "must be false");
-    const nativeLeaf = name.startsWith("mcp__opengeni__")
-      ? name.slice("mcp__opengeni__".length)
-      : name.startsWith("opengeni__")
-        ? name.slice("opengeni__".length)
-        : undefined;
-    // Only hashed MCP wire names may deliberately replace a built-in leaf's card.
-    const exactHostName = /^mcp_(?:[0-9a-f]{16}|[0-9a-f]{24})__[A-Za-z0-9_]+$/.test(name);
-    // A stock build has no entries to check; the flag lets it drop the name list.
-    if (
-      import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" &&
-      ((nativeLeaf !== undefined && isBuiltInToolCardName(nativeLeaf)) ||
-        (!exactHostName && isBuiltInToolCardName(name)))
-    ) {
-      fail(`${field}.name`, `"${name}" has a built-in card`);
-    }
-    names.add(name);
-    component(entry.render, `${field}.render`);
-  });
+  list(value, "toolRegistryEntries").forEach((item, index) =>
+    checkToolRegistryEntry(item, `toolRegistryEntries[${index}]`, names),
+  );
+}
+
+type ToolRegistryLoader = NonNullable<HostExtension["toolRegistryLoader"]>;
+
+/**
+ * The extension's tool-card loader, checked like install: each loaded entry
+ * meets the install-time rules, against the installed entries' names too. A
+ * refused entry is dropped, and one warning per load names the refused fields
+ * only (never an entry). A rejection passes through to the caller.
+ */
+export function createHostToolRegistryLoader(
+  source: ToolRegistryLoader,
+  installed: HostExtension["toolRegistryEntries"],
+): ToolRegistryLoader {
+  return async () => {
+    const loaded: unknown = await source();
+    if (!Array.isArray(loaded)) fail("toolRegistryLoader", "must resolve to an array");
+    const names = new Set((installed ?? []).map((entry) => entry.name));
+    const kept: HostToolRegistryEntry[] = [];
+    const refused: string[] = [];
+    loaded.forEach((item: unknown, index) => {
+      try {
+        checkToolRegistryEntry(item, `toolRegistryLoader[${index}]`, names);
+        // Checked just above, as install checks the eager entries.
+        kept.push(item as HostToolRegistryEntry);
+      } catch (error) {
+        if (!(error instanceof HostExtensionInvalidError)) throw error;
+        refused.push(error.field);
+      }
+    });
+    if (refused.length > 0) console.warn("HOST_TOOL_REGISTRY_ENTRY_REFUSED", refused);
+    return kept;
+  };
 }
 
 /** "sessions" or one of the extension's own workspace pages without params. */
@@ -483,6 +525,7 @@ export function validateHostExtension(value: unknown): HostExtension {
     component(provider, `shellProviders[${index}]`),
   );
   checkToolRegistryEntries(fields.toolRegistryEntries);
+  optionalFunction(fields.toolRegistryLoader, "toolRegistryLoader");
   optionalFunction(fields.workspaceFilter, "workspaceFilter");
   checkLifecycle(fields.lifecycle);
   return value as HostExtension;
