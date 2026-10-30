@@ -57,6 +57,27 @@ describe("model monitoring value bounds", () => {
 });
 
 describe("boundSessionEventMcpPage", () => {
+  test("omits host context before bounding the public event page", () => {
+    const retained: SessionEvent = {
+      ...event(7, { text: "visible message", modelContext: "host-only context" }),
+      type: "user.message",
+    };
+    const page = boundSessionEventMcpPage({
+      events: [retained],
+      mode: "forensic",
+      payloadMode: "full",
+      direction: "after",
+      sourceHasMore: false,
+      sourceTruncatedBy: null,
+      after: 0,
+      before: null,
+    });
+    expect(page.events[0]?.payload).toEqual({ text: "visible message" });
+    expect(page.nextAfter).toBe(7);
+    expect(page.bytes).toBe(Buffer.byteLength(JSON.stringify(page, null, 2)));
+    expect(retained.payload).toHaveProperty("modelContext", "host-only context");
+  });
+
   test("reports exact pretty-JSON bytes and newest-tail coverage", () => {
     const page = boundSessionEventMcpPage({
       events: [event(98), event(99), event(100)],

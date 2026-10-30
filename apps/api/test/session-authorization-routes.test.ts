@@ -887,6 +887,51 @@ describe("embedding host session authorization routes", () => {
     const headers = { authorization: value.authorization };
     const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}`;
 
+    for (const path of [base, `/v1/workspaces/${value.grant.workspaceId}/sessions`]) {
+      const response = await app.request(path, { headers });
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain('"initialModelContext"');
+      expect(body).not.toContain('"modelContext"');
+      expect(body).not.toContain("host-only selected-record context");
+    }
+
+    const eventsResponse = await app.request(`${base}/events?mode=forensic&payloadMode=full`, {
+      headers,
+    });
+    expect(eventsResponse.status).toBe(200);
+    expect(eventsResponse.headers.get("X-OpenGeni-Forensic-Exact")).toBe("false");
+    const events = (await eventsResponse.json()) as Array<{
+      type: string;
+      payload: Record<string, unknown>;
+    }>;
+    const message = events.find((event) => event.type === "user.message");
+    expect(message?.payload.text).toBe("private child");
+    expect(message?.payload).not.toHaveProperty("modelContext");
+
+    const streamAbort = new AbortController();
+    const streamResponse = await app.request(`${base}/events/stream`, {
+      headers,
+      signal: streamAbort.signal,
+    });
+    expect(streamResponse.status).toBe(200);
+    const reader = streamResponse.body?.getReader();
+    if (!reader) throw new Error("event stream has no body");
+    let replay = "";
+    try {
+      while (!replay.includes('"type":"user.message"')) {
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("event stream ended before the user message");
+        replay += new TextDecoder().decode(chunk.value);
+      }
+      expect(replay).toContain("private child");
+      expect(replay).not.toContain("modelContext");
+      expect(replay).not.toContain("host-only selected-record context");
+    } finally {
+      streamAbort.abort();
+      await reader.cancel();
+    }
+
     const turnsResponse = await app.request(`${base}/turns`, { headers });
     expect(turnsResponse.status).toBe(200);
     const turns = (await turnsResponse.json()) as Array<Record<string, unknown>>;
@@ -943,7 +988,7 @@ describe("embedding host session authorization routes", () => {
     });
     expect(claimed).toMatchObject({ action: "claimed", turn: { id: started.turn.id } });
     if (claimed.action !== "claimed") throw new Error(`turn was not claimed: ${claimed.reason}`);
-    expect(claimed.turn).not.toHaveProperty("modelContext");
+    expect(claimed.turn.modelContext).toBe("host-only selected-record context");
     const history = await getActiveSessionHistoryItems(
       client.db,
       value.grant.workspaceId,
