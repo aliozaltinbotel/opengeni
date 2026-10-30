@@ -24,6 +24,18 @@ export type McpPhaseOutcome = "completed" | "rejected" | "failed" | "cancelled";
 type Context = { observer: Observability; scope: string; callKey?: string; nextRequest: number };
 const storage = new AsyncLocalStorage<Context | undefined>();
 
+export type WorkspaceMcpTimingObservation = Readonly<{
+  requestId: string;
+  totalMs: number;
+  phase: "route_prepare" | "transport_setup" | "sdk_dispatch" | "host_handler" | "response_write";
+  durationMs: number;
+  toolKind: "call" | "list";
+  outcome: "ok" | "tool_error" | "refused" | "rejected" | "failed" | "cancelled";
+}>;
+export type WorkspaceMcpTimingObserver = (
+  observation: WorkspaceMcpTimingObservation,
+) => void | Promise<void>;
+
 const approvalOutcomes = [
   "allow",
   "ask",

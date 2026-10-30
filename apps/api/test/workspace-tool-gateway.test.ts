@@ -260,7 +260,7 @@ describe("workspace tool gateway adapters", () => {
       await client.callTool({ name: "opengeni__session_get", arguments: {} });
       await expect(
         client.callTool({ name: "opengeni__session_create", arguments: {} }),
-      ).rejects.toThrow("Tool is not present in the active gateway catalog");
+      ).rejects.toMatchObject({ code: -32602, data: { code: "TOOL_NOT_FOUND", name: "opengeni__session_create" } });
 
       await callWorkspaceToolGateway(prepared, access, {
         operationId: "33333333-3333-4333-8333-333333333333",
@@ -420,7 +420,7 @@ describe("workspace tool gateway adapters", () => {
           name: "inventory__lookup",
           arguments: { sku: "SKU-1" },
         }),
-      ).rejects.toThrow("Tool is not present in the active gateway catalog");
+      ).rejects.toMatchObject({ code: -32602, data: { code: "TOOL_APPROVAL_REQUIRED", name: "inventory__lookup" } });
     } finally {
       await Promise.allSettled([client.close(), server.close()]);
     }

@@ -20,6 +20,8 @@ import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 import { projectErrorCauseAttributes } from "./error-cause";
 import { operationalErrorDiagnostic } from "./operational-error";
+import { subscribeWorkspaceMcpTiming } from "./internal/workspace-mcp-timing";
+import type { WorkspaceMcpTimingObserver } from "./mcp-timing";
 export {
   errorCauseAttributes,
   PUBLIC_ERROR_CAUSE_NAMES,
@@ -55,6 +57,8 @@ export {
   measureMcpPhase,
   recordToolApproval,
   MCP_EXECUTION_PHASES,
+  type WorkspaceMcpTimingObservation,
+  type WorkspaceMcpTimingObserver,
 } from "./mcp-timing";
 export {
   currentTraceContext,
@@ -794,6 +798,11 @@ type MetricRegistration = {
 };
 
 export class Observability {
+  /** Optional content-free gateway timing stream. No subscriber means no measurement. */
+  onWorkspaceMcpTiming(observer: WorkspaceMcpTimingObserver): () => void {
+    return subscribeWorkspaceMcpTiming(this, observer);
+  }
+
   private spanBatch: unknown[] = [];
   private spanBatchScheduled = false;
   private readonly diagnosticQueue = new ExportQueue((outcome) => {
