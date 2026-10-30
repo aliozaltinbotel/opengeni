@@ -26,6 +26,7 @@ import type { TargetAuthorityFence } from "./workspace-tool-target-fence";
 import {
   observeWorkspaceToolGatewayMcpTransport,
   workspaceToolGatewayTimingMiddleware,
+  excludeWorkspaceToolGatewayTiming,
   recordWorkspaceToolTargetOperation,
 } from "./workspace-tool-gateway-observability";
 import {
@@ -787,13 +788,27 @@ export function createAppComposition(deps: AppDependencies): {
     }
   };
 
-  app.use("*", workspaceToolGatewayTimingMiddleware(observability, async (c, next) => {
-    const correlationId =
-      boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
-    correlationIds.set(c, correlationId);
-    c.header(OPENGENI_CORRELATION_HEADER, correlationId);
-    await next();
-  }));
+  app.use(
+    "*",
+    workspaceToolGatewayTimingMiddleware(
+      observability,
+      async (c, next) => {
+        const correlationId =
+          correlationIds.get(c) ??
+          boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ??
+          crypto.randomUUID();
+        correlationIds.set(c, correlationId);
+        c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+        await next();
+      },
+      (c) => {
+        const requestId =
+          boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
+        correlationIds.set(c, requestId);
+        return requestId;
+      },
+    ),
+  );
 
   // Unauthenticated local mode: admit only requests addressed to this computer
   // and, when a browser sent them, from this stack's web app (see
@@ -1977,6 +1992,7 @@ export function createAppComposition(deps: AppDependencies): {
       throw error;
     }
     const grant = authorization.grant;
+    if (grantUsesAttemptScopedMcp(grant)) excludeWorkspaceToolGatewayTiming();
     // MCP handshakes (initialize, ping, notifications) read and disclose
     // nothing scoped. A session-bound agent attempt still proves it is the
     // live attempt, but skips the catalog and admin reads

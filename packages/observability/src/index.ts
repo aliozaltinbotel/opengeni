@@ -20,7 +20,8 @@ import { ExportQueue } from "./export-queue";
 import { failureDiagnostic, type FailureDiagnosticInput } from "./failure-diagnostic";
 import { projectErrorCauseAttributes } from "./error-cause";
 import { operationalErrorDiagnostic } from "./operational-error";
-import type { WorkspaceMcpTimingObservation, WorkspaceMcpTimingObserver } from "./mcp-timing";
+import { subscribeWorkspaceMcpTiming } from "./internal/workspace-mcp-timing";
+import type { WorkspaceMcpTimingObserver } from "./mcp-timing";
 export {
   errorCauseAttributes,
   PUBLIC_ERROR_CAUSE_NAMES,
@@ -56,8 +57,6 @@ export {
   measureMcpPhase,
   recordToolApproval,
   MCP_EXECUTION_PHASES,
-  beginWorkspaceMcpHostHandler,
-  withWorkspaceMcpHostTiming,
   type WorkspaceMcpTimingObservation,
   type WorkspaceMcpTimingObserver,
 } from "./mcp-timing";
@@ -799,30 +798,9 @@ type MetricRegistration = {
 };
 
 export class Observability {
-  private workspaceMcpTimingObservers?: Set<WorkspaceMcpTimingObserver>;
-
   /** Optional content-free gateway timing stream. No subscriber means no measurement. */
   onWorkspaceMcpTiming(observer: WorkspaceMcpTimingObserver): () => void {
-    const observers = (this.workspaceMcpTimingObservers ??= new Set());
-    observers.add(observer);
-    return () => {
-      observers.delete(observer);
-    };
-  }
-
-  hasWorkspaceMcpTimingSubscribers(): boolean {
-    return (this.workspaceMcpTimingObservers?.size ?? 0) > 0;
-  }
-
-  publishWorkspaceMcpTiming(observation: WorkspaceMcpTimingObservation): void {
-    for (const observer of this.workspaceMcpTimingObservers ?? []) {
-      try {
-        const result = observer(observation);
-        if (result) void Promise.resolve(result).catch(() => {});
-      } catch {
-        // Observer errors, including their potentially private messages, stay isolated.
-      }
-    }
+    return subscribeWorkspaceMcpTiming(this, observer);
   }
 
   private spanBatch: unknown[] = [];

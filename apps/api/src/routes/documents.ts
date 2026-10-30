@@ -1,4 +1,7 @@
-import { observeWorkspaceToolGatewayMcpTransport } from "../workspace-tool-gateway-observability";
+import {
+  observeWorkspaceToolGatewayMcpTransport,
+  excludeWorkspaceToolGatewayTiming,
+} from "../workspace-tool-gateway-observability";
 import { fileOwnerContextForAccess } from "@opengeni/core";
 import { requireWorkspaceAttachmentsAllowed } from "../http/organization-session-policy";
 import { withSessionRlsActorContext } from "@opengeni/db";
@@ -815,6 +818,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         }
       });
     }
+    excludeWorkspaceToolGatewayTiming();
     let grant: Awaited<ReturnType<typeof requireAccessGrant>>;
     try {
       grant = await requireAccessGrant(c, deps, workspaceId, "documents:search");

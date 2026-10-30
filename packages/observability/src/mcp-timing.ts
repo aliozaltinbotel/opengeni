@@ -36,19 +36,6 @@ export type WorkspaceMcpTimingObserver = (
   observation: WorkspaceMcpTimingObservation,
 ) => void | Promise<void>;
 
-type WorkspaceMcpHostTiming = { begin: () => { end: () => void } };
-const workspaceTiming = new AsyncLocalStorage<WorkspaceMcpHostTiming>();
-
-/** Request-local diagnostics only; never carries caller or tool content. */
-export function withWorkspaceMcpHostTiming<T>(timing: WorkspaceMcpHostTiming, run: () => T): T {
-  return workspaceTiming.run(timing, run);
-}
-
-/** No clock read or measurement allocation outside a subscribed HTTP request. */
-export function beginWorkspaceMcpHostHandler(): { end: () => void } | undefined {
-  return workspaceTiming.getStore()?.begin();
-}
-
 const approvalOutcomes = [
   "allow",
   "ask",

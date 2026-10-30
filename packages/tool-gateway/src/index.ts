@@ -1,9 +1,9 @@
+import { beginWorkspaceMcpHostHandler } from "@opengeni/observability/internal/workspace-mcp-timing";
 import { createHash, randomUUID } from "node:crypto";
 import {
   bindMcpTelemetry,
   withMcpCallIdentity,
   measureMcpPhase,
-  beginWorkspaceMcpHostHandler,
 } from "@opengeni/observability";
 import Ajv, {
   _,

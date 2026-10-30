@@ -2,8 +2,11 @@ import type { ToolGatewayCatalogEntry } from "@opengeni/contracts";
 import type { Observability } from "@opengeni/observability";
 import {
   withWorkspaceMcpHostTiming,
-  type WorkspaceMcpTimingObservation,
-} from "@opengeni/observability";
+  hasWorkspaceMcpTimingSubscribers,
+  publishWorkspaceMcpTiming,
+  type WorkspaceMcpTimingScope,
+} from "@opengeni/observability/internal/workspace-mcp-timing";
+import type { WorkspaceMcpTimingObservation } from "@opengeni/observability";
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { MiddlewareHandler } from "hono";
 import type { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
@@ -11,10 +14,10 @@ import { MCP_MAX_INBOUND_REQUEST_BYTES } from "@opengeni/runtime/mcp-network";
 
 type TimingOutcome = WorkspaceMcpTimingObservation["outcome"];
 type TimingRequest = { id: string | number; kind: "call" | "list" };
-const gatewayRouteTiming = new AsyncLocalStorage<GatewayRouteTiming>();
+const gatewayRouteTiming = new AsyncLocalStorage<{ current: GatewayRouteTiming | undefined }>();
 
 class GatewayRequestTiming {
-  readonly requestId = crypto.randomUUID();
+  readonly scope: WorkspaceMcpTimingScope = { current: this };
   transportAt: number | undefined;
   dispatchAt: number | undefined;
   writeAt: number | undefined;
@@ -28,6 +31,8 @@ class GatewayRequestTiming {
     private readonly observer: Observability,
     readonly request: TimingRequest,
     private readonly startedAt: number,
+    readonly requestId: string,
+    private readonly queueDelivery: (deliver: () => void) => void,
   ) {}
 
   begin = (): { end: () => void } => {
@@ -45,6 +50,7 @@ class GatewayRequestTiming {
   finish(endedAt: number, outcome = this.outcome): void {
     if (this.closed) return;
     this.closed = true;
+    this.scope.current = undefined;
     const totalMs = Math.max(0, endedAt - this.startedAt);
     const routeMs = Math.max(0, (this.transportAt ?? endedAt) - this.startedAt);
     const setupMs =
@@ -61,45 +67,70 @@ class GatewayRequestTiming {
       host_handler: hostMs,
       response_write: writeMs,
     };
-    for (const phase of [
-      "route_prepare",
-      "transport_setup",
-      "sdk_dispatch",
-      "host_handler",
-      "response_write",
-    ] as const) {
-      try {
-        this.observer.publishWorkspaceMcpTiming(
-          Object.freeze({
-            requestId: this.requestId,
-            totalMs,
-            phase,
-            durationMs: durations[phase],
-            toolKind: this.request.kind,
-            outcome,
-          }),
-        );
-      } catch {
-        // Neither observer failure nor private error text enters execution or telemetry.
+    const observer = this.observer;
+    const requestId = this.requestId;
+    const kind = this.request.kind;
+    // The route releases delivery after cleanup; standalone transports queue it directly.
+    this.queueDelivery(() => {
+      for (const phase of [
+        "route_prepare",
+        "transport_setup",
+        "sdk_dispatch",
+        "host_handler",
+        "response_write",
+      ] as const) {
+        try {
+          publishWorkspaceMcpTiming(
+            observer,
+            Object.freeze({
+              requestId,
+              totalMs,
+              phase,
+              durationMs: durations[phase],
+              toolKind: kind,
+              outcome,
+            }),
+          );
+        } catch {
+          // Neither observer failure nor private error text enters execution or telemetry.
+        }
       }
-    }
+    });
   }
 }
 
 class GatewayRouteTiming {
+  readonly scope: { current: GatewayRouteTiming | undefined } = { current: this };
   gateway = false;
+  excluded = false;
+  discoveredBody: string | undefined;
   disposeDiscovery: (() => void) | undefined;
   readonly requests = new Map<string | number, GatewayRequestTiming>();
   private transportAt: number | undefined;
   private endedAt: number | undefined;
   private outcome: TimingOutcome | undefined;
+  private readonly pendingDeliveries: Array<() => void> = [];
 
   constructor(
     private readonly observer: Observability,
     private readonly startedAt: number,
+    readonly requestId: string,
+    private deliveryDeferred = false,
   ) {}
 
+  private queueDelivery = (deliver: () => void): void => {
+    if (this.deliveryDeferred) this.pendingDeliveries.push(deliver);
+    else setTimeout(deliver, 0);
+  };
+
+  /** Close measurements at SDK completion, but let the API return after its cleanup. */
+  releaseDelivery(): void {
+    this.deliveryDeferred = false;
+    for (const deliver of this.pendingDeliveries.splice(0)) this.queueDelivery(deliver);
+  }
+
   recognize(message: unknown): GatewayRequestTiming | undefined {
+    if (this.excluded) return undefined;
     if (
       typeof message !== "object" ||
       message === null ||
@@ -118,6 +149,8 @@ class GatewayRouteTiming {
         this.observer,
         { id: message.id, kind: message.method === "tools/call" ? "call" : "list" },
         this.startedAt,
+        this.requestId,
+        this.queueDelivery,
       );
       timing.transportAt = this.transportAt;
       this.requests.set(message.id, timing);
@@ -131,12 +164,42 @@ class GatewayRouteTiming {
     for (const timing of this.requests.values()) timing.transportAt = transportAt;
   }
 
+  exclude(): void {
+    this.excluded = true;
+    this.pendingDeliveries.length = 0;
+    this.scope.current = undefined;
+    this.disposeDiscovery?.();
+    this.discoveredBody = undefined;
+    for (const timing of this.requests.values()) timing.scope.current = undefined;
+    this.requests.clear();
+  }
+
   finish(outcome?: TimingOutcome): void {
-    if (this.endedAt !== undefined) return;
-    this.endedAt = performance.now();
+    if (this.endedAt !== undefined || this.excluded) return;
+    const endedAt = (this.endedAt = performance.now());
+    this.scope.current = undefined;
     this.outcome = outcome;
     this.disposeDiscovery?.();
-    for (const timing of this.requests.values()) timing.finish(this.endedAt, outcome);
+    for (const timing of this.requests.values()) timing.finish(endedAt, outcome);
+    // Canonical recognition wins. Refusal-only discovery parses after the caller
+    // receives its response, outside every measured phase, and retains no route.
+    const body = this.requests.size === 0 ? this.discoveredBody : undefined;
+    this.discoveredBody = undefined;
+    this.requests.clear();
+    if (body === undefined) return;
+    const { observer, startedAt, requestId, transportAt } = this;
+    this.queueDelivery(() => {
+      try {
+        const discovered: unknown = JSON.parse(body);
+        const completed = new GatewayRouteTiming(observer, startedAt, requestId);
+        if (transportAt !== undefined) completed.enterTransport(transportAt);
+        for (const message of Array.isArray(discovered) ? discovered : [discovered])
+          completed.recognize(message);
+        for (const timing of completed.requests.values()) timing.finish(endedAt, outcome);
+      } catch {
+        /* Canonical body admission owns malformed requests. */
+      }
+    });
   }
 }
 
@@ -168,8 +231,7 @@ function startTimingDiscovery(request: Request, timing: GatewayRouteTiming): () 
         const chunk = await reader.read();
         if (disposed) return;
         if (chunk.done) {
-          const body: unknown = JSON.parse(text + decoder.decode());
-          for (const message of Array.isArray(body) ? body : [body]) timing.recognize(message);
+          timing.discoveredBody = text + decoder.decode();
           return;
         }
         bytes += chunk.value.byteLength;
@@ -192,30 +254,45 @@ function startTimingDiscovery(request: Request, timing: GatewayRouteTiming): () 
 export function workspaceToolGatewayTimingMiddleware(
   observability: Observability,
   middleware: MiddlewareHandler,
+  correlationId?: (context: Parameters<MiddlewareHandler>[0]) => string | undefined,
 ): MiddlewareHandler {
   return (c, next) => {
     if (
-      !observability.hasWorkspaceMcpTimingSubscribers?.() ||
+      !hasWorkspaceMcpTimingSubscribers(observability) ||
       !/^\/v1\/workspaces\/[^/]+\/mcp(?:\/(?:docs|files))?$/.test(c.req.path)
     )
       return middleware(c, next);
-    const timing = new GatewayRouteTiming(observability, performance.now());
+    const timing = new GatewayRouteTiming(
+      observability,
+      performance.now(),
+      correlationId?.(c) ?? crypto.randomUUID(),
+      true,
+    );
+    const scope = timing.scope;
     const dispose = startTimingDiscovery(c.req.raw, timing);
-    return gatewayRouteTiming.run(timing, async () => {
+    return gatewayRouteTiming.run(scope, async () => {
       try {
         const response = await middleware(c, next);
         const status = response?.status ?? c.res.status;
         // Native agent-attempt / dedicated first-party servers are not the gateway.
-        if (!timing.gateway && status >= 400) timing.finish(status >= 500 ? "failed" : "refused");
+        if (!timing.gateway && !timing.excluded && status >= 400)
+          timing.finish(status >= 500 ? "failed" : "refused");
         return response;
       } catch (error) {
         timing.finish("failed");
         throw error;
       } finally {
         dispose();
+        scope.current = undefined;
+        timing.releaseDelivery();
       }
     });
   };
+}
+
+/** Native servers share the URL, but never represent gateway work. */
+export function excludeWorkspaceToolGatewayTiming(): void {
+  gatewayRouteTiming.getStore()?.current?.exclude();
 }
 
 /** Install after Server.connect, which owns transport.onmessage. */
@@ -223,8 +300,8 @@ export function observeWorkspaceToolGatewayMcpTransport(
   observability: Observability | undefined,
   transport: WebStandardStreamableHTTPServerTransport,
 ): void {
-  if (!observability?.hasWorkspaceMcpTimingSubscribers?.()) return;
-  const routeTiming = gatewayRouteTiming.getStore();
+  if (!observability || !hasWorkspaceMcpTimingSubscribers(observability)) return;
+  const routeTiming = gatewayRouteTiming.getStore()?.current;
   if (routeTiming) routeTiming.gateway = true;
   const pending = new Set<GatewayRouteTiming>();
   const handleRequest = transport.handleRequest;
@@ -232,16 +309,16 @@ export function observeWorkspaceToolGatewayMcpTransport(
   const send = transport.send;
   const close = transport.close;
   transport.onmessage = (message, extra) => {
-    const timing = gatewayRouteTiming.getStore()?.recognize(message);
+    const timing = gatewayRouteTiming.getStore()?.current?.recognize(message);
     if (!timing) return onmessage?.(message, extra);
     timing.dispatchAt = performance.now();
-    return withWorkspaceMcpHostTiming(timing, () => onmessage?.(message, extra));
+    return withWorkspaceMcpHostTiming(timing.scope, () => onmessage?.(message, extra));
   };
   transport.send = (message, options) => {
     const id = "id" in message && !("method" in message) ? message.id : undefined;
     const timing =
       typeof id === "string" || typeof id === "number"
-        ? gatewayRouteTiming.getStore()?.requests.get(id)
+        ? gatewayRouteTiming.getStore()?.current?.requests.get(id)
         : undefined;
     if (timing) {
       timing.writeAt = performance.now();
@@ -270,17 +347,24 @@ export function observeWorkspaceToolGatewayMcpTransport(
     }
   };
   transport.handleRequest = (request, options) => {
-    if (!observability.hasWorkspaceMcpTimingSubscribers())
+    if (!hasWorkspaceMcpTimingSubscribers(observability))
       return handleRequest.call(transport, request, options);
     const transportAt = performance.now();
     const observe = async (): Promise<Response> => {
-      const route = gatewayRouteTiming.getStore();
-      const timing = route ?? new GatewayRouteTiming(observability, transportAt);
+      const route = gatewayRouteTiming.getStore()?.current;
+      const timing =
+        route ??
+        new GatewayRouteTiming(
+          observability,
+          transportAt,
+          request.headers.get("x-opengeni-correlation-id") ?? crypto.randomUUID(),
+        );
+      const scope = timing.scope;
       const dispose = route ? undefined : startTimingDiscovery(request, timing);
       pending.add(timing);
       timing.enterTransport(transportAt);
       try {
-        const response = await gatewayRouteTiming.run(timing, () =>
+        const response = await gatewayRouteTiming.run(scope, () =>
           handleRequest.call(transport, request, options),
         );
         timing.finish(
@@ -288,18 +372,15 @@ export function observeWorkspaceToolGatewayMcpTransport(
         );
         return response;
       } catch (error) {
-        // The SDK has no typed code for its pre-admission stateless reuse refusal.
-        timing.finish(
-          error instanceof Error &&
-            error.message ===
-              "Stateless transport cannot be reused across requests. Create a new transport per request."
-            ? "refused"
-            : "failed",
-        );
+        // An exception before canonical dispatch has no stable SDK refusal code.
+        // Emit nothing for it, including stateless transport reuse.
+        if (timing.requests.size === 0) timing.exclude();
+        else timing.finish("failed");
         throw error;
       } finally {
         dispose?.();
         pending.delete(timing);
+        scope.current = undefined;
       }
     };
     return observe();

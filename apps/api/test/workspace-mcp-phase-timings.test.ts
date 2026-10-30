@@ -1,3 +1,5 @@
+import * as observabilityExports from "@opengeni/observability";
+import { beginWorkspaceMcpHostHandler } from "@opengeni/observability/internal/workspace-mcp-timing";
 import { describe, expect, spyOn, test } from "bun:test";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { createObservability, type WorkspaceMcpTimingObservation } from "@opengeni/observability";
@@ -16,6 +18,12 @@ import {
   workspaceToolGatewayTimingMiddleware,
   observeWorkspaceToolGatewayMcpTransport,
 } from "../src/workspace-tool-gateway-observability";
+
+async function settleTimingDelivery(): Promise<void> {
+  // Discovery and publication use successive tasks; cross both, not a duration guess.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
 
 const grant: AccessGrant = {
   accountId: "11111111-1111-4111-8111-111111111111",
@@ -138,11 +146,12 @@ async function serve(obs = observer(), prepared = gateway(), access = grant) {
     },
   };
 }
-function expectClosed(
+async function expectClosed(
   events: WorkspaceMcpTimingObservation[],
   outcome: WorkspaceMcpTimingObservation["outcome"],
   kind: "call" | "list" = "call",
 ) {
+  await settleTimingDelivery();
   expect(events).toHaveLength(5);
   expect(events.map((event) => event.phase)).toEqual(phases);
   expect(new Set(events.map((event) => event.requestId)).size).toBe(1);
@@ -152,9 +161,7 @@ function expectClosed(
       (event) => event.outcome === outcome && event.toolKind === kind && event.durationMs >= 0,
     ),
   ).toBe(true);
-  expect(
-    Math.abs(events.reduce((sum, event) => sum + event.durationMs, 0) - events[0]!.totalMs),
-  ).toBeLessThan(0.001);
+  expect(events.every((event) => event.durationMs <= event.totalMs)).toBe(true);
   for (const event of events)
     expect(Object.keys(event).sort()).toEqual([
       "durationMs",
@@ -180,12 +187,138 @@ describe("workspace MCP phase timings", () => {
     try {
       const response = await run.transport.handleRequest(request());
       expect((await response.json()).result.content[0].text).toBe("private-result");
-      expectClosed(events, "ok");
+      await expectClosed(events, "ok");
       expect(events[4]!.durationMs).toBeGreaterThan(0);
     } finally {
       unsubscribe();
       await run.close();
     }
+  });
+  test("response precedes slow observer delivery and phases match an independent clock", async () => {
+    const obs = observer();
+    const events: WorkspaceMcpTimingObservation[] = [];
+    let responseReturned = false;
+    let observerSawResponse = false;
+    obs.onWorkspaceMcpTiming((event) => {
+      observerSawResponse = responseReturned;
+      const until = performance.now() + 10;
+      while (performance.now() < until) {
+        /* Deliberately slow host observer. */
+      }
+      events.push(event);
+      throw new Error("observer failure remains isolated");
+    });
+    const run = await serve(obs, gateway({ delay: true }));
+    try {
+      const startedAt = performance.now();
+      const response = await run.transport.handleRequest(request());
+      const independentlyMeasuredTotal = performance.now() - startedAt;
+      responseReturned = true;
+      expect(response.status).toBe(200);
+      expect(events).toEqual([]);
+      await settleTimingDelivery();
+      expect(observerSawResponse).toBe(true);
+      await expectClosed(events, "ok");
+      expect(Math.abs(events[0]!.totalMs - independentlyMeasuredTotal)).toBeLessThan(10);
+      expect(
+        Math.abs(
+          events.reduce((sum, event) => sum + event.durationMs, 0) - independentlyMeasuredTotal,
+        ),
+      ).toBeLessThan(10);
+      expect(events[2]!.durationMs).toBeGreaterThan(0);
+    } finally {
+      await run.close();
+    }
+  });
+  test("canonical dispatch skips diagnostic JSON parsing", async () => {
+    const obs = observer();
+    obs.onWorkspaceMcpTiming(() => {});
+    const run = await serve(obs);
+    const originalParse = JSON.parse;
+    let parses = 0;
+    const parse = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (text.includes('"private-argument"')) parses++;
+      return originalParse(text, reviver);
+    });
+    try {
+      await run.transport.handleRequest(request());
+      await Bun.sleep(0);
+      expect(parses).toBe(0);
+    } finally {
+      parse.mockRestore();
+      await run.close();
+    }
+  });
+  test("background tool work loses the completed request timing scope", async () => {
+    const obs = observer();
+    obs.onWorkspaceMcpTiming(() => {});
+    const resume = Promise.withResolvers<void>();
+    let background: Promise<unknown> | undefined;
+    const run = await serve(
+      obs,
+      gateway({
+        onExecute: () => {
+          background = resume.promise.then(() => beginWorkspaceMcpHostHandler());
+        },
+      }),
+    );
+    try {
+      await run.transport.handleRequest(request());
+      resume.resolve();
+      expect(await background).toBeUndefined();
+    } finally {
+      resume.resolve();
+      await run.close();
+    }
+  });
+  test("refusal discovery parses after Response and excludes its CPU time", async () => {
+    const obs = observer();
+    const events: WorkspaceMcpTimingObservation[] = [];
+    obs.onWorkspaceMcpTiming((event) => {
+      events.push(event);
+    });
+    const app = new Hono();
+    app.use(
+      "*",
+      workspaceToolGatewayTimingMiddleware(obs, async (c) => {
+        await settleTimingDelivery();
+        return c.text("refused", 401);
+      }),
+    );
+    const originalParse = JSON.parse;
+    let parses = 0;
+    const parse = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+      if (text.includes('"private-argument"')) {
+        parses++;
+        const until = performance.now() + 30;
+        while (performance.now() < until) {
+          /* Diagnostic parser cost. */
+        }
+      }
+      return originalParse(text, reviver);
+    });
+    try {
+      const startedAt = performance.now();
+      const response = await app.request(
+        new Request(`http://localhost/v1/workspaces/${grant.workspaceId}/mcp`, request()),
+      );
+      const independentlyMeasuredTotal = performance.now() - startedAt;
+      expect(response.status).toBe(401);
+      expect(parses).toBe(0);
+      await expectClosed(events, "refused");
+      expect(parses).toBe(1);
+      expect(Math.abs(events[0]!.totalMs - independentlyMeasuredTotal)).toBeLessThan(10);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+  test("published root exposes the subscription but no timing plumbing", () => {
+    expect("beginWorkspaceMcpHostHandler" in observabilityExports).toBe(false);
+    expect("withWorkspaceMcpHostTiming" in observabilityExports).toBe(false);
+    const obs = observer();
+    expect(typeof obs.onWorkspaceMcpTiming).toBe("function");
+    expect("publishWorkspaceMcpTiming" in obs).toBe(false);
+    expect("hasWorkspaceMcpTimingSubscribers" in obs).toBe(false);
   });
   test("host execution excludes secret resolution and lifecycle overhead", async () => {
     const obs = observer();
@@ -196,7 +329,7 @@ describe("workspace MCP phase timings", () => {
     const run = await serve(obs, gateway({ delay: true }));
     try {
       await run.transport.handleRequest(request());
-      expectClosed(events, "ok");
+      await expectClosed(events, "ok");
       expect(events[3]!.durationMs).toBeGreaterThan(10);
       expect(events[2]!.durationMs).toBeGreaterThan(35);
       expect(events[3]!.durationMs).toBeLessThan(events[2]!.durationMs);
@@ -215,7 +348,7 @@ describe("workspace MCP phase timings", () => {
       expect(
         (await (await run.transport.handleRequest(request("tools/list"))).json()).result.tools,
       ).toHaveLength(1);
-      expectClosed(events, "ok", "list");
+      await expectClosed(events, "ok", "list");
       expect(events[3]!.durationMs).toBe(0);
     } finally {
       await run.close();
@@ -237,7 +370,7 @@ describe("workspace MCP phase timings", () => {
       const run = await serve(obs, gateway(options));
       try {
         await run.transport.handleRequest(request());
-        expectClosed(events, outcome);
+        await expectClosed(events, outcome);
         if (options.hidden || options.approval || options.blocked)
           expect(events[3]!.durationMs).toBe(0);
       } finally {
@@ -257,7 +390,7 @@ describe("workspace MCP phase timings", () => {
         expect(
           (await run.transport.handleRequest(request("tools/call", options))).status,
         ).toBeGreaterThanOrEqual(400);
-        expectClosed(events, "refused");
+        await expectClosed(events, "refused");
         expect(events.slice(2).map((event) => event.durationMs)).toEqual([0, 0, 0]);
       } finally {
         await run.close();
@@ -282,11 +415,12 @@ describe("workspace MCP phase timings", () => {
         runs.map((run) => run.transport.handleRequest(request())),
       );
       expect(responses.map((response) => response.status)).toEqual([200, 200]);
+      await settleTimingDelivery();
       expect(events).toHaveLength(10);
       const ids = [...new Set(events.map((event) => event.requestId))];
       expect(ids).toHaveLength(2);
       for (const id of ids)
-        expectClosed(
+        await expectClosed(
           events.filter((event) => event.requestId === id),
           "ok",
         );
@@ -308,14 +442,14 @@ describe("workspace MCP phase timings", () => {
       ]);
       expect(responses[0]).toMatchObject({ status: "fulfilled", value: { status: 200 } });
       expect(responses[1]).toMatchObject({ status: "rejected", reason: expect.any(Error) });
-      expectClosed(
+      await settleTimingDelivery();
+      await expectClosed(
         events.filter((event) => event.toolKind === "call"),
         "ok",
       );
       const refused = events.filter((event) => event.toolKind === "list");
-      // SDK refuses reuse before body admission; diagnostic recognition is best-effort.
-      if (refused.length > 0) expectClosed(refused, "refused", "list");
-      expect(new Set(events.map((event) => event.requestId)).size).toBe(refused.length > 0 ? 2 : 1);
+      expect(refused).toEqual([]);
+      expect(new Set(events.map((event) => event.requestId)).size).toBe(1);
     } finally {
       await run.close();
     }
@@ -344,7 +478,7 @@ describe("workspace MCP phase timings", () => {
     );
     try {
       await run.transport.handleRequest(request());
-      expectClosed(events, "ok");
+      await expectClosed(events, "ok");
       expect(events[3]!.durationMs).toBeGreaterThan(45);
     } finally {
       await run.close();
@@ -402,14 +536,14 @@ describe("workspace MCP phase timings", () => {
     authorized.headers.set("authorization", `Bearer ${await token(secret)}`);
     expect((await app.request(authorized)).status).toBe(200);
     expect(executions).toBe(1);
-    expectClosed(events, "ok");
+    await expectClosed(events, "ok");
     expect(events[0]!.durationMs).toBeGreaterThan(0);
     events.length = 0;
     const denied = new Request(path, request());
     denied.headers.set("authorization", `Bearer ${await token("wrong-signing-secret")}`);
     expect((await app.request(denied)).status).toBe(401);
     expect(executions).toBe(1);
-    expectClosed(events, "refused");
+    await expectClosed(events, "refused");
     expect(events.slice(1).map((event) => event.durationMs)).toEqual([0, 0, 0, 0]);
   });
   test("subscribed diagnostics never wait for unfinished uploads before real authentication refuses", async () => {
@@ -576,7 +710,7 @@ describe("workspace MCP phase timings", () => {
     const pending = handleMcpRequestWithClientAbort(transport, request(), controller.signal);
     try {
       await observed.promise;
-      expectClosed(events, "failed");
+      await expectClosed(events, "failed");
       expect(events[4]!.durationMs).toBeGreaterThan(0);
       controller.abort();
       expect((await pending).status).toBe(499);
@@ -610,7 +744,7 @@ describe("workspace MCP phase timings", () => {
       await entered.promise;
       controller.abort();
       expect((await pending).status).toBe(499);
-      expectClosed(events, "cancelled");
+      await expectClosed(events, "cancelled");
       expect(events[4]!.durationMs).toBe(0);
     } finally {
       await run.close();

@@ -1,4 +1,7 @@
-import { observeWorkspaceToolGatewayMcpTransport } from "../workspace-tool-gateway-observability";
+import {
+  observeWorkspaceToolGatewayMcpTransport,
+  excludeWorkspaceToolGatewayTiming,
+} from "../workspace-tool-gateway-observability";
 import { readSessionAttachmentFiles } from "@opengeni/core";
 import { createHash } from "node:crypto";
 import { ZodError } from "zod";
@@ -158,6 +161,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
         }
       });
     }
+    excludeWorkspaceToolGatewayTiming();
     let access: Awaited<ReturnType<typeof requireAccessGrantAuthorization>>;
     try {
       access = await requireAccessGrantAuthorization(c, deps, workspaceId, "files:read");
