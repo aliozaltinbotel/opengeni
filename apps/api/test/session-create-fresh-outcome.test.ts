@@ -480,7 +480,9 @@ test("public host message origins survive create/send/steer into exact first-cal
     expect(receipt.incompleteReasons).toEqual([]);
     expect(receipt.complete).toBe(true);
     expect(receipt.inputs.flatMap(node=>node.retainedSources)).toContainEqual(refs[0]!);
-    const title=await persistModelCallSourceReceipt(client.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:2},{instructions:"Generate a short title",input:["Selected host passage"],purpose:"TITLE",instructionSelections});
+    // A title call reads the session opener: the created initial message, or the first accepted message otherwise.
+    const opener=mode==="create"?request.initialMessage:"Selected host passage";
+    const title=await persistModelCallSourceReceipt(client.db,{...identity,sourceKey:crypto.randomUUID(),requestIndex:2},{instructions:"Generate a short title",input:[opener],purpose:"TITLE",instructionSelections});
     expect(title.incompleteReasons).toEqual([]);
     expect(title.inputs.flatMap(node=>node.retainedSources)).toContainEqual(refs[0]!);
   }
