@@ -1,4 +1,4 @@
-import { SessionCancelSettlementQuery } from "@opengeni/contracts";
+import { SessionCancelSettlementQuery, projectSessionEventForPublic } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
 import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
@@ -3784,8 +3784,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
             payloadMode: dbPayloadMode,
           })
         : [];
-    const events =
+    const storedEvents =
       bookkeeping.length > 0 ? mergeBySequence(dbPage.events, bookkeeping) : dbPage.events;
+    const events = storedEvents.map(projectSessionEventForPublic);
     if (resultMode === "compact") {
       const event = events[0];
       c.header("X-OpenGeni-Event-Result-Mode", "compact");
@@ -3810,7 +3811,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const compactProjection = compact ? coalesceSessionEventDeltasWithCoverage(events) : null;
     const projected = compactProjection?.events ?? events;
     const forensicExact =
-      !compact && mode === "forensic" && payloadMode === "full" && dbPage.fullPayloadsExact;
+      !compact &&
+      mode === "forensic" &&
+      payloadMode === "full" &&
+      dbPage.fullPayloadsExact &&
+      events.every((event, index) => event === storedEvents[index]);
     const page = boundSessionEventHttpPage(projected, {
       direction,
       eventProjection: payloadMode === "full" ? "exact" : "bounded",
@@ -3859,7 +3864,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   });
 
   // Selected search hit only: never use the audit event projection here, even
-  // in summary mode (it can contain modelContext or truncate visible text).
+  // in summary mode (it can truncate visible text).
   app.get(
     "/v1/workspaces/:workspaceId/sessions/:sessionId/events/:eventId/message-preview",
     async (c) => {

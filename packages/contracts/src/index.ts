@@ -19141,6 +19141,20 @@ export const SessionEvent = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
+/** Public event content excludes host-only context; canonical storage stays exact. */
+export function projectSessionEventForPublic(event: SessionEvent): SessionEvent {
+  if (event.type !== "user.message" && event.type !== "session.created") return event;
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return event;
+  if (!("modelContext" in payload) && !("initialModelContext" in payload)) return event;
+  const {
+    modelContext: _modelContext,
+    initialModelContext: _initialModelContext,
+    ...visiblePayload
+  } = payload as Record<string, unknown>;
+  return { ...event, payload: visiblePayload };
+}
+
 export type SessionEventCompactResult = {
   version: 1;
   semanticClass: SessionEventSemanticClass;
