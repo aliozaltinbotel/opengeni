@@ -986,6 +986,8 @@ describe("embedding host session authorization routes", () => {
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,
+      ownerSubjectId: null,
+      visibility: "workspace_shared",
       operation: "session.read",
       surface: "http",
     });
@@ -1000,12 +1002,16 @@ describe("embedding host session authorization routes", () => {
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,
+      ownerSubjectId: null,
+      visibility: "workspace_shared",
       operation: "session.composer.read",
       surface: "http",
     });
     expect(decisions).toContainEqual({
       sessionId: value.child.id,
       rootSessionId: value.root.id,
+      ownerSubjectId: null,
+      visibility: "workspace_shared",
       operation: "session.composer.read",
       surface: "core",
     });
