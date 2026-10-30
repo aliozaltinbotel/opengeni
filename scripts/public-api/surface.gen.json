@@ -36774,8 +36774,6 @@
       "OpenGeniChatCreateOptions": "type",
       "OpenGeniChatLabels": "type",
       "OpenGeniChatProps": "type",
-      "OpenGeniClientProvider": "value",
-      "OpenGeniClientProviderProps": "type",
       "OpenGeniContextValue": "type",
       "OpenGeniHostLink": "type",
       "OpenGeniLinkProvider": "value",

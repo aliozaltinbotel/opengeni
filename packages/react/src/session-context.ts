@@ -49,14 +49,6 @@ export type OpenGeniContextValue = {
 
 export const OpenGeniContext = createContext<OpenGeniContextValue | null>(null);
 
-/**
- * A client with no workspace: supplied by `OpenGeniClientProvider` above pages
- * that are not inside any workspace (a host's pages outside the workspace
- * routes). Only client-scoped hooks read it; workspace-scoped hooks still need
- * an `OpenGeniProvider` (or `{ client, workspaceId }` overrides).
- */
-export const OpenGeniClientContext = createContext<SessionClientLike | null>(null);
-
 const NOOP_REGISTER_RECONCILER: OpenGeniContextValue["registerSessionReconciler"] = () => () =>
   undefined;
 const NOOP_RECONCILE_SESSION: OpenGeniContextValue["reconcileSession"] = async () => undefined;
@@ -441,8 +433,7 @@ export function useOpenGeniClient(
   override: Pick<ClientOverride, "client"> = {},
 ): SessionClientLike {
   const context = useContext(OpenGeniContext);
-  const clientOnly = useContext(OpenGeniClientContext);
-  const client = override.client ?? context?.client ?? clientOnly;
+  const client = override.client ?? context?.client;
   if (!client) {
     throw new Error(
       "@opengeni/react: no Opengeni client available. Wrap the tree in <OpenGeniProvider> or pass { client } to the hook.",

@@ -50,8 +50,8 @@ export type {
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
-export { OpenGeniClientProvider, OpenGeniProvider } from "./provider";
-export type { OpenGeniClientProviderProps, OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
+export { OpenGeniProvider } from "./provider";
+export type { OpenGeniProviderProps, ErrorMessageFormatter } from "./provider";
 export {
   createOpenGeniText,
   OpenGeniMessagesProvider,

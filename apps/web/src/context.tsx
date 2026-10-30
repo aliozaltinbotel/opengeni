@@ -1,7 +1,6 @@
 import { useExternalAuthRecovery } from "./lib/external-auth-recovery";
 import { ArchiveConfirmationProvider } from "@opengeni/react/app/lib/archive-session";
 import { AppContext } from "@opengeni/react/app/app-context";
-import { OpenGeniClientProvider } from "@opengeni/react/app/client-provider";
 import {
   createSlackLinkPrepareController,
   useAppState,
@@ -336,21 +335,17 @@ export function RootRouteComponent() {
   ) : hostOutsideRoute && clientConfig && (!managedAuthRequired || authSession) ? (
     // Before the access and onboarding gates: the person may have no
     // workspace yet (the host's registration, not-admitted or identity pages).
-    // The signed-in person's own client, with no workspace, so a host page can
-    // list that person's workspaces (useWorkspaces); workspace-scoped hooks
-    // still refuse here, and the server authorizes every call as anywhere else.
+    // A signed-in person's own app context, once resolved, so a host page can
+    // read that person's workspaces (useAppContext().workspaces). It opens no
+    // workspace: workspace-scoped hooks still refuse here.
     browserAccountsConfigured && !browserAccountsEnabled ? (
       <LoadingPanel />
+    ) : appContext ? (
+      <AppContext.Provider value={appContext}>
+        <Outlet />
+      </AppContext.Provider>
     ) : (
-      <OpenGeniClientProvider client={client}>
-        {appContext ? (
-          <AppContext.Provider value={appContext}>
-            <Outlet />
-          </AppContext.Provider>
-        ) : (
-          <Outlet />
-        )}
-      </OpenGeniClientProvider>
+      <Outlet />
     )
   ) : /^\/(?:native-sign-in|site-auth\/authorize)\/?$/.test(pathname) &&
     managedAuthRequired &&

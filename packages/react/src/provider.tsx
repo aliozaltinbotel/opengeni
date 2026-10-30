@@ -27,9 +27,6 @@ export { useOpenGeni, useOpenGeniClient } from "./session-context";
 export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 const CONTRACT_RELOAD_STORAGE_PREFIX = "opengeni.reloadForApiContract:";
 
-export { OpenGeniClientProvider } from "./app/client-provider";
-export type { OpenGeniClientProviderProps } from "./app/client-provider";
-
 export type OpenGeniProviderProps = {
   client: SessionClientLike;
   workspaceId: string;
