@@ -187,6 +187,16 @@ export type HostExtension = Readonly<{
   hiddenNativeSections?: readonly NativeSectionId[];
   shellProviders?: readonly ComponentType<{ workspaceId: string; children: ReactNode }>[];
   toolRegistryEntries?: readonly HostToolRegistryEntry[];
+  /**
+   * More tool cards, loaded on demand instead of at startup: called at most
+   * once, the first time a chat shows a tool call no card is known for (for
+   * example `() => import("./tool-cards").then((module) => module.entries)`).
+   * Each entry is checked like a `toolRegistryEntries` one, and a refused
+   * entry is dropped. Until it settles such a call renders the generic card;
+   * open chats then redraw with the loaded cards. A rejection leaves the
+   * generic card for the rest of the page's life and is not retried.
+   */
+  toolRegistryLoader?: () => Promise<readonly HostToolRegistryEntry[]>;
   workspaceFilter?: (workspace: Readonly<{ id: string; accountId: string }>) => boolean;
   /**
    * Design §12.2 I15: awaited by the console before sign-out and before

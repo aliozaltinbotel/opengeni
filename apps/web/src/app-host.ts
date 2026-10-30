@@ -9,7 +9,11 @@ import { configurePageAppHost } from "@opengeni/react/app/lib/app-host";
 import { lazySurface } from "@opengeni/react/app/lib/app-surfaces";
 import type { HostExtensionContext } from "@opengeni/react/app/host-extension";
 import { createHostMessageContextStore } from "@opengeni/react/app/lib/message-context";
-import { createHostMessageContextResolver, createHostStartersResolver } from "@/host-extension/registry";
+import {
+  createHostMessageContextResolver,
+  createHostStartersResolver,
+  createHostToolRegistryLoader,
+} from "@/host-extension/registry";
 import { guardHostSessionIndicator } from "@opengeni/react/app/components/session-indicator";
 import { hostExtension } from "@/host-extension/startup";
 
@@ -27,6 +31,11 @@ const extensionMessageContext = hostExtension.messageContext
 configurePageAppHost({
   api: webAppApiHost,
   toolRegistryEntries: hostExtension.toolRegistryEntries,
+  // A stock build has no loader; the flag lets it drop the loader's check.
+  toolRegistryLoader:
+    import.meta.env.OPENGENI_WEB_HOST_EXTENSION_STOCK !== "true" && hostExtension.toolRegistryLoader
+      ? createHostToolRegistryLoader(hostExtension.toolRegistryLoader, hostExtension.toolRegistryEntries)
+      : undefined,
   hiddenNativeDestinations: hostExtension.hiddenNativeDestinations,
   hiddenNativeSections: hostExtension.hiddenNativeSections,
   brand: hostExtension.brand,
