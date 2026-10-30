@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { parseSync } from "oxc-parser";
@@ -11,6 +11,7 @@ import {
 
 import {
   createHostExtensionSlot,
+  createHostToolRegistryLoader,
   currentHostExtension,
   extensionSettingsPaths,
   hiddenNativeDestinations,
@@ -647,6 +648,56 @@ describe("host extension registry", () => {
       expectInvalid(
         extensionWith({ toolRegistryEntries: [entry, { ...entry, render: Page }] }),
         "toolRegistryEntries[1].name",
+      );
+    });
+
+    test("accepts a tool-card loader and refuses one that is not a function", () => {
+      const extension = extensionWith({ toolRegistryLoader: async () => [entry] });
+      expect(validateHostExtension(extension)).toBe(extension);
+      expectInvalid({ id: "fixture", toolRegistryLoader: [entry] }, "toolRegistryLoader");
+    });
+
+    test("a loaded entry repeating an installed or loaded name is dropped with one warning", async () => {
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const other = { ...entry, name: "host-app__list_tasks" };
+        // A built bundle is untyped at runtime: it can return entries its types rule out.
+        const loaded: readonly unknown[] = [
+          entry,
+          other,
+          { ...other, render: Page },
+          { ...other, name: "host-app__x", render: 1 },
+        ];
+        const loader = createHostToolRegistryLoader(
+          async () => loaded as readonly (typeof entry)[],
+          [entry],
+        );
+        expect(await loader()).toEqual([other]);
+        expect(warn.mock.calls).toEqual([
+          [
+            "HOST_TOOL_REGISTRY_ENTRY_REFUSED",
+            [
+              "toolRegistryLoader[0].name",
+              "toolRegistryLoader[2].name",
+              "toolRegistryLoader[3].render",
+            ],
+          ],
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    test("a loader that rejects or resolves no array rejects, for the registry to fall back", async () => {
+      const failure = new Error("host failure");
+      await expect(
+        createHostToolRegistryLoader(() => Promise.reject(failure), undefined)(),
+      ).rejects.toBe(failure);
+      const notAList = (async () => ({ entries: [entry] })) as unknown as () => Promise<
+        readonly never[]
+      >;
+      await expect(createHostToolRegistryLoader(notAList, undefined)()).rejects.toThrow(
+        "HOST_EXTENSION_INVALID: toolRegistryLoader must resolve to an array",
       );
     });
   });

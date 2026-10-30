@@ -59,6 +59,11 @@ export type AppHost = Readonly<{
   onSessionState?: ((state: SessionViewState) => void) | undefined;
   /** The host extension's tool cards, ahead of the built-in renderers. */
   toolRegistryEntries?: readonly ToolRegistryEntry[] | undefined;
+  /**
+   * More tool cards, loaded at most once, the first time a tool call has no
+   * known card (see `HostExtension.toolRegistryLoader`).
+   */
+  toolRegistryLoader?: (() => Promise<readonly ToolRegistryEntry[]>) | undefined;
   /** Native destinations the host extension hides from every link source. */
   hiddenNativeDestinations?: readonly NativeDestination[] | undefined;
   hiddenNativeSections?: readonly NativeSectionId[] | undefined;

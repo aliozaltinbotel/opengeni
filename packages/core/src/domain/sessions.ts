@@ -1,4 +1,4 @@
-import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
+import { SessionCreationReceiptRecoveryRequest, projectSessionEventForPublic } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { getSessionCreationReceipt } from "@opengeni/db";
 import type {
@@ -2088,7 +2088,7 @@ function finalizePostUserMessageTurn(
     });
   }
   return {
-    accepted: result.accepted,
+    accepted: projectSessionEventForPublic(result.accepted),
     turn: result.turn,
     receipt: {
       id: result.receipt.id,

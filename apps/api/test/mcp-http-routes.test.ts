@@ -5,9 +5,18 @@ import * as core from "@opengeni/core";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing/settings";
 import type { AccessContext } from "@opengeni/contracts";
-import { createApp } from "../src/app";
+import { createAppComposition } from "../src/app";
 import * as gateway from "../src/workspace-tool-gateway";
+import * as sessionPolicy from "../src/http/organization-session-policy";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import * as nativeMcp from "../src/mcp/server";
 import * as oauth from "../src/mcp-oauth";
+
+async function settleTimingDelivery(): Promise<void> {
+  // Discovery and publication use successive tasks; cross both, not a duration guess.
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
 
 const accountId = "00000000-0000-4000-8000-000000000101";
 const workspaceId = "00000000-0000-4000-8000-000000000102";
@@ -68,7 +77,7 @@ function fixture(options: { unauthenticated?: boolean; preparationError?: Error 
   for (const spy of [bootstrap, workspace, otherGrant, preparation, errorLog, infoLog]) {
     restorers.push(() => spy.mockRestore());
   }
-  const app = createApp({
+  const { app } = createAppComposition({
     settings,
     db: { execute: async () => [] } as never,
     bus: {} as never,
@@ -102,6 +111,178 @@ function post(body: unknown, headers: Record<string, string> = {}) {
 }
 
 describe("workspace MCP Streamable HTTP routes", () => {
+  test.each([200, 406])(
+    "gateway %i defers observers and refusal parsing until API cleanup returns",
+    async (status) => {
+      const f = fixture();
+      const events: import("@opengeni/observability").WorkspaceMcpTimingObservation[] = [];
+      const cleanupStarted = Promise.withResolvers<void>();
+      const releaseCleanup = Promise.withResolvers<void>();
+      let responseReturned = false;
+      let observerBeforeResponse = false;
+      let diagnosticParses = 0;
+      let parserBeforeResponse = false;
+      f.prepared.close = async () => {
+        cleanupStarted.resolve();
+        await releaseCleanup.promise;
+      };
+      f.observability.onWorkspaceMcpTiming((event) => {
+        observerBeforeResponse ||= !responseReturned;
+        const until = performance.now() + 5;
+        while (performance.now() < until) {
+          /* Deliberately slow subscriber. */
+        }
+        events.push(event);
+        throw new Error("observer isolation fixture");
+      });
+      const parse = JSON.parse;
+      const parser = spyOn(JSON, "parse").mockImplementation((text, reviver) => {
+        if (text.includes('"id":"held-cleanup"')) {
+          diagnosticParses++;
+          parserBeforeResponse ||= !responseReturned;
+        }
+        return parse(text, reviver);
+      });
+      const startedAt = performance.now();
+      const response = f.app
+        .request(
+          path,
+          post(
+            { jsonrpc: "2.0", id: "held-cleanup", method: "tools/list" },
+            status === 406 ? { accept: "application/json" } : {},
+          ),
+        )
+        .then((value) => {
+          responseReturned = true;
+          return value;
+        });
+      try {
+        await cleanupStarted.promise;
+        const sdkFinishedBy = performance.now() - startedAt;
+        await settleTimingDelivery();
+        expect(responseReturned).toBe(false);
+        expect(diagnosticParses).toBe(0);
+        expect(events).toEqual([]);
+        releaseCleanup.resolve();
+        expect((await response).status).toBe(status);
+        expect(events).toEqual([]);
+        await settleTimingDelivery();
+        expect(events).toHaveLength(5);
+        expect(observerBeforeResponse).toBe(false);
+        expect(parserBeforeResponse).toBe(false);
+        expect(diagnosticParses).toBe(status === 406 ? 1 : 0);
+        expect(events.every((event) => event.totalMs <= sdkFinishedBy)).toBe(true);
+      } finally {
+        releaseCleanup.resolve();
+        await response;
+        await settleTimingDelivery();
+        parser.mockRestore();
+      }
+    },
+  );
+
+  test.each([404, 499])(
+    "native attempt %i emits no gateway phases; gateway retains correlated five",
+    async (status) => {
+      const f = fixture();
+      const events: import("@opengeni/observability").WorkspaceMcpTimingObservation[] = [];
+      f.observability.onWorkspaceMcpTiming((event) => {
+        events.push(event);
+      });
+      const access = f.context.workspaceGrants[0]!;
+      access.principalKind = "agent_attempt";
+      access.metadata = {
+        sessionId: "00000000-0000-4000-8000-000000000103",
+        firstPartyMcpTools: [],
+      };
+      const authorize = spyOn(core, "requireSessionAuthorization").mockRejectedValue(
+        new core.SessionAuthorizationDeniedError("revoked"),
+      );
+      const live = spyOn(core, "requireLiveAgentAttemptAuthorization").mockResolvedValue({
+        kind: "agent_attempt",
+        subjectId: "worker:test",
+        callerSessionId: access.metadata.sessionId,
+        callerRootSessionId: access.metadata.sessionId,
+        turnId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+      } as never);
+      const learning = spyOn(db, "freezeAgentLearningPolicy").mockResolvedValue({
+        defaultScope: "workspace",
+        subjectId: "worker:test",
+      } as never);
+      const catalog = spyOn(core, "resolveWorkspaceCatalogSettings").mockImplementation(
+        async (_db, settings) => ({ settings }) as never,
+      );
+      const started = spyOn(db, "sessionStartedByPerson").mockResolvedValue(false);
+      const admin = spyOn(db, "resolveSessionAdminAuthority").mockResolvedValue(null);
+      const policy = spyOn(
+        sessionPolicy,
+        "deniedSessionToolFamiliesForOrganization",
+      ).mockResolvedValue([]);
+      const entered = Promise.withResolvers<void>();
+      // Replace only the tool catalog: composition, native branch, authorization,
+      // SDK dispatch and client-abort transport all remain real.
+      const native = spyOn(nativeMcp, "buildOpenGeniMcpServer").mockImplementation(() => {
+        const server = new McpServer({ name: "native-timing-fixture", version: "1" });
+        server.registerTool("wait", {}, async (_extra) => {
+          entered.resolve();
+          await new Promise<void>((resolve) =>
+            _extra.signal.addEventListener("abort", () => resolve(), { once: true }),
+          );
+          return { content: [] };
+        });
+        return server;
+      });
+      for (const spy of [authorize, live, learning, catalog, started, admin, policy, native])
+        restorers.push(() => spy.mockRestore());
+      const body = {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "wait", arguments: {} },
+      };
+      if (status === 404) {
+        expect((await f.app.request(path, post(body))).status).toBe(404);
+        await settleTimingDelivery();
+        expect(events).toEqual([]);
+      } else {
+        authorize.mockResolvedValue(null);
+        const controller = new AbortController();
+        const pending = f.app.request(path, { ...post(body), signal: controller.signal });
+        try {
+          await entered.promise;
+          controller.abort();
+          expect((await pending).status).toBe(499);
+          await settleTimingDelivery();
+          expect(events).toEqual([]);
+        } finally {
+          controller.abort();
+        }
+      }
+      access.principalKind = "human_session";
+      delete access.metadata;
+      for (const correlation of ["host-request-42", undefined]) {
+        const response = await f.app.request(
+          path,
+          post(
+            { jsonrpc: "2.0", id: 2, method: "tools/list" },
+            correlation ? { "x-opengeni-correlation-id": correlation } : {},
+          ),
+        );
+        expect(response.status).toBe(200);
+        await settleTimingDelivery();
+        expect(events).toHaveLength(5);
+        expect(
+          events.every(
+            (event) => event.requestId === response.headers.get("x-opengeni-correlation-id"),
+          ),
+        ).toBe(true);
+        events.length = 0;
+      }
+    },
+  );
+
   test.each([{}, { "mcp-session-id": secret, "last-event-id": secret }])(
     "authorized GET refuses an unsupported stream without preparing tools (%j)",
     async (headers) => {

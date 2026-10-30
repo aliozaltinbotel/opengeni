@@ -564,8 +564,10 @@ substituted in. Exact-message application context does not enter this prefix.
   `input_text` part in that same canonical user-role history item, and preserves
   it through queueing, steering, retry, approval resume, worker recovery, and
   realtime handoff. Standard timeline rendering displays only the visible
-  message text; full event/audit reads retain `modelContext`. It is **not**
-  secret, private, privileged, or system-level authority. For realtime voice,
+  message text. Public session, turn, queue, event and acceptance projections
+  omit host-only `modelContext`/`initialModelContext`, including HTTP forensic
+  reads, SSE and MCP. Canonical storage, model history and trusted worker
+  claims retain the context. It is not privileged or system-level authority. For realtime voice,
   SDK/React hosts may provide `getModelContext`; Opengeni captures its current
   bounded value once when each durable delegation or finalized transcript entry
   is created, without restarting the controller when the callback changes. A
@@ -577,8 +579,12 @@ Use workspace `agentInstructions` for stable tenant-wide behavior and session
 `instructions` for a durable session persona. Use `modelContext` for concise
 submit-time route, selection, viewport, or entity context that belongs to the
 user's current message but should not clutter the ordinary chat presentation.
-Do not put secrets in it: authorized full event/audit surfaces may return the
-exact value. When current product state must be read or mutated, prefer a
+Do not put secrets in it: the model receives the exact value, and the model
+request diagnostic snapshot can contain it inside the captured provider body.
+The authenticated `/model-context` diagnostic is an explicit exception to the
+public field projection: viewers authorized to read that session can inspect
+its raw provider request, including rendered host context. There is no separate
+diagnostic permission. When current product state must be read or mutated, prefer a
 tenant-scoped tool over a large context snapshot.
 
 Because `modelContext` is appended in the newest user history item rather than
