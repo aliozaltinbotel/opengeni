@@ -13,12 +13,44 @@ import {
 import { act, createElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { HostExtension } from "@opengeni/react/app/host-extension";
+import { useOpenGeni, useOpenGeniClient, useWorkspaces } from "@opengeni/react";
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const RegisterPage = () => createElement("p", { "data-testid": "host-page" }, "Register");
 const NotAdmittedPage = () => createElement("p", { "data-testid": "host-page" }, "Not admitted");
+// A host resolver page: lists the signed-in person's workspaces with no workspace of its own.
+const WorkspacesPage = () => {
+  const { workspaces, loading, error } = useWorkspaces();
+  if (loading) return createElement("p", null, "Loading");
+  return createElement(
+    "p",
+    { "data-testid": "host-page" },
+    error ? `error:${error.message}` : workspaces.map((workspace) => workspace.name).join(","),
+  );
+};
+// Workspace-scoped hooks still need a workspace: the client alone never stands in for one.
+const WorkspaceScopedPage = () => {
+  let text: string;
+  try {
+    text = `workspace:${useOpenGeni().workspaceId}`;
+  } catch {
+    text = "no workspace";
+  }
+  return createElement("p", { "data-testid": "host-page" }, text);
+};
+// A public page reaches a signed-out visitor, who has no client.
+const PublicClientPage = () => {
+  let text: string;
+  try {
+    useOpenGeniClient();
+    text = "client";
+  } catch {
+    text = "no client";
+  }
+  return createElement("p", { "data-testid": "host-page" }, text);
+};
 const HostProvider = ({ children }: { children: ReactNode }) =>
   createElement("section", { "data-testid": "host-provider" }, children);
 
@@ -27,6 +59,9 @@ const extension: HostExtension = {
   outsideWorkspaceRoutes: [
     { path: "register", load: async () => ({ default: RegisterPage }), access: "public" },
     { path: "not-admitted", load: async () => ({ default: NotAdmittedPage }) },
+    { path: "choose-workspace", load: async () => ({ default: WorkspacesPage }) },
+    { path: "scoped", load: async () => ({ default: WorkspaceScopedPage }) },
+    { path: "public-client", load: async () => ({ default: PublicClientPage }), access: "public" },
   ],
   outsideWorkspaceProviders: [HostProvider],
 };
@@ -39,7 +74,8 @@ void mock.module("@opengeni/react/app/app-state", () => ({
   ...appState,
   useAppState: () => ({
     appContext: {},
-    client: {},
+    // The signed-in person's own client: it answers only that person's workspaces.
+    client: { listWorkspaces: async () => [{ id: "w1", accountId: "a1", name: "Alpha" }, { id: "w2", accountId: "a1", name: "Beta" }] },
     clientConfig: {
       auth: { mode: "managedSession" },
       productAccessMode: "managed",
@@ -137,6 +173,20 @@ describe("host pages outside any workspace", () => {
   test("a signed-in page reaches a person with no workspace, before onboarding", async () => {
     state.signedIn = true;
     expect(await render("/not-admitted")).toEqual({ text: "Not admitted", inProvider: true });
+  });
+
+  test("a signed-in page lists the person's workspaces through useWorkspaces, with no workspace of its own", async () => {
+    state.signedIn = true;
+    expect(await render("/choose-workspace")).toEqual({ text: "Alpha,Beta", inProvider: true });
+  });
+
+  test("a signed-in page gets no workspace from the client alone: workspace-scoped hooks still refuse", async () => {
+    state.signedIn = true;
+    expect(await render("/scoped")).toEqual({ text: "no workspace", inProvider: true });
+  });
+
+  test("a public page for a signed-out visitor stays without a client", async () => {
+    expect(await render("/public-client")).toEqual({ text: "no client", inProvider: true });
   });
 
   test("a signed-in page still asks a signed-out visitor to sign in", async () => {
