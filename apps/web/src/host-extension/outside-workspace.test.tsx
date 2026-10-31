@@ -13,12 +13,45 @@ import {
 import { act, createElement, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { HostExtension } from "@opengeni/react/app/host-extension";
+import { useOptionalAppContext } from "@opengeni/react/app/app-context";
+import { useOpenGeni, useOpenGeniClient } from "@opengeni/react";
 
 GlobalRegistrator.register();
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 const RegisterPage = () => createElement("p", { "data-testid": "host-page" }, "Register");
 const NotAdmittedPage = () => createElement("p", { "data-testid": "host-page" }, "Not admitted");
+// A host resolver page: reads the signed-in person's workspaces from the app context.
+const WorkspacesPage = () => {
+  const appContext = useOptionalAppContext();
+  const text = appContext
+    ? appContext.workspaces.map((workspace) => workspace.name).join(",")
+    : "no app context";
+  return createElement("p", { "data-testid": "host-page" }, text);
+};
+// The app context opens no workspace: workspace-scoped hooks still refuse.
+const WorkspaceScopedPage = () => {
+  const refusals: string[] = [];
+  try {
+    refusals.push(`workspace:${useOpenGeni().workspaceId}`);
+  } catch {
+    refusals.push("no workspace");
+  }
+  try {
+    useOpenGeniClient();
+    refusals.push("client");
+  } catch {
+    refusals.push("no client");
+  }
+  return createElement("p", { "data-testid": "host-page" }, refusals.join(","));
+};
+// A public page renders with the public pages, outside the app context.
+const PublicContextPage = () =>
+  createElement(
+    "p",
+    { "data-testid": "host-page" },
+    useOptionalAppContext() ? "app context" : "no app context",
+  );
 const HostProvider = ({ children }: { children: ReactNode }) =>
   createElement("section", { "data-testid": "host-provider" }, children);
 
@@ -27,18 +60,31 @@ const extension: HostExtension = {
   outsideWorkspaceRoutes: [
     { path: "register", load: async () => ({ default: RegisterPage }), access: "public" },
     { path: "not-admitted", load: async () => ({ default: NotAdmittedPage }) },
+    { path: "choose-workspace", load: async () => ({ default: WorkspacesPage }) },
+    { path: "scoped", load: async () => ({ default: WorkspaceScopedPage }) },
+    {
+      path: "public-context",
+      load: async () => ({ default: PublicContextPage }),
+      access: "public",
+    },
   ],
   outsideWorkspaceProviders: [HostProvider],
 };
 void mock.module("@opengeni/web-host-extension", () => ({ default: extension }));
 
 /** What the console's app state reports: signed out, or signed in with no workspace. */
-const state = { signedIn: false };
+const state = { signedIn: false, appContextResolved: true };
+/** The signed-in person's own workspaces, as their resolved app context carries them. */
+const personWorkspaces = [
+  { id: "w1", accountId: "a1", name: "Alpha" },
+  { id: "w2", accountId: "a1", name: "Beta" },
+];
 const appState = await import("@opengeni/react/app/app-state");
 void mock.module("@opengeni/react/app/app-state", () => ({
   ...appState,
   useAppState: () => ({
-    appContext: {},
+    appContext:
+      state.signedIn && state.appContextResolved ? { workspaces: personWorkspaces } : null,
     client: {},
     clientConfig: {
       auth: { mode: "managedSession" },
@@ -94,6 +140,7 @@ afterAll(() => {
 beforeEach(() => {
   document.body.replaceChildren();
   state.signedIn = false;
+  state.appContextResolved = true;
 });
 
 async function render(url: string): Promise<{ text: string; inProvider: boolean }> {
@@ -137,6 +184,28 @@ describe("host pages outside any workspace", () => {
   test("a signed-in page reaches a person with no workspace, before onboarding", async () => {
     state.signedIn = true;
     expect(await render("/not-admitted")).toEqual({ text: "Not admitted", inProvider: true });
+  });
+
+  test("a signed-in page reads exactly the person's workspaces from their app context", async () => {
+    state.signedIn = true;
+    expect(await render("/choose-workspace")).toEqual({ text: "Alpha,Beta", inProvider: true });
+  });
+
+  test("a signed-in page has no app context until it has resolved", async () => {
+    state.signedIn = true;
+    state.appContextResolved = false;
+    expect(await render("/choose-workspace")).toEqual({ text: "no app context", inProvider: true });
+  });
+
+  test("a signed-in page gets no workspace from the app context: workspace hooks still refuse", async () => {
+    state.signedIn = true;
+    expect(await render("/scoped")).toEqual({ text: "no workspace,no client", inProvider: true });
+  });
+
+  test("a public page has no app context, signed out or signed in", async () => {
+    expect(await render("/public-context")).toEqual({ text: "no app context", inProvider: true });
+    state.signedIn = true;
+    expect(await render("/public-context")).toEqual({ text: "no app context", inProvider: true });
   });
 
   test("a signed-in page still asks a signed-out visitor to sign in", async () => {

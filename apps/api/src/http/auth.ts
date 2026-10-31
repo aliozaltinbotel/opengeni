@@ -26,7 +26,10 @@ const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/ins
 const prReviewGithubBrowserPathPattern =
   /^\/v1\/workspaces\/[^/]+\/pr-review\/github\/(?:connect|installations\/select|installations\/[^/]+\/configure)$/;
 
-export function requireAccessKey(settings: Settings): MiddlewareHandler {
+export function requireAccessKey(
+  settings: Settings,
+  verifyManagedSession?: (context: Context) => Promise<boolean>,
+): MiddlewareHandler {
   return async (c, next) => {
     // §7.2 P1: requireAccessKey is the coarse NETWORK perimeter, not the
     // per-tenant identity gate (that is resolveAccessContext). When
@@ -44,6 +47,22 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
       return;
     }
     if (await isAuthorized(c, settings)) {
+      await next();
+      return;
+    }
+    // Managed humans authenticate with their current browser session, never a
+    // deployment key shipped to the browser. The app supplies the canonical
+    // session resolver; a cookie by itself is not proof. Explicit credentials
+    // select their own lane and must never fall back to an ambient session.
+    if (
+      settings.productAccessMode === "managed" &&
+      c.req.path.startsWith("/v1/") &&
+      c.req.header("cookie") !== undefined &&
+      c.req.header("authorization") === undefined &&
+      c.req.header("x-opengeni-access-key") === undefined &&
+      verifyManagedSession &&
+      (await verifyManagedSession(c))
+    ) {
       await next();
       return;
     }

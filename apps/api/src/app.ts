@@ -197,6 +197,7 @@ import {
   requireAccessContext,
   requirePermission,
   releaseManagedAuthRequestActorLease,
+  getManagedSession,
   resolveCatalogSettings,
   resolveWorkspaceCatalogSettings,
   resolveCallerWorkspaceModelSelections,
@@ -1122,7 +1123,48 @@ export function createAppComposition(deps: AppDependencies): {
     );
   });
 
-  const accessKeyBoundary = requireAccessKey(deps.settings);
+  // The perimeter may resolve a managed session and acquire its actor lease.
+  // Enclose every later refusal/error in the existing validation/cleanup owner.
+  app.use("/v1/*", async (c, next) => {
+    try {
+      await next();
+      try {
+        await validateManagedAuthRequestActorLease(c.req.raw);
+      } catch (error) {
+        if (error instanceof ManagedAuthActorChangeError) {
+          c.header("x-opengeni-actor-state", "changed");
+          throw new HTTPException(409, { message: error.code, cause: error });
+        }
+        if (error instanceof ManagedAuthActorLeaseOutcomeUnknownError) {
+          throw new ApiHttpError(503, {
+            code: "upstream_unavailable",
+            message: error.code,
+            retryable: true,
+            outcomeUnknown: true,
+            details: { managedAuthCode: error.code },
+          });
+        }
+        throw error;
+      }
+    } finally {
+      await releaseManagedAuthRequestActorLease(c.req.raw).catch((error) => {
+        observability.error("Managed actor mutation lease release failed", {
+          error,
+          errorClass: error instanceof Error ? error.name : "UnknownError",
+        });
+      });
+    }
+  });
+
+  const accessKeyBoundary = requireAccessKey(deps.settings, async (c) => {
+    if (!managedAuth) return false;
+    const session = await getManagedSession(c, managedAuth, {
+      db: deps.db,
+      sessionSetMode: deps.settings.managedAuthSessionSetMode,
+      sessionAdapter: managedAuthSessionAdapter,
+    });
+    return Boolean(session?.user);
+  });
   app.use("*", async (c, next) => {
     // Git's credential helper supplies the exact encrypted broker bearer in
     // Authorization. It cannot also supply the deployment access key, and the
@@ -1200,37 +1242,6 @@ export function createAppComposition(deps: AppDependencies): {
       );
     }
     await next();
-  });
-
-  app.use("/v1/*", async (c, next) => {
-    try {
-      await next();
-      try {
-        await validateManagedAuthRequestActorLease(c.req.raw);
-      } catch (error) {
-        if (error instanceof ManagedAuthActorChangeError) {
-          c.header("x-opengeni-actor-state", "changed");
-          throw new HTTPException(409, { message: error.code, cause: error });
-        }
-        if (error instanceof ManagedAuthActorLeaseOutcomeUnknownError) {
-          throw new ApiHttpError(503, {
-            code: "upstream_unavailable",
-            message: error.code,
-            retryable: true,
-            outcomeUnknown: true,
-            details: { managedAuthCode: error.code },
-          });
-        }
-        throw error;
-      }
-    } finally {
-      await releaseManagedAuthRequestActorLease(c.req.raw).catch((error) => {
-        observability.error("Managed actor mutation lease release failed", {
-          error,
-          errorClass: error instanceof Error ? error.name : "UnknownError",
-        });
-      });
-    }
   });
 
   // These product-owned auth routes must be registered before Better Auth's
