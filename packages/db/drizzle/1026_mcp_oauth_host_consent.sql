@@ -10,3 +10,9 @@ ALTER TABLE mcp_oauth_authorization_requests
   ADD COLUMN host_proposal_digest text,
   ADD COLUMN host_operation_id uuid,
   ADD COLUMN host_admitted_at timestamptz;
+
+-- Preserve the authorizing operation/material after pending requests and codes
+-- are consumed. NULL preserves predecessor/standalone grants unchanged.
+ALTER TABLE mcp_oauth_authorization_codes ADD COLUMN host_admission_ref jsonb;
+ALTER TABLE mcp_oauth_access_tokens ADD COLUMN host_admission_ref jsonb;
+ALTER TABLE mcp_oauth_refresh_tokens ADD COLUMN host_admission_ref jsonb;

@@ -450,7 +450,10 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
         throw new HTTPException(403, { message: "Same-origin browser approval is required" });
       const proposal = await prepareMcpOAuthHostProposal(c, deps, request, form);
       if (!matchesDisplayedMcpOAuthProposal(form, proposal))
-        throw new HTTPException(409, { message: "Consent changed; review and authorize again" });
+        return c.html(
+          await renderMcpOAuthHostReview(c, deps, form.get("request") ?? "", proposal, form),
+          409,
+        );
       const browser = await requireCanonicalHumanRequestIdentity(c, {
         db: deps.db,
         managedAuth: deps.managedAuth,
@@ -1542,6 +1545,11 @@ async function renderMcpOAuthHostReview(
   proposal: McpOAuthHostProposal,
   form: URLSearchParams,
 ): Promise<string> {
+  c.header("cache-control", "no-store");
+  c.header(
+    "content-security-policy",
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; connect-src 'self'",
+  );
   const context = await requireAccessContext(c, deps);
   const workspaces = await listConsentWorkspaces(deps, context);
   const clientId = proposal.material.clientId;

@@ -2479,9 +2479,14 @@ and admits the exact revision/digest/operation through the corresponding
 `mcp_connection.create` governance. Admission and existing host attribution commit
 in one native database transaction. Callback success grants nothing: the ordinary
 native approve POST rechecks current browser/catalog facts and atomically consumes
-only the exact stored admission once. The same transaction compares the existing
-native session/identity owner facts; the API's native workspace resolver owns the
-live workspace check. Native OAuth alone issues/exchanges codes and tokens.
+only the exact stored admission once. The same transaction holds the existing
+organization-membership and workspace-tenancy
+fences, locks the live permission row, and rechecks the native workspace and
+session/identity owners. The authorizing operation/request/revision/digest tuple
+then follows the existing code, grant and refresh-family rows; the HOST connection
+read exposes that optional reference so its acting-human attribution remains
+joinable after pending requests and authorization codes are consumed. Native OAuth
+alone issues/exchanges codes and tokens.
 
 The handoff has its own aggregate maximum of 10 seconds, clamped to credential
 and pending-request expiry. The host must clamp each existing 5-second call ceiling

@@ -54,6 +54,16 @@ beforeAll(async () => {
   await admin.begin(async (transaction) => {
     await transaction.unsafe(organizationConnectionsSource);
   });
+  // The current repository reads the additive consent/admission grant columns.
+  for (const name of [
+    "1021_mcp_oauth_workspace_consent_preset.sql",
+    "1022_mcp_oauth_consented_tool_set_versions.sql",
+    "1026_mcp_oauth_host_consent.sql",
+  ]) {
+    await admin.begin(async (tx) => {
+      await tx.unsafe(await Bun.file(new URL(`../drizzle/${name}`, import.meta.url)).text());
+    });
+  }
   await provisionRoles(blank.databaseUrl, {
     appRole: "opengeni_app",
     appPassword: blank.appPassword,

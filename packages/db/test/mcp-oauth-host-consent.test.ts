@@ -43,6 +43,13 @@ beforeAll(async () => {
       subject_id text, resource text, redirect_uri text, code_challenge text, state text,
       permissions jsonb, tool_identities jsonb, organization_access jsonb, consent_preset text,
       tool_set_versions jsonb, expires_at timestamptz);
+    create table workspaces (id uuid primary key, account_id uuid);
+    create table workspace_memberships (workspace_id uuid, subject_id text, permissions jsonb);
+    insert into workspaces values ('${workspaceId}', '${organizationId}');
+    insert into workspace_memberships values ('${workspaceId}', 'user:person', '["workspace:read"]');
+    create function list_self_organization_memberships(text) returns jsonb language sql as $$select '[]'::jsonb$$;
+    create table mcp_oauth_access_tokens (like mcp_oauth_authorization_requests);
+    create table mcp_oauth_refresh_tokens (like mcp_oauth_authorization_requests);
     create table organization_host_command_attributions (
       account_id uuid, operation_id uuid, mutation text, service_subject_id text,
       service_initiator_subject_id text, acting_external_source text, acting_external_id text,
@@ -100,6 +107,7 @@ const attributionFor = (operationId: string) => ({
 function admissionFor(proposal: NonNullable<Awaited<ReturnType<typeof freeze>>>) {
   return {
     organizationId,
+    workspaceId,
     requestHash,
     revision: proposal.revision,
     digest: proposal.digest,

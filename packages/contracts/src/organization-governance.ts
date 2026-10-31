@@ -513,6 +513,20 @@ export const HostMcpConnectionConsentScope = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostMcpConnectionConsentScope = z.infer<typeof HostMcpConnectionConsentScope>;
 
+/** Immutable causal link carried by existing OAuth code/grant/family rows. */
+export const HostMcpOAuthAdmissionReference = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      organizationId: primitives.uuid,
+      requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+      operationId: primitives.uuid,
+      revision: primitives.positiveInteger,
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict(),
+);
+export type HostMcpOAuthAdmissionReference = z.infer<typeof HostMcpOAuthAdmissionReference>;
+
 /**
  * Host read of one MCP connection
  * (`GET /v1/host/organizations/:id/mcp-connections/:connectionId`): whether
@@ -547,6 +561,7 @@ export const HostOrganizationMcpConnection = /* @__PURE__ */ defineSchema(() =>
       consentScope: HostMcpConnectionConsentScope,
       revokedAt: primitives.dateTime.nullable(),
       updatedAt: primitives.dateTime,
+      hostAdmission: HostMcpOAuthAdmissionReference.optional(),
     })
     .strict(),
 );

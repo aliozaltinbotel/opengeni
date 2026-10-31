@@ -25,6 +25,12 @@ import {
   createDb,
   createManagedOrganization,
   createOrganizationApiKey,
+  createOrganizationWorkspace,
+  revokeOrganizationWorkspaceMember,
+  consumeMcpOAuthAuthorizationRequest,
+  readMcpOAuthHostProposal,
+  resolveMcpOAuthAccessToken,
+  getMcpOAuthConnectionRecord,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -1435,9 +1441,9 @@ describe("organization recovery and workspace deletion are governed", () => {
   }, 120_000);
 });
 
-async function startHostWorkspaceConsent(app: App) {
+async function startHostWorkspaceConsent(app: App, workspaceId = world.sharedWorkspaceId) {
   const mcpClient = await registerMcpClient();
-  const url = authorizeUrl(mcpClient, `${origin}/v1/workspaces/${world.sharedWorkspaceId}/mcp`);
+  const url = authorizeUrl(mcpClient, `${origin}/v1/workspaces/${workspaceId}/mcp`);
   const response = await app.request(url.pathname + url.search, {
     headers: { cookie: world.owner.cookie },
   });
@@ -1449,18 +1455,20 @@ async function startHostWorkspaceConsent(app: App) {
   if (!request || !revision || !digest) throw new Error("Displayed native proposal is absent");
   const form = new URLSearchParams({
     request,
-    workspace_id: world.sharedWorkspaceId,
+    workspace_id: workspaceId,
     decision: "approve",
     access_preset: "full",
     host_revision: revision,
     host_digest: digest,
   });
-  const minted = await app.request(`/v1/auth/host-token?workspace=${world.sharedWorkspaceId}`, {
+  const minted = await app.request(`/v1/auth/host-token?workspace=${workspaceId}`, {
     headers: { cookie: world.owner.cookie, origin },
   });
   expect(minted.status).toBe(200);
   const { token } = await minted.json();
   return {
+    mcpClient,
+    resource: `${origin}/v1/workspaces/${workspaceId}/mcp`,
     form,
     token: token as string,
     preflight: (overrides: Record<string, string> = {}) =>
@@ -1835,6 +1843,8 @@ describe("governed workspace OAuth HOST consent", () => {
     let app: App | undefined;
     let callbackCount = 0;
     let returned = false;
+    let catalogVersion = "v1";
+    let driftFinalPost = true;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -1843,6 +1853,28 @@ describe("governed workspace OAuth HOST consent", () => {
     const browserOrigin = server.url.origin;
     app = appFor(hostPort, {
       publicBaseUrl: browserOrigin,
+      workspaceToolServers: async () => [
+        {
+          id: "consent-tools",
+          toolSetVersion: catalogVersion,
+          server: {
+            name: "host:consent-tools",
+            cacheToolsList: false,
+            connect: async () => {},
+            close: async () => {},
+            listTools: async () => [
+              {
+                name: catalogVersion === "v1" ? "read_record" : "read_new",
+                description: "Read a fixture record",
+                inputSchema: { type: "object", properties: {} },
+                annotations: { readOnlyHint: true },
+              },
+            ],
+            callTool: async () => [{ type: "text", text: "fixture" }],
+            invalidateToolsCache: async () => {},
+          },
+        },
+      ],
       mcpOAuthHostConsent: {
         async admit(input) {
           callbackCount += 1;
@@ -1870,6 +1902,13 @@ describe("governed workspace OAuth HOST consent", () => {
       },
     ]);
     const page = await context.newPage();
+    await page.route(`${browserOrigin}/oauth/authorize`, async (route) => {
+      if (route.request().method() === "POST" && driftFinalPost) {
+        catalogVersion = "v2";
+        driftFinalPost = false;
+      }
+      await route.continue();
+    });
     await page.route("http://127.0.0.1:4567/**", async (route) => {
       returned = new URL(route.request().url()).searchParams.has("code");
       await route.fulfill({ status: 200, contentType: "text/plain", body: "Connected" });
@@ -1895,8 +1934,17 @@ describe("governed workspace OAuth HOST consent", () => {
       ).toBe(true);
       await page.screenshot({ path: "/tmp/q15-native-consent-review-390.png", fullPage: true });
       await page.getByRole("button", { name: "Authorize", exact: true }).click();
-      await page.getByText("Connected", { exact: true }).waitFor({ timeout: 5000 });
+      await page.getByText("consent-tools: read_new", { exact: true }).waitFor({ timeout: 5000 });
+      await page.getByRole("alert").filter({ hasText: "Access changed" }).waitFor();
       expect(callbackCount).toBe(1);
+      expect(returned).toBe(false);
+      await page.screenshot({
+        path: "/tmp/q15-native-consent-final-drift-390.png",
+        fullPage: true,
+      });
+      await page.getByRole("button", { name: "Authorize", exact: true }).click();
+      await page.getByText("Connected", { exact: true }).waitFor({ timeout: 5000 });
+      expect(callbackCount).toBe(2);
       expect(returned).toBe(true);
     } finally {
       await context.close();
@@ -1942,7 +1990,12 @@ describe("governed workspace OAuth HOST consent", () => {
     const pending = await startHostWorkspaceConsent(app);
     expect((await pending.preflight()).status).toBe(200);
     version = "v2";
-    expect((await pending.approve()).status).toBe(409);
+    const drifted = await pending.approve();
+    expect(drifted.status).toBe(409);
+    expect(drifted.headers.get("content-type")).toContain("text/html");
+    expect(await drifted.text()).toContain(
+      "Access changed. Review the permissions and tools below, then authorize again.",
+    );
     const refreshed = await pending.preflight();
     expect(refreshed.status).toBe(409);
     expect(await refreshed.text()).toContain("read_new");
@@ -1991,5 +2044,151 @@ describe("governed workspace OAuth HOST consent", () => {
       appFor(hostPort, { mcpOAuthHostConsent: { async admit() {} } }),
     );
     expect((await app.request(path, { headers: bearer(pending.token) })).status).toBe(401);
+  }, 60_000);
+  test("final DB consumption refuses a real workspace revocation committed after native preparation", async () => {
+    const workspace = await createOrganizationWorkspace(client.db, {
+      organizationId: world.governedOrganizationId,
+      actorSubjectId: world.owner.subjectId,
+      name: "Consent revocation fixture",
+      operationId: crypto.randomUUID(),
+    });
+    let app: App;
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          await admitWithVerifiedHumanHost(app, input);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app, workspace.id);
+    expect((await pending.preflight()).status).toBe(200);
+    const requestHash = createHash("sha256").update(pending.form.get("request")!).digest("hex");
+    const proposal = await readMcpOAuthHostProposal(client.db, {
+      organizationId: world.governedOrganizationId,
+      requestHash,
+    });
+    if (!proposal) throw new Error("Prepared proposal is absent");
+    const member = workspace.members.find(
+      (candidate) => candidate.organizationMembershipId === world.ownerMembershipId,
+    );
+    if (!member) throw new Error("Owner workspace grant is absent");
+    await revokeOrganizationWorkspaceMember(client.db, {
+      organizationId: world.governedOrganizationId,
+      actorSubjectId: world.owner.subjectId,
+      workspaceId: workspace.id,
+      targetOrganizationMembershipId: world.ownerMembershipId,
+      expectedUpdatedAt: member.updatedAt,
+      operationId: crypto.randomUUID(),
+      requireRemainingSharedWorkspace: true,
+    });
+    const codeHash = createHash("sha256").update(crypto.randomUUID()).digest("hex");
+    expect(
+      await consumeMcpOAuthAuthorizationRequest(client.db, {
+        requestHash,
+        subjectId: world.owner.subjectId,
+        codeHash,
+        codeExpiresAt: new Date(Date.now() + 60_000),
+        hostAdmission: proposal,
+        hostBrowserAuthUserId: world.owner.subjectId.slice("user:".length),
+      }),
+    ).toBeNull();
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from mcp_oauth_authorization_codes where code_hash = ${codeHash}`
+      )[0]!.count,
+    ).toBe(0);
+  }, 60_000);
+
+  test("issued and refreshed connection retains its exact HOST admission and acting-human attribution", async () => {
+    let app: App;
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          await admitWithVerifiedHumanHost(app, input);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    expect((await pending.preflight()).status).toBe(200);
+    const requestHash = createHash("sha256").update(pending.form.get("request")!).digest("hex");
+    const proposal = await readMcpOAuthHostProposal(client.db, {
+      organizationId: world.governedOrganizationId,
+      requestHash,
+    });
+    if (!proposal) throw new Error("Admitted proposal is absent");
+    const expected = {
+      organizationId: proposal.organizationId,
+      requestHash,
+      operationId: proposal.operationId,
+      revision: proposal.revision,
+      digest: proposal.digest,
+    };
+    const approved = await pending.approve();
+    expect(approved.status).toBe(200);
+    const redirect = new URL((approved.headers.get("refresh") ?? "").replace(/^0;url=/, ""));
+    const code = redirect.searchParams.get("code");
+    if (!code) throw new Error("Native code is absent");
+    const exchange = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: pending.mcpClient.clientId,
+        code,
+        code_verifier: pending.mcpClient.verifier,
+        redirect_uri: redirectUri,
+        resource: pending.resource,
+      }),
+    });
+    expect(exchange.status).toBe(200);
+    const token = await exchange.json();
+    const access = await resolveMcpOAuthAccessToken(
+      client.db,
+      createHash("sha256").update(token.access_token).digest("hex"),
+    );
+    expect(access?.hostAdmission).toEqual(expected);
+    if (!access) throw new Error("Native grant is absent");
+    const refreshed = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        client_id: pending.mcpClient.clientId,
+        refresh_token: token.refresh_token,
+        resource: pending.resource,
+      }),
+    });
+    expect(refreshed.status).toBe(200);
+    const next = await refreshed.json();
+    const latest = await resolveMcpOAuthAccessToken(
+      client.db,
+      createHash("sha256").update(next.access_token).digest("hex"),
+    );
+    expect(latest?.hostAdmission).toEqual(expected);
+    const record = await getMcpOAuthConnectionRecord(client.db, {
+      accountId: proposal.organizationId,
+      connectionId: access.refreshFamilyId,
+    });
+    expect(record?.grant.hostAdmission).toEqual(expected);
+    const read = await app.request(
+      `/v1/host/organizations/${proposal.organizationId}/mcp-connections/${access.refreshFamilyId}`,
+      { headers: bearer(await serviceToken()) },
+    );
+    expect(read.status).toBe(200);
+    expect((await read.json()).hostAdmission).toEqual(expected);
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from mcp_oauth_authorization_requests where request_hash = ${requestHash}`
+      )[0]!.count,
+    ).toBe(0);
+    expect(
+      (
+        await shared.admin`select count(*)::int as count from mcp_oauth_authorization_codes where code_hash = ${createHash("sha256").update(code).digest("hex")}`
+      )[0]!.count,
+    ).toBe(0);
+    const [attribution] =
+      await shared.admin`select acting_external_source, acting_external_id from organization_host_command_attributions where account_id = ${proposal.organizationId} and operation_id = ${proposal.operationId}`;
+    expect(attribution!.acting_external_source).toBe("test:consent");
+    expect(attribution!.acting_external_id).toBe(world.owner.subjectId);
   }, 60_000);
 });
