@@ -1,3 +1,4 @@
+import type { HostMcpOAuthAdmissionReference } from "@opengeni/contracts/organization-governance";
 import { createSubscriptionPoolTables } from "./subscription-pool-schema";
 import { subscriptionConnections } from "./subscription-core-schema";
 import type { StoredSessionAdmissionBlock } from "./session-admission-block";
@@ -4595,6 +4596,11 @@ export const mcpOauthAuthorizationRequests = pgTable(
     redirectUri: text("redirect_uri").notNull(),
     codeChallenge: text("code_challenge").notNull(),
     state: text("state"),
+    hostProposal: jsonb("host_proposal").$type<Record<string, unknown>>(),
+    hostProposalRevision: integer("host_proposal_revision").notNull().default(0),
+    hostProposalDigest: text("host_proposal_digest"),
+    hostOperationId: uuid("host_operation_id"),
+    hostAdmittedAt: timestamp("host_admitted_at", { withTimezone: true }),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -4616,6 +4622,7 @@ export const mcpOauthAuthorizationCodes = pgTable(
       .notNull()
       .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
     ...mcpOauthGrantColumns(),
+    hostAdmissionRef: jsonb("host_admission_ref").$type<HostMcpOAuthAdmissionReference>(),
     redirectUri: text("redirect_uri").notNull(),
     codeChallenge: text("code_challenge").notNull(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
@@ -4641,6 +4648,7 @@ export const mcpOauthRefreshTokens = pgTable(
       .notNull()
       .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
     ...mcpOauthGrantColumns(),
+    hostAdmissionRef: jsonb("host_admission_ref").$type<HostMcpOAuthAdmissionReference>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     connectedAt: timestamp("connected_at", { withTimezone: true }),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
@@ -4670,6 +4678,7 @@ export const mcpOauthAccessTokens = pgTable(
       .notNull()
       .references(() => mcpOauthClients.clientId, { onDelete: "cascade" }),
     ...mcpOauthGrantColumns(),
+    hostAdmissionRef: jsonb("host_admission_ref").$type<HostMcpOAuthAdmissionReference>(),
     expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
     revokedAt: timestamp("revoked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

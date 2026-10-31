@@ -42,6 +42,7 @@ export async function readHostMcpConnection(
   if (!record) return null;
   const liveness = await connectionLiveness(deps, input, record);
   return HostOrganizationMcpConnection.parse({
+    ...(record.grant.hostAdmission ? { hostAdmission: record.grant.hostAdmission } : {}),
     connectionId: record.id,
     organizationId: record.accountId,
     workspaceId: record.grant.workspaceId,

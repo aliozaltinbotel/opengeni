@@ -27,6 +27,8 @@ import {
   HostOrganizationIdentity,
   HostOrganizationInvitation,
   HostOrganizationMcpConnection,
+  HostMcpOAuthConsentProposal,
+  HostAdmitMcpOAuthConsentRequest,
   HostOrganizationMember,
   HostOrganizationMemberLifecycleRequest,
   HostOrganizationOwner,
@@ -54,10 +56,13 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  admitMcpOAuthHostProposal,
+  readMcpOAuthHostProposal,
   createOrganizationInvitation,
   ensureOrganizationHostOwner,
   getOrganizationInvitationForAdministration,
   getWorkspace,
+  getOrganizationAdministrationOverview,
   hostSessionPolicyWriteGranted,
   lookupOrganizationHostIdentity,
   nestedPostgresSqlState,
@@ -305,6 +310,58 @@ export function registerGovernedOrganizationCommandRoutes(app: Hono, deps: ApiRo
         details: { code: HOST_MCP_CONNECTION_NOT_IN_ORGANIZATION },
       });
     return context.json(HostOrganizationMcpConnection.parse(connection));
+  });
+
+  app.get(`${base}/mcp-consent-requests/:requestHash`, async (context) => {
+    context.header("cache-control", "no-store");
+    const authority = await requireHostService(context, deps);
+    if (!(await organizationGovernedByHost(deps, authority.organizationId)))
+      throw organizationNotHostGoverned();
+    const requestHash = parsePathId(
+      context,
+      "requestHash",
+      HostMcpOAuthConsentProposal.shape.requestHash,
+    );
+    await getOrganizationAdministrationOverview(deps.db, {
+      organizationId: authority.organizationId,
+      actorSubjectId: authority.actorSubjectId,
+    });
+    const proposal = await readMcpOAuthHostProposal(deps.db, {
+      organizationId: authority.organizationId,
+      requestHash,
+    });
+    if (!proposal) throw new HTTPException(404, { message: "Pending consent is unavailable" });
+    return context.json(HostMcpOAuthConsentProposal.parse(proposal));
+  });
+
+  app.post(`${base}/mcp-consent-requests/:requestHash/admit`, async (context) => {
+    context.header("cache-control", "no-store");
+    const authority = await requireHostCommand(context, deps, "mcp_connection.create");
+    const requestHash = parsePathId(
+      context,
+      "requestHash",
+      HostMcpOAuthConsentProposal.shape.requestHash,
+    );
+    const { actingExternalUser, command } = await parseCommand(
+      context,
+      HostAdmitMcpOAuthConsentRequest,
+    );
+    const outcome = await admitMcpOAuthHostProposal(deps.db, {
+      organizationId: authority.organizationId,
+      requestHash,
+      ...command,
+      attribution: {
+        organizationId: authority.organizationId,
+        operationId: command.operationId,
+        mutation: "mcp_connection.create",
+        serviceSubjectId: authority.actorSubjectId,
+        serviceInitiatorSubjectId: authority.serviceInitiatorSubjectId,
+        actingExternalUser,
+      },
+    });
+    if (outcome === "conflict")
+      throw new HTTPException(409, { message: "Pending consent proposal changed" });
+    return context.json({ outcome });
   });
 
   app.post(`${base}/members/:membershipId/change-role`, async (context) => {
@@ -786,8 +843,8 @@ async function parseCommand<Schema extends z.ZodTypeAny>(
   return parsed.data;
 }
 
-function parsePathId(context: Context, name: string): string {
-  const parsed = Uuid.safeParse(context.req.param(name));
+function parsePathId(context: Context, name: string, schema: z.ZodType<string> = Uuid): string {
+  const parsed = schema.safeParse(context.req.param(name));
   if (!parsed.success) throw new HTTPException(422, { message: `invalid ${name}` });
   return parsed.data.toLowerCase();
 }
