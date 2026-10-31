@@ -42,7 +42,38 @@ test("unknown host-required tools make the entire create decision unreadable", a
   ).rejects.toBeInstanceOf(SessionAuthorizationUnavailableError);
 });
 
+test("create denial has a distinct envelope identity from source-session denial", async () => {
+  await expect(
+    requireSessionCreateAuthorization(
+      {
+        db: {} as Database,
+        sessionAuthorization: {
+          ...port,
+          authorizeSessionCreate: async () => ({ allowed: false, reason: "revoked" }),
+        },
+      },
+      grant,
+      "http",
+      [],
+    ),
+  ).rejects.toBeInstanceOf(SessionCreateAuthorizationDeniedError);
+});
 
-test("create denial has a distinct envelope identity from source-session denial",async()=>{
-  await expect(requireSessionCreateAuthorization({db:{} as Database,sessionAuthorization:{...port,authorizeSessionCreate:async()=>({allowed:false,reason:"revoked"})}},grant,"http",[])).rejects.toBeInstanceOf(SessionCreateAuthorizationDeniedError);
+test("legacy create authorization methods retain their port receiver", async () => {
+  const receiverPort = {
+    marker: "host-port",
+    ...port,
+    async authorizeSessionCreate() {
+      if (this.marker !== "host-port") throw new Error("receiver lost");
+      return { allowed: true as const };
+    },
+  };
+  await expect(
+    requireSessionCreateAuthorization(
+      { db: {} as Database, sessionAuthorization: receiverPort },
+      grant,
+      "http",
+      [],
+    ),
+  ).resolves.toMatchObject({ decision: { allowed: true } });
 });

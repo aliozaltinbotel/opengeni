@@ -356,3 +356,9 @@ test("host-required internal servers are eagerly persisted, while public input c
   expect(untrustedRow?.policy.hostRequiredMcpServerIds).toBeUndefined();
   expect(untrustedRow?.tools.some((tool) => tool.id === "host")).toBe(false);
 });
+
+test("create and created callbacks retain the configured port receiver",async()=>{
+  const port={...allowEveryTarget,marker:"bound-port",async authorizeSessionCreate(){expect(this.marker).toBe("bound-port");return {allowed:true as const};},async sessionCreated(){expect(this.marker).toBe("bound-port");}};
+  const who=await person();
+  expect((await create(appWith(port),who,{initialMessage:"hello"})).status).toBe(202);
+});

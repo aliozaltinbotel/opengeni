@@ -1216,7 +1216,7 @@ export async function createAndStartSessionWithOutcome(input: {
         ? {
             hostSessionCreated: async (session: Session) =>
               withSessionCreateHostDeadline(() =>
-                hook({
+                hook.call(host.port, {
                   accountId: input.accountId,
                   workspaceId: input.workspaceId,
                   sessionId: session.id,
@@ -4340,7 +4340,8 @@ async function createSessionForRequestInFileScope(
             await applyInitialUsageLimit(tx, sessionId);
           }
         : externalBeforeCreateCommit;
-  const createdHook = unresolvedDeps.sessionAuthorization?.sessionCreated;
+  const createdPort = unresolvedDeps.sessionAuthorization;
+  const createdHook = createdPort?.sessionCreated;
   const hostRequiredIds = [
     ...new Set([
       ...(parentSession?.toolPolicy.hostRequiredMcpServerIds ?? []),
@@ -4361,7 +4362,7 @@ async function createSessionForRequestInFileScope(
         ? {
             hostSessionCreated: async (created: Session) => {
               await withSessionCreateHostDeadline(() =>
-                createdHook({
+                createdHook.call(createdPort, {
                   accountId: grant.accountId,
                   workspaceId,
                   sessionId: created.id,

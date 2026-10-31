@@ -572,7 +572,7 @@ export async function authorizeSessionCreateForActor(
   let rawDecision: unknown;
   try {
     rawDecision = authorizeCreate
-      ? await withSessionCreateHostDeadline(() => authorizeCreate(input))
+      ? await withSessionCreateHostDeadline(() => authorizeCreate.call(port, input))
       : { allowed: true };
   } catch (error) {
     throw new SessionAuthorizationUnavailableError({ cause: error });

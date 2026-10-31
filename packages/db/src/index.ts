@@ -31670,14 +31670,27 @@ export async function settleHostSessionCreate(
   input: { accountId: string; workspaceId: string; sessionId: string; ready: boolean },
 ): Promise<void> {
   await withSessionActivityRlsContext(db, input, async (tx) => {
-    if (!input.ready)
-      await mutateSessionControlInTransaction(tx, {
+    if (!input.ready) {
+      const [session] = await tx
+        .select({ importedArchiveImportId: schema.sessions.importedArchiveImportId })
+        .from(schema.sessions)
+        .where(and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ))
+        .limit(1);
+      if (!session) throw new Error("HOST_SESSION_CREATE_NOT_FOUND");
+      // Imported originals have no execution to cancel. Preserve their guarded
+      // historical status/events; the same immutable failed flag archives them.
+      if (!session.importedArchiveImportId) await mutateSessionControlInTransaction(tx, {
         ...input,
         actor: { type: "service", subjectId: "service:session-create-host" },
         operationKey: `host-session-create:${input.sessionId}`,
         action: "cancel",
         reason: "Host session creation failed",
       });
+    }
     await tx
       .update(schema.sessions)
       .set({ hostSessionCreateState: input.ready ? "ready" : "failed" })
@@ -34342,7 +34355,7 @@ async function sessionListTotalsInScope(
     }),
     ...(archiveStatus === "all"
       ? []
-      : [sql`coalesce(root_archive.archived, false) = ${archiveStatus === "archived"}`]),
+      : [sql`(coalesce(root_archive.archived, false) or ${schema.sessions.hostSessionCreateState} = 'failed') = ${archiveStatus === "archived"}`]),
     // A Site this person archived from their sidebar hides its conversations
     // with its row, as an archived chat hides its tree.
     ...(archiveStatus === "active" && siteConversations
@@ -34380,7 +34393,7 @@ async function sessionListTotalsInScope(
         ${schema.sessions.createdAt} as created_at,
         ${schema.sessions.metadata}->'_opengeniSiteOrigin'->>'title' as origin_title,
         ${sessionRelatedListScope(options.authorizationScope)} as related,
-        coalesce(root_personal.archived, false) as archived,
+        (coalesce(root_personal.archived, false) or ${schema.sessions.hostSessionCreateState} = 'failed') as archived,
         coalesce(root_personal.pinned, false) as pinned,
         coalesce(case when root_personal.manually_unread_through is not null then -1
           else root_personal.acknowledged_sequence end, 0) as acknowledged_sequence,
@@ -34409,6 +34422,7 @@ async function sessionListTotalsInScope(
         select * from personal_state where session_id = child.id offset 0
       ) personal on true
       where child.workspace_id = ${workspaceId} and child.parent_session_id is not null
+        and (${archiveStatus} = 'all' or child.host_session_create_state <> 'failed')
         and exists (select 1 from roots root where root.related and root.id = child.root_session_id)
     ), nodes(root_id, channel_id, id, account_id, status, active_turn_id,
         input_wait_until, input_wait_turn_id, pause_revision, pinned_path, related,
@@ -34770,14 +34784,14 @@ function sessionFilters(
         : sql`${schema.sessions.siteAccessRootId} is null`,
     );
   }
-  const archivedRoot = sql`exists (
+  const archivedRoot = sql`(${schema.sessions.hostSessionCreateState} = 'failed' or exists (
     select 1
     from ${schema.sessionPins} archive_state
     where archive_state.workspace_id = ${schema.sessions.workspaceId}
       and archive_state.subject_id = ${options.subjectId}
       and archive_state.session_id = ${schema.sessions.rootSessionId}
       and archive_state.archived = true
-  )`;
+  ))`;
   const archiveStatus = options.archiveStatus ?? (options.archivedOnly ? "archived" : "active");
   if (archiveStatus !== "all") {
     filters.push(archiveStatus === "archived" ? archivedRoot : sql`not (${archivedRoot})`);
@@ -35528,12 +35542,12 @@ async function readSessionListForSubject(
         const searchFilter = sessionSearchFilter(options.search);
         // Descendants inherit their root's subject-specific archive ordering,
         // just as they inherit its archive visibility in sessionFilters.
-        const archiveSortAt = sql`(select archive_order.archived_at
+        const archiveSortAt = sql`coalesce((select archive_order.archived_at
               from ${schema.sessionPins} archive_order
               where archive_order.workspace_id = ${schema.sessions.workspaceId}
                 and archive_order.subject_id = ${options.subjectId}
                 and archive_order.session_id = ${schema.sessions.rootSessionId}
-                and archive_order.archived = true)`;
+                and archive_order.archived = true), case when ${schema.sessions.hostSessionCreateState} = 'failed' then coalesce(${schema.sessions.directControlChangedAt}, ${schema.sessions.updatedAt}) end)`;
         // Locale-independent normalization shared with the UI contract. Do not
         // use localeCompare/lower(): those depend on deployment/client locale.
         const ordinarySortAt =
@@ -36629,6 +36643,14 @@ export async function setSessionArchive(
         )
         .limit(1);
       const current = mapSessionArchive(existing);
+      if (storedSession.hostSessionCreateState === "failed" && !input.archived) {
+        throw new SessionArchiveVersionConflictError({
+          ...current,
+          archived: true,
+          archivedAt: current.archivedAt ?? (storedSession.directControlChangedAt ?? storedSession.updatedAt).toISOString(),
+        });
+      }
+
       if (current.archived === input.archived) {
         if (input.archived && input.beforeArchive) {
           const replay = await input.beforeArchive(tx, current.archiveVersion);
@@ -92014,6 +92036,10 @@ function mapSession(
     ...pin,
     ...attention,
     ...archive,
+    ...(row.hostSessionCreateState === "failed" ? {
+      archived: true,
+      archivedAt: archive.archivedAt ?? (row.directControlChangedAt ?? row.updatedAt).toISOString(),
+    } : {}),
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

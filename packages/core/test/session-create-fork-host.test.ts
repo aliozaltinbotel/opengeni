@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import {
   createDb,
+  getSession,
+  listSessionsForSubject,
+  settleHostSessionCreate,
+  setSessionArchive,
+  SessionArchiveVersionConflictError,
   createSession,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
@@ -206,4 +211,68 @@ test("a failed child callback stays globally closed and reports the real task ro
     { state: string; turns: number; archives: number }[]
   >`select s.host_session_create_state as state,(select count(*)::int from session_turns t where t.session_id=s.id) as turns,(select count(*)::int from session_pins p where p.session_id=s.id and p.archived) as archives from sessions s where s.id=${childId}`;
   expect(row).toEqual({ state: "failed", turns: 0, archives: 0 });
+  expect((await getSession(client.db, grant.workspaceId, childId))?.archived).toBe(true);
+  expect((await getSession(client.db, grant.workspaceId, parent.id))?.archived).toBe(false);
+  const active = await listSessionsForSubject(client.db, grant.workspaceId, {
+    subjectId: grant.subjectId,
+    parentSessionId: parent.id,
+    limit: 10,
+  });
+  expect(active.sessions.some((session) => session.id === childId)).toBe(false);
+  const archived = await listSessionsForSubject(client.db, grant.workspaceId, {
+    subjectId: grant.subjectId,
+    parentSessionId: parent.id,
+    archiveStatus: "archived",
+    limit: 10,
+  });
+  expect(archived.sessions.some((session) => session.id === childId && session.archived)).toBe(
+    true,
+  );
+  const service = await createSession(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    initialMessage: "service",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    reasoningEffort: "medium",
+    latencyMode: "standard",
+    sandboxBackend: "none",
+    createdBy: { kind: "service", subjectId: "automation:host-archive-test" },
+    hostSessionCreatePending: true,
+  });
+  await settleHostSessionCreate(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: service.id,
+    ready: false,
+  });
+  expect((await getSession(client.db, grant.workspaceId, service.id))?.archived).toBe(true);
+  const roots = await listSessionsForSubject(client.db, grant.workspaceId, {
+    subjectId: grant.subjectId,
+    parentSessionId: null,
+    includeTotals: true,
+    limit: 10,
+  });
+  expect(roots.sessions.some((session) => session.id === service.id)).toBe(false);
+  const archivedRoots = await listSessionsForSubject(client.db, grant.workspaceId, {
+    subjectId: grant.subjectId,
+    parentSessionId: null,
+    archiveStatus: "archived",
+    sortBy: "archivedAt",
+    includeTotals: true,
+    limit: 10,
+  });
+  expect(
+    archivedRoots.sessions.some((session) => session.id === service.id && session.archived),
+  ).toBe(true);
+
+  await expect(
+    setSessionArchive(client.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: service.id,
+      subjectId: grant.subjectId,
+      archived: false,
+    }),
+  ).rejects.toBeInstanceOf(SessionArchiveVersionConflictError);
 });

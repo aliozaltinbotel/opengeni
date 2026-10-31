@@ -544,7 +544,8 @@ export async function forkManagedHumanSession(
     authorizationSurface,
     deps.settings?.mcpServers ?? [],
   );
-  const createdHook = deps.sessionAuthorization?.sessionCreated;
+  const createdPort = deps.sessionAuthorization;
+  const createdHook = createdPort?.sessionCreated;
   const assertHostReady = async (sessionId: string) => {
     const scope = { accountId: authorization.grant.accountId, workspaceId, sessionId };
     if ((await readHostSessionCreateState(deps.db, scope)) !== "ready")
@@ -682,7 +683,7 @@ export async function forkManagedHumanSession(
   else if (hostCreate && createdHook) {
     try {
       await withSessionCreateHostDeadline(() =>
-        createdHook({
+        createdHook.call(createdPort, {
           ...scope,
           rootSessionId: result.sessionId,
           actor: hostCreate.actor,
