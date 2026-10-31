@@ -966,6 +966,7 @@ type OrganizationGovernancePort = {
   }): "allow" | "refuse";
   memberRouteAccess?: "allowlist";
   organizationCreation?: "host";
+  allowedRealtimeModels?: readonly string[];
 };
 ```
 
@@ -1022,6 +1023,18 @@ keep each route's own checks; so does a caller with no grant in the workspace
 and nothing tells an outsider the organization exists. MCP OAuth clients
 authenticate inside `/mcp` and get that route's own answer. A guarded path
 that resolves no handler template is refused for a person (fail closed).
+
+**Realtime voice models (opt-in).** With `allowedRealtimeModels` on the port
+(realtime catalog ids, for example `opengeni-gateway/openai/gpt-realtime-2.1`),
+a governed organization's `GET /v1/workspaces/:id/realtime-model-catalog`
+lists only those models, in catalog order, and the server refuses any other
+model: a voice start (`POST .../sessions/:id/realtime`) answers `403` with
+`error.details.code = "REALTIME_MODEL_NOT_ALLOWED"` and the refused `model`
+before anything is written, and a WebRTC or WebSocket connection of a voice
+mode whose model is no longer allowed is refused the same way. An empty list
+allows no voice model. A saved workspace or organization default outside the
+list is simply not listed. Without the field, and for an organization the
+host does not govern, the stock catalog and starts are unchanged.
 
 The allowlist (exported from `@opengeni/api-router/app`) is the workspace
 itself, the session list and create, the composer's reads

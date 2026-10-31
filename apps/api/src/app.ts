@@ -160,6 +160,7 @@ import {
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
+  realtimeModelNotAllowedHttpError,
 } from "./http/api-error";
 import {
   isRequestBodyValidationError,
@@ -2576,6 +2577,7 @@ export function createAppComposition(deps: AppDependencies): {
               subscriptionSettingsLockedHttpError(rawError) ??
               workspaceControlBusyHttpError(rawError) ??
               scheduledTaskTargetAccessHttpError(rawError) ??
+              realtimeModelNotAllowedHttpError(rawError) ??
               agentConfigHttpError(rawError) ??
               modelUnavailableHttpError(rawError) ??
               connectionAccountSelectionHttpError(rawError) ??
