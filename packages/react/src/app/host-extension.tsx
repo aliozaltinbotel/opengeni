@@ -144,6 +144,15 @@ export type HostExtensionCommandMenuProvider = Readonly<{
   heading: string;
   search: (query: string, context: HostExtensionContext, signal: AbortSignal) => Promise<readonly HostExtensionCommandResult[]>;
 }>;
+/**
+ * The console's own chat as a side panel beside the extension's rail pages
+ * (`mode: "rail"`). A page opens it with `openChatPanel(context)` from
+ * `@opengeni/react/app/chat-panel`. `enabled` decides per page: a page it
+ * answers false for, and every settings page, has no panel.
+ */
+export type HostExtensionChatPanel = Readonly<{
+  enabled: (context: HostExtensionContext) => boolean;
+}>;
 export type HostExtensionUtility = Readonly<{
   id: string;
   label: string;
@@ -159,6 +168,8 @@ export type HostExtension = Readonly<{
   starters?: (context: HostExtensionContext) => readonly HostExtensionStarter[];
   /** Persistent host information above every session and the new-chat page. */
   sessionIndicator?: ComponentType<{ workspaceId: string; sessionId: string | null }>;
+  /** The console's chat as a side panel beside the extension's rail pages (`HostExtensionChatPanel`). */
+  chatPanel?: HostExtensionChatPanel;
   commandMenuProviders?: readonly HostExtensionCommandMenuProvider[];
   utilities?: readonly HostExtensionUtility[];
   brand?: Readonly<{

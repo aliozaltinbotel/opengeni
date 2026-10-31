@@ -145,6 +145,13 @@ function checkSessionIndicator(value: unknown): void {
   }
 }
 
+function checkChatPanel(value: unknown): void {
+  if (value === undefined) return;
+  const panel = record(value, "chatPanel");
+  knownKeys(panel, "chatPanel", ["enabled"]);
+  if (typeof panel.enabled !== "function") fail("chatPanel.enabled", "must be a function");
+}
+
 function list(value: unknown, field: string): readonly unknown[] {
   if (value === undefined) return [];
   return Array.isArray(value) ? value : fail(field, "must be an array");
@@ -498,6 +505,7 @@ export function validateHostExtension(value: unknown): HostExtension {
   optionalFunction(fields.messageContext, "messageContext");
   optionalFunction(fields.starters, "starters");
   checkSessionIndicator(fields.sessionIndicator);
+  checkChatPanel(fields.chatPanel);
   list(fields.hiddenNativeSections, "hiddenNativeSections").forEach((section, index) => {
     if (!isNativeSectionId(section)) fail(`hiddenNativeSections[${index}]`, "is not a native section");
   });

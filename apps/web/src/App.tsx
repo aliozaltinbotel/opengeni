@@ -1071,6 +1071,7 @@ const workspaceAccountRoute = createRoute({
 export const hostExtensionWorkspaceRoutes = buildHostExtensionWorkspaceRoutes(
   workspaceRoute,
   hostExtension.routes,
+  hostExtension.chatPanel,
 );
 // The host extension's pages outside any workspace: registration refused any
 // path that shares a first segment with a native top-level route.
