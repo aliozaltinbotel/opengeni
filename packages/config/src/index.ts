@@ -1871,6 +1871,17 @@ const SettingsSchema = z.object({
     .int("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)")
     .positive("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS must be a positive integer (ms)")
     .default(20_000),
+  // Bounds on one session's pending input (Send/Steer accepted, not yet
+  // claimed): message count, stored bytes and age. Admission past count or
+  // bytes answers 429 SESSION_PENDING_INPUT_LIMIT_REACHED; older messages stop
+  // counting and are retired at the next admission. Unset, admission uses
+  // SESSION_PENDING_INPUT_LIMITS (optional, so hand-built Settings keep
+  // type-checking). Env: OPENGENI_SESSION_PENDING_INPUT_MAX_COUNT,
+  // OPENGENI_SESSION_PENDING_INPUT_MAX_BYTES (at most the 32 MiB request body),
+  // OPENGENI_SESSION_PENDING_INPUT_TTL_MS (at most 30 days).
+  sessionPendingInputMaxCount: z.coerce.number().int().positive().max(10_000).optional(),
+  sessionPendingInputMaxBytes: z.coerce.number().int().positive().max(32 * 1024 * 1024).optional(),
+  sessionPendingInputTtlMs: z.coerce.number().int().positive().max(30 * 24 * 60 * 60 * 1_000).optional(),
   // Rig setup-script budget (M3): the wall-clock timeout the rig-setup lifecycle
   // hook runs its script under, distinct from the 120s per-command lifecycle
   // default (a rig may compile/install heavy tooling on first cold create).
@@ -5806,6 +5817,9 @@ export function getSettings(source: NodeJS.ProcessEnv = process.env): Settings {
     sandboxLeaseWarmingTtlMs: optional("OPENGENI_SANDBOX_LEASE_WARMING_TTL_MS"),
     sandboxWarmingTimeoutMs: optional("OPENGENI_SANDBOX_WARMING_TIMEOUT_MS"),
     workspaceControlLockTimeoutMs: optional("OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS"),
+    sessionPendingInputMaxCount: optional("OPENGENI_SESSION_PENDING_INPUT_MAX_COUNT"),
+    sessionPendingInputMaxBytes: optional("OPENGENI_SESSION_PENDING_INPUT_MAX_BYTES"),
+    sessionPendingInputTtlMs: optional("OPENGENI_SESSION_PENDING_INPUT_TTL_MS"),
     rigSetupTimeoutMs: optional("OPENGENI_RIG_SETUP_TIMEOUT_MS"),
     sandboxWarmRateMicrosPerSecondJson: optional(
       "OPENGENI_SANDBOX_WARM_RATE_MICROS_PER_SECOND_JSON",

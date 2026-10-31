@@ -1,6 +1,9 @@
 import {
   ClaudeProviderAccountAuthoritySnapshotV1,
   MESSAGE_TIME_ZONE_METADATA_KEY,
+  SESSION_PENDING_INPUT_EXPIRED,
+  SESSION_PENDING_INPUT_LIMIT_REACHED,
+  type SessionPendingInputLimits,
   WORKSPACE_CLAUDE_PROVIDER_ACCOUNT_AUTHORITY_SNAPSHOT_V1,
 } from "@opengeni/contracts";
 import {
@@ -53,7 +56,7 @@ import {
   type TimelineAnnotation,
   type PersonalResourceAttachmentIntent,
 } from "@opengeni/contracts";
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import {
   withSessionRlsActorContext,
   withWorkspaceSessionActivityRls,
@@ -1594,6 +1597,201 @@ export async function deleteSessionQueueItemInTransaction(
   };
 }
 
+/** Seconds a sender is told to wait before retrying a refused Send or Steer. */
+export const SESSION_PENDING_INPUT_RETRY_AFTER_SECONDS = 10;
+
+/**
+ * A Send or Steer that would pass the session's pending-input bounds
+ * (`SESSION_PENDING_INPUT_LIMITS`). Thrown inside the prompt transaction
+ * before the turn, event or command receipt commits, so nothing is written.
+ * `limit` names the bound; `retryAfterSeconds` is null when the message alone
+ * is larger than `maxBytes`, so no wait can admit it.
+ */
+export class SessionPendingInputLimitError extends Error {
+  readonly name = "SessionPendingInputLimitError";
+  readonly code = SESSION_PENDING_INPUT_LIMIT_REACHED;
+  constructor(
+    readonly facts: {
+      limit: "count" | "bytes";
+      pendingCount: number;
+      pendingBytes: number;
+      messageBytes: number;
+      maxCount: number;
+      maxBytes: number;
+      retryAfterSeconds: number | null;
+    },
+  ) {
+    super(
+      facts.retryAfterSeconds === null
+        ? `This message is larger than the ${facts.maxBytes} bytes a chat can hold waiting. Send a shorter message.`
+        : facts.limit === "count"
+          ? `This chat already has ${facts.pendingCount} messages waiting (the limit is ${facts.maxCount}). Wait for one to start, or remove one from the queue, then send again.`
+          : `This chat's waiting messages already hold ${facts.pendingBytes} of ${facts.maxBytes} bytes. Wait for one to start, or remove one from the queue, then send again.`,
+    );
+  }
+}
+
+/** Human and API prompts the session accepted that no turn has claimed yet. */
+function pendingInputPredicate(workspaceId: string, sessionId: string) {
+  return and(
+    eq(schema.sessionTurns.workspaceId, workspaceId),
+    eq(schema.sessionTurns.sessionId, sessionId),
+    eq(schema.sessionTurns.status, "queued"),
+    inArray(schema.sessionTurns.source, ["user", "api"]),
+    isNull(schema.sessionTurns.startedAt),
+  );
+}
+
+function pendingInputExpiredBefore(ttlMs: number) {
+  return sql`${schema.sessionTurns.createdAt} < now() - make_interval(secs => ${ttlMs / 1_000})`;
+}
+
+/**
+ * Retires the session's pending prompts older than `ttlMs` the way a person
+ * deletes a waiting prompt: each is cancelled (`cancelReason:
+ * "pending_input_expired"`), the queue renumbers, and one
+ * `session.queue.changed` delete event names the reason. Its `user.message`
+ * stays in the history. Caller holds the workspace control prefix and the
+ * session's write rows (the prompt transaction). Returns the retired turn ids.
+ */
+export async function retireExpiredPendingInputInTransaction(
+  db: SessionActivityDatabase,
+  input: { accountId: string; workspaceId: string; sessionId: string; ttlMs: number },
+): Promise<string[]> {
+  const candidates = await db
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        pendingInputPredicate(input.workspaceId, input.sessionId),
+        pendingInputExpiredBefore(input.ttlMs),
+      ),
+    )
+    .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.id));
+  if (candidates.length === 0) return [];
+  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  const turns = (
+    await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      turnIds: candidates.map((row) => row.id),
+    })
+  ).turns
+    .filter(
+      (turn) =>
+        turn.status === "queued" &&
+        turn.startedAt === null &&
+        (turn.source === "user" || turn.source === "api"),
+    )
+    // Retire in queue order, so the delete events read front to back.
+    .sort((left, right) => left.position - right.position || left.id.localeCompare(right.id));
+  if (turns.length === 0) return [];
+  const now = new Date();
+  for (const turn of turns) {
+    await db
+      .update(schema.sessionTurns)
+      .set({
+        status: "cancelled",
+        cancelledBy: "system:pending_input_ttl",
+        cancelReason: SESSION_PENDING_INPUT_EXPIRED,
+        version: turn.version + 1,
+        finishedAt: now,
+        updatedAt: now,
+      })
+      .where(eq(schema.sessionTurns.id, turn.id));
+  }
+  const remaining = await loadQueuedTurns(db, input.workspaceId, input.sessionId, true);
+  await normalizeQueuePositions(
+    db,
+    input.workspaceId,
+    input.sessionId,
+    remaining.map((row) => row.id),
+  );
+  const events = turns.map((turn, index) =>
+    withLosslessContentWriteVersion(
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sequence: session.lastSequence + index + 1,
+        type: "session.queue.changed",
+        turnId: turn.id,
+        payload: {
+          operation: "delete",
+          queueVersion: session.queueVersion + index + 1,
+          turnId: turn.id,
+          reason: SESSION_PENDING_INPUT_EXPIRED,
+        },
+        occurredAt: now,
+      },
+      "payload",
+      "payloadCodecVersion",
+    ),
+  );
+  await db.insert(schema.sessionEvents).values(events);
+  await db
+    .update(schema.sessions)
+    .set({
+      queueVersion: session.queueVersion + turns.length,
+      lastSequence: session.lastSequence + turns.length,
+      updatedAt: now,
+    })
+    .where(eq(schema.sessions.id, input.sessionId));
+  return turns.map((turn) => turn.id);
+}
+
+/**
+ * Refuses a new prompt of `messageBytes` that would pass the session's
+ * pending-input bounds; prompts older than `ttlMs` do not count.
+ */
+export async function assertSessionPendingInputWithinLimitsInTransaction(
+  db: SessionActivityDatabase,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    messageBytes: number;
+    limits: SessionPendingInputLimits;
+  },
+): Promise<void> {
+  const [usage] = await db
+    .select({
+      count: sql<number>`count(*)::int`,
+      bytes: sql<number>`coalesce(sum(octet_length(${schema.sessionTurns.prompt}) + coalesce(octet_length(${schema.sessionTurns.modelContext}), 0)), 0)::bigint`,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        pendingInputPredicate(input.workspaceId, input.sessionId),
+        sql`not (${pendingInputExpiredBefore(input.limits.ttlMs)})`,
+      ),
+    );
+  const pendingCount = Number(usage?.count ?? 0);
+  const pendingBytes = Number(usage?.bytes ?? 0);
+  const { maxCount, maxBytes } = input.limits;
+  const facts = {
+    pendingCount,
+    pendingBytes,
+    messageBytes: input.messageBytes,
+    maxCount,
+    maxBytes,
+  };
+  if (input.messageBytes > maxBytes)
+    throw new SessionPendingInputLimitError({ ...facts, limit: "bytes", retryAfterSeconds: null });
+  if (pendingCount + 1 > maxCount)
+    throw new SessionPendingInputLimitError({
+      ...facts,
+      limit: "count",
+      retryAfterSeconds: SESSION_PENDING_INPUT_RETRY_AFTER_SECONDS,
+    });
+  if (pendingBytes + input.messageBytes > maxBytes)
+    throw new SessionPendingInputLimitError({
+      ...facts,
+      limit: "bytes",
+      retryAfterSeconds: SESSION_PENDING_INPUT_RETRY_AFTER_SECONDS,
+    });
+}
+
 export async function editQueuedTurnInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2189,6 +2387,8 @@ async function promptCausalHuman(
   );
 }
 
+const PENDING_INPUT_ENCODER = new TextEncoder();
+
 export async function submitHumanPromptInTransaction(
   db: SessionActivityDatabase,
   input: {
@@ -2262,6 +2462,12 @@ export async function submitHumanPromptInTransaction(
 
     /** Request-scoped callers bound the control prefix wait; lifecycle callers omit it. */
     controlLockTimeoutMs?: number;
+    /**
+     * Bounds on the session's pending input (`SESSION_PENDING_INPUT_LIMITS`),
+     * set by the API and MCP admission. Omitted (lifecycle callers), nothing
+     * is bounded or retired.
+     */
+    pendingInputLimits?: SessionPendingInputLimits;
   },
 ): Promise<SubmitHumanPromptResult> {
   const annotations = TimelineAnnotations.parse(input.annotations ?? []);
@@ -2376,6 +2582,24 @@ export async function submitHumanPromptInTransaction(
     throw new SessionControlConflictError();
   }
 
+  if (input.pendingInputLimits) {
+    // Stale waiting prompts leave the queue first, then the new message must
+    // fit the bounds; a refusal rolls back the whole prompt transaction.
+    await retireExpiredPendingInputInTransaction(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      ttlMs: input.pendingInputLimits.ttlMs,
+    });
+    await assertSessionPendingInputWithinLimitsInTransaction(db, {
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      messageBytes:
+        PENDING_INPUT_ENCODER.encode(input.text).byteLength +
+        PENDING_INPUT_ENCODER.encode(input.modelContext ?? "").byteLength,
+      limits: input.pendingInputLimits,
+    });
+  }
   const storedSession = await lockSession(db, input.workspaceId, input.sessionId);
   const [session] = await withEffectiveSessionPolicy(db, input.workspaceId, [storedSession]);
   if (!session) throw new Error("Session disappeared during prompt admission");

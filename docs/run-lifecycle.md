@@ -389,6 +389,35 @@ NATS and workspace-control fanout plus the immediate Temporal wake attempt are
 scheduled only after commit and are not response-holding; durable event replay
 and the wake outbox recover their failures.
 
+**Pending input is bounded.** A session's pending input is its human and API
+messages accepted by Send or Steer that no turn has claimed yet
+(`session_turns.status = 'queued'`, `started_at IS NULL`), whether they wait in
+the prompt queue or are about to run. `SESSION_PENDING_INPUT_LIMITS`
+(`@opengeni/contracts`) bounds it: at most `maxCount` messages (default 64) and
+`maxBytes` stored UTF-8 bytes of message text plus model context (default
+4 MiB), the new message included; deployments set
+`OPENGENI_SESSION_PENDING_INPUT_MAX_COUNT`, `..._MAX_BYTES` and `..._TTL_MS`.
+The API and first-party MCP admission check it inside the prompt transaction,
+under the session lock: past either bound the transaction rolls back (no turn,
+event, draft rotation or command receipt) and the API answers 429
+`limit_exceeded` with `details.code: "SESSION_PENDING_INPUT_LIMIT_REACHED"`,
+`details.limit` (`count` or `bytes`), the pending count and bytes, and
+`retryAfterSeconds` (also `Retry-After`). The same `clientEventId` may be
+retried and is admitted as a fresh Send once there is room. A message larger
+than `maxBytes` on its own is refused as not retryable, with no
+`retryAfterSeconds`. The stock console shows the message as not sent with the
+SDK's rate-limit text. A pending message older than `ttlMs` (default seven
+days) stops counting, and the session's next such admission retires it first,
+in the same transaction, through the queue-delete lifecycle: its turn is
+`cancelled` with `cancelReason: "pending_input_expired"`, the queue renumbers,
+and a `session.queue.changed` event with `operation: "delete"` and
+`reason: "pending_input_expired"` precedes the new message, so the sender sees
+it leave the queue (or the chat, for one that was about to run) and its
+`user.message` stays in the history. Nothing else retires it: a pending
+message the worker claims before any later admission runs normally. Lifecycle
+admissions that pass no bounds (voice handoff, schedules, agents) are neither
+bounded nor retire anything.
+
 One narrow Send exception prevents a conversational answer from getting stuck
 behind the question it is answering. When the active, unpaused branch is in
 `requires_action`, a normal human Send is promoted inside that same transaction
