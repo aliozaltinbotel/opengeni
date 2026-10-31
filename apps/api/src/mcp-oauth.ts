@@ -46,6 +46,7 @@ import {
   requireAccessGrantAuthorization,
   type ApiRouteDeps,
 } from "@opengeni/core";
+import type { Settings } from "@opengeni/config";
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { trustedRequestSourceRateLimitKey, type RequestSourceTrust } from "./http/request-source";
@@ -680,15 +681,34 @@ export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
   );
 }
 
-export function mcpOAuthAuthenticateHeader(deps: ApiRouteDeps, pathname: string): string {
+export function mcpOAuthAuthenticateHeader(deps: McpOAuthIssuerDeps, pathname: string): string {
   return `Bearer resource_metadata="${mcpOAuthIssuer(deps)}/.well-known/oauth-protected-resource${pathname}", scope="${MCP_OAUTH_SCOPE}"`;
+}
+
+/**
+ * The challenge the deployment perimeter adds to its own 401 on an exact
+ * workspace MCP resource, so a client refused before the route is reached
+ * still discovers the protected-resource metadata (RFC 9728). It is the
+ * route's own challenge: the issuer is the configured public base URL and the
+ * path is the request's workspace MCP path; no request header contributes.
+ * Null when MCP OAuth is off or has no public base URL, or for any other path.
+ */
+export function workspaceMcpPerimeterChallenge(
+  settings: Pick<Settings, "mcpOauthEnabled" | "publicBaseUrl">,
+  pathname: string,
+): string | null {
+  if (!settings.mcpOauthEnabled || !settings.publicBaseUrl) return null;
+  if (!WORKSPACE_MCP_PATH.test(pathname)) return null;
+  return mcpOAuthAuthenticateHeader({ settings }, pathname);
 }
 
 function requireMcpOAuthEnabled(deps: ApiRouteDeps): void {
   if (!deps.settings.mcpOauthEnabled) throw new HTTPException(404, { message: "not found" });
 }
 
-function mcpOAuthIssuer(deps: ApiRouteDeps): string {
+type McpOAuthIssuerDeps = { settings: Pick<Settings, "publicBaseUrl"> };
+
+function mcpOAuthIssuer(deps: McpOAuthIssuerDeps): string {
   if (!deps.settings.publicBaseUrl) throw new Error("MCP OAuth public base URL is not configured");
   return new URL(deps.settings.publicBaseUrl).origin;
 }

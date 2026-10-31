@@ -10,6 +10,7 @@ import {
   isMcpOAuthPublicProtocolPath,
   isMcpOAuthResourcePath,
   mcpOAuthBearerToken,
+  workspaceMcpPerimeterChallenge,
 } from "../mcp-oauth";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
@@ -47,6 +48,12 @@ export function requireAccessKey(settings: Settings): MiddlewareHandler {
       await next();
       return;
     }
+    // A workspace MCP route sets its OAuth challenge itself, but a request
+    // refused here never reaches it. Attach the same challenge so an MCP
+    // client can still discover the protected-resource metadata; the refusal
+    // is unchanged.
+    const challenge = workspaceMcpPerimeterChallenge(settings, new URL(c.req.url).pathname);
+    if (challenge) c.header("www-authenticate", challenge);
     return c.json({ error: "unauthorized" }, 401);
   };
 }
