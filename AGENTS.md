@@ -927,13 +927,18 @@ Migration ordinals are taken from a shared linear ledger, so two candidates that
 Already-published duplicate ordinals are immutable history, not renumber
 candidates: `schema_migrations.name` is the full SQL filename. The ordinal
 guard accepts a duplicate group only when all its names already coexist on
-one checked protected base (`origin/main` or `origin/production`, never a custom
-`--base`); it must not mistake main's published history for
+one checked protected base (`origin/main`, `origin/production`, or a reviewed
+immutable ancestor explicitly supplied with `--protected-base <full-commit>`,
+never a comparison-only custom `--base`); it must not mistake main's published history for
 new work against lagging production or combine independent allocations across
 bases. Retain both published `0730_maintenance_work_probes.sql` and
 `0730_subscription_core_personal_connection_versions.sql` unchanged. New
 migrations must still take the next free ordinal, and unpublished collisions
-must still be renumbered before merge.
+must still be renumbered before merge. Fork release owners must pin that
+explicit trust input to the reviewed source commit; never select a new candidate
+commit merely to bless its collisions. Mutable refs, non-commit objects, witnesses that are not ancestors of the
+comparison base, and changes to the witness SQL bytes are rejected. This is a
+reviewed operator trust input, not product authorization.
 
 Migration `0117_sandbox_recovery_generations.sql` is a one-way maintenance cutover. Stop every old API, control-worker, and turn-worker writer before activation; activation rejects a live `opengeni_app` session and rolls its transaction back cleanly. Application/image rollback to an old writer is allowed only before migration activation. After activation, no old writer may restart; move forward with the protocol-v2 application because there is no mixed-version or down-migration path.
 

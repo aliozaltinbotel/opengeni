@@ -3062,6 +3062,7 @@ describe("release schema contract", () => {
       "1024_validate_recordings_and_consent_checks.sql",
       "1025_host_session_create_admission.sql",
       "1026_mcp_oauth_host_consent.sql",
+      "1027_validate_host_session_create_admission.sql",
     ].filter((path) =>
       unfilteredSourceContract.migrations.some((migration) => migration.path === path),
     );

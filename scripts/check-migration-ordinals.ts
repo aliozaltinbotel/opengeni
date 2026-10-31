@@ -6,7 +6,7 @@
  * on one protected base retain their immutable filename identities.
  * Prints the exact renumber command for new collisions only.
  *
- *   bun scripts/check-migration-ordinals.ts [--base <ref>]
+ *   bun scripts/check-migration-ordinals.ts [--base <ref>] [--protected-base <full-commit>]...
  *
  * The primary base defaults to `origin/main` (fetched when missing) because a
  * collision is a property of what protected main holds *now*, not of the
@@ -68,7 +68,7 @@ async function main(): Promise<void> {
       : (process.env.OPENGENI_MIGRATION_BASE_REF ?? "origin/main");
   if (!primary) throw new Error("--base expects a git ref");
 
-  const ledgers: Array<{ ref: string; files: MigrationName[] }> = [];
+  const ledgers: Array<{ ref: string; files: MigrationName[]; protectedHistory?: true }> = [];
   const loadedPrimary = await loadLedger(root, primary, true);
   if (!loadedPrimary) throw new Error(`cannot read ${MIGRATIONS_DIR} at ${primary}`);
   ledgers.push(loadedPrimary);
@@ -79,6 +79,45 @@ async function main(): Promise<void> {
   if (primary !== "origin/production") {
     const production = await loadLedger(root, "origin/production", false);
     if (production) ledgers.push(production);
+  }
+
+  // A fork's reviewed source ledger is an explicit trust input, separate from
+  // the comparison-only --base. Mutable refs and unrelated histories cannot
+  // silently authorize exemptions for newly allocated duplicate ordinals.
+  for (let index = 0; index < process.argv.length; index++) {
+    if (process.argv[index] !== "--protected-base") continue;
+    const commit = process.argv[++index];
+    if (!commit || !/^[a-f0-9]{40}$/.test(commit)) {
+      throw new Error("--protected-base expects a full 40-character commit hash");
+    }
+    const object = await git(root, "cat-file", "-t", commit);
+    if (object.code !== 0 || object.stdout.trim() !== "commit") {
+      throw new Error(`--protected-base ${commit} must name a commit object`);
+    }
+    const ancestor = await git(root, "merge-base", "--is-ancestor", commit, primary);
+    if (ancestor.code !== 0) {
+      throw new Error(
+        `--protected-base ${commit} must be an ancestor of comparison base ${primary}`,
+      );
+    }
+    const ledger = await loadLedger(root, commit, true);
+    if (!ledger) throw new Error(`cannot read ${MIGRATIONS_DIR} at ${commit}`);
+    const changed = await git(
+      root,
+      "diff",
+      "--name-only",
+      "--diff-filter=MDT",
+      "--no-renames",
+      commit,
+      "--",
+      `:(glob)${MIGRATIONS_DIR}/*.sql`,
+    );
+    if (changed.code !== 0)
+      throw new Error(`cannot compare protected migration bytes at ${commit}`);
+    if (changed.stdout.trim()) {
+      throw new Error(`Protected historical SQL differs from ${commit}:\n${changed.stdout.trim()}`);
+    }
+    ledgers.push({ ...ledger, protectedHistory: true });
   }
 
   const headLedger = listMigrationFiles(root);

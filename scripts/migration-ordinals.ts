@@ -139,17 +139,23 @@ export function findOrdinalCollisions(
 /**
  * Compare all protected ledgers without treating published history on one as
  * new work on another. A complete duplicate group must already coexist on ONE
- * protected base (origin/main or origin/production, never a custom --base);
+ * protected base (origin/main, origin/production, or an explicitly trusted
+ * immutable ancestor supplied with --protected-base; never a custom --base);
  * combining independent allocations from main and production is not evidence
  * that either branch accepted that collision. SQL names are migration receipt
  * identities, so a published pair must not be "repaired" by replaying a rename.
  */
 export function findProtectedOrdinalCollisions(
   head: readonly MigrationName[],
-  bases: readonly { ref: string; files: readonly MigrationName[] }[],
+  bases: readonly { ref: string; files: readonly MigrationName[]; protectedHistory?: true }[],
 ): { collisions: (OrdinalCollision & { ref: string })[]; duplicates: string[][] } {
   const published = bases
-    .filter((base) => base.ref === "origin/main" || base.ref === "origin/production")
+    .filter(
+      (base) =>
+        base.ref === "origin/main" ||
+        base.ref === "origin/production" ||
+        base.protectedHistory === true,
+    )
     .map((base) => new Set(base.files.map((migration) => migration.file)));
   const coexists = (files: readonly string[]) =>
     published.some((ledger) => files.every((file) => ledger.has(file)));

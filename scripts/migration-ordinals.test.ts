@@ -673,6 +673,77 @@ describe("migration ordinal CLIs", () => {
     expect(collision.stderr).toContain("0003_unpublished.sql");
   });
 
+  test("an explicit immutable protected fork base preserves only its complete historical groups", async () => {
+    const { root } = await fixtureRepo();
+    await git(root, "merge", "-q", "--no-edit", "origin/main");
+    const protectedCommit = (await git(root, "rev-parse", "HEAD")).trim();
+    await git(root, "commit", "-q", "--allow-empty", "-m", "candidate");
+    const guard = ["bun", join(scripts, "check-migration-ordinals.ts"), "--base", protectedCommit];
+    expect((await run(root, guard)).code).toBe(1);
+    const trusted = [...guard, "--protected-base", protectedCommit];
+    const accepted = await run(root, trusted);
+    expect(accepted.stderr).toBe("");
+    expect(accepted.code).toBe(0);
+    expect(accepted.stdout).toContain(protectedCommit);
+    await writeFile(
+      join(root, "packages/db/drizzle/0003_unpublished.sql"),
+      "-- deployment-mode: rolling\nselect 3;\n",
+    );
+    const rejected = await run(root, trusted);
+    expect(rejected.code).toBe(1);
+    expect(rejected.stderr).toContain("0003_unpublished.sql");
+    expect(rejected.stderr).toContain("duplicate ordinal");
+    const missing = await run(root, [...guard, "--protected-base", "a".repeat(40)]);
+    expect(missing.code).toBe(1);
+    expect(missing.stderr).toContain("must name a commit object");
+    const mutable = await run(root, [...guard, "--protected-base", "HEAD"]);
+    expect(mutable.code).toBe(1);
+    expect(mutable.stderr).toContain("full 40-character commit");
+    await rm(join(root, "packages/db/drizzle/0003_unpublished.sql"));
+    await writeFile(join(root, "packages/db/drizzle/0001_first.sql"), "SELECT 999;\n");
+    const rewritten = await run(root, trusted);
+    expect(rewritten.code).toBe(1);
+    expect(rewritten.stderr).toContain("Protected historical SQL differs");
+    await git(root, "checkout", "--", "packages/db/drizzle/0001_first.sql");
+    await git(
+      root,
+      "mv",
+      "packages/db/drizzle/0001_first.sql",
+      "packages/db/drizzle/0004_renamed.sql",
+    );
+    const renamed = await run(root, trusted);
+    expect(renamed.code).toBe(1);
+    expect(renamed.stderr).toContain("Protected historical SQL differs");
+    await git(
+      root,
+      "mv",
+      "packages/db/drizzle/0004_renamed.sql",
+      "packages/db/drizzle/0001_first.sql",
+    );
+    await writeFile(join(root, "packages/db/drizzle/0004_a.sql"), "SELECT 4;\n");
+    await writeFile(join(root, "packages/db/drizzle/0004_b.sql"), "SELECT 4;\n");
+    const newGroup = await run(root, trusted);
+    expect(newGroup.code).toBe(1);
+    expect(newGroup.stderr).toContain("0004_a.sql, 0004_b.sql");
+    const blob = (await git(root, "hash-object", "packages/db/drizzle/0001_first.sql")).trim();
+    const nonCommit = await run(root, [...guard, "--protected-base", blob]);
+    expect(nonCommit.code).toBe(1);
+    expect(nonCommit.stderr).toContain("must name a commit object");
+    const unrelated = (await git(root, "rev-parse", "origin/main")).trim();
+    await git(root, "checkout", "-q", "--orphan", "unrelated");
+    await git(root, "commit", "-q", "--allow-empty", "-m", "unrelated");
+    const notAncestor = await run(root, [
+      "bun",
+      join(scripts, "check-migration-ordinals.ts"),
+      "--base",
+      "HEAD",
+      "--protected-base",
+      unrelated,
+    ]);
+    expect(notAncestor.code).toBe(1);
+    expect(notAncestor.stderr).toContain("ancestor of comparison base");
+  });
+
   test("--base HEAD cannot grandfather unpublished local duplicate history", async () => {
     const { root } = await fixtureRepo();
     await git(root, "merge", "-q", "--no-edit", "origin/main");
