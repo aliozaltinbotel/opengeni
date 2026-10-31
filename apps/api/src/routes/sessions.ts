@@ -1,3 +1,4 @@
+import { sessionCreateCreatorForRequest } from "./host-token";
 import { SessionCancelSettlementQuery, projectSessionEventForPublic } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
 import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
@@ -898,7 +899,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           payload,
           authorization,
           undefined,
-          { authorizationSurface: "http" },
+          {
+            authorizationSurface: "http",
+            creator: sessionCreateCreatorForRequest(c, deps, grant),
+          },
         );
       result = await measureSessionCreatePhase(deps.observability, "core_create", () =>
         origin ? withSiteSessionOrigin(origin, create) : create(),
@@ -1668,6 +1672,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         parsed.data,
         "http",
+        sessionCreateCreatorForRequest(c, deps, authorization.grant),
       );
       return c.json(response, response.replay ? 200 : 201);
     } catch (error) {

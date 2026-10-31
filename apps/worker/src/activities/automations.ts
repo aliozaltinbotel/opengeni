@@ -264,6 +264,7 @@ export function createAutomationActivities(
             ? {
                 sessionCreateHost: {
                   port: service.sessionAuthorization,
+                  creator: { principalKind: "service" as const },
                   actor: { kind: "subject" as const, subjectId: accepted.serviceSubjectId },
                   configuredServers: catalogSettings.mcpServers,
                 },

@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "
 import {
   signDelegatedAccessToken,
   type AuthorizeSessionCreateInput,
+  type SessionCreateCreator,
   type SessionAuthorizationPort,
 } from "@opengeni/contracts";
 import type { SessionWorkflowClient } from "@opengeni/core";
@@ -133,6 +134,7 @@ describe("session create with a first message asks the host", () => {
         workspaceId: who.grant.workspaceId,
         actor: expect.objectContaining({ subjectId: who.grant.subjectId }),
         surface: "http",
+        creator: { principalKind: "human_session" },
       },
     ]);
   });
@@ -231,10 +233,18 @@ test("the created hook sees a committed shell with no turn and failure cancels i
 
 test("a successful created hook opens the shell before admitting its initial turn", async () => {
   let sessionId = "";
+  let creator: SessionCreateCreator | undefined;
   const app = appWith({
     ...allowEveryTarget,
+    authorizeSessionCreate: async (input) => {
+      creator = input.creator;
+      expect(creator).toEqual({ principalKind: "human_session" });
+      return { allowed: true };
+    },
     sessionCreated: async (input) => {
       sessionId = input.sessionId;
+      expect(input.creator).toBe(creator);
+      expect(input.creator?.readCredential).toBeUndefined();
     },
   });
   const who = await person();

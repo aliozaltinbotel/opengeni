@@ -1,3 +1,4 @@
+import { sessionCreateCreatorForRequest } from "./host-token";
 import {
   AppendArchivedSessionEventsRequest,
   ImportArchivedSessionRequest,
@@ -275,6 +276,7 @@ export function registerSessionHistoryImportRoutes(app: Hono, deps: ApiRouteDeps
           workspaceId,
           parsed.data,
           "http",
+          sessionCreateCreatorForRequest(c, deps, authorization.grant),
         );
         return c.json(response, response.created ? 201 : 200);
       } catch (error) {

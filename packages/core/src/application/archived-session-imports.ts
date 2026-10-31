@@ -6,6 +6,7 @@ import {
   type Permission,
   type SessionEvent,
   type SessionAuthorizationSurface,
+  type SessionCreateCreator,
 } from "@opengeni/contracts";
 import {
   ArchivedSessionImportError,
@@ -101,6 +102,7 @@ export async function importArchivedSessionForRequest(
   workspaceId: string,
   rawPayload: unknown,
   authorizationSurface: SessionAuthorizationSurface = "core",
+  requestCreator?: SessionCreateCreator,
 ): Promise<ImportArchivedSessionResponse> {
   const grant = requireImportAuthorization(authorization, workspaceId, "sessions:create");
   const payload = ImportArchivedSessionRequest.parse(rawPayload);
@@ -111,6 +113,7 @@ export async function importArchivedSessionForRequest(
     grant,
     authorizationSurface,
     deps.settings.mcpServers,
+    requestCreator,
   );
 
   if (payload.visibility === "user_private") {
@@ -152,6 +155,7 @@ export async function importArchivedSessionForRequest(
           ...scope,
           rootSessionId: result.session.rootSessionId,
           actor: hostCreate.actor,
+          creator: hostCreate.creator,
           surface: authorizationSurface,
         }),
       );

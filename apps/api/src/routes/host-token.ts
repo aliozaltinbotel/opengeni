@@ -1,6 +1,7 @@
+import type { AccessGrant, SessionCreateCreator } from "@opengeni/contracts";
 import { canonicalPublicOrigin, consoleAllowedOriginEntries } from "@opengeni/config";
 import {
-  requireAccessGrantAuthorization,
+  requireFreshAccessGrantAuthorization,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
   type ManagedAuth,
@@ -175,6 +176,42 @@ export function registerHostTokenRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
+/** Only the HTTP request owner can supply browser proof to native create hooks.
+ * The existing mint re-reads canonical identity, authentication and membership on
+ * every read. A selector, bearer or causal human on child work is never a cookie.
+ */
+export function sessionCreateCreatorForRequest(
+  context: Context,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+): SessionCreateCreator {
+  const creator: SessionCreateCreator = { principalKind: grant.principalKind ?? null };
+  if (
+    grant.principalKind !== "human_session" ||
+    context.req.header("authorization") ||
+    !context.req.header("cookie")
+  )
+    return creator;
+  const configuration = hostTokenConfiguration(deps);
+  if (!configuration) return creator;
+  return {
+    ...creator,
+    readCredential: async () => {
+      try {
+        return (
+          await mintHostSessionToken(context, deps, configuration, {
+            purpose: "workspace",
+            workspaceId: grant.workspaceId,
+          })
+        ).token;
+      } catch {
+        // No underlying exception (or cause) may carry request credentials.
+        throw new Error("Session creator credential unavailable");
+      }
+    },
+  };
+}
+
 function hostTokenConfiguration(deps: ApiRouteDeps): HostTokenConfiguration | null {
   const audience = deps.settings.hostTokenAudience;
   const issuer = canonicalPublicOrigin(deps.settings.publicBaseUrl);
@@ -292,6 +329,7 @@ async function mintHostSessionToken(
   context: Context,
   deps: ApiRouteDeps,
   configuration: HostTokenConfiguration,
+  targetRequest?: HostTokenRequest,
 ): Promise<{ token: string; expiresAt: string }> {
   const origin = context.req.header("origin");
   if (
@@ -301,7 +339,7 @@ async function mintHostSessionToken(
   ) {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.originRejected);
   }
-  const request = hostTokenRequest(context);
+  const request = targetRequest ?? hostTokenRequest(context);
   // A browser session only: bearer credentials never mint a host token.
   if (context.req.header("authorization") || !context.req.header("cookie")) {
     throw new HostTokenRefusalError(HOST_TOKEN_REFUSALS.sessionRequired);
@@ -376,7 +414,7 @@ async function workspaceClaims(
   // The canonical access resolver re-derives live membership: a suspended or
   // revoked organization membership has no grant here.
   const authorization = await refuseOnHttpStatus(
-    requireAccessGrantAuthorization(context, deps, workspaceId, "workspace:read"),
+    requireFreshAccessGrantAuthorization(context, deps, workspaceId, "workspace:read"),
     {
       401: HOST_TOKEN_REFUSALS.sessionRequired,
       403: HOST_TOKEN_REFUSALS.notMember,

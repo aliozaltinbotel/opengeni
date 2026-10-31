@@ -9688,8 +9688,21 @@ export type AuthorizeSessionInput = {
   surface: SessionAuthorizationSurface;
 };
 
+/** Request-local provenance, never a public request field or durable session data.
+ * A subject selector alone is not human proof. Hosts must independently verify
+ * the credential and current authority on each hook; absence grants nothing.
+ */
+export type SessionCreateCreator = {
+  principalKind: AccessPrincipalKind | null;
+  /** Opaque workspace host JWT, minted only from the actual browser session.
+   * Never serialize, log, persist, or expose this credential to the agent.
+   */
+  readCredential?: () => Promise<string>;
+};
+
 /** A session create that admits a first turn: there is no target session yet. */
 export type AuthorizeSessionCreateInput = {
+  creator?: SessionCreateCreator;
   accountId: string;
   workspaceId: string;
   actor: SessionAuthorizationActor;
@@ -9733,6 +9746,7 @@ export const SessionCreateDecision = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCreateDecision = z.infer<typeof SessionCreateDecision>;
 export type SessionCreatedInput = {
+  creator?: SessionCreateCreator;
   accountId: string;
   workspaceId: string;
   sessionId: string;

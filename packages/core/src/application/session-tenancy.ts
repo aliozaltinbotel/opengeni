@@ -7,6 +7,7 @@ import {
   sessionVisibilityToPublic,
   type ForkSessionRequest,
   type SessionAuthorizationSurface,
+  type SessionCreateCreator,
   type SessionVisibility,
   type UpdateSessionVisibilityRequest,
   type VariableSet,
@@ -527,6 +528,7 @@ export async function forkManagedHumanSession(
   sourceSessionId: string,
   request: ForkSessionRequest,
   authorizationSurface: SessionAuthorizationSurface = "core",
+  creator?: SessionCreateCreator,
 ): Promise<ForkSessionResponse> {
   await requireSessionTenancyMutationGate(deps, authorization, workspaceId, [
     "sessions:read",
@@ -543,6 +545,7 @@ export async function forkManagedHumanSession(
     authorization.grant,
     authorizationSurface,
     deps.settings?.mcpServers ?? [],
+    creator,
   );
   const createdPort = deps.sessionAuthorization;
   const createdHook = createdPort?.sessionCreated;
@@ -687,6 +690,7 @@ export async function forkManagedHumanSession(
           ...scope,
           rootSessionId: result.sessionId,
           actor: hostCreate.actor,
+          creator: hostCreate.creator,
           surface: authorizationSurface,
         }),
       );
