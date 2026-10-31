@@ -1398,6 +1398,12 @@ provider require boundaries without requiring a full runtime dependency tree.
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
+   Managed browser cookies enter product `/v1/` routes through the canonical
+   current-session resolver even when the optional deployment-key perimeter is
+   enabled. Explicit credentials keep their own lane; deployment-only surfaces
+   still require the key, and route membership/permissions remain live. The
+   existing actor-lease validation/release wrapper encloses this session lookup
+   and every later refusal so early errors cannot strand a mutation lease.
 2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
    intent commit in Postgres.
 3. Child spans time creation; fanout/wake overlap post-commit;
