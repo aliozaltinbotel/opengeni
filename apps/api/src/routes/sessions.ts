@@ -1,6 +1,7 @@
 import { SessionCancelSettlementQuery, projectSessionEventForPublic } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
 import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
+import { organizationReasoningDisclosure, withholdSessionEventReasoning } from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import { readSessionResponsePair } from "./session-response-reads";
@@ -3643,9 +3644,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
+    const reasoningWithheld =
+      (await organizationReasoningDisclosure(deps, grant.accountId)) === "withheld";
     const rawAfter = c.req.query("after");
     const rawBefore = c.req.query("before");
     const after = eventSequence(rawAfter, 0);
@@ -3786,7 +3789,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         : [];
     const storedEvents =
       bookkeeping.length > 0 ? mergeBySequence(dbPage.events, bookkeeping) : dbPage.events;
-    const events = storedEvents.map(projectSessionEventForPublic);
+    // A withheld organization's reasoning events keep their place without text
+    // in every mode; a withheld page is then not forensic-exact.
+    const events = storedEvents.map((event) => {
+      const publicEvent = projectSessionEventForPublic(event);
+      return reasoningWithheld ? withholdSessionEventReasoning(publicEvent) : publicEvent;
+    });
     if (resultMode === "compact") {
       const event = events[0];
       c.header("X-OpenGeni-Event-Result-Mode", "compact");
@@ -3809,7 +3817,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       return c.json(result);
     }
     const compactProjection = compact ? coalesceSessionEventDeltasWithCoverage(events) : null;
-    const projected = compactProjection?.events ?? events;
+    // Coalescing joins reasoning runs into one row; that row carries no text either.
+    const projected =
+      compactProjection && reasoningWithheld
+        ? compactProjection.events.map(withholdSessionEventReasoning)
+        : (compactProjection?.events ?? events);
     const forensicExact =
       !compact &&
       mode === "forensic" &&
@@ -3963,6 +3975,8 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }
     await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
+    const withholdReasoning =
+      (await organizationReasoningDisclosure(deps, grant.accountId)) === "withheld";
     return sseSessionStream(
       db,
       bus,
@@ -3974,6 +3988,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         ...browserSseDeliveryOptions(c.req.query("transport")),
         observability: deps.observability,
         actorEpoch: getManagedAuthRequestActorEpoch(c.req.raw) ?? undefined,
+        ...(withholdReasoning ? { withholdReasoning } : {}),
         reauthorizeAfterMs:
           c.req.header("x-opengeni-site-frame") === "1"
             ? 2_000

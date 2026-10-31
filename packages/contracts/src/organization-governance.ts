@@ -113,7 +113,24 @@ export type OrganizationGovernancePort = {
    * asked (any governing host's refusal refuses).
    */
   organizationCreation?: "host";
+  /**
+   * `"withheld"`: the provider's reasoning text (OpenAI reasoning summaries,
+   * Anthropic thinking, chat-completions reasoning) never leaves the server
+   * for a session of an organization this host governs. Each
+   * `agent.reasoning.delta` event keeps its id, sequence, turn and coverage,
+   * so cursors and gap detection are unchanged, and is delivered without
+   * text (its payload keeps only a numeric `coalescedUntil`) on the session
+   * stream, the event list (every mode, forensic included) and the MCP
+   * session views; the stock transcript draws nothing for it. A worker given the same port asks the provider for no
+   * reasoning summary for those sessions. Stored events and model history are
+   * not changed. Unset or `"full"`: stock behaviour.
+   */
+  reasoningDisclosure?: ReasoningDisclosure;
 };
+
+/** Whether a governed organization's sessions show the provider's reasoning text. */
+export const REASONING_DISCLOSURES = ["full", "withheld"] as const;
+export type ReasoningDisclosure = (typeof REASONING_DISCLOSURES)[number];
 
 /** Refusal detail codes (`error.details.code`). */
 export const ORGANIZATION_GOVERNED_BY_HOST = "ORGANIZATION_GOVERNED_BY_HOST";
