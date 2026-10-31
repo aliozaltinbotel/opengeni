@@ -5,7 +5,15 @@ import {
   ToolGatewayIdentity,
   type AccessGrant,
 } from "@opengeni/contracts";
-import type { HostMcpConnectionConsentScope } from "@opengeni/contracts/organization-governance";
+import {
+  HostMcpOAuthConsentProposal,
+  type HostMcpConnectionConsentScope,
+} from "@opengeni/contracts/organization-governance";
+import {
+  recordOrganizationHostCommandAttribution,
+  type OrganizationHostCommandAttribution,
+} from "./organization-host-command-attributions";
+import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { rawRows, type Database, withWorkspaceSubjectRls } from "./database";
@@ -227,7 +235,27 @@ export async function rebindMcpOAuthAuthorizationRequest(
           permissions = ${JSON.stringify(input.permissions)}::jsonb,
           tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb,
           consent_preset = ${input.consentPreset ?? null},
-          tool_set_versions = ${jsonOrNull(input.toolSetVersions)}::jsonb
+          tool_set_versions = ${jsonOrNull(input.toolSetVersions)}::jsonb,
+host_proposal = case when account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid
+            and permissions = ${JSON.stringify(input.permissions)}::jsonb
+            and tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
+            and consent_preset is not distinct from ${input.consentPreset ?? null}
+            and tool_set_versions is not distinct from ${jsonOrNull(input.toolSetVersions)}::jsonb then host_proposal else null end,
+          host_proposal_digest = case when account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid
+            and permissions = ${JSON.stringify(input.permissions)}::jsonb
+            and tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
+            and consent_preset is not distinct from ${input.consentPreset ?? null}
+            and tool_set_versions is not distinct from ${jsonOrNull(input.toolSetVersions)}::jsonb then host_proposal_digest else null end,
+          host_operation_id = case when account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid
+            and permissions = ${JSON.stringify(input.permissions)}::jsonb
+            and tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
+            and consent_preset is not distinct from ${input.consentPreset ?? null}
+            and tool_set_versions is not distinct from ${jsonOrNull(input.toolSetVersions)}::jsonb then host_operation_id else null end,
+          host_admitted_at = case when account_id = ${input.accountId}::uuid and workspace_id = ${input.workspaceId}::uuid
+            and permissions = ${JSON.stringify(input.permissions)}::jsonb
+            and tool_identities = ${JSON.stringify(input.toolIdentities)}::jsonb
+            and consent_preset is not distinct from ${input.consentPreset ?? null}
+            and tool_set_versions is not distinct from ${jsonOrNull(input.toolSetVersions)}::jsonb then host_admitted_at else null end
       where request_hash = ${input.requestHash}
         and subject_id = ${input.subjectId}
         and expires_at > clock_timestamp()
@@ -243,9 +271,47 @@ export async function consumeMcpOAuthAuthorizationRequest(
     subjectId: string;
     codeHash: string;
     codeExpiresAt: Date;
+    hostAdmission?: McpOAuthHostAdmission;
+    /** Current native cookie resolver supplies this; never a form field. */
+    hostBrowserAuthUserId?: string;
   },
 ): Promise<McpOAuthAuthorizationRequest | null> {
   return await db.transaction(async (tx) => {
+    if (input.hostAdmission) {
+      if (!input.hostBrowserAuthUserId) return null;
+      const [pending] = await rawRows<{ host_proposal: unknown }>(
+        tx,
+        sql`select host_proposal
+        from mcp_oauth_authorization_requests where request_hash = ${input.requestHash}
+          and account_id = ${input.hostAdmission.organizationId}::uuid
+          and subject_id = ${input.subjectId} and expires_at > clock_timestamp()
+          and host_proposal_revision = ${input.hostAdmission.revision}
+          and host_proposal_digest = ${input.hostAdmission.digest}
+          and host_operation_id = ${input.hostAdmission.operationId}::uuid
+          and host_admitted_at is not null for update`,
+      );
+      if (!pending) return null;
+      const material = HostMcpOAuthConsentProposal.shape.material.parse(pending.host_proposal);
+      const human = material.human;
+      // Both facts are owned by the native database. No Better Auth HTTP/pool
+      // call or host callback runs in this transaction. Compare the existing
+      // identity owner's projection rather than duplicating its authority.
+      const [live] = await rawRows<{ valid: boolean }>(
+        tx,
+        sql`with current_identity as (
+        select get_canonical_human_identity_projection(${input.hostBrowserAuthUserId}) as facts
+      ) select validate_canonical_human_session(${human.authSessionId}, ${input.hostBrowserAuthUserId}, false)
+        and facts->'activeIdentity'->>'id' = ${human.identityId}
+        and facts->'activeIdentity'->>'status' = 'active'
+        and facts->'activeIdentity'->>'activeLoginBindingId' = ${human.loginBindingId}
+        and exists (select 1 from jsonb_array_elements(facts->'loginBindings') binding
+          where binding->>'id' = ${human.loginBindingId} and binding->>'status' = 'active'
+            and (binding->>'revision')::bigint = ${human.loginBindingRevision}) as valid
+        from current_identity`,
+      );
+      if (live?.valid !== true) return null;
+    }
+
     const [row] = await rawRows<
       GrantRow & {
         request_hash: string;
@@ -261,6 +327,15 @@ export async function consumeMcpOAuthAuthorizationRequest(
         where request_hash = ${input.requestHash}
           and subject_id = ${input.subjectId}
           and expires_at > clock_timestamp()
+          and ${
+            input.hostAdmission
+              ? sql`host_proposal_revision = ${input.hostAdmission.revision}
+            and host_proposal_digest = ${input.hostAdmission.digest}
+            and host_operation_id = ${input.hostAdmission.operationId}::uuid
+            and account_id = ${input.hostAdmission.organizationId}::uuid
+            and host_admitted_at is not null`
+              : sql`host_proposal is null`
+          }
         returning request_hash, client_id, account_id, workspace_id, subject_id, resource,
           redirect_uri, code_challenge, state, permissions, tool_identities, organization_access, consent_preset, tool_set_versions, expires_at`,
     );
@@ -784,4 +859,152 @@ function stringArray(value: unknown): string[] {
     throw new Error("Invalid MCP OAuth string array persisted in database");
   }
   return value;
+}
+
+/** Exact server-owned proposal; the embedding host reads this through HOST auth. */
+export type McpOAuthHostProposal = Omit<HostMcpOAuthConsentProposal, "admitted">;
+export type McpOAuthHostHuman = {
+  identityId: string;
+  authSessionId: string;
+  loginBindingId: string;
+  loginBindingRevision: number;
+};
+export type McpOAuthHostAdmission = Pick<
+  McpOAuthHostProposal,
+  "requestHash" | "organizationId" | "revision" | "digest" | "operationId"
+>;
+type HostProposalRow = {
+  request_hash: string;
+  account_id: string;
+  workspace_id: string;
+  host_proposal_revision: number;
+  host_proposal_digest: string;
+  host_operation_id: string;
+  expires_at: Date | string;
+  host_proposal: Record<string, unknown>;
+  host_admitted_at: Date | string | null;
+};
+function mapHostProposal(row: HostProposalRow): McpOAuthHostProposal {
+  return {
+    requestHash: row.request_hash,
+    organizationId: row.account_id,
+    workspaceId: row.workspace_id,
+    revision: row.host_proposal_revision,
+    digest: row.host_proposal_digest,
+    operationId: row.host_operation_id,
+    expiresAt: new Date(row.expires_at).toISOString(),
+    material: HostMcpOAuthConsentProposal.shape.material.parse(row.host_proposal),
+  };
+}
+/** Freeze under the request's row lock. Unchanged material keeps its operation id. */
+export async function freezeMcpOAuthHostProposal(
+  db: Database,
+  input: {
+    requestHash: string;
+    organizationId: string;
+    workspaceId: string;
+    subjectId: string;
+    human: McpOAuthHostHuman;
+  },
+): Promise<McpOAuthHostProposal | null> {
+  return db.transaction(async (tx) => {
+    const [current] = await rawRows<{
+      material: Record<string, unknown>;
+      encoded: string;
+      host_proposal_digest: string | null;
+      host_proposal_revision: number;
+    }>(
+      tx,
+      sql`
+      select material, material::text as encoded, host_proposal_digest, host_proposal_revision
+      from (
+        select jsonb_build_object(
+          'clientId', client_id, 'organizationId', account_id, 'workspaceId', workspace_id,
+          'subjectId', subject_id, 'resource', resource, 'redirectUri', redirect_uri,
+          'codeChallenge', code_challenge, 'codeChallengeMethod', 'S256',
+          'permissions', permissions, 'toolIdentities', tool_identities,
+          'organizationAccess', organization_access, 'consentPreset', consent_preset,
+          'toolSetVersions', tool_set_versions, 'expiresAt', expires_at,
+          'human', ${JSON.stringify(input.human)}::jsonb
+        ) as material, host_proposal_digest, host_proposal_revision
+        from mcp_oauth_authorization_requests
+        where request_hash = ${input.requestHash} and account_id = ${input.organizationId}::uuid
+          and workspace_id = ${input.workspaceId}::uuid and subject_id = ${input.subjectId}
+          and expires_at > clock_timestamp()
+        for update
+      ) locked`,
+    );
+    if (!current) return null;
+    const digest = createHash("sha256").update(current.encoded).digest("hex");
+    if (digest !== current.host_proposal_digest) {
+      await tx.execute(sql`update mcp_oauth_authorization_requests
+        set host_proposal = ${JSON.stringify(current.material)}::jsonb,
+          host_proposal_revision = host_proposal_revision + 1,
+          host_proposal_digest = ${digest}, host_operation_id = ${crypto.randomUUID()}::uuid,
+          host_admitted_at = null
+        where request_hash = ${input.requestHash}`);
+    }
+    const [row] = await rawRows<HostProposalRow>(
+      tx,
+      sql`select request_hash, account_id, workspace_id,
+      expires_at, host_proposal, host_proposal_revision, host_proposal_digest, host_operation_id, host_admitted_at
+      from mcp_oauth_authorization_requests where request_hash = ${input.requestHash}`,
+    );
+    return row ? mapHostProposal(row) : null;
+  });
+}
+/** Protected API callers must first verify the addressed HOST organization. */
+export async function readMcpOAuthHostProposal(
+  db: Database,
+  input: {
+    requestHash: string;
+    organizationId: string;
+  },
+): Promise<(McpOAuthHostProposal & { admitted: boolean }) | null> {
+  const [row] = await rawRows<HostProposalRow>(
+    db,
+    sql`select request_hash, account_id, workspace_id,
+    expires_at, host_proposal, host_proposal_revision, host_proposal_digest, host_operation_id, host_admitted_at
+    from mcp_oauth_authorization_requests
+    where request_hash = ${input.requestHash} and account_id = ${input.organizationId}::uuid
+      and expires_at > clock_timestamp() and host_proposal is not null`,
+  );
+  return row ? { ...mapHostProposal(row), admitted: row.host_admitted_at !== null } : null;
+}
+/** Durable exact admission, independently consumed by explicit native consent. */
+export async function admitMcpOAuthHostProposal(
+  db: Database,
+  input: McpOAuthHostAdmission & { attribution: OrganizationHostCommandAttribution },
+): Promise<"admitted" | "replayed" | "conflict"> {
+  return db.transaction(async (tx) => {
+    const [row] = await rawRows<HostProposalRow>(
+      tx,
+      sql`select request_hash, account_id, workspace_id,
+      expires_at, host_proposal, host_proposal_revision, host_proposal_digest, host_operation_id, host_admitted_at
+      from mcp_oauth_authorization_requests
+      where request_hash = ${input.requestHash} and account_id = ${input.organizationId}::uuid
+        and expires_at > clock_timestamp() and host_proposal is not null for update`,
+    );
+    if (
+      !row ||
+      row.host_proposal_revision !== input.revision ||
+      row.host_proposal_digest !== input.digest ||
+      row.host_operation_id !== input.operationId
+    )
+      return "conflict";
+    {
+      if (
+        input.attribution.operationId !== input.operationId ||
+        input.attribution.organizationId !== input.organizationId ||
+        input.attribution.mutation !== "mcp_connection.create"
+      )
+        return "conflict";
+      if ((await recordOrganizationHostCommandAttribution(tx, input.attribution)) === "conflict")
+        return "conflict";
+    }
+    if (row.host_admitted_at !== null) return "replayed";
+    await tx.execute(sql`update mcp_oauth_authorization_requests set host_admitted_at = clock_timestamp()
+      where request_hash = ${input.requestHash}`);
+    return "admitted";
+  });
 }

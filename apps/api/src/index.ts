@@ -552,6 +552,8 @@ export type StartApiOptions = {
    * credential mutations the host does not allow, and serve the host's commands.
    */
   organizationGovernance?: OrganizationGovernancePort | null;
+  /** Optional workspace OAuth host handoff, forwarded unchanged to composition. */
+  mcpOAuthHostConsent?: AppDependencies["mcpOAuthHostConsent"];
   /**
    * Embedding-host tool servers for the workspace tool gateway
    * (`AppDependencies.workspaceToolServers`), executed in-process.
@@ -579,11 +581,12 @@ export function startApiSessionAuthorizationOverride(
  * forwards nothing; `null` and a port are forwarded as given.
  */
 export function startApiOrganizationGovernanceOverride(
-  options: Pick<StartApiOptions, "organizationGovernance">,
-): Pick<AppDependencies, "organizationGovernance"> | Record<string, never> {
-  return options.organizationGovernance === undefined
-    ? {}
-    : { organizationGovernance: options.organizationGovernance };
+  options: Pick<StartApiOptions, "organizationGovernance" | "mcpOAuthHostConsent">,
+): Pick<AppDependencies, "organizationGovernance" | "mcpOAuthHostConsent"> | Record<string, never> {
+  return {
+    ...(options.organizationGovernance === undefined ? {} : { organizationGovernance: options.organizationGovernance }),
+    ...(options.mcpOAuthHostConsent === undefined ? {} : { mcpOAuthHostConsent: options.mcpOAuthHostConsent }),
+  };
 }
 
 /**

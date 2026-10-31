@@ -94,24 +94,45 @@ let world: World;
 
 function appFor(
   organizationGovernance?: OrganizationGovernancePort,
-  options: { externalMemberFirstUse?: boolean } = {},
+  options: {
+    externalMemberFirstUse?: boolean;
+    mcpOAuthHostConsent?: AppDependencies["mcpOAuthHostConsent"];
+    structuredLogs?: boolean;
+    publicBaseUrl?: string;
+    workspaceToolServers?: AppDependencies["workspaceToolServers"];
+  } = {},
 ): App {
   return createApp({
     settings: testSettings({
       databaseUrl: shared.adminUrl,
       productAccessMode: "managed",
       betterAuthSecret: "organization-governance-test-secret-32-bytes",
-      publicBaseUrl: origin,
+      publicBaseUrl: options.publicBaseUrl ?? origin,
       delegationSecret,
       organizationUserSetupEmailTokenTransport: "query",
       organizationUserSetupQueryEdgeSanitizationConfirmed: true,
       mcpOauthEnabled: true,
+      hostTokenAudience: "https://host-consent.example.test",
+      observabilityStructuredLogs: options.structuredLogs === true,
       externalMemberFirstUseEnabled: options.externalMemberFirstUse === true,
+      ...(options.workspaceToolServers
+        ? {
+            mcpServers: [
+              {
+                id: "consent-tools",
+                url: "https://consent-tools.invalid/mcp",
+                cacheToolsList: false,
+              },
+            ],
+          }
+        : {}),
     }),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {} as never,
     managedEmailTransport,
+    ...(options.mcpOAuthHostConsent ? { mcpOAuthHostConsent: options.mcpOAuthHostConsent } : {}),
+    ...(options.workspaceToolServers ? { workspaceToolServers: options.workspaceToolServers } : {}),
     ...(organizationGovernance ? { organizationGovernance } : {}),
   } as AppDependencies);
 }
@@ -1412,4 +1433,563 @@ describe("organization recovery and workspace deletion are governed", () => {
       expect(await workspaceExists(stockWorkspaceId)).toBe(false);
     }
   }, 120_000);
+});
+
+async function startHostWorkspaceConsent(app: App) {
+  const mcpClient = await registerMcpClient();
+  const url = authorizeUrl(mcpClient, `${origin}/v1/workspaces/${world.sharedWorkspaceId}/mcp`);
+  const response = await app.request(url.pathname + url.search, {
+    headers: { cookie: world.owner.cookie },
+  });
+  expect(response.status).toBe(200);
+  const html = await response.text();
+  const request = /ogmcp_req_[A-Za-z0-9_-]+/u.exec(html)?.[0];
+  const revision = /name="host_revision" value="([0-9]+)"/u.exec(html)?.[1];
+  const digest = /name="host_digest" value="([a-f0-9]+)"/u.exec(html)?.[1];
+  if (!request || !revision || !digest) throw new Error("Displayed native proposal is absent");
+  const form = new URLSearchParams({
+    request,
+    workspace_id: world.sharedWorkspaceId,
+    decision: "approve",
+    access_preset: "full",
+    host_revision: revision,
+    host_digest: digest,
+  });
+  const minted = await app.request(`/v1/auth/host-token?workspace=${world.sharedWorkspaceId}`, {
+    headers: { cookie: world.owner.cookie, origin },
+  });
+  expect(minted.status).toBe(200);
+  const { token } = await minted.json();
+  return {
+    form,
+    token: token as string,
+    preflight: (overrides: Record<string, string> = {}) =>
+      app.request("/oauth/authorize/host-consent", {
+        method: "POST",
+        headers: {
+          ...browser(world.owner.cookie),
+          "x-opengeni-host-consent-credential": token,
+          ...overrides,
+        },
+        body: JSON.stringify({ form: form.toString() }),
+      }),
+    approve: (overrides: Record<string, string> = {}) =>
+      app.request("/oauth/authorize", {
+        method: "POST",
+        headers: {
+          ...browser(world.owner.cookie),
+          "content-type": "application/x-www-form-urlencoded",
+          ...overrides,
+        },
+        body: form,
+      }),
+  };
+}
+
+type HostConsentInput = Parameters<NonNullable<AppDependencies["mcpOAuthHostConsent"]>["admit"]>[0];
+/** Test embedding host: real JWT/JWKS and HOST routes; no Cendra authority claim. */
+async function admitWithVerifiedHumanHost(
+  app: App,
+  input: HostConsentInput,
+  issuer = origin,
+): Promise<void> {
+  const { createLocalJWKSet, jwtVerify } = await import("jose");
+  const keys = await (await app.request("/v1/auth/jwks")).json();
+  const { payload } = await jwtVerify(input.readCredential(), createLocalJWKSet(keys), {
+    issuer,
+    audience: "https://host-consent.example.test",
+    algorithms: ["ES256"],
+  });
+  const path = `/v1/host/organizations/${input.proposal.organizationId}/mcp-consent-requests/${input.proposal.requestHash}`;
+  const service = await serviceToken();
+  const response = await app.request(path, { headers: bearer(service) });
+  if (!response.ok) throw new Error("Host proposal unavailable");
+  const stored = await response.json();
+  if (
+    payload.purpose !== undefined ||
+    payload.identity_status !== "active" ||
+    payload.org !== stored.organizationId ||
+    payload.ws !== stored.workspaceId ||
+    payload.sub !== stored.material.human.identityId ||
+    payload.sid !== stored.material.human.authSessionId ||
+    payload.login_binding_id !== stored.material.human.loginBindingId ||
+    payload.login_binding_revision !== stored.material.human.loginBindingRevision ||
+    input.proposal.digest !== stored.digest ||
+    input.proposal.revision !== stored.revision ||
+    input.proposal.operationId !== stored.operationId
+  )
+    throw new Error("Host human/proposal binding refused");
+  const admitted = await app.request(`${path}/admit`, {
+    method: "POST",
+    headers: bearer(service),
+    body: JSON.stringify({
+      actingExternalUser: { source: "test:consent", externalId: world.owner.subjectId },
+      command: {
+        revision: stored.revision,
+        digest: stored.digest,
+        operationId: stored.operationId,
+      },
+    }),
+  });
+  if (!admitted.ok) throw new Error("Host admission refused");
+}
+
+describe("governed workspace OAuth HOST consent", () => {
+  test("connects explicit native approval through a real HOST admission command", async () => {
+    let callbackCount = 0;
+    let app: App;
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit({ proposal, readCredential }) {
+          callbackCount += 1;
+          const { createLocalJWKSet, jwtVerify } = await import("jose");
+          const keys = await (await app.request("/v1/auth/jwks")).json();
+          const verified = await jwtVerify(readCredential(), createLocalJWKSet(keys), {
+            issuer: origin,
+            audience: "https://host-consent.example.test",
+            algorithms: ["ES256"],
+          });
+          expect(verified.payload.org).toBe(proposal.organizationId);
+          expect(verified.payload.ws).toBe(proposal.workspaceId);
+          const path = `/v1/host/organizations/${proposal.organizationId}/mcp-consent-requests/${proposal.requestHash}`;
+          const service = await serviceToken();
+          const canonical = await app.request(path, { headers: bearer(service) });
+          expect(canonical.status).toBe(200);
+          const stored = await canonical.json();
+          expect(stored.material.human.identityId).toBe(verified.payload.sub);
+          expect(stored.material.human.authSessionId).toBe(verified.payload.sid);
+          expect(stored.material.human.loginBindingRevision).toBe(
+            verified.payload.login_binding_revision,
+          );
+          const admitted = await app.request(`${path}/admit`, {
+            method: "POST",
+            headers: bearer(service),
+            body: JSON.stringify({
+              actingExternalUser: { source: "test:consent", externalId: world.owner.subjectId },
+              command: {
+                revision: stored.revision,
+                digest: stored.digest,
+                operationId: stored.operationId,
+              },
+            }),
+          });
+          expect(admitted.status).toBe(200);
+          expect(await admitted.json()).toEqual({ outcome: "admitted" });
+        },
+      },
+    });
+    const mcpClient = await registerMcpClient();
+    const resource = `${origin}/v1/workspaces/${world.sharedWorkspaceId}/mcp`;
+    const url = authorizeUrl(mcpClient, resource);
+    const started = await app.request(url.pathname + url.search, {
+      headers: { cookie: world.owner.cookie },
+    });
+    expect(started.status).toBe(200);
+    const html = await started.text();
+    const requestToken = /ogmcp_req_[A-Za-z0-9_-]+/u.exec(html)?.[0];
+    const revision = /name="host_revision" value="([0-9]+)"/u.exec(html)?.[1];
+    const digest = /name="host_digest" value="([a-f0-9]+)"/u.exec(html)?.[1];
+    expect(requestToken).toBeDefined();
+    expect(revision).toBeDefined();
+    expect(digest).toBeDefined();
+    const form = new URLSearchParams({
+      request: requestToken!,
+      workspace_id: world.sharedWorkspaceId,
+      decision: "approve",
+      access_preset: "full",
+      host_revision: revision!,
+      host_digest: digest!,
+    });
+    const tokenResponse = await app.request(
+      `/v1/auth/host-token?workspace=${world.sharedWorkspaceId}`,
+      { headers: { cookie: world.owner.cookie, origin } },
+    );
+    expect(tokenResponse.status).toBe(200);
+    const minted = await tokenResponse.json();
+    const preflight = await app.request("/oauth/authorize/host-consent", {
+      method: "POST",
+      headers: {
+        ...browser(world.owner.cookie),
+        "x-opengeni-host-consent-credential": minted.token,
+      },
+      body: JSON.stringify({ form: form.toString() }),
+    });
+    expect(preflight.status).toBe(200);
+    expect(await preflight.json()).toEqual({ outcome: "admitted" });
+    expect(callbackCount).toBe(1);
+    const approved = await app.request("/oauth/authorize", {
+      method: "POST",
+      headers: {
+        ...browser(world.owner.cookie),
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form,
+    });
+    expect(approved.status).toBe(200);
+    expect(approved.headers.get("refresh") ?? "").toContain("code=");
+    const replay = await app.request("/oauth/authorize", {
+      method: "POST",
+      headers: {
+        ...browser(world.owner.cookie),
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form,
+    });
+    expect(await replay.text()).not.toContain("code=");
+  }, 180_000);
+  test("callback allow without stored admission never issues a native code", async () => {
+    let callbacks = 0;
+    const app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit() {
+          callbacks += 1;
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    expect((await pending.preflight()).status).toBe(503);
+    expect(callbacks).toBe(1);
+    expect((await pending.approve()).status).toBe(403);
+  }, 60_000);
+
+  test("scope changes visibly refresh consent and require another explicit approval", async () => {
+    let callbacks = 0;
+    const app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit() {
+          callbacks += 1;
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    pending.form.set("access_preset", "read_only");
+    const changed = await pending.preflight();
+    expect(changed.status).toBe(409);
+    const page = await changed.text();
+    expect(page).toContain(
+      "Access changed. Review the permissions and tools below, then authorize again.",
+    );
+    expect(page).toContain('value="read_only" checked');
+    expect(page).toContain("Permissions and tools");
+    expect(callbacks).toBe(0);
+    expect((await pending.approve()).status).toBe(409);
+    pending.form.set("host_revision", /name="host_revision" value="([0-9]+)"/u.exec(page)![1]!);
+    pending.form.set("host_digest", /name="host_digest" value="([a-f0-9]+)"/u.exec(page)![1]!);
+    expect((await pending.preflight()).status).toBe(503);
+    expect(callbacks).toBe(1);
+  }, 60_000);
+
+  test("native service or bearer context and cross-origin requests cannot perform the browser handoff", async () => {
+    let callbacks = 0;
+    const app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit() {
+          callbacks += 1;
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    const service = await serviceToken();
+    for (const credential of [service, pending.token]) {
+      expect([401, 403]).toContain(
+        (await pending.preflight({ authorization: `Bearer ${credential}` })).status,
+      );
+      expect([401, 403]).toContain(
+        (await pending.approve({ authorization: `Bearer ${credential}` })).status,
+      );
+    }
+    expect((await pending.preflight({ origin: "https://foreign.example" })).status).toBe(403);
+    expect((await pending.approve({ origin: "https://foreign.example" })).status).toBe(403);
+    expect(callbacks).toBe(0);
+  }, 60_000);
+
+  test("opaque credential and credential-bearing host failures never enter native logs or errors", async () => {
+    const app = appFor(hostPort, {
+      structuredLogs: true,
+      mcpOAuthHostConsent: {
+        async admit({ readCredential }) {
+          throw new Error(`host failed: ${readCredential()}`);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    const logs: string[] = [];
+    const originals = { log: console.log, error: console.error, warn: console.warn };
+    console.log = (...args: unknown[]) => {
+      logs.push(JSON.stringify(args));
+    };
+    console.error = (...args: unknown[]) => {
+      logs.push(JSON.stringify(args));
+    };
+    console.warn = (...args: unknown[]) => {
+      logs.push(JSON.stringify(args));
+    };
+    let response: Response;
+    try {
+      response = await pending.preflight();
+    } finally {
+      Object.assign(console, originals);
+    }
+    expect(response.status).toBe(503);
+    expect(await response.text()).not.toContain(pending.token);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.join("\n")).not.toContain(pending.token);
+    expect(logs.join("\n")).not.toContain("host failed:");
+    expect(logs.join("\n")).not.toContain("x-opengeni-host-consent-credential");
+  }, 60_000);
+
+  test("a committed HOST admission survives response loss and preserves the same operation", async () => {
+    let app: App;
+    const operations: string[] = [];
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          operations.push(input.proposal.operationId);
+          await admitWithVerifiedHumanHost(app, input);
+          throw new Error(input.readCredential());
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    expect((await pending.preflight()).status).toBe(200);
+    expect((await pending.preflight()).status).toBe(200);
+    expect(operations).toHaveLength(2);
+    expect(operations[1]).toBe(operations[0]);
+    const approved = await pending.approve();
+    expect(approved.status).toBe(200);
+    expect(approved.headers.get("refresh") ?? "").toContain("code=");
+    const attribution =
+      await shared.admin`select count(*)::int as count from organization_host_command_attributions where account_id = ${world.governedOrganizationId} and operation_id = ${operations[0]}`;
+    expect(attribution[0]!.count).toBe(1);
+  }, 60_000);
+
+  test("the test embedding host refuses registration, foreign-workspace and another-session JWTs", async () => {
+    let app: App;
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          await admitWithVerifiedHumanHost(app, input);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    const registration = await app.request("/v1/auth/host-token?purpose=registration", {
+      headers: { cookie: world.owner.cookie, origin },
+    });
+    expect(registration.status).toBe(200);
+    const foreign = await app.request(
+      `/v1/auth/host-token?workspace=${world.ungovernedWorkspaceId}`,
+      { headers: { cookie: world.owner.cookie, origin } },
+    );
+    expect(foreign.status).toBe(200);
+    const signedIn = await app.request("/v1/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email: world.owner.email, password: "password1234" }),
+    });
+    const cookie = signedIn.headers
+      .getSetCookie()
+      .find((value) => value.includes("better-auth.session_token="))
+      ?.split(";", 1)[0];
+    if (!cookie) throw new Error("Second genuine browser session is absent");
+    const second = await app.request(`/v1/auth/host-token?workspace=${world.sharedWorkspaceId}`, {
+      headers: { cookie, origin },
+    });
+    expect(second.status).toBe(200);
+    for (const response of [registration, foreign, second]) {
+      const { token } = await response.json();
+      expect(
+        (await pending.preflight({ "x-opengeni-host-consent-credential": token })).status,
+      ).toBe(503);
+    }
+    expect(
+      (await pending.preflight({ "x-opengeni-host-consent-credential": await serviceToken() }))
+        .status,
+    ).toBe(401);
+    expect((await pending.approve()).status).toBe(403);
+  }, 60_000);
+
+  test("a changed native login-binding revision invalidates a previously stored admission", async () => {
+    let app: App;
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          await admitWithVerifiedHumanHost(app, input);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    expect((await pending.preflight()).status).toBe(200);
+    const [binding] =
+      await shared.admin`select host_proposal->'human'->>'loginBindingId' as id from mcp_oauth_authorization_requests where request_hash = ${createHash("sha256").update(pending.form.get("request")!).digest("hex")}`;
+    // A fixture-only concurrent native identity revision; this does not qualify
+    // any Cendra login-binding or member-resolution policy.
+    await shared.admin.begin(async (tx) => {
+      await tx`select set_config('opengeni.canonical_human_identity_lifecycle', 'active', true)`;
+      await tx`update canonical_human_login_bindings set revision = revision + 1 where id = ${binding!.id}`;
+    });
+    expect((await pending.approve()).status).toBe(409);
+  }, 60_000);
+  test("browser reviews changed access and explicitly approves the real native workspace path", async () => {
+    const { chromium } = await import("playwright");
+    let app: App | undefined;
+    let callbackCount = 0;
+    let returned = false;
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: (request) => (app ? app.fetch(request) : new Response(null, { status: 503 })),
+    });
+    const browserOrigin = server.url.origin;
+    app = appFor(hostPort, {
+      publicBaseUrl: browserOrigin,
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          callbackCount += 1;
+          await admitWithVerifiedHumanHost(app!, input, browserOrigin);
+        },
+      },
+    });
+    const mcpClient = await registerMcpClient();
+    const authorization = authorizeUrl(
+      mcpClient,
+      `${browserOrigin}/v1/workspaces/${world.sharedWorkspaceId}/mcp`,
+    );
+    const url = new URL(authorization.pathname + authorization.search, browserOrigin);
+    const browserInstance = await chromium.launch({ headless: true });
+    const context = await browserInstance.newContext({ viewport: { width: 1440, height: 1000 } });
+    const cookieSeparator = world.owner.cookie.indexOf("=");
+    await context.addCookies([
+      {
+        name: world.owner.cookie.slice(0, cookieSeparator),
+        value: world.owner.cookie.slice(cookieSeparator + 1),
+        domain: new URL(browserOrigin).hostname,
+        path: "/",
+        httpOnly: true,
+        sameSite: "Lax",
+      },
+    ]);
+    const page = await context.newPage();
+    await page.route("http://127.0.0.1:4567/**", async (route) => {
+      returned = new URL(route.request().url()).searchParams.has("code");
+      await route.fulfill({ status: 200, contentType: "text/plain", body: "Connected" });
+    });
+    try {
+      await page.goto(url.toString());
+      await page.getByRole("heading", { name: "Authorize this client" }).waitFor();
+      expect(callbackCount).toBe(0);
+      await page.screenshot({ path: "/tmp/q15-native-consent-1440.png", fullPage: true });
+      await page.getByRole("radio", { name: "Read only", exact: false }).check();
+      await page.getByRole("button", { name: "Authorize", exact: true }).click();
+      await page
+        .getByRole("alert")
+        .filter({ hasText: "Access changed" })
+        .waitFor({ timeout: 5000 });
+      expect(callbackCount).toBe(0);
+      expect(await page.getByRole("radio", { name: "Read only", exact: false }).isChecked()).toBe(
+        true,
+      );
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+      ).toBe(true);
+      await page.screenshot({ path: "/tmp/q15-native-consent-review-390.png", fullPage: true });
+      await page.getByRole("button", { name: "Authorize", exact: true }).click();
+      await page.getByText("Connected", { exact: true }).waitFor({ timeout: 5000 });
+      expect(callbackCount).toBe(1);
+      expect(returned).toBe(true);
+    } finally {
+      await context.close();
+      await browserInstance.close();
+      await server.stop(true);
+    }
+  }, 60_000);
+
+  test("a changed live tool catalog invalidates the admitted proposal before native issuance", async () => {
+    let app: App;
+    let version = "v1";
+    let callbacks = 0;
+    app = appFor(hostPort, {
+      workspaceToolServers: async () => [
+        {
+          id: "consent-tools",
+          toolSetVersion: version,
+          server: {
+            name: "host:consent-tools",
+            cacheToolsList: false,
+            connect: async () => {},
+            close: async () => {},
+            listTools: async () => [
+              {
+                name: version === "v1" ? "read_record" : "read_new",
+                description: "Read a fixture record",
+                inputSchema: { type: "object", properties: {} },
+                annotations: { readOnlyHint: true },
+              },
+            ],
+            callTool: async () => [{ type: "text", text: "fixture" }],
+            invalidateToolsCache: async () => {},
+          },
+        },
+      ],
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          callbacks += 1;
+          await admitWithVerifiedHumanHost(app, input);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    expect((await pending.preflight()).status).toBe(200);
+    version = "v2";
+    expect((await pending.approve()).status).toBe(409);
+    const refreshed = await pending.preflight();
+    expect(refreshed.status).toBe(409);
+    expect(await refreshed.text()).toContain("read_new");
+    expect(callbacks).toBe(1);
+    const [row] =
+      await shared.admin`select host_admitted_at, host_proposal->'toolSetVersions'->>'consent-tools' as version from mcp_oauth_authorization_requests where request_hash = ${createHash("sha256").update(pending.form.get("request")!).digest("hex")}`;
+    expect(row!.host_admitted_at).toBeNull();
+    expect(row!.version).toBe("v2");
+  }, 60_000);
+
+  test("cancellation during the host handoff leaves no consumable request", async () => {
+    let app: App;
+    let pending: Awaited<ReturnType<typeof startHostWorkspaceConsent>>;
+    app = appFor(hostPort, {
+      mcpOAuthHostConsent: {
+        async admit() {
+          const form = new URLSearchParams(pending.form);
+          form.set("decision", "deny");
+          const denied = await app.request("/oauth/authorize", {
+            method: "POST",
+            headers: {
+              ...browser(world.owner.cookie),
+              "content-type": "application/x-www-form-urlencoded",
+            },
+            body: form,
+          });
+          expect(denied.status).toBe(200);
+        },
+      },
+    });
+    pending = await startHostWorkspaceConsent(app);
+    expect((await pending.preflight()).status).toBe(503);
+    expect((await pending.approve()).status).toBe(400);
+  }, 60_000);
+  test("HOST consent path validation stays behind service authentication and returns a client refusal", async () => {
+    const app = appFor(hostPort);
+    const path = `/v1/host/organizations/${world.governedOrganizationId}/mcp-consent-requests/not-a-hash`;
+    expect((await app.request(path)).status).toBe(401);
+    const service = await serviceToken();
+    expect((await app.request(path, { headers: bearer(service) })).status).toBe(422);
+    expect(
+      (await app.request(`${path}/admit`, { method: "POST", headers: bearer(service), body: "{}" }))
+        .status,
+    ).toBe(422);
+    const pending = await startHostWorkspaceConsent(
+      appFor(hostPort, { mcpOAuthHostConsent: { async admit() {} } }),
+    );
+    expect((await app.request(path, { headers: bearer(pending.token) })).status).toBe(401);
+  }, 60_000);
 });

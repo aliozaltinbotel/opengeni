@@ -2462,6 +2462,41 @@ human approval and rejects direct calls to their projected names; those entries
 remain available through the current-human HTTP/SDK approval path and the Site
 direct-call path.
 
+For a host-governed **workspace** resource, an optional `mcpOAuthHostConsent`
+port connects the existing native consent form to the embedding host. Only an
+explicit approval obtains the existing cookie-only workspace host JWT; the
+browser passes it in the private `x-opengeni-host-consent-credential` channel,
+keeps it in memory, and native authentication remains its own browser cookie.
+The native API freezes the server-owned protocol, current human/session/login
+binding, permissions, tool identities and versions on the existing pending
+request. The displayed revision/digest must match; changed material visibly
+refreshes that same form and needs another explicit approval.
+
+The embedding host verifies the human JWT, independently reads
+`GET /v1/host/organizations/:organizationId/mcp-consent-requests/:requestHash`,
+and admits the exact revision/digest/operation through the corresponding
+`POST .../:requestHash/admit` under existing service delegation and
+`mcp_connection.create` governance. Admission and existing host attribution commit
+in one native database transaction. Callback success grants nothing: the ordinary
+native approve POST rechecks current browser/catalog facts and atomically consumes
+only the exact stored admission once. The same transaction compares the existing
+native session/identity owner facts; the API's native workspace resolver owns the
+live workspace check. Native OAuth alone issues/exchanges codes and tokens.
+
+The handoff has its own aggregate maximum of 10 seconds, clamped to credential
+and pending-request expiry. The host must clamp each existing 5-second call ceiling
+to the remaining aggregate time. A lost response is indeterminate; reread/replay
+only the unchanged operation. No host call runs in a database transaction, no
+credential enters persistence/logs/errors, and no session/list 50 ms exception is
+extended. Without the optional port the existing governance behavior is retained;
+standalone/ungoverned consent is unchanged.
+
+Governed organization-wide `/v1/mcp` consent remains on its existing refusal.
+The console's current Connected agents setup advertises that organization URL;
+a host integrating this workspace-only handoff must provide the current workspace
+URL `/v1/workspaces/:workspaceId/mcp`. This extension does not qualify that
+organization-wide UI, the embedding host's business authority, or a rollout.
+
 Provider adapters may narrow destinations, credentials, and retries, never
 weaken shared connection, approval, idempotency, or audit boundaries.
 
