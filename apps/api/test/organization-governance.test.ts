@@ -102,6 +102,7 @@ function appFor(
   organizationGovernance?: OrganizationGovernancePort,
   options: {
     externalMemberFirstUse?: boolean;
+    authRequired?: boolean;
     mcpOAuthHostConsent?: AppDependencies["mcpOAuthHostConsent"];
     structuredLogs?: boolean;
     publicBaseUrl?: string;
@@ -112,6 +113,7 @@ function appFor(
     settings: testSettings({
       databaseUrl: shared.adminUrl,
       productAccessMode: "managed",
+      ...(options.authRequired ? { authRequired: true, accessKey: "native-test-perimeter-key" } : {}),
       betterAuthSecret: "organization-governance-test-secret-32-bytes",
       publicBaseUrl: options.publicBaseUrl ?? origin,
       delegationSecret,
@@ -1543,6 +1545,55 @@ async function admitWithVerifiedHumanHost(
 }
 
 describe("governed workspace OAuth HOST consent", () => {
+  test("key-protected browser host consent reaches only its exact cookie protocol route", async () => {
+    let app: App;
+    let callbacks = 0;
+    app = appFor(hostPort, {
+      authRequired: true,
+      mcpOAuthHostConsent: {
+        async admit(input) {
+          callbacks += 1;
+          await admitWithVerifiedHumanHost(app, input);
+        },
+      },
+    });
+    const pending = await startHostWorkspaceConsent(app);
+    const displayedRevision = pending.form.get("host_revision")!;
+    pending.form.set("host_revision", String(Number(displayedRevision) + 1));
+    const stale = await pending.preflight();
+    expect(stale.status).toBe(409);
+    expect(stale.headers.get("location")).toBeNull();
+    expect(stale.headers.get("refresh")).toBeNull();
+    expect(callbacks).toBe(0);
+    pending.form.set("host_revision", displayedRevision);
+
+    expect((await pending.preflight({ cookie: "" })).status).toBe(401);
+    expect(
+      (await pending.preflight({ "x-opengeni-host-consent-credential": "not-a-host-token" }))
+        .status,
+    ).toBe(401);
+    expect((await pending.preflight({ origin: "https://foreign.example" })).status).toBe(403);
+    expect(callbacks).toBe(0);
+    for (const path of [
+      "/oauth/authorize/host-consent/extra",
+      "/oauth/authorize/host-consent-other",
+      "/v1/non-protocol-probe",
+    ]) {
+      const response = await app.request(path, {
+        method: "POST",
+        headers: browser(world.owner.cookie),
+        body: "{}",
+      });
+      expect(response.status).toBe(401);
+    }
+    const admitted = await pending.preflight();
+    expect(admitted.status).toBe(200);
+    expect(await admitted.json()).toEqual({ outcome: "admitted" });
+    expect(callbacks).toBe(1);
+    const approved = await pending.approve();
+    expect(approved.status).toBe(200);
+    expect(approved.headers.get("refresh") ?? "").toContain("code=");
+  }, 60_000);
   test("connects explicit native approval through a real HOST admission command", async () => {
     let callbackCount = 0;
     let app: App;

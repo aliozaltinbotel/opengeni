@@ -801,6 +801,7 @@ export function isMcpOAuthPublicProtocolPath(pathname: string): boolean {
     pathname.startsWith("/.well-known/oauth-protected-resource/") ||
     pathname === "/oauth/register" ||
     pathname === "/oauth/authorize" ||
+    pathname === "/oauth/authorize/host-consent" ||
     pathname === "/oauth/token"
   );
 }
