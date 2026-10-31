@@ -966,6 +966,7 @@ type OrganizationGovernancePort = {
   }): "allow" | "refuse";
   memberRouteAccess?: "allowlist";
   organizationCreation?: "host";
+  reasoningDisclosure?: "full" | "withheld";
 };
 ```
 
@@ -1022,6 +1023,28 @@ keep each route's own checks; so does a caller with no grant in the workspace
 and nothing tells an outsider the organization exists. MCP OAuth clients
 authenticate inside `/mcp` and get that route's own answer. A guarded path
 that resolves no handler template is refused for a person (fail closed).
+
+**Reasoning disclosure (opt-in).** With `reasoningDisclosure: "withheld"` on
+the port, the provider's reasoning text (OpenAI reasoning summaries, Anthropic
+thinking and chat-completions reasoning) never leaves the server for a session
+of an organization the host governs, whoever reads it. Every
+`agent.reasoning.delta` keeps its id, sequence, turn and coverage, so cursors,
+replay and gap detection are unchanged, and is delivered without text (the
+payload keeps only a numeric `coalescedUntil`) on
+`GET .../sessions/:id/events/stream` (live, replay and the `http1-bounded`
+batch), `GET .../sessions/:id/events` in every mode and payload mode
+(a forensic page then answers `X-OpenGeni-Forensic-Exact: false`), and the MCP
+`session_events` debug and compact reads. The stock transcript draws nothing
+for a reasoning event without text, so a governed reader sees no thinking row
+at all; there is no placeholder. Session reads, turns, the model-context read,
+the MCP conversation, results and tools views, `session_wait` and the Slack and
+Teams deliveries carry no reasoning text, and a published Site already omits
+reasoning events. Stored events and model history are unchanged; the setting
+only changes what is delivered. Give the worker the same port
+(`ActivityDependencies.organizationGovernance`) and a turn of such an
+organization also asks the provider for no reasoning summary; Anthropic
+thinking and chat-completions reasoning are not controlled by that request, so
+the server-side removal is the guarantee. Unset or `"full"`, nothing changes.
 
 The allowlist (exported from `@opengeni/api-router/app`) is the workspace
 itself, the session list and create, the composer's reads
