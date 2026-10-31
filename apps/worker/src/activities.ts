@@ -75,6 +75,9 @@ export function createActivityTestHarness(dependencies: ActivityDependencies = {
             throw new Error("Test host must provide requestWorkerDrain for stalled cleanup");
           }),
         turnFinalizationTimeoutMs: dependencies.turnFinalizationTimeoutMs,
+        ...(dependencies.organizationGovernance
+          ? { organizationGovernance: dependencies.organizationGovernance }
+          : {}),
         summarizeContextForCompaction:
           dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
         documentServices: dependencies.documentServices ?? createDocumentServices(common.settings),

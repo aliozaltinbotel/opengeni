@@ -100,6 +100,8 @@ import {
 export type BuildTurnAgentDeps = {
   /** The organization's session policy; absent means nothing is denied. */
   sessionToolFamilies?: SessionToolFamilyGate;
+  /** The governing host withholds reasoning from this organization: request no summary. */
+  reasoningWithheld?: boolean;
   /** NPD-013: the in-attempt fallback's build does not ask for the session title a second time (fallbackRunInputs). */
   suppressMissingSessionTitleHint?: boolean;
   /** Connected-vault providers and the shared read budget for this attempt. */
@@ -644,7 +646,9 @@ export async function buildTurnAgent(deps: BuildTurnAgentDeps) {
     turnExecutionPolicy.latencyMode,
   );
   const textVerbosity = textVerbosityForTurn(resolvedModel, turnExecutionPolicy.upstreamModelId);
-  const reasoningSummary = reasoningSummaryForTurn(resolvedModel);
+  const reasoningSummary = deps.reasoningWithheld
+    ? ("none" as const)
+    : reasoningSummaryForTurn(resolvedModel);
   const approvedToolCallId = approvedConnectorActionCallId(trigger);
   const skillCatalog = preparedTools.skillCatalog ?? deps.skillCatalog;
   if (skillCatalog.some(entry => entry.modelSourceRefs !== undefined) && skillCatalog.some(entry => !entry.modelSourceRefs?.length))

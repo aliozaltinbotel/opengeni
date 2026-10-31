@@ -13,6 +13,7 @@ import type {
   SessionWorkflowWakeDeliveryResult,
   SessionAdmissionFence,
 } from "@opengeni/db";
+import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
@@ -192,6 +193,13 @@ export type TurnActivityServices = SharedActivityServices & {
   /** Trusted host admission of each committed AGENT/COMPACTION/TITLE source receipt.
    * A configured failure prevents provider dispatch; session metadata cannot select this hook. */
   authorizeModelCallSource?: AuthorizeModelCallSource;
+  /**
+   * The embedding host's organization governance, the same port the API takes.
+   * With `reasoningDisclosure: "withheld"`, a turn of an organization it
+   * governs asks the provider for no reasoning summary; the API withholds any
+   * reasoning text regardless. Unset: every turn keeps the stock request.
+   */
+  organizationGovernance?: OrganizationGovernancePort | null;
   /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
   summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
 };
