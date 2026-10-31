@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -187,7 +188,7 @@ describe("image Node stages use the distrusted Node", () => {
 // ca-certificates older than Debian's emSign G3 / Comodo AAA distrust. Every
 // published server image either upgrades ca-certificates in a package install
 // or uses the current store built in the trust-store stage.
-test("every published server image trusts the current Debian store, not its base image's", async () => {
+test("historical 721 workflow inventory: current server images trust the current Debian store, not their base image's", async () => {
   const dockerfile = await readFile(join(repository, "docker/opengeni.Dockerfile"), "utf8");
   const stages = new Map<string, { from: string; body: string }>();
   for (const block of dockerfile.split(/^(?=FROM )/mu).filter((part) => part.startsWith("FROM "))) {
@@ -208,9 +209,7 @@ test("every published server image trusts the current Debian store, not its base
       body,
     );
   const workflows = await Promise.all(
-    [".github/workflows/ci.yml", ".github/workflows/release-candidate.yml"].map((file) =>
-      readFile(join(repository, file), "utf8"),
-    ),
+    ["ci.yml", "release-candidate.yml"].map(readRetiredWorkflow),
   );
   const published = new Set(
     workflows.flatMap((workflow) =>

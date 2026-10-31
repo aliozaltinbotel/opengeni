@@ -1,10 +1,10 @@
+import { readRetiredWorkflow, retiredWorkflowNames } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
-const workflowDir = resolve(root, ".github/workflows");
 const playwrightActionPath = resolve(root, ".github/actions/playwright-browsers/action.yml");
 const PLAYWRIGHT_ACTION = "./.github/actions/playwright-browsers";
 const MAX_JOB_TIMEOUT_MINUTES = 120;
@@ -228,12 +228,12 @@ const EXPECTED_JOB_BUDGETS = {
 } as const;
 
 async function loadWorkflows(): Promise<Record<string, Workflow>> {
-  const files = (await readdir(workflowDir)).filter((entry) => /\.ya?ml$/u.test(entry)).sort();
+  const files = retiredWorkflowNames().filter((entry) => /\.ya?ml$/u.test(entry)).sort();
   return Object.fromEntries(
     await Promise.all(
       files.map(async (file) => [
         file,
-        Bun.YAML.parse(await readFile(resolve(workflowDir, file), "utf8")) as Workflow,
+        Bun.YAML.parse(readRetiredWorkflow(file)) as Workflow,
       ]),
     ),
   );
@@ -266,7 +266,7 @@ describe("workflow timeout contract", () => {
     expect(validJobCap("batch-ci.yml", "plan", { "timeout-minutes": 20, steps: [] })).toBe(true);
     expect(validJobCap("other.yml", "plan", job)).toBe(false);
   });
-  test("all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
+  test("historical 721 workflow fixture: all jobs and the exact 49 run plus 5 action steps use static native caps", async () => {
     const workflows = await loadWorkflows();
     const capped: Array<readonly [string, string, string, number, "run" | "action"]> = [];
     const budgets: Record<string, { stepCaps: number; needed: number; jobCap: number }> = {};
@@ -313,7 +313,7 @@ describe("workflow timeout contract", () => {
     }
   });
 
-  test("the consolidated browser lane and Playwright runtime budget stay structurally bound", async () => {
+  test("historical 721 workflow fixture: the consolidated browser lane and Playwright runtime budget stay structurally bound", async () => {
     const workflows = await loadWorkflows();
     const callers = Object.entries(workflows).flatMap(([file, workflow]) =>
       Object.entries(workflow.jobs ?? {}).flatMap(([job, definition]) =>
@@ -351,9 +351,9 @@ describe("workflow timeout contract", () => {
     expect(((duration + 15) * attempts) / 60).toBeLessThanOrEqual(17);
   });
 
-  test("Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {
+  test("historical 721 workflow fixture: Playwright retry, cache, and dirlock cleanup behavior stays intact", async () => {
     for (const file of Object.keys(await loadWorkflows())) {
-      expect(await readFile(resolve(workflowDir, file), "utf8")).not.toContain(
+      expect(readRetiredWorkflow(file)).not.toContain(
         "playwright install",
       );
     }

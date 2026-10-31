@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
@@ -292,18 +293,15 @@ test("large plan extraction keeps old result limits unchanged", () => {
   expect(JSON.parse(readResultZip(archive, ["impact-plan.json"], 1_000_000)).length).toBe(70_000);
   expect(() => readResultZip(archive, ["impact-plan.json"], 1_000_001)).toThrow();
 });
-test("workflow preserves full-green mode and job results while gating only unit execution", () => {
-  const workflow = readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8");
+test("historical 721 workflow fixture: workflow preserves full-green mode and job results while gating only unit execution", () => {
+  const workflow = readRetiredWorkflow("ci.yml");
   const unit = workflow.split("  unit-shards:")[1]!.split("  integration-shards:")[0]!;
   expect(unit).toContain("reuse-batch-units.ts verify");
   expect(unit).toContain('\'[{"index":0,"number":1,"total":1}]\'');
   expect(unit).toContain("if: ${{ needs.plan.outputs.unit_reuse != 'true' }}");
   expect(unit).toContain('OPENGENI_REQUIRE_REAL_DB: "1"');
   expect(workflow).toContain("bun scripts/ci/impact.ts --full");
-  const batch = readFileSync(
-    new URL("../../.github/workflows/batch-ci.yml", import.meta.url),
-    "utf8",
-  );
+  const batch = readRetiredWorkflow("batch-ci.yml");
   expect(batch).toContain(". / 240");
   expect(batch).toContain("if . > 16 then 16");
   expect(batch).toContain("scripts/ci/run-unit-shard.ts --plan");

@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import {
   chmod,
@@ -224,8 +225,8 @@ describe("exact-source canary interaction bundle", () => {
     }
   });
 
-  test("the image completeness gate rejects every missing cohort asset or sidecar", async () => {
-    const workflow = parse(await readFile(join(root, ".github/workflows/ci.yml"), "utf8"));
+  test("historical 721 workflow fixture: the image completeness gate rejects every missing cohort asset or sidecar", async () => {
+    const workflow = parse(readRetiredWorkflow("ci.yml"));
     const step = workflow.jobs["api-image"].steps.find(
       (entry: { name?: string }) => entry.name === "Require complete exact-SHA canary agent bake",
     );

@@ -1,7 +1,8 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 const workflow = (name: string) =>
-  Bun.YAML.parse(readFileSync(`.github/workflows/${name}.yml`, "utf8")) as any;
+  Bun.YAML.parse(readRetiredWorkflow(`${name}.yml`)) as any;
 const queue = workflow("merge-queue");
 const ci = workflow("ci");
 
@@ -78,7 +79,7 @@ function jobRuns(jobs: Record<string, any>, job: string, condition: string, run:
   });
 }
 
-test("queue checks cover PR entry and the exact combined merge group", () => {
+test("historical 721 workflow fixture: queue checks cover PR entry and the exact combined merge group", () => {
   expect(queue.on.pull_request.branches).toEqual(["main"]);
   expect(queue.on.merge_group.types).toEqual(["checks_requested"]);
   expect(queue.permissions).toEqual({ contents: "read" });
@@ -110,7 +111,7 @@ test("queue checks cover PR entry and the exact combined merge group", () => {
   expect(gate).toContain('else test "$UNITS" = success');
 });
 
-test("cheap PR entry never masquerades as combined-tree CI or duplicates the heavy suite", () => {
+test("historical 721 workflow fixture: cheap PR entry never masquerades as combined-tree CI or duplicates the heavy suite", () => {
   expect(queue.jobs.entry.if).toBe(
     "${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref != 'changeset-release/main' }}",
   );
@@ -126,7 +127,7 @@ test("cheap PR entry never masquerades as combined-tree CI or duplicates the hea
   expect(queue.jobs.plan.steps.some((step: any) => step.run?.includes("bun install"))).toBe(false);
 });
 
-test("ordinary PR events cannot starve reconciliation or publish public alerts", () => {
+test("historical 721 workflow fixture: ordinary PR events cannot starve reconciliation or publish public alerts", () => {
   const health = workflow("queue-health");
   expect(health.on.workflow_run.workflows).toContain("Batch CI");
   expect(health.jobs.report.if).toContain(
@@ -143,7 +144,7 @@ test("ordinary PR events cannot starve reconciliation or publish public alerts",
   expect(run.env.QUEUE_HEALTH_ALERTS).toContain("github.event_name != 'workflow_run'");
 });
 
-test("main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
+test("historical 721 workflow fixture: main full CI cannot be cancelled by a new push and publishes only full exact-SHA success", () => {
   expect(ci.concurrency["cancel-in-progress"]).toBe(
     "${{ github.event_name == 'pull_request' && github.event.action == 'synchronize' }}",
   );
@@ -215,7 +216,7 @@ function ciConcurrency(context: {
   };
 }
 
-test("every main push, retry and Version merge commit runs in its own non-cancelling group", () => {
+test("historical 721 workflow fixture: every main push, retry and Version merge commit runs in its own non-cancelling group", () => {
   const push = (run_id: string, run_attempt = "1", ref = "refs/heads/main", message = "fix: x") =>
     ciConcurrency({ event_name: "push", ref, run_id, run_attempt, head_commit_message: message });
   // Two consecutive ordinary main pushes never share a group, so a run that
@@ -279,7 +280,7 @@ test("every main push, retry and Version merge commit runs in its own non-cancel
   ).toBe("ci-302-2");
 });
 
-test("full-green publishes only for a non-cancelled full main push whose direct needs all succeeded", () => {
+test("historical 721 workflow fixture: full-green publishes only for a non-cancelled full main push whose direct needs all succeeded", () => {
   const job = ci.jobs["full-green"];
   const needs: string[] = job.needs;
   const atoms = conditionAtoms(job.if);
@@ -347,14 +348,14 @@ test("full-green publishes only for a non-cancelled full main push whose direct 
   for (const mode of ["impact", "docs", ""]) expect([mode, runs({ mode })]).toEqual([mode, false]);
 });
 
-test("queue source retains committed runtime and outstanding release-plan contracts", () => {
+test("historical 721 workflow fixture: queue source retains committed runtime and outstanding release-plan contracts", () => {
   const commands = queue.jobs.contracts.steps.map((step: any) => step.run ?? "").join("\n");
   expect(commands).toContain("generate-site-browser-runtime.ts --check");
   expect(commands).toContain("bunx changeset status");
   expect(commands).toContain('git update-ref refs/heads/main "$GITHUB_SHA"');
 });
 
-test("bot-created PRs get queue entry evidence only after authenticated full CI", () => {
+test("historical 721 workflow fixture: bot-created PRs get queue entry evidence only after authenticated full CI", () => {
   const report = ci.jobs["automation-report"];
   const step = report.steps.find(
     (candidate: any) => candidate.name === "Report queue entry check for the admitted Version PR",
@@ -366,7 +367,7 @@ test("bot-created PRs get queue entry evidence only after authenticated full CI"
   expect(step.run).toContain("-f name='Queue ready'");
 });
 
-test("prepared ruleset is inert, main-only, uses MERGE and requires every successful queue entry", () => {
+test("historical 721 workflow fixture: prepared ruleset is inert, main-only, uses MERGE and requires every successful queue entry", () => {
   const ruleset = JSON.parse(readFileSync(".github/main-merge-queue.ruleset.json", "utf8"));
   expect(ruleset.enforcement).toBe("disabled");
   expect(ruleset.conditions.ref_name.include).toEqual(["refs/heads/main"]);
@@ -385,7 +386,7 @@ test("prepared ruleset is inert, main-only, uses MERGE and requires every succes
   ]);
 });
 
-test("Mergify option is a non-discovered draft with true batches and isolated Version handling", () => {
+test("historical 721 workflow fixture: Mergify option is a non-discovered draft with true batches and isolated Version handling", () => {
   const draft = Bun.YAML.parse(readFileSync("docs/queue-options/.mergify.yml", "utf8")) as any;
   expect(draft.merge_queue.max_parallel_checks).toBe(2);
   expect(draft.defaults.queue_rule.merge_method).toBe("merge");

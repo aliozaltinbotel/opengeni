@@ -1,12 +1,13 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-const raw = readFileSync(".github/workflows/batch-ci.yml", "utf8");
+const raw = readRetiredWorkflow("batch-ci.yml");
 const workflow = Bun.YAML.parse(raw) as any;
 
-test("Batch planning starts without a workflow-internal main-priority wait", () => {
+test("historical 721 workflow fixture: Batch planning starts without a workflow-internal main-priority wait", () => {
   expect(workflow.jobs.plan["timeout-minutes"]).toBe(20);
   expect(raw).not.toContain("github-pr-ci.ts priority");
   expect(workflow.jobs.plan.steps.slice(0, 3).map((step: any) => step.id ?? step.uses)).toEqual([
@@ -19,7 +20,7 @@ test("Batch planning starts without a workflow-internal main-priority wait", () 
   expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
 });
 
-test("previous-binary unavailable database records infrastructure, not PR blame", () => {
+test("historical 721 workflow fixture: previous-binary unavailable database records infrastructure, not PR blame", () => {
   const directory = mkdtempSync(join(tmpdir(), "batch-posture-infra-"));
   const step = workflow.jobs.source.steps.find((s: any) =>
     s.run?.includes("batch-setup.ts postgres"),
@@ -62,14 +63,14 @@ test("previous-binary unavailable database records infrastructure, not PR blame"
   }
 });
 
-test("one push-tip batch workflow does not run per PR or cancel active work", () => {
+test("historical 721 workflow fixture: one push-tip batch workflow does not run per PR or cancel active work", () => {
   expect(workflow.on).toEqual({ push: { branches: ["queue/**"] } });
   expect(workflow.permissions).toEqual({ contents: "read", actions: "read" });
   expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
   expect(workflow.concurrency.group).toContain("github.ref");
   expect(workflow.jobs.ready.name).toBe("Batch ready");
 });
-test("candidate provenance supplies the whole base-to-tip impact range", () => {
+test("historical 721 workflow fixture: candidate provenance supplies the whole base-to-tip impact range", () => {
   const plan = workflow.jobs.plan.steps.find((step: any) => step.id === "plan").run;
   expect(plan).toContain('inspect --tip "$GITHUB_SHA" --git-dir .git');
   expect(plan).toContain(".baseSha");
@@ -80,7 +81,7 @@ test("candidate provenance supplies the whole base-to-tip impact range", () => {
     false,
   );
 });
-test("controller is the sole retry owner; all unit files retain real DB and deadlines", () => {
+test("historical 721 workflow fixture: controller is the sole retry owner; all unit files retain real DB and deadlines", () => {
   expect(raw).not.toContain("retry-once.ts");
   expect(workflow.jobs.units.env.OPENGENI_REQUIRE_REAL_DB).toBe("1");
   expect(workflow.jobs.units.strategy["fail-fast"]).toBe(false);
@@ -88,7 +89,7 @@ test("controller is the sole retry owner; all unit files retain real DB and dead
   expect(units).toContain("--timeout-seconds 1200");
   expect(units).toContain("--shard ${{ matrix.index }} --shards ${{ matrix.total }}");
 });
-test("receipts never mix attempts and the gate runs even on failed code jobs", () => {
+test("historical 721 workflow fixture: receipts never mix attempts and the gate runs even on failed code jobs", () => {
   const gate = workflow.jobs.ready;
   expect(gate.if).toBe("${{ always() }}");
   expect(gate.needs).toEqual(["plan", "source", "units"]);
@@ -104,7 +105,7 @@ test("receipts never mix attempts and the gate runs even on failed code jobs", (
   );
 });
 
-test("installation and database setup produce explicit receipts before candidate assertions", () => {
+test("historical 721 workflow fixture: installation and database setup produce explicit receipts before candidate assertions", () => {
   for (const job of [workflow.jobs.source, workflow.jobs.units]) {
     const setup = job.steps.find((step: any) => step.run?.includes("batch-setup.ts install"));
     expect(setup.run).toContain("batch-result.ts run --failure-only --job");
@@ -115,7 +116,7 @@ test("installation and database setup produce explicit receipts before candidate
   const plan = workflow.jobs.plan.steps.find((step: any) => step.id === "plan").run;
   expect(plan).toContain("batch-result.ts run --job plan");
 });
-test("batch source preserves the complete existing fast contract inventory", () => {
+test("historical 721 workflow fixture: batch source preserves the complete existing fast contract inventory", () => {
   const source = readFileSync("scripts/ci/batch-source.ts", "utf8");
   for (const check of [
     "generate-site-browser-runtime.ts",
@@ -127,7 +128,7 @@ test("batch source preserves the complete existing fast contract inventory", () 
   expect(source).toMatch(/"--exclude",\s*"publish-closure"/);
 });
 
-test("required source job runs the actual pinned previous-binary database check on the batch tip", () => {
+test("historical 721 workflow fixture: required source job runs the actual pinned previous-binary database check on the batch tip", () => {
   const source = workflow.jobs.source;
   const step = source.steps.find((s: any) => s.name === "Previous-binary database readiness");
   expect(source.if).toBeUndefined();

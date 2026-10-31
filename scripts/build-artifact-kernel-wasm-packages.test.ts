@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { afterEach, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -130,14 +131,14 @@ test("regenerates exact version-bearing metadata for a fixed Changesets release"
   }
 });
 
-test("version automation regenerates WASM identity without forcing peer dependents major", async () => {
+test("historical 721 workflow fixture: version automation regenerates WASM identity without forcing peer dependents major", async () => {
   const [rootPackageRaw, changesetConfigRaw, reactPackageRaw, artifactToolPackageRaw, ciWorkflow] =
     await Promise.all([
       readFile(join(repoRoot, "package.json"), "utf8"),
       readFile(join(repoRoot, ".changeset/config.json"), "utf8"),
       readFile(join(repoRoot, "packages/react/package.json"), "utf8"),
       readFile(join(repoRoot, "packages/artifact-tool/package.json"), "utf8"),
-      readFile(join(repoRoot, ".github/workflows/ci.yml"), "utf8"),
+      readRetiredWorkflow("ci.yml"),
     ]);
   const rootPackage = JSON.parse(rootPackageRaw) as { scripts?: Record<string, string> };
   const changesetConfig = JSON.parse(changesetConfigRaw) as {

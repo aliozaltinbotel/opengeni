@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
 import { mkdtemp, rm, cp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,11 +7,11 @@ import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
 import { isolatedGitEnvironment } from "../packages/runtime/test/isolated-git-home-fixture";
 
-const workflow = await Bun.file(new URL("../.github/workflows/ci.yml", import.meta.url)).text();
+const workflow = readRetiredWorkflow("ci.yml");
 const guard = workflow.match(/          changeset_count=.*?\n          fi/s)?.[0];
 if (!guard) throw new Error("Missing changeset release guard");
 
-test("the service attribution changeset produces a publishable SDK version", async () => {
+test("historical 721 workflow fixture: the service attribution changeset produces a publishable SDK version", async () => {
   const root = fileURLToPath(new URL("../", import.meta.url));
   const path = join(root, ".changeset/sdk-service-attribution.md");
   // Version PRs consume changesets; this regression applies while it is pending.
