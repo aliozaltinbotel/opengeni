@@ -2,6 +2,7 @@ import {
   GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE,
   ORGANIZATION_CREATE_GOVERNED,
   ORGANIZATION_GOVERNED_BY_HOST,
+  REALTIME_MODEL_NOT_ALLOWED,
   type GovernedMutation,
   type GovernedMutationChannel,
   type OrganizationGovernancePort,
@@ -103,6 +104,44 @@ export function withholdSessionEventReasoning<Event extends { type: string; payl
     payload:
       typeof until === "number" && Number.isSafeInteger(until) ? { coalescedUntil: until } : {},
   };
+}
+
+/**
+ * The realtime voice models this organization's sessions may use, or null for
+ * no restriction (no `allowedRealtimeModels` on the port, or an organization
+ * the host does not govern). A list that is not strings fails the caller
+ * closed, as a port that throws does.
+ */
+export async function organizationAllowedRealtimeModels(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<ReadonlySet<string> | null> {
+  const allowed: unknown = deps.organizationGovernance?.allowedRealtimeModels;
+  if (allowed === undefined) return null;
+  if (!Array.isArray(allowed) || allowed.some((model) => typeof model !== "string"))
+    throw new OrganizationGovernancePortContractError(
+      "OrganizationGovernancePort.allowedRealtimeModels must be a list of model ids",
+    );
+  if (!(await organizationGovernedByHost(deps, organizationId))) return null;
+  return new Set(allowed as string[]);
+}
+
+/** Raised where a governed organization's host does not allow a realtime voice model. */
+export class RealtimeModelNotAllowedError extends Error {
+  readonly name = "RealtimeModelNotAllowedError";
+  readonly code = REALTIME_MODEL_NOT_ALLOWED;
+  constructor(readonly model: string) {
+    super("This voice model is not available in this organization.");
+  }
+}
+
+/** Refuses a realtime voice model outside the governing host's allowlist. */
+export async function requireOrganizationRealtimeModelAllowed(
+  deps: OrganizationGovernanceDeps,
+  input: { organizationId: string; model: string },
+): Promise<void> {
+  const allowed = await organizationAllowedRealtimeModels(deps, input.organizationId);
+  if (allowed && !allowed.has(input.model)) throw new RealtimeModelNotAllowedError(input.model);
 }
 
 function describeValue(value: unknown): string {

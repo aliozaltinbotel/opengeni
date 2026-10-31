@@ -67,6 +67,7 @@ import {
   type WorkspaceMember as WorkspaceMemberValue,
 } from "@opengeni/contracts";
 import { loadWorkspaceCodexCatalogReadiness } from "@opengeni/core";
+import { organizationAllowedRealtimeModels } from "@opengeni/core";
 import {
   allWorkspacePermissions,
   getBillingBalance,
@@ -1292,6 +1293,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsConnected,
       workspaceSettings,
       organizationDefaults,
+      allowedModels,
     ] = await Promise.all([
       workspaceCodexRealtimeReady(deps, grant, workspaceId),
       workspaceXaiOperationAvailable(deps.db, deps.settings, {
@@ -1303,6 +1305,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       elevenLabsKeyAvailable(deps.db, { accountId: grant.accountId, workspaceId }),
       getWorkspaceSettings(deps.db, workspaceId),
       getOrganizationModelDefaults(deps.db, grant.accountId),
+      // A governing host may allow only some voice models; the rest are not listed.
+      organizationAllowedRealtimeModels(deps, grant.accountId),
     ]);
     const availability = (
       credentialReady: boolean,
@@ -1409,7 +1413,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     // which model each of them chose to start voice conversations with.
     const workspaceDefaultModel = resolveWorkspaceRealtimeDefaultModel(workspaceSettings);
     const organizationDefaultModel = organizationDefaults.realtimeDefaultModel;
-    const withVoiceSettings = models.map((model) => {
+    const listed = allowedModels ? models.filter((model) => allowedModels.has(model.id)) : models;
+    const withVoiceSettings = listed.map((model) => {
       const saved = resolveWorkspaceRealtimeVoiceSettings(workspaceSettings, model.id);
       const inherited = resolveRealtimeVoiceSettings(null, organizationDefaults, model.id);
       return {

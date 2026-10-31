@@ -162,6 +162,7 @@ import {
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
   sessionPendingInputLimitHttpError,
+  realtimeModelNotAllowedHttpError,
 } from "./http/api-error";
 import {
   isRequestBodyValidationError,
@@ -2579,6 +2580,7 @@ export function createAppComposition(deps: AppDependencies): {
               workspaceControlBusyHttpError(rawError) ??
               sessionPendingInputLimitHttpError(rawError) ??
               scheduledTaskTargetAccessHttpError(rawError) ??
+              realtimeModelNotAllowedHttpError(rawError) ??
               agentConfigHttpError(rawError) ??
               modelUnavailableHttpError(rawError) ??
               connectionAccountSelectionHttpError(rawError) ??

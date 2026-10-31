@@ -14,6 +14,7 @@ import {
 } from "@opengeni/db";
 import {
   ConnectionAccountSelectionError,
+  RealtimeModelNotAllowedError,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
 } from "@opengeni/core";
@@ -183,6 +184,22 @@ export function sessionPendingInputLimitHttpError(error: unknown): ApiHttpError 
     retryable: refusal.facts.retryAfterSeconds !== null,
     outcomeUnknown: false,
     details: { code: refusal.code, ...refusal.facts },
+  });
+}
+
+/**
+ * A governed organization's host does not allow this realtime voice model
+ * (`OrganizationGovernancePort.allowedRealtimeModels`): 403 `forbidden` with
+ * `details.code: "REALTIME_MODEL_NOT_ALLOWED"` and the refused `model`.
+ */
+export function realtimeModelNotAllowedHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof RealtimeModelNotAllowedError)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: error.code, model: error.model },
   });
 }
 

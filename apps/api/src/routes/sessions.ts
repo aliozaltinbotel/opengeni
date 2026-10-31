@@ -2,6 +2,11 @@ import { SessionCancelSettlementQuery, projectSessionEventForPublic } from "@ope
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
 import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
 import { organizationReasoningDisclosure, withholdSessionEventReasoning } from "@opengeni/core";
+import {
+  organizationAllowedRealtimeModels,
+  RealtimeModelNotAllowedError,
+  requireOrganizationRealtimeModelAllowed,
+} from "@opengeni/core";
 import { mergeToolRefs } from "@opengeni/contracts";
 import { authorizeRealtimeProviderDispatch, createRealtimeUsageProxyAttachment, realtimeProxyAuthority } from "../realtime-usage-proxy";
 import { readSessionResponsePair } from "./session-response-reads";
@@ -1702,6 +1707,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       await c.req.json().catch(() => null),
       { status: 400, message: "invalid session realtime request" },
     );
+    // A governing host's voice model allowlist refuses any other model (403).
+    await requireOrganizationRealtimeModelAllowed(deps, {
+      organizationId: grant.accountId,
+      model: parsed.model,
+    });
     try {
       await realtimeVoiceBilling.admit({
         accountId: grant.accountId,
@@ -1855,6 +1865,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     );
 
     c.header("cache-control", "private, no-store");
+    const allowedModels = await organizationAllowedRealtimeModels(deps, grant.accountId);
     try {
       const {
         realtimeId,
@@ -1894,6 +1905,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
               "This voice model does not use WebRTC negotiation",
             );
           }
+          // A mode started before its organization's host narrowed the voice
+          // models does not connect with a model it no longer allows.
+          if (allowedModels && !allowedModels.has(claimed.mode.model))
+            throw new RealtimeModelNotAllowedError(claimed.mode.model);
           return claimed;
         }),
       );
@@ -2147,6 +2162,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
           "Realtime client secrets are single-use; reconnect with a new operation",
         );
       }
+      await requireOrganizationRealtimeModelAllowed(deps, {
+        organizationId: grant.accountId,
+        model: claim.mode.model,
+      });
       provider = realtimeWebsocketProvider(claim.mode.model);
       if (!provider) {
         throw new RealtimeWebsocketBrokerError(

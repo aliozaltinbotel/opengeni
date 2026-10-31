@@ -126,6 +126,16 @@ export type OrganizationGovernancePort = {
    * not changed. Unset or `"full"`: stock behaviour.
    */
   reasoningDisclosure?: ReasoningDisclosure;
+  /**
+   * The realtime voice models (catalog ids, for example
+   * `opengeni-gateway/openai/gpt-realtime-2.1`) a session of an organization
+   * this host governs may use. The workspace realtime model catalog lists
+   * only these, and a voice start (`POST .../sessions/:id/realtime`) or a
+   * connection of a voice mode with any other model is refused with 403
+   * `REALTIME_MODEL_NOT_ALLOWED`. An empty list allows none. Unset: the full
+   * stock catalog.
+   */
+  allowedRealtimeModels?: readonly string[];
 };
 
 /** Whether a governed organization's sessions show the provider's reasoning text. */
@@ -133,6 +143,8 @@ export const REASONING_DISCLOSURES = ["full", "withheld"] as const;
 export type ReasoningDisclosure = (typeof REASONING_DISCLOSURES)[number];
 
 /** Refusal detail codes (`error.details.code`). */
+/** 403: a governed organization's host does not allow this realtime voice model. */
+export const REALTIME_MODEL_NOT_ALLOWED = "REALTIME_MODEL_NOT_ALLOWED";
 export const ORGANIZATION_GOVERNED_BY_HOST = "ORGANIZATION_GOVERNED_BY_HOST";
 export const ORGANIZATION_NOT_HOST_GOVERNED = "ORGANIZATION_NOT_HOST_GOVERNED";
 /**
