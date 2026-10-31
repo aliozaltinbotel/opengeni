@@ -3327,6 +3327,8 @@ organization-workspace lifecycle authority; see [external membership operation r
 
 ### Operations
 
+Owned-fork execution (2026-11-01): [local validation and deployment](../AGENTS.md#local-validation-and-deployment-cendra-fork) replaces GitHub Actions on `aliozaltinbotel/opengeni`. The hosted CI/merge-controller descriptions below are retained upstream reference; those controllers are inactive on this fork. Local source qualification, security contracts, provenance, review and rollback remain mandatory.
+
 The standalone database backup runner (`scripts/backup.ts`, `scripts/backup/`)
 uses PostgreSQL clients, Age and rclone without depending on the API or worker.
 Deployment-owned scheduling and a dedicated credential boundary keep recovery
@@ -3386,8 +3388,8 @@ plan is not authorization or qualification for a live policy transition.
 | Change area | Canonical source | Read first |
 | --- | --- | --- |
 | Deployment profile, Helm, Terraform, or conformance | `packages/deployment/`, `deploy/` | [`deployment.md`](deployment.md) |
-| Build, CI, publishing, or release evidence | `package.json`, `.github/workflows/`, `scripts/release/` | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
-| Merge batcher, candidate CI or admission receipts | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts`, `.github/workflows/batch-ci.yml` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
+| Build, local validation, publishing, or release evidence | `package.json`, `scripts/release/`, `AGENTS.md` local execution rule | [`../CONTRIBUTING.md`](../CONTRIBUTING.md), [`../AGENTS.md`](../AGENTS.md), [`merge-queue.md`](merge-queue.md) |
+| Retained upstream merge batcher and admission receipts (inactive on the owned fork) | `scripts/merge-batcher/`, `scripts/ci/batch-*.ts` | [`merge-batcher.md`](merge-batcher.md), [`../AGENTS.md`](../AGENTS.md) |
 | Logs, traces, metrics, or dashboards | `packages/observability/`, `deploy/observability/` | [`application-observability.md`](application-observability.md), [`deployment.md`](deployment.md) Observability |
 
 ---
