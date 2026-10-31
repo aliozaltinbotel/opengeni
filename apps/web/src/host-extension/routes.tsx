@@ -4,10 +4,14 @@
 // checked at registration (registry.ts): none shadows a native route.
 import { createRoute, lazyRouteComponent, useParams, type AnyRoute } from "@tanstack/react-router";
 import type {
+  HostExtensionChatPanel,
   HostExtensionOutsideWorkspaceRoute,
   HostExtensionRoute,
 } from "@opengeni/react/app/host-extension";
 import type { ComponentType, ReactElement, ReactNode } from "react";
+
+import type { ChatPanelSeam } from "./chat-panel-state";
+import { validateHostMessageContext } from "./registry";
 
 /** A loaded extension page as a plain function component, the shape the lazy route wants. */
 export type HostExtensionPageFunction = (props: { workspaceId: string }) => ReactElement;
@@ -19,6 +23,7 @@ export type HostExtensionPageFunction = (props: { workspaceId: string }) => Reac
  */
 async function loadPage(
   route: HostExtensionRoute,
+  chatPanel: ChatPanelSeam | undefined,
 ): Promise<{ default: HostExtensionPageFunction }> {
   if (route.mode === "settings") {
     const { default: Page } = await route.load();
@@ -28,11 +33,15 @@ async function loadPage(
     route.load(),
     import("./route-frame"),
   ]);
-  return { default: framedHostExtensionPage(page) };
+  return { default: framedHostExtensionPage(page, chatPanel) };
 }
 
-function hostExtensionWorkspaceRoute(parent: AnyRoute, route: HostExtensionRoute): AnyRoute {
-  const Page = lazyRouteComponent(() => loadPage(route));
+function hostExtensionWorkspaceRoute(
+  parent: AnyRoute,
+  route: HostExtensionRoute,
+  chatPanel: ChatPanelSeam | undefined,
+): AnyRoute {
+  const Page = lazyRouteComponent(() => loadPage(route, chatPanel));
   function HostExtensionRouteComponent() {
     const { workspaceId } = useParams({ strict: false });
     if (workspaceId === undefined) {
@@ -47,12 +56,20 @@ function hostExtensionWorkspaceRoute(parent: AnyRoute, route: HostExtensionRoute
   });
 }
 
-/** One lazy child route of `parent` per extension route, in declaration order. */
+/**
+ * One lazy child route of `parent` per extension route, in declaration order.
+ * With the extension's `chatPanel`, each rail page's frame offers the chat
+ * panel. It and the console's context check are handed to the frame, not
+ * imported there: a lazy module's edge into the startup registry regroups the
+ * startup chunks.
+ */
 export function buildHostExtensionWorkspaceRoutes(
   parent: AnyRoute,
   routes: readonly HostExtensionRoute[] | undefined,
+  chatPanel?: HostExtensionChatPanel,
 ): AnyRoute[] {
-  return (routes ?? []).map((route) => hostExtensionWorkspaceRoute(parent, route));
+  const seam = chatPanel && { panel: chatPanel, validate: validateHostMessageContext };
+  return (routes ?? []).map((route) => hostExtensionWorkspaceRoute(parent, route, seam));
 }
 
 /** Nests `providers` around `children`, the first outermost. */

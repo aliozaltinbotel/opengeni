@@ -9,10 +9,12 @@ import {
   isDatabaseConnectionLoss,
   SessionUsageLimitUnavailableError,
   nestedPostgresSqlState,
+  SessionPendingInputLimitError,
   WorkspaceControlBusyError,
 } from "@opengeni/db";
 import {
   ConnectionAccountSelectionError,
+  RealtimeModelNotAllowedError,
   SessionUsageLimitHttpError,
   sessionUsageLimitRefusalFromError,
 } from "@opengeni/core";
@@ -158,6 +160,46 @@ export function workspaceControlBusyHttpError(error: unknown): ApiHttpError | nu
     retryable: true,
     outcomeUnknown: false,
     details: { code: busy.code, lockTimeoutMs: busy.lockTimeoutMs },
+  });
+}
+
+/**
+ * A Send or Steer past the session's pending-input bounds
+ * (`SESSION_PENDING_INPUT_LIMITS`). Nothing was written. 429 `limit_exceeded`
+ * with `details.code: "SESSION_PENDING_INPUT_LIMIT_REACHED"`, the bound that
+ * refused (`limit`), the session's pending count and bytes, and
+ * `retryAfterSeconds` (also the `Retry-After` header). A message larger than
+ * `maxBytes` on its own is not retryable and has no `retryAfterSeconds`.
+ */
+export function sessionPendingInputLimitHttpError(error: unknown): ApiHttpError | null {
+  // Core admission raises it as a 429 HTTPException carrying the refusal.
+  const refusal =
+    error instanceof HTTPException && error.cause instanceof SessionPendingInputLimitError
+      ? error.cause
+      : null;
+  if (!refusal) return null;
+  return new ApiHttpError(429, {
+    code: "limit_exceeded",
+    message: refusal.message,
+    retryable: refusal.facts.retryAfterSeconds !== null,
+    outcomeUnknown: false,
+    details: { code: refusal.code, ...refusal.facts },
+  });
+}
+
+/**
+ * A governed organization's host does not allow this realtime voice model
+ * (`OrganizationGovernancePort.allowedRealtimeModels`): 403 `forbidden` with
+ * `details.code: "REALTIME_MODEL_NOT_ALLOWED"` and the refused `model`.
+ */
+export function realtimeModelNotAllowedHttpError(error: unknown): ApiHttpError | null {
+  if (!(error instanceof RealtimeModelNotAllowedError)) return null;
+  return new ApiHttpError(403, {
+    code: "forbidden",
+    message: error.message,
+    retryable: false,
+    outcomeUnknown: false,
+    details: { code: error.code, model: error.model },
   });
 }
 

@@ -2371,8 +2371,12 @@ export type BuildAgentOptions = {
     response: HumanInputResponse;
   };
   reasoningEffort?: ReasoningEffort;
-  /** Provider-generated Responses summaries. Omitted preserves the existing wire. */
-  reasoningSummary?: "auto" | "detailed";
+  /**
+   * Provider-generated Responses summaries. Omitted preserves the existing
+   * wire. `"none"` requests no summary: the reasoning setting carries only its
+   * effort (the host withholds reasoning from this session's readers).
+   */
+  reasoningSummary?: "auto" | "detailed" | "none";
   /** Product latency selection frozen onto this turn. */
   latencyMode?: LatencyMode;
   /** Provider-specific wire value resolved by the worker (`fast` or `priority`). */
@@ -3548,7 +3552,9 @@ export function buildOpenGeniAgent(
     modelSettings: {
       reasoning: {
         effort: options.reasoningEffort ?? settings.openaiReasoningEffort,
-        summary: options.reasoningSummary ?? "detailed",
+        ...(options.reasoningSummary === "none"
+          ? {}
+          : { summary: options.reasoningSummary ?? "detailed" }),
       },
       ...(options.textVerbosity ? { text: { verbosity: options.textVerbosity } } : {}),
       // Round-trip the encrypted reasoning payload with every call so chains

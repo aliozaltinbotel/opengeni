@@ -247,6 +247,7 @@ import {
   resolveScheduledTaskPreflightModel,
   workflowIdForSession,
 } from "@opengeni/core";
+import { organizationReasoningDisclosure, withholdSessionEventReasoning } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   githubBindingStatus,
@@ -5983,7 +5984,9 @@ function registerWorkspaceOrchestrationTools(
             requestedResultMode === "compact"
               ? "full"
               : (requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full"));
-          const dbPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
+          const reasoningWithheld =
+            (await organizationReasoningDisclosure(deps, grant.accountId)) === "withheld";
+          const storedPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
             after: after ?? 0,
             ...(before !== undefined ? { before } : {}),
             direction,
@@ -6000,6 +6003,10 @@ function registerWorkspaceOrchestrationTools(
             ...(latestClass ? { authoritativeLatest: true } : {}),
             maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
           });
+          // A withheld organization's reasoning events keep their place without text.
+          const dbPage = reasoningWithheld
+            ? { ...storedPage, events: storedPage.events.map(withholdSessionEventReasoning) }
+            : storedPage;
           if (requestedResultMode === "compact") {
             const event = dbPage.events[0];
             const result = event

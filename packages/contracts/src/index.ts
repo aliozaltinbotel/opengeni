@@ -20978,6 +20978,39 @@ export const TurnBudgetV1 = z
   );
 export type TurnBudgetV1 = z.infer<typeof TurnBudgetV1>;
 
+/**
+ * Bounds on one session's pending input: the human and API messages the
+ * session accepted (Send or Steer) that no turn has claimed yet, whether they
+ * wait in the prompt queue or are about to run. A Send or Steer through the
+ * API or the first-party MCP that would pass `maxCount` messages or `maxBytes`
+ * stored UTF-8 bytes (message text plus its model context, the new message
+ * included) is refused with 429 `limit_exceeded`,
+ * `details.code: "SESSION_PENDING_INPUT_LIMIT_REACHED"`, and nothing is
+ * written. A pending message older than `ttlMs` no longer counts and is
+ * retired at the session's next such admission: it leaves the queue like a
+ * deleted prompt (`session.queue.changed`, `operation: "delete"`,
+ * `reason: "pending_input_expired"`), its turn is cancelled with that reason
+ * and its `user.message` stays in the history. Deployments set their own
+ * values with `OPENGENI_SESSION_PENDING_INPUT_MAX_COUNT`,
+ * `OPENGENI_SESSION_PENDING_INPUT_MAX_BYTES` and
+ * `OPENGENI_SESSION_PENDING_INPUT_TTL_MS`; these are the defaults.
+ */
+// Pure: a bundle that never reads the limits (the web console) carries none of it.
+export const SESSION_PENDING_INPUT_LIMITS = /* @__PURE__ */ Object.freeze({
+  maxCount: 64,
+  maxBytes: 4_194_304,
+  ttlMs: 604_800_000,
+});
+export type SessionPendingInputLimits = {
+  readonly maxCount: number;
+  readonly maxBytes: number;
+  readonly ttlMs: number;
+};
+/** `error.details.code` of the 429 a Send or Steer past the pending-input bounds receives. */
+export const SESSION_PENDING_INPUT_LIMIT_REACHED = "SESSION_PENDING_INPUT_LIMIT_REACHED";
+/** `cancelReason` of a pending message retired after `SESSION_PENDING_INPUT_LIMITS.ttlMs`. */
+export const SESSION_PENDING_INPUT_EXPIRED = "pending_input_expired";
+
 export const SessionUserMessagePayload = /* @__PURE__ */ defineSchema(() =>
   z
     .object({

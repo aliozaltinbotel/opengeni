@@ -2,9 +2,11 @@ import {
   GOVERNED_MEMBER_REQUIRES_SHARED_WORKSPACE,
   ORGANIZATION_CREATE_GOVERNED,
   ORGANIZATION_GOVERNED_BY_HOST,
+  REALTIME_MODEL_NOT_ALLOWED,
   type GovernedMutation,
   type GovernedMutationChannel,
   type OrganizationGovernancePort,
+  type ReasoningDisclosure,
 } from "@opengeni/contracts/organization-governance";
 import {
   ensureGovernedOrganizationSessionPolicy,
@@ -65,6 +67,81 @@ export async function organizationGovernedByHost(
       `OrganizationGovernancePort.governs must return a boolean, not ${describeValue(governed)}`,
     );
   return governed;
+}
+
+/**
+ * Whether this organization's sessions show the provider's reasoning text.
+ * `"withheld"` only when the bound port sets `reasoningDisclosure: "withheld"`
+ * and governs the organization; without that field nothing is read. A port
+ * that throws, and a failed lookup, fail the caller (closed).
+ */
+export async function organizationReasoningDisclosure(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<ReasoningDisclosure> {
+  if (deps.organizationGovernance?.reasoningDisclosure !== "withheld") return "full";
+  return (await organizationGovernedByHost(deps, organizationId)) ? "withheld" : "full";
+}
+
+/**
+ * The event as a reader of a `"withheld"` organization receives it: an
+ * `agent.reasoning.delta` keeps its envelope (id, sequence, turn, coverage)
+ * and only the numeric `coalescedUntil` of its payload (the last sequence a
+ * coalesced or folded run covers), so cursors and gap detection are unchanged
+ * and no reasoning text is delivered. Every other event is returned as it is.
+ */
+export function withholdSessionEventReasoning<Event extends { type: string; payload: unknown }>(
+  event: Event,
+): Event {
+  if (event.type !== "agent.reasoning.delta") return event;
+  const payload =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : {};
+  const until = payload.coalescedUntil;
+  return {
+    ...event,
+    payload:
+      typeof until === "number" && Number.isSafeInteger(until) ? { coalescedUntil: until } : {},
+  };
+}
+
+/**
+ * The realtime voice models this organization's sessions may use, or null for
+ * no restriction (no `allowedRealtimeModels` on the port, or an organization
+ * the host does not govern). A list that is not strings fails the caller
+ * closed, as a port that throws does.
+ */
+export async function organizationAllowedRealtimeModels(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<ReadonlySet<string> | null> {
+  const allowed: unknown = deps.organizationGovernance?.allowedRealtimeModels;
+  if (allowed === undefined) return null;
+  if (!Array.isArray(allowed) || allowed.some((model) => typeof model !== "string"))
+    throw new OrganizationGovernancePortContractError(
+      "OrganizationGovernancePort.allowedRealtimeModels must be a list of model ids",
+    );
+  if (!(await organizationGovernedByHost(deps, organizationId))) return null;
+  return new Set(allowed as string[]);
+}
+
+/** Raised where a governed organization's host does not allow a realtime voice model. */
+export class RealtimeModelNotAllowedError extends Error {
+  readonly name = "RealtimeModelNotAllowedError";
+  readonly code = REALTIME_MODEL_NOT_ALLOWED;
+  constructor(readonly model: string) {
+    super("This voice model is not available in this organization.");
+  }
+}
+
+/** Refuses a realtime voice model outside the governing host's allowlist. */
+export async function requireOrganizationRealtimeModelAllowed(
+  deps: OrganizationGovernanceDeps,
+  input: { organizationId: string; model: string },
+): Promise<void> {
+  const allowed = await organizationAllowedRealtimeModels(deps, input.organizationId);
+  if (allowed && !allowed.has(input.model)) throw new RealtimeModelNotAllowedError(input.model);
 }
 
 function describeValue(value: unknown): string {

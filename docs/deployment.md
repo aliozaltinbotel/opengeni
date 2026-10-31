@@ -3216,6 +3216,7 @@ The runtime secret must provide values such as:
 - `OPENGENI_NATS_URL` when not using in-cluster NATS
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
 - optional `OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS` (positive integer milliseconds, default `20000`): how long one HTTP-originated session/workspace mutation may wait to enter the workspace control prefix before the API answers the retryable 503 `WORKSPACE_CONTROL_BUSY`; the API validates it at boot and worker settlement never uses it. `generateRuntimeArtifacts` carries it into `runtime.env` only when set
+- optional `OPENGENI_SESSION_PENDING_INPUT_MAX_COUNT` (default `64`, at most `10000`), `OPENGENI_SESSION_PENDING_INPUT_MAX_BYTES` (default `4194304`, at most the 32 MiB request body) and `OPENGENI_SESSION_PENDING_INPUT_TTL_MS` (default `604800000`, seven days; at most 30 days): the bounds on one session's pending input (`SESSION_PENDING_INPUT_LIMITS`, see [run lifecycle](run-lifecycle.md)). A Send or Steer past the count or bytes answers 429 `SESSION_PENDING_INPUT_LIMIT_REACHED`; `generateRuntimeArtifacts` carries each into `runtime.env` only when set
 - `OPENGENI_OPENAI_API_KEY` or Azure OpenAI equivalents
 - optional `OPENGENI_OPENROUTER_API_KEY` for the deployment-managed reviewed
   OpenRouter rail; keep it in the runtime Secret, never catalog JSON

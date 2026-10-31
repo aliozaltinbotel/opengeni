@@ -909,6 +909,40 @@ describe("API helpers", () => {
     }
   });
 
+  test("challenges a workspace MCP request the deployment perimeter refuses", async () => {
+    const workspaceId = "00000000-0000-4000-8000-000000000001";
+    const app = createApp({
+      settings: testSettings({
+        productAccessMode: "configured",
+        authRequired: true,
+        accessKey: "configured-deployment-access-key",
+        mcpOauthEnabled: true,
+        publicBaseUrl: "https://api.example.test",
+      }),
+      db: { execute: async () => [] } as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+
+    for (const headers of [{}, { authorization: "Bearer not-a-prefixed-token" }]) {
+      const path = `/v1/workspaces/${workspaceId}/mcp`;
+      const response = await app.request(`http://attacker.example${path}`, {
+        method: "POST",
+        headers: { ...headers, "x-forwarded-host": "attacker.example" },
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toBe(
+        `Bearer resource_metadata="https://api.example.test/.well-known/oauth-protected-resource${path}", scope="mcp:access"`,
+      );
+      expect(await response.json()).toEqual({ error: "unauthorized" });
+
+      const rest = await app.request(`/v1/workspaces/${workspaceId}/tools/catalog`, { headers });
+      expect(rest.status).toBe(401);
+      expect(rest.headers.get("www-authenticate")).toBeNull();
+    }
+  });
+
   test("returns secret-safe typed bounded /v1 errors with a correlation id", async () => {
     const app = createApp({
       settings: testSettings(),

@@ -23,6 +23,7 @@ import {
 } from "@opengeni/events";
 import type { Observability } from "@opengeni/observability";
 import { MANAGED_AUTH_ACTOR_EPOCH_HEADER } from "@opengeni/core/managed-auth-session-sets";
+import { withholdSessionEventReasoning } from "@opengeni/core";
 import { subscribeSessionListHints, type SessionListHintIds } from "./session-list-hints";
 
 const SESSION_REPLAY_PAGE_SIZE = 100;
@@ -308,6 +309,10 @@ export async function sseSessionStream(
   signal: AbortSignal,
   options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  // A withheld organization gets each `agent.reasoning.delta` at its sequence
+  // with no text, after coalescing, on the batch, the replay and live frames.
+  const deliverable = (event: SessionEvent): SessionEvent =>
+    options.withholdReasoning === true ? withholdSessionEventReasoning(event) : event;
   if (isHttp1BrowserBatch(options)) {
     const { events } = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
@@ -321,7 +326,7 @@ export async function sseSessionStream(
     );
     return finiteSseBatchResponse(
       compactProjection.events.map((event) =>
-        formatSessionEventSse(event, coverage.get(event.sequence) ?? event.sequence),
+        formatSessionEventSse(deliverable(event), coverage.get(event.sequence) ?? event.sequence),
       ),
       options,
     );
@@ -417,7 +422,7 @@ export async function sseSessionStream(
       );
       for (const projected of compactProjection.events) {
         const coveredThrough = coverage.get(projected.sequence) ?? projected.sequence;
-        await writeFrame(formatSessionEventSse(projected, coveredThrough));
+        await writeFrame(formatSessionEventSse(deliverable(projected), coveredThrough));
         lastSent = coveredThrough;
       }
       if (lastSent <= previousLastSent) {
@@ -1265,7 +1270,14 @@ async function collectFiniteSseBatch(
   return bytes.buffer;
 }
 
-export type SessionSseDeliveryOptions = SseDeliveryOptions;
+export type SessionSseDeliveryOptions = SseDeliveryOptions & {
+  /**
+   * The session's organization withholds the provider's reasoning
+   * (`OrganizationGovernancePort.reasoningDisclosure`): each reasoning event is
+   * delivered at its sequence without text.
+   */
+  withholdReasoning?: boolean;
+};
 
 function sseObservationReporter(
   stream: SseStreamKind,

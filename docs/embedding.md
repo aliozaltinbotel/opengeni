@@ -966,6 +966,8 @@ type OrganizationGovernancePort = {
   }): "allow" | "refuse";
   memberRouteAccess?: "allowlist";
   organizationCreation?: "host";
+  reasoningDisclosure?: "full" | "withheld";
+  allowedRealtimeModels?: readonly string[];
 };
 ```
 
@@ -1022,6 +1024,40 @@ keep each route's own checks; so does a caller with no grant in the workspace
 and nothing tells an outsider the organization exists. MCP OAuth clients
 authenticate inside `/mcp` and get that route's own answer. A guarded path
 that resolves no handler template is refused for a person (fail closed).
+
+**Reasoning disclosure (opt-in).** With `reasoningDisclosure: "withheld"` on
+the port, the provider's reasoning text (OpenAI reasoning summaries, Anthropic
+thinking and chat-completions reasoning) never leaves the server for a session
+of an organization the host governs, whoever reads it. Every
+`agent.reasoning.delta` keeps its id, sequence, turn and coverage, so cursors,
+replay and gap detection are unchanged, and is delivered without text (the
+payload keeps only a numeric `coalescedUntil`) on
+`GET .../sessions/:id/events/stream` (live, replay and the `http1-bounded`
+batch), `GET .../sessions/:id/events` in every mode and payload mode
+(a forensic page then answers `X-OpenGeni-Forensic-Exact: false`), and the MCP
+`session_events` debug and compact reads. The stock transcript draws nothing
+for a reasoning event without text, so a governed reader sees no thinking row
+at all; there is no placeholder. Session reads, turns, the model-context read,
+the MCP conversation, results and tools views, `session_wait` and the Slack and
+Teams deliveries carry no reasoning text, and a published Site already omits
+reasoning events. Stored events and model history are unchanged; the setting
+only changes what is delivered. Give the worker the same port
+(`ActivityDependencies.organizationGovernance`) and a turn of such an
+organization also asks the provider for no reasoning summary; Anthropic
+thinking and chat-completions reasoning are not controlled by that request, so
+the server-side removal is the guarantee. Unset or `"full"`, nothing changes.
+
+**Realtime voice models (opt-in).** With `allowedRealtimeModels` on the port
+(realtime catalog ids, for example `opengeni-gateway/openai/gpt-realtime-2.1`),
+a governed organization's `GET /v1/workspaces/:id/realtime-model-catalog`
+lists only those models, in catalog order, and the server refuses any other
+model: a voice start (`POST .../sessions/:id/realtime`) answers `403` with
+`error.details.code = "REALTIME_MODEL_NOT_ALLOWED"` and the refused `model`
+before anything is written, and a WebRTC or WebSocket connection of a voice
+mode whose model is no longer allowed is refused the same way. An empty list
+allows no voice model. A saved workspace or organization default outside the
+list is simply not listed. Without the field, and for an organization the
+host does not govern, the stock catalog and starts are unchanged.
 
 The allowlist (exported from `@opengeni/api-router/app`) is the workspace
 itself, the session list and create, the composer's reads
@@ -2486,6 +2522,28 @@ renders it once the person is signed in, before the workspace access and
 onboarding gates. These pages render inside `outsideWorkspaceProviders`
 (components taking only `children`), not inside `shellProviders`, which take a
 workspace.
+
+`chatPanel` opens the console's own chat as a side panel beside the
+extension's rail pages. It is `{ enabled(context) }`, which decides per page
+(`context` is `{ workspaceId, pathname }`); a page it answers false for, and
+every `mode: "settings"` page, has no panel. A page opens the panel with
+`openChatPanel(context)` from `@opengeni/react/app/chat-panel`, which returns
+false and changes nothing where no panel is offered (so the page can keep its
+own link to a new chat there). The panel is the signed-in person's chat on the
+console's own client and app context, like the Site view's chat panel: the
+extension's tool cards, `sessionIndicator` and `starters` apply in it, and an
+open chat has its one stream. `context` is checked like `messageContext`
+(labelled items with unique ids and only `id`, `text`, `label` and `detail`);
+a refused value opens the panel without it and warns once
+(`HOST_CHAT_PANEL_CONTEXT_FAILED`). The items show as pills beside the page's
+own `messageContext`, which still resolves at each send, and go with every
+message; the person can leave any of them out. Opening the panel again while
+a chat is open keeps that chat and replaces the items. A closed panel opens on
+a new chat; one created there starts with the workspace's default tools, like
+the Site view's chats. "Open as a full chat" opens that chat's route with the
+items the person kept, still sent beside the page's context there. The panel's
+code loads with the Site view's chunk the first time a page opens it, not at
+startup.
 
 `hiddenNativeDestinations` hides a native destination wherever the console
 offers it: its nav entries, its settings-rail and settings-search entries, its

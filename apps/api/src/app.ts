@@ -80,6 +80,7 @@ import {
   ClientConfig,
   CodemodeCallRequest,
   ErrorEnvelope,
+  SESSION_PENDING_INPUT_LIMIT_REACHED,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
   OPENGENI_CORRELATION_HEADER,
@@ -160,6 +161,8 @@ import {
   scheduledTaskTargetAccessHttpError,
   sessionUsageLimitHttpError,
   workspaceControlBusyHttpError,
+  sessionPendingInputLimitHttpError,
+  realtimeModelNotAllowedHttpError,
 } from "./http/api-error";
 import {
   isRequestBodyValidationError,
@@ -2575,7 +2578,9 @@ export function createAppComposition(deps: AppDependencies): {
               allowanceExhaustedHttpError(rawError) ??
               subscriptionSettingsLockedHttpError(rawError) ??
               workspaceControlBusyHttpError(rawError) ??
+              sessionPendingInputLimitHttpError(rawError) ??
               scheduledTaskTargetAccessHttpError(rawError) ??
+              realtimeModelNotAllowedHttpError(rawError) ??
               agentConfigHttpError(rawError) ??
               modelUnavailableHttpError(rawError) ??
               connectionAccountSelectionHttpError(rawError) ??
@@ -2610,6 +2615,12 @@ export function createAppComposition(deps: AppDependencies): {
       apiError?.details?.code === DATABASE_CONTENTION_ERROR_DETAIL_CODE
     ) {
       c.header("retry-after", "1");
+    }
+    if (
+      apiError?.details?.code === SESSION_PENDING_INPUT_LIMIT_REACHED &&
+      typeof apiError.details.retryAfterSeconds === "number"
+    ) {
+      c.header("retry-after", String(apiError.details.retryAfterSeconds));
     }
     const envelope = ErrorEnvelope.parse({
       error: {
