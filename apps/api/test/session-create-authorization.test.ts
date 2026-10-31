@@ -1,3 +1,4 @@
+import { beginSessionRealtimeInTransaction, withWorkspaceSubjectSessionActivityRls } from "@opengeni/db";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   signDelegatedAccessToken,
@@ -38,9 +39,16 @@ afterAll(async () => {
 
 const noop = async () => undefined;
 
-function appWith(port: SessionAuthorizationPort) {
+function appWith(
+  port: SessionAuthorizationPort,
+  servers: ReturnType<typeof testSettings>["mcpServers"] = [],
+) {
   return createApp({
-    settings: testSettings({ productAccessMode: "managed", delegationSecret: SECRET }),
+    settings: testSettings({
+      productAccessMode: "managed",
+      delegationSecret: SECRET,
+      mcpServers: servers,
+    }),
     db: client.db,
     bus: new MemoryEventBus(),
     workflowClient: {
@@ -74,7 +82,7 @@ async function person() {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     subjectId: grant.subjectId,
-    permissions: ["sessions:create", "sessions:read"],
+    permissions: ["sessions:create", "sessions:read", "sessions:control"],
     principalKind: "human_session",
     exp: Math.floor(Date.now() / 1000) + 3_600,
   })}`;
@@ -154,7 +162,7 @@ describe("session create with a first message asks the host", () => {
     expect(await sessionCount(who.grant.workspaceId)).toBe(0);
   });
 
-  test("a create without a first message, and a port without the method, are unchanged", async () => {
+  test("a create without a first message asks the host; a port without the method is unchanged", async () => {
     let asked = 0;
     const refusing = appWith({
       ...allowEveryTarget,
@@ -164,11 +172,193 @@ describe("session create with a first message asks the host", () => {
       },
     });
     const who = await person();
-    // Without a first message the route gives its own answer; the host is not asked.
-    expect((await create(refusing, who, {})).code).not.toBe("SESSION_CREATE_NOT_AUTHORIZED");
-    expect(asked).toBe(0);
+    // Empty shells are authorized before they can admit a later turn.
+    expect((await create(refusing, who, { startMode: "realtime" })).code).toBe(
+      "SESSION_CREATE_NOT_AUTHORIZED",
+    );
+    expect(asked).toBe(1);
     expect((await create(appWith(allowEveryTarget), who, { initialMessage: "hi" })).status).toBe(
       202,
     );
   });
+});
+
+test("an unknown required server refuses before any shell is created", async () => {
+  const app = appWith({
+    ...allowEveryTarget,
+    authorizeSessionCreate: async () => ({
+      allowed: true,
+      requiredToolServers: [{ id: "missing" }],
+    }),
+  });
+  const who = await person();
+  expect(await create(app, who, { initialMessage: "hello" })).toEqual({
+    status: 503,
+    code: "SESSION_AUTHORIZATION_UNAVAILABLE",
+  });
+  expect(await sessionCount(who.grant.workspaceId)).toBe(0);
+});
+
+test("the created hook sees a committed shell with no turn and failure cancels it", async () => {
+  let createdId = "";
+  const app = appWith({
+    ...allowEveryTarget,
+    sessionCreated: async (input) => {
+      createdId = input.sessionId;
+      expect(input.actor).toMatchObject({ kind: "subject" });
+      expect(input.rootSessionId).toBe(input.sessionId);
+      const [row] = await shared.admin<
+        { state: string; turns: number }[]
+      >`select s.host_session_create_state as state, (select count(*)::int from session_turns t where t.session_id=s.id) as turns from sessions s where s.id=${input.sessionId}`;
+      expect(row).toEqual({ state: "pending", turns: 0 });
+      throw new Error("host unavailable");
+    },
+  });
+  const who = await person();
+  expect(await create(app, who, { initialMessage: "hello" })).toEqual({
+    status: 503,
+    code: "SESSION_AUTHORIZATION_UNAVAILABLE",
+  });
+  expect(createdId).not.toBe("");
+  const [row] = await shared.admin<
+    { state: string; turns: number }[]
+  >`select s.host_session_create_state as state, (select count(*)::int from session_turns t where t.session_id=s.id) as turns from sessions s where s.id=${createdId}`;
+  expect(row).toEqual({ state: "failed", turns: 0 });
+  const [archive]=await shared.admin<{archived:boolean}[]>`select archived from session_pins where session_id=${createdId} and subject_id=${who.grant.subjectId}`;
+  expect(archive?.archived).toBe(true);
+
+});
+
+test("a successful created hook opens the shell before admitting its initial turn", async () => {
+  let sessionId = "";
+  const app = appWith({
+    ...allowEveryTarget,
+    sessionCreated: async (input) => {
+      sessionId = input.sessionId;
+    },
+  });
+  const who = await person();
+  expect((await create(app, who, { initialMessage: "hello" })).status).toBe(202);
+  const [row] = await shared.admin<
+    { state: string; turns: number }[]
+  >`select s.host_session_create_state as state, (select count(*)::int from session_turns t where t.session_id=s.id) as turns from sessions s where s.id=${sessionId}`;
+  expect(row).toEqual({ state: "ready", turns: 1 });
+});
+
+test("a concurrent append to a pending shell cannot admit a turn", async () => {
+  const who = await person();
+  let appendStatus = 0;
+  let createdId = "";
+  const app = appWith({
+    ...allowEveryTarget,
+    sessionCreated: async (input) => {
+      createdId = input.sessionId;
+      await expect(withWorkspaceSubjectSessionActivityRls(client.db,who.grant.workspaceId,who.grant.subjectId,tx=>beginSessionRealtimeInTransaction(tx,{accountId:who.grant.accountId,workspaceId:who.grant.workspaceId,sessionId:input.sessionId,operationId:crypto.randomUUID(),ownerSubjectId:who.grant.subjectId,browserInstanceId:crypto.randomUUID(),ownerKey:crypto.randomUUID(),model:"gpt-live-1-boulder-alpha"}))).rejects.toMatchObject({code:"HOST_SESSION_CREATE_NOT_READY"});
+
+      const response = await app.request(
+        `/v1/workspaces/${who.grant.workspaceId}/sessions/${input.sessionId}/events`,
+        {
+          method: "POST",
+          headers: { authorization: who.authorization, "content-type": "application/json" },
+          body: JSON.stringify({
+            type: "user.message",
+            clientEventId: crypto.randomUUID(),
+            payload: { text: "concurrent" },
+          }),
+        },
+      );
+      appendStatus = response.status;
+      expect(response.status).toBeGreaterThanOrEqual(400);
+      const [row] = await shared.admin<
+        { count: number }[]
+      >`select count(*)::int as count from session_turns where session_id=${input.sessionId}`;
+      expect(row?.count).toBe(0);
+    },
+  });
+  expect((await create(app, who, { initialMessage: "hello" })).status).toBe(202);
+  expect(appendStatus).toBeGreaterThanOrEqual(400);
+  const after = await app.request(
+    `/v1/workspaces/${who.grant.workspaceId}/sessions/${createdId}/events`,
+    {
+      method: "POST",
+      headers: { authorization: who.authorization, "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "user.message",
+        clientEventId: crypto.randomUUID(),
+        payload: { text: "after hook" },
+      }),
+    },
+  );
+  expect(after.status).toBe(202);
+});
+
+test("a deadline failure cannot be reopened by a late callback", async () => {
+  let sessionId = "";
+  const app = appWith({
+    ...allowEveryTarget,
+    sessionCreated: async (input) => {
+      sessionId = input.sessionId;
+      await new Promise((resolve) => setTimeout(resolve, 5_200));
+    },
+  });
+  const who = await person();
+  expect(await create(app, who, { initialMessage: "hello" })).toEqual({
+    status: 503,
+    code: "SESSION_AUTHORIZATION_UNAVAILABLE",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const [row] = await shared.admin<
+    { state: string; turns: number }[]
+  >`select s.host_session_create_state as state,(select count(*)::int from session_turns t where t.session_id=s.id) as turns from sessions s where s.id=${sessionId}`;
+  expect(row).toEqual({ state: "failed", turns: 0 });
+});
+
+test("host-required internal servers are eagerly persisted, while public input cannot mint requirements", async () => {
+  const servers = [
+    {
+      id: "host",
+      url: "https://host.example/mcp",
+      cacheToolsList: false,
+      visibility: "internal" as const,
+    },
+  ];
+  let sessionId = "";
+  const app = appWith(
+    {
+      ...allowEveryTarget,
+      authorizeSessionCreate: async () => ({
+        allowed: true,
+        requiredToolServers: [{ id: "host" }],
+      }),
+      sessionCreated: async (input) => {
+        sessionId = input.sessionId;
+      },
+    },
+    servers,
+  );
+  const who = await person();
+  expect(
+    (await create(app, who, { initialMessage: "hello", excludedMcpServerIds: ["host"] })).status,
+  ).toBe(202);
+  const [row] = await shared.admin<
+    { policy: { hostRequiredMcpServerIds: string[] }; tools: unknown[] }[]
+  >`select tool_policy as policy,tools from sessions where id=${sessionId}`;
+  expect(row?.policy.hostRequiredMcpServerIds).toEqual(["host"]);
+  expect(row?.tools).toContainEqual({ kind: "mcp", id: "host", eager: true });
+  const untrusted = await create(appWith(allowEveryTarget, servers), who, {
+    initialMessage: "hello",
+    hostRequiredMcpServerIds: ["host"],
+  });
+  expect(untrusted.status).toBe(202);
+  const [untrustedRow] = await shared.admin<
+    { policy: { hostRequiredMcpServerIds?: string[] }; tools: { id: string }[] }[]
+  >`select tool_policy as policy,tools from sessions where workspace_id=${who.grant.workspaceId} and id<>${sessionId}`;
+  expect(untrustedRow?.policy.hostRequiredMcpServerIds).toBeUndefined();
+  expect(untrustedRow?.tools.some((tool) => tool.id === "host")).toBe(false);
+});
+
+test("create and created callbacks retain the configured port receiver",async()=>{
+  const port={...allowEveryTarget,marker:"bound-port",async authorizeSessionCreate(){expect(this.marker).toBe("bound-port");return {allowed:true as const};},async sessionCreated(){expect(this.marker).toBe("bound-port");}};
+  const who=await person();
+  expect((await create(appWith(port),who,{initialMessage:"hello"})).status).toBe(202);
 });

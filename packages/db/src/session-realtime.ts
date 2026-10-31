@@ -37,6 +37,7 @@ const SESSION_REALTIME_MIN_LEASE_MS = 5_000;
 const SESSION_REALTIME_MAX_LEASE_MS = 120_000;
 
 export type SessionRealtimeConflictCode =
+  | "HOST_SESSION_CREATE_NOT_READY"
   | "SESSION_CANCELLED"
   | "CONTROL_NOT_ACTIVE"
   | "REALTIME_ACTIVE"
@@ -368,6 +369,9 @@ async function lockRealtimeSession(
 }
 
 function assertRealtimeAdmission(session: SessionRow): void {
+  if (session.hostSessionCreateState !== "ready") {
+    throw new SessionRealtimeConflictError("HOST_SESSION_CREATE_NOT_READY", "Host session creation has not completed");
+  }
   if (session.status === "cancelled") {
     throw new SessionRealtimeConflictError(
       "SESSION_CANCELLED",

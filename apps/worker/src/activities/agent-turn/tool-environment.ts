@@ -281,7 +281,10 @@ export async function prepareTurnToolPolicy(deps: PrepareTurnToolPolicyDeps) {
     ]),
   });
   const effectivePolicyTools = resolvedToolPolicy.toolRefs.filter(
-    (tool) => tool.kind !== "mcp" || families.allowsMcpServer(tool.id),
+    (tool) =>
+      tool.kind !== "mcp" ||
+      session.toolPolicy.hostRequiredMcpServerIds?.includes(tool.id) ||
+      families.allowsMcpServer(tool.id),
   );
   const turnTools = withFirstPartyTools(runSettings, effectivePolicyTools);
   // W1 (secrets delivery): the turn no longer loads or decrypts Variable Sets,

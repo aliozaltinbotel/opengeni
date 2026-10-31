@@ -362,3 +362,21 @@ test("internal MCP visibility preserves retained selections and normal workspace
   });
   expect(recovered.effectivePolicy.effectiveIds).toEqual(["opengeni"]);
 });
+
+test("host-required internal servers stay eager and mandatory across policy modes and exclusions", () => {
+  for (const mode of ["workspace_default", "explicit", "inherited"] as const) {
+    const resolved = resolveSessionToolPolicy({
+      toolPolicy: {
+        mode,
+        inheritedFromSessionId: null,
+        excludedMcpServerIds: ["host"],
+        hostRequiredMcpServerIds: ["host"],
+      },
+      sessionTools: [],
+      availableMcpServerIds: ["host", "opengeni"],
+      defaultMcpServerIds: [],
+    });
+    expect(resolved.toolRefs).toContainEqual(mcp("host", false, true));
+    expect(resolved.effectivePolicy.mandatoryIds).toContain("host");
+  }
+});

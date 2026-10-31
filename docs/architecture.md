@@ -22,6 +22,21 @@ funding. Migration 0845 retains the canonical signup issuer and one-human/one-or
 receipt but issues zero money; monthly Free funding replaces new signup bonuses.
 Legacy positive receipts remain eligible and retain their balances; no backfill.
 
+Hosts may optionally authorize every session creation through `SessionAuthorizationPort.authorizeSessionCreate`,
+including child, agent-created, and historical-import sessions. Its create-specific decision can add up to sixteen configured MCP
+servers, including internal servers. The session's existing tool-policy record retains these as required,
+eager tools, inherited by children and preserved across tool-policy and agent-configuration writes.
+`sessionCreated` runs after the shell commits and before initial turn admission. Opted-in shells use a durable
+pending admission flag; a database insert fence blocks every turn writer and realtime admission while the hook is pending or failed.
+A five-second deadline bounds creation callbacks. Success opens admission; failure leaves the shell closed
+and invokes native cancellation. Subject-created roots additionally use the existing personal archive projection.
+The immutable failed-create flag projects the exact failed session as archived in existing reads and archive
+filters, including child and service-created sessions. It cannot be cleared by personal unarchive writes and
+never archives a failed child's parent. Historical imports have no executable turns: failure only commits the
+failed admission flag, preserving their read-only historical status and events rather than issuing execution
+cancellation. Ordinary personal archive preferences remain unchanged. Concurrent keyed retries never run a second hook. Hosts without either
+creation method retain ordinary creation and the ready default; native authorization still applies.
+
 Keyed authenticated session creation records a write-once `sessions.creation_receipt`
 in the shell insert transaction, before start/dispatch. It binds the complete normalized
 public request digest and original creator to the exact account, workspace, session and

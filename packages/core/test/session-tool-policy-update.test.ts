@@ -789,3 +789,41 @@ describe("durable session tool-policy updates", () => {
     ).rejects.toThrow(`Session not found: ${foreign.id}`);
   }, 180_000);
 });
+
+test("host-required ids survive explicit edits and excluded workspace defaults", async () => {
+  if (!available) throw new Error("PostgreSQL unavailable");
+  const owner = await workspace("host-required-policy");
+  const created = await session(firstDb, {
+    ...owner,
+    tools: [OPENGENI, { ...DOCS, eager: true }],
+    toolPolicy: { ...EXPLICIT, hostRequiredMcpServerIds: ["docs"] },
+  });
+  const edited = await updateSessionToolPolicy(
+    deps(firstDb, new MemoryEventBus()),
+    grant(owner.workspaceId, owner.accountId),
+    created.id,
+    explicitTools([OPENGENI], 1),
+  );
+  expect(edited.toolPolicy.hostRequiredMcpServerIds).toEqual(["docs"]);
+  expect(edited.tools).toContainEqual({ ...DOCS, eager: true });
+  const reset = await updateSessionToolPolicy(
+    deps(firstDb, new MemoryEventBus()),
+    grant(owner.workspaceId, owner.accountId),
+    created.id,
+    { mode: "workspace_default", expectedVersion: edited.toolPolicyVersion },
+  );
+  expect(reset.toolPolicy.hostRequiredMcpServerIds).toEqual(["docs"]);
+  expect(reset.tools).toContainEqual({ ...DOCS, eager: true });
+  const excluded = await updateSessionToolPolicy(
+    deps(firstDb, new MemoryEventBus()),
+    grant(owner.workspaceId, owner.accountId),
+    created.id,
+    {
+      mode: "workspace_default",
+      expectedVersion: reset.toolPolicyVersion,
+      excludedMcpServerIds: ["docs"],
+    },
+  );
+  expect(excluded.toolPolicy.hostRequiredMcpServerIds).toEqual(["docs"]);
+  expect(excluded.tools).toContainEqual({ ...DOCS, eager: true });
+});
