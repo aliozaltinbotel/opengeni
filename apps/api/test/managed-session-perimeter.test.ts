@@ -32,6 +32,13 @@ function appWithSessionVerifier(options: {
 const cookie = { cookie: "better-auth.session_token=signed-session" };
 
 describe("managed browser admission at the deployment perimeter", () => {
+  test("managed mode without the canonical verifier never admits cookie presence", async () => {
+    const app = new Hono();
+    app.use("*", requireAccessKey(testSettings({ productAccessMode: "managed", authRequired: true, accessKey: "private-deployment-key" })));
+    app.get("/v1/access/me", (context) => context.json({ reached: true }));
+    expect((await app.request("/v1/access/me", { headers: cookie })).status).toBe(401);
+  });
+
   test("verified current managed sessions reach all three bootstrap reads without a deployment key", async () => {
     const { app, calls } = appWithSessionVerifier();
     for (const path of ["/v1/access/me", "/v1/workspaces", "/v1/organization-memberships"]) {
