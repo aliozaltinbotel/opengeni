@@ -1,0 +1,5 @@
+---
+"@opengeni/react": minor
+---
+
+A web console host extension can open the console's own chat as a side panel beside its rail pages: `HostExtension.chatPanel` is `{ enabled(context) }`, which decides per page, and a page calls `openChatPanel(context)` from `@opengeni/react/app/chat-panel`. The panel is the signed-in person's chat on the console's own client and app context, like the Site view's chat panel, with the extension's tool cards, session indicator and starters, and one stream per open chat. `context` is checked like `messageContext`: a refused value opens the panel without it and warns once (`HOST_CHAT_PANEL_CONTEXT_FAILED`). Its items show as pills beside the page's own `messageContext`, which still resolves at each send, and "Open as a full chat" keeps the items the person did not leave out. `openChatPanel` returns false and changes nothing where no panel is offered: a page `enabled` answers false for, a settings page, or a console without `chatPanel`. A console without it is unchanged.

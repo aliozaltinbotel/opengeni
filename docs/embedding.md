@@ -2487,6 +2487,28 @@ onboarding gates. These pages render inside `outsideWorkspaceProviders`
 (components taking only `children`), not inside `shellProviders`, which take a
 workspace.
 
+`chatPanel` opens the console's own chat as a side panel beside the
+extension's rail pages. It is `{ enabled(context) }`, which decides per page
+(`context` is `{ workspaceId, pathname }`); a page it answers false for, and
+every `mode: "settings"` page, has no panel. A page opens the panel with
+`openChatPanel(context)` from `@opengeni/react/app/chat-panel`, which returns
+false and changes nothing where no panel is offered (so the page can keep its
+own link to a new chat there). The panel is the signed-in person's chat on the
+console's own client and app context, like the Site view's chat panel: the
+extension's tool cards, `sessionIndicator` and `starters` apply in it, and an
+open chat has its one stream. `context` is checked like `messageContext`
+(labelled items with unique ids and only `id`, `text`, `label` and `detail`);
+a refused value opens the panel without it and warns once
+(`HOST_CHAT_PANEL_CONTEXT_FAILED`). The items show as pills beside the page's
+own `messageContext`, which still resolves at each send, and go with every
+message; the person can leave any of them out. Opening the panel again while
+a chat is open keeps that chat and replaces the items. A closed panel opens on
+a new chat; one created there starts with the workspace's default tools, like
+the Site view's chats. "Open as a full chat" opens that chat's route with the
+items the person kept, still sent beside the page's context there. The panel's
+code loads with the Site view's chunk the first time a page opens it, not at
+startup.
+
 `hiddenNativeDestinations` hides a native destination wherever the console
 offers it: its nav entries, its settings-rail and settings-search entries, its
 links, and its URL, which renders the not-found page. `insights` also hides the

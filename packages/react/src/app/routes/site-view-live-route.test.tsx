@@ -98,6 +98,8 @@ mock.module("../app-context", () => ({
 mock.module("../lib/app-api", () => ({ useAppApi: () => ({ request: async () => ({}) }) }));
 mock.module("../lib/navigation", () => ({
   useNavigate: () => async () => {},
+  // For the host chat panel this route's chunk also holds.
+  useLocation: () => ({ pathname: "/" }),
   Link: ({ children }: { children: ReactNode }) => <a href="#link">{children}</a>,
 }));
 mock.module("../lib/console-site", () => ({
@@ -115,7 +117,10 @@ mock.module("../../components/session-conversation", () => ({
     return <div data-conversation={props.sessionId} />;
   },
 }));
-mock.module("../../components/new-conversation", () => ({ NewConversation: () => null }));
+mock.module("../../components/new-conversation", () => ({
+  NewConversation: () => null,
+  NewConversationView: () => null,
+}));
 
 let module: typeof import("./site-view");
 let ownsDom = false;
