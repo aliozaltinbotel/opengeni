@@ -35,6 +35,9 @@ export default defineConfig({
   // A stock build drops extension-only checks from the startup bundle.
   define: hostExtensionDefine(process.env.OPENGENI_WEB_HOST_EXTENSION),
   build: {
+    // Nonce-based hosts allow fonts from self, never data URLs. Vite otherwise
+    // inlines small font subsets (including JetBrains Mono) into the CSS.
+    assetsInlineLimit: (filename) => /\.(?:woff2?|ttf|otf)$/iu.test(filename) ? false : undefined,
     // The canonical post-build budget below computes gzip sizes for the exact
     // initial/session graphs and every chunk. Avoid Vite recomputing compressed
     // sizes for hundreds of lazy syntax assets before that bounded gate runs.

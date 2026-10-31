@@ -17,9 +17,10 @@
 
 type NonceDocument = Document & { __opengeniCspNonce?: string };
 
-/** The nonce in `<meta property="csp-nonce">`, or undefined. */
+/** The host page nonce: Vite property convention, or the existing name convention. */
 export function readCspNonce(doc: Document): string | undefined {
-  const meta = doc.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]');
+  const meta = doc.querySelector<HTMLMetaElement>('meta[property="csp-nonce"]')
+    ?? doc.querySelector<HTMLMetaElement>('meta[name="csp-nonce"]');
   // Browsers hide a nonce attribute's value from getAttribute once applied.
   const value = meta?.nonce || meta?.getAttribute("nonce") || "";
   return value.trim() === "" ? undefined : value;
