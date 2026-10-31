@@ -170,6 +170,9 @@ import {
 import {
   assertExactNewSessionDraftInTransaction,
   createSession,
+  readHostSessionCreateState,
+  settleHostSessionCreate,
+  setSessionArchive,
   createSessionWithIdempotencyKeyResult,
   canonicalSessionCommandHash,
   frozenInitiatorForCommandActor,
@@ -262,6 +265,10 @@ import {
   grantHasAgentAttemptAuthority,
   requireLiveAgentAttemptAuthorization,
   requireSessionAuthorization,
+  requireSessionCreateAuthorization,
+  authorizeSessionCreateForActor,
+  withSessionCreateHostDeadline,
+  SessionAuthorizationUnavailableError,
   SessionAuthorizationDeniedError,
 } from "../session-authorization";
 import { assertNativeMcpConnectionRef } from "./native-mcp-connection-admission";
@@ -919,6 +926,8 @@ type AgentChildSessionCreatePresentation = {
 
 /** Trusted entry-point options for creating a session outside the REST body. */
 export type SessionCreateRequestOptions = {
+  /** Trusted calling entry point; never part of the request body. */
+  authorizationSurface?: import("@opengeni/contracts").SessionAuthorizationSurface;
   /** Internal durable Teams inbox proof; never accepted from a REST request body. */
   teamsConversation?: TeamsConversationProof;
   /**
@@ -988,6 +997,13 @@ export async function createAndStartSessionWithOutcome(input: {
   /** Internal database-only composition seam. The exact session shell and this
    * linkage commit together before its first event/turn can be initialized. */
   beforeCreateCommit?: (tx: Database, sessionId: string) => Promise<void>;
+  hostSessionCreated?: (session: Session) => Promise<void>;
+  /** Native accepted-work authority; only trusted worker composition supplies it. */
+  sessionCreateHost?: {
+    port: import("@opengeni/contracts").SessionAuthorizationPort;
+    actor: import("@opengeni/contracts").SessionAuthorizationActor;
+    configuredServers: readonly { id: string }[];
+  };
   /** Backend-only accepted-work composition. Recheck live caller authority
    * here before capturing; session-shell authorization may have happened in
    * an earlier transaction. Called only for a newly inserted initial turn. */
@@ -1166,7 +1182,56 @@ export async function createAndStartSessionWithOutcome(input: {
   allowNestedAgentDepthIncrease?: boolean;
   subjectId?: string | null;
 }): Promise<CreateSessionOutcome> {
-  if(Object.hasOwn(input.metadata,"nativeImportedHistoryOrigins")) throw new Error("nativeImportedHistoryOrigins is server-owned");
+  const host = input.sessionCreateHost;
+  if (host && (host.port.authorizeSessionCreate || host.port.sessionCreated)) {
+    const decision = await authorizeSessionCreateForActor(
+      host.port,
+      {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        actor: host.actor,
+        surface: "core",
+      },
+      host.configuredServers,
+    );
+    const ids = [
+      ...new Set([
+        ...(input.toolPolicy.hostRequiredMcpServerIds ?? []),
+        ...(decision.requiredToolServers?.map((server) => server.id) ?? []),
+      ]),
+    ];
+    const hook = host.port.sessionCreated;
+    input = {
+      ...input,
+      tools: ids.length
+        ? mergeToolRefs(
+            input.tools,
+            ids.map((id) => ({ kind: "mcp" as const, id, eager: true })),
+          )
+        : input.tools,
+      toolPolicy: ids.length
+        ? { ...input.toolPolicy, hostRequiredMcpServerIds: ids }
+        : input.toolPolicy,
+      ...(hook
+        ? {
+            hostSessionCreated: async (session: Session) =>
+              withSessionCreateHostDeadline(() =>
+                hook({
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: session.id,
+                  rootSessionId: session.rootSessionId,
+                  actor: host.actor,
+                  surface: "core",
+                }),
+              ),
+          }
+        : {}),
+    };
+  }
+
+  if (Object.hasOwn(input.metadata, "nativeImportedHistoryOrigins"))
+    throw new Error("nativeImportedHistoryOrigins is server-owned");
   const frozenBundledSkillIds = bundledSkillSelectionForAgentConfig(
     input.bundledSkillIds,
     input.agentConfig,
@@ -1327,6 +1392,7 @@ export async function createAndStartSessionWithOutcome(input: {
           bundledSkillIds: input.bundledSkillIds,
           tools: input.tools,
           toolPolicy: input.toolPolicy,
+          hostSessionCreatePending: input.hostSessionCreated !== undefined,
           metadata: sessionMetadata,
           initialAgentLearning: input.initialAgentLearning,
 
@@ -1387,6 +1453,14 @@ export async function createAndStartSessionWithOutcome(input: {
     }
     const { session: keyed, created } = keyedResult;
     if (!created) {
+      // A replay never runs a second callback for the same committed shell.
+      // Retry after the original create settles; failed creations stay closed.
+      const hostState = await readHostSessionCreateState(input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: keyed.id,
+      });
+      if (hostState !== "ready") throw new SessionAuthorizationUnavailableError();
       const persistedPolicy = readTurnExecutionPolicyV1(keyed.metadata);
       const finished = await finishStartSession(
         keyed.temporalWorkflowId
@@ -1442,6 +1516,7 @@ export async function createAndStartSessionWithOutcome(input: {
         bundledSkillIds: input.bundledSkillIds,
         tools: input.tools,
         toolPolicy: input.toolPolicy,
+        hostSessionCreatePending: input.hostSessionCreated !== undefined,
         metadata: sessionMetadata,
         initialAgentLearning: input.initialAgentLearning,
         ...(input.createdBy ? { createdBy: input.createdBy } : {}),
@@ -1529,6 +1604,8 @@ async function finishNewlyCreatedSession(
   try {
     return await finishStartSession(input, session);
   } catch (error) {
+    if (input.hostSessionCreated && error instanceof SessionAuthorizationUnavailableError)
+      throw error;
     try {
       await discardUninitializedSessionShell(input.db, {
         accountId: session.accountId,
@@ -1579,6 +1656,7 @@ async function finishStartSession(
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
     startupObservability?: SessionStartObservability | null;
+    hostSessionCreated?: (session: Session) => Promise<void>;
     initialMessage: string;
     captureInitialTurnAuthority?: (
       tx: Database,
@@ -1632,6 +1710,38 @@ async function finishStartSession(
   },
   session: Session,
 ): Promise<{ session: CreateSessionResponse; changed: boolean }> {
+  if (input.hostSessionCreated) {
+    const scope = {
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+    };
+    const state = await readHostSessionCreateState(input.db, scope);
+    if (state === "failed") throw new SessionAuthorizationUnavailableError();
+    if (state === "pending") {
+      try {
+        await input.hostSessionCreated(session);
+        await settleHostSessionCreate(input.db, { ...scope, ready: true });
+      } catch (error) {
+        let cause: unknown = error;
+        try {
+          await settleHostSessionCreate(input.db, { ...scope, ready: false });
+          if (!session.parentSessionId && session.createdBy?.kind === "subject") {
+            await setSessionArchive(input.db, {
+              workspaceId: session.workspaceId,
+              sessionId: session.id,
+              subjectId: session.createdBy.subjectId,
+              archived: true,
+            });
+          }
+        } catch (closingError) {
+          // A database outage leaves the durable pending fence closed.
+          cause = closingError;
+        }
+        throw new SessionAuthorizationUnavailableError({ cause });
+      }
+    }
+  }
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
   // machine. Home backend and active route are independent: a backend:none
@@ -3315,6 +3425,12 @@ async function createSessionForRequestInFileScope(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
   );
+  const hostCreate = await requireSessionCreateAuthorization(
+    unresolvedDeps,
+    grant,
+    requestOptions.authorizationSurface ?? "core",
+    runtimeSettings.mcpServers,
+  );
   const requestedMcpPolicies =
     payload.mcpApprovalPolicies ?? parentSession?.mcpApprovalPolicies ?? {};
   const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = {};
@@ -4224,9 +4340,39 @@ async function createSessionForRequestInFileScope(
             await applyInitialUsageLimit(tx, sessionId);
           }
         : externalBeforeCreateCommit;
+  const createdHook = unresolvedDeps.sessionAuthorization?.sessionCreated;
+  const hostRequiredIds = [
+    ...new Set([
+      ...(parentSession?.toolPolicy.hostRequiredMcpServerIds ?? []),
+      ...(hostCreate?.decision.requiredToolServers?.map((server) => server.id) ?? []),
+    ]),
+  ];
+  if (hostRequiredIds.length) {
+    toolPolicy = { ...toolPolicy, hostRequiredMcpServerIds: hostRequiredIds };
+    tools = mergeToolRefs(
+      tools,
+      hostRequiredIds.map((id) => ({ kind: "mcp" as const, id, eager: true })),
+    );
+  }
   let createOutcome: CreateSessionOutcome;
   try {
     createOutcome = await createAndStartSessionWithOutcome({
+      ...(hostCreate && createdHook
+        ? {
+            hostSessionCreated: async (created: Session) => {
+              await withSessionCreateHostDeadline(() =>
+                createdHook({
+                  accountId: grant.accountId,
+                  workspaceId,
+                  sessionId: created.id,
+                  rootSessionId: created.rootSessionId,
+                  actor: hostCreate.actor,
+                  surface: requestOptions.authorizationSurface ?? "core",
+                }),
+              );
+            },
+          }
+        : {}),
       ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
       db,
       bus,
@@ -5826,6 +5972,20 @@ export async function updateSessionToolPolicy(
         }
       }
 
+      if (session.toolPolicy.hostRequiredMcpServerIds?.length) {
+        nextPolicy = {
+          ...nextPolicy,
+          hostRequiredMcpServerIds: session.toolPolicy.hostRequiredMcpServerIds,
+        };
+        nextTools = mergeToolRefs(
+          nextTools,
+          session.toolPolicy.hostRequiredMcpServerIds.map((id) => ({
+            kind: "mcp" as const,
+            id,
+            eager: true,
+          })),
+        );
+      }
       const currentPolicy = session.toolPolicy;
       // JSONB normalizes object-key order on the round trip, so plain
       // JSON.stringify would turn an identical retry into a second mutation
@@ -6092,6 +6252,20 @@ export async function updateSessionAgent(
         throw new HTTPException(422, {
           message: "a session with an open goal must keep its goal tools",
         });
+      }
+      if (session.toolPolicy.hostRequiredMcpServerIds?.length) {
+        toolPolicy = {
+          ...toolPolicy,
+          hostRequiredMcpServerIds: session.toolPolicy.hostRequiredMcpServerIds,
+        };
+        tools = mergeToolRefs(
+          tools,
+          session.toolPolicy.hostRequiredMcpServerIds.map((id) => ({
+            kind: "mcp" as const,
+            id,
+            eager: true,
+          })),
+        );
       }
       const unchanged =
         stableJson({

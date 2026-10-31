@@ -81,6 +81,7 @@ export function createSharedActivityServices(
       // Compute sandboxes reach their agent over this process's bus and database.
       installComputeAgentPlane({ db, bus, settings });
       return {
+        sessionAuthorization: dependencies.sessionAuthorization,
         settings: resolvedSettings,
         catalogSourceSettings: settings,
         db,

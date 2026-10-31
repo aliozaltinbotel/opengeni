@@ -14,6 +14,9 @@ import {
 import {
   assertSessionIsNotImported,
   forkSessionContent,
+  readHostSessionCreateState,
+  settleHostSessionCreate,
+  setSessionArchive,
   getSessionForSubject,
   getRig,
   getPrivateSessionCreatePolicy,
@@ -44,7 +47,12 @@ import {
   hasVerifiedOwningUserAuthorization,
   type AccessGrantAuthorization,
 } from "../access";
-import { requireSessionAuthorization } from "../session-authorization";
+import {
+  requireSessionAuthorization,
+  requireSessionCreateAuthorization,
+  withSessionCreateHostDeadline,
+  SessionAuthorizationUnavailableError,
+} from "../session-authorization";
 import type { AppDependencies } from "../dependencies";
 import { variableSetsRemovedError } from "../domain/encryption-key";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
@@ -530,8 +538,23 @@ export async function forkManagedHumanSession(
       actorSubjectId: authorization.grant.subjectId,
     });
   }
+  const hostCreate = await requireSessionCreateAuthorization(
+    deps,
+    authorization.grant,
+    authorizationSurface,
+    deps.settings?.mcpServers ?? [],
+  );
+  const createdHook = deps.sessionAuthorization?.sessionCreated;
+  const assertHostReady = async (sessionId: string) => {
+    const scope = { accountId: authorization.grant.accountId, workspaceId, sessionId };
+    if ((await readHostSessionCreateState(deps.db, scope)) !== "ready")
+      throw new SessionAuthorizationUnavailableError();
+  };
   const beforeCommit = externalContinuationCommitAuthorizer(authorization);
   const forkInput = {
+    hostSessionCreatePending: createdHook !== undefined,
+    hostRequiredMcpServerIds:
+      hostCreate?.decision.requiredToolServers?.map((server) => server.id) ?? [],
     sourceWorkspaceId: workspaceId,
     sourceSessionId,
     ...(request.sourceEventId ? { sourceEventId: request.sourceEventId } : {}),
@@ -599,6 +622,7 @@ export async function forkManagedHumanSession(
   // owner makes a formerly shared session private.
   const applied = await recoverAppliedReceipt();
   if (applied) {
+    await assertHostReady(applied.sessionId);
     const response = await projectAndPublishSessionFork(
       deps,
       authorization.grant.subjectId,
@@ -620,6 +644,7 @@ export async function forkManagedHumanSession(
     // exact applied receipt can convert the authorization failure into replay.
     const racedApplied = await recoverAppliedReceipt();
     if (racedApplied) {
+      await assertHostReady(racedApplied.sessionId);
       const response = await projectAndPublishSessionFork(
         deps,
         authorization.grant.subjectId,
@@ -648,6 +673,39 @@ export async function forkManagedHumanSession(
         ...(runtimeConfiguration ? { runtimeConfiguration } : {}),
       }),
   );
+  const scope = {
+    accountId: authorization.grant.accountId,
+    workspaceId,
+    sessionId: result.sessionId,
+  };
+  if (result.replay) await assertHostReady(result.sessionId);
+  else if (hostCreate && createdHook) {
+    try {
+      await withSessionCreateHostDeadline(() =>
+        createdHook({
+          ...scope,
+          rootSessionId: result.sessionId,
+          actor: hostCreate.actor,
+          surface: authorizationSurface,
+        }),
+      );
+      await settleHostSessionCreate(deps.db, { ...scope, ready: true });
+    } catch (error) {
+      let cause: unknown = error;
+      try {
+        await settleHostSessionCreate(deps.db, { ...scope, ready: false });
+        await setSessionArchive(deps.db, {
+          workspaceId,
+          sessionId: result.sessionId,
+          subjectId: authorization.grant.subjectId,
+          archived: true,
+        });
+      } catch (closingError) {
+        cause = closingError;
+      }
+      throw new SessionAuthorizationUnavailableError({ cause });
+    }
+  }
   const response = await projectAndPublishSessionFork(deps, authorization.grant.subjectId, result);
   await publishRuntimeConfiguration(result);
   return response;

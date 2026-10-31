@@ -112,6 +112,7 @@ export type InspectSessionAttemptActivity = (input: {
 /** Services shared by both Temporal worker roles. Keep this graph free of the
  * agent runtime and document parser so each process can load only its role. */
 export type SharedActivityServices = {
+  sessionAuthorization?: import("@opengeni/contracts").SessionAuthorizationPort | undefined;
   settings: Settings;
   /**
    * Original environment/host settings retained across live database-catalog

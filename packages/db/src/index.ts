@@ -30382,6 +30382,8 @@ async function setScheduledTaskAuthorityRlsContext(
 }
 
 export type SessionCreateInput = {
+  /** Trusted create composition only; closes every turn writer until the host settles. */
+  hostSessionCreatePending?: boolean;
   creationReceiptRequest?: SessionCreationReceiptRequest | undefined;
   initialMessageModelSourceRefs?: ModelSourceRef[] | undefined;
   initialAgentLearning?: import("@opengeni/contracts").AgentLearningOverrides | undefined;
@@ -31387,6 +31389,7 @@ async function createSessionInTransaction(
     const insertValues: typeof schema.sessions.$inferInsert = withLosslessContentWriteVersion(
       {
         id,
+        hostSessionCreateState: input.hostSessionCreatePending ? "pending" : "ready",
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         initialMessage: input.initialMessage,
@@ -31637,6 +31640,56 @@ async function createSessionInTransaction(
     created: true,
     denied: false,
   };
+}
+
+/** Read the durable hook fence without admitting any business or native turn. */
+export async function readHostSessionCreateState(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string },
+): Promise<"ready" | "pending" | "failed"> {
+  return withSessionActivityRlsContext(db, input, async (tx) => {
+    const [row] = await tx
+      .select({ state: schema.sessions.hostSessionCreateState })
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      )
+      .limit(1);
+    if (!row) throw new Error("HOST_SESSION_CREATE_NOT_FOUND");
+    return row.state;
+  });
+}
+
+/** Only a successful callback opens the shell. Failure uses the native cancellation owner. */
+export async function settleHostSessionCreate(
+  db: Database,
+  input: { accountId: string; workspaceId: string; sessionId: string; ready: boolean },
+): Promise<void> {
+  await withSessionActivityRlsContext(db, input, async (tx) => {
+    if (!input.ready)
+      await mutateSessionControlInTransaction(tx, {
+        ...input,
+        actor: { type: "service", subjectId: "service:session-create-host" },
+        operationKey: `host-session-create:${input.sessionId}`,
+        action: "cancel",
+        reason: "Host session creation failed",
+      });
+    await tx
+      .update(schema.sessions)
+      .set({ hostSessionCreateState: input.ready ? "ready" : "failed" })
+      .where(
+        and(
+          eq(schema.sessions.accountId, input.accountId),
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+          eq(schema.sessions.hostSessionCreateState, "pending"),
+        ),
+      );
+  });
 }
 
 export async function createSession(db: Database, input: SessionCreateInput): Promise<DbSession> {
