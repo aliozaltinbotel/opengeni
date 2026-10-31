@@ -6,6 +6,7 @@ import {
   SessionAuthorizationListScope,
   type AccessGrant,
   type AuthorizeSessionCreateInput,
+  type SessionCreateCreator,
   type SessionAuthorizationPort,
   type SessionAgentAccess,
   type SessionAgentAccessViewer,
@@ -523,6 +524,9 @@ export async function withSessionCreateHostDeadline<T>(call: () => Promise<T>): 
         timer = setTimeout(() => reject(new SessionAuthorizationUnavailableError()), 5_000);
       }),
     ]);
+  } catch {
+    // Create hooks may read private credentials; never retain host error payloads.
+    throw new SessionAuthorizationUnavailableError();
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
@@ -539,15 +543,25 @@ export async function requireSessionCreateAuthorization(
   grant: AccessGrant,
   surface: SessionAuthorizationSurface,
   configuredServers: readonly { id: string }[] = [],
+  requestCreator?: SessionCreateCreator,
 ): Promise<
   | {
       actor: SessionAuthorizationActor;
+      creator: SessionCreateCreator;
       decision: Extract<SessionCreateDecision, { allowed: true }>;
     }
   | undefined
 > {
   const port = deps.sessionAuthorization;
   if (!port?.authorizeSessionCreate && !port?.sessionCreated) return;
+  const principalKind = grant.principalKind ?? null;
+  if (
+    requestCreator &&
+    (requestCreator.principalKind !== principalKind ||
+      (requestCreator.readCredential && principalKind !== "human_session"))
+  )
+    throw new SessionAuthorizationUnavailableError();
+  const creator = requestCreator ?? { principalKind };
   const reads = claimSessionAuthorizationReads();
   const claims = agentAttemptClaims(grant);
   const facts = claims
@@ -556,10 +570,10 @@ export async function requireSessionCreateAuthorization(
   const { actor } = resolveSessionAuthorizationActor(grant, claims, facts);
   const decision = await authorizeSessionCreateForActor(
     port,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId, actor, surface },
+    { accountId: grant.accountId, workspaceId: grant.workspaceId, actor, surface, creator },
     configuredServers,
   );
-  return { actor, decision };
+  return { actor, decision, creator };
 }
 
 /** Native accepted-work writers already hold their authenticated service/attempt actor. */

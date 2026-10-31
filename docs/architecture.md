@@ -36,6 +36,16 @@ never archives a failed child's parent. Historical imports have no executable tu
 failed admission flag, preserving their read-only historical status and events rather than issuing execution
 cancellation. Ordinary personal archive preferences remain unchanged. Concurrent keyed retries never run a second hook. Hosts without either
 creation method retain ordinary creation and the ready default; native authorization still applies.
+Create hooks also accept optional request-local `creator` provenance. HTTP create,
+fork and import owners retain the actual verified grant kind, and managed browser
+requests supply an opaque asynchronous `readCredential` backed by the existing
+cookie-only workspace host-token mint. Every read rechecks the browser session,
+canonical identity and live workspace membership. Bearer, agent-attempt and service
+callers never acquire that human proof, including children with a causal human
+selector. Hosts independently verify each credential and current authority in both
+hooks; neither a subject nor a principal kind proves human presence. The context
+and credential are never durable session data or public projections.
+
 
 Keyed authenticated session creation records a write-once `sessions.creation_receipt`
 in the shell insert transaction, before start/dispatch. It binds the complete normalized

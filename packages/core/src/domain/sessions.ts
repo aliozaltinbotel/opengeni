@@ -926,6 +926,8 @@ type AgentChildSessionCreatePresentation = {
 
 /** Trusted entry-point options for creating a session outside the REST body. */
 export type SessionCreateRequestOptions = {
+  /** Actual request-owner provenance; never accepted from the public body. */
+  creator?: import("@opengeni/contracts").SessionCreateCreator;
   /** Trusted calling entry point; never part of the request body. */
   authorizationSurface?: import("@opengeni/contracts").SessionAuthorizationSurface;
   /** Internal durable Teams inbox proof; never accepted from a REST request body. */
@@ -1003,6 +1005,7 @@ export async function createAndStartSessionWithOutcome(input: {
     port: import("@opengeni/contracts").SessionAuthorizationPort;
     actor: import("@opengeni/contracts").SessionAuthorizationActor;
     configuredServers: readonly { id: string }[];
+    creator?: import("@opengeni/contracts").SessionCreateCreator;
   };
   /** Backend-only accepted-work composition. Recheck live caller authority
    * here before capturing; session-shell authorization may have happened in
@@ -1190,6 +1193,7 @@ export async function createAndStartSessionWithOutcome(input: {
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         actor: host.actor,
+        ...(host.creator ? { creator: host.creator } : {}),
         surface: "core",
       },
       host.configuredServers,
@@ -1222,6 +1226,7 @@ export async function createAndStartSessionWithOutcome(input: {
                   sessionId: session.id,
                   rootSessionId: session.rootSessionId,
                   actor: host.actor,
+                  ...(host.creator ? { creator: host.creator } : {}),
                   surface: "core",
                 }),
               ),
@@ -3430,6 +3435,7 @@ async function createSessionForRequestInFileScope(
     grant,
     requestOptions.authorizationSurface ?? "core",
     runtimeSettings.mcpServers,
+    requestOptions.creator,
   );
   const requestedMcpPolicies =
     payload.mcpApprovalPolicies ?? parentSession?.mcpApprovalPolicies ?? {};
@@ -4368,6 +4374,7 @@ async function createSessionForRequestInFileScope(
                   sessionId: created.id,
                   rootSessionId: created.rootSessionId,
                   actor: hostCreate.actor,
+                  creator: hostCreate.creator,
                   surface: requestOptions.authorizationSurface ?? "core",
                 }),
               );

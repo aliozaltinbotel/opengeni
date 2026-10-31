@@ -5,6 +5,7 @@ import {
   requireSessionCreateAuthorization,
   SessionCreateAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
+  withSessionCreateHostDeadline,
 } from "../src/session-authorization";
 const grant: AccessGrant = {
   accountId: crypto.randomUUID(),
@@ -76,4 +77,84 @@ test("legacy create authorization methods retain their port receiver", async () 
       [],
     ),
   ).resolves.toMatchObject({ decision: { allowed: true } });
+});
+
+test("create hooks receive request-local proof without projecting its credential", async () => {
+  const creator = {
+    principalKind: "human_session" as const,
+    readCredential: async () => "test-proof",
+  };
+  let received: unknown;
+  await requireSessionCreateAuthorization(
+    {
+      db: {} as Database,
+      sessionAuthorization: {
+        ...port,
+        authorizeSessionCreate: async (input) => {
+          received = input.creator;
+          return { allowed: true };
+        },
+      },
+    },
+    grant,
+    "http",
+    [],
+    creator,
+  );
+  expect(received).toBe(creator);
+  expect(JSON.stringify(received)).not.toContain("test-proof");
+});
+
+test.each(["service", "api_key", "configured_key", undefined] as const)(
+  "create classification preserves %s instead of promoting its subject to human",
+  async (principalKind) => {
+    let received: unknown;
+    await requireSessionCreateAuthorization(
+      {
+        db: {} as Database,
+        sessionAuthorization: {
+          ...port,
+          authorizeSessionCreate: async (input) => {
+            received = input.creator;
+            return { allowed: true };
+          },
+        },
+      },
+      { ...grant, principalKind },
+      "core",
+    );
+    expect(received).toEqual({ principalKind: principalKind ?? null });
+  },
+);
+
+test("non-human or mismatched grant provenance cannot carry human credential proof", async () => {
+  for (const principalKind of ["service", "configured_key", undefined] as const) {
+    await expect(
+      requireSessionCreateAuthorization(
+        { db: {} as Database, sessionAuthorization: port },
+        { ...grant, principalKind },
+        "http",
+        [],
+        { principalKind: principalKind ?? null, readCredential: async () => "fake" },
+      ),
+    ).rejects.toBeInstanceOf(SessionAuthorizationUnavailableError);
+  }
+  await expect(
+    requireSessionCreateAuthorization(
+      { db: {} as Database, sessionAuthorization: port },
+      grant,
+      "http",
+      [],
+      { principalKind: "service" },
+    ),
+  ).rejects.toBeInstanceOf(SessionAuthorizationUnavailableError);
+});
+
+test("create callback failures discard credential-bearing host exceptions", async () => {
+  const failure = await withSessionCreateHostDeadline(async () => {
+    throw new Error("fake-private-credential");
+  }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(SessionAuthorizationUnavailableError);
+  expect(String(failure)).not.toContain("fake-private-credential");
+  expect((failure as Error).cause).toBeUndefined();
 });
