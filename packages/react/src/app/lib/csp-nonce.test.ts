@@ -21,6 +21,17 @@ function page(nonce: string | null): Document {
 }
 
 describe("CSP nonce", () => {
+  test("accepts the name meta supplied by existing host edges", () => {
+    const doc = page(null);
+    const meta = doc.createElement("meta");
+    meta.setAttribute("name", "csp-nonce");
+    meta.setAttribute("nonce", NONCE);
+    doc.head.append(meta);
+    expect(readCspNonce(doc)).toBe(NONCE);
+    expect(installCspNonce(doc)).toBe(NONCE);
+    expect(doc.createElement("style").getAttribute("nonce")).toBe(NONCE);
+  });
+
   test("with a meta nonce, every <style> the document creates carries it", () => {
     const doc = page(NONCE);
     expect(installCspNonce(doc)).toBe(NONCE);

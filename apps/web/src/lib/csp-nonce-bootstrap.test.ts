@@ -18,6 +18,18 @@ async function bootstrapSource(): Promise<string> {
 }
 
 describe("index.html CSP nonce bootstrap", () => {
+  test("bootstraps styles from the existing host name meta before modules", async () => {
+    const doc = document.implementation.createHTMLDocument("host console");
+    const meta = doc.createElement("meta");
+    meta.setAttribute("name", "csp-nonce");
+    meta.setAttribute("nonce", "host-edge-nonce");
+    doc.head.append(meta);
+    new Function("document", "window", await bootstrapSource())(doc, {});
+    expect(doc.createElement("style").getAttribute("nonce")).toBe("host-edge-nonce");
+    expect(doc.createElement("script").hasAttribute("nonce")).toBe(false);
+    expect(installCspNonce(doc)).toBe("host-edge-nonce");
+  });
+
   test("stamps the meta nonce on created styles before any module, and the module agrees", async () => {
     const meta = document.createElement("meta");
     meta.setAttribute("property", "csp-nonce");

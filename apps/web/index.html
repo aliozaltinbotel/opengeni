@@ -57,11 +57,12 @@
     </script>
     <script id="opengeni-csp-nonce-bootstrap">
       // A host serving the console under a nonce CSP puts the nonce in
-      // <meta property="csp-nonce" nonce="..."> ahead of this script. Stamp it
+      // <meta property="csp-nonce" nonce="..."> (or name="csp-nonce") ahead of this script. Stamp it
       // on every <style> the page creates and expose it to get-nonce, before
       // any module runs. Keep in sync with @opengeni/react/app/lib/csp-nonce.
       (() => {
-        const meta = document.querySelector('meta[property="csp-nonce"]');
+        const meta = document.querySelector('meta[property="csp-nonce"]')
+          || document.querySelector('meta[name="csp-nonce"]');
         const nonce = (meta && (meta.nonce || meta.getAttribute("nonce"))) || "";
         if (nonce.trim() === "" || document.__opengeniCspNonce) return;
         const create = document.createElement;
