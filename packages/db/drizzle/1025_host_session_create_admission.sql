@@ -3,8 +3,11 @@
 -- host-created callback opts a new shell into the fail-closed pending state.
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '5min';
-ALTER TABLE sessions ADD COLUMN IF NOT EXISTS host_session_create_state text NOT NULL DEFAULT 'ready'
-  CHECK (host_session_create_state IN ('ready', 'pending', 'failed'));
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS host_session_create_state text NOT NULL DEFAULT 'ready';
+-- Enforce new writes now; migration 1027 validates historical rows separately
+-- so this expansion never holds its ALTER lock through a table scan.
+ALTER TABLE sessions ADD CONSTRAINT sessions_host_session_create_state_check
+  CHECK (host_session_create_state IN ('ready', 'pending', 'failed')) NOT VALID;
 
 CREATE OR REPLACE FUNCTION opengeni_private.require_host_session_create_ready()
 RETURNS trigger LANGUAGE plpgsql SET search_path = pg_catalog, public AS $host_create$

@@ -1,8 +1,14 @@
 import { z } from "zod";
 import * as primitives from "./primitives";
 import { defineSchema } from "./define-schema";
+import { Permission } from "./permissions";
+import { ToolGatewayIdentity } from "./tool-catalog";
 import { CanonicalHumanIdentityStatus } from "./canonical-human-identities";
-import { OrganizationAccessPreset, OrganizationWorkspaceScope } from "./organization-access";
+import {
+  OrganizationAccessPolicy,
+  OrganizationAccessPreset,
+  OrganizationWorkspaceScope,
+} from "./organization-access";
 import {
   CreateOrganizationInvitationRequest,
   OrganizationInvitationStatus,
@@ -507,6 +513,20 @@ export const HostMcpConnectionConsentScope = /* @__PURE__ */ defineSchema(() =>
 );
 export type HostMcpConnectionConsentScope = z.infer<typeof HostMcpConnectionConsentScope>;
 
+/** Immutable causal link carried by existing OAuth code/grant/family rows. */
+export const HostMcpOAuthAdmissionReference = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      organizationId: primitives.uuid,
+      requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+      operationId: primitives.uuid,
+      revision: primitives.positiveInteger,
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+    })
+    .strict(),
+);
+export type HostMcpOAuthAdmissionReference = z.infer<typeof HostMcpOAuthAdmissionReference>;
+
 /**
  * Host read of one MCP connection
  * (`GET /v1/host/organizations/:id/mcp-connections/:connectionId`): whether
@@ -541,6 +561,7 @@ export const HostOrganizationMcpConnection = /* @__PURE__ */ defineSchema(() =>
       consentScope: HostMcpConnectionConsentScope,
       revokedAt: primitives.dateTime.nullable(),
       updatedAt: primitives.dateTime,
+      hostAdmission: HostMcpOAuthAdmissionReference.optional(),
     })
     .strict(),
 );
@@ -657,3 +678,88 @@ export const HostOrganizationInvitation = /* @__PURE__ */ defineSchema(() =>
     .strict(),
 );
 export type HostOrganizationInvitation = z.infer<typeof HostOrganizationInvitation>;
+
+/** One pending native OAuth proposal. This projection carries no code or bearer. */
+export const HostMcpOAuthConsentProposal = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      requestHash: z.string().regex(/^[a-f0-9]{64}$/),
+      organizationId: primitives.uuid,
+      workspaceId: primitives.uuid,
+      revision: z.number().int().positive(),
+      digest: z.string().regex(/^[a-f0-9]{64}$/),
+      operationId: primitives.uuid,
+      expiresAt: z.string().datetime(),
+      material: z
+        .object({
+          clientId: z.string().min(1).max(256),
+          organizationId: primitives.uuid,
+          workspaceId: primitives.uuid,
+          subjectId: z.string().min(1).max(1024),
+          resource: z.string().url().max(2048),
+          redirectUri: z.string().url().max(2048),
+          codeChallenge: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+          codeChallengeMethod: z.literal("S256"),
+          permissions: z.array(Permission).max(4096),
+          toolIdentities: z.array(ToolGatewayIdentity).max(4096),
+          organizationAccess: OrganizationAccessPolicy.nullable(),
+          consentPreset: OrganizationAccessPreset.nullable(),
+          toolSetVersions: z
+            .record(z.string().min(1).max(256), z.string().min(1).max(256))
+            .nullable(),
+          expiresAt: z.string().max(64),
+          human: z
+            .object({
+              identityId: primitives.uuid,
+              authSessionId: z.string().min(1).max(1024),
+              loginBindingId: primitives.uuid,
+              loginBindingRevision: z.number().int().positive(),
+            })
+            .strict(),
+        })
+        .strict(),
+      admitted: z.boolean(),
+    })
+    .strict(),
+);
+export type HostMcpOAuthConsentProposal = z.infer<typeof HostMcpOAuthConsentProposal>;
+export const HostAdmitMcpOAuthConsentRequest = /* @__PURE__ */ defineSchema(() =>
+  z
+    .object({
+      actingExternalUser: ActingExternalUser,
+      command: z
+        .object({
+          revision: z.number().int().positive(),
+          digest: z.string().regex(/^[a-f0-9]{64}$/),
+          operationId: primitives.uuid,
+        })
+        .strict(),
+    })
+    .strict(),
+);
+export type HostAdmitMcpOAuthConsentRequest = z.infer<typeof HostAdmitMcpOAuthConsentRequest>;
+/**
+ * Optional embedding-host handoff for an explicitly approved native proposal.
+ * Read the opaque human credential only to authenticate to the configured host;
+ * never serialize/persist/log it or an exception it appears in. The host verifies
+ * the JWT locally and independently reads/admit the canonical proposal through
+ * HOST commands. Returning from this call grants nothing. Honor the aggregate
+ * signal/deadline and clamp each network call to min(5s, remaining time).
+ */
+export type McpOAuthHostConsentPort = {
+  admit(input: {
+    proposal: Pick<
+      HostMcpOAuthConsentProposal,
+      | "requestHash"
+      | "organizationId"
+      | "workspaceId"
+      | "revision"
+      | "digest"
+      | "operationId"
+      | "expiresAt"
+    >;
+    readCredential: () => string;
+    signal: AbortSignal;
+    deadlineAt: number;
+  }): Promise<void>;
+};
