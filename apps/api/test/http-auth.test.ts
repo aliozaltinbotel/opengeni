@@ -238,6 +238,96 @@ describe("configured deployment perimeter authentication", () => {
   });
 });
 
+describe("workspace MCP perimeter OAuth challenge", () => {
+  const publicOrigin = "https://api.example.test";
+  const workspaceMcpPaths = [
+    `/v1/workspaces/${workspaceId}/mcp`,
+    `/v1/workspaces/${workspaceId}/mcp/docs`,
+    `/v1/workspaces/${workspaceId}/mcp/files`,
+  ];
+  const expectedChallenge = (path: string) =>
+    `Bearer resource_metadata="${publicOrigin}/.well-known/oauth-protected-resource${path}", scope="mcp:access"`;
+
+  function oauthPerimeterApp(overrides: Partial<ReturnType<typeof testSettings>> = {}) {
+    const app = new Hono();
+    app.use(
+      "*",
+      requireAccessKey(
+        testSettings({
+          productAccessMode: "configured",
+          authRequired: true,
+          accessKey,
+          mcpOauthEnabled: true,
+          publicBaseUrl: `${publicOrigin}/console`,
+          ...overrides,
+        }),
+      ),
+    );
+    app.all("*", (context) => context.json({ ok: true }));
+    return app;
+  }
+
+  test("a refused workspace MCP request carries the route's exact challenge and no data", async () => {
+    const app = oauthPerimeterApp();
+    for (const path of workspaceMcpPaths) {
+      for (const headers of [{}, { authorization: "Bearer not-a-prefixed-token" }]) {
+        const response = await app.request(path, { method: "POST", headers });
+        expect(response.status).toBe(401);
+        expect(response.headers.get("www-authenticate")).toBe(expectedChallenge(path));
+        expect(await response.json()).toEqual({ error: "unauthorized" });
+      }
+    }
+  });
+
+  test("a 401 on any other route, or with MCP OAuth off or unconfigured, is unchanged", async () => {
+    const enabled = oauthPerimeterApp();
+    for (const path of [
+      `/v1/workspaces/${workspaceId}/tools/catalog`,
+      `/v1/workspaces/${workspaceId}/mcp/other`,
+      `/v1/workspaces/not-a-workspace-id/mcp`,
+      "/v1/mcp",
+      "/v1/protected",
+    ]) {
+      const response = await enabled.request(path, { method: "POST" });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toBeNull();
+      expect(await response.json()).toEqual({ error: "unauthorized" });
+    }
+    for (const overrides of [{ mcpOauthEnabled: false }, { publicBaseUrl: undefined }]) {
+      const response = await oauthPerimeterApp(overrides).request(workspaceMcpPaths[0]!, {
+        method: "POST",
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toBeNull();
+      expect(await response.json()).toEqual({ error: "unauthorized" });
+    }
+    // Admission itself is unchanged: the deployment key still passes.
+    const admitted = await enabled.request(workspaceMcpPaths[0]!, {
+      method: "POST",
+      headers: { "x-opengeni-access-key": accessKey },
+    });
+    expect(admitted.status).toBe(200);
+    expect(admitted.headers.get("www-authenticate")).toBeNull();
+  });
+
+  test("a forged Host or forwarded header cannot change the challenge URL", async () => {
+    const app = oauthPerimeterApp();
+    for (const path of workspaceMcpPaths) {
+      const response = await app.request(`http://attacker.example${path}`, {
+        method: "POST",
+        headers: {
+          host: "attacker.example",
+          "x-forwarded-host": "attacker.example",
+          "x-forwarded-proto": "http",
+          forwarded: "host=attacker.example;proto=http",
+        },
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get("www-authenticate")).toBe(expectedChallenge(path));
+    }
+  });
+});
+
 
 // Pure canonical-perimeter/issuer checks. No test fixture or DB allocation.
 const continuationSpies: Array<{ mockRestore(): void }> = [];

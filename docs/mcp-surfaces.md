@@ -267,6 +267,9 @@ RFC 8707 resource binding to one workspace MCP/Docs/Files resource, scope
 `mcp:access`, opaque 15-minute access tokens, and rotating 30-day refresh
 tokens. Consent requires the existing managed or local current-human session. OAuth
 tokens are accepted only by MCP routes and never become REST credentials.
+A 401 on a workspace MCP/Docs/Files resource, including one from the
+deployment access-key perimeter, carries the RFC 9728 challenge
+`Bearer resource_metadata="<issuer>/.well-known/oauth-protected-resource<path>", scope="mcp:access"`.
 OAuth consent grants MCP access; it does not silently satisfy a tool's separate
 one-shot human-approval classification. HTTP/SDK approval capabilities bind a
 private provider-authority revision as well as the public catalog identity and
