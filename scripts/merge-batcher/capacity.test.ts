@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "../ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { capacitySetting, readHeadroom } from "../ci/batch-traffic-shadow";
 import { GitHubAuth, GitHubReader } from "./github";
@@ -767,9 +768,9 @@ describe("main before fan-out and queued main jobs hold (review of 7779ef9)", ()
     });
   });
 
-  test("MAIN_PRE_FANOUT_JOBS matches the ci.yml jobs that do not need plan, plus plan", async () => {
+  test("historical 721 workflow fixture: MAIN_PRE_FANOUT_JOBS matches the ci.yml jobs that do not need plan, plus plan", async () => {
     const workflow = Bun.YAML.parse(
-      await Bun.file(new URL("../../.github/workflows/ci.yml", import.meta.url)).text(),
+      readRetiredWorkflow("ci.yml"),
     ) as { jobs: Record<string, { needs?: string | string[] }> };
     const needs = (name: string): string[] => {
       const raw = workflow.jobs[name]?.needs;

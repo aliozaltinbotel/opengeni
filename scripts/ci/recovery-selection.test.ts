@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import * as t from "oxc-parser";
@@ -116,8 +117,8 @@ const fixtureRun = (pattern = mcpTitle.replace("%s", "mcp")) =>
   `bun test --timeout 180000 --test-name-pattern '${overflowTitle}' ./${compaction}`;
 
 describe("recovery incident selection", () => {
-  test("CI executes exactly the active MCP checkpoint and real-history overflow incidents", () => {
-    const workflow = parse(readFileSync(".github/workflows/ci.yml", "utf8"));
+  test("historical 721 workflow fixture: CI executes exactly the active MCP checkpoint and real-history overflow incidents", () => {
+    const workflow = parse(readRetiredWorkflow("ci.yml"));
     const step = workflow.jobs["test-suite"].steps.find(
       (item: { name?: string }) => item.name === "Recovery integration regressions",
     );

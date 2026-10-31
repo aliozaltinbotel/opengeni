@@ -1,6 +1,6 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse } from "yaml";
 import { admitCanaryConfirmation } from "./confirm-canary-publication";
@@ -84,7 +84,7 @@ describe("canary confirmation admission", () => {
   });
 });
 
-describe("publish and confirmation jobs", () => {
+describe("historical 721 workflow fixture: publish and confirmation jobs", () => {
   type Step = {
     name: string;
     id?: string;
@@ -102,7 +102,7 @@ describe("publish and confirmation jobs", () => {
     steps: (Step & { with?: Record<string, unknown> })[];
   };
   const workflow = parse(
-    readFileSync(join(import.meta.dir, "../.github/workflows/publish-canary.yml"), "utf8"),
+    readRetiredWorkflow("publish-canary.yml"),
   ) as { jobs: { publish: Job; confirm: Job } };
   const { publish, confirm } = workflow.jobs;
 

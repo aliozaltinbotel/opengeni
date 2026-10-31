@@ -2022,6 +2022,8 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 
 ## Verified public release
 
+Owned-fork update (2026-11-01): GitHub Actions is disabled under [the local execution rule](../AGENTS.md#local-validation-and-deployment-cendra-fork). The hosted publication/reconciliation procedure below is retained upstream reference, not an active fork deployment path. Use the existing local image/build and Cendra repin owners after local qualification; retain immutable provenance and rollback/readback. A publisher requiring hosted run receipts must be corrected at its existing owner before invocation. Do not simulate a hosted release identity or dispatch a removed workflow.
+
 Managed production npm packages are reconciled automatically by
 `reconcile-production-packages.yml` every five minutes (GitHub scheduling may
 delay a run). It reads the healthy production revision and that source's

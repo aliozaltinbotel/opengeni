@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -1481,8 +1482,8 @@ describe("workflow fail-closed contracts", () => {
     }
   });
 
-  test("CI preserves trusted admission while planning candidate jobs from the exact head", () => {
-    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+  test("historical 721 workflow fixture: CI preserves trusted admission while planning candidate jobs from the exact head", () => {
+    const ci = readRetiredWorkflow("ci.yml");
     const admission = ci.slice(ci.indexOf("  automation-admission:"), ci.indexOf("  plan:"));
     expect(admission).toContain("ref: ${{ github.sha }}");
     expect(admission).toContain("bun-version-file: .bun-version");
@@ -1519,8 +1520,8 @@ describe("workflow fail-closed contracts", () => {
     );
   });
 
-  test("CI runs the compact session-search header regression with real database evidence", () => {
-    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+  test("historical 721 workflow fixture: CI runs the compact session-search header regression with real database evidence", () => {
+    const ci = readRetiredWorkflow("ci.yml");
     const step = ci.slice(
       ci.indexOf("      - name: Compact session-search header browser acceptance"),
       ci.indexOf("      - name: Queue surface browser acceptance"),
@@ -1535,8 +1536,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("path: /tmp/session-search-header-evidence");
   });
 
-  test("CI retains exact aggregate names and every current release/image lane", () => {
-    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+  test("historical 721 workflow fixture: CI retains exact aggregate names and every current release/image lane", () => {
+    const ci = readRetiredWorkflow("ci.yml");
     expect(ci).toContain("name: Typecheck and unit tests");
     expect(ci).toContain("name: Workload image builds");
     expect(ci).toContain("name: Admit automation Version PR");
@@ -1555,8 +1556,8 @@ describe("workflow fail-closed contracts", () => {
     expect(ci).toContain("canary-images-${{ github.sha }}");
   });
 
-  test("selected CI work is profiled and memory bounded", () => {
-    const ci = readFileSync(".github/workflows/ci.yml", "utf8");
+  test("historical 721 workflow fixture: selected CI work is profiled and memory bounded", () => {
+    const ci = readRetiredWorkflow("ci.yml");
     for (const script of [
       "run-typecheck-plan.ts",
       "run-guards-plan.ts",
