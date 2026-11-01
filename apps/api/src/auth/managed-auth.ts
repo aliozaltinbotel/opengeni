@@ -469,7 +469,7 @@ export function createManagedAuth(
       sendVerificationEmail: async ({ user, url }) => {
         await sendManagedAuthEmail(
           managedEmailTransport,
-          emailVerificationMessage(settings.productName, user.email, url),
+          emailVerificationMessage(settings.productName, user.email, verificationUrlForConsole(settings, url)),
         );
       },
       afterEmailVerification: async (user) => {
@@ -1031,7 +1031,23 @@ function passwordResetMessage(
   };
 }
 
-async function verificationUrl(settings: Settings, email: string): Promise<string> {
+/** Keep the verification endpoint on the API; only its default browser landing moves. */
+export function verificationUrlForConsole(settings: Settings, value: string): string {
+  if (!settings.webBaseUrl) return value;
+  const destination = new URL("/", settings.webBaseUrl);
+  if (!betterAuthTrustedOrigins(settings).includes(destination.origin)) {
+    throw new Error("Verification console origin must be trusted");
+  }
+  const url = new URL(value);
+  const callback = url.searchParams.get("callbackURL");
+  const apiHome = settings.publicBaseUrl ? new URL("/", settings.publicBaseUrl).toString() : null;
+  if (callback === null || callback === "/" || callback === apiHome) {
+    url.searchParams.set("callbackURL", destination.toString());
+  }
+  return url.toString();
+}
+
+export async function verificationUrl(settings: Settings, email: string): Promise<string> {
   if (!settings.betterAuthSecret) {
     throw new Error(
       "OPENGENI_BETTER_AUTH_SECRET is required to send managed auth verification email",
@@ -1044,7 +1060,7 @@ async function verificationUrl(settings: Settings, email: string): Promise<strin
   const url = new URL("/v1/auth/verify-email", settings.publicBaseUrl);
   url.searchParams.set("token", token);
   url.searchParams.set("callbackURL", "/");
-  return url.toString();
+  return verificationUrlForConsole(settings, url.toString());
 }
 
 function splitCsv(raw: string): string[] {
