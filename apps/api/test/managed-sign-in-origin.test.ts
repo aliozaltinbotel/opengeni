@@ -96,3 +96,62 @@ test("a trusted second hostname of the same deployment is admitted", async () =>
   });
   expect(untrusted.status).toBe(403);
 });
+
+test("an explicitly configured legacy console can confirm credentials across same-site origins", async () => {
+  const consoleOrigin = "https://console.example.com";
+  const split = {
+    settings: {
+      publicBaseUrl: origin,
+      webBaseUrl: consoleOrigin,
+      consoleAllowedOrigins: consoleOrigin,
+      managedAuthSessionSetMode: "legacy",
+    },
+  } as ApiRouteDeps;
+  const app = new Hono();
+  app.onError((_error, c) => c.json({ rejected: true }, 403));
+  app.post("/", async (c) => {
+    await admitManagedSignInMutation(c, split);
+    return c.json({ admitted: true });
+  });
+  const response = await app.request(origin, {
+    method: "POST",
+    headers: {
+      origin: consoleOrigin,
+      "sec-fetch-site": "same-site",
+      "content-type": "application/json",
+    },
+  });
+  expect(response.status).toBe(200);
+});
+
+for (const input of [
+  { mode: "legacy", configured: true, origin: "https://console.example.com", fetchSite: "cross-site" },
+  { mode: "legacy", configured: true, origin: "https://other.example.com", fetchSite: "same-site" },
+  { mode: "legacy", configured: false, origin: "https://console.example.com", fetchSite: "same-site" },
+  { mode: "dual", configured: true, origin: "https://console.example.com", fetchSite: "same-site" },
+  { mode: "broker", configured: true, origin: "https://console.example.com", fetchSite: "same-site" },
+]) {
+  test(`split-origin credential confirmation preserves refusal: ${JSON.stringify(input)}`, async () => {
+    const app = new Hono();
+    let admitted = false;
+    app.onError((_error, c) => c.json({ rejected: true }, 403));
+    app.post("/", async (c) => {
+      await admitManagedSignInMutation(c, {
+        settings: {
+          publicBaseUrl: origin,
+          webBaseUrl: "https://console.example.com",
+          consoleAllowedOrigins: input.configured ? "https://console.example.com" : undefined,
+          managedAuthSessionSetMode: input.mode,
+        },
+      } as ApiRouteDeps);
+      admitted = true;
+      return c.json({ admitted });
+    });
+    const response = await app.request(origin, {
+      method: "POST",
+      headers: { origin: input.origin, "sec-fetch-site": input.fetchSite, "content-type": "application/json" },
+    });
+    expect(response.status).toBe(403);
+    expect(admitted).toBe(false);
+  });
+}

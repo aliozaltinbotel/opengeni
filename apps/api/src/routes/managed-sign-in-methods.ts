@@ -29,7 +29,7 @@ import {
   verifyManagedAuthPassword,
 } from "../auth/managed-auth";
 import { ApiHttpError } from "../http/api-error";
-import { trustedBrowserOrigins } from "../http/browser-mutation-origin";
+import { isConfiguredConsoleSameSiteMutation, trustedBrowserOrigins } from "../http/browser-mutation-origin";
 import { runManagedSignInConnect } from "../auth/managed-auth-attempt-context";
 import { deliverManagedSignInNotification } from "../auth/managed-sign-in-notifications";
 import { managedAuthSelectedProofHeaders } from "../auth/managed-auth-session-adapter";
@@ -75,10 +75,11 @@ async function identity(context: Context, deps: ApiRouteDeps) {
 export async function admitManagedSignInMutation(context: Context, deps: ApiRouteDeps) {
   const origins = deps.settings.publicBaseUrl ? trustedBrowserOrigins(deps.settings) : [];
   const origin = context.req.header("origin");
+  const fetchSite = context.req.header("sec-fetch-site");
   if (
     !origin ||
     !origins.includes(origin) ||
-    context.req.header("sec-fetch-site") !== "same-origin" ||
+    (fetchSite !== "same-origin" && !isConfiguredConsoleSameSiteMutation(deps.settings, origin, fetchSite)) ||
     context.req.header("content-type")?.split(";", 1)[0] !== "application/json"
   ) {
     throw new ApiHttpError(403, {
