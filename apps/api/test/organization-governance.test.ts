@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   organizationAccessPresetPermissions,
   signDelegatedAccessToken,
@@ -1577,7 +1579,6 @@ describe("governed workspace OAuth HOST consent", () => {
     for (const path of [
       "/oauth/authorize/host-consent/extra",
       "/oauth/authorize/host-consent-other",
-      "/v1/non-protocol-probe",
     ]) {
       const response = await app.request(path, {
         method: "POST",
@@ -1586,6 +1587,13 @@ describe("governed workspace OAuth HOST consent", () => {
       });
       expect(response.status).toBe(401);
     }
+    // S's canonical managed-cookie perimeter admits an authenticated /v1 request; an absent route remains 404.
+    expect((await app.request("/v1/non-protocol-probe", {
+      method: "POST", headers: browser(world.owner.cookie), body: "{}",
+    })).status).toBe(404);
+    expect((await app.request("/v1/non-protocol-probe", {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    })).status).toBe(401);
     const admitted = await pending.preflight();
     expect(admitted.status).toBe(200);
     expect(await admitted.json()).toEqual({ outcome: "admitted" });
@@ -1968,7 +1976,7 @@ describe("governed workspace OAuth HOST consent", () => {
       await page.goto(url.toString());
       await page.getByRole("heading", { name: "Authorize this client" }).waitFor();
       expect(callbackCount).toBe(0);
-      await page.screenshot({ path: "/tmp/q15-native-consent-1440.png", fullPage: true });
+      await page.screenshot({ path: join(tmpdir(), "q15-native-consent-1440.png"), fullPage: true });
       await page.getByRole("radio", { name: "Read only", exact: false }).check();
       await page.getByRole("button", { name: "Authorize", exact: true }).click();
       await page
@@ -1983,14 +1991,14 @@ describe("governed workspace OAuth HOST consent", () => {
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
       ).toBe(true);
-      await page.screenshot({ path: "/tmp/q15-native-consent-review-390.png", fullPage: true });
+      await page.screenshot({ path: join(tmpdir(), "q15-native-consent-review-390.png"), fullPage: true });
       await page.getByRole("button", { name: "Authorize", exact: true }).click();
       await page.getByText("consent-tools: read_new", { exact: true }).waitFor({ timeout: 5000 });
       await page.getByRole("alert").filter({ hasText: "Access changed" }).waitFor();
       expect(callbackCount).toBe(1);
       expect(returned).toBe(false);
       await page.screenshot({
-        path: "/tmp/q15-native-consent-final-drift-390.png",
+        path: join(tmpdir(), "q15-native-consent-final-drift-390.png"),
         fullPage: true,
       });
       await page.getByRole("button", { name: "Authorize", exact: true }).click();
