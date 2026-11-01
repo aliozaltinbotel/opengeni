@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "../ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -20,8 +21,8 @@ import {
 const root = fileURLToPath(new URL("../../", import.meta.url));
 
 describe("lockstep package versioning", () => {
-  test("both clean-worktree CI reproductions disable runtime auto-install", async () => {
-    const workflow = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
+  test("historical workflow fixture: both clean-worktree CI reproductions disable runtime auto-install", async () => {
+    const workflow = readRetiredWorkflow("ci.yml");
     expect(
       workflow.match(
         /bun --no-install "\$GITHUB_WORKSPACE\/node_modules\/@changesets\/cli\/bin\.js" version/g,

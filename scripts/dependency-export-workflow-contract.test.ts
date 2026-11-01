@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,7 +30,7 @@ type Step = {
 type Workflow = { jobs: Record<string, { steps?: Step[] }> };
 
 async function workflowSteps(name: string): Promise<Step[][]> {
-  const source = await readFile(join(root, ".github/workflows", name), "utf8");
+  const source = readRetiredWorkflow(name);
   const workflow = Bun.YAML.parse(source) as Workflow;
   return Object.values(workflow.jobs).map((job) => job.steps ?? []);
 }
@@ -40,7 +41,7 @@ describe("stable dependency export guard wiring", () => {
     ["release.yml", "${{ steps.acceptance-bundle.outputs.expected_packages }}"],
     ["release-embedded.yml", "${{ inputs.expected_packages }}"],
   ] as const) {
-    test(`${name} preserves its admitted set and reconciles before registry-only proof`, async () => {
+    test(`historical workflow fixture: ${name} preserves its admitted set and reconciles before registry-only proof`, async () => {
       const jobs = await workflowSteps(name);
       const publicationJobs = jobs.filter((steps) =>
         steps.some((step) => step.with?.publish === "bun run release:publish"),
@@ -105,7 +106,7 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
     }
   });
 
-  test("package-contract CI includes the stable route regression", async () => {
+  test("historical workflow fixture: package-contract CI includes the stable route regression", async () => {
     const jobs = await workflowSteps("ci.yml");
     expect(
       jobs
@@ -114,9 +115,9 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
     ).toBe(true);
   });
 
-  test("workflow-owned regression does not replace or skip the exact candidate", async () => {
+  test("historical workflow fixture: workflow-owned regression does not replace or skip the exact candidate", async () => {
     const workflow = Bun.YAML.parse(
-      await readFile(join(root, ".github/workflows/ci.yml"), "utf8"),
+      readRetiredWorkflow("ci.yml"),
     ) as Workflow;
     const steps = workflow.jobs["package-contracts"]!.steps!;
     expect(steps[0]!.with?.ref).toBe(
@@ -162,7 +163,7 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
     expect(steps[effective]!.run).toBe("bun run test:effective-dependency-exports");
   });
 
-  test("new workflow runs real export regressions when the old candidate lacks every guard file", async () => {
+  test("historical workflow fixture: new workflow runs real export regressions when the old candidate lacks every guard file", async () => {
     const steps = (await workflowSteps("ci.yml")).flat();
     const guard = steps.find(
       (step) => step.name === "Registry dependency export guard regression",
@@ -336,7 +337,7 @@ if [[ "$*" == "run test:effective-dependency-exports" ]]; then exit 37; fi
       succeeds: false,
     },
   ] as const) {
-    test(`workflow-owned CI enforces complete tooling for ${scenario.name}`, async () => {
+    test(`historical workflow fixture: workflow-owned CI enforces complete tooling for ${scenario.name}`, async () => {
       const run = (await workflowSteps("ci.yml"))
         .flat()
         .find((step) => step.name === "Registry dependency export guard regression")?.run;

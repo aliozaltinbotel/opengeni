@@ -7913,6 +7913,8 @@ export const SessionToolPolicy = /* @__PURE__ */ defineSchema(() =>
     mode: z.enum(["workspace_default", "explicit", "inherited"]),
     inheritedFromSessionId: primitives.nullableUuid,
     excludedMcpServerIds: SessionExcludedMcpServerIds.optional(),
+    /** Trusted host additions, persisted at create and never editable by session callers. */
+    hostRequiredMcpServerIds: z.array(SessionMcpServerId.max(200)).optional(),
     // Independent of connector selection. Absence preserves an ambiguous legacy
     // snapshot; only an explicit default intent follows future built-in tools.
     firstPartyMode: z.enum(["workspace_default", "explicit"]).optional(),
@@ -9686,8 +9688,21 @@ export type AuthorizeSessionInput = {
   surface: SessionAuthorizationSurface;
 };
 
+/** Request-local provenance, never a public request field or durable session data.
+ * A subject selector alone is not human proof. Hosts must independently verify
+ * the credential and current authority on each hook; absence grants nothing.
+ */
+export type SessionCreateCreator = {
+  principalKind: AccessPrincipalKind | null;
+  /** Opaque workspace host JWT, minted only from the actual browser session.
+   * Never serialize, log, persist, or expose this credential to the agent.
+   */
+  readCredential?: () => Promise<string>;
+};
+
 /** A session create that admits a first turn: there is no target session yet. */
 export type AuthorizeSessionCreateInput = {
+  creator?: SessionCreateCreator;
   accountId: string;
   workspaceId: string;
   actor: SessionAuthorizationActor;
@@ -9715,6 +9730,30 @@ export const SessionAuthorizationDecision = /* @__PURE__ */ defineSchema(() =>
   ]),
 );
 export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDecision>;
+
+/** Host-only session-create decision; other authorization methods retain their existing shape. */
+export const SessionCreateDecision = /* @__PURE__ */ defineSchema(() =>
+  z.discriminatedUnion("allowed", [
+    z.object({
+      allowed: z.literal(true),
+      requiredToolServers: z
+        .array(z.object({ id: SessionMcpServerId.max(200) }).strict())
+        .max(16)
+        .optional(),
+    }),
+    z.object({ allowed: z.literal(false), reason: z.enum(["not_found", "forbidden", "revoked"]) }),
+  ]),
+);
+export type SessionCreateDecision = z.infer<typeof SessionCreateDecision>;
+export type SessionCreatedInput = {
+  creator?: SessionCreateCreator;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  rootSessionId: string;
+  actor: SessionAuthorizationActor;
+  surface: SessionAuthorizationSurface;
+};
 
 /**
  * A database-applicable listing scope. `rootSessionIds` includes every
@@ -9834,18 +9873,10 @@ export type SessionAuthorizationPort = {
     modelAccountOperation?: boolean;
   };
   authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
-  /**
-   * Optional, target-free: asked before `POST /v1/workspaces/:id/sessions`
-   * creates a session whose request carries an `initialMessage` (the first
-   * turn the default start mode admits). A refusal answers 403
-   * `SESSION_CREATE_NOT_AUTHORIZED` and creates nothing; a throw or an
-   * unreadable answer answers 503 `SESSION_AUTHORIZATION_UNAVAILABLE`.
-   * Without it, creation checks only the native `sessions:create` permission,
-   * as before. `relatedSessionAccess` and `reauthorizeAfterMs` are ignored.
-   */
-  authorizeSessionCreate?(
-    input: AuthorizeSessionCreateInput,
-  ): Promise<SessionAuthorizationDecision>;
+  /** Optional host check before every session create, including child and agent creates. */
+  authorizeSessionCreate?(input: AuthorizeSessionCreateInput): Promise<SessionCreateDecision>;
+  /** Runs after the shell commits, before any turn can be admitted. Failure leaves it closed. */
+  sessionCreated?(input: SessionCreatedInput): Promise<void>;
   /**
    * Return the complete current scope used inside Opengeni's cursor query.
    * This is deliberately not a post-filter callback: search, pinning, ordering,

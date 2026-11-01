@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { existsSync } from "node:fs";
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
@@ -27,7 +28,7 @@ type ParsedWorkflow = {
 };
 
 async function workflow(name: string): Promise<string> {
-  return readFile(resolve(root, ".github/workflows", name), "utf8");
+  return readRetiredWorkflow(name);
 }
 
 async function action(name: string): Promise<string> {
@@ -148,7 +149,7 @@ function stepIndex(parsed: ParsedWorkflow, jobName: string, name: string): numbe
 }
 
 describe("release image workflow contract", () => {
-  test("both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
+  test("historical workflow fixture: both agent bake consumers install source dependencies and bind the checked-out source identity", async () => {
     const [ci, candidate] = await Promise.all([
       workflow("ci.yml"),
       workflow("release-candidate.yml"),
@@ -223,7 +224,7 @@ describe("release image workflow contract", () => {
     expect(validConsumer(wrongControllerIdentity)).toBe(false);
   });
 
-  test("runs controller and source phases with their owner-specific Bun pins", async () => {
+  test("historical workflow fixture: runs controller and source phases with their owner-specific Bun pins", async () => {
     const [candidate, acceptance, release, embedded] = await Promise.all([
       workflow("release-candidate.yml"),
       workflow("release-acceptance.yml"),
@@ -621,7 +622,7 @@ describe("release image workflow contract", () => {
     expect(dockerfile).not.toContain('"start:artifact-outbox"');
   });
 
-  test("coalesces mutable Version-PR work without cancelling immutable publication", async () => {
+  test("historical workflow fixture: coalesces mutable Version-PR work without cancelling immutable publication", async () => {
     const [release, ci] = await Promise.all([workflow("release.yml"), workflow("ci.yml")]);
     const versionProjection = release.slice(
       release.indexOf("\n  version:\n"),
@@ -651,7 +652,7 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("downloads artifact ZIPs through portable gh api stdout redirection", async () => {
+  test("historical workflow fixture: downloads artifact ZIPs through portable gh api stdout redirection", async () => {
     const workflows = await Promise.all(
       ["release-acceptance.yml", "release.yml", "release-embedded.yml"].map(workflow),
     );
@@ -667,7 +668,7 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("candidate builds every image under a fresh attempt tag and freezes a full-SHA receipt", async () => {
+  test("historical workflow fixture: candidate builds every image under a fresh attempt tag and freezes a full-SHA receipt", async () => {
     const [candidate, admissionWorkflow] = await Promise.all([
       workflow("release-candidate.yml"),
       workflow("release-source-admission.yml"),
@@ -863,7 +864,7 @@ describe("release image workflow contract", () => {
     expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
 
-  test("candidate web deployment identity uses the validated source SHA, not its release version or controller", async () => {
+  test("historical workflow fixture: candidate web deployment identity uses the validated source SHA, not its release version or controller", async () => {
     const parsed = Bun.YAML.parse(await workflow("release-candidate.yml")) as ParsedWorkflow;
     const steps = parsed.jobs.candidate?.steps ?? [];
     const sourceRevision = "${{ inputs.source_sha }}";
@@ -908,7 +909,7 @@ describe("release image workflow contract", () => {
     );
   });
 
-  test("main CI publishes exact-SHA canary images without granting PR publication", async () => {
+  test("historical workflow fixture: main CI publishes exact-SHA canary images without granting PR publication", async () => {
     const ci = await workflow("ci.yml");
     const images = ci.slice(ci.indexOf("\n  api-image:\n"), ci.indexOf("\n  automation-report:\n"));
     const parsed = Bun.YAML.parse(ci) as {
@@ -1116,7 +1117,7 @@ describe("release image workflow contract", () => {
     expect(images).not.toMatch(/:latest(?:['"}\s]|$)/);
   });
 
-  test("final release promotes accepted manifests and has no image build boundary", async () => {
+  test("historical workflow fixture: final release promotes accepted manifests and has no image build boundary", async () => {
     const release = await workflow("release.yml");
     const publicationAdmission = await workflow("release-publication-admission.yml");
     const finalJob = release.slice(release.indexOf("\n  images:\n"));
@@ -1206,7 +1207,7 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("acceptance imports only an exact protected operator artifact", async () => {
+  test("historical workflow fixture: acceptance imports only an exact protected operator artifact", async () => {
     const acceptance = await workflow("release-acceptance.yml");
     expect(acceptance).toContain(".github/workflows/release-acceptance.yml");
     expect(acceptance).toContain("name: production-acceptance");
@@ -1240,7 +1241,7 @@ describe("release image workflow contract", () => {
     );
   });
 
-  test("embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
+  test("historical workflow fixture: embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
     const release = await workflow("release-embedded.yml");
     const candidateAdmission = release.indexOf("Admit the candidate before source execution");
     const candidateReceipt = release.indexOf(
@@ -1368,7 +1369,7 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain('--tag "${name}:latest"');
   });
 
-  test("package-only publication is exact-source, CI-gated, and evidence-bound", async () => {
+  test("historical workflow fixture: package-only publication is exact-source, CI-gated, and evidence-bound", async () => {
     const publish = await workflow("publish-packages.yml");
     const sourceGate = publish.indexOf("Require successful protected source CI");
     const plan = publish.indexOf("Plan exact package publication");
@@ -1408,7 +1409,7 @@ describe("release image workflow contract", () => {
     expect(reconciliation).toBeGreaterThan(mutation);
   });
 
-  test("public registry authentication is portable, short-lived, and version-bound", async () => {
+  test("historical workflow fixture: public registry authentication is portable, short-lived, and version-bound", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");
     const embedded = await workflow("release-embedded.yml");
@@ -1444,7 +1445,7 @@ describe("release image workflow contract", () => {
     expect(login).not.toContain("admin-password");
   });
 
-  test("agent publication pins a new release tag to the built source on manual dispatch", async () => {
+  test("historical workflow fixture: agent publication pins a new release tag to the built source on manual dispatch", async () => {
     const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
     const publish = parsed.jobs.publish!.steps!.find((step) =>
       step.uses?.startsWith("softprops/action-gh-release@"),
@@ -1455,7 +1456,7 @@ describe("release image workflow contract", () => {
     expect(publish!.with?.tag_name).toBe("agent-v${{ needs.guard.outputs.version }}");
   });
 
-  test("standalone macOS agent signing keeps the same stable identity as the app", async () => {
+  test("historical workflow fixture: standalone macOS agent signing keeps the same stable identity as the app", async () => {
     const parsed = Bun.YAML.parse(await workflow("agent-release.yml")) as ParsedWorkflow;
     const steps = parsed.jobs.build!.steps!;
     for (const name of [
@@ -1481,7 +1482,7 @@ describe("release image workflow contract", () => {
     expect(launchd).toContain('pub const MACOS_APP_BUNDLE_ID: &str = "ai.opengeni.agent";');
   });
 
-  test("agent publication creates only immutable-compatible versioned releases", async () => {
+  test("historical workflow fixture: agent publication creates only immutable-compatible versioned releases", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
     expect(agentRelease).toContain("https://app.opengeni.ai/install.sh");
@@ -1557,7 +1558,7 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("releases/download/agent-latest");
   });
 
-  test("linux agent release embeds a glibc browserd sidecar", async () => {
+  test("historical workflow fixture: linux agent release embeds a glibc browserd sidecar", async () => {
     const agentRelease = await workflow("agent-release.yml");
 
     expect(agentRelease).toContain("Build interaction helpers (Linux glibc)");
@@ -1570,7 +1571,7 @@ describe("release image workflow contract", () => {
     expect(agentRelease).not.toContain("Build interaction helpers (Linux musl)");
   });
 
-  test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
+  test("historical workflow fixture: release-state parsing accepts a valid absent release without weakening type checks", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");
     const embedded = await workflow("release-embedded.yml");
@@ -1612,7 +1613,7 @@ ${parser}`,
     expect(invalidResult.status).not.toBe(0);
   });
 
-  test("ordinary CI builds the same seven physical image roles", async () => {
+  test("historical workflow fixture: ordinary CI builds the same seven physical image roles", async () => {
     const ci = await workflow("ci.yml");
     const parsed = Bun.YAML.parse(ci) as { jobs: Record<string, { steps: Array<unknown> }> };
     const imagesJob = ci.slice(ci.indexOf("\n  api-image:\n"));

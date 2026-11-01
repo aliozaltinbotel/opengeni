@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -274,7 +275,7 @@ describe("main-push Batch CI attestation", () => {
   });
 });
 
-describe("ci.yml attested topology", () => {
+describe("historical workflow fixture: ci.yml attested topology", () => {
   type Job = {
     name?: string;
     needs?: string | string[];
@@ -283,7 +284,7 @@ describe("ci.yml attested topology", () => {
     steps?: { name?: string; id?: string; if?: string; run?: string }[];
   };
   const workflow = Bun.YAML.parse(
-    readFileSync(new URL("../../.github/workflows/ci.yml", import.meta.url), "utf8"),
+    readRetiredWorkflow("ci.yml"),
   ) as { jobs: Record<string, Job> };
   const gate = "needs.plan.outputs.attested != 'true'";
   const needs = (job: Job) => (job.needs === undefined ? [] : [job.needs].flat());

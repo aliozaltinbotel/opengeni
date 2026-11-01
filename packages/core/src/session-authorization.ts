@@ -2,8 +2,12 @@ import {
   canonicalSessionAuthorizationOperation,
   SessionAuthorizationActor,
   SessionAuthorizationDecision,
+  SessionCreateDecision,
   SessionAuthorizationListScope,
   type AccessGrant,
+  type AuthorizeSessionCreateInput,
+  type SessionCreateCreator,
+  type SessionAuthorizationPort,
   type SessionAgentAccess,
   type SessionAgentAccessViewer,
   type SessionAuthorizationOperation,
@@ -112,6 +116,9 @@ export class SessionAuthorizationDeniedError extends Error {
     this.name = "SessionAuthorizationDeniedError";
   }
 }
+
+/** A target-free create refusal keeps its HTTP contract distinct from hidden target denial. */
+export class SessionCreateAuthorizationDeniedError extends SessionAuthorizationDeniedError {}
 
 export class SessionAuthorizationUnavailableError extends Error {
   readonly code = "SESSION_AUTHORIZATION_UNAVAILABLE";
@@ -507,10 +514,27 @@ async function authorizeSessionFromFacts(
   };
 }
 
+/** Bound host calls even when an in-process embedding port never settles. */
+export async function withSessionCreateHostDeadline<T>(call: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      call(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new SessionAuthorizationUnavailableError()), 5_000);
+      }),
+    ]);
+  } catch {
+    // Create hooks may read private credentials; never retain host error payloads.
+    throw new SessionAuthorizationUnavailableError();
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 /**
- * The host's target-free check before a session create that admits a first
- * turn (`initialMessage`). Without a bound port or its optional
- * `authorizeSessionCreate`, nothing is asked. The actor is resolved as for
+ * The host's target-free check before every session create. Without a bound
+ * port or its optional creation methods, nothing is asked. The actor is resolved as for
  * every other check; a refusal throws SessionAuthorizationDeniedError, a
  * throw or an unreadable answer SessionAuthorizationUnavailableError.
  */
@@ -518,29 +542,62 @@ export async function requireSessionCreateAuthorization(
   deps: SessionAuthorizationDependencies,
   grant: AccessGrant,
   surface: SessionAuthorizationSurface,
-): Promise<void> {
+  configuredServers: readonly { id: string }[] = [],
+  requestCreator?: SessionCreateCreator,
+): Promise<
+  | {
+      actor: SessionAuthorizationActor;
+      creator: SessionCreateCreator;
+      decision: Extract<SessionCreateDecision, { allowed: true }>;
+    }
+  | undefined
+> {
   const port = deps.sessionAuthorization;
-  if (!port?.authorizeSessionCreate) return;
+  if (!port?.authorizeSessionCreate && !port?.sessionCreated) return;
+  const principalKind = grant.principalKind ?? null;
+  if (
+    requestCreator &&
+    (requestCreator.principalKind !== principalKind ||
+      (requestCreator.readCredential && principalKind !== "human_session"))
+  )
+    throw new SessionAuthorizationUnavailableError();
+  const creator = requestCreator ?? { principalKind };
   const reads = claimSessionAuthorizationReads();
   const claims = agentAttemptClaims(grant);
   const facts = claims
     ? await readSessionAuthorizationFacts(deps.db, grant, claims.callerSessionId, claims, reads)
     : null;
   const { actor } = resolveSessionAuthorizationActor(grant, claims, facts);
+  const decision = await authorizeSessionCreateForActor(
+    port,
+    { accountId: grant.accountId, workspaceId: grant.workspaceId, actor, surface, creator },
+    configuredServers,
+  );
+  return { actor, decision, creator };
+}
+
+/** Native accepted-work writers already hold their authenticated service/attempt actor. */
+export async function authorizeSessionCreateForActor(
+  port: SessionAuthorizationPort,
+  input: AuthorizeSessionCreateInput,
+  configuredServers: readonly { id: string }[],
+): Promise<Extract<SessionCreateDecision, { allowed: true }>> {
+  const authorizeCreate = port.authorizeSessionCreate;
   let rawDecision: unknown;
   try {
-    rawDecision = await port.authorizeSessionCreate({
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      actor,
-      surface,
-    });
+    rawDecision = authorizeCreate
+      ? await withSessionCreateHostDeadline(() => authorizeCreate.call(port, input))
+      : { allowed: true };
   } catch (error) {
     throw new SessionAuthorizationUnavailableError({ cause: error });
   }
-  const parsed = SessionAuthorizationDecision.safeParse(rawDecision);
+  const parsed = SessionCreateDecision.safeParse(rawDecision);
   if (!parsed.success) throw new SessionAuthorizationUnavailableError({ cause: parsed.error });
-  if (!parsed.data.allowed) throw new SessionAuthorizationDeniedError(parsed.data.reason);
+  if (!parsed.data.allowed) throw new SessionCreateAuthorizationDeniedError(parsed.data.reason);
+  const configuredIds = new Set(configuredServers.map((server) => server.id));
+  if (parsed.data.requiredToolServers?.some((server) => !configuredIds.has(server.id)))
+    throw new SessionAuthorizationUnavailableError();
+  return parsed.data;
 }
 
 /** Resolve the host's complete current list scope for an in-database query. */

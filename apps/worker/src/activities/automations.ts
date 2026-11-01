@@ -260,6 +260,16 @@ export function createAutomationActivities(
             }
           : resolvedTurnExecutionPolicy;
         const created = await createSession({
+          ...(service.sessionAuthorization
+            ? {
+                sessionCreateHost: {
+                  port: service.sessionAuthorization,
+                  creator: { principalKind: "service" as const },
+                  actor: { kind: "subject" as const, subjectId: accepted.serviceSubjectId },
+                  configuredServers: catalogSettings.mcpServers,
+                },
+              }
+            : {}),
           db: service.db,
           bus: service.bus,
           workflowClient: {

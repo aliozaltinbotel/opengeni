@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import * as coreRoot from "../src";
 import {
   getManagedAuthRequestActorAbortSignal,
@@ -588,5 +588,85 @@ describe("managed auth session lookup failures", () => {
       throw generic;
     }).catch((error: unknown) => error);
     expect(isolated).toBe(generic);
+  });
+});
+
+// A timed-out host callback can outlive the enclosing HTTP finally.
+describe("completed mutation request lease scope", () => {
+  async function requestContext(method = "POST"): Promise<Context> {
+    let captured: Context | undefined;
+    const app = new Hono().all("/", (context) => {
+      captured = context;
+      return context.json({ ready: true });
+    });
+    await app.request("/", { method, headers: {
+      cookie: `opengeni.session_set=${authority}`, "x-opengeni-actor-epoch": "7",
+    } });
+    if (!captured) throw new Error("request context missing");
+    return captured;
+  }
+  function lookup(context: Context, db: unknown) {
+    return getManagedSession(context, {} as never, {
+      db: db as never, sessionSetMode: "broker", sessionAdapter: managedSessionAdapter() as never,
+    });
+  }
+  test("a late unsafe lookup cannot acquire after request cleanup", async () => {
+    const context = await requestContext();
+    const sequence = sequenceDatabase([]);
+    const runtime = deterministicLeaseRuntime(() => 1_000);
+    try {
+      await releaseManagedAuthRequestActorLease(context.req.raw);
+      await expect(lookup(context, sequence.db)).rejects.toThrow();
+      expect(sequence.calls).toHaveLength(0);
+      expect(runtime.tasks).toHaveLength(0);
+      expect(runtime.terminateCalls()).toBe(0);
+    } finally { runtime.restore(); }
+  });
+  test("a canonical read resolving after cleanup cannot acquire or return a session", async () => {
+    let resolveSnapshot!: (rows: unknown[]) => void;
+    const snapshot = new Promise<unknown[]>((resolve) => { resolveSnapshot = resolve; });
+    const sequence = sequenceDatabase([() => snapshot]);
+    const context = await requestContext();
+    const runtime = deterministicLeaseRuntime(() => 1_000);
+    try {
+      const pending = lookup(context, sequence.db);
+      await flushPromiseCallbacks();
+      expect(sequence.calls).toHaveLength(1);
+      await releaseManagedAuthRequestActorLease(context.req.raw);
+      resolveSnapshot([{ result: sessionSetSnapshot }]);
+      await expect(pending).rejects.toThrow();
+      expect(sequence.calls).toHaveLength(1);
+      expect(runtime.tasks).toHaveLength(0);
+      expect(runtime.terminateCalls()).toBe(0);
+    } finally { runtime.restore(); }
+  });
+  test("an acquire resolving after cleanup is released without arming lease timers", async () => {
+    let resolveAcquire!: (rows: unknown[]) => void;
+    const acquisition = new Promise<unknown[]>((resolve) => { resolveAcquire = resolve; });
+    const sequence = sequenceDatabase([
+      [{ result: sessionSetSnapshot }], () => acquisition, [{ released: true }],
+    ]);
+    const context = await requestContext();
+    const runtime = deterministicLeaseRuntime(() => 1_000);
+    try {
+      const pending = lookup(context, sequence.db);
+      await flushPromiseCallbacks();
+      expect(sequence.calls).toHaveLength(2);
+      await releaseManagedAuthRequestActorLease(context.req.raw);
+      resolveAcquire([{ expiresAt: "2026-08-26T01:15:00.000Z" }]);
+      await expect(pending).rejects.toThrow();
+      expect(sequence.calls).toHaveLength(3);
+      expect(sequence.remaining).toHaveLength(0);
+      expect(getManagedAuthRequestActorLeaseStamp(context.req.raw)).toBeNull();
+      expect(runtime.tasks).toHaveLength(0);
+      expect(runtime.terminateCalls()).toBe(0);
+    } finally { runtime.restore(); }
+  });
+  test("completed GET scopes retain fresh current-auth stream rechecks", async () => {
+    const context = await requestContext("GET");
+    const sequence = sequenceDatabase([[{ result: sessionSetSnapshot }]]);
+    await releaseManagedAuthRequestActorLease(context.req.raw);
+    expect((await lookup(context, sequence.db))?.user.id).toBe(selectedSession.authUserId);
+    expect(sequence.calls).toHaveLength(1);
   });
 });

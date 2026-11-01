@@ -1,10 +1,11 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 
 const workflow = (name: string) =>
-  Bun.YAML.parse(readFileSync(`.github/workflows/${name}.yml`, "utf8")) as any;
+  Bun.YAML.parse(readRetiredWorkflow(`${name}.yml`)) as any;
 
-test("PR-only capped selection precedes unit count; selected failures still fail aggregate", () => {
+test("historical workflow fixture: PR-only capped selection precedes unit count; selected failures still fail aggregate", () => {
   const { jobs } = workflow("pr-ci");
   const plan = jobs.plan.steps.find((step: any) => step.id === "plan").run as string;
   expect(plan).toContain(
@@ -21,7 +22,7 @@ test("PR-only capped selection precedes unit count; selected failures still fail
   expect(JSON.stringify(workflow("batch-ci"))).not.toContain("pr-fast-plan.ts");
 });
 
-test("PR CI reserves a bounded PR lane without cancelling main or batch", () => {
+test("historical workflow fixture: PR CI reserves a bounded PR lane without cancelling main or batch", () => {
   const pr = workflow("pr-ci");
   expect(pr.concurrency.queue).toBeUndefined();
   expect(pr.concurrency["cancel-in-progress"]).toBe(true);
@@ -47,7 +48,7 @@ test("PR CI reserves a bounded PR lane without cancelling main or batch", () => 
   expect(pr.jobs.fast.concurrency).toBeUndefined();
 });
 
-test("actual concurrency expression isolates PRs and matches dispatch", () => {
+test("historical workflow fixture: actual concurrency expression isolates PRs and matches dispatch", () => {
   const group = String(workflow("pr-ci").concurrency.group);
   const expression = group.slice(group.indexOf("${{") + 3, group.lastIndexOf("}}"));
   // Evaluate this authored expression's restricted function subset, not a
@@ -69,7 +70,7 @@ test("actual concurrency expression isolates PRs and matches dispatch", () => {
   expect(workflow("pr-ci").jobs.fast.strategy).toBeUndefined();
 });
 
-test("Queue ready entry and labeling do not wait for PR CI", () => {
+test("historical workflow fixture: Queue ready entry and labeling do not wait for PR CI", () => {
   const queue = workflow("merge-queue");
   expect(queue.on.pull_request.types).toContain("labeled");
   const entry = Object.values(queue.jobs).find((j: any) =>
@@ -80,7 +81,7 @@ test("Queue ready entry and labeling do not wait for PR CI", () => {
   expect(entry.steps.map((s: any) => s.run ?? "").join("\n")).toContain("exact-head PR CI");
 });
 
-test("required aggregate covers docs and every selected job at exact head", () => {
+test("historical workflow fixture: required aggregate covers docs and every selected job at exact head", () => {
   const { jobs } = workflow("pr-ci");
   expect(jobs.fast.steps.some((s: any) => s.run === "bun run lint")).toBe(true);
   expect(jobs.ready.name).toBe("PR CI");
@@ -111,7 +112,7 @@ test("required aggregate covers docs and every selected job at exact head", () =
   expect(units.run).toContain("run-unit-shard.ts");
 });
 
-test("write-capable supersession handler executes trusted base only on a new PR push", () => {
+test("historical workflow fixture: write-capable supersession handler executes trusted base only on a new PR push", () => {
   const handler = workflow("pr-ci-superseded");
   expect(handler.on.pull_request_target.types).toEqual(["synchronize"]);
   const job = Object.values(handler.jobs)[0] as any;
@@ -122,7 +123,7 @@ test("write-capable supersession handler executes trusted base only on a new PR 
   );
 });
 
-test("Version release explicitly queues hosted exact-head CI after trusted validation dispatch", () => {
+test("historical workflow fixture: Version release explicitly queues hosted exact-head CI after trusted validation dispatch", () => {
   const release = workflow("release");
   const steps = Object.values(release.jobs).flatMap((j: any) => j.steps ?? []) as any[];
   const dispatch = steps.findIndex((s) => s.id === "version_ci");

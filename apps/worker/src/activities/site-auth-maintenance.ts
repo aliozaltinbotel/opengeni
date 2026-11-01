@@ -153,6 +153,16 @@ async function dispatchMaintenanceSession(
     latencyModeSource: "deployment",
   });
   const created = await dependencies.createSession({
+    ...(service.sessionAuthorization
+      ? {
+          sessionCreateHost: {
+            port: service.sessionAuthorization,
+            creator: { principalKind: "service" as const },
+            actor: { kind: "subject" as const, subjectId: "site-auth-maintenance" },
+            configuredServers: catalogSettings.mcpServers,
+          },
+        }
+      : {}),
     requestedSessionId: maintenance.sessionId,
     db: service.db,
     bus: service.bus,

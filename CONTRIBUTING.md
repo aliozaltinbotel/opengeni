@@ -1,5 +1,7 @@
 # Contributing To Opengeni
 
+Owned-fork policy (2026-11-01): `aliozaltinbotel/opengeni` follows [local validation and deployment](AGENTS.md#local-validation-and-deployment-cendra-fork). GitHub Actions/hosted queue/release dispatch instructions inherited below are not executable instructions for this fork. Use existing local checks and supported build/deployment owners, retain exact-source evidence and review, and preserve source/provenance/rollback contracts. Controllers requiring hosted identities need an existing-owner correction before use; never fabricate those identities. Upstream policy is unchanged.
+
 Thanks for considering a contribution.
 
 ## Development Setup

@@ -503,3 +503,38 @@ describe("automation run workflow", () => {
     expect(settleAutomationRunFailure).toHaveBeenCalledWith(input);
   });
 });
+
+test("automation create forwards the configured host and its accepted service actor", async () => {
+  const service = await services()();
+  const port = {
+    authorizeSession: async () => ({ allowed: true as const }),
+    resolveListScope: async () => ({ kind: "all" as const }),
+  };
+  service.sessionAuthorization = port;
+  let forwarded: unknown;
+  const activity = createAutomationActivities(async () => service, {
+    claim: async () => run,
+    settle: async () => undefined,
+    admit: async () => null,
+    assertModelPolicy: async () => undefined,
+    assertAuthority: async () => undefined,
+    recordUsage: async () => undefined,
+    readWorkspace: async () => ({ settings: {} }) as never,
+    createSession: async (input) => {
+      forwarded = input.sessionCreateHost;
+      return {
+        session: { id: sessionId },
+        outcome: "created",
+        replay: false,
+        changed: true,
+      } as never;
+    },
+  });
+  expect((await activity.dispatchAutomationRun({ accountId, workspaceId, runId })).action).toBe(
+    "started",
+  );
+  expect(forwarded).toMatchObject({
+    port,
+    actor: { kind: "subject", subjectId: run.acceptedExecution.serviceSubjectId },
+  });
+});

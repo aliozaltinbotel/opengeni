@@ -99,9 +99,13 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   const policy = input.toolPolicy;
   const availableIds = new Set(input.availableMcpServerIds);
   const defaultIds = new Set(input.defaultMcpServerIds ?? []);
-  const mandatoryIds: string[] = MANDATORY_SESSION_MCP_SERVER_IDS.filter((id) =>
-    availableIds.has(id),
-  );
+  const hostRequiredIds = new Set(policy.hostRequiredMcpServerIds ?? []);
+  const mandatoryIds = sortedIds([
+    ...MANDATORY_SESSION_MCP_SERVER_IDS.filter((id) => availableIds.has(id)),
+    ...hostRequiredIds,
+  ]);
+  if ([...hostRequiredIds].some((id) => !availableIds.has(id)))
+    throw new Error("HOST_REQUIRED_MCP_SERVER_UNAVAILABLE");
   const mandatoryIdSet = new Set<string>(mandatoryIds);
   const tracksWorkspaceDefaults = policy.mode === "workspace_default";
   const excludedIds = new Set(tracksWorkspaceDefaults ? policy.excludedMcpServerIds : []);
@@ -127,7 +131,11 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   }
   toolRefs = mergeToolRefs(
     toolRefs,
-    mandatoryIds.map((id) => ({ kind: "mcp" as const, id })),
+    mandatoryIds.map((id) => ({
+      kind: "mcp" as const,
+      id,
+      ...(hostRequiredIds.has(id) ? { eager: true as const } : {}),
+    })),
   );
 
   // `effectiveIds` is the requested policy truth, including unavailable
@@ -145,7 +153,11 @@ export function resolveSessionToolPolicy(input: SessionToolPolicyInput): Resolve
   const effectiveIds = sortedIds(
     mergeToolRefs(
       requestedEffectiveRefs,
-      mandatoryIds.map((id) => ({ kind: "mcp" as const, id })),
+      mandatoryIds.map((id) => ({
+        kind: "mcp" as const,
+        id,
+        ...(hostRequiredIds.has(id) ? { eager: true as const } : {}),
+      })),
     ).map((tool) => tool.id),
   );
   const configuredIds = effectiveIds.filter((id) => availableIds.has(id));
@@ -241,7 +253,14 @@ export function resolveTurnToolPolicy(
     toolPolicy: input.toolPolicy,
     sessionTools: scheduledIds ? input.turn.tools : input.session.tools,
     availableMcpServerIds: scheduledIds
-      ? scheduledIds.filter((id) => availableIds.has(id))
+      ? [
+          ...new Set([
+            ...scheduledIds.filter((id) => availableIds.has(id)),
+            ...(input.toolPolicy.hostRequiredMcpServerIds ?? []).filter((id) =>
+              availableIds.has(id),
+            ),
+          ]),
+        ]
       : availableIds,
     defaultMcpServerIds: scheduledIds ?? input.defaultMcpServerIds ?? [],
   });

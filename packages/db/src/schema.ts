@@ -5275,6 +5275,11 @@ export const sessions = pgTable(
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>().notNull(),
     // Optimistic-concurrency fence for durable session tool-policy writes.
     toolPolicyVersion: integer("tool_policy_version").notNull().default(1),
+    // Creation hook admission fence; old/no-host sessions remain immediately ready.
+    hostSessionCreateState: text("host_session_create_state")
+      .$type<"ready" | "pending" | "failed">()
+      .notNull()
+      .default("ready"),
     mcpApprovalPolicies: jsonb("mcp_approval_policies")
       .$type<Record<string, SessionMcpApprovalPolicy>>()
       .notNull()

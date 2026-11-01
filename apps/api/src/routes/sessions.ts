@@ -1,3 +1,4 @@
+import { sessionCreateCreatorForRequest } from "./host-token";
 import { SessionCancelSettlementQuery, projectSessionEventForPublic } from "@opengeni/contracts";
 import { SessionCreationReceiptRecoveryRequest } from "@opengeni/contracts";
 import { cancelHumanSessionWorkstreamWithReceipt, readSessionCreationReceiptForRequest, readHumanSessionCancelSettlement } from "@opengeni/core";
@@ -353,13 +354,12 @@ import {
   hasVerifiedOwningUserAuthorization,
   requirePermission,
   requireSessionAuthorization,
-  requireSessionCreateAuthorization,
-  type SessionAuthorizationDependencies,
   requireSessionAuthorizationListScope,
   resolveWorkspaceCatalogSettings,
   withResolvedSessionAuthorization,
   SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
   SessionAuthorizationDeniedError,
+  SessionCreateAuthorizationDeniedError,
   SessionAuthorizationUnavailableError,
   SessionTenancyManagedHumanRequiredError,
   SessionTenancyPersistenceOutcomeUnknownError,
@@ -825,9 +825,6 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         422,
       );
     }
-    // A request that admits a first turn asks the host first (TL3's create window).
-    if (typeof (payload as { initialMessage?: unknown } | null)?.initialMessage === "string")
-      await requireSessionCreateAuthorizationForHttp(deps, grant);
     let result: CreateSessionRequestOutcome;
     try {
       const legacyFields = legacyVariableSetFields(payload);
@@ -895,7 +892,18 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         }
       }
       const create = () =>
-        createSessionForRequestWithOutcome(deps, grant, workspaceId, payload, authorization);
+        createSessionForRequestWithOutcome(
+          deps,
+          grant,
+          workspaceId,
+          payload,
+          authorization,
+          undefined,
+          {
+            authorizationSurface: "http",
+            creator: sessionCreateCreatorForRequest(c, deps, grant),
+          },
+        );
       result = await measureSessionCreatePhase(deps.observability, "core_create", () =>
         origin ? withSiteSessionOrigin(origin, create) : create(),
       );
@@ -1664,9 +1672,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         parsed.data,
         "http",
+        sessionCreateCreatorForRequest(c, deps, authorization.grant),
       );
       return c.json(response, response.replay ? 200 : 201);
     } catch (error) {
+      if (error instanceof SessionCreateAuthorizationDeniedError || error instanceof SessionAuthorizationUnavailableError)
+        return sessionCreateErrorResponse(c,error);
       throw sessionTenancyHttpError(error);
     }
   });
@@ -6162,34 +6173,6 @@ export function sessionAuthorizationOperationForHttp(
   return null;
 }
 
-/** The host's create check, as the API envelope: 403 SESSION_CREATE_NOT_AUTHORIZED or 503. */
-async function requireSessionCreateAuthorizationForHttp(
-  deps: SessionAuthorizationDependencies,
-  grant: AccessGrant,
-): Promise<void> {
-  try {
-    await requireSessionCreateAuthorization(deps, grant, "http");
-  } catch (error) {
-    if (error instanceof SessionAuthorizationDeniedError)
-      throw new ApiHttpError(403, {
-        code: "forbidden",
-        message: "You can't start a session here.",
-        retryable: false,
-        outcomeUnknown: false,
-        details: { code: "SESSION_CREATE_NOT_AUTHORIZED" },
-      });
-    if (error instanceof SessionAuthorizationUnavailableError)
-      throw new ApiHttpError(503, {
-        code: "upstream_unavailable",
-        message: "Session authorization is unavailable.",
-        retryable: true,
-        outcomeUnknown: false,
-        details: { code: "SESSION_AUTHORIZATION_UNAVAILABLE" },
-      });
-    throw error;
-  }
-}
-
 export function sessionAuthorizationHttpError(error: unknown): HTTPException {
   if (error instanceof SessionAuthorizationDeniedError) {
     return new HTTPException(404, { message: "session not found" });
@@ -7023,6 +7006,22 @@ function optionalEventSequence(raw: string | undefined): number | undefined {
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (
+    error instanceof SessionAuthorizationDeniedError ||
+    error instanceof SessionAuthorizationUnavailableError
+  ) {
+    const denied = error instanceof SessionAuthorizationDeniedError;
+    throw new ApiHttpError(denied ? 403 : 503, {
+      code: denied ? "forbidden" : "upstream_unavailable",
+      message: denied ? "You can't start a session here." : "Session authorization is unavailable.",
+      retryable: !denied,
+      outcomeUnknown: false,
+      details: {
+        code: denied ? "SESSION_CREATE_NOT_AUTHORIZED" : "SESSION_AUTHORIZATION_UNAVAILABLE",
+      },
+    });
+  }
+
   if (error instanceof SessionUsageLimitHttpError) {
     // a create-time usage limit the caller may not set (agents and
     // children) or that this server does not accept yet (producer flag off).
