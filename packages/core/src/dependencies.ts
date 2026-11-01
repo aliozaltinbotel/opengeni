@@ -35,6 +35,7 @@ import type { ExternalActorContinuation } from "@opengeni/contracts/external-ide
 import type {
   HostWebhookDeliveryRequest,
   OrganizationGovernancePort,
+  McpOAuthHostConsentPort,
 } from "@opengeni/contracts/organization-governance";
 import type { LocalMcpServerRegistration } from "@opengeni/runtime";
 import type { AccessGrant, KnowledgeEntryListRequest, KnowledgeEntryListResponse, KnowledgeSavePreparationRequest, KnowledgeSavePreparationResponse } from "@opengeni/contracts";
@@ -305,6 +306,8 @@ export type AppDependencies = {
    * host's own commands are served under `/v1/host/organizations/*`.
    */
   organizationGovernance?: OrganizationGovernancePort | null;
+  /** Optional human-authenticated handoff; durable HOST admission remains required. */
+  mcpOAuthHostConsent?: McpOAuthHostConsentPort | null;
   /**
    * Optional embedding-host tool servers for the workspace tool gateway (the
    * workspace MCP server, HTTP `/tools/*`, Sites and current-human calls).
