@@ -3977,9 +3977,28 @@ export const DelegatedAccessTokenPayload = /* @__PURE__ */ defineSchema(() =>
       // attempt still owns the signed turn.
       attemptId: primitives.optionalUuid,
       executionGeneration: z.number().int().positive().optional(),
+      /** Evidence only: accepted solely by the host-source verifier, never as a bearer. */
+      hostSource: z.object({
+        purpose: z.literal("HOST_SOURCE"),
+        resource: z.url().max(2048),
+        serverId: z.string().min(1).max(256),
+        toolName: z.string().min(1).max(256),
+        wireToolName: z.string().min(1).max(512),
+        nativeModelSourceKey: z.string().min(1).max(256),
+        sourceCallId: z.string().min(1).max(512),
+        operationId: primitives.uuid,
+        inputSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        credentialSha256: z.string().regex(/^[a-f0-9]{64}$/),
+        /** Existing worker-frozen subject used by native connection lookup, distinct from the worker principal. */
+        connectionSubjectId: z.string().min(1).max(512),
+      }).strict().optional(),
       exp: primitives.positiveInteger,
     })
     .superRefine((payload, ctx) => {
+      if (payload.hostSource && (payload.principalKind !== "agent_attempt"
+        || payload.credentialRestriction !== undefined || payload.serviceInitiator !== undefined)) {
+        ctx.addIssue({code: z.ZodIssueCode.custom, path: ["hostSource"], message: "host source requires an unrestricted exact native attempt"});
+      }
       const exactAttemptClaims = [
         payload.sessionId,
         payload.turnId,
@@ -4073,6 +4092,7 @@ export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPay
 const delegatedAccessTokenPrefix = "ogd_";
 const delegatedServiceAccessTokenPrefix = "ogd2_";
 const delegatedRestrictedAccessTokenPrefix = "ogd3_";
+const hostSourceAttestationPrefix = "ogd4_";
 
 export async function signDelegatedAccessToken(
   secret: string,
@@ -4080,7 +4100,9 @@ export async function signDelegatedAccessToken(
 ): Promise<string> {
   const parsed = DelegatedAccessTokenPayload.parse(payload);
   const prefix =
-    parsed.credentialRestriction === "developer_setup"
+    parsed.hostSource
+      ? hostSourceAttestationPrefix
+      : parsed.credentialRestriction === "developer_setup"
       ? delegatedRestrictedAccessTokenPrefix
       : parsed.serviceInitiator
         ? delegatedServiceAccessTokenPrefix
@@ -4100,14 +4122,28 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
-  const prefix = token.startsWith(delegatedRestrictedAccessTokenPrefix)
+  return await verifyDelegatedEnvelope(secret, token, nowSeconds, false);
+}
+
+/** Same signed delegation envelope and key; this purpose grants no API access. */
+export async function verifyHostSourceAttestation(
+  secret: string, token: string, nowSeconds = Math.floor(Date.now() / 1000),
+): Promise<(DelegatedAccessTokenPayload & { hostSource: NonNullable<DelegatedAccessTokenPayload["hostSource"]> }) | null> {
+  const payload = await verifyDelegatedEnvelope(secret, token, nowSeconds, true);
+  return payload?.hostSource ? { ...payload, hostSource: payload.hostSource } : null;
+}
+
+async function verifyDelegatedEnvelope(secret: string, token: string, nowSeconds: number, hostSource: boolean): Promise<DelegatedAccessTokenPayload | null> {
+  const prefix = token.startsWith(hostSourceAttestationPrefix)
+    ? hostSourceAttestationPrefix
+    : token.startsWith(delegatedRestrictedAccessTokenPrefix)
     ? delegatedRestrictedAccessTokenPrefix
     : token.startsWith(delegatedServiceAccessTokenPrefix)
       ? delegatedServiceAccessTokenPrefix
       : token.startsWith(delegatedAccessTokenPrefix)
         ? delegatedAccessTokenPrefix
         : null;
-  if (!prefix) {
+  if (!prefix || (prefix === hostSourceAttestationPrefix) !== hostSource) {
     return null;
   }
   const withoutPrefix = token.slice(prefix.length);
@@ -4134,6 +4170,7 @@ export async function verifyDelegatedAccessToken(
   if (!payload.success || payload.data.exp < nowSeconds) {
     return null;
   }
+  if ((prefix === hostSourceAttestationPrefix) !== (payload.data.hostSource !== undefined)) return null;
   if (
     (prefix === delegatedRestrictedAccessTokenPrefix) !==
     (payload.data.credentialRestriction === "developer_setup")

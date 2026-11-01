@@ -686,7 +686,7 @@ export function registerMcpOAuthRoutes(app: Hono, deps: ApiRouteDeps): void {
 }
 
 export async function resolveMcpOAuthRouteAccess(
-  deps: ApiRouteDeps,
+  deps: Pick<ApiRouteDeps, "db" | "settings">,
   request: Request,
   workspaceId: string,
 ): Promise<McpOAuthRouteAccess | null> {
@@ -827,7 +827,7 @@ export function workspaceMcpPerimeterChallenge(
   return mcpOAuthAuthenticateHeader({ settings }, pathname);
 }
 
-function requireMcpOAuthEnabled(deps: ApiRouteDeps): void {
+function requireMcpOAuthEnabled(deps: Pick<ApiRouteDeps, "settings">): void {
   if (!deps.settings.mcpOauthEnabled) throw new HTTPException(404, { message: "not found" });
 }
 
@@ -838,7 +838,7 @@ function mcpOAuthIssuer(deps: McpOAuthIssuerDeps): string {
   return new URL(deps.settings.publicBaseUrl).origin;
 }
 
-function parseMcpOAuthResource(deps: ApiRouteDeps, value: string): McpOAuthResource {
+function parseMcpOAuthResource(deps: Pick<ApiRouteDeps, "settings">, value: string): McpOAuthResource {
   let url: URL;
   try {
     url = new URL(value);

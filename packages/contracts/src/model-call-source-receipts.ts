@@ -89,3 +89,17 @@ export type AuthorizeModelCallSource = (
   receipt: ModelCallSourceReceipt,
   context: Readonly<{ signal?: AbortSignal }>,
 ) => Promise<void>;
+
+/** Verified per-call provenance. Never business authority or a public MCP input. */
+export type NativeHostSourceContext = Readonly<Pick<ModelCallSourceReceipt,
+  "accountId" | "workspaceId" | "sessionId" | "turnId" | "attemptId" | "executionGeneration" | "requestIndex"> & {
+  nativeModelSourceKey: ModelCallSourceReceipt["sourceKey"];
+  receiptId: ModelCallSourceReceipt["id"];
+  receiptDigest: ModelCallSourceReceipt["digest"];
+  sourceCallId: string;
+  operationId: string;
+  serverId: string;
+  toolName: string;
+  inputSha256: string;
+}>;
+export const NATIVE_HOST_SOURCE_HEADER = "x-opengeni-host-source";

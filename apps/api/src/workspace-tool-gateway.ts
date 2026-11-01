@@ -1,3 +1,4 @@
+import type { NativeHostSourceVerifier } from "./host-source-attestation";
 import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
 import { deniedSessionToolFamiliesForOrganization } from "./http/organization-session-policy";
 import { createHash, randomBytes } from "node:crypto";
@@ -1360,6 +1361,7 @@ export function buildWorkspaceToolGatewayMcpServer(
   prepared: PreparedWorkspaceToolGateway,
   grant: AccessGrant,
   observability?: Observability,
+  sourceVerifier?: NativeHostSourceVerifier,
 ): Server {
   const callableEntries = prepared.toolGatewayCatalog.entries.filter(
     (entry) => entry.approval !== "human" && consentStillAllows(prepared, entry),
@@ -1419,6 +1421,7 @@ export function buildWorkspaceToolGatewayMcpServer(
     });
     try {
       await prepared.reauthorize?.();
+      const source = await sourceVerifier?.(entry, request.params.arguments ?? {});
       const call = await prepared.toolGateway.prepareCall(
         {
           operationId: crypto.randomUUID(),
@@ -1427,7 +1430,10 @@ export function buildWorkspaceToolGatewayMcpServer(
           arguments: request.params.arguments ?? {},
           caller: { kind: "mcp", subjectId: grant.subjectId },
         },
-        { signal: extra.signal },
+        { signal: extra.signal, ...(source ? { nativeHostSource: { context: source, reauthorize: async () => {
+          const current = await sourceVerifier!(entry, request.params.arguments ?? {});
+          if (digestCanonicalJson(current) !== digestCanonicalJson(source)) throw new HTTPException(403, { message: "native host source changed" });
+        } } } : {}) },
       );
       await prepared.reauthorize?.();
       const result = (await call.execute()) as CallToolResult;
