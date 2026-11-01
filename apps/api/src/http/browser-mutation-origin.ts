@@ -35,6 +35,18 @@ export function trustedBrowserOrigins(settings: TrustedBrowserOriginSettings): s
   return [...origins];
 }
 
+/** Legacy split-origin consoles keep the configured origin and same-site checks together. */
+export function isConfiguredConsoleSameSiteMutation(
+  settings: Pick<ApiRouteDeps["settings"], "managedAuthSessionSetMode" | "consoleAllowedOrigins">,
+  origin: string | undefined,
+  fetchSite: string | undefined,
+): boolean {
+  return settings.managedAuthSessionSetMode === "legacy" &&
+    origin !== undefined &&
+    consoleAllowedOriginEntries(settings.consoleAllowedOrigins).includes(origin) &&
+    fetchSite === "same-site";
+}
+
 /**
  * The one browser-origin rule for cookie-authenticated state changes (model
  * and subscription connections, organization settings, site publishing).
@@ -76,11 +88,7 @@ export function requireSameOriginBrowserMutation(c: Context, deps: ApiRouteDeps)
     });
   }
   const fetchSite = c.req.header("sec-fetch-site")?.toLowerCase();
-  const consoleFetchSiteMatches =
-    deps.settings.managedAuthSessionSetMode === "legacy" &&
-    origin !== undefined &&
-    consoleAllowedOriginEntries(deps.settings.consoleAllowedOrigins).includes(origin) &&
-    fetchSite === "same-site";
+  const consoleFetchSiteMatches = isConfiguredConsoleSameSiteMutation(deps.settings, origin, fetchSite);
   const localFetchSiteMatches =
     localOriginMatches &&
     (fetchSite === "same-origin" ||
