@@ -34,7 +34,8 @@ async function invoke(proof = originalProof, name = wireToolName, value = args, 
   const text = await response.text();
   let output: { error?: unknown; result?: { isError?: boolean } } = {};
   try { output = JSON.parse(text); } catch { /* A non-JSON refusal is still a refusal, never PASS. */ }
-  return { status: response.status, allowed: response.status === 200 && output.result !== undefined && !output.error && output.result.isError !== true };
+  return { status: response.status, allowed: response.status === 200 && output.result !== undefined && !output.error && output.result.isError !== true,
+    refused: response.status === 401 || response.status === 403 || (response.status === 200 && (output.error !== undefined || output.result?.isError === true)) };
 }
 
 beforeAll(async () => {
@@ -137,9 +138,9 @@ test("real HTTP refuses missing/tampered/wrong-purpose and mismatched source, su
       { ...claims, executionGeneration: claims.executionGeneration! + 1 },
       ...[{ nativeModelSourceKey: crypto.randomUUID() }, { connectionSubjectId: "user:foreign" }, { toolName: "other" }, { serverId: "other" }]
         .map(change => ({ ...claims, hostSource: { ...claims.hostSource, ...change } })),
-    ].map(value => signDelegatedAccessToken(secret, value)))]) expect((await invoke(proof)).allowed).toBe(false);
-  expect((await invoke(originalProof, wireToolName, { purpose: "different-input" })).allowed).toBe(false);
-  expect((await invoke(originalProof, "host__other")).allowed).toBe(false);
+    ].map(value => signDelegatedAccessToken(secret, value)))]) expect((await invoke(proof)).refused).toBe(true);
+  expect((await invoke(originalProof, wireToolName, { purpose: "different-input" })).refused).toBe(true);
+  expect((await invoke(originalProof, "host__other")).refused).toBe(true);
   expect(sourceCalls).toHaveLength(before);
 });
 
@@ -147,7 +148,7 @@ test("normal pause withdraws the attempt and refresh replay revokes the ordinary
   const before = sourceCalls.length;
   const paused = await app.request(`/v1/workspaces/${workspaceId}/sessions/${scope.sessionId}/control`, { method: "POST", headers: { ...browser, cookie },
     body: JSON.stringify({ action: "pause", clientEventId: crypto.randomUUID() }) });
-  expect(paused.status).toBe(200); expect((await invoke()).allowed).toBe(false);
+  expect(paused.status).toBe(200); expect((await invoke()).refused).toBe(true);
   const refresh = () => app.request("/oauth/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ grant_type: "refresh_token", client_id: clientId, refresh_token: refreshToken, resource: resource() }) });
   expect((await refresh()).status).toBe(200); expect((await refresh()).status).toBe(400);
