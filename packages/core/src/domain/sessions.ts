@@ -1,4 +1,5 @@
 import { SessionCreationReceiptRecoveryRequest, projectSessionEventForPublic } from "@opengeni/contracts";
+import { SESSION_PENDING_INPUT_LIMITS, type SessionPendingInputLimits } from "@opengeni/contracts";
 import { createHash } from "node:crypto";
 import { getSessionCreationReceipt } from "@opengeni/db";
 import type {
@@ -209,6 +210,7 @@ import {
   setSubjectRlsContext,
   replaySubmittedHumanPromptFromBoundaryReceipt,
   submitHumanPromptInTransaction,
+  SessionPendingInputLimitError,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitleWithEvent,
   setSessionKeepLive,
@@ -1963,6 +1965,15 @@ type PostUserMessageTurnResult = {
   replay: boolean;
 };
 
+/** The deployment's pending-input bounds; a host's partial Settings falls back to the defaults. */
+export function sessionPendingInputLimits(settings: Settings): SessionPendingInputLimits {
+  return {
+    maxCount: settings.sessionPendingInputMaxCount ?? SESSION_PENDING_INPUT_LIMITS.maxCount,
+    maxBytes: settings.sessionPendingInputMaxBytes ?? SESSION_PENDING_INPUT_LIMITS.maxBytes,
+    ttlMs: settings.sessionPendingInputTtlMs ?? SESSION_PENDING_INPUT_LIMITS.ttlMs,
+  };
+}
+
 type PostUserMessageTurnInput = {
   db: Database;
   bus: EventBus;
@@ -1992,6 +2003,8 @@ type PostUserMessageTurnInput = {
 
   captureTurnAuthority?: (tx: Database, turnId: string) => Promise<void>;
   personalResourceAttachment?: PersonalResourceAttachmentIntent;
+  /** Bounds on the session's pending input; omitted, nothing is bounded. */
+  pendingInputLimits?: SessionPendingInputLimits;
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
   /** Content-free product surface the request entered through. */
@@ -2256,6 +2269,7 @@ export async function postUserMessageTurn(
                   }
                 : {}),
               controlLockTimeoutMs: workspaceControlRequestLockTimeoutMs(),
+              ...(input.pendingInputLimits ? { pendingInputLimits: input.pendingInputLimits } : {}),
             }),
           undefined,
           "shared",
@@ -5052,6 +5066,7 @@ async function acceptSessionUserMessageInFileScope(
         : {}),
       ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
       recordAgentRunUsage: true,
+      pendingInputLimits: sessionPendingInputLimits(deps.settings),
       ...(deps.schedulePromptPostCommit
         ? { schedulePostCommit: deps.schedulePromptPostCommit }
         : {}),
@@ -5104,6 +5119,11 @@ async function acceptSessionUserMessageInFileScope(
         );
       }
     }
+    // Past the session's pending-input bounds: 429 with
+    // SESSION_PENDING_INPUT_LIMIT_REACHED and retry guidance. The prompt
+    // transaction rolled back, so no turn, event or receipt was written.
+    if (error instanceof SessionPendingInputLimitError)
+      throw new HTTPException(429, { message: error.message, cause: error });
     throw error;
   }
 }

@@ -205,10 +205,16 @@ export const SANDBOX_LIFECYCLE_PASSTHROUGH_ENV: readonly string[] = [
 /** Optional request-admission tuning for the API. The workspace control-prefix
  * budget bounds how long one HTTP-originated session/workspace mutation waits
  * to enter `workspace_inference_controls` before the retryable 503; it is
- * validated at boot by @opengeni/config (positive integer ms, default 20000)
- * and is a valueEnv passthrough, emitted only when set. */
+ * validated at boot by @opengeni/config (positive integer ms, default 20000).
+ * The pending-input bounds cap one session's accepted-but-unclaimed messages
+ * (count, bytes, age; defaults `SESSION_PENDING_INPUT_LIMITS`) before the 429
+ * `SESSION_PENDING_INPUT_LIMIT_REACHED`. All are valueEnv passthroughs,
+ * emitted only when set. */
 export const WORKSPACE_CONTROL_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_WORKSPACE_CONTROL_LOCK_TIMEOUT_MS",
+  "OPENGENI_SESSION_PENDING_INPUT_MAX_COUNT",
+  "OPENGENI_SESSION_PENDING_INPUT_MAX_BYTES",
+  "OPENGENI_SESSION_PENDING_INPUT_TTL_MS",
 ];
 
 /** Child lifecycle notices rollout flag (API + both workers). Default off in
