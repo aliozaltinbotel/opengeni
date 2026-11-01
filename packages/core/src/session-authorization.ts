@@ -7,6 +7,7 @@ import {
   type AccessGrant,
   type AuthorizeSessionCreateInput,
   type SessionCreateCreator,
+  type SessionCreateRequestCorrelation,
   type SessionAuthorizationPort,
   type SessionAgentAccess,
   type SessionAgentAccessViewer,
@@ -544,6 +545,7 @@ export async function requireSessionCreateAuthorization(
   surface: SessionAuthorizationSurface,
   configuredServers: readonly { id: string }[] = [],
   requestCreator?: SessionCreateCreator,
+  creationRequest?: SessionCreateRequestCorrelation,
 ): Promise<
   | {
       actor: SessionAuthorizationActor;
@@ -570,7 +572,8 @@ export async function requireSessionCreateAuthorization(
   const { actor } = resolveSessionAuthorizationActor(grant, claims, facts);
   const decision = await authorizeSessionCreateForActor(
     port,
-    { accountId: grant.accountId, workspaceId: grant.workspaceId, actor, surface, creator },
+    { accountId: grant.accountId, workspaceId: grant.workspaceId, actor, surface, creator,
+      ...(creationRequest ? { creationRequest } : {}) },
     configuredServers,
   );
   return { actor, decision, creator };

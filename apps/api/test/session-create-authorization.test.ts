@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
+import { deploymentUnavailableFirstPartyMcpTools } from "@opengeni/config";
 import { beginSessionRealtimeInTransaction, withWorkspaceSubjectSessionActivityRls } from "@opengeni/db";
 import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import {
   signDelegatedAccessToken,
+  CreateSessionRequest,
+  stableJson,
+  type SessionCreateRequestCorrelation,
   type AuthorizeSessionCreateInput,
   type SessionCreateCreator,
   type SessionAuthorizationPort,
@@ -43,12 +48,14 @@ const noop = async () => undefined;
 function appWith(
   port: SessionAuthorizationPort,
   servers: ReturnType<typeof testSettings>["mcpServers"] = [],
+  deployment: Partial<Pick<ReturnType<typeof testSettings>, "artifactMaterializerDeployed" | "eventTriggersEnabled">> = {},
 ) {
   return createApp({
     settings: testSettings({
       productAccessMode: "managed",
       delegationSecret: SECRET,
       mcpServers: servers,
+      ...deployment,
     }),
     db: client.db,
     bus: new MemoryEventBus(),
@@ -135,6 +142,7 @@ describe("session create with a first message asks the host", () => {
         actor: expect.objectContaining({ subjectId: who.grant.subjectId }),
         surface: "http",
         creator: { principalKind: "human_session" },
+        creationRequest: { requestedSessionId: null, idempotencyKey: null, requestSha256: expect.stringMatching(/^[a-f0-9]{64}$/u) },
       },
     ]);
   });
@@ -371,4 +379,55 @@ test("create and created callbacks retain the configured port receiver",async()=
   const port={...allowEveryTarget,marker:"bound-port",async authorizeSessionCreate(){expect(this.marker).toBe("bound-port");return {allowed:true as const};},async sessionCreated(){expect(this.marker).toBe("bound-port");}};
   const who=await person();
   expect((await create(appWith(port),who,{initialMessage:"hello"})).status).toBe(202);
+});
+
+
+test("public create hooks share immutable server correlation before deployment filtering and ignore client digest claims", async () => {
+  const deployment = { artifactMaterializerDeployed: false };
+  expect(deploymentUnavailableFirstPartyMcpTools(testSettings(deployment)).has("editable_artifact_export")).toBe(true);
+  const requestedSessionId = crypto.randomUUID();
+  const idempotencyKey = `cendra-agent-handoff:${crypto.randomUUID()}`;
+  const raw = { requestedSessionId, idempotencyKey, initialMessage: "Synthetic accepted work",
+    firstPartyMcpTools: ["editable_artifact_export"], requestSha256: "0".repeat(64),
+    creationRequest: { requestedSessionId: crypto.randomUUID(), requestSha256: "1".repeat(64) } };
+  const expected = Object.freeze({ requestedSessionId, idempotencyKey,
+    requestSha256: createHash("sha256").update(stableJson(CreateSessionRequest.parse(raw))).digest("hex") });
+  let before: SessionCreateRequestCorrelation | undefined;
+  let afterCalled = false;
+  const app = appWith({ ...allowEveryTarget,
+    authorizeSessionCreate: async input => {
+      before = input.creationRequest;
+      expect(before).toEqual(expected);
+      expect(Object.isFrozen(before)).toBe(true);
+      expect(input.creator?.readCredential).toBeUndefined();
+      return { allowed: true };
+    },
+    sessionCreated: async input => {
+      afterCalled = true;
+      expect(input.creationRequest).toBe(before);
+      expect(input.creationRequest).toEqual(expected);
+      expect(input.sessionId).toBe(requestedSessionId);
+      expect(input.rootSessionId).toBe(requestedSessionId);
+    },
+  }, [], deployment);
+  expect((await create(app, await person(), raw)).status).toBe(202);
+  expect(afterCalled).toBe(true);
+});
+
+test("changed public request content changes host correlation without admitting either request", async () => {
+  const requestedSessionId = crypto.randomUUID();
+  const idempotencyKey = `cendra-agent-handoff:${crypto.randomUUID()}`;
+  const requests = ["Synthetic first request", "Synthetic changed request"].map(initialMessage => ({ requestedSessionId, idempotencyKey, initialMessage }));
+  const observed: SessionCreateRequestCorrelation[] = [];
+  const app = appWith({ ...allowEveryTarget, authorizeSessionCreate: async input => {
+    if (!input.creationRequest) throw new Error("CREATE_CORRELATION_MISSING");
+    observed.push(input.creationRequest);
+    return { allowed: false, reason: "forbidden" };
+  } });
+  const who = await person();
+  for (const request of requests) expect((await create(app, who, request)).status).toBe(403);
+  expect(observed).toEqual(requests.map(request => ({ requestedSessionId, idempotencyKey,
+    requestSha256: createHash("sha256").update(stableJson(CreateSessionRequest.parse(request))).digest("hex") })));
+  expect(observed[0]?.requestSha256).not.toBe(observed[1]?.requestSha256);
+  expect(await sessionCount(who.grant.workspaceId)).toBe(0);
 });

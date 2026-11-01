@@ -9700,8 +9700,18 @@ export type SessionCreateCreator = {
   readCredential?: () => Promise<string>;
 };
 
+/** Server-derived correlation of the normalized public create request, before runtime defaults.
+ * This selects accepted host work; it never grants authority or supplies Human presence.
+ */
+export type SessionCreateRequestCorrelation = Readonly<{
+  requestedSessionId: string | null;
+  idempotencyKey: string | null;
+  requestSha256: string;
+}>;
+
 /** A session create that admits a first turn: there is no target session yet. */
 export type AuthorizeSessionCreateInput = {
+  creationRequest?: SessionCreateRequestCorrelation;
   creator?: SessionCreateCreator;
   accountId: string;
   workspaceId: string;
@@ -9746,6 +9756,7 @@ export const SessionCreateDecision = /* @__PURE__ */ defineSchema(() =>
 );
 export type SessionCreateDecision = z.infer<typeof SessionCreateDecision>;
 export type SessionCreatedInput = {
+  creationRequest?: SessionCreateRequestCorrelation;
   creator?: SessionCreateCreator;
   accountId: string;
   workspaceId: string;
