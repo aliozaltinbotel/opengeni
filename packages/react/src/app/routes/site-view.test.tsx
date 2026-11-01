@@ -100,6 +100,8 @@ mock.module("../lib/app-api", () => ({
 }));
 mock.module("../lib/navigation", () => ({
   useNavigate: () => async (options: unknown) => void navigations.push(options),
+  // For the host chat panel this route's chunk also holds.
+  useLocation: () => ({ pathname: "/" }),
   Link: ({
     children,
     to,
@@ -218,6 +220,8 @@ mock.module("../../components/session-conversation", () => ({
   },
 }));
 mock.module("../../components/new-conversation", () => ({
+  // For the host chat panel this route's chunk also holds.
+  NewConversationView: () => null,
   NewConversation: (props: {
     createSession: (text: string, key: string, options: object) => Promise<string>;
     onCreated: (created: object) => void;

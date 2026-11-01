@@ -75,6 +75,11 @@ const SitePublishingPage = lazy(() =>
   })),
 );
 
+// A host extension's chat panel (`HostExtension.chatPanel`) is the same kind of
+// side chat and loads from this route's chunk: its own lazy entry would
+// regroup the shared code-split chunks.
+export { default as HostChatPanel } from "../components/host-chat-panel";
+
 const SITE_ROUTE = "/workspaces/$workspaceId/sites/$siteId";
 /** The panel's width while it sits beside the Site, set live while dragging. */
 const WIDTH_VARIABLE = "--og-site-chat-width";
