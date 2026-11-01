@@ -50,6 +50,8 @@ import { summarizeToolGatewayInputErrors, type ToolGatewayInputIssueSummary } fr
 
 export type ToolGatewayExecutionContext = import("@opengeni/contracts").NativeModelSourceContext & {
   operationId: string;
+  /** Verified native API provenance, never parsed from caller arguments or metadata. */
+  nativeHostSource?: Readonly<{ context: import("@opengeni/contracts").NativeHostSourceContext; reauthorize(): Promise<void> }>;
   caller: ToolGatewayCaller;
   /** Trusted in-process SDK correlation; not operation identity or approval authority. */
   sourceCallId?: string;
@@ -61,7 +63,7 @@ export type ToolGatewayExecutionContext = import("@opengeni/contracts").NativeMo
 
 export type ToolGatewayCallContext = Pick<
   ToolGatewayExecutionContext,
-  "sourceCallId" | "nativeModelSourceKey" | "transportMeta" | "signal"
+  "sourceCallId" | "nativeModelSourceKey" | "nativeHostSource" | "transportMeta" | "signal"
 >;
 
 export type ToolGatewayDefinition = Omit<ToolGatewayCatalogEntryValue, "codemodePath"> & {
@@ -390,6 +392,7 @@ export class ToolGateway {
               const executionContext: Parameters<ToolGatewayDefinition["execute"]>[1] = {
                 operationId,
                 caller,
+                ...(context.nativeHostSource === undefined ? {} : { nativeHostSource: context.nativeHostSource }),
                 ...(context.sourceCallId === undefined ? {} : { sourceCallId: context.sourceCallId }),
                 ...(context.nativeModelSourceKey === undefined ? {} : { nativeModelSourceKey: context.nativeModelSourceKey }),
                 ...(context.transportMeta === undefined ? {} : { transportMeta: context.transportMeta }),

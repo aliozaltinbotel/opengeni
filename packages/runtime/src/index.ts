@@ -1,3 +1,4 @@
+import { withNativeHostSourceInvocation, nativeHostSourceRequestInit, nativeHostToolIdentity, ownsNativeHostSourceDestination } from "./host-source-attestation";
 export { isOfficialDriveMcpConfig, mergeDriveMcpTools } from "./drive-mcp";
 import type { SessionToolFamily } from "@opengeni/contracts/organization-session-policy";
 import { DRIVE_MCP_BRIDGE_ADAPTER, type DriveMcpBridgeContext } from "./drive-mcp";
@@ -5302,6 +5303,9 @@ export type LocalMcpServerRegistration = {
   approvalAuthority?: unknown;
   /** Stable operation semantics for cross-attempt continuation, evaluated per tool. */
   effectAuthority?: (toolName: string) => unknown;
+  /** Verified native producer evidence for this invocation; does not replace server authorization. */
+  callToolWithSource?: (toolName: string, args: Record<string, unknown>, source: import("@opengeni/contracts").NativeHostSourceContext,
+    options: Readonly<{ signal?: AbortSignal }>) => Promise<import("@opengeni/contracts").AttemptToolResult>;
   /** Provider-free argument/credential preflight for the current-human gateway. */
   preflightCall?: (
     toolName: string,
@@ -5982,6 +5986,7 @@ export async function prepareAgentTools(
               local.effectAuthority,
               false,
               eagerToolNames,
+              local.callToolWithSource,
             ),
             config,
             options,
@@ -6030,7 +6035,8 @@ export async function prepareAgentTools(
           options.requestSignal?.throwIfAborted();
           await options.authorizeProviderRequest?.();
           options.requestSignal?.throwIfAborted();
-          const initial = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          const credentialed = options.runMcpCredentials?.requestInit(config, input, init) ?? init;
+          const initial = await nativeHostSourceRequestInit(settings, input, credentialed);
           const requestInit = options.requestSignal
             ? {
                 ...initial,
@@ -6382,6 +6388,7 @@ export async function prepareAgentTools(
         "attempt_catalog_build",
         async () =>
           await prepareAttemptToolEnvironment(
+            settings,
             activeMcpServers,
             registry,
             resolvedMcpConnectionIds,
@@ -6682,6 +6689,7 @@ function normalizedCredentialTargetUrl(value: string): string | null {
 }
 
 async function prepareAttemptToolEnvironment(
+  settings: Settings,
   servers: MCPServer[],
   registry: ReadonlyMap<string, Settings["mcpServers"][number]>,
   resolvedMcpConnectionIds: ReadonlyMap<string, string>,
@@ -6704,6 +6712,7 @@ async function prepareAttemptToolEnvironment(
     options.sessionAttachedRemoteMcpTargets,
     options.runMcpCredentials,
     options.localMcpServers,
+    { scope, subjectId: options.subjectId, connectionSubjectId: options.credentialSubjectId, settings },
   );
   const serversByRegistryId = new Map(
     prepared.servers.map(({ server }) => [server.registryId, server]),
@@ -7128,6 +7137,7 @@ async function prepareToolGatewayDefinitionsFromServers(
   externalIdentityTargets: readonly { id: string; url: string }[] = [],
   runMcpCredentials?: RunMcpCredentials,
   localServers: readonly LocalMcpServerRegistration[] = [],
+  producer?: { scope: AttemptToolScope; subjectId: string | undefined; connectionSubjectId: string | undefined; settings: Settings },
 ): Promise<{
   servers: { server: PrefixedMcpServer; config: Settings["mcpServers"][number] }[];
   definitions: Array<
@@ -7237,7 +7247,8 @@ async function prepareToolGatewayDefinitionsFromServers(
                 content: [{ type: "text", text: error.message }],
               };
             }
-            const execute = async () =>
+            const execute = async () => withNativeHostSourceInvocation(
+              producer?.scope, producer?.subjectId, producer?.connectionSubjectId, context, producer && ownsNativeHostSourceDestination(producer.settings, producer.scope, new URL(config.url).href) ? nativeHostToolIdentity(tool._meta) : undefined, toolName, args, async () =>
               await server.executeCatalogTool(
                 toolName,
                 args,
@@ -7245,11 +7256,12 @@ async function prepareToolGatewayDefinitionsFromServers(
                 {
                   ...(context.signal ? { signal: context.signal } : {}),
                   maxResultBytes: MCP_MAX_RESPONSE_BYTES,
+                  ...(context.nativeHostSource ? { nativeHostSource: context.nativeHostSource } : {}),
                   ...(context.transportMeta?.targetedCall === true
                     ? { propagateInvocationErrors: true }
                     : {}),
                 },
-              );
+              ));
             const recovery = configuredMcpOperationRecovery(server, toolName);
             if (!recovery) return await execute();
             if (!recovery.supported || !["model", "codemode"].includes(context.caller.kind)) {
@@ -9456,6 +9468,7 @@ export class PrefixedMcpServer implements MCPServer {
      * request while this server's other schemas are deferred behind search.
      */
     eagerToolNames?: readonly string[],
+    private readonly hostSourceCall?: LocalMcpServerRegistration["callToolWithSource"],
   ) {
     this.eagerToolNames = new Set(eagerToolNames ?? []);
     this.registryId = registryId;
@@ -9870,6 +9883,7 @@ export class PrefixedMcpServer implements MCPServer {
        * exact result, so a large read must never fail before that seam.
        */
       maxResultBytes?: number;
+      nativeHostSource?: import("@opengeni/tool-gateway").ToolGatewayExecutionContext["nativeHostSource"];
     },
   ): Promise<AttemptToolResultValue> {
     if (!this.isAllowed(unprefixed)) {
@@ -9915,7 +9929,15 @@ export class PrefixedMcpServer implements MCPServer {
     try {
       this.runMcpCredentials?.assertAvailable(this.registryId);
       const physicalCall = async (callArgs: Record<string, unknown>) => {
-        const projected = this.inner.callToolResult
+        const source = options?.nativeHostSource;
+        if (source && this.hostSourceCall) {
+          if (source.context.serverId !== this.registryId || source.context.toolName !== unprefixed
+            || source.context.inputSha256 !== digestCanonicalJson(callArgs)) throw new Error("HOST_SOURCE_TARGET_MISMATCH");
+          await source.reauthorize();
+        }
+        const projected = source && this.hostSourceCall
+          ? await this.hostSourceCall(unprefixed, callArgs, source.context, { ...(options?.signal ? { signal: options.signal } : {}) })
+          : this.inner.callToolResult
           ? await this.inner.callToolResult(unprefixed, callArgs, meta, options)
           : mcpContentAsResult(await this.inner.callTool(unprefixed, callArgs, meta, options));
         return projected;

@@ -2478,6 +2478,20 @@ human approval and rejects direct calls to their projected names; those entries
 remain available through the current-human HTTP/SDK approval path and the Site
 direct-call path.
 
+Native worker calls to an embedding host may carry a purpose-bound host-source
+attestation in `x-opengeni-host-source`. It reuses native signed delegation and
+the current-attempt owner, with a prefix rejected by ordinary bearer verification.
+The proof binds the actual request-local model producer, exact attempt generation,
+host tool, canonical arguments and separate OAuth credential. The native API
+still requires the ordinary current OAuth connection, matching its subject to the
+worker-frozen credential owner separately from the worker principal; it rereads the exact immutable source receipt and rechecks the live attempt at
+physical dispatch. Only the optional `LocalMcpServerRegistration.callToolWithSource`
+hook receives this per-call context. Public arguments/metadata and source-absent
+human or external calls cannot populate it. Source evidence grants no Cendra
+business authority, disclosure decision or budget; the host retains those owners.
+Implementation: `packages/runtime/src/host-source-attestation.ts` and
+`apps/api/src/host-source-attestation.ts`.
+
 For a host-governed **workspace** resource, an optional `mcpOAuthHostConsent`
 port connects the existing native consent form to the embedding host. Only an
 explicit approval obtains the existing cookie-only workspace host JWT; the

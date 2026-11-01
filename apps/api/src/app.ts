@@ -1,3 +1,5 @@
+import { nativeHostSourceVerifier } from "./host-source-attestation";
+import { NATIVE_HOST_SOURCE_HEADER } from "@opengeni/contracts";
 import {
   oauthSignupChallengeVerified,
   runWithSignupChallenge,
@@ -1983,6 +1985,7 @@ export function createAppComposition(deps: AppDependencies): {
           prepared,
           oauthAccess.grant,
           routeDeps.observability,
+          nativeHostSourceVerifier(routeDeps, oauthAccess.grant, c.req.raw),
         );
         try {
           await mcp.connect(transport);
@@ -1993,6 +1996,7 @@ export function createAppComposition(deps: AppDependencies): {
         }
       });
     }
+    if (c.req.header(NATIVE_HOST_SOURCE_HEADER) !== undefined) throw new HTTPException(403, { message: "host source requires MCP OAuth" });
     let authorization: Awaited<ReturnType<typeof requireMcpAccessGrantAuthorization>>;
     try {
       authorization = await requireMcpAccessGrantAuthorization(c, routeDeps, workspaceId);
