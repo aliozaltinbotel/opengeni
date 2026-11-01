@@ -26,6 +26,8 @@ import {
   markSessionWorkflowWakeDelivered,
   runtimeDatabaseReadyCheck,
   getKnowledgeEntry,
+  getCanonicalHumanIdentityProjection,
+  CanonicalHumanIdentityNotFoundError,
   withRlsContext,
   type Database,
   type EventOccurrenceToStart,
@@ -539,6 +541,8 @@ export async function createTemporalWorkflowClient(
 export type StartApiOptions = {
   settings?: ReturnType<typeof getSettings>;
   observability?: Observability;
+  /** Borrow the API-owned current identity reader before listening. The host never owns its pool. */
+  onCanonicalHumanIdentityReader?: (read: CanonicalHumanIdentityReader) => void | Promise<void>;
   /**
    * Embedding-host session ACL (`AppDependencies.sessionAuthorization`). A host
    * that runs this entry rather than mounting `createApp(deps)` binds it here;
@@ -560,6 +564,24 @@ export type StartApiOptions = {
    */
   workspaceToolServers?: AppDependencies["workspaceToolServers"];
 };
+
+export type CanonicalHumanIdentityReader = (authUserId: string) =>
+  Promise<Awaited<ReturnType<typeof getCanonicalHumanIdentityProjection>> | null>;
+
+/** Shares only the existing public read, never a database handle or an identity result. */
+export async function bindStartApiCanonicalHumanIdentityReader(
+  db: Database,
+  options: Pick<StartApiOptions, "onCanonicalHumanIdentityReader">,
+): Promise<void> {
+  await options.onCanonicalHumanIdentityReader?.(async (authUserId) => {
+    try {
+      return await getCanonicalHumanIdentityProjection(db, authUserId);
+    } catch (error) {
+      if (error instanceof CanonicalHumanIdentityNotFoundError) return null;
+      throw error;
+    }
+  });
+}
 
 /**
  * The composition override an embedding host's `sessionAuthorization` option
@@ -686,6 +708,8 @@ export async function startApi(options: StartApiOptions = {}) {
         onRetry,
       },
     );
+    // The embedding host must finish binding before any application listener exists.
+    await bindStartApiCanonicalHumanIdentityReader(dbClient.db, options);
   } catch (error) {
     await Promise.allSettled([bus?.close(), workflowClient?.close(), dbClient.close()]);
     throw error;
