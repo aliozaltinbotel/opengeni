@@ -225,3 +225,57 @@ test("split-origin verification keeps the API endpoint and accepts only a truste
   expect(verificationUrlForConsole(settings, explicit.toString())).toBe(explicit.toString());
   await expect(verificationUrl({ ...settings, webBaseUrl: "https://untrusted.example.test" }, "fixture@example.invalid")).rejects.toThrow("trusted");
 });
+
+test("split-origin verification returns signup root markers to the console", async () => {
+  const { verificationUrlForConsole } = await import("../src/auth/managed-auth");
+  const settings = testSettings({
+    publicBaseUrl: "https://api.example.test",
+    webBaseUrl: "https://console.example.test",
+    consoleAllowedOrigins: "https://console.example.test",
+  });
+  for (const callback of [
+    "/?auth_event=email_verified",
+    "/?utm_source=fixture&auth_event=email_verified#return",
+    "https://api.example.test/?auth_event=email_verified",
+  ]) {
+    const original = new URL("https://api.example.test/v1/auth/verify-email");
+    original.searchParams.set("token", "synthetic-verification-fixture");
+    original.searchParams.set("callbackURL", callback);
+    const delivered = new URL(verificationUrlForConsole(settings, original.toString()));
+    expect(delivered.origin).toBe(original.origin);
+    expect(delivered.pathname).toBe(original.pathname);
+    expect(delivered.searchParams.get("token")).toBe(original.searchParams.get("token"));
+    const expected = new URL(callback, settings.publicBaseUrl);
+    expected.host = "console.example.test";
+    expect(delivered.searchParams.get("callbackURL")).toBe(expected.toString());
+  }
+});
+
+
+test("verification callback rewriting preserves explicit destinations and trust refusal", async () => {
+  const { verificationUrlForConsole } = await import("../src/auth/managed-auth");
+  const settings = testSettings({
+    publicBaseUrl: "https://api.example.test",
+    webBaseUrl: "https://console.example.test",
+    consoleAllowedOrigins: "https://console.example.test",
+  });
+  for (const callback of [
+    "https://console.example.test/workspaces?auth_event=email_verified",
+    "/connect-agent?auth_event=email_verified",
+    "//other.example.test/?auth_event=email_verified",
+    "https://other.example.test/?auth_event=email_verified",
+    "https://fixture:fixture@api.example.test/",
+    "javascript:fixture()",
+    "https://[invalid",
+  ]) {
+    const original = new URL("https://api.example.test/v1/auth/verify-email");
+    original.searchParams.set("token", "synthetic-verification-fixture");
+    original.searchParams.set("callbackURL", callback);
+    expect(verificationUrlForConsole(settings, original.toString())).toBe(original.toString());
+  }
+  const original = new URL("https://api.example.test/v1/auth/verify-email");
+  original.searchParams.set("callbackURL", "/?auth_event=email_verified");
+  expect(() => verificationUrlForConsole({
+    ...settings, webBaseUrl: "https://other.example.test",
+  }, original.toString())).toThrow("trusted");
+});

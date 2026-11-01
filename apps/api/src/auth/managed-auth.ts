@@ -1040,8 +1040,24 @@ export function verificationUrlForConsole(settings: Settings, value: string): st
   }
   const url = new URL(value);
   const callback = url.searchParams.get("callbackURL");
-  const apiHome = settings.publicBaseUrl ? new URL("/", settings.publicBaseUrl).toString() : null;
-  if (callback === null || callback === "/" || callback === apiHome) {
+  if (callback === null) {
+    url.searchParams.set("callbackURL", destination.toString());
+    return url.toString();
+  }
+  const apiHome = new URL("/", settings.publicBaseUrl ?? url.origin);
+  let callbackUrl: URL;
+  try {
+    callbackUrl = new URL(callback, apiHome);
+  } catch {
+    // Leave invalid explicit callbacks to the authentication owner's validation.
+    return value;
+  }
+  if (
+    callbackUrl.origin === apiHome.origin && callbackUrl.pathname === "/" &&
+    !callbackUrl.username && !callbackUrl.password
+  ) {
+    destination.search = callbackUrl.search;
+    destination.hash = callbackUrl.hash;
     url.searchParams.set("callbackURL", destination.toString());
   }
   return url.toString();
