@@ -1,16 +1,13 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
-const source = readFileSync(
-  new URL("../.github/workflows/publish-desktop-image.yml", import.meta.url),
-  "utf8",
-);
+const source = readRetiredWorkflow("publish-desktop-image.yml");
 const workflow = Bun.YAML.parse(source);
 const job = workflow.jobs["desktop-image"];
 const steps = job.steps;
 
-test("desktop publication uses existing public-release OIDC without global OCI routing", () => {
+test("historical workflow fixture: desktop publication uses existing public-release OIDC without global OCI routing", () => {
   expect(job.environment).toBe("public-release");
   expect(job.permissions).toEqual({ contents: "read", packages: "write", "id-token": "write" });
   const login = steps.find((step: any) => step.uses === "./.github/actions/public-oci-login");
@@ -30,7 +27,7 @@ test("desktop publication uses existing public-release OIDC without global OCI r
   );
 });
 
-test("anonymous digest and installed runtime proof gates success and retains evidence", () => {
+test("historical workflow fixture: anonymous digest and installed runtime proof gates success and retains evidence", () => {
   const proof = steps.find(
     (step: any) => step.name === "Verify anonymous desktop publication and installed runtime",
   );
@@ -58,7 +55,7 @@ test("anonymous digest and installed runtime proof gates success and retains evi
   expect(evidence.with.path).toBe(".release/desktop-publication");
 });
 
-test("published doctor receives both required installation paths in its container", () => {
+test("historical workflow fixture: published doctor receives both required installation paths in its container", () => {
   const proof = steps.find(
     (step: any) => step.name === "Verify anonymous desktop publication and installed runtime",
   );
@@ -97,7 +94,7 @@ docker() {
   }
 });
 
-test("operator-registry publication is dispatch-only and never writes canary tags", () => {
+test("historical workflow fixture: operator-registry publication is dispatch-only and never writes canary tags", () => {
   // A push trigger queued one gated run per main commit. Main CI publishes the
   // exact-SHA GHCR desktop image and records it in the canary receipt instead.
   expect(Object.keys(workflow.on)).toEqual(["workflow_dispatch"]);

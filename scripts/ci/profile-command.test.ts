@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./retired-workflow-fixture.ts";
 import { describe, expect, test } from "bun:test";
 import {
   existsSync,
@@ -353,7 +354,7 @@ describe("bounded live resource diagnostics", () => {
     );
   });
 
-  test("flag off retains default stdout; workflow opts in only for typecheck", async () => {
+  test("historical workflow fixture: flag off retains default stdout; workflow opts in only for typecheck", async () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-resource-default-"));
     try {
       const child = Bun.spawn(
@@ -377,7 +378,7 @@ describe("bounded live resource diagnostics", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-    const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+    const workflow = readRetiredWorkflow("ci.yml");
     expect(workflow.match(/--live-resources/gu)).toHaveLength(1);
     const typecheck = workflow
       .split("- name: Profile impacted TypeScript 7 projects")[1]!

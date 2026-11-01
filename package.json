@@ -149,8 +149,6 @@
     "check:subscription-core-neutral": "bun scripts/check-subscription-core-neutral.ts",
     "check:no-legacy-subscription-runtime": "bun scripts/check-no-legacy-subscription-runtime.ts",
     "check:no-legacy-codex-runtime": "bun run check:no-legacy-subscription-runtime",
-    "check:workflow-graph": "bun scripts/workflow-execution-graph.ts",
-    "workflow-graph:refresh": "bun scripts/workflow-execution-graph.ts --write",
     "check:migration-ordinals": "bun scripts/check-migration-ordinals.ts",
     "check:migration-rls-backfills": "bun scripts/check-migration-rls-backfills.ts",
     "check:migration-lock-order": "bun scripts/check-migration-lock-order.ts",

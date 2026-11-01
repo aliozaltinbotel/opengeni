@@ -2,6 +2,14 @@
 
 This repository is a clean TypeScript/Bun stack. The public API is session-based.
 
+## Local validation and deployment (Cendra fork)
+
+Permanent operator rule (2026-11-01), scoped to `aliozaltinbotel/opengeni`: run required checks locally, then deploy from the local operator environment through the existing supported build/deployment owners. GitHub Actions is disabled. Do not add or restore executable `.github/workflows` definitions, dispatch/rerun Actions, wait for hosted checks or consume Actions credits. This overrides inherited hosted-CI, queue and release-automation execution instructions on this fork; it does not change `Cloudgeni-ai/opengeni` or weaken product/security contracts.
+
+Use the pinned toolchain and existing package scripts, type/unit/browser runners and deployment owners. Retain exact source SHA/tree, commands, results and independent review. Preserve missing/failed evidence as such. After local validation, preserve image/source provenance, authorization, backups and rollback, then verify deployed identities and affected real staging flows. No hosted run ID, signature, receipt or build number may be fabricated. A retained upstream controller that requires Actions identity needs an explicit correction at its existing owner before local use; it is not a replacement local pipeline.
+
+Keep immutable historical releases, receipts and scripts. Existing local workload image commands in [Deployment](docs/deployment.md#build-images) remain available; Cendra's fork repin/carrier/rollout procedure is owned by `CendraAgenticPMS/docs/opengeni/FORK-POLICY.md`.
+
 > **Start here for orientation: [`docs/architecture.md`](docs/architecture.md).** It is the canonical whole-system map — what Opengeni is, the load-bearing invariants, the current workspace layout, the major ownership boundaries, and the _"if you're changing X, read Y first"_ routing index. Read it before navigating an unfamiliar area, and **keep it current**: if your change adds/removes/renames an app, package, example workspace, or sandbox backend; alters an architectural invariant, the data-flow, or the session/turn lifecycle; or changes which file is canonical for a change area — update `docs/architecture.md` in the _same_ change. A stale map is a bug. (This file, AGENTS.md, owns _how to run and operate_ the stack; architecture.md owns _how the system is shaped_.)
 
 When the user says **"start the dev server"**, **"spin it up"**, or **"run the full stack"**, they mean the steps under **Full local stack**.
@@ -481,10 +489,10 @@ never ignore `definitionVersion` globally or compose unrelated digest migrations
 
 Treat a candidate as an immutable semantic source revision, not as a snapshot of
 the latest protected branch. Create the branch from current `main` initially,
-then keep the exact head frozen while CI and review run. Ordinary PRs into
-`main` use targeted local checks without pull-request CI; post-merge CI remains
-enabled. Freeze-head source admission runs only for
-`hotfix/*` PRs into `production`.
+then keep the exact head frozen while the required local checks and independent review run.
+The owned fork has no hosted pre-merge or post-merge CI. Validate compatibility
+against its actual target branch and preserve release/source admission contracts
+without invoking retired Actions controllers.
 
 - A protected-branch advance alone is **not** a source revision, does not
   invalidate a head-bound review, and must not produce another candidate label.
@@ -506,38 +514,30 @@ enabled. Freeze-head source admission runs only for
   mutation.” They must never direct a source owner to “reconcile again” merely
   because `main` advanced. Candidate/version numbers count substantive source
   changes only.
-- Run independent review as soon as the candidate is ready; CI and review may
-  proceed concurrently, while merge still waits for both.
+- Run independent review as soon as the candidate is ready; local checks and review
+  may proceed concurrently, while merge still waits for both.
 
 Promote `main` → `production` with a merge-commit PR (never squash / never
 GitHub rebase-and-merge). Hotfix PRs into `production` keep freeze-head
 admission; see `CONTRIBUTING.md` § Release / Publishing.
 
-Acknowledged canary receipt recovery uses
-`.github/workflows/reconcile-canary-publication.yml` and
-`scripts/reconcile-canary-publication.ts`. It is a separate protected GET-only
-controller, reads historical publisher source as data, and preserves the failed
-origin and absent Site artifact. Only complete positive acknowledged cohorts are
-eligible; unknown writes never replay. Distinct linked receipts and Site pins are
-nonpromotable and require explicit manual staging consumer authority. Do not relax
-the canonical receipt verifier's source equality, production or scheduled release guards.
-Canary publication is two jobs: `publish` writes with credentials and hands the
-acknowledged cohort to the credential-free `confirm` job, which waits for npm's
-asynchronous processing and uploads the Site pins. When npm is slow, re-run the
-failed `confirm` job; reconciliation is only for a failed `publish` job.
-Exact-source canary publication may select a normally merged protected-main ancestor
-with successful exact-source CI through `scripts/canary-source-admission.ts`.
-The trusted current-main controller stays checked out separately, and supplied
-Sigstore provenance identifies both it and the selected package source without
-overriding GitHub identity. Split-source receipt protocol V2 is deliberately not
-accepted by the canonical V1 reconciliation verifier. See `CONTRIBUTING.md`.
+Inherited canary publication/reconciliation procedures are reference material on this fork;
+their GitHub Actions controllers are retired. Keep `scripts/reconcile-canary-publication.ts`,
+`scripts/canary-source-admission.ts`, immutable receipts and source equality checks.
+Unknown writes must never replay, and only complete verified cohorts can be promoted.
+Preserve failed origins and absent Site artifacts. Distinct linked receipts and Site pins remain
+nonpromotable without explicit manual staging consumer authority. Canonical receipt source
+equality, production guards and signatures remain mandatory; split-source V2 receipts do not
+become valid inputs to the V1 reconciliation verifier because hosted automation is disabled.
+An existing publisher that requires hosted identity must be adapted and reviewed before
+local invocation; absence of Actions evidence is not acceptance.
 The publisher entrypoint is bundled by Bun and executed by pinned native Node;
 package builds and packing remain on pinned Bun. Do not run TUF verification
 under Bun 1.4.0: its missing default ECDSA digest rejects the real Sigstore root.
 Never bypass root signatures or change their threshold to accommodate a runtime.
 
-See the hotfix admission contract in
-`.github/workflows/source-admission.yml`, `scripts/check-source-admission.mjs`,
+See the retained hotfix admission contract in
+`scripts/check-source-admission.mjs`,
 and `scripts/check-source-admission.test.ts`. Do not reintroduce an
 exact-current-tip ancestry requirement in prompts, goals, documentation, or
 operator procedure.
@@ -788,111 +788,18 @@ End-to-end agent runs require the full stack plus valid model and sandbox creden
 
 ## Reviewed merges to main
 
-Follow [`docs/merge-batcher.md`](docs/merge-batcher.md); historical measurements
-and inactive alternatives remain in [`docs/merge-queue.md`](docs/merge-queue.md).
-Admission uses GitHub: an open, non-draft PR with native auto-merge requested
-(`gh pr merge --auto --squash`) **or** `queue-ready`, and the configured
-required fast GitHub-hosted checks (lint, types and selected unit tests) passing
-on its exact current head, not the full PR suite. Agent comments,
-VM attestations and reviewer session UUIDs are not admission requirements.
-Approval requirements come from the existing repository protection policy;
-the batcher adds no separate human or agent approval gate. Follow the repository's
-development validation guidance and report failures honestly, but do not invent
-an attestation requirement for queue intake. A changed head needs its own required
-checks; old-head success does not transfer. Version PRs remain singletons.
+For this owned fork, serialize ordinary reviewed PR merges against the actual target branch
+after its required local checks and independent review pass. Record the exact candidate and
+resulting merge source. Preserve applicable branch protections, release ancestry and immutable
+history; never force-push shared history or bypass protection to compensate for disabled Actions.
+A stale hosted check is not local evidence. The inherited merge-batcher/queue and hosted release
+controllers are inactive; retained scripts and historical receipts do not authorize their activation.
 
-GitHub native queue enforcement and vendor installation stay off. Only the
-rollout owner's explicit go permits activation of the reviewed controller and rules.
-Candidate-only CI shadow permission is not permission to control main or change
-rulesets. The prepared [administration bundle](docs/merge-batcher-admin/README.md)
-does not activate anything; keep main control inactive until the rollout owner
-gives a separate explicit go with the matching core/workflow implementation.
-Merge mode follows **readable current GitHub rules**, not an owner-local receipt
-or whether a controller happens to be running. Read
-`gh api repos/Cloudgeni-ai/opengeni/rules/branches/main` and the paginated ruleset
-inventory/details (including inherited rules), as described in
-the [agent readback procedure](docs/merge-batcher-admin/README.md#agent-readable-merge-mode).
-GitHub may omit `bypass_actors` for ordinary readers; that expected omission is
-not malformed policy and does not by itself force hold. Exact App/bypass checks
-belong to the activation operator, not ordinary agents selecting a merge path.
-Before activation or after a complete verified OFF restoration, the original
-squash-only PR admission plus non-FF/deletion protection, with no batcher writer
-restriction or partial guard transition, means normal reviewed squash after the
-required GitHub checks and existing protection policy. A private receipt is not a
-prerequisite for that read-only determination. A partial transition, inaccessible
-effective-policy readback or unknown mode is **hold**: do not merge. Once the
-readable effective policy shows the complete intended main writer restriction
-alongside admission and immutable protection, choose queue-only (never direct
-merge) without requiring hidden bypass data. For the update rule, exactly
-`{type:"update"}` (parameters absent) is equivalent to exactly
-`{type:"update",parameters:{update_allows_fetch_and_merge:false}}`.
-Explicit true, empty/null parameters, nonboolean values, extra fields or duplicate
-rules are not that equivalence; unknown or mixed policy remains hold. The batcher
-is the **only normal path to main**; this queue-only instruction takes effect with
-that activation without waiting for another source edit. Submit the documented
-ready signal (`gh pr merge --auto --squash` **or** `queue-ready`; either suffices) and
-observe the **Batch ready** result and exact landed SHA. Do not directly squash or
-merge a PR to main, use `--admin`, call a direct merge API, or push main. Do not
-create/update/delete queue or batcher-state refs or manually rerun/cancel Batch CI.
-Stopping the controller alone does **not** restore the manual merge path. The
-authorized operator's one-command OFF must prove writer stop and restore the exact
-prior rules, then publish its verified manual-mode receipt for the audit. Agents
-independently confirm restoration through the same readable GitHub rules; the
-owner's local receipt is not their only source. A ruleset name alone is never
-proof of mode, identity or bypass scope. Organization administrators have an
-emergency bypass on writer/admission restrictions, not on the separate immutable
-non-FF/deletion guard. GitHub does not enforce the word "emergency": this is an
-operator policy, never permission for routine queue bypass. Do not rebase merely
-because main advanced: the batcher tests the
-combined tree. Any head change invalidates earlier check results and requires a new
-candidate. Version PRs always occupy their own batch.
-
-Queue-green is not release-green. Releases require full main CI on the exact
-released tip, with verified Version ancestry and matching image provenance.
-A batcher landing whose exact tree passed a trusted Batch CI attempt satisfies
-main CI by attestation: its test lanes are skipped, while artifacts, images and
-receipts still run (`scripts/ci/batch-attestation.ts`). Version PR, control-plane
-and CI-definition landings never attest, and release admission refuses attested
-receipts, so a released tip always has the full suite.
-The required batch suite is plan/source/impact-selected units/Batch ready on the
-exact stacked candidate tree. Its verified latest-attempt success may land even
-when full-main CI is red or unknown; full main CI remains an independent backstop,
-not a candidate admission gate. Development validation is not a comment-based
-admission gate. The controller may retry a failed candidate's entire Batch CI once,
-using exact-attempt evidence classified as trusted code failure, verified
-infrastructure failure, provider cancellation, no-job-logs, or positive
-failed/timed-out job evidence.
-After a trusted second code failure, split the cohort and durably park failing
-singleton heads without blame or ejection,
-while other ready heads proceed. A new ready event or main advancement does not
-retry a parked head; a changed head may re-enter. Comparable base evidence remains
-unavailable, and full-main CI success is not a substitute. Current receipts lack
-trusted failure fingerprints, so no same-way suspected-base landing hold is claimed.
-Cancelled or infrastructure-error candidate runs are not failing PR verdicts;
-the controller owns the single unchanged-input retry; unknown evidence never
-authorizes it, and a second unknown/infrastructure outcome remains held. Do not stack manual
-or in-job retries on it, or silently resubmit an ejected unchanged head.
-Retries run the **entire** batch workflow, not GitHub's "Re-run failed jobs":
-the plan and task receipts are deliberately bound to one run attempt.
-Full main CI also requires **Re-run all jobs** when recovering a release candidate:
-the Full CI and canary image receipts must belong to the same selected attempt.
-A partial rerun can turn the provider run green while leaving the SHA ineligible
-for release. Changes to
-the batcher or its CI control files require an isolated batch and explicit
-independent review of those control-plane changes.
-
-Budget/threshold increases, newly skipped tests and reduced coverage must be
-explicit in the PR description, labelled `test-policy-change`, and confirmed in
-independent review. Never conceal a failing check by weakening it.
-The documented `hotfix/*` → `production` incident lane stays separate; ordinary
-main changes never bypass the queue. See the incident and rollback steps in the
-queue runbook before any exceptional main action.
-
-If full post-merge main CI goes red, identify and reproduce the culprit against
-the last fully green SHA, then **revert the culprit PR first through the queue**
-and fix it afterwards. Do not leave main red while developing the forward fix.
-Coalesced runs can contain several PRs: the tip PR is not automatically the culprit.
-Cancelled runs are not failures. Automatic blind reverts are not authorized.
+Budget/threshold increases, newly skipped tests and reduced coverage require an explicit reason
+and independent review. Never conceal a failure by weakening its check. If local validation of a
+landed change fails, identify the culprit against a qualified baseline, then use a reviewed revert
+or correction with preserved evidence and rollback controls. Do not infer blame from the latest PR
+or automatically revert unknown failures.
 
 ## Deployment Work Notes
 
@@ -905,7 +812,7 @@ is bootstrap evidence until this compatibility binary ships; see
 
 When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform, conformance checks, preview variable-sets, observability, or cloud-provider-agnostic infrastructure, treat the source as authoritative: deployment contracts in `packages/deployment`, the Helm chart under `deploy/helm/opengeni`, Terraform roots under `deploy/terraform`, stack wrappers under `deploy/stacks`, and operator docs in `docs/deployment.md`.
 
-Every new SQL migration must declare its reviewed production path on line 1: `-- deployment-mode: rolling` for online-compatible expand-and-contract work, or `-- deployment-mode: maintenance` for an incompatible one-way cutover. Rolling is the default: one maintenance migration drains every API, control and turn worker for its whole release. A new maintenance migration must carry `-- maintenance-justification: <why no expand/contract sequence works>` in its leading comment block, and a rolling migration that drops, renames, retypes or sets NOT NULL on an existing table must carry `-- contract-step: <migration or PR after which nothing uses the old shape, or why the previous release is unaffected>`; `bun run check:migration-deployment-mode` is the CI guard. Follow [`docs/migrations-expand-contract.md`](docs/migrations-expand-contract.md). The protected production gate hashes the ordered SQL history and rejects rewrites or unclassified additions.
+Every new SQL migration must declare its reviewed production path on line 1: `-- deployment-mode: rolling` for online-compatible expand-and-contract work, or `-- deployment-mode: maintenance` for an incompatible one-way cutover. Rolling is the default: one maintenance migration drains every API, control and turn worker for its whole release. A new maintenance migration must carry `-- maintenance-justification: <why no expand/contract sequence works>` in its leading comment block, and a rolling migration that drops, renames, retypes or sets NOT NULL on an existing table must carry `-- contract-step: <migration or PR after which nothing uses the old shape, or why the previous release is unaffected>`; `bun run check:migration-deployment-mode` is the local guard. Follow [`docs/migrations-expand-contract.md`](docs/migrations-expand-contract.md). The protected production gate hashes the ordered SQL history and rejects rewrites or unclassified additions.
 
 Migration `0345_tenant_scoped_session_tenancy_fence.sql` is a maintenance-only
 writer-protocol cutover. Stop every old API, control worker, and turn worker
@@ -914,15 +821,15 @@ replaces schema-wide session-tenancy table locks with a workspace advisory
 protocol and installs database triggers that reject all 17 hot-table mutations
 unless the acting backend already holds that workspace fence.
 
-**A migration never waits for an advisory lock after taking a table lock.** Application transactions take the workspace fence before they lock rows, and `ALTER TABLE` (including `NO FORCE ROW LEVEL SECURITY`), `LOCK TABLE`, plain `CREATE INDEX` and `CREATE TRIGGER` hold their lock until the migration commits. Taking a fence after one of them deadlocks with live traffic during a rolling deploy, and PostgreSQL aborts the application transactions in the cycle. Take every fence before the first table lock, or rely on the table locks you hold (they already exclude every other reader and writer of those tables) and take no fence; if a fence-checking trigger fires on the migration's own write, disable it inside that window. `bun run check:migration-lock-order` is the CI guard; never add to its grandfathered list.
+**A migration never waits for an advisory lock after taking a table lock.** Application transactions take the workspace fence before they lock rows, and `ALTER TABLE` (including `NO FORCE ROW LEVEL SECURITY`), `LOCK TABLE`, plain `CREATE INDEX` and `CREATE TRIGGER` hold their lock until the migration commits. Taking a fence after one of them deadlocks with live traffic during a rolling deploy, and PostgreSQL aborts the application transactions in the cycle. Take every fence before the first table lock, or rely on the table locks you hold (they already exclude every other reader and writer of those tables) and take no fence; if a fence-checking trigger fires on the migration's own write, disable it inside that window. `bun run check:migration-lock-order` is the local guard; never add to its grandfathered list.
 
-**A migration-time backfill over a FORCE-RLS table must open the owner-only posture window.** `FORCE ROW LEVEL SECURITY` binds the table _owner_, and Opengeni migrates as a NON-superuser owner without `BYPASSRLS`, with no tenant GUC set. A bare `UPDATE`/`DELETE`/`INSERT ... SELECT`/`DO $$` backfill therefore matches **zero rows and reports success**, and an `IF EXISTS ... RAISE EXCEPTION` preflight certifies a cutover it cannot see. Wrap the statement in `ALTER TABLE "t" NO FORCE ROW LEVEL SECURITY; ... ALTER TABLE "t" FORCE ROW LEVEL SECURITY;` (relaxes only the owner; the app role stays policy-bound; the file is one implicit transaction), set the tenant GUC around it, or use an RLS-immune `ADD COLUMN ... NOT NULL DEFAULT`. `VALIDATE CONSTRAINT`, `SET NOT NULL`, unique-index builds, and RI checks _do_ see every row — which is why a CHECK that evaluates to NULL (and therefore passes) is the trap. `bun run check:migration-rls-backfills` is the CI guard; migration bytes are frozen, so never add to its grandfathered lists. Drive `migrate()` through `acquireOwnerMigratedTestDatabase` to test this boundary. See [`docs/force-rls-migration-backfills.md`](docs/force-rls-migration-backfills.md).
+**A migration-time backfill over a FORCE-RLS table must open the owner-only posture window.** `FORCE ROW LEVEL SECURITY` binds the table _owner_, and Opengeni migrates as a NON-superuser owner without `BYPASSRLS`, with no tenant GUC set. A bare `UPDATE`/`DELETE`/`INSERT ... SELECT`/`DO $$` backfill therefore matches **zero rows and reports success**, and an `IF EXISTS ... RAISE EXCEPTION` preflight certifies a cutover it cannot see. Wrap the statement in `ALTER TABLE "t" NO FORCE ROW LEVEL SECURITY; ... ALTER TABLE "t" FORCE ROW LEVEL SECURITY;` (relaxes only the owner; the app role stays policy-bound; the file is one implicit transaction), set the tenant GUC around it, or use an RLS-immune `ADD COLUMN ... NOT NULL DEFAULT`. `VALIDATE CONSTRAINT`, `SET NOT NULL`, unique-index builds, and RI checks _do_ see every row — which is why a CHECK that evaluates to NULL (and therefore passes) is the trap. `bun run check:migration-rls-backfills` is the local guard; migration bytes are frozen, so never add to its grandfathered lists. Drive `migrate()` through `acquireOwnerMigratedTestDatabase` to test this boundary. See [`docs/force-rls-migration-backfills.md`](docs/force-rls-migration-backfills.md).
 
-**A test that replays the migration ledger needs an explicit timeout.** Calling `migrate()` - or any `acquire*TestDatabase` helper, which builds the shared template through `ensureTemplateBuilt` -> `migrate()` - rebuilds the whole schema against a fresh database. That cost grows with every migration that lands and is unrelated to the size of the file it lives in. CI packs unit shards by source-file _byte size_ within execution categories, not measured runtime; same-category changes can still concentrate costly ledger replays on one shard. Parallel-safe tests share the PostgreSQL fixture concurrently, while cluster-role/shared-PostgreSQL-sensitive phases stay serialized. Historical byte-only repacking turned `main` red at commit `d13a9849b` without touching a migration. Declare a budget above the 30 s shard default (`180_000` is the convention); `bun run check:migration-test-budgets` (a CI guard, always on) fails otherwise and names each site.
+**A test that replays the migration ledger needs an explicit timeout.** Calling `migrate()` - or any `acquire*TestDatabase` helper, which builds the shared template through `ensureTemplateBuilt` -> `migrate()` - rebuilds the whole schema against a fresh database. That cost grows with every migration that lands and is unrelated to the size of the file it lives in. CI packs unit shards by source-file _byte size_ within execution categories, not measured runtime; same-category changes can still concentrate costly ledger replays on one shard. Parallel-safe tests share the PostgreSQL fixture concurrently, while cluster-role/shared-PostgreSQL-sensitive phases stay serialized. Historical byte-only repacking turned `main` red at commit `d13a9849b` without touching a migration. Declare a budget above the 30 s shard default (`180_000` is the convention); `bun run check:migration-test-budgets` (a required local guard) fails otherwise and names each site.
 
-**Every new migration must be registered at all three release-schema contract sites.** `scripts/release-schema-contract.test.ts` pins the ledger in three places a new migration moves: `appendedMigrationPaths` (the forward list, which keeps the migration out of the governed host-export checkpoint input so the pinned aggregate SHA-256 never has to change), a `completeSourceContract.migrations.some(...)` presence probe feeding the pinned `fileCount`, and a `latestMigration` branch in that same assertion, prepended OUTERMOST so the newest migration wins the ternary. The last two pin the _unfiltered_ ledger, so the forward-list entry alone still leaves the contract test red. Do **not** repair any of it by pinning a fresh hash in the `releaseSchemaContractHash` ladder: that aggregate covers the whole filtered ledger, so a hash computed on your branch is stale the moment another migration merges first - the pull request stays green and protected `main` lands red, which is how migrations 0331, 0332, 0333, and 0334 each broke `main` in one day. `bun run check:migration-schema-contract` (a CI guard) fails on any migration this head adds on top of its base that is missing from any of the three, names which ones, and prints the exact edit for each. Advancing the governed checkpoint itself is a deliberate, separate change against current `main`.
+**Every new migration must be registered at all three release-schema contract sites.** `scripts/release-schema-contract.test.ts` pins the ledger in three places a new migration moves: `appendedMigrationPaths` (the forward list, which keeps the migration out of the governed host-export checkpoint input so the pinned aggregate SHA-256 never has to change), a `completeSourceContract.migrations.some(...)` presence probe feeding the pinned `fileCount`, and a `latestMigration` branch in that same assertion, prepended OUTERMOST so the newest migration wins the ternary. The last two pin the _unfiltered_ ledger, so the forward-list entry alone still leaves the contract test red. Do **not** repair any of it by pinning a fresh hash in the `releaseSchemaContractHash` ladder: that aggregate covers the whole filtered ledger, so a hash computed on your branch is stale the moment another migration merges first - the pull request stays green and protected `main` lands red, which is how migrations 0331, 0332, 0333, and 0334 each broke `main` in one day. `bun run check:migration-schema-contract` (a local guard) fails on any migration this head adds on top of its base that is missing from any of the three, names which ones, and prints the exact edit for each. Advancing the governed checkpoint itself is a deliberate, separate change against current `main`.
 
-Migration ordinals are taken from a shared linear ledger, so two candidates that each add the next free ordinal collide when the first one merges. The migrator orders by full file name and tolerates that, but the release-schema hash ladder, harness stamps, and docs pin the ordinal, so a colliding candidate must move to the next free ordinal as one source revision. Do it mechanically: `bun run migration:renumber <ordinal|basename> --next` (add `--also <path>` for docs/changesets that name the migration by number only; `--dry-run` shows the plan) renames the SQL and its `packages/db/test/migration-<ordinal>-*.test.ts` companions, rewrites every reference, and re-pins `scripts/release-schema-contract.test.ts`; `bun run check:migration-ordinals` (a CI guard) fails with that exact command when a head migration reuses an ordinal already on `main`. Never hand-edit the hash ladder for a rename.
+Migration ordinals are taken from a shared linear ledger, so two candidates that each add the next free ordinal collide when the first one merges. The migrator orders by full file name and tolerates that, but the release-schema hash ladder, harness stamps, and docs pin the ordinal, so a colliding candidate must move to the next free ordinal as one source revision. Do it mechanically: `bun run migration:renumber <ordinal|basename> --next` (add `--also <path>` for docs/changesets that name the migration by number only; `--dry-run` shows the plan) renames the SQL and its `packages/db/test/migration-<ordinal>-*.test.ts` companions, rewrites every reference, and re-pins `scripts/release-schema-contract.test.ts`; `bun run check:migration-ordinals` (a local guard) fails with that exact command when a head migration reuses an ordinal already on `main`. Never hand-edit the hash ladder for a rename.
 
 Already-published duplicate ordinals are immutable history, not renumber
 candidates: `schema_migrations.name` is the full SQL filename. The ordinal

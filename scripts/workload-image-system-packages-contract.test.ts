@@ -1,3 +1,4 @@
+import { readRetiredWorkflow } from "./ci/retired-workflow-fixture.ts";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,7 +67,7 @@ function keepsSpecializedWorkloadPackagesCoalesced(source: string): boolean {
 }
 
 describe("workload image system package contract", () => {
-  test("builds web assets natively and assembles either runtime architecture without execution", async () => {
+  test("historical workflow fixture: builds web assets natively and assembles either runtime architecture without execution", async () => {
     const dockerfile = await readFile(resolve(root, "docker/opengeni.Dockerfile"), "utf8");
     const builder = stage(dockerfile, "web-build");
     const runtime = stage(dockerfile, "web");
@@ -80,7 +81,7 @@ describe("workload image system package contract", () => {
     expect(runtime).toContain("/app/apps/web/dist ./apps/web/dist");
     expect(runtime).toContain("/app/web-server/server.ts ./apps/web/src/server.ts");
     expect(runtime).toContain("USER bun");
-    const ci = await readFile(resolve(root, ".github/workflows/ci.yml"), "utf8");
+    const ci = readRetiredWorkflow("ci.yml");
     const webJob = ci.slice(
       ci.indexOf("  web-image:"),
       ci.indexOf("  artifact-materializer-image:"),
