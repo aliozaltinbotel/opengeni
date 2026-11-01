@@ -2821,6 +2821,11 @@ async function createSessionForRequestInFileScope(
   // Hash the complete normalized public request before deployment/default resolution.
   // This contains no receipt and stores no raw request or credentials.
   const creationRequestSha256 = createHash("sha256").update(stableJson(payload)).digest("hex");
+  const creationRequest = Object.freeze({
+    requestedSessionId: payload.requestedSessionId ?? null,
+    idempotencyKey: payload.idempotencyKey ?? null,
+    requestSha256: creationRequestSha256,
+  });
 
   // A tool whose backing workload this deployment does not run is dropped, not
   // rejected: a client echoing a full catalog must not fail on a deployment fact.
@@ -3436,6 +3441,7 @@ async function createSessionForRequestInFileScope(
     requestOptions.authorizationSurface ?? "core",
     runtimeSettings.mcpServers,
     requestOptions.creator,
+    creationRequest,
   );
   const requestedMcpPolicies =
     payload.mcpApprovalPolicies ?? parentSession?.mcpApprovalPolicies ?? {};
@@ -4375,6 +4381,7 @@ async function createSessionForRequestInFileScope(
                   rootSessionId: created.rootSessionId,
                   actor: hostCreate.actor,
                   creator: hostCreate.creator,
+                  creationRequest,
                   surface: requestOptions.authorizationSurface ?? "core",
                 }),
               );

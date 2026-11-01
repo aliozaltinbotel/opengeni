@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { CreateSessionRequest, stableJson, type AuthorizeSessionCreateInput } from "@opengeni/contracts";
 import type { AccessGrant, SessionAuthorizationPort } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import {
@@ -157,4 +159,56 @@ test("create callback failures discard credential-bearing host exceptions", asyn
   expect(failure).toBeInstanceOf(SessionAuthorizationUnavailableError);
   expect(String(failure)).not.toContain("fake-private-credential");
   expect((failure as Error).cause).toBeUndefined();
+});
+
+
+test("create hooks forward server-derived immutable request correlation for an external runner without human proof", async () => {
+  const externalGrant: AccessGrant = {
+    ...grant,
+    subjectId: `external_user:${crypto.randomUUID()}`,
+  };
+  const request = CreateSessionRequest.parse({
+    requestedSessionId: crypto.randomUUID(),
+    idempotencyKey: `cendra-agent-handoff:${crypto.randomUUID()}`,
+    initialMessage: "Synthetic accepted handoff",
+  });
+  const creationRequest = Object.freeze({
+    requestedSessionId: request.requestedSessionId ?? null,
+    idempotencyKey: request.idempotencyKey ?? null,
+    requestSha256: createHash("sha256").update(stableJson(request)).digest("hex"),
+  });
+  const creator = { principalKind: "human_session" as const };
+  let received: AuthorizeSessionCreateInput | undefined;
+  await requireSessionCreateAuthorization(
+    { db: {} as Database, sessionAuthorization: { ...port, authorizeSessionCreate: async (input) => {
+      received = input;
+      return { allowed: true };
+    } } },
+    externalGrant,
+    "http",
+    [],
+    creator,
+    creationRequest,
+  );
+  expect(received?.creationRequest).toBe(creationRequest);
+  expect(received?.actor).toEqual({ kind: "subject", subjectId: externalGrant.subjectId });
+  expect(received?.creator).toBe(creator);
+  expect(received?.creator?.readCredential).toBeUndefined();
+  expect(Object.isFrozen(received?.creationRequest)).toBe(true);
+});
+
+test("create hooks retain absent request correlation instead of inventing a native birth", async () => {
+  let received: AuthorizeSessionCreateInput | undefined;
+  await requireSessionCreateAuthorization(
+    { db: {} as Database, sessionAuthorization: { ...port, authorizeSessionCreate: async (input) => {
+      received = input;
+      return { allowed: true };
+    } } },
+    grant,
+    "core",
+    [],
+  );
+  expect(received).toBeDefined();
+  if (received === undefined) throw new Error("CREATE_HOOK_NOT_CALLED");
+  expect(Object.hasOwn(received, "creationRequest")).toBe(false);
 });
