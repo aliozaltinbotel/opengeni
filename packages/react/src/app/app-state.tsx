@@ -26,7 +26,7 @@ import {
 import { creationHandoffReconciled } from "./lib/session-creation-handoff";
 import { useConsoleSharedQueries } from "./lib/shared-query";
 import { useNavigate, usePage, useRouterState } from "./lib/navigation";
-import { useEmbedded, useHostMessageContext } from "./lib/app-host";
+import { useEmbedded, useHostMessageContext, useHiddenNativeSections } from "./lib/app-host";
 import {
   resolveWorkspaceSessionDefaults,
   resolveWorkspaceSessionToolDefaults,
@@ -309,6 +309,9 @@ export function createSlackLinkPrepareController<Request>(value: PendingSlackLin
 export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions) {
   const messageContext = useHostMessageContext();
   const embedded = useEmbedded();
+  const hiddenNativeSections = useHiddenNativeSections();
+  const integrationsVisible = !hiddenNativeSections.includes("capabilities.integrations");
+  const nativeCatalogVisible = integrationsVisible || !hiddenNativeSections.includes("capabilities.plugins");
   const hostMessageContext = useRef(messageContext);
   hostMessageContext.current = messageContext;
   const {
@@ -1709,6 +1712,11 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
       const refreshId = mcpRefreshId.current + 1;
       mcpRefreshId.current = refreshId;
       setWorkspaceMcpCatalogLoadedSuccessfully(false);
+      if (!nativeCatalogVisible) {
+        // Discovery is intentionally unavailable; configured host tools still come from clientConfig.
+        setWorkspaceMcpCatalogReady(true);
+        return;
+      }
       const requestKey = `${accessKeyVersion}:${workspaceId}`;
       try {
         const result = await runCurrentWorkspaceRequest({
@@ -1722,7 +1730,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
                 requestKey,
                 async () => await client.listCapabilities(workspaceId),
               ),
-              client.listApiIntegrations(workspaceId),
+              integrationsVisible ? client.listApiIntegrations(workspaceId) : Promise.resolve(null),
             ]),
         });
         if (!result) {
@@ -1732,7 +1740,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         setWorkspaceMcpServers(
           mergeMcpServerOptions(
             enabledWorkspaceCapabilityMcpServers(catalog.items),
-            installedApiIntegrationMcpServers(apiIntegrations.integrations),
+            apiIntegrations ? installedApiIntegrationMcpServers(apiIntegrations.integrations) : [],
           ),
         );
         setWorkspaceCapabilityCatalog(catalog.items);
@@ -1747,7 +1755,7 @@ export function useAppState(host: AppStateHost, appStateOptions: AppStateOptions
         throw error;
       }
     },
-    [accessKeyVersion, client],
+    [accessKeyVersion, client, integrationsVisible, nativeCatalogVisible],
   );
 
   async function startSession(
