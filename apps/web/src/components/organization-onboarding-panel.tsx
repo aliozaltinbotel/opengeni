@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from "react";
 import { toast } from "sonner";
+import { Navigate } from "@tanstack/react-router";
 import type { ClientModel } from "@opengeni/sdk";
 import type { OpenGeniBrowserClient } from "@opengeni/sdk/browser";
 
@@ -58,6 +59,7 @@ import { rememberSignupUseCase } from "@opengeni/react/app/lib/signup-starter-se
 
 export function OrganizationOnboardingPanel({
   onComplete,
+  organizationRegistrationRoute,
   client,
   billingMode = "disabled",
   codexEnabled = false,
@@ -88,6 +90,8 @@ export function OrganizationOnboardingPanel({
   /** Client-config model defaults; the included model is derived from them when not given. */
   modelDefaults?: { defaultModel: string; models: readonly ClientModel[] } | null;
   previewState?: SelfServiceOrganizationOnboardingState;
+  /** Validated signed-in host route; this selects presentation and grants no organization authority. */
+  organizationRegistrationRoute?: string;
   activeEmail?: string | null;
   invitation?: OrganizationInvitationContinuation | null;
   onUseInvitedAccount?: (targetEmail: string) => void;
@@ -560,6 +564,11 @@ export function OrganizationOnboardingPanel({
         </div>
       </section>,
     );
+  }
+
+  if (state === "required" && !previewState && organizationRegistrationRoute) {
+    // Host pages are registered dynamically outside the native typed route tree.
+    return <Navigate to={`/${organizationRegistrationRoute}` as never} replace />;
   }
 
   if (useCase === null) {
