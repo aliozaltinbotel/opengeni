@@ -731,3 +731,44 @@ test("a composer that mounts again opens Connectors from the last rows, refreshi
   await act(async () => againRoot.unmount());
   again.remove();
 });
+
+
+test("host-hidden integrations do not perform connector discovery or alter supplied tools", async () => {
+  const { configurePageAppHost } = await import("../lib/app-host");
+  configurePageAppHost({ hiddenNativeSections: ["capabilities.plugins", "capabilities.integrations"] });
+  let reads = 0;
+  context.client = { listCapabilities: async () => { reads++; return { items: [] }; },
+    listConnections: async () => { reads++; return []; }, catalogAssetUrl: () => null } as unknown as OpenGeniBrowserClient;
+  const servers = [{ id: "host-required", name: "Host tool" }];
+  const props = { workspaceId: "host-workspace", servers, firstPartyTools: [], fileUploadsEnabled: false,
+    onToolSelectionChange: () => {} } as unknown as ComponentProps<typeof WorkspaceComposerPlus>;
+  const container = document.createElement("div"); document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<WorkspaceComposerPlus {...props} />));
+    await act(async () => window.dispatchEvent(new Event("focus")));
+    expect(reads).toBe(0);
+    expect(composer!.servers).toBe(servers);
+  } finally {
+    await act(async () => root.unmount()); container.remove();
+    configurePageAppHost({ hiddenNativeSections: [] });
+  }
+});
+
+
+test("workspace startup respects host-hidden integration reads", async () => {
+  const { configurePageAppHost } = await import("../lib/app-host");
+  const { useWorkspaceIntegrations } = await import("../lib/use-workspace-integrations");
+  configurePageAppHost({ hiddenNativeSections: ["capabilities.plugins", "capabilities.integrations"] });
+  let integrationReads = 0, catalogRefreshes = 0;
+  const integrations = { accessKeyVersion: 1, refreshGitHub: async () => { integrationReads++; },
+    refreshPersonalGitHub: async () => { integrationReads++; }, refreshWorkspaceMcpServers: async () => { catalogRefreshes++; },
+    resetWorkspaceIntegrations: () => {}, setSelectedRepoIds: () => {}, setSelectedRepoRefs: () => {} };
+  function Shell() { useWorkspaceIntegrations(integrations, "host-workspace", true); return null; }
+  const container = document.createElement("div"); const root = createRoot(container);
+  try {
+    await act(async () => root.render(<Shell />));
+    expect(integrationReads).toBe(0);
+    expect(catalogRefreshes).toBe(1);
+  } finally { await act(async () => root.unmount()); configurePageAppHost({ hiddenNativeSections: [] }); }
+});

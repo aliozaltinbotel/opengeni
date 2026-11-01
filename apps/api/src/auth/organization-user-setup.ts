@@ -17,7 +17,7 @@ export function assertOrganizationUserSetupDeliveryConfigured(
 ): void {
   assertOrganizationUserSetupQueryTransportConfigured(settings);
   requiredSetupSecret(settings);
-  requiredPublicBaseUrl(settings);
+  requiredSetupWebBaseUrl(settings);
   assertManagedEmailTransportMetadata(transport);
 }
 
@@ -86,7 +86,7 @@ export async function deriveOrganizationUserSetupToken(
   );
   const token = base64Url(new Uint8Array(signature));
   const digest = await sha256Hex(token);
-  const url = new URL("/setup-account", requiredPublicBaseUrl(settings));
+  const url = new URL("/setup-account", requiredSetupWebBaseUrl(settings));
   if ((input.transport ?? settings.organizationUserSetupEmailTokenTransport) === "query") {
     // Email security gateways routinely wrap links and may discard URL
     // fragments. Enable this only after the compatibility web rollout; the
@@ -277,11 +277,12 @@ function requiredSetupSecret(settings: Settings): string {
   return settings.betterAuthSecret;
 }
 
-function requiredPublicBaseUrl(settings: Settings): string {
-  if (!settings.publicBaseUrl) {
+function requiredSetupWebBaseUrl(settings: Settings): string {
+  const baseUrl = settings.webBaseUrl ?? settings.publicBaseUrl;
+  if (!baseUrl) {
     throw new Error("OPENGENI_PUBLIC_BASE_URL is required for organization user setup");
   }
-  return settings.publicBaseUrl;
+  return baseUrl;
 }
 
 async function sha256Hex(value: string): Promise<string> {

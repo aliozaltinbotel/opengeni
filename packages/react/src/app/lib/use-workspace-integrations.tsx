@@ -4,6 +4,7 @@ import { userErrorText } from "../../ui/api-error";
 import type { AppContextValue } from "../app-context";
 import { isAbortError } from "./session-tools";
 import { toast } from "./toast";
+import { useHiddenNativeSections } from "./app-host";
 import { useGitHubHistoryRefresh } from "./use-github-history-refresh";
 
 /**
@@ -37,7 +38,8 @@ export function useWorkspaceIntegrations(
     setSelectedRepoIds,
     setSelectedRepoRefs,
   } = context;
-  useGitHubHistoryRefresh(workspaceId, enabled, refreshGitHub);
+  const integrationsVisible = !useHiddenNativeSections().includes("capabilities.integrations");
+  useGitHubHistoryRefresh(workspaceId, enabled && integrationsVisible, refreshGitHub);
   useEffect(() => {
     if (!enabled) {
       return;
@@ -46,8 +48,10 @@ export function useWorkspaceIntegrations(
     resetWorkspaceIntegrations();
     setSelectedRepoIds(new Set());
     setSelectedRepoRefs({});
-    void refreshGitHub(workspaceId, abortController.signal);
-    void refreshPersonalGitHub(workspaceId, abortController.signal);
+    if (integrationsVisible) {
+      void refreshGitHub(workspaceId, abortController.signal);
+      void refreshPersonalGitHub(workspaceId, abortController.signal);
+    }
     void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!abortController.signal.aborted && !isAbortError(error)) {
         toast.error("Couldn't load workspace MCP tools", {
@@ -59,6 +63,7 @@ export function useWorkspaceIntegrations(
   }, [
     accessKeyVersion,
     enabled,
+    integrationsVisible,
     refreshGitHub,
     refreshPersonalGitHub,
     refreshWorkspaceMcpServers,
