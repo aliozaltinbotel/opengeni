@@ -830,6 +830,13 @@ surfaces in `apps/api/src/`.
 Workspace permissions answer whether a principal may use a capability at all.
 An embedding host may additionally narrow native per-session access by binding `AppDependencies.sessionAuthorization`:
 
+Hosts using `startApi` can bind `onCanonicalHumanIdentityReader` to borrow the
+API-owned canonical identity reader. Startup awaits this callback before listening;
+a callback failure follows normal dependency cleanup. Each invocation performs the
+existing current projection read on the API's database pool, returning `null` only
+for a missing identity. The API owns pool shutdown; hosts must stop using the reader
+when they close the API. No identity result or business authority is cached.
+
 ```ts
 type SessionAuthorizationPort = {
   capabilities?: { modelAccountOperation?: boolean };
