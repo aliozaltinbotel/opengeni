@@ -111,7 +111,7 @@ type ActorMutationLease = {
   poisoned: unknown | null;
   actorTransitionApplied: boolean;
 };
-const actorMutationLeaseByRequest = new WeakMap<Request, ActorMutationLease>();
+const actorMutationLeaseByRequest = new WeakMap<Request, ActorMutationLease | null>();
 const managedActorEpochByRequest = new WeakMap<Request, string>();
 const managedActorAdmissionByRequest = new WeakMap<Request, ManagedAuthActorAdmissionStamp>();
 
@@ -134,7 +134,12 @@ export function configureManagedUserAdmission(
 }
 
 export async function getManagedSession(...args: Parameters<typeof resolveManagedSession>) {
+  const request = args[0].req.raw;
+  // Read-only streams may reauthorize after their finite HTTP handler returns.
+  const mutation = requestNeedsActorMutationLease(request.method);
+  if (mutation) assertManagedAuthRequestActorLeaseOpen(request);
   const session = await resolveManagedSession(...args);
+  if (mutation) assertManagedAuthRequestActorLeaseOpen(request);
   assertManagedUserAdmission(args[1], session?.user);
   return session;
 }
@@ -406,8 +411,9 @@ function selectedSlotForAuthority(
 /** Release the multi-replica actor fence after the outer HTTP handler settles. */
 export async function releaseManagedAuthRequestActorLease(request: Request): Promise<void> {
   const lease = actorMutationLeaseByRequest.get(request);
+  // Retain terminal state even while an acquisition is still awaiting the DB.
+  actorMutationLeaseByRequest.set(request, null);
   if (!lease) return;
-  actorMutationLeaseByRequest.delete(request);
   if (lease.refreshTimer) lease.runtime.cancel(lease.refreshTimer);
   if (lease.deadlineTimer) lease.runtime.cancel(lease.deadlineTimer);
   if (lease.fatalTimer) lease.runtime.cancel(lease.fatalTimer);
@@ -415,6 +421,11 @@ export async function releaseManagedAuthRequestActorLease(request: Request): Pro
     authorityHash: lease.authorityHash,
     requestId: lease.requestId,
   });
+}
+
+/** A retained request-local proof reader must not outlive its HTTP scope. */
+export function assertManagedAuthRequestActorLeaseOpen(request: Request): void {
+  if (actorMutationLeaseByRequest.get(request) === null) throw new ManagedAuthActorChangeError();
 }
 
 /** Cooperative cancellation signal for actor-scoped provider/external I/O. */
@@ -523,6 +534,7 @@ async function ensureActorMutationLeaseForHash(
   authorityHash: string,
   actorEpoch: string,
 ): Promise<void> {
+  assertManagedAuthRequestActorLeaseOpen(request);
   const existing = actorMutationLeaseByRequest.get(request);
   if (existing) {
     if (existing.authorityHash !== authorityHash || existing.actorEpoch !== actorEpoch) {
@@ -561,6 +573,12 @@ async function ensureActorMutationLeaseForHash(
       throw new ManagedAuthActorChangeError();
     }
     throw error;
+  }
+  if (actorMutationLeaseByRequest.get(request) === null) {
+    // The outer finally already ran. Settle this late acquisition without
+    // registering it or arming refresh, deadline or fatal timers.
+    await releaseManagedAuthActorMutationLease(db, { authorityHash, requestId: lease.requestId });
+    throw new ManagedAuthActorChangeError();
   }
   lease.localFatalDeadlineMonotonicMs =
     acquireStartedAtMonotonicMs +

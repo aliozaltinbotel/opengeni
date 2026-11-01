@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Hono } from "hono";
 import type { AccessGrant, SessionCreateCreator } from "@opengeni/contracts";
-import type { ApiRouteDeps } from "@opengeni/core";
+import { releaseManagedAuthRequestActorLease, type ApiRouteDeps } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing/settings";
 import { sessionCreateCreatorForRequest } from "../src/routes/host-token";
 
@@ -73,4 +73,23 @@ test("disabled host tokens retain stock create compatibility without manufacturi
       },
     ),
   ).toEqual({ principalKind: "human_session" });
+});
+
+test("retained creator proof refuses after request completion before canonical reads or mint", async () => {
+  let creator: SessionCreateCreator | undefined;
+  let canonicalReads = 0;
+  const app = new Hono().post("/create", async (context) => {
+    creator = sessionCreateCreatorForRequest(context, { ...deps,
+      managedAuth: { api: { getSession: async () => { canonicalReads += 1; return { headers: new Headers(), response: null }; } } },
+      db: { execute: async () => { canonicalReads += 1; throw new Error("unexpected canonical read"); } },
+    } as ApiRouteDeps, grant);
+    await releaseManagedAuthRequestActorLease(context.req.raw);
+    return context.json({ ready: true });
+  });
+  await app.request("https://native.example.test/create", { method: "POST", headers: {
+    cookie: "synthetic-session", origin: "https://native.example.test",
+  } });
+  if (!creator?.readCredential) throw new Error("creator proof reader missing");
+  await expect(creator.readCredential()).rejects.toThrow("Session creator credential unavailable");
+  expect(canonicalReads).toBe(0);
 });

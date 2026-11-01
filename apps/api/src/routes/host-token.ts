@@ -2,6 +2,7 @@ import type { AccessGrant, SessionCreateCreator } from "@opengeni/contracts";
 import { canonicalPublicOrigin, consoleAllowedOriginEntries } from "@opengeni/config";
 import {
   requireFreshAccessGrantAuthorization,
+  assertManagedAuthRequestActorLeaseOpen,
   type AccessGrantAuthorization,
   type ApiRouteDeps,
   type ManagedAuth,
@@ -198,12 +199,13 @@ export function sessionCreateCreatorForRequest(
     ...creator,
     readCredential: async () => {
       try {
-        return (
-          await mintHostSessionToken(context, deps, configuration, {
-            purpose: "workspace",
-            workspaceId: grant.workspaceId,
-          })
-        ).token;
+        assertManagedAuthRequestActorLeaseOpen(context.req.raw);
+        const minted = await mintHostSessionToken(context, deps, configuration, {
+          purpose: "workspace",
+          workspaceId: grant.workspaceId,
+        });
+        assertManagedAuthRequestActorLeaseOpen(context.req.raw);
+        return minted.token;
       } catch {
         // No underlying exception (or cause) may carry request credentials.
         throw new Error("Session creator credential unavailable");
@@ -385,6 +387,7 @@ async function mintHostSessionToken(
   const latest = latestAuthentication(authentication);
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + configuration.ttlSeconds;
+  if (targetRequest !== undefined) assertManagedAuthRequestActorLeaseOpen(context.req.raw);
   const token = await signHostSessionToken(configuration.auth, {
     iss: configuration.issuer,
     aud: configuration.audience,

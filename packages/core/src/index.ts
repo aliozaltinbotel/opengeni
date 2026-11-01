@@ -76,6 +76,7 @@ export {
   ManagedAuthActorLeaseOutcomeUnknownError,
   markManagedAuthRequestActorTransitionApplied,
   releaseManagedAuthRequestActorLease,
+  assertManagedAuthRequestActorLeaseOpen,
   validateManagedAuthRequestActorLease,
   type ManagedAuthActorAdmissionStamp,
   type ManagedAuthActorMutationLeaseStamp,
