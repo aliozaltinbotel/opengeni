@@ -27373,6 +27373,8 @@
         "$.firstPartyAdditions": "array?",
         "$.firstPartyAdditions[]": "ref(FirstPartyMcpToolName)",
         "$.firstPartyMode": "enum?=[\"\\\"explicit\\\"\",\"\\\"workspace_default\\\"\"]",
+        "$.hostRequiredMcpServerIds": "array?",
+        "$.hostRequiredMcpServerIds[]": "string",
         "$.inheritedFromSessionId": "string! null",
         "$.mode": "enum!=[\"\\\"explicit\\\"\",\"\\\"inherited\\\"\",\"\\\"workspace_default\\\"\"]"
       }

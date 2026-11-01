@@ -5,12 +5,16 @@ import {
   ImportArchivedSessionResponse,
   type Permission,
   type SessionEvent,
+  type SessionAuthorizationSurface,
+  type SessionCreateCreator,
 } from "@opengeni/contracts";
 import {
   ArchivedSessionImportError,
   appendArchivedSessionEvents,
   getArchivedSessionImportId,
   importArchivedSession,
+  readHostSessionCreateState,
+  settleHostSessionCreate,
   withSessionRlsActorContext,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
@@ -27,6 +31,9 @@ import { fileOwnerContextForAccess } from "../domain/file-owner";
 import {
   grantHasAgentAttemptAuthority,
   requireSessionAuthorization,
+  requireSessionCreateAuthorization,
+  withSessionCreateHostDeadline,
+  SessionAuthorizationUnavailableError,
 } from "../session-authorization";
 import { externalContinuationCommitAuthorizer } from "./external-continuation";
 import { requireManagedHumanPrivateSessionCreate } from "./session-tenancy";
@@ -94,9 +101,21 @@ export async function importArchivedSessionForRequest(
   authorization: AccessGrantAuthorization,
   workspaceId: string,
   rawPayload: unknown,
+  authorizationSurface: SessionAuthorizationSurface = "core",
+  requestCreator?: SessionCreateCreator,
 ): Promise<ImportArchivedSessionResponse> {
   const grant = requireImportAuthorization(authorization, workspaceId, "sessions:create");
   const payload = ImportArchivedSessionRequest.parse(rawPayload);
+  const port = deps.sessionAuthorization;
+  const createdHook = port?.sessionCreated;
+  const hostCreate = await requireSessionCreateAuthorization(
+    deps,
+    grant,
+    authorizationSurface,
+    deps.settings.mcpServers,
+    requestCreator,
+  );
+
   if (payload.visibility === "user_private") {
     await requireManagedHumanPrivateSessionCreate(deps, authorization, workspaceId);
   }
@@ -113,10 +132,44 @@ export async function importArchivedSessionForRequest(
         actor.privateFileOwnerSubjectId ?? null,
       ),
       payload,
+      ...(createdHook ? { hostSessionCreatePending: true } : {}),
+      ...(hostCreate?.decision.requiredToolServers?.length
+        ? {
+            hostRequiredMcpServerIds: hostCreate.decision.requiredToolServers.map(
+              (server) => server.id,
+            ),
+          }
+        : {}),
       createdBy: creator.initiator!,
       createdByContext: creator.context ?? {},
     }),
   );
+  const scope = { accountId: grant.accountId, workspaceId, sessionId: result.session.id };
+  if (!result.created) {
+    if ((await readHostSessionCreateState(deps.db, scope)) !== "ready")
+      throw new SessionAuthorizationUnavailableError();
+  } else if (hostCreate && createdHook) {
+    try {
+      await withSessionCreateHostDeadline(() =>
+        createdHook.call(port, {
+          ...scope,
+          rootSessionId: result.session.rootSessionId,
+          actor: hostCreate.actor,
+          creator: hostCreate.creator,
+          surface: authorizationSurface,
+        }),
+      );
+      await settleHostSessionCreate(deps.db, { ...scope, ready: true });
+    } catch (error) {
+      let cause: unknown = error;
+      try {
+        await settleHostSessionCreate(deps.db, { ...scope, ready: false });
+      } catch (closingError) {
+        cause = closingError;
+      }
+      throw new SessionAuthorizationUnavailableError({ cause });
+    }
+  }
   await publishImportedEvents(deps, workspaceId, result.session.id, result.events);
   return ImportArchivedSessionResponse.parse(result);
 }

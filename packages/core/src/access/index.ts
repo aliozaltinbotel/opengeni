@@ -882,11 +882,21 @@ export async function requireFreshAccessGrant(
   workspaceId: string,
   permission?: Permission,
 ): Promise<AccessGrant> {
+  return (await requireFreshAccessGrantAuthorization(c, deps, workspaceId, permission)).grant;
+}
+
+/** Fresh live grants with their original verified cookie/owning-user provenance. */
+export async function requireFreshAccessGrantAuthorization(
+  c: Context,
+  deps: AccessDeps,
+  workspaceId: string,
+  permission?: Permission,
+): Promise<AccessGrantAuthorization> {
   const context = await resolveAccessContext(c, deps);
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
   }
-  return (await accessGrantAuthorization(context, deps, workspaceId, permission)).grant;
+  return accessGrantAuthorization(context, deps, workspaceId, permission);
 }
 
 export type AccessGrantAuthorization = {

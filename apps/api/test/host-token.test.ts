@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import type { Settings } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
+import type { SessionAuthorizationPort, SessionCreateCreator } from "@opengeni/contracts";
 import {
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_HEADER,
   MANAGED_AUTH_SESSION_SET_API_CONTRACT_REVISION,
@@ -71,7 +72,10 @@ afterAll(async () => {
   await shared?.release();
 }, 60_000);
 
-function managedApp(overrides: Partial<Settings> = {}) {
+function managedApp(
+  overrides: Partial<Settings> = {},
+  sessionAuthorization?: SessionAuthorizationPort,
+) {
   return createApp({
     settings: testSettings({
       databaseUrl: shared.adminUrl,
@@ -82,7 +86,13 @@ function managedApp(overrides: Partial<Settings> = {}) {
     }),
     db: client.db,
     bus: new MemoryEventBus(),
-    workflowClient: {} as never,
+    workflowClient: {
+      signalUserMessage: async () => undefined,
+      wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
+      startSessionWorkflow: async () => undefined,
+    } as ApiRouteDeps["workflowClient"],
+    ...(sessionAuthorization ? { sessionAuthorization } : {}),
   });
 }
 
@@ -975,3 +985,185 @@ describe("host session token JWKS cache and mint limit", () => {
     expect((await mint(instance, { cookie: otherSession }, owner.workspaceId)).status).toBe(200);
   }, 120_000);
 });
+
+test("creator proof verifies real browser JWT for create and fork while preserving import policy", async () => {
+  let beforeCreator: SessionCreateCreator | undefined;
+  let instance: ManagedApp;
+  let owner: Awaited<ReturnType<typeof ownerWithOrganization>>;
+  const phases: string[] = [];
+  const tokenIds = new Set<string>();
+  const verifyCreator = async (creator: SessionCreateCreator | undefined) => {
+    expect(creator?.principalKind).toBe("human_session");
+    if (!creator?.readCredential) throw new Error("Browser creator proof missing");
+    const token = await creator.readCredential();
+    const jwks = (await (await instance.request("/v1/auth/jwks")).json()) as JSONWebKeySet;
+    const { payload } = await jwtVerify(token, createLocalJWKSet(jwks), {
+      issuer: origin,
+      audience,
+      algorithms: ["ES256"],
+    });
+    const identity = await getCanonicalHumanIdentityProjection(client.db, owner.userId);
+    expect(payload.sub).toBe(identity.activeIdentity.id);
+    expect(payload.ws).toBe(owner.workspaceId);
+    expect(payload.org).toBe(owner.organizationId);
+    expect(payload.sid).toBe((await sessionRow(owner.cookie)).id);
+    expect(payload.exp! * 1000).toBeGreaterThan(Date.now());
+    if (typeof payload.jti !== "string") throw new Error("Host token id missing");
+    tokenIds.add(payload.jti);
+    expect(JSON.stringify(creator)).not.toContain(token);
+  };
+  instance = managedApp(
+    { hostTokenAudience: audience },
+    {
+      authorizeSession: async () => ({ allowed: true }),
+      resolveListScope: async () => ({ kind: "all" }),
+      authorizeSessionCreate: async (input) => {
+        beforeCreator = input.creator;
+        await verifyCreator(input.creator);
+        phases.push("before");
+        return { allowed: true };
+      },
+      sessionCreated: async (input) => {
+        expect(input.creator).toBe(beforeCreator);
+        await verifyCreator(input.creator);
+        const [state] = await shared.admin<{ state: string; turns: number }[]>`
+        select host_session_create_state as state,
+          (select count(*)::int from session_turns where session_id = ${input.sessionId}) as turns
+        from sessions where id = ${input.sessionId}`;
+        expect(state).toEqual({ state: "pending", turns: 0 });
+        phases.push("after");
+      },
+    },
+  );
+  owner = await ownerWithOrganization(instance, "Creator Proof");
+  const headers = { cookie: owner.cookie, origin, "content-type": "application/json" };
+  const base = `/v1/workspaces/${owner.workspaceId}`;
+  const created = await instance.request(`${base}/sessions`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ initialMessage: "Test request" }),
+  });
+  expect(created.status).toBe(202);
+  const session = (await created.json()) as { id: string; initialTurnId: string };
+  const cancelled = await instance.request(`${base}/sessions/${session.id}/control`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action: "cancel", clientEventId: crypto.randomUUID() }),
+  });
+  expect(cancelled.status).toBe(200);
+  // No model worker runs in this fixture. Reuse the native fork fixture's
+  // retained-history prerequisite after the ordinary control path settles work.
+  await shared.admin`insert into session_history_items(account_id, workspace_id, session_id, turn_id, position, item)
+    values(${owner.organizationId}, ${owner.workspaceId}, ${session.id}, ${session.initialTurnId}, 1,
+      ${shared.admin.json({ type: "message", role: "user", content: "Retained test request" })})`;
+  const forked = await instance.request(`${base}/sessions/${session.id}/forks`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      idempotencyKey: crypto.randomUUID(),
+      visibility: "workspace",
+      workspaceSharedAcknowledged: true,
+    }),
+  });
+  expect(forked.status).toBe(201);
+  const imported = await instance.request(`${base}/session-imports`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      importId: crypto.randomUUID(),
+      title: "Historical test",
+      createdAt: "2020-01-01T00:00:00Z",
+      events: [
+        {
+          type: "user.message",
+          createdAt: "2020-01-01T00:00:01Z",
+          payload: { text: "Historical request" },
+        },
+      ],
+    }),
+  });
+  expect(imported.status).toBe(403);
+  expect(phases).toEqual(["before", "after", "before", "after"]);
+  expect(tokenIds.size).toBe(4);
+}, 60_000);
+
+test("creator proof cannot mint from cached membership revoked between hooks", async () => {
+  let instance: ManagedApp;
+  let owner: Awaited<ReturnType<typeof ownerWithOrganization>>;
+  let membership: Awaited<ReturnType<typeof acceptOrganizationInvitation>>["membership"];
+  let createdSessionId = "";
+  let firstMinted = false;
+  let secondRefused = false;
+  let beforeCreator: SessionCreateCreator | undefined;
+  instance = managedApp(
+    { hostTokenAudience: audience },
+    {
+      authorizeSession: async () => ({ allowed: true }),
+      resolveListScope: async () => ({ kind: "all" }),
+      authorizeSessionCreate: async (input) => {
+        beforeCreator = input.creator;
+        if (!input.creator?.readCredential) throw new Error("Browser proof missing");
+        await input.creator.readCredential();
+        firstMinted = true;
+        return { allowed: true };
+      },
+      sessionCreated: async (input) => {
+        createdSessionId = input.sessionId;
+        expect(input.creator).toBe(beforeCreator);
+        await updateOrganizationMember(client.db, {
+          organizationId: owner.organizationId,
+          actorSubjectId: owner.subjectId,
+          operationId: crypto.randomUUID(),
+          membershipId: membership.id,
+          transition: {
+            kind: "suspend",
+            expectedAuthorizationRevision: membership.authorizationRevision,
+            operationId: crypto.randomUUID(),
+          },
+        });
+        if (!input.creator?.readCredential) throw new Error("Browser proof missing");
+        try {
+          await input.creator.readCredential();
+        } catch {
+          secondRefused = true;
+        }
+        throw new Error("Host refuses revoked creator");
+      },
+    },
+  );
+  owner = await ownerWithOrganization(instance, "Revoking Creator Owner");
+  const member = await signUp(instance, "Revoking Creator Member");
+  const invitation = await createOrganizationInvitation(client.db, {
+    organizationId: owner.organizationId,
+    actorSubjectId: owner.subjectId,
+    operationId: crypto.randomUUID(),
+    targetSubjectId: member.subjectId,
+    targetEmail: member.email,
+    role: "member",
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+  ({ membership } = await acceptOrganizationInvitation(client.db, {
+    organizationId: owner.organizationId,
+    actorSubjectId: member.subjectId,
+    operationId: crypto.randomUUID(),
+    invitationId: invitation.id,
+    expectedRevision: invitation.revision,
+  }));
+  const response = await instance.request(
+    `/v1/workspaces/${membership.personalWorkspaceId}/sessions`,
+    {
+      method: "POST",
+      headers: { cookie: member.cookie, origin, "content-type": "application/json" },
+      body: JSON.stringify({ initialMessage: "Test request" }),
+    },
+  );
+  expect(response.status).toBe(503);
+  expect(firstMinted).toBe(true);
+  expect(createdSessionId).not.toBe("");
+  expect(secondRefused).toBe(true);
+  const [state] = await shared.admin<{ state: string; turns: number }[]>`
+    select host_session_create_state as state,
+      (select count(*)::int from session_turns where session_id = ${createdSessionId}) as turns
+    from sessions where id = ${createdSessionId}`;
+  expect(state).toEqual({ state: "failed", turns: 0 });
+}, 60_000);

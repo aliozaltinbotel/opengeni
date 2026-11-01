@@ -22,6 +22,31 @@ funding. Migration 0845 retains the canonical signup issuer and one-human/one-or
 receipt but issues zero money; monthly Free funding replaces new signup bonuses.
 Legacy positive receipts remain eligible and retain their balances; no backfill.
 
+Hosts may optionally authorize every session creation through `SessionAuthorizationPort.authorizeSessionCreate`,
+including child, agent-created, and historical-import sessions. Its create-specific decision can add up to sixteen configured MCP
+servers, including internal servers. The session's existing tool-policy record retains these as required,
+eager tools, inherited by children and preserved across tool-policy and agent-configuration writes.
+`sessionCreated` runs after the shell commits and before initial turn admission. Opted-in shells use a durable
+pending admission flag; a database insert fence blocks every turn writer and realtime admission while the hook is pending or failed.
+A five-second deadline bounds creation callbacks. Success opens admission; failure leaves the shell closed
+and invokes native cancellation. Subject-created roots additionally use the existing personal archive projection.
+The immutable failed-create flag projects the exact failed session as archived in existing reads and archive
+filters, including child and service-created sessions. It cannot be cleared by personal unarchive writes and
+never archives a failed child's parent. Historical imports have no executable turns: failure only commits the
+failed admission flag, preserving their read-only historical status and events rather than issuing execution
+cancellation. Ordinary personal archive preferences remain unchanged. Concurrent keyed retries never run a second hook. Hosts without either
+creation method retain ordinary creation and the ready default; native authorization still applies.
+Create hooks also accept optional request-local `creator` provenance. HTTP create,
+fork and import owners retain the actual verified grant kind, and managed browser
+requests supply an opaque asynchronous `readCredential` backed by the existing
+cookie-only workspace host-token mint. Every read rechecks the browser session,
+canonical identity and live workspace membership. Bearer, agent-attempt and service
+callers never acquire that human proof, including children with a causal human
+selector. Hosts independently verify each credential and current authority in both
+hooks; neither a subject nor a principal kind proves human presence. The context
+and credential are never durable session data or public projections.
+
+
 Keyed authenticated session creation records a write-once `sessions.creation_receipt`
 in the shell insert transaction, before start/dispatch. It binds the complete normalized
 public request digest and original creator to the exact account, workspace, session and
@@ -1398,6 +1423,12 @@ provider require boundaries without requiring a full runtime dependency tree.
 ### 4.1 Request and event path
 
 1. `apps/api` establishes perimeter, trace, authentication, workspace/grant.
+   Managed browser cookies enter product `/v1/` routes through the canonical
+   current-session resolver even when the optional deployment-key perimeter is
+   enabled. Explicit credentials keep their own lane; deployment-only surfaces
+   still require the key, and route membership/permissions remain live. The
+   existing actor-lease validation/release wrapper encloses this session lookup
+   and every later refusal so early errors cannot strand a mutation lease.
 2. Routes call `@opengeni/core`; validated state/events/queue/control/audit/wake
    intent commit in Postgres.
 3. Child spans time creation; fanout/wake overlap post-commit;
