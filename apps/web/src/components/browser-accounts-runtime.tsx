@@ -309,6 +309,7 @@ export function BrowserAccountsSignedOutPanel(props: {
 }
 
 export function BrowserAccountsOrganizationOnboardingPanel(props: {
+  organizationRegistrationRoute?: string;
   client: OpenGeniBrowserClient;
   billingMode?: "disabled" | "stripe";
   codexEnabled?: boolean;
@@ -361,6 +362,7 @@ export function BrowserAccountsOrganizationOnboardingPanel(props: {
 
   return (
     <OrganizationOnboardingPanel
+      organizationRegistrationRoute={props.organizationRegistrationRoute}
       client={props.client}
       billingMode={props.billingMode}
       codexEnabled={props.codexEnabled}

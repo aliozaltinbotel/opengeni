@@ -56,7 +56,7 @@ import { CreditRequiredGate } from "@opengeni/react/app/components/credit-requir
 import type { PendingSlackLink } from "@opengeni/react/app/app-context";
 import type { ClientConfig, SlackUserLinkAccessRequest } from "@opengeni/react/app/types";
 import { afterHostSignOut } from "@/host-extension/lifecycle";
-import { outsideWorkspaceRouteAt } from "@/host-extension/registry";
+import { currentHostExtension, outsideWorkspaceRouteAt } from "@/host-extension/registry";
 import {
   clearPendingDeveloperSetup,
   pendingDeveloperSetupFor,
@@ -412,6 +412,7 @@ export function RootRouteComponent() {
     !slackLinkContinuationWorkspaceId ? (
     browserAccountsEnabled ? (
       <BrowserAccountsOrganizationOnboardingPanel
+        organizationRegistrationRoute={currentHostExtension().organizationRegistrationRoute}
         client={client}
         billingMode={clientConfig.billingMode ?? "disabled"}
         codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}
@@ -426,6 +427,7 @@ export function RootRouteComponent() {
     ) : (
       <Suspense fallback={<LoadingPanel />}>
         <OrganizationOnboardingPanel
+          organizationRegistrationRoute={currentHostExtension().organizationRegistrationRoute}
           client={client}
           billingMode={clientConfig.billingMode ?? "disabled"}
           codexEnabled={clientConfig.models.some((catalogModel) => catalogModel.source === "codex")}

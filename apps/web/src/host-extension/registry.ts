@@ -518,6 +518,17 @@ export function validateHostExtension(value: unknown): HostExtension {
   checkNavOverrides(fields.navOverrides, hidden, groups);
   checkLanding(fields.landing, paths);
   checkOutsideWorkspaceRoutes(fields.outsideWorkspaceRoutes);
+  if (fields.organizationRegistrationRoute !== undefined) {
+    const path = text(fields.organizationRegistrationRoute, "organizationRegistrationRoute");
+    const target = list(fields.outsideWorkspaceRoutes, "outsideWorkspaceRoutes").find(
+      (route) => isRecord(route) && route.path === path,
+    );
+    if (!isRecord(target) || target.access === "public")
+      fail(
+        "organizationRegistrationRoute",
+        "must name a declared signed-in outside-workspace route",
+      );
+  }
   list(fields.outsideWorkspaceProviders, "outsideWorkspaceProviders").forEach((provider, index) =>
     component(provider, `outsideWorkspaceProviders[${index}]`),
   );

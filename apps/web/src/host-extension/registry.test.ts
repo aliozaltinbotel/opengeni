@@ -783,6 +783,35 @@ describe("host extension registry", () => {
     });
   });
 
+  describe("host organization registration", () => {
+    const registrationPage = async () => ({ default: Page });
+    test("accepts only a declared signed-in outside-workspace registration route", () => {
+      const extension = extensionWith({
+        outsideWorkspaceRoutes: [{ path: "register", load: registrationPage }],
+        organizationRegistrationRoute: "register",
+      });
+      expect(validateHostExtension(extension)).toBe(extension);
+    });
+    test.each(["missing", "https://outside.example/register", "//outside.example/register"])(
+      "refuses an undeclared or external registration destination %s",
+      (destination) => {
+        expectInvalid(
+          extensionWith({ organizationRegistrationRoute: destination }),
+          "organizationRegistrationRoute",
+        );
+      },
+    );
+    test("refuses a public registration destination", () => {
+      expectInvalid(
+        extensionWith({
+          outsideWorkspaceRoutes: [{ path: "register", load: registrationPage, access: "public" }],
+          organizationRegistrationRoute: "register",
+        }),
+        "organizationRegistrationRoute",
+      );
+    });
+  });
+
   describe("outside-workspace routes", () => {
     const OutsidePage = () => null;
     const outsideLoad = async () => ({ default: OutsidePage });

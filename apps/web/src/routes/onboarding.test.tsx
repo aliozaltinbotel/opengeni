@@ -3,6 +3,13 @@ import { GlobalRegistrator } from "@happy-dom/global-registrator";
 import type { OrganizationUserSetupPreview } from "@opengeni/contracts";
 import { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  createRootRoute,
+  createRoute,
+  createRouter,
+  createMemoryHistory,
+  RouterProvider,
+} from "@tanstack/react-router";
 import type { OrganizationInvitation } from "@opengeni/react/app/types";
 
 /**
@@ -2797,3 +2804,83 @@ describe("organization onboarding UI", () => {
     }
   });
 });
+
+test("a new managed human uses the declared host registration page instead of native organization creation", async () => {
+  const onComplete = mock(() => undefined);
+  const initialCalls = completeSelfServiceSetup.mock.calls.length;
+  const route = createRootRoute();
+  const onboarding = createRoute({
+    getParentRoute: () => route,
+    path: "/",
+    component: () => (
+      <OrganizationOnboardingPanel
+        onComplete={onComplete}
+        organizationRegistrationRoute="register"
+      />
+    ),
+  });
+  const registration = createRoute({
+    getParentRoute: () => route,
+    path: "/register",
+    component: () => <p>Host workspace registration</p>,
+  });
+  const router = createRouter({
+    routeTree: route.addChildren([onboarding, registration]),
+    history: createMemoryHistory({ initialEntries: ["/"] }),
+  });
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<RouterProvider router={router} />));
+    await flush();
+    await flush();
+    expect(router.state.location.pathname).toBe("/register");
+    expect(container.textContent).toContain("Host workspace registration");
+    expect(completeSelfServiceSetup.mock.calls.length).toBe(initialCalls);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test.each(["invitation_pending", "unavailable"] as const)(
+  "a configured host registration route preserves the server's %s state",
+  async (state) => {
+    onboardingStatus.mockImplementationOnce(async () => ({ state }));
+    const route = createRootRoute();
+    const onboarding = createRoute({
+      getParentRoute: () => route,
+      path: "/",
+      component: () => (
+        <OrganizationOnboardingPanel
+          onComplete={() => undefined}
+          organizationRegistrationRoute="register"
+        />
+      ),
+    });
+    const registration = createRoute({
+      getParentRoute: () => route,
+      path: "/register",
+      component: () => <p>Host workspace registration</p>,
+    });
+    const router = createRouter({
+      routeTree: route.addChildren([onboarding, registration]),
+      history: createMemoryHistory({ initialEntries: ["/"] }),
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<RouterProvider router={router} />));
+      await flush();
+      await flush();
+      expect(router.state.location.pathname).toBe("/");
+      expect(container.textContent).not.toContain("Host workspace registration");
+      expect(container.querySelector("#organization-onboarding-name")).toBeNull();
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
+  },
+);

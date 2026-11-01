@@ -186,6 +186,12 @@ export type HostExtension = Readonly<{
   /** Host pages at the console's top level, outside any workspace. */
   outsideWorkspaceRoutes?: readonly HostExtensionOutsideWorkspaceRoute[];
   /**
+   * Signed-in outside-workspace route for a managed human whose server-confirmed
+   * organization setup is required. Replaces only native self-service creation;
+   * invitation, loading and unavailable states keep their normal owners.
+   */
+  organizationRegistrationRoute?: string;
+  /**
    * The workspace-relative path the console opens for a workspace (the root
    * redirect and `workspaces/$workspaceId/`): "sessions" or one of the
    * extension's own static routes. Default "sessions".
