@@ -5,6 +5,7 @@ import {
   type GovernedMutation,
   type GovernedMutationChannel,
   type OrganizationGovernancePort,
+  type ReasoningDisclosure,
 } from "@opengeni/contracts/organization-governance";
 import {
   ensureGovernedOrganizationSessionPolicy,
@@ -65,6 +66,43 @@ export async function organizationGovernedByHost(
       `OrganizationGovernancePort.governs must return a boolean, not ${describeValue(governed)}`,
     );
   return governed;
+}
+
+/**
+ * Whether this organization's sessions show the provider's reasoning text.
+ * `"withheld"` only when the bound port sets `reasoningDisclosure: "withheld"`
+ * and governs the organization; without that field nothing is read. A port
+ * that throws, and a failed lookup, fail the caller (closed).
+ */
+export async function organizationReasoningDisclosure(
+  deps: OrganizationGovernanceDeps,
+  organizationId: string,
+): Promise<ReasoningDisclosure> {
+  if (deps.organizationGovernance?.reasoningDisclosure !== "withheld") return "full";
+  return (await organizationGovernedByHost(deps, organizationId)) ? "withheld" : "full";
+}
+
+/**
+ * The event as a reader of a `"withheld"` organization receives it: an
+ * `agent.reasoning.delta` keeps its envelope (id, sequence, turn, coverage)
+ * and only the numeric `coalescedUntil` of its payload (the last sequence a
+ * coalesced or folded run covers), so cursors and gap detection are unchanged
+ * and no reasoning text is delivered. Every other event is returned as it is.
+ */
+export function withholdSessionEventReasoning<Event extends { type: string; payload: unknown }>(
+  event: Event,
+): Event {
+  if (event.type !== "agent.reasoning.delta") return event;
+  const payload =
+    event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : {};
+  const until = payload.coalescedUntil;
+  return {
+    ...event,
+    payload:
+      typeof until === "number" && Number.isSafeInteger(until) ? { coalescedUntil: until } : {},
+  };
 }
 
 function describeValue(value: unknown): string {

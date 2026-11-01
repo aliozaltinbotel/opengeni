@@ -1,4 +1,5 @@
 import type { ModelRequest } from "@openai/agents";
+import { organizationReasoningDisclosure } from "@opengeni/core";
 import type { AuthorizeModelCallSource } from "@opengeni/contracts";
 import { persistModelCallSourceReceipt, type NativeModelSourceRequest } from "@opengeni/db";
 import { withClaudeConnectionCredential } from "@opengeni/config";
@@ -1635,6 +1636,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // The organization's session policy, read once for this attempt: its
           // denied tool families never reach the catalog or a Codemode bearer.
           const sessionToolFamilies = await readTurnSessionToolFamilyGate(db, input.accountId);
+          // A governing host may withhold reasoning from this organization's
+          // readers; this attempt then asks the provider for no summary.
+          const reasoningWithheld =
+            (await organizationReasoningDisclosure(
+              { db, organizationGovernance: resolvedServices.organizationGovernance ?? null },
+              input.accountId,
+            )) === "withheld";
           const runCredentials = await prepareRunCredentials({
             sessionToolFamilies,
             turnTools,
@@ -1863,6 +1871,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
           const agentBuildInput = {
             sessionToolFamilies,
+            ...(reasoningWithheld ? { reasoningWithheld } : {}),
             vaultAccess,
             skillCatalog: toolRuntime.skillCatalog,
             nativeSkillArtifactSources: toolRuntime.nativeSkillArtifactSources,
