@@ -142,6 +142,12 @@ export type OrganizationGovernancePort = {
    * stock catalog.
    */
   allowedRealtimeModels?: readonly string[];
+  /** Narrow configured workspace gateway servers for an organization this host governs. Never grants access. */
+  narrowWorkspaceToolServers?(input: {
+    organizationId: string;
+    workspaceId: string;
+    serverIds: readonly string[];
+  }): Promise<readonly string[]>;
 };
 
 /** Whether a governed organization's sessions show the provider's reasoning text. */

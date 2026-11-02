@@ -24,6 +24,7 @@ import {
   requireWorkspaceSiteToolAuthorization,
   workspaceToolGatewayDefinitionFilter,
   workspaceToolGatewaySettingsForGrant,
+  narrowWorkspaceToolServerIds,
   workspaceToolGatewayDeclarations,
   type PreparedWorkspaceToolGateway,
 } from "../src/workspace-tool-gateway";
@@ -184,6 +185,7 @@ async function policyCeilingGateway(
           inputSchema: {
             type: "object",
             properties: {},
+            required: [],
             additionalProperties: false,
           },
         }));
@@ -912,4 +914,33 @@ describe("workspace tool gateway adapters", () => {
       }),
     ).toBe(true);
   });
+});
+
+test('a host narrowing intersects configured servers while absent policy preserves native docs', () => {
+  const settings = testSettings({mcpServers:[
+    {id:'opengeni',url:'https://native.invalid/mcp',cacheToolsList:false},
+    {id:'docs',url:'https://native.invalid/docs',cacheToolsList:false},
+    {id:'cendra-pms',url:'https://cendra.invalid/mcp',cacheToolsList:false},
+  ]});
+  const current = {...grant(),permissions:['workspace:read','documents:search'] as AccessGrant['permissions']};
+  expect(workspaceToolGatewaySettingsForGrant(settings,current).mcpServers.map(server=>server.id)).toEqual(['opengeni','docs','cendra-pms']);
+  expect(workspaceToolGatewaySettingsForGrant(settings,current,undefined,['opengeni','cendra-pms','invented']).mcpServers.map(server=>server.id)).toEqual(['opengeni','cendra-pms']);
+  expect(workspaceToolGatewaySettingsForGrant(settings,current,undefined,[]).mcpServers).toEqual([]);
+});
+
+test('governed narrowing calls only its current host and propagates refusal or malformed answers',async()=>{
+ const input={organizationId:accountId,workspaceId,serverIds:['opengeni','docs','cendra-pms']};
+ let lookups=0,calls=0;
+ const governance={governs:()=>true,decide:()=>'refuse' as const,async narrowWorkspaceToolServers(value:typeof input){calls++;expect(value).toEqual(input);return ['opengeni','cendra-pms'];}};
+ const governed=async()=>{lookups++;return true;};
+ expect(await narrowWorkspaceToolServerIds(undefined,input,governed)).toBeUndefined();expect(lookups).toBe(0);
+ expect(await narrowWorkspaceToolServerIds(governance,input,async()=>false)).toBeUndefined();expect(calls).toBe(0);
+ expect(await narrowWorkspaceToolServerIds(governance,input,governed)).toEqual(['opengeni','cendra-pms']);expect(calls).toBe(1);
+ await expect(narrowWorkspaceToolServerIds({...governance,async narrowWorkspaceToolServers(){throw Error('host refused');}},input,governed)).rejects.toThrow('host refused');
+ for(const invalid of [null,'docs',[42]]){
+  const malformed={...governance,narrowWorkspaceToolServers:async()=>invalid};
+  // @ts-expect-error Deliberately exercise an invalid runtime host response.
+  await expect(narrowWorkspaceToolServerIds(malformed,input,governed)).rejects.toThrow('WORKSPACE_TOOL_SERVER_NARROWING_INVALID');
+ }
+ await expect(narrowWorkspaceToolServerIds(governance,input,async()=>{throw Error('classification unavailable');})).rejects.toThrow('classification unavailable');
 });
