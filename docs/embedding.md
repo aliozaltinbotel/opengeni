@@ -954,6 +954,8 @@ freezes an ordinary personal-connection delegation onto the causal turn. See
 
 ### Organization Governance
 
+`OrganizationGovernancePort.narrowWorkspaceToolServers` optionally narrows the configured gateway server IDs for a workspace of a governed organization. It receives the actual organization/workspace and configured IDs. The gateway intersects its answer with the existing servers and permission filters; it cannot add a server, tool or permission. An absent callback or ungoverned organization retains native behavior. Rejected or malformed responses fail closed. A host can use its own canonical workspace binding to narrow only its managed primary lane while leaving other lanes unchanged. This affects gateway preparation and OAuth proposal production, not the native Documents lifecycle.
+
 Canonical sources: `OrganizationGovernancePort` and `GOVERNED_MUTATIONS` in
 `packages/contracts/src/organization-governance.ts`, the route gate in
 `apps/api/src/http/organization-governance.ts` and the host commands in

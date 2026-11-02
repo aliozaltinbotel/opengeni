@@ -1,5 +1,6 @@
 import type { NativeHostSourceVerifier } from "./host-source-attestation";
-import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway } from "@opengeni/core";
+import type { OrganizationGovernancePort } from "@opengeni/contracts/organization-governance";
+import { isVerifiedDelegatedHumanAuthorization, knowledgeContextForGateway, organizationGovernedByHost } from "@opengeni/core";
 import { deniedSessionToolFamiliesForOrganization } from "./http/organization-session-policy";
 import { createHash, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -925,7 +926,11 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
     tools: allGatewayToolRefs(settings),
     bindings: accountBindings,
   });
-  const callerSettings = workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant);
+  const narrowedServerIds = await narrowWorkspaceToolServerIds(routeDeps.organizationGovernance, {
+    organizationId: grant.accountId, workspaceId: grant.workspaceId,
+    serverIds: accountRoutes.settings.mcpServers.map(server => server.id),
+  }, () => organizationGovernedByHost(routeDeps, grant.accountId));
+  const callerSettings = workspaceToolGatewaySettingsForGrant(accountRoutes.settings, grant, undefined, narrowedServerIds);
   const targetServerId = options.target
     ? workspaceToolGatewayTargetServer(callerSettings, options.target)
     : undefined;
@@ -943,6 +948,7 @@ async function prepareWorkspaceToolGatewayForGrantInternal(
       : accountRoutes.settings,
     grant,
     allowedIdentities,
+    narrowedServerIds,
   );
   const gatewayServerIds = new Set(gatewaySettings.mcpServers.map((server) => server.id));
   const fence = options.fence;
@@ -1336,17 +1342,34 @@ function workspaceToolGatewayIdentityKey(identity: ToolGatewayIdentity): string 
   return JSON.stringify([identity.serverId, identity.toolName]);
 }
 
+/** The producer supplies its existing live organization classification; this callback can only narrow. */
+export async function narrowWorkspaceToolServerIds(
+  governance: OrganizationGovernancePort | null | undefined,
+  input: { organizationId: string; workspaceId: string; serverIds: readonly string[] },
+  governedByHost: () => Promise<boolean>,
+): Promise<readonly string[] | undefined> {
+  if (!governance?.narrowWorkspaceToolServers || !await governedByHost()) return undefined;
+  const selected: unknown = await governance.narrowWorkspaceToolServers(input);
+  if (!Array.isArray(selected) || !selected.every((id: unknown) => typeof id === "string")) {
+    throw new Error("WORKSPACE_TOOL_SERVER_NARROWING_INVALID");
+  }
+  return selected;
+}
+
 export function workspaceToolGatewaySettingsForGrant(
   settings: Settings,
   grant: AccessGrant,
   allowedIdentities?: readonly { serverId: string; toolName: string }[],
+  narrowedServerIds?: readonly string[],
 ): Settings {
   const allowedServerIds = allowedIdentities
     ? new Set(allowedIdentities.map((identity) => identity.serverId))
     : null;
+  const narrowed = narrowedServerIds === undefined ? null : new Set(narrowedServerIds);
   return {
     ...settings,
     mcpServers: settings.mcpServers.filter((server) => {
+      if (narrowed && !narrowed.has(server.id)) return false;
       if (allowedServerIds && !allowedServerIds.has(server.id)) return false;
       if (server.id === "docs" && !hasPermission(grant.permissions, "documents:search")) {
         return false;

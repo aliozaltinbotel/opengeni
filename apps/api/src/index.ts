@@ -1151,3 +1151,4 @@ function temporalScheduleUpdateOptions(options: ScheduleOptions): ScheduleUpdate
       : {}),
   };
 }
+export { workspaceToolGatewaySettingsForGrant } from "./workspace-tool-gateway";
